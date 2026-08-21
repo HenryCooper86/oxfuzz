@@ -6418,6 +6418,52 @@ mod tests {
         scheduler.stop().await;
     }
 
+    /// Poll until `schedule_id` has at least `expected` occurrence rows.
+    ///
+    /// Returns as soon as the condition holds, so an unloaded run costs one
+    /// query rather than a fixed wait, and a loaded one gets a budget it can
+    /// actually finish inside. A fixed sleep has to be simultaneously long
+    /// enough for the slowest runner and short enough not to waste every fast
+    /// one, and there is no value that is both.
+    async fn wait_for_occurrence_rows(store: &Store, schedule_id: &str, expected: i64) {
+        for _ in 0..500 {
+            if occurrence_row_count(store, schedule_id).await >= expected {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("schedule {schedule_id} did not record {expected} occurrence row(s)");
+    }
+
+    async fn occurrence_row_count(store: &Store, schedule_id: &str) -> i64 {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM schedule_occurrences WHERE schedule_id = ?1",
+        )
+        .bind(schedule_id)
+        .fetch_one(store.pool())
+        .await
+        .unwrap()
+    }
+
+    async fn execution_row_count(store: &Store, schedule_id: &str) -> i64 {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM schedule_executions WHERE schedule_id = ?1",
+        )
+        .bind(schedule_id)
+        .fetch_one(store.pool())
+        .await
+        .unwrap()
+    }
+
+    /// How long a losing scheduler is given to attempt a duplicate write after
+    /// the winner's row appears.
+    ///
+    /// This one genuinely is a settle window rather than a wait for a condition:
+    /// the property is that a second row never appears, and absence cannot be
+    /// polled for. Uniqueness is enforced by the store; this only widens the
+    /// window in which a regression would be observed.
+    const DUPLICATE_DISPATCH_WINDOW: Duration = Duration::from_millis(250);
+
     #[tokio::test]
     async fn two_service_schedulers_dispatch_one_time_at_most_once() {
         let fixture = scheduler_fixture_with_store().await;
@@ -6435,26 +6481,23 @@ mod tests {
         );
         let first = first.unwrap();
         let second = second.unwrap();
-        tokio::time::sleep(Duration::from_millis(100)).await;
 
+        // "At most once" is two claims, and the old fixed sleep served both
+        // badly. Wait for the winner's row on a budget the slowest runner can
+        // meet, then hold still long enough for a loser to write a second one.
         let store = fixture.store.as_ref().unwrap();
+        wait_for_occurrence_rows(store, "raced-once", 1).await;
+        tokio::time::sleep(DUPLICATE_DISPATCH_WINDOW).await;
+
         assert_eq!(
-            sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM schedule_occurrences WHERE schedule_id = 'raced-once'",
-            )
-            .fetch_one(store.pool())
-            .await
-            .unwrap(),
-            1
+            occurrence_row_count(store, "raced-once").await,
+            1,
+            "both schedulers dispatched the same one-time occurrence"
         );
         assert_eq!(
-            sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM schedule_executions WHERE schedule_id = 'raced-once'",
-            )
-            .fetch_one(store.pool())
-            .await
-            .unwrap(),
-            1
+            execution_row_count(store, "raced-once").await,
+            1,
+            "the raced occurrence was executed more than once"
         );
         first.stop().await;
         second.stop().await;
