@@ -532,6 +532,7 @@ impl ServiceContainer {
                     minimized: false,
                     bug_report: None,
                     casr: Some(casr),
+                    origin: hf_core::crash::CrashOrigin::Unknown,
                 }
             })
             .collect::<Vec<_>>();

@@ -174,6 +174,7 @@ fn stored_crash(run_id: uuid::Uuid, target_id: uuid::Uuid, marker: &str) -> hf_c
         minimized: false,
         bug_report: None,
         casr: None,
+        origin: hf_core::crash::CrashOrigin::Unknown,
     }
 }
 
