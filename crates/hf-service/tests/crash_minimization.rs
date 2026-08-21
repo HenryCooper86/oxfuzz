@@ -169,6 +169,7 @@ async fn fixture(name: &str) -> Fixture {
             compiler: "clang".to_owned(),
             args: Vec::new(),
             output: PathBuf::from("fuzz_parse_input"),
+            extra_flags: Vec::new(),
         },
         sanitizer: Sanitizer::Address,
         status: hf_core::harness::HarnessStatus::Promoted,

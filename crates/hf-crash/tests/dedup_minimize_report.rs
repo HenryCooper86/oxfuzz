@@ -23,6 +23,7 @@ fn crash(sig: &str, kind: CrashKind) -> Crash {
         minimized: false,
         bug_report: None,
         casr: None,
+        origin: hf_core::crash::CrashOrigin::Unknown,
     }
 }
 

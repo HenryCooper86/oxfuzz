@@ -13,7 +13,7 @@
 
 use std::fmt::Write as _;
 
-use hf_core::crash::{Crash, CrashSeverity};
+use hf_core::crash::{Crash, CrashOrigin, CrashSeverity};
 use hf_core::error::ClassifiedError;
 use hf_core::target::TargetCandidate;
 use hf_coverage::CoverageSummary;
@@ -149,6 +149,11 @@ pub struct Labels {
     pub corpus_section: &'static str,
     pub findings_section: &'static str,
     pub finding_prefix: &'static str,
+    /// Heading for faults that lie in the generated harness rather than the
+    /// project under test.
+    pub harness_defects_section: &'static str,
+    /// One line explaining why those are listed apart from the findings.
+    pub harness_defects_note: &'static str,
     // Executive summary narrative
     pub status_unknown: &'static str,
     pub engine_unknown: &'static str,
@@ -287,6 +292,10 @@ impl Labels {
             corpus_section: "Corpus",
             findings_section: "Findings",
             finding_prefix: "Finding",
+            harness_defects_section: "Harness defects",
+            harness_defects_note: "These crashes fault inside the generated harness, not the \
+                                   target. They are harness bugs to fix, not findings about \
+                                   the project, and are excluded from the counts above.",
             status_unknown: "no run recorded",
             engine_unknown: "n/a",
             coverage_unknown: "not available",
@@ -410,6 +419,10 @@ impl Labels {
             corpus_section: "语料库",
             findings_section: "发现项",
             finding_prefix: "发现项",
+            harness_defects_section: "测试桩缺陷 (Harness defects)",
+            harness_defects_note: "这些崩溃发生在生成的测试桩内部，而非目标项目。\
+                                   它们是需要修复的测试桩缺陷，不属于对项目的发现项，\
+                                   因此不计入上述统计。",
             unique_crashes: "去重后的崩溃数",
             exploitable_line: "可利用 / 可能可利用",
             corpus_line: "语料库",
@@ -505,6 +518,33 @@ impl Labels {
 /// Render a campaign report as GitHub-flavored Markdown.
 #[must_use]
 pub fn render_markdown(data: &ReportData, labels: &Labels) -> String {
+    // A fault inside the generated harness is a harness bug, not a finding
+    // about the project under test. Partition here rather than at the call site
+    // so every caller -- including one assembling `ReportData` directly -- gets
+    // the same separation, and so no count, chart, or finding entry below can
+    // see a harness defect.
+    let harness_defects: Vec<Crash> = data
+        .crashes
+        .iter()
+        .filter(|crash| crash.origin == CrashOrigin::Harness)
+        .cloned()
+        .collect();
+    let target_only;
+    let data = if harness_defects.is_empty() {
+        data
+    } else {
+        target_only = ReportData {
+            crashes: data
+                .crashes
+                .iter()
+                .filter(|crash| crash.origin != CrashOrigin::Harness)
+                .cloned()
+                .collect(),
+            ..data.clone()
+        };
+        &target_only
+    };
+
     let mut md = String::with_capacity(4096);
 
     let _ = writeln!(
@@ -540,6 +580,7 @@ pub fn render_markdown(data: &ReportData, labels: &Labels) -> String {
     render_coverage(&mut md, data, labels);
     render_corpus(&mut md, data, labels);
     render_findings(&mut md, data, labels);
+    render_harness_defects(&mut md, &harness_defects, labels);
 
     let _ = writeln!(md, "---");
     let _ = writeln!(md);
@@ -553,6 +594,39 @@ pub fn render_markdown(data: &ReportData, labels: &Labels) -> String {
         labels.narrative_full_stop
     );
     md
+}
+
+/// List faults that lie in the generated harness, apart from the findings.
+///
+/// Nothing is hidden: a harness defect is real and needs fixing, it is just not
+/// a statement about the project under test. Renders nothing when there are
+/// none, so an ordinary report is unchanged.
+fn render_harness_defects(md: &mut String, defects: &[Crash], labels: &Labels) {
+    if defects.is_empty() {
+        return;
+    }
+    let _ = writeln!(md, "## {}", labels.harness_defects_section);
+    let _ = writeln!(md);
+    let _ = writeln!(md, "{}", labels.harness_defects_note);
+    let _ = writeln!(md);
+    for (index, crash) in defects.iter().enumerate() {
+        let _ = writeln!(
+            md,
+            "- {}{}{} {}",
+            labels.finding_prefix,
+            labels.bullet_colon,
+            index + 1,
+            crash.summary
+        );
+        let _ = writeln!(
+            md,
+            "  - {}{}{}",
+            labels.unique_crashes,
+            labels.bullet_colon,
+            inline_code(&crash.stack_signature)
+        );
+    }
+    let _ = writeln!(md);
 }
 
 fn render_executive_summary(md: &mut String, data: &ReportData, labels: &Labels) {
