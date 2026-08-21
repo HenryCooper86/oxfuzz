@@ -8,7 +8,7 @@ description = "Tauri v2 desktop GUI for oxfuzz"
 # Product capabilities are on by default; `--no-default-features` drops their
 # presentation entrypoints.
 [features]
-default = ["automotive-scapy", "build-context", "proof-carrying", "semgrep-enrichment"]
+default = ["automotive-scapy", "build-context", "native-analysis", "proof-carrying", "semgrep-enrichment"]
 automotive-scapy = ["hf-service/automotive-scapy"]
 build-context = ["hf-service/build-context"]
 native-analysis = ["hf-service/native-analysis"]
