@@ -4,6 +4,7 @@
 
 #[cfg(feature = "build-context")]
 pub mod build_context;
+pub mod enrichment;
 pub mod ranking;
 mod reachability;
 pub mod scanner;
