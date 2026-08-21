@@ -198,6 +198,21 @@ mod tests {
     /// that over-matches gets caught, and a rule without one is not done.
     const FIXTURES: &[(&str, &str, &str)] = &[
         (
+            "allocation-size-multiplication",
+            "void* f(int a, int b){ return malloc(a * b); }",
+            "void* f(int a, int b){ return calloc(a, b); }",
+        ),
+        (
+            "source-size-in-copy",
+            "void f(char*d, char*s){ memcpy(d, s, sizeof(s)); }",
+            "void f(char*d, char*s){ memcpy(d, s, sizeof(d)); }",
+        ),
+        (
+            "loop-bound-off-by-one",
+            "void f(char*s){ for (int i = 0; i <= strlen(s); i++) { g(i); } }",
+            "void f(char*s){ for (int i = 0; i < strlen(s); i++) { g(i); } }",
+        ),
+        (
             "assignment-in-assertion",
             "void f(int a, int b){ assert(a = b); }",
             "void f(int a, int b){ assert(a == b); }",

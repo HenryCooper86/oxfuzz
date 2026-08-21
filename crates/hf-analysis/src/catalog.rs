@@ -197,6 +197,27 @@ pub(crate) const SHARED_RULES: &[Rule] = &[
         kind: RuleKind::Shape,
         query: include_str!("../rules/c/free-of-non-heap.scm"),
     },
+    Rule {
+        id: "allocation-size-multiplication",
+        cwe: "CWE-190",
+        severity: Severity::Warning,
+        kind: RuleKind::Shape,
+        query: include_str!("../rules/c/allocation-size-multiplication.scm"),
+    },
+    Rule {
+        id: "source-size-in-copy",
+        cwe: "CWE-806",
+        severity: Severity::Error,
+        kind: RuleKind::Shape,
+        query: include_str!("../rules/c/source-size-in-copy.scm"),
+    },
+    Rule {
+        id: "loop-bound-off-by-one",
+        cwe: "CWE-193",
+        severity: Severity::Warning,
+        kind: RuleKind::Shape,
+        query: include_str!("../rules/c/loop-bound-off-by-one.scm"),
+    },
 ];
 
 /// Rules that only compile against the C grammar.
