@@ -27,6 +27,47 @@ pub(crate) fn run_rule(
         RuleKind::Shape => run_shape_rule(rule, query, tree, source, out),
         RuleKind::PairedSites => run_paired_sites_rule(rule, query, tree, source, out),
         RuleKind::AfterEvent => run_after_event_rule(rule, query, tree, source, out),
+        RuleKind::TaintedArgument => run_tainted_argument_rule(rule, query, tree, source, out),
+    }
+}
+
+/// Report `@hit` only where `@var` names a parameter of the enclosing function.
+fn run_tainted_argument_rule(
+    rule: &'static Rule,
+    query: &Query,
+    tree: &Tree,
+    source: &str,
+    out: &mut Vec<Finding>,
+) {
+    let (Some(hit_index), Some(var_index)) = (
+        query.capture_index_for_name(HIT_CAPTURE),
+        query.capture_index_for_name(VAR_CAPTURE),
+    ) else {
+        return;
+    };
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(query, tree.root_node(), source.as_bytes());
+    while let Some(matched) = matches.next() {
+        let variable = matched
+            .captures
+            .iter()
+            .find(|capture| capture.index == var_index)
+            .and_then(|capture| capture.node.utf8_text(source.as_bytes()).ok());
+        let hit = matched
+            .captures
+            .iter()
+            .find(|capture| capture.index == hit_index)
+            .map(|capture| capture.node);
+        if let (Some(variable), Some(hit)) = (variable, hit) {
+            if crate::context::is_attacker_influenced(hit, source, variable) {
+                out.push(Finding {
+                    rule_id: rule.id,
+                    cwe: rule.cwe,
+                    severity: rule.severity,
+                    span: span_of(hit),
+                });
+            }
+        }
     }
 }
 
