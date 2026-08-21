@@ -7,6 +7,7 @@ description = "Target discovery: static analysis, semantic ranking, Target Inven
 
 [features]
 default = []
+build-context = []
 semgrep-enrichment = []
 
 [dependencies]
