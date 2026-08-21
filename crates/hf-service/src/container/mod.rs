@@ -28,6 +28,8 @@ mod system;
 mod triage;
 mod workspace;
 
+#[cfg(feature = "native-analysis")]
+pub use discovery::AnalyzedInventory;
 pub use guards::AgentTurnGuard;
 pub use harness_workspace::{copy_project_sources, generate_target_seeds};
 pub(crate) use workspace::ensure_workspace_directory;

@@ -80,6 +80,8 @@ pub use agent::{AgentRegistryInfo, AgentToolDefinition, AgentTurnRequest};
 /// without depending on `hf-harness` directly.
 pub use hf_harness::{LintFinding, LintSeverity};
 
+#[cfg(feature = "native-analysis")]
+pub use container::AnalyzedInventory;
 pub use container::{
     build_sandbox_image, copy_project_sources, generate_target_seeds, initialize_workspace_root,
     project_workspace_dir, provider_pool_from_config, provider_pool_from_env, repo_root,
