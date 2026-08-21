@@ -26,9 +26,30 @@ pub async fn discover(
     project_root: &Path,
     lang: TargetLanguage,
 ) -> Result<TargetInventory, ClassifiedError> {
+    discover_with_signals(project_root, lang)
+        .await
+        .map(|(inventory, _signals)| inventory)
+}
+
+/// Discover fuzzing targets and the native static-analysis signals produced by
+/// the same parse.
+///
+/// The signals come from the trees the scan already built, so obtaining them
+/// costs a query-cursor pass rather than a second walk of the project. Feed
+/// them to [`crate::enrichment::score_overlay`] with the returned inventory.
+///
+/// Empty without the `native-analysis` feature, and for any language scanned
+/// lexically, since those carry no tree to match against.
+///
+/// # Errors
+/// Returns `ClassifiedError` if the project root cannot be read.
+pub async fn discover_with_signals(
+    project_root: &Path,
+    lang: TargetLanguage,
+) -> Result<(TargetInventory, Vec<crate::enrichment::EnrichmentSignal>), ClassifiedError> {
     tokio::task::yield_now().await;
     let project_root = canonical_project_root(project_root)?;
-    let (mut candidates, call_graph) = match lang {
+    let (mut candidates, call_graph, signals) = match lang {
         TargetLanguage::C | TargetLanguage::Cpp => scan_c(&project_root, lang)?,
         TargetLanguage::Rust => scan_rust(&project_root)?,
         TargetLanguage::Go => scan_go(&project_root)?,
@@ -49,11 +70,14 @@ pub async fn discover(
         c.project_root.clone_from(&project_root);
         c.id = deterministic_target_id(c);
     }
-    Ok(TargetInventory {
-        project_root,
-        candidates,
-        call_graph,
-    })
+    Ok((
+        TargetInventory {
+            project_root,
+            candidates,
+            call_graph,
+        },
+        signals,
+    ))
 }
 
 fn canonical_project_root(project_root: &Path) -> Result<PathBuf, ClassifiedError> {
@@ -231,6 +255,7 @@ fn discoverable_source_files_in_walk_order(
 type ScanResult = (
     Vec<TargetCandidate>,
     std::collections::HashMap<String, Vec<String>>,
+    Vec<crate::enrichment::EnrichmentSignal>,
 );
 
 /// Shared walker for the dependency-free lexical scanners (Rust, Go,
@@ -279,7 +304,7 @@ fn scan_lexical(
         };
         extract(&src, &path, &mut candidates);
     }
-    Ok((candidates, std::collections::HashMap::new()))
+    Ok((candidates, std::collections::HashMap::new(), Vec::new()))
 }
 
 /// Discover Rust fuzz targets with a dependency-free lexical scan.
@@ -905,10 +930,11 @@ fn scan_c(root: &Path, lang: TargetLanguage) -> Result<ScanResult, ClassifiedErr
         std::collections::HashMap::new();
     let mut complexity_map: std::collections::HashMap<String, u32> =
         std::collections::HashMap::new();
+    let mut signals: Vec<crate::enrichment::EnrichmentSignal> = Vec::new();
     // Sorted, not raw walk order: readdir order is filesystem-dependent, and
     // candidate order must be identical on every machine.
     for relative in discoverable_source_files(root, lang)? {
-        let path = root.join(relative);
+        let path = root.join(&relative);
         // Non-UTF-8 or unreadable sources are common in the wild (Latin-1
         // comments, permission gaps); skip the file rather than aborting the
         // whole project scan. tree-sitter requires `&str`, so a genuinely
@@ -932,6 +958,9 @@ fn scan_c(root: &Path, lang: TargetLanguage) -> Result<ScanResult, ClassifiedErr
             &mut calls,
             &mut complexity_map,
         );
+        // Same tree, same source: the marginal cost of a signal is a query
+        // cursor pass, not another parse.
+        signals.extend(analyze_unit(&tree, &src, &relative, lang));
     }
     // Annotate candidates with reachability + accumulated complexity.
     crate::reachability::analyze(&mut candidates, &calls, &complexity_map);
@@ -950,7 +979,52 @@ fn scan_c(root: &Path, lang: TargetLanguage) -> Result<ScanResult, ClassifiedErr
             call_graph.insert(caller.clone(), project);
         }
     }
-    Ok((candidates, call_graph))
+    Ok((candidates, call_graph, signals))
+}
+
+/// Native static-analysis signals for one translation unit.
+///
+/// Paths are relative to the project root, matching what the enrichment join
+/// compares against; an absolute path here would silently attribute nothing.
+#[cfg(feature = "native-analysis")]
+fn analyze_unit(
+    tree: &tree_sitter::Tree,
+    src: &str,
+    relative: &Path,
+    lang: TargetLanguage,
+) -> Vec<crate::enrichment::EnrichmentSignal> {
+    let Some(rules) = hf_analysis::rules_for(lang) else {
+        return Vec::new();
+    };
+    let analysis = rules.analyze_bounded(tree, src);
+    if analysis.truncated {
+        tracing::warn!(
+            file = %relative.display(),
+            "static analysis truncated at the per-file finding cap"
+        );
+    }
+    analysis
+        .findings
+        .into_iter()
+        .map(|finding| crate::enrichment::EnrichmentSignal {
+            relative_path: relative.to_path_buf(),
+            start_line: finding.span.start_line,
+            start_col: finding.span.start_col,
+            rule_key: finding.rule_id.to_owned(),
+            weight: finding.severity.weight(),
+        })
+        .collect()
+}
+
+/// Native analysis is not built in, so no signals are produced.
+#[cfg(not(feature = "native-analysis"))]
+fn analyze_unit(
+    _tree: &tree_sitter::Tree,
+    _src: &str,
+    _relative: &Path,
+    _lang: TargetLanguage,
+) -> Vec<crate::enrichment::EnrichmentSignal> {
+    Vec::new()
 }
 
 fn extract_functions(

@@ -6,12 +6,14 @@ license.workspace = true
 description = "Target discovery: static analysis, semantic ranking, Target Inventory"
 
 [features]
-default = []
+default = ["native-analysis"]
 build-context = []
+native-analysis = ["dep:hf-analysis"]
 semgrep-enrichment = []
 
 [dependencies]
 hf-core = { workspace = true }
+hf-analysis = { workspace = true, optional = true }
 hf-provider = { workspace = true }
 hf-prompt = { workspace = true }
 async-trait = { workspace = true }
