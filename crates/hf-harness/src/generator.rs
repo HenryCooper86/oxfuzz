@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use hf_core::build::BuildContext;
 use hf_core::engine::EngineKind;
 use hf_core::error::ClassifiedError;
 use hf_core::harness::{BuildCommand, Harness, HarnessDraft, HarnessStatus, SmokeRunSummary};
@@ -24,13 +25,16 @@ pub async fn draft(
     engine: EngineKind,
     llm: Box<dyn LlmProvider>,
 ) -> Result<HarnessDraft, ClassifiedError> {
-    draft_with_context(target, engine, &[], llm).await
+    draft_with_context(target, engine, &[], None, llm).await
 }
 
 /// Draft a harness for a target using the LLM, augmenting the prompt with
 /// related project context retrieved from the knowledge index (call sites,
-/// related parsers). An empty slice renders the base prompt unchanged, so a
-/// missing index or failed retrieval degrades to [`draft`].
+/// related parsers) and with the project's real compile context.
+///
+/// An empty `related` slice and a `build` of `None` render the base prompt
+/// unchanged, so a missing index, a failed retrieval, or a project without a
+/// compile database all degrade to [`draft`].
 ///
 /// # Errors
 /// Returns `ClassifiedError` if the LLM call fails or the response contains
@@ -39,9 +43,10 @@ pub async fn draft_with_context(
     target: &TargetCandidate,
     engine: EngineKind,
     related: &[RelatedContext],
+    build: Option<&BuildContext>,
     llm: Box<dyn LlmProvider>,
 ) -> Result<HarnessDraft, ClassifiedError> {
-    let prompt = render_harness_prompt_with_context(target, engine, related);
+    let prompt = render_harness_prompt_with_context(target, engine, related, build);
     let messages = vec![Message::user(prompt)];
     let req = ChatRequest::from_messages(messages);
     let resp = llm.chat_completion(&req).await?;
@@ -1324,6 +1329,7 @@ mod tests {
             &target,
             EngineKind::LibFuzzer,
             &related,
+            None,
             Box::new(CaptureProvider {
                 seen: Arc::clone(&seen),
             }),
@@ -1334,6 +1340,32 @@ mod tests {
         let prompt = seen.lock().expect("capture lock").clone();
         assert!(prompt.contains("Related project context"), "{prompt}");
         assert!(prompt.contains("parse_header(buf, len);"), "{prompt}");
+    }
+
+    #[tokio::test]
+    async fn draft_with_context_injects_build_context_into_prompt() {
+        let target = sample_target();
+        let seen = Arc::new(Mutex::new(String::new()));
+        let build = hf_core::build::BuildContext {
+            include_dirs: vec![std::path::PathBuf::from("/proj/include")],
+            defines: vec!["-DHAVE_CONFIG_H=1".to_owned()],
+            ..hf_core::build::BuildContext::default()
+        };
+        draft_with_context(
+            &target,
+            EngineKind::LibFuzzer,
+            &[],
+            Some(&build),
+            Box::new(CaptureProvider {
+                seen: Arc::clone(&seen),
+            }),
+        )
+        .await
+        .expect("draft should succeed");
+
+        let prompt = seen.lock().expect("capture lock").clone();
+        assert!(prompt.contains("Project build context"), "{prompt}");
+        assert!(prompt.contains("HAVE_CONFIG_H=1"), "{prompt}");
     }
 
     #[tokio::test]
