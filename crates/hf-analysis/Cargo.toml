@@ -13,5 +13,8 @@ tree-sitter-cpp = { workspace = true }
 streaming-iterator = { workspace = true }
 thiserror = { workspace = true }
 
+[dev-dependencies]
+hf-core = { workspace = true }
+
 [lints]
 workspace = true

@@ -162,6 +162,23 @@ pub fn compile_all(lang: TargetLanguage) -> Result<usize, RuleCompileError> {
     RuleSet::compile(&language, rules).map(|set| set.len())
 }
 
+/// Every rule id this build carries, deduplicated and sorted.
+///
+/// For tooling that needs to check a reference against the real rule set rather
+/// than against a copy of it: a stale copy silently misreports coverage.
+#[must_use]
+pub fn rule_ids() -> Vec<&'static str> {
+    let mut ids: Vec<&'static str> = SHARED_RULES
+        .iter()
+        .chain(C_ONLY_RULES)
+        .chain(CPP_ONLY_RULES)
+        .map(|rule| rule.id)
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
 /// The compiled rule set for `lang`, or `None` for a language with no rules.
 ///
 /// Compiled once per language for the process lifetime. Query compilation is

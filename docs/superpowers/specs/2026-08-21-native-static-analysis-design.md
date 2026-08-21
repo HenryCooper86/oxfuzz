@@ -671,3 +671,123 @@ re-derivation grouped by defect rather than by function name:
 The last five are effort, not information: each is reachable by extending the
 pass, and none was worth extending it for inside phase 1b. They are the natural
 content of a phase 1e if the section 12 gate shows the coverage gap matters.
+
+## 19. Phase 1c Measurement
+
+Run 2026-08-21 against the 48 annotated fixtures in
+`third_party/semgrep-rules/rules/c`, using the corpus harness in
+`crates/hf-analysis/tests/corpus_coverage.rs`.
+
+```text
+fixtures read      : 48
+hit                : 95
+miss               : 124
+not attempted      : 79   (upstream rule uncovered by design, sections 18.1-18.4)
+false positive     : 14
+improvement        : 0    (Semgrep documents 8 misses; we caught none of them)
+recall on attempted: 43.4%
+```
+
+Line alignment was spot-checked before trusting the number: on `double-free.c`
+the harness expects findings at lines 23 and 58 and the analyzer reports exactly
+those, so the misses are real rather than an off-by-one in the annotation
+parser.
+
+### 19.1 Misses by upstream rule
+
+| Upstream rule | Misses |
+| --- | ---: |
+| off-by-one | 18 |
+| use-of-source-size-in-copy | 14 |
+| unsafe-ret-snprintf-vsnprintf | 13 |
+| typos | 13 |
+| integer-wraparound | 13 |
+| use-after-free | 7 |
+| unterminated-string-strncpy | 6 |
+| suspicious-assert | 6 |
+| format-string-bugs | 6 |
+| overlapping-source-destination | 5 |
+| insecure-api-scanf | 4 |
+| unsafe-ret-strlcpy-strlcat | 3 |
+| regex-dos | 3 |
+| ret-stack-address, pointer-subtraction, memory-address-exposure, incorrect-use-of-memset | 2 each |
+| unsafe-strlen, insecure-api-strcpy-strcat, incorrect-use-of-free, double-free, argv-envp-access | 1 each |
+
+The pattern is one thing, not twenty: each re-derived rule matches **one** shape
+of its defect, and the upstream rule matches several. `integer-wraparound`
+covers many wrapping computations; ours covers a product used as an allocation
+size. `typos` covers a family of operator confusions; ours covers assignment in
+an `if` or `while` condition. `off-by-one` covers many bound errors; ours covers
+a `<=` loop against a length call.
+
+One miss is not narrowness but the deliberate kill set: `double-free.c:88` frees
+the same pointer twice with an unrelated call between the two, and section 7.2
+suppresses that on purpose. That one is working as designed, and it is the cost
+that section named in advance.
+
+### 19.2 False positives
+
+14, clustered in four rules:
+
+| Rule | Count | Cause |
+| --- | ---: | --- |
+| `os-command-execution` | 6 | Flags every `system`/`exec*` call; the upstream rule flags only calls whose argument is not a literal. |
+| `weak-pseudo-random` | 2 | Flags `rand` unconditionally; the fixture marks seeded-from-entropy uses as acceptable. |
+| `unbounded-scanf-conversion` | 2 | Flags a `%s` conversion that the fixture bounds by other means. |
+| `unbounded-string-copy` | 2 | Flags `sprintf` where the fixture marks a bounded use as acceptable. |
+| `environment-from-variable` | 2 | Flags every `putenv` of a variable; the upstream rule flags only stack-allocated arguments. |
+
+These are the opposite failure from the misses: too broad rather than too narrow,
+and every one is a rule that ignores context the upstream rule reads.
+
+## 20. Phase 1c Gate Decision: FAIL
+
+**Phase 1d must not proceed.** The native analyzer is not yet a replacement for
+the rule set it would delete.
+
+Two independent reasons, either sufficient on its own:
+
+1. **Recall is 43.4% on the classes we claim to cover.** Section 18.5 records 34
+   of 49 upstream classes as covered. Measured, those 34 classes catch fewer
+   than half the cases their upstream counterparts catch. The reconciliation
+   table described intent; this is the first measurement of effect, and the two
+   do not agree.
+2. **14 false positives.** Section 7.2 commits to the opposite posture --
+   suppress rather than over-report, because a false finding costs operator
+   trust that does not come back. Five rules violate that commitment.
+
+What this does **not** show: that the approach is wrong. The machinery works, the
+harness is sound, the shared scoring holds, and C++ went from zero coverage to
+32 rules. What it shows is that a re-derived rule written to one shape of a
+defect is not equivalent to an upstream rule written to several, and that
+writing 32 rules is perhaps a third of the work rather than most of it.
+
+### 20.1 What phase 1d becomes
+
+Not deletion. A phase **1b-2**, widening rules against the corpus:
+
+- Widen the five over-broad rules to read the context their upstream
+  counterparts read. This is a correctness fix, not coverage work, and should
+  land first: shipping a false positive is worse than shipping a gap.
+- Widen the top five by miss count -- `off-by-one`,
+  `use-of-source-size-in-copy`, `unsafe-ret-snprintf-vsnprintf`, `typos`,
+  `integer-wraparound` -- which account for 71 of the 124 misses between them.
+- Re-run section 19 after each, and record the number. The harness makes this a
+  measurement rather than an argument.
+
+### 20.2 What the gate should require next time
+
+Section 12 set no numeric bar, which made "does it pass" a judgement call at the
+worst moment. Concretely, before deleting Semgrep:
+
+- **Zero false positives** on the corpus, or each one individually justified in
+  writing.
+- **Recall at or above 90%** on the classes section 18.5 claims to cover.
+- Misses on uncovered classes are expected and not counted.
+
+### 20.3 What was right to keep
+
+The corpus harness itself. It is `#[ignore]`d, reads third-party fixtures only
+from a test, and turned an unfalsifiable claim into a number in one run. Had
+phase 1d proceeded on the reconciliation table alone, oxfuzz would have deleted
+a working subsystem and replaced it with one that finds 43% as much.
