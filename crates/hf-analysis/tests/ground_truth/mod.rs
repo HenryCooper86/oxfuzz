@@ -137,6 +137,7 @@ pub const COVERAGE: &[(&str, &[&str])] = &[
             "index-at-buffer-size",
             "allocation-missing-terminator",
             "length-compared-to-size",
+            "strncat-constant-bound",
         ],
     ),
     ("overlapping-source-destination", &["overlapping-copy"]),

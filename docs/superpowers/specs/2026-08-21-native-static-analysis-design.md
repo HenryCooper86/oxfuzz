@@ -922,3 +922,64 @@ round measurable. The bar in section 20.2 is retained as a quality goal.
 The one thing that should not be revisited without new evidence is deletion. If
 some later phase reaches parity, that is when to reopen it -- with a
 measurement, not a table of intent.
+
+## 23. Second Widening Round
+
+Measured 2026-08-22.
+
+```text
+hit 136 | miss 85 | false positive 0 | improvement 0
+recall (mapped rule): 61.5%    (42.7% at the end of the first round)
+recall (any rule)   : 72.9%    [161 of 221 defective lines flagged]
+```
+
+### 23.1 Two metrics, reported separately
+
+The harness now reports recall two ways, and blending them would hide the more
+interesting of the two.
+
+- **Mapped rule** asks whether the rule section 18.5 records as covering an
+  upstream rule is the one that fired. This is rule-for-rule parity.
+- **Any rule** asks whether the analyzer flagged the defective line at all. A
+  defect found by a differently-named rule is still found, and this is what an
+  operator experiences.
+
+The gap between them, about eleven points, is mostly rules catching defects
+outside the class they were written for -- an unbounded copy reported by the
+copy rule on a line the corpus annotates for off-by-one, for instance.
+
+The mapped number stays the headline precisely because it is the one that
+cannot be improved by editing a table. The any-rule number is reported beside
+it, not instead of it.
+
+### 23.2 What moved
+
+Most of the first jump, 42.7% to 53.7%, was not new rules. Two coverage-map
+edits from the previous round had silently failed -- each a text substitution
+against a form `cargo fmt` had since reflowed, neither asserted -- so the
+harness counted 15 real reports as misses. A third gap credited
+`strncat-constant-bound` in one fixture but not the other where it also fires.
+The lesson is narrow and worth stating: **a measurement harness that
+under-credits is more dangerous than one that over-credits**, because it argues
+for abandoning work that is already done.
+
+`stdin` was invisible to the taint pass: not a call, never assigned, so it never
+entered the influenced set, and nine `fscanf(stdin, ...)` reads were skipped.
+
+The rest came from five widened rules, at the cost of five false positives
+introduced and removed within the same round. All five were one bug: the new
+position-aware format-string patterns lacked adjacency anchors, so a wildcard
+skipped over a literal format and matched a data argument further along.
+
+### 23.3 Coverage
+
+34 of 49 upstream classes, up one: `incorrect-use-of-strncat` is now covered by
+`strncat-constant-bound`, which closes the last class section 18.5 listed as
+blocked on effort rather than on missing information.
+
+The remaining 85 misses concentrate in four classes -- `typos`, `off-by-one`,
+`integer-wraparound`, and `use-of-source-size-in-copy` -- and the shapes left in
+each need information the analyzer does not have: whether an array subscript
+equals the declared size, whether a variable used as an allocation size was
+range-checked, whether an octal literal was intended. These are closer to the
+type-information wall in section 18.4 than to the widening the first rounds did.
