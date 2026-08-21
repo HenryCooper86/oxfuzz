@@ -605,7 +605,7 @@ All 49 upstream rules, each with exactly one disposition. This is the input the
 phase 1c gate needs: a ranking delta traced to a row here is explained, not a
 failure.
 
-**Covered: 34 of 49**, by 32 oxfuzz rules. Three upstream pairs collapse, because
+**Covered: 33 of 49**, by 32 oxfuzz rules. Three upstream pairs collapse, because
 re-derivation grouped by defect rather than by function name:
 `strcpy`/`strcat` with `sprintf`/`vsprintf` into `unbounded-string-copy`;
 `snprintf`/`vsnprintf` with `strlcpy`/`strlcat` into
@@ -616,10 +616,10 @@ re-derivation grouped by defect rather than by function name:
 | insecure-api-gets | `dangerous-function-gets` |
 | insecure-api-ato | `unchecked-conversion-ato` |
 | unchecked-ret-scanf | `unchecked-return-scanf` |
-| insecure-api-scanf | `unbounded-scanf-conversion` |
+| insecure-api-scanf | `unbounded-scanf-conversion`, `unbounded-string-scan` |
 | insecure-api-alloca | `dangerous-function-alloca` |
 | insecure-api-strcpy-strcat | `unbounded-string-copy` |
-| insecure-api-sprintf-vsprintf | `unbounded-string-copy` |
+| insecure-api-sprintf-vsprintf | `unbounded-format-write` |
 | insecure-api-mktemp-tmpnam-tempnam | `insecure-temporary-file` |
 | insecure-api-rand-srand | `weak-pseudo-random` |
 | insecure-api-signal | `signal-handler-race` |
@@ -644,11 +644,11 @@ re-derivation grouped by defect rather than by function name:
 | off-by-one | `loop-bound-off-by-one` |
 | ret-stack-address | `returned-stack-address` |
 | unterminated-string-strncpy | `unterminated-strncpy` |
-| putenv-stack-var | `environment-from-variable` |
+
 | regex-dos | `catastrophic-regex` |
 | pointer-subtraction | `pointer-subtraction-size` |
 
-**Not covered: 15 of 49**, each with a reason.
+**Not covered: 16 of 49**, each with a reason.
 
 | Upstream | Disposition |
 | --- | --- |
@@ -667,6 +667,7 @@ re-derivation grouped by defect rather than by function name:
 | unchecked-ret-malloc | Needs a null-check kill the kill set does not yet model |
 | incorrect-use-of-strncat | Needs remaining-destination-space reasoning |
 | write-into-stack-buffer | Needs to know an object is a stack allocation |
+| putenv-stack-var | Withdrawn in the widening phase: the defect is putenv of a *stack* variable and the corpus accepts a `static` one, but storage class is not information this analyzer gathers. Two known false positives were worse than a gap. |
 
 The last five are effort, not information: each is reachable by extending the
 pass, and none was worth extending it for inside phase 1b. They are the natural
@@ -791,3 +792,53 @@ The corpus harness itself. It is `#[ignore]`d, reads third-party fixtures only
 from a test, and turned an unfalsifiable claim into a number in one run. Had
 phase 1d proceeded on the reconciliation table alone, oxfuzz would have deleted
 a working subsystem and replaced it with one that finds 43% as much.
+
+## 21. Widening Phase: False Positives Eliminated
+
+Re-measured 2026-08-21 after the false-positive work in spec section 20.1.
+
+```text
+hit                : 79     (was 95)
+miss               : 139    (was 124)
+false positive     : 0      (was 14)
+recall on attempted: 36.2%  (was 43.4%)
+```
+
+**Zero false positives**, which is half of the section 20.2 bar. Recall fell,
+and the fall is the point rather than a side effect: 14 of the earlier 95 hits
+were rules firing on anything that looked vaguely relevant, and the same
+breadth produced the 14 false positives. Removing the breadth removed both.
+
+### 21.1 What changed
+
+- **`os-command-execution` and `unbounded-string-scan` now require a
+  caller-chosen argument.** The corpus flags `system(string)` where `string` is
+  a parameter and accepts `system(buf)` where `buf` is a local literal; the
+  analyzer was not reading that distinction at all.
+- **A one-step taint pass** backs that check. A name is caller-chosen if it is a
+  parameter, if it was assigned from something already caller-chosen or from a
+  known untrusted source, or if it is the destination of a string builder whose
+  source was caller-chosen. That last case is what catches
+  `snprintf(buf, ..., user); popen(buf, ...)`, which a parameter check alone
+  misses. It is deliberately not "any call propagates", which would taint most
+  locals in a function and reintroduce the over-reporting.
+- **`sprintf` split out of `unbounded-string-copy`** into
+  `unbounded-format-write`, which requires an unbounded conversion in the format
+  literal. `sprintf(buf, "n: %d", n)` is bounded; `%s` is not.
+- **`weak-pseudo-random` narrowed** to `rand` and `srand`. The corpus accepts a
+  properly seeded `random()`.
+- **`environment-from-variable` withdrawn.** The defect is `putenv` of a *stack*
+  variable and the corpus accepts a `static` one, but storage class is not
+  information this analyzer gathers. Two known false positives were worse than a
+  gap, so coverage drops from 34 classes to 33 and section 18.5 says so.
+
+### 21.2 The gate still fails
+
+Recall of 36.2% is far from the 90% bar. The 139 misses remain what section 19.1
+described: each rule matches one shape where the upstream rule matches several.
+That work is untouched and is the whole remaining distance.
+
+Correcting section 18.5 downward rather than leaving it at 34 matters more than
+the number: the table is the evidence phase 1d reads, and a table describing
+intent rather than measured behavior is how a subsystem gets deleted on a
+promise.

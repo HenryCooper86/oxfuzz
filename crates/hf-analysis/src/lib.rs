@@ -11,6 +11,7 @@
 //! See `docs/superpowers/specs/2026-08-21-native-static-analysis-design.md`.
 
 mod catalog;
+mod context;
 pub mod finding;
 mod query;
 mod sequence;
@@ -225,11 +226,6 @@ mod tests {
             "void f(char*d, char*s){ strncpy(d, s, sizeof(d) - 1); }",
         ),
         (
-            "environment-from-variable",
-            "void f(char*e){ putenv(e); }",
-            "void f(void){ putenv(\"A=1\"); }",
-        ),
-        (
             "catastrophic-regex",
             "void f(void*re){ regcomp(re, \"(a+)+b\", 0); }",
             "void f(void*re){ regcomp(re, \"^[a-z]+$\", 0); }",
@@ -310,9 +306,27 @@ mod tests {
             "void f(char*d, char*s){ strncpy(d, s, 8); strlcpy(d, s, 8); }",
         ),
         (
+            "unbounded-format-write",
+            "void f(char*b, char*s){ sprintf(b, \"v: %s\", s); }",
+            // A numeric conversion has a bounded width.
+            "void f(char*b, int n){ sprintf(b, \"v: %d\", n); }",
+        ),
+        (
             "unbounded-scanf-conversion",
             "void f(char*b){ scanf(\"%s\", b); }",
             "void f(char*b, int*n){ scanf(\"%10s\", b); scanf(\"%d\", n); }",
+        ),
+        (
+            "unbounded-string-scan",
+            "void f(char*src, char*b){ sscanf(src, \"%s\", b); }",
+            // A literal source cannot overflow anything.
+            "void f(char*b){ sscanf(\"constant\", \"%s\", b); }",
+        ),
+        (
+            "os-command-execution",
+            "void f(char*c){ system(c); }",
+            // A local constant is not injectable.
+            "void f(void){ char buf[] = \"id\"; system(buf); }",
         ),
         (
             "insecure-temporary-file",
@@ -336,11 +350,6 @@ mod tests {
             "int f(int fd, void*st){ return fstat(fd, st); }",
         ),
         (
-            "os-command-execution",
-            "void f(char*c){ system(c); }",
-            "void f(char*c){ my_system(c); }",
-        ),
-        (
             "strlen-sum-overflow",
             "unsigned long f(char*a, char*b){ return strlen(a) + strlen(b) + 1; }",
             // A single length plus a constant cannot wrap in practice.
@@ -353,10 +362,10 @@ mod tests {
         // Written as a literal so adding or dropping a rule is a deliberate
         // edit with a commit message, not a silent change in coverage. The
         // reconciliation table in spec section 18.5 is keyed to these numbers.
-        assert_eq!(compile_all(TargetLanguage::C).unwrap(), 32, "C rule count");
+        assert_eq!(compile_all(TargetLanguage::C).unwrap(), 33, "C rule count");
         assert_eq!(
             compile_all(TargetLanguage::Cpp).unwrap(),
-            32,
+            33,
             "C++ rule count"
         );
     }
