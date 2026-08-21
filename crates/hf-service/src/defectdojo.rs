@@ -14,7 +14,7 @@
 
 use std::fmt::Write as _;
 
-use hf_core::crash::Crash;
+use hf_core::crash::{Crash, CrashOrigin};
 use hf_core::error::ClassifiedError;
 use serde::{Deserialize, Serialize};
 
@@ -356,8 +356,16 @@ pub fn finding_for(crash: &Crash) -> serde_json::Value {
 /// Render triaged crashes as a `DefectDojo` Generic Findings Import document.
 #[must_use]
 pub fn crashes_to_generic(crashes: &[Crash]) -> serde_json::Value {
+    // A `DefectDojo` finding asserts a defect in the product under test. A fault
+    // whose root frame is the generated harness is a harness bug to fix, not a
+    // finding to file against the project, so it is dropped here rather than at
+    // the call site -- this is the only mapper, and filing is not reversible.
     serde_json::json!({
-        "findings": crashes.iter().map(finding_for).collect::<Vec<_>>(),
+        "findings": crashes
+            .iter()
+            .filter(|crash| crash.origin != CrashOrigin::Harness)
+            .map(finding_for)
+            .collect::<Vec<_>>(),
     })
 }
 
@@ -643,6 +651,17 @@ mod tests {
             cfg_with_product_type(Some("Kernel")).resolved_product_type(),
             "Kernel"
         );
+    }
+
+    #[test]
+    fn harness_defects_are_not_pushed_as_findings() {
+        // A DefectDojo finding asserts a defect in the product under test. A
+        // fault inside the generated harness is not one.
+        let mut harness_crash = base_crash();
+        harness_crash.origin = CrashOrigin::Harness;
+        let document = crashes_to_generic(&[base_crash(), harness_crash]);
+        let findings = document["findings"].as_array().expect("findings array");
+        assert_eq!(findings.len(), 1, "harness defect leaked: {document}");
     }
 
     #[test]

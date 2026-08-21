@@ -189,3 +189,43 @@ fn empty_crashes_yield_empty_results() {
     assert!(doc["runs"][0]["results"].as_array().unwrap().is_empty());
     assert_eq!(doc["version"], "2.1.0");
 }
+
+#[test]
+fn harness_origin_crashes_are_not_sarif_results() {
+    // A SARIF result asserts a finding about the scanned project. A fault
+    // inside the generated harness is not one.
+    let mut harness_crash = crash(
+        CrashKind::Asan,
+        CrashSeverity::Exploitable,
+        "heap-buffer-overflow(write)",
+        "",
+    );
+    harness_crash.id = Uuid::new_v4();
+    harness_crash.origin = hf_core::crash::CrashOrigin::Harness;
+
+    let doc = crashes_to_sarif(
+        &[
+            crash(
+                CrashKind::Asan,
+                CrashSeverity::Exploitable,
+                "heap-buffer-overflow(write)",
+                "",
+            ),
+            harness_crash,
+        ],
+        "0.1.0",
+        std::path::Path::new("/proj"),
+    );
+
+    let results = doc["runs"][0]["results"].as_array().expect("results array");
+    assert_eq!(results.len(), 1, "harness defect leaked into SARIF: {doc}");
+}
+
+#[test]
+fn a_run_of_only_harness_defects_exports_no_results() {
+    let mut harness_crash = crash(CrashKind::Asan, CrashSeverity::Exploitable, "segv", "");
+    harness_crash.origin = hf_core::crash::CrashOrigin::Harness;
+    let doc = crashes_to_sarif(&[harness_crash], "0.1.0", std::path::Path::new("/proj"));
+    let results = doc["runs"][0]["results"].as_array().expect("results array");
+    assert!(results.is_empty(), "{doc}");
+}
