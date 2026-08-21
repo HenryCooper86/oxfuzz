@@ -185,6 +185,81 @@ pub fn rules_for(lang: TargetLanguage) -> Option<&'static RuleSet> {
 mod tests {
     use super::*;
 
+    /// Every rule ships a positive fixture that must match and a negative one
+    /// that must not. The negative is the one that matters: it is where a rule
+    /// that over-matches gets caught, and a rule without one is not done.
+    const FIXTURES: &[(&str, &str, &str)] = &[
+        (
+            "dangerous-function-alloca",
+            "void f(int n){ char *p = alloca(n); (void)p; }",
+            "void f(int n){ char *p = my_alloca(n); int alloca_size = n; (void)p; (void)alloca_size; }",
+        ),
+        (
+            "unbounded-string-copy",
+            "void f(char*d, char*s){ strcpy(d, s); }",
+            "void f(char*d, char*s){ strncpy(d, s, 8); strlcpy(d, s, 8); }",
+        ),
+        (
+            "unbounded-scanf-conversion",
+            "void f(char*b){ scanf(\"%s\", b); }",
+            "void f(char*b, int*n){ scanf(\"%10s\", b); scanf(\"%d\", n); }",
+        ),
+        (
+            "insecure-temporary-file",
+            "void f(char*t){ mktemp(t); }",
+            // mkstemp returns an open descriptor and is the recommended fix.
+            "void f(char*t){ mkstemp(t); }",
+        ),
+        (
+            "weak-pseudo-random",
+            "int f(void){ return rand(); }",
+            "int f(void){ return arc4random(); }",
+        ),
+        (
+            "signal-handler-race",
+            "void f(void (*h)(int)){ signal(2, h); }",
+            "void f(void *a){ sigaction(2, a, 0); }",
+        ),
+        (
+            "toctou-access-check",
+            "int f(char*p){ return access(p, 4); }",
+            "int f(int fd, void*st){ return fstat(fd, st); }",
+        ),
+        (
+            "os-command-execution",
+            "void f(char*c){ system(c); }",
+            "void f(char*c){ my_system(c); }",
+        ),
+        (
+            "strlen-sum-overflow",
+            "unsigned long f(char*a, char*b){ return strlen(a) + strlen(b) + 1; }",
+            // A single length plus a constant cannot wrap in practice.
+            "unsigned long f(char*s){ return strlen(s) + 1; }",
+        ),
+    ];
+
+    #[test]
+    fn every_rule_matches_its_positive_fixture() {
+        for (rule_id, positive, _) in FIXTURES {
+            let findings = analyze_c(positive);
+            assert!(
+                findings.iter().any(|finding| finding.rule_id == *rule_id),
+                "{rule_id} did not match its positive fixture; got {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_rule_matches_its_negative_fixture() {
+        for (rule_id, _, negative) in FIXTURES {
+            let findings = analyze_c(negative);
+            assert!(
+                !findings.iter().any(|finding| finding.rule_id == *rule_id),
+                "{rule_id} over-matched its negative fixture; got {findings:?}"
+            );
+        }
+    }
+
     fn analyze_c(source: &str) -> Vec<Finding> {
         let mut parser = tree_sitter::Parser::new();
         parser
@@ -302,11 +377,13 @@ mod tests {
             .iter()
             .map(|finding| (finding.span.start_line, finding.rule_id))
             .collect();
+        // Line 3 carries two rules; within a line the order is by rule id.
         assert_eq!(
             order,
             vec![
                 (2, "dangerous-function-gets"),
-                (3, "unchecked-return-scanf")
+                (3, "unbounded-scanf-conversion"),
+                (3, "unchecked-return-scanf"),
             ]
         );
     }
@@ -352,9 +429,17 @@ mod tests {
 
     #[test]
     fn flags_scanf_whose_result_is_discarded() {
+        // Two distinct rules fire here and both are true: the return value is
+        // discarded, and the %s conversion is unbounded. The assertion names
+        // the rule under test rather than the count, so adding a rule that is
+        // also correct about this line does not break it.
         let findings = analyze_c("void f(char*b){ scanf(\"%s\", b); }");
-        assert_eq!(findings.len(), 1, "{findings:?}");
-        assert_eq!(findings[0].rule_id, "unchecked-return-scanf");
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule_id == "unchecked-return-scanf"),
+            "{findings:?}"
+        );
     }
 
     #[test]
@@ -362,9 +447,19 @@ mod tests {
         // The rule is about the discarded return value, so a checked call is
         // the negative fixture that proves the constraint works.
         let checked = analyze_c("void f(char*b){ if (scanf(\"%s\", b) != 1) return; }");
-        assert!(checked.is_empty(), "{checked:?}");
+        assert!(
+            !checked
+                .iter()
+                .any(|finding| finding.rule_id == "unchecked-return-scanf"),
+            "{checked:?}"
+        );
         let assigned = analyze_c("void f(char*b){ int n = scanf(\"%s\", b); (void)n; }");
-        assert!(assigned.is_empty(), "{assigned:?}");
+        assert!(
+            !assigned
+                .iter()
+                .any(|finding| finding.rule_id == "unchecked-return-scanf"),
+            "{assigned:?}"
+        );
     }
 
     #[test]
