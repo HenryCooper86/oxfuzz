@@ -12,12 +12,26 @@ pub(crate) struct Rule {
 }
 
 /// Rules matched against C translation units.
-pub(crate) const C_RULES: &[Rule] = &[Rule {
-    id: "dangerous-function-gets",
-    cwe: "CWE-242",
-    severity: Severity::Error,
-    query: include_str!("../rules/c/dangerous-function-gets.scm"),
-}];
+pub(crate) const C_RULES: &[Rule] = &[
+    Rule {
+        id: "dangerous-function-gets",
+        cwe: "CWE-242",
+        severity: Severity::Error,
+        query: include_str!("../rules/c/dangerous-function-gets.scm"),
+    },
+    Rule {
+        id: "unchecked-conversion-ato",
+        cwe: "CWE-252",
+        severity: Severity::Warning,
+        query: include_str!("../rules/c/unchecked-conversion-ato.scm"),
+    },
+    Rule {
+        id: "unchecked-return-scanf",
+        cwe: "CWE-252",
+        severity: Severity::Warning,
+        query: include_str!("../rules/c/unchecked-return-scanf.scm"),
+    },
+];
 
 /// Rules matched against C++ translation units. C++ gains its own rules once
 /// the shape rules that need C++-only grammar nodes are written; until then the
