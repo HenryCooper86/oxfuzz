@@ -611,7 +611,7 @@ All 49 upstream rules, each with exactly one disposition. This is the input the
 phase 1c gate needs: a ranking delta traced to a row here is explained, not a
 failure.
 
-**Covered: 33 of 49**, by 32 oxfuzz rules. Three upstream pairs collapse, because
+**Covered: 34 of 49**, by 32 oxfuzz rules. Three upstream pairs collapse, because
 re-derivation grouped by defect rather than by function name:
 `strcpy`/`strcat` with `sprintf`/`vsprintf` into `unbounded-string-copy`;
 `snprintf`/`vsnprintf` with `strlcpy`/`strlcat` into
@@ -654,7 +654,7 @@ re-derivation grouped by defect rather than by function name:
 | regex-dos | `catastrophic-regex` |
 | pointer-subtraction | `pointer-subtraction-size` |
 
-**Not covered: 16 of 49**, each with a reason.
+**Not covered: 15 of 49**, each with a reason.
 
 | Upstream | Disposition |
 | --- | --- |
@@ -671,7 +671,7 @@ re-derivation grouped by defect rather than by function name:
 | mismatched-memory-management-cpp | Same as above |
 | incorrect-order-setuid-setgid | Needs ordering between two *different* events; the pass pairs a repeated event or an event and a use, not two distinct calls |
 | unchecked-ret-malloc | Needs a null-check kill the kill set does not yet model |
-| incorrect-use-of-strncat | Needs remaining-destination-space reasoning |
+| incorrect-use-of-strncat | Covered in the second widening round by `strncat-constant-bound`: a constant bound cannot express remaining space. |
 | write-into-stack-buffer | Needs to know an object is a stack allocation |
 | putenv-stack-var | Withdrawn in the widening phase: the defect is putenv of a *stack* variable and the corpus accepts a `static` one, but storage class is not information this analyzer gathers. Two known false positives were worse than a gap. |
 
