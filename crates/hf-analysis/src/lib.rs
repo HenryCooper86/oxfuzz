@@ -306,6 +306,17 @@ mod tests {
             "void f(char*d, char*s){ strncpy(d, s, 8); strlcpy(d, s, 8); }",
         ),
         (
+            "truncating-write-return-used",
+            "int f(char*b, char*s){ int n = snprintf(b, 8, \"%s\", s); return n; }",
+            // Only width-bounded conversions, so the value cannot be a lie.
+            "int f(char*b, int v){ int n = snprintf(b, 8, \"%d\", v); return n; }",
+        ),
+        (
+            "snprintf-size-mismatch",
+            "void f(char*d, char*s){ snprintf(d, sizeof(s), \"%s\", s); }",
+            "void f(char*d, char*s){ snprintf(d, sizeof(d), \"%s\", s); }",
+        ),
+        (
             "unbounded-format-write",
             "void f(char*b, char*s){ sprintf(b, \"v: %s\", s); }",
             // A numeric conversion has a bounded width.
@@ -362,10 +373,10 @@ mod tests {
         // Written as a literal so adding or dropping a rule is a deliberate
         // edit with a commit message, not a silent change in coverage. The
         // reconciliation table in spec section 18.5 is keyed to these numbers.
-        assert_eq!(compile_all(TargetLanguage::C).unwrap(), 33, "C rule count");
+        assert_eq!(compile_all(TargetLanguage::C).unwrap(), 35, "C rule count");
         assert_eq!(
             compile_all(TargetLanguage::Cpp).unwrap(),
-            33,
+            35,
             "C++ rule count"
         );
     }

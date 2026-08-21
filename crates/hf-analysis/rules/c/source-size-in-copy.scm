@@ -19,9 +19,16 @@
       .
       (identifier)
       (identifier) @src
-      (call_expression
-        function: (identifier) @len
-        arguments: (argument_list (identifier) @size))
+      [
+        (call_expression
+          function: (identifier) @len
+          arguments: (argument_list (identifier) @size))
+        (binary_expression
+          left: (call_expression
+            function: (identifier) @len
+            arguments: (argument_list (identifier) @size))
+          operator: "+")
+      ]
       .)
     (#match? @fn "^(memcpy|memmove|strncpy|strncat)$")
     (#eq? @len "strlen")
