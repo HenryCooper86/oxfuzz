@@ -307,18 +307,16 @@ pub async fn try_compile(
     // `source_name`/`output_name` derive from the (user-influenced) target
     // symbol and are interpolated into a `bash -c` script, so shell-quote them.
     // The `/work` prefix and compiler/args are values we control.
-    let source_q = sh_quote(source_name);
-    let output_q = sh_quote(&output_name);
-    let compile_script = format!(
-        "{compiler} {args} -I{container_ws} {container_ws}/{source_q} {extra_sources} -o /tmp/{output_q} && cp /tmp/{output_q} {container_ws}/{output_q} && chmod +x {container_ws}/{output_q}",
-        compiler = harness.build_cmd.compiler,
-        args = harness.build_cmd.args.join(" "),
-        container_ws = container_ws,
-        source_q = source_q,
-        output_q = output_q,
-        extra_sources = list_c_files(workspace, container_ws, source_name),
+    let script = compile_script(
+        &harness.build_cmd.compiler,
+        &harness.build_cmd.args,
+        &harness.build_cmd.extra_flags,
+        container_ws,
+        source_name,
+        &output_name,
+        &list_c_files(workspace, container_ws, source_name),
     );
-    let cmd = vec!["bash".to_owned(), "-c".to_owned(), compile_script];
+    let cmd = vec!["bash".to_owned(), "-c".to_owned(), script];
     let limits = hf_core::runtime::ResourceLimits {
         max_mem_mb: 4096,
         max_cpus: 2,
@@ -886,6 +884,7 @@ pub fn build_command(engine: EngineKind, lang: TargetLanguage, output_name: &str
                 crate::cargo_fuzz::sanitize_target_name(output_name),
             ],
             output: PathBuf::from(output_name),
+            extra_flags: Vec::new(),
         };
     }
     // C++ harnesses/targets must be compiled and, crucially, LINKED with the
@@ -903,6 +902,7 @@ pub fn build_command(engine: EngineKind, lang: TargetLanguage, output_name: &str
                 "-g".to_owned(),
             ],
             output: PathBuf::from(output_name),
+            extra_flags: Vec::new(),
         },
         EngineKind::AflPlusPlus => BuildCommand {
             compiler: if is_cpp {
@@ -917,11 +917,13 @@ pub fn build_command(engine: EngineKind, lang: TargetLanguage, output_name: &str
                 "-g".to_owned(),
             ],
             output: PathBuf::from(output_name),
+            extra_flags: Vec::new(),
         },
         EngineKind::Honggfuzz => BuildCommand {
             compiler: if is_cpp { "hfuzz-c++" } else { "hfuzz-cc" }.to_owned(),
             args: vec!["-fsanitize=address".to_owned(), "-g".to_owned()],
             output: PathBuf::from(output_name),
+            extra_flags: Vec::new(),
         },
         // syzkaller fuzzes a kernel built with coverage instrumentation rather
         // than a per-function harness binary; this represents the kernel build.
@@ -929,6 +931,7 @@ pub fn build_command(engine: EngineKind, lang: TargetLanguage, output_name: &str
             compiler: "make".to_owned(),
             args: vec!["CONFIG_KCOV=y".to_owned(), "CONFIG_DEBUG_INFO=y".to_owned()],
             output: PathBuf::from(output_name),
+            extra_flags: Vec::new(),
         },
     }
 }
@@ -1066,6 +1069,41 @@ fn list_c_files(workspace: &Path, container_ws: &str, source_name: &str) -> Stri
     files.join(" ")
 }
 
+/// Build the `bash -c` script that compiles a harness inside the sandbox.
+///
+/// `extra_flags` comes from the project's compile database and is therefore
+/// untrusted, as are `source_name` and `output_name`, which derive from the
+/// target symbol. Every one of them is shell-quoted here, which is the single
+/// place quoting happens for this command. The compiler, its engine arguments,
+/// and the `/work` prefix are values oxfuzz controls.
+///
+/// Project flags precede `-I{container_ws}` and the source so a project include
+/// directory wins over the staged workspace root when both hold a header of the
+/// same name.
+fn compile_script(
+    compiler: &str,
+    args: &[String],
+    extra_flags: &[String],
+    container_ws: &str,
+    source_name: &str,
+    output_name: &str,
+    extra_sources: &str,
+) -> String {
+    let quoted_flags = extra_flags
+        .iter()
+        .map(|flag| sh_quote(flag))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let source_q = sh_quote(source_name);
+    let output_q = sh_quote(output_name);
+    format!(
+        "{compiler} {args} {quoted_flags} -I{container_ws} {container_ws}/{source_q} \
+         {extra_sources} -o /tmp/{output_q} && cp /tmp/{output_q} {container_ws}/{output_q} \
+         && chmod +x {container_ws}/{output_q}",
+        args = args.join(" "),
+    )
+}
+
 /// Single-quote a string for safe interpolation into a POSIX shell command.
 ///
 /// Wraps the value in single quotes (which suppress every shell metacharacter)
@@ -1094,6 +1132,63 @@ mod tests {
     use hf_core::types::TokenUsage;
     use hf_test_utils::mock_provider::MockProvider;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn compile_script_places_project_flags_before_the_source() {
+        let script = compile_script(
+            "clang",
+            &["-fsanitize=fuzzer".to_owned()],
+            &["-I/work/include".to_owned(), "-DA=1".to_owned()],
+            "/work",
+            "harness.c",
+            "fuzz_p",
+            "",
+        );
+        let flags_at = script.find("-I/work/include").unwrap();
+        let source_at = script.find("/work/'harness.c'").unwrap();
+        assert!(
+            flags_at < source_at,
+            "flags must precede the source: {script}"
+        );
+    }
+
+    #[test]
+    fn compile_script_quotes_project_flags() {
+        // Flags originate in the untrusted project's compile database. Even
+        // though the allowlist rejects this token, the script must not depend
+        // on that.
+        let script = compile_script(
+            "clang",
+            &[],
+            &["-DEVIL=$(touch /tmp/pwned)".to_owned()],
+            "/work",
+            "harness.c",
+            "fuzz_p",
+            "",
+        );
+        assert!(
+            script.contains("'-DEVIL=$(touch /tmp/pwned)'"),
+            "flag not quoted: {script}"
+        );
+    }
+
+    #[test]
+    fn compile_script_without_project_flags_matches_the_plain_build() {
+        // A project with no compile database must compile exactly as before.
+        let script = compile_script(
+            "clang",
+            &["-g".to_owned()],
+            &[],
+            "/work",
+            "harness.c",
+            "fuzz_p",
+            "",
+        );
+        assert!(
+            script.contains("clang -g  -I/work /work/'harness.c'"),
+            "{script}"
+        );
+    }
 
     fn sample_target() -> TargetCandidate {
         TargetCandidate {
