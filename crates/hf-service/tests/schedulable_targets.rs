@@ -74,6 +74,7 @@ fn harness(
             compiler: "clang".to_owned(),
             args: vec![],
             output: PathBuf::from("fuzz"),
+            extra_flags: Vec::new(),
         },
         sanitizer: Sanitizer::Address,
         status,

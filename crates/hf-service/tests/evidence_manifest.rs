@@ -210,6 +210,7 @@ async fn service_assembles_a_manifest_from_durable_run_and_approval_evidence() {
             compiler: "clang".to_owned(),
             args: Vec::new(),
             output: PathBuf::from("fuzz_bin"),
+            extra_flags: Vec::new(),
         },
         sanitizer: Sanitizer::Address,
         status: HarnessStatus::Promoted,
@@ -271,6 +272,7 @@ async fn service_assembles_a_manifest_from_durable_run_and_approval_evidence() {
         minimized: false,
         bug_report: None,
         casr: None,
+        origin: hf_core::crash::CrashOrigin::Unknown,
     };
     let store = Arc::new(store);
     store.upsert_crash(&crash).await.unwrap();

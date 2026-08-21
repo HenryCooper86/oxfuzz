@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::Utc;
+use hf_core::build::BuildContext;
 use hf_core::engine::{EngineKind, FuzzRunConfig};
 use hf_core::error::ClassifiedError;
 use hf_core::harness::{Harness, HarnessDraft, HarnessStatus};
@@ -36,6 +37,70 @@ use super::{
     heuristic_draft, require_fuzzing_harness_engine, resolve_internal_run, CompileOutcome,
     HarnessGenOutcome, LlmProviderBridge, SeedEntry, ServiceContainer, SMOKE_FUZZ_SECS,
 };
+
+/// The project's compile context for prompt rendering, or `None` when it ships
+/// no database or the database cannot be read.
+///
+/// Drafting is best-effort and never fails, so an unreadable database degrades
+/// to a prompt without build context. `project_compile_flags` still fails the
+/// build for that same project, which is where an operator needs to see it.
+#[cfg(feature = "build-context")]
+fn project_build_context(container: &ServiceContainer, project: &Path) -> Option<BuildContext> {
+    match container.resolve_build_context(project) {
+        Ok(context) => context,
+        Err(error) => {
+            tracing::warn!(
+                "compile database for {} is unusable ({error}); drafting without build context",
+                project.display()
+            );
+            None
+        }
+    }
+}
+
+/// Compile-database support is not built in, so prompts carry no build context.
+#[cfg(not(feature = "build-context"))]
+fn project_build_context(_container: &ServiceContainer, _project: &Path) -> Option<BuildContext> {
+    None
+}
+
+/// The container path the sandbox stages the project at. Compile-database
+/// include directories are rewritten against it.
+#[cfg(feature = "build-context")]
+const CONTAINER_WORKSPACE: &str = "/work";
+
+/// Project-derived compile flags for a harness build, empty when the project
+/// ships no compile database.
+///
+/// A broken database propagates rather than degrading to no flags: a project
+/// that has one and cannot parse it is misconfigured, and building without the
+/// flags would fail later with a confusing missing-header error instead.
+#[cfg(feature = "build-context")]
+fn project_compile_flags(
+    container: &ServiceContainer,
+    project: &Path,
+) -> Result<Vec<String>, ClassifiedError> {
+    Ok(container
+        .resolve_build_context(project)?
+        .map(|context| {
+            hf_discovery::build_context::staged_compile_flags(
+                &context,
+                project,
+                CONTAINER_WORKSPACE,
+            )
+        })
+        .unwrap_or_default())
+}
+
+/// Compile-database support is not built in, so a harness compiles with the
+/// engine arguments alone.
+#[cfg(not(feature = "build-context"))]
+fn project_compile_flags(
+    _container: &ServiceContainer,
+    _project: &Path,
+) -> Result<Vec<String>, ClassifiedError> {
+    Ok(Vec::new())
+}
 
 impl ServiceContainer {
     /// Resolve a target symbol to its discovered candidate id.
@@ -82,8 +147,15 @@ impl ServiceContainer {
             let provider = LlmProviderBridge::new(pool)
                 .with_diagnostics(Arc::clone(&self.diagnostics), "harness_draft");
             let related = crate::knowledge::harness_related_context(project, candidate);
-            match hf_harness::draft_with_context(candidate, engine, &related, Box::new(provider))
-                .await
+            let build = project_build_context(self, project);
+            match hf_harness::draft_with_context(
+                candidate,
+                engine,
+                &related,
+                build.as_ref(),
+                Box::new(provider),
+            )
+            .await
             {
                 Ok(draft) => return draft.source,
                 Err(e) => tracing::warn!(
@@ -102,6 +174,31 @@ impl ServiceContainer {
     /// # Errors
     /// Returns `ClassifiedError::Harness` if the harness still fails to build
     /// after `max_repairs` attempts, or an infrastructure error from the sandbox.
+    /// One LLM repair pass over failing harness source.
+    ///
+    /// `None` when there is no provider configured to repair with, or the
+    /// repair call itself failed; either makes the current failure terminal.
+    /// Shared by the lint gate and the compiler-failure path so both feed the
+    /// model the same way.
+    async fn repair_harness_source(
+        &self,
+        candidate: &TargetCandidate,
+        engine: EngineKind,
+        source: &str,
+        diagnostics: &str,
+    ) -> Option<String> {
+        let pool = self.provider_pool()?;
+        let provider = LlmProviderBridge::new(pool)
+            .with_diagnostics(Arc::clone(&self.diagnostics), "harness_repair");
+        match hf_harness::repair(candidate, engine, source, diagnostics, Box::new(provider)).await {
+            Ok(draft) => Some(draft.source),
+            Err(error) => {
+                tracing::warn!("harness repair for '{}' failed: {error}", candidate.symbol);
+                None
+            }
+        }
+    }
+
     async fn compile_source_with_repair(
         &self,
         candidate: &TargetCandidate,
@@ -118,9 +215,29 @@ impl ServiceContainer {
         let mut last_diagnostics = String::new();
 
         loop {
+            let lint = hf_harness::lint_harness_source(&source, lang);
+            if hf_harness::has_blocking_finding(&lint) {
+                // A lint error is a build failure the compiler would have
+                // accepted. Route it into the same repair path, skipping the
+                // container round-trip that would have produced a clean build
+                // of an unusable harness.
+                last_diagnostics = hf_harness::render_findings(&lint);
+                match self
+                    .repair_harness_source(candidate, engine, &source, &last_diagnostics)
+                    .await
+                {
+                    Some(repaired) if repairs_used < max_repairs => {
+                        source = repaired;
+                        repairs_used += 1;
+                        continue;
+                    }
+                    _ => break,
+                }
+            }
             let mut build_cmd =
                 hf_harness::build_command(engine, lang, &harness_binary_name(target));
             build_cmd.output = PathBuf::from(harness_binary_name(target));
+            build_cmd.extra_flags = project_compile_flags(self, &candidate.project_root)?;
             let harness = Harness {
                 id: Uuid::new_v4(),
                 target_id: candidate.id,
@@ -160,6 +277,7 @@ impl ServiceContainer {
                         binary_name,
                         workspace: workspace.to_path_buf(),
                         repairs_used,
+                        lint,
                     });
                 }
                 hf_harness::CompileResult::Failed(failure) => {
@@ -167,27 +285,15 @@ impl ServiceContainer {
                     if repairs_used >= max_repairs {
                         break;
                     }
-                    let Some(pool) = self.provider_pool() else {
-                        // No LLM to repair with; the first failure is terminal.
-                        break;
-                    };
-                    let provider = LlmProviderBridge::new(pool)
-                        .with_diagnostics(Arc::clone(&self.diagnostics), "harness_repair");
-                    match hf_harness::repair(
-                        candidate,
-                        engine,
-                        &source,
-                        &last_diagnostics,
-                        Box::new(provider),
-                    )
-                    .await
+                    match self
+                        .repair_harness_source(candidate, engine, &source, &last_diagnostics)
+                        .await
                     {
-                        Ok(draft) => {
-                            source = draft.source;
+                        Some(repaired) => {
+                            source = repaired;
                             repairs_used += 1;
                         }
-                        Err(e) => {
-                            tracing::warn!("harness repair for '{target}' failed: {e}");
+                        None => {
                             break;
                         }
                     }
@@ -240,8 +346,15 @@ impl ServiceContainer {
             // project has been indexed; empty on any failure, which renders
             // the un-augmented prompt.
             let related = crate::knowledge::harness_related_context(project, &candidate);
-            match hf_harness::draft_with_context(&candidate, engine, &related, Box::new(provider))
-                .await
+            let build = project_build_context(self, project);
+            match hf_harness::draft_with_context(
+                &candidate,
+                engine,
+                &related,
+                build.as_ref(),
+                Box::new(provider),
+            )
+            .await
             {
                 Ok(draft) => Ok(draft),
                 // The LLM is configured but the call failed (provider down, auth,
@@ -279,13 +392,23 @@ impl ServiceContainer {
         require_fuzzing_harness_engine(engine, lang)?;
         self.authorize_recorded(Action::CompileHarness, "harness_compile", Some(project))
             .await?;
+        // Cheapest check first: a harness that terminates the process, spawns a
+        // shell, or opens a socket is rejected before a container starts.
+        let lint = hf_harness::lint_harness_source(&source, lang);
+        if hf_harness::has_blocking_finding(&lint) {
+            return Err(ClassifiedError::Harness(format!(
+                "harness lint failed:\n{}",
+                hf_harness::render_findings(&lint)
+            )));
+        }
         prepare_configured_workspace_root()?;
         let workspace = workspace_dir(project, target);
         std::fs::create_dir_all(&workspace)
             .map_err(|e| ClassifiedError::Internal(format!("mkdir: {e}")))?;
         copy_project_sources(project, &workspace);
 
-        let build_cmd = hf_harness::build_command(engine, lang, &harness_binary_name(target));
+        let mut build_cmd = hf_harness::build_command(engine, lang, &harness_binary_name(target));
+        build_cmd.extra_flags = project_compile_flags(self, project)?;
         let harness = Harness {
             id: Uuid::new_v4(),
             target_id: self.resolve_target_id(project, target, lang).await?,
@@ -320,6 +443,7 @@ impl ServiceContainer {
                 .unwrap_or(target)
                 .to_string(),
             workspace,
+            lint,
         })
     }
 
@@ -889,5 +1013,59 @@ impl ServiceContainer {
         let corpus = hf_corpus::list(&corpus_dir)?;
         self.persist_corpus(target_id, &corpus).await?;
         Ok(entries)
+    }
+}
+
+#[cfg(all(test, feature = "build-context"))]
+mod build_context_wiring_tests {
+    use std::sync::Arc;
+
+    use super::{project_compile_flags, ServiceContainer};
+
+    #[test]
+    fn a_compile_database_reaches_the_harness_build_command() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join("include")).unwrap();
+        // Built with serde_json rather than string interpolation: a Windows
+        // temporary directory is `C:\Users\...`, and those separators are
+        // invalid JSON escapes when pasted into a string literal.
+        let document = serde_json::json!([{
+            "directory": project.path(),
+            "file": project.path().join("a.c"),
+            "arguments": [
+                "cc".to_owned(),
+                format!("-I{}", project.path().join("include").display()),
+                "-DA=1".to_owned(),
+                "-c".to_owned(),
+                "a.c".to_owned(),
+            ],
+        }]);
+        std::fs::write(
+            project.path().join("compile_commands.json"),
+            serde_json::to_vec(&document).unwrap(),
+        )
+        .unwrap();
+        let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
+
+        let flags = project_compile_flags(&container, project.path()).unwrap();
+
+        assert_eq!(flags, vec!["-I/work/include", "-DA=1"]);
+    }
+
+    #[test]
+    fn a_project_without_a_database_builds_with_no_extra_flags() {
+        let project = tempfile::tempdir().unwrap();
+        let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
+        assert!(project_compile_flags(&container, project.path())
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn a_broken_database_fails_the_build_instead_of_dropping_the_flags() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("compile_commands.json"), "{not json").unwrap();
+        let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
+        assert!(project_compile_flags(&container, project.path()).is_err());
     }
 }
