@@ -306,6 +306,16 @@ mod tests {
             "void f(char*d, char*s){ strncpy(d, s, 8); strlcpy(d, s, 8); }",
         ),
         (
+            "index-at-buffer-size",
+            "void f(void){ char b[8]; b[sizeof(b)] = 0; }",
+            "void f(void){ char b[8]; b[sizeof(b) - 1] = 0; }",
+        ),
+        (
+            "allocation-missing-terminator",
+            "char* f(char*s){ return malloc(strlen(s)); }",
+            "char* f(char*s){ return malloc(strlen(s) + 1); }",
+        ),
+        (
             "truncating-write-return-used",
             "int f(char*b, char*s){ int n = snprintf(b, 8, \"%s\", s); return n; }",
             // Only width-bounded conversions, so the value cannot be a lie.
@@ -373,11 +383,11 @@ mod tests {
         // Written as a literal so adding or dropping a rule is a deliberate
         // edit with a commit message, not a silent change in coverage. The
         // reconciliation table in spec section 18.5 is keyed to these numbers.
-        assert_eq!(compile_all(TargetLanguage::C).unwrap(), 35, "C rule count");
+        assert_eq!(compile_all(TargetLanguage::C).unwrap(), 37, "C rule count");
         assert_eq!(
             compile_all(TargetLanguage::Cpp).unwrap(),
-            35,
-            "C++ rule count"
+            36,
+            "C++ rule count; one C-only rule, see catalog"
         );
     }
 
