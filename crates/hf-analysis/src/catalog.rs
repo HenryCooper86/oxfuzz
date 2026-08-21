@@ -278,16 +278,37 @@ pub(crate) const SHARED_RULES: &[Rule] = &[
         kind: RuleKind::Shape,
         query: include_str!("../rules/c/snprintf-size-mismatch.scm"),
     },
+    Rule {
+        id: "allocation-missing-terminator",
+        cwe: "CWE-193",
+        severity: Severity::Error,
+        kind: RuleKind::Shape,
+        query: include_str!("../rules/c/allocation-missing-terminator.scm"),
+    },
 ];
 
 /// Rules that only compile against the C grammar.
-pub(crate) const C_ONLY_RULES: &[Rule] = &[Rule {
-    id: "assignment-in-condition",
-    cwe: "CWE-480",
-    severity: Severity::Info,
-    kind: RuleKind::Shape,
-    query: include_str!("../rules/c/assignment-in-condition.scm"),
-}];
+///
+/// `index-at-buffer-size` is here because C++ names the subscript field
+/// differently: it admits multi-dimensional subscripts, so the index is a
+/// `subscript_argument_list` rather than a single `index` field. A C++ form is
+/// worth writing, and until it exists C++ does not carry this rule.
+pub(crate) const C_ONLY_RULES: &[Rule] = &[
+    Rule {
+        id: "assignment-in-condition",
+        cwe: "CWE-480",
+        severity: Severity::Info,
+        kind: RuleKind::Shape,
+        query: include_str!("../rules/c/assignment-in-condition.scm"),
+    },
+    Rule {
+        id: "index-at-buffer-size",
+        cwe: "CWE-193",
+        severity: Severity::Warning,
+        kind: RuleKind::Shape,
+        query: include_str!("../rules/c/index-at-buffer-size.scm"),
+    },
+];
 
 /// Rules that only compile against the C++ grammar.
 pub(crate) const CPP_ONLY_RULES: &[Rule] = &[Rule {
