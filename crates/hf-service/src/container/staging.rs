@@ -195,6 +195,75 @@ pub(super) fn retain_run_context(run: &mut RunRecord, context: RunContextDigests
 /// `copy_project_sources` plus the corpus. Symlinks and unexpectedly large
 /// trees fail closed so an untrusted workspace cannot turn regression
 /// bookkeeping into an unbounded host traversal.
+/// Directories under the workspace that hold something other than staged build
+/// input: the corpus and the Rust crate tree have their own passes, and the
+/// rest is run output or a generated scaffold rather than project source.
+const NON_BUILD_INPUT_DIRS: [&str; 6] = ["corpus", "src", "out", "runs", "fuzz", "target"];
+
+/// Collect staged C/C++ build inputs and Rust crate manifests anywhere under
+/// the workspace, at their workspace-relative paths.
+///
+/// Recursive because `copy_project_sources` preserves the project's directory
+/// layout: a flat scan of the workspace root would digest only the files that
+/// happen to sit at the top level and silently stop covering the rest, which
+/// would leave run provenance asserting more than it checked. Symlinks fail
+/// closed for the same reason they do in `collect`.
+fn collect_build_inputs(
+    root: &Path,
+    directory: &Path,
+    paths: &mut Vec<PathBuf>,
+) -> Result<(), ClassifiedError> {
+    let mut entries = std::fs::read_dir(directory)
+        .map_err(|error| {
+            ClassifiedError::Validation(format!(
+                "read comparison context {}: {error}",
+                directory.display()
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            ClassifiedError::Validation(format!("read comparison context entry: {error}"))
+        })?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        let path = entry.path();
+        let kind = entry.file_type().map_err(|error| {
+            ClassifiedError::Validation(format!(
+                "inspect comparison context {}: {error}",
+                path.display()
+            ))
+        })?;
+        if kind.is_symlink() {
+            return Err(ClassifiedError::Validation(format!(
+                "comparison context contains a symlink: {}",
+                path.display()
+            )));
+        }
+        let name = entry.file_name();
+        if kind.is_dir() {
+            if NON_BUILD_INPUT_DIRS
+                .iter()
+                .any(|skipped| std::ffi::OsStr::new(skipped) == name)
+            {
+                continue;
+            }
+            collect_build_inputs(root, &path, paths)?;
+            continue;
+        }
+        if !kind.is_file() {
+            continue;
+        }
+        let name = name.to_string_lossy();
+        let extension = path.extension().and_then(|value| value.to_str());
+        let is_source = matches!(extension, Some("c" | "h" | "cc" | "cpp" | "cxx" | "hpp"))
+            && !name.starts_with("harness.");
+        if is_source || matches!(name.as_ref(), "Cargo.toml" | "Cargo.lock") {
+            paths.push(path.strip_prefix(root).unwrap_or(&path).to_path_buf());
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn run_context_digests(
     workspace: &Path,
     sandbox_image_sha256: &str,
@@ -274,22 +343,7 @@ pub(super) fn run_context_digests(
     }
 
     let mut relative_paths = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(workspace) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
-                continue;
-            }
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            let extension = path.extension().and_then(|value| value.to_str());
-            let is_source = matches!(extension, Some("c" | "h" | "cc" | "cpp" | "cxx" | "hpp"))
-                && !name.starts_with("harness.");
-            if is_source || matches!(name.as_ref(), "Cargo.toml" | "Cargo.lock") {
-                relative_paths.push(PathBuf::from(name.as_ref()));
-            }
-        }
-    }
+    collect_build_inputs(workspace, workspace, &mut relative_paths)?;
     collect(workspace, &workspace.join("src"), true, &mut relative_paths)?;
     collect(
         workspace,
@@ -756,6 +810,35 @@ mod staging_tests {
                 .unwrap()
                 .combined
         );
+    }
+
+    #[test]
+    fn comparison_context_covers_nested_staged_sources() {
+        // `copy_project_sources` preserves the project's directory layout, so a
+        // header under `include/` is a real build input. A flat root scan would
+        // digest none of it and run provenance would stop meaning anything.
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join("include")).unwrap();
+        std::fs::create_dir_all(workspace.path().join("lib/parser")).unwrap();
+        std::fs::write(workspace.path().join("include/dns.h"), "int p(void);").unwrap();
+        std::fs::write(
+            workspace.path().join("lib/parser/dns.c"),
+            "int p(void){return 0;}",
+        )
+        .unwrap();
+
+        let first = run_context_digests(workspace.path(), &"a".repeat(64)).unwrap();
+        std::fs::write(workspace.path().join("include/dns.h"), "int p(int);").unwrap();
+        let second = run_context_digests(workspace.path(), &"a".repeat(64)).unwrap();
+        assert_ne!(first.source, second.source, "nested header not digested");
+
+        std::fs::write(
+            workspace.path().join("lib/parser/dns.c"),
+            "int p(void){return 1;}",
+        )
+        .unwrap();
+        let third = run_context_digests(workspace.path(), &"a".repeat(64)).unwrap();
+        assert_ne!(second.source, third.source, "nested source not digested");
     }
 
     #[test]
