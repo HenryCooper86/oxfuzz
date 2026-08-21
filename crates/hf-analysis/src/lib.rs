@@ -151,6 +151,40 @@ mod tests {
     }
 
     #[test]
+    fn flags_the_ato_family_by_pattern() {
+        for call in ["atoi(s)", "atol(s)", "atoll(s)"] {
+            let findings = analyze_c(&format!("int f(char*s){{ return {call}; }}"));
+            assert_eq!(findings.len(), 1, "{call}: {findings:?}");
+            assert_eq!(findings[0].rule_id, "unchecked-conversion-ato");
+            assert_eq!(findings[0].cwe, "CWE-252");
+        }
+    }
+
+    #[test]
+    fn does_not_flag_a_name_that_only_starts_like_the_family() {
+        // #match? must be anchored at both ends or `atomic_load` matches.
+        let findings = analyze_c("void f(void){ atomic_load(0); atoi_safe(0); }");
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn flags_scanf_whose_result_is_discarded() {
+        let findings = analyze_c("void f(char*b){ scanf(\"%s\", b); }");
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].rule_id, "unchecked-return-scanf");
+    }
+
+    #[test]
+    fn does_not_flag_scanf_whose_result_is_used() {
+        // The rule is about the discarded return value, so a checked call is
+        // the negative fixture that proves the constraint works.
+        let checked = analyze_c("void f(char*b){ if (scanf(\"%s\", b) != 1) return; }");
+        assert!(checked.is_empty(), "{checked:?}");
+        let assigned = analyze_c("void f(char*b){ int n = scanf(\"%s\", b); (void)n; }");
+        assert!(assigned.is_empty(), "{assigned:?}");
+    }
+
+    #[test]
     fn flags_a_call_to_gets() {
         let findings = analyze_c("int main(void){ char b[8]; gets(b); return 0; }");
         assert_eq!(findings.len(), 1, "{findings:?}");
