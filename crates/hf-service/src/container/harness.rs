@@ -37,6 +37,44 @@ use super::{
     HarnessGenOutcome, LlmProviderBridge, SeedEntry, ServiceContainer, SMOKE_FUZZ_SECS,
 };
 
+/// The container path the sandbox stages the project at. Compile-database
+/// include directories are rewritten against it.
+#[cfg(feature = "build-context")]
+const CONTAINER_WORKSPACE: &str = "/work";
+
+/// Project-derived compile flags for a harness build, empty when the project
+/// ships no compile database.
+///
+/// A broken database propagates rather than degrading to no flags: a project
+/// that has one and cannot parse it is misconfigured, and building without the
+/// flags would fail later with a confusing missing-header error instead.
+#[cfg(feature = "build-context")]
+fn project_compile_flags(
+    container: &ServiceContainer,
+    project: &Path,
+) -> Result<Vec<String>, ClassifiedError> {
+    Ok(container
+        .resolve_build_context(project)?
+        .map(|context| {
+            hf_discovery::build_context::staged_compile_flags(
+                &context,
+                project,
+                CONTAINER_WORKSPACE,
+            )
+        })
+        .unwrap_or_default())
+}
+
+/// Compile-database support is not built in, so a harness compiles with the
+/// engine arguments alone.
+#[cfg(not(feature = "build-context"))]
+fn project_compile_flags(
+    _container: &ServiceContainer,
+    _project: &Path,
+) -> Result<Vec<String>, ClassifiedError> {
+    Ok(Vec::new())
+}
+
 impl ServiceContainer {
     /// Resolve a target symbol to its discovered candidate id.
     ///
@@ -121,6 +159,7 @@ impl ServiceContainer {
             let mut build_cmd =
                 hf_harness::build_command(engine, lang, &harness_binary_name(target));
             build_cmd.output = PathBuf::from(harness_binary_name(target));
+            build_cmd.extra_flags = project_compile_flags(self, &candidate.project_root)?;
             let harness = Harness {
                 id: Uuid::new_v4(),
                 target_id: candidate.id,
@@ -285,7 +324,8 @@ impl ServiceContainer {
             .map_err(|e| ClassifiedError::Internal(format!("mkdir: {e}")))?;
         copy_project_sources(project, &workspace);
 
-        let build_cmd = hf_harness::build_command(engine, lang, &harness_binary_name(target));
+        let mut build_cmd = hf_harness::build_command(engine, lang, &harness_binary_name(target));
+        build_cmd.extra_flags = project_compile_flags(self, project)?;
         let harness = Harness {
             id: Uuid::new_v4(),
             target_id: self.resolve_target_id(project, target, lang).await?,
@@ -889,5 +929,46 @@ impl ServiceContainer {
         let corpus = hf_corpus::list(&corpus_dir)?;
         self.persist_corpus(target_id, &corpus).await?;
         Ok(entries)
+    }
+}
+
+#[cfg(all(test, feature = "build-context"))]
+mod build_context_wiring_tests {
+    use std::sync::Arc;
+
+    use super::{project_compile_flags, ServiceContainer};
+
+    #[test]
+    fn a_compile_database_reaches_the_harness_build_command() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join("include")).unwrap();
+        let db = format!(
+            r#"[{{"directory":"{root}","file":"{root}/a.c",
+                  "arguments":["cc","-I{root}/include","-DA=1","-c","{root}/a.c"]}}]"#,
+            root = project.path().display()
+        );
+        std::fs::write(project.path().join("compile_commands.json"), db).unwrap();
+        let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
+
+        let flags = project_compile_flags(&container, project.path()).unwrap();
+
+        assert_eq!(flags, vec!["-I/work/include", "-DA=1"]);
+    }
+
+    #[test]
+    fn a_project_without_a_database_builds_with_no_extra_flags() {
+        let project = tempfile::tempdir().unwrap();
+        let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
+        assert!(project_compile_flags(&container, project.path())
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn a_broken_database_fails_the_build_instead_of_dropping_the_flags() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("compile_commands.json"), "{not json").unwrap();
+        let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
+        assert!(project_compile_flags(&container, project.path()).is_err());
     }
 }
