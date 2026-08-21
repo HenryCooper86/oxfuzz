@@ -13,6 +13,7 @@
 mod catalog;
 pub mod finding;
 mod query;
+mod sequence;
 
 use std::sync::OnceLock;
 
@@ -292,6 +293,9 @@ mod tests {
             "dangerous-function-gets",
             "unchecked-conversion-ato",
             "unchecked-return-scanf",
+            // Four negative cases of its own: reassignment between the sites,
+            // different variables, different blocks, and a single free.
+            "double-free",
         ];
         let covered: std::collections::HashSet<&str> = FIXTURES
             .iter()
@@ -327,6 +331,58 @@ mod tests {
                 "{rule_id} over-matched its negative fixture; got {findings:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_double_free_is_reported_at_the_second_site() {
+        let source = "void f(char*p){ free(p); g(); free(p); }";
+        let findings = analyze_c(source);
+        let hit = findings
+            .iter()
+            .find(|finding| finding.rule_id == "double-free")
+            .expect("double free not reported");
+        // The second free is the defect; reporting the first would point a
+        // reader at correct code.
+        let second_free = source.rfind("free(p)").unwrap();
+        assert_eq!(hit.span.start_col as usize, second_free, "{hit:?}");
+    }
+
+    #[test]
+    fn a_reassignment_between_frees_is_not_a_double_free() {
+        let findings = analyze_c("void f(char*p){ free(p); p = 0; free(p); }");
+        assert!(
+            !findings.iter().any(|f| f.rule_id == "double-free"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn frees_of_different_variables_are_not_a_double_free() {
+        let findings = analyze_c("void f(char*p, char*q){ free(p); free(q); }");
+        assert!(
+            !findings.iter().any(|f| f.rule_id == "double-free"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn frees_in_different_blocks_are_not_a_double_free() {
+        // The pass reasons within one block; an if-guarded free followed by an
+        // unconditional one is a sequence it cannot judge, so it stays silent.
+        let findings = analyze_c("void f(char*p, int c){ if (c) { free(p); } free(p); }");
+        assert!(
+            !findings.iter().any(|f| f.rule_id == "double-free"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_single_free_is_not_a_double_free() {
+        let findings = analyze_c("void f(char*p){ free(p); }");
+        assert!(
+            !findings.iter().any(|f| f.rule_id == "double-free"),
+            "{findings:?}"
+        );
     }
 
     fn analyze_c(source: &str) -> Vec<Finding> {
