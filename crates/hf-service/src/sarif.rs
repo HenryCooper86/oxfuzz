@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use hf_core::crash::{Crash, CrashKind, CrashSeverity};
+use hf_core::crash::{Crash, CrashKind, CrashOrigin, CrashSeverity};
 use hf_core::engine::{EngineKind, FuzzProgress};
 use hf_core::error::ClassifiedError;
 use hf_guardrails::Guardrails;
@@ -247,13 +247,22 @@ pub fn crashes_to_sarif(
 ) -> serde_json::Value {
     use serde_json::json;
 
+    // A SARIF result asserts a finding about the scanned project. A fault whose
+    // root frame is the generated harness is a harness defect, so it is dropped
+    // here -- before the per-CWE maximum below, which would otherwise let a
+    // harness defect raise a rule's severity even with no result of its own.
+    let crashes: Vec<&Crash> = crashes
+        .iter()
+        .filter(|crash| crash.origin != CrashOrigin::Harness)
+        .collect();
+
     // Rule-level `security-severity` must reflect the MOST severe finding for a
     // CWE, not whichever crash was processed first: GitHub code scanning (and
     // most SARIF dashboards) read the numeric severity from the rule, so an
     // Exploitable crash sharing a CWE with an earlier NotExploitable one would
     // otherwise be surfaced at the lower score. Compute the max per CWE up front.
     let mut max_score: std::collections::BTreeMap<&str, f64> = std::collections::BTreeMap::new();
-    for crash in crashes {
+    for crash in &crashes {
         let score = security_severity(crash);
         max_score
             .entry(cwe_for(crash).id)
@@ -266,7 +275,7 @@ pub fn crashes_to_sarif(
     let mut rule_ids: Vec<&str> = Vec::new();
     let mut results: Vec<serde_json::Value> = Vec::new();
 
-    for crash in crashes {
+    for crash in &crashes {
         let cwe = cwe_for(crash);
         let score = security_severity(crash);
         if !rule_ids.contains(&cwe.id) {

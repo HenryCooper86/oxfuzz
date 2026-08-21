@@ -714,3 +714,84 @@ fn language_selects_the_label_set() {
     assert!(zh.contains("## 发现项"));
     assert_ne!(en, zh);
 }
+
+#[test]
+fn a_harness_origin_crash_is_reported_separately_from_findings() {
+    // A fault inside the generated harness is a harness defect, not a finding
+    // about the project under test.
+    let mut target_crash = sample_crash();
+    target_crash.origin = hf_core::crash::CrashOrigin::Target;
+    // The findings section renders the drafted bug report title.
+    if let Some(report) = target_crash.bug_report.as_mut() {
+        report.title = "Heap overflow in dns_parse_name".to_owned();
+    }
+
+    let mut harness_crash = sample_crash();
+    harness_crash.id = Uuid::new_v4();
+    harness_crash.origin = hf_core::crash::CrashOrigin::Harness;
+    harness_crash.summary = "stack-buffer-overflow in LLVMFuzzerTestOneInput".to_owned();
+    if let Some(report) = harness_crash.bug_report.as_mut() {
+        report.title = "Overflow in LLVMFuzzerTestOneInput".to_owned();
+    }
+
+    let mut data = populated();
+    data.crashes = vec![target_crash, harness_crash];
+    let md = render_markdown(&data, &Labels::english());
+
+    let (findings, defects) = md
+        .split_once("## Harness defects")
+        .expect("no harness defects section");
+    assert!(findings.contains("dns_parse_name"), "{findings}");
+    assert!(
+        !findings.contains("LLVMFuzzerTestOneInput"),
+        "harness defect leaked into findings: {findings}"
+    );
+    assert!(defects.contains("LLVMFuzzerTestOneInput"), "{defects}");
+}
+
+#[test]
+fn a_report_without_harness_defects_has_no_such_section() {
+    let mut data = populated();
+    for crash in &mut data.crashes {
+        crash.origin = hf_core::crash::CrashOrigin::Target;
+    }
+    let md = render_markdown(&data, &Labels::english());
+    assert!(!md.contains("Harness defects"), "{md}");
+}
+
+#[test]
+fn harness_defects_do_not_count_toward_the_crash_total() {
+    let mut target_crash = sample_crash();
+    target_crash.origin = hf_core::crash::CrashOrigin::Target;
+    let mut harness_crash = sample_crash();
+    harness_crash.id = Uuid::new_v4();
+    harness_crash.origin = hf_core::crash::CrashOrigin::Harness;
+
+    let mut only_target = populated();
+    only_target.crashes = vec![target_crash.clone()];
+    let mut with_defect = populated();
+    with_defect.crashes = vec![target_crash, harness_crash];
+
+    let baseline = render_markdown(&only_target, &Labels::english());
+    let widened = render_markdown(&with_defect, &Labels::english());
+    let (widened_findings, _) = widened
+        .split_once("## Harness defects")
+        .expect("no harness defects section");
+    let (baseline_findings, _) = baseline
+        .split_once("---\n\n_")
+        .unwrap_or((baseline.as_str(), ""));
+
+    // The executive summary counts findings about the target, so a harness
+    // defect must not change it.
+    let count_line = |text: &str| {
+        text.lines()
+            .find(|line| line.contains("unique crash(es)"))
+            .unwrap_or_default()
+            .to_owned()
+    };
+    assert_eq!(
+        count_line(baseline_findings),
+        count_line(widened_findings),
+        "a harness defect changed the target crash count"
+    );
+}
