@@ -2280,6 +2280,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hf-analysis"
+version = "0.2.1"
+dependencies = [
+ "hf-core",
+ "streaming-iterator",
+ "thiserror 2.0.19",
+ "tree-sitter",
+ "tree-sitter-c",
+ "tree-sitter-cpp",
+]
+
+[[package]]
 name = "hf-automotive"
 version = "0.2.1"
 dependencies = [
