@@ -22,7 +22,7 @@ use tree_sitter::{Language, Query, Tree};
 
 pub use finding::{Finding, Severity, SourceSpan};
 
-use catalog::{Rule, CPP_RULES, C_RULES};
+use catalog::{Rule, CPP_ONLY_RULES, C_ONLY_RULES, SHARED_RULES};
 
 /// Cap on findings retained from one translation unit.
 ///
@@ -111,9 +111,13 @@ impl RuleSet {
         }
     }
 
-    fn compile(language: &Language, rules: &'static [Rule]) -> Result<Self, RuleCompileError> {
-        let compiled = rules
-            .iter()
+    fn compile(
+        language: &Language,
+        rule_lists: [&'static [Rule]; 2],
+    ) -> Result<Self, RuleCompileError> {
+        let compiled = rule_lists
+            .into_iter()
+            .flatten()
             .map(|rule| {
                 Query::new(language, rule.query)
                     .map(|query| (rule, query))
@@ -133,10 +137,13 @@ impl RuleSet {
 /// `None` says "unanalyzed", which is honest for a language scanned lexically
 /// and therefore carrying no tree to match against. An empty rule set would say
 /// "analyzed, nothing found", which is not the same claim.
-fn language_rules(lang: TargetLanguage) -> Option<(Language, &'static [Rule])> {
+fn language_rules(lang: TargetLanguage) -> Option<(Language, [&'static [Rule]; 2])> {
     match lang {
-        TargetLanguage::C => Some((tree_sitter_c::LANGUAGE.into(), C_RULES)),
-        TargetLanguage::Cpp => Some((tree_sitter_cpp::LANGUAGE.into(), CPP_RULES)),
+        TargetLanguage::C => Some((tree_sitter_c::LANGUAGE.into(), [SHARED_RULES, C_ONLY_RULES])),
+        TargetLanguage::Cpp => Some((
+            tree_sitter_cpp::LANGUAGE.into(),
+            [SHARED_RULES, CPP_ONLY_RULES],
+        )),
         TargetLanguage::Rust | TargetLanguage::Go | TargetLanguage::Python => None,
     }
 }
@@ -302,7 +309,11 @@ mod tests {
             .map(|(rule_id, _, _)| *rule_id)
             .chain(DEDICATED.iter().copied())
             .collect();
-        for rule in catalog::C_RULES {
+        for rule in catalog::SHARED_RULES
+            .iter()
+            .chain(catalog::C_ONLY_RULES)
+            .chain(catalog::CPP_ONLY_RULES)
+        {
             assert!(
                 covered.contains(rule.id),
                 "rule '{}' has no negative fixture",
@@ -383,6 +394,58 @@ mod tests {
             !findings.iter().any(|f| f.rule_id == "double-free"),
             "{findings:?}"
         );
+    }
+
+    fn analyze_cpp(source: &str) -> Vec<Finding> {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_cpp::LANGUAGE.into())
+            .expect("tree-sitter-cpp loads");
+        let tree = parser.parse(source, None).expect("fixture parses");
+        rules_for(TargetLanguage::Cpp)
+            .expect("C++ has rules")
+            .analyze(&tree, source)
+    }
+
+    #[test]
+    fn cpp_gets_the_shared_rules() {
+        // C++ carried no rules at all until the lists were shared, so a C++
+        // project got silence rather than analysis. These are the same call
+        // shapes in both grammars.
+        let findings = analyze_cpp("void f(char*d, char*s){ strcpy(d, s); }");
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule_id == "unbounded-string-copy"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn cpp_gets_the_sequence_rules_too() {
+        let findings = analyze_cpp("void f(char*p){ free(p); g(); free(p); }");
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule_id == "double-free"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn the_condition_rule_works_in_both_grammars() {
+        // C wraps a condition in parenthesized_expression and C++ in
+        // condition_clause, so this rule needs one form per grammar. Both must
+        // report, or C++ silently loses the rule.
+        let source = "int f(int a, int b){ if (a = b) { return 1; } return 0; }";
+        for findings in [analyze_c(source), analyze_cpp(source)] {
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule_id == "assignment-in-condition"),
+                "{findings:?}"
+            );
+        }
     }
 
     fn analyze_c(source: &str) -> Vec<Finding> {
