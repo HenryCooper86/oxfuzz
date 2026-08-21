@@ -23,6 +23,33 @@ pub use finding::{Finding, Severity, SourceSpan};
 
 use catalog::{Rule, CPP_RULES, C_RULES};
 
+/// Cap on findings retained from one translation unit.
+///
+/// A generated or minified source can contain a pathological number of matching
+/// sites; retaining them all would cost memory for no ranking value, since the
+/// boost saturates at three distinct rules regardless.
+pub const MAX_FINDINGS_PER_FILE: usize = 5_000;
+
+/// Cap on findings retained across one analysis session.
+///
+/// Matches the limit the Semgrep normalization already applied, so behavior at
+/// the boundary is unchanged. `hf-analysis` owns the constant rather than
+/// borrowing it: the Semgrep one is deleted in phase 1d.
+pub const MAX_FINDINGS_TOTAL: usize = 50_000;
+
+/// The result of analyzing one or more translation units.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Analysis {
+    /// Findings retained, in deterministic order.
+    pub findings: Vec<Finding>,
+    /// A cap stopped collection, so this analysis is partial.
+    ///
+    /// Surfaced rather than silent: a truncated overlay is still usable for
+    /// ranking, but a caller comparing two producers needs to know it did not
+    /// see everything.
+    pub truncated: bool,
+}
+
 /// Why an embedded rule could not be compiled into a query.
 #[derive(Debug, thiserror::Error)]
 #[error("rule '{rule_id}' failed to compile: {source}")]
@@ -63,6 +90,24 @@ impl RuleSet {
         }
         query::order_findings(&mut findings);
         findings
+    }
+
+    /// Match every rule against one translation unit, bounded by
+    /// [`MAX_FINDINGS_PER_FILE`].
+    ///
+    /// Truncation keeps the earliest findings in source order rather than an
+    /// arbitrary subset, so a partial overlay is still reproducible.
+    #[must_use]
+    pub fn analyze_bounded(&self, tree: &Tree, source: &str) -> Analysis {
+        let mut findings = self.analyze(tree, source);
+        let truncated = findings.len() > MAX_FINDINGS_PER_FILE;
+        if truncated {
+            findings.truncate(MAX_FINDINGS_PER_FILE);
+        }
+        Analysis {
+            findings,
+            truncated,
+        }
     }
 
     fn compile(language: &Language, rules: &'static [Rule]) -> Result<Self, RuleCompileError> {
@@ -149,6 +194,61 @@ mod tests {
         rules_for(TargetLanguage::C)
             .expect("C has rules")
             .analyze(&tree, source)
+    }
+
+    fn analyze_c_bounded(source: &str) -> Analysis {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_c::LANGUAGE.into())
+            .expect("tree-sitter-c loads");
+        let tree = parser.parse(source, None).expect("fixture parses");
+        rules_for(TargetLanguage::C)
+            .expect("C has rules")
+            .analyze_bounded(&tree, source)
+    }
+
+    #[test]
+    fn a_pathological_file_is_capped_and_says_so() {
+        let mut source = String::from("void f(char*b){\n");
+        for _ in 0..(MAX_FINDINGS_PER_FILE + 10) {
+            source.push_str("  gets(b);\n");
+        }
+        source.push('}');
+
+        let analysis = analyze_c_bounded(&source);
+
+        assert_eq!(analysis.findings.len(), MAX_FINDINGS_PER_FILE);
+        assert!(analysis.truncated, "truncation must be visible, not silent");
+    }
+
+    #[test]
+    fn an_ordinary_file_is_not_marked_truncated() {
+        let analysis = analyze_c_bounded("void f(char*b){ gets(b); }");
+        assert_eq!(analysis.findings.len(), 1);
+        assert!(!analysis.truncated);
+    }
+
+    #[test]
+    fn a_capped_analysis_is_still_ordered() {
+        // Truncation must not hand back an arbitrary subset: the retained
+        // findings are the first ones in source order, so a partial overlay is
+        // still reproducible.
+        let mut source = String::from("void f(char*b){\n");
+        for _ in 0..(MAX_FINDINGS_PER_FILE + 10) {
+            source.push_str("  gets(b);\n");
+        }
+        source.push('}');
+
+        let analysis = analyze_c_bounded(&source);
+        let lines: Vec<u32> = analysis
+            .findings
+            .iter()
+            .map(|finding| finding.span.start_line)
+            .collect();
+        let mut sorted = lines.clone();
+        sorted.sort_unstable();
+        assert_eq!(lines, sorted);
+        assert_eq!(lines[0], 2, "the earliest findings are the ones kept");
     }
 
     #[test]
