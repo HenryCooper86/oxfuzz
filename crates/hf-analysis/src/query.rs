@@ -60,3 +60,29 @@ fn span_of(node: Node) -> SourceSpan {
         end_col: u32::try_from(end.column).unwrap_or(u32::MAX),
     }
 }
+
+/// Put findings in a stable, source-order-independent sequence.
+///
+/// Ordered by position, then rule id, so the same source always yields the same
+/// list regardless of which order the rules ran in or which order tree-sitter
+/// returned matches. A non-deterministic overlay would make a ranking
+/// comparison between two producers unreadable.
+///
+/// Duplicates are removed after sorting: one rule can match the same node twice
+/// when its query admits overlapping bindings, and distinct-rule counting drives
+/// the boost, so a repeat must not inflate it. Two different rules at one
+/// position are both kept, because that is two distinct rules.
+pub(crate) fn order_findings(findings: &mut Vec<Finding>) {
+    findings.sort_by(|a, b| {
+        a.span
+            .start_line
+            .cmp(&b.span.start_line)
+            .then(a.span.start_col.cmp(&b.span.start_col))
+            .then(a.rule_id.cmp(b.rule_id))
+    });
+    findings.dedup_by(|a, b| {
+        a.rule_id == b.rule_id
+            && a.span.start_line == b.span.start_line
+            && a.span.start_col == b.span.start_col
+    });
+}
