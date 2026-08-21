@@ -1,7 +1,11 @@
 //! Phase 1c: measure native coverage against the upstream fixture corpus.
-mod corpus;
+// Named ground_truth, not corpus: .gitignore carries a broad `corpus/` rule for
+// fuzzing corpora, which silently swallowed this module's directory. The file
+// existed locally, `git status` reported a clean tree because ignored files are
+// not listed, and the build failed on every CI platform with a missing module.
+mod ground_truth;
 
-use corpus::{parse_annotations, Expectation};
+use ground_truth::{parse_annotations, Expectation};
 
 #[test]
 fn an_annotation_applies_to_the_next_code_line() {
@@ -51,7 +55,7 @@ fn a_trailing_annotation_with_no_following_code_is_dropped() {
     assert!(parse_annotations("free(p);\n// ruleid: raptor-x\n").is_empty());
 }
 
-use corpus::COVERAGE;
+use ground_truth::COVERAGE;
 
 #[test]
 fn the_coverage_map_names_every_upstream_rule() {
