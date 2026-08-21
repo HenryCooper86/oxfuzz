@@ -110,7 +110,13 @@ pub const COVERAGE: &[(&str, &[&str])] = &[
     ("insecure-api-rand-srand", &["weak-pseudo-random"]),
     (
         "insecure-api-scanf",
-        &["unbounded-scanf-conversion", "unbounded-string-scan"],
+        &[
+            "unbounded-scanf-conversion",
+            "unbounded-string-scan",
+            // A non-literal scan format is reported by this rule, and a map
+            // that omits it counts a real report as a miss.
+            "non-literal-format-string",
+        ],
     ),
     ("insecure-api-signal", &["signal-handler-race"]),
     ("insecure-api-sprintf-vsprintf", &["unbounded-format-write"]),
@@ -148,7 +154,7 @@ pub const COVERAGE: &[(&str, &[&str])] = &[
     ),
     (
         "unsafe-ret-snprintf-vsnprintf",
-        &["unchecked-truncating-write"],
+        &["unchecked-truncating-write", "truncating-write-return-used"],
     ),
     (
         "unsafe-ret-strlcpy-strlcat",
