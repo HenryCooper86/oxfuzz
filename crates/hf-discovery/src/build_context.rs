@@ -267,6 +267,42 @@ fn accepted_std(token: &str) -> bool {
             .all(|character| character.is_ascii_digit() || character.is_ascii_lowercase())
 }
 
+/// Render a build context as compiler tokens valid inside the sandbox, where
+/// the project is staged at `container_root` (`/work`).
+///
+/// Include directories are rewritten from host paths to their staged
+/// equivalents. `copy_project_sources` preserves the project's directory layout,
+/// so a directory at `<project>/include` is staged at `<container_root>/include`.
+/// A directory that does not lie under `project_root` is dropped rather than
+/// passed through: `extract_build_context` already confined them, and a second
+/// check here costs nothing.
+///
+/// Tokens are returned unquoted. Quoting belongs to the single place that builds
+/// the compile command, so it happens exactly once.
+#[must_use]
+pub fn staged_compile_flags(
+    ctx: &BuildContext,
+    project_root: &Path,
+    container_root: &str,
+) -> Vec<String> {
+    let mut flags = Vec::new();
+    for directory in &ctx.include_dirs {
+        let Ok(relative) = directory.strip_prefix(project_root) else {
+            continue;
+        };
+        let posix = hf_core::runtime::posix_relative(relative);
+        if posix.is_empty() {
+            flags.push(format!("-I{container_root}"));
+        } else {
+            flags.push(format!("-I{container_root}/{posix}"));
+        }
+    }
+    flags.extend(ctx.defines.iter().cloned());
+    flags.extend(ctx.std_flag.iter().cloned());
+    flags.extend(ctx.extra_flags.iter().cloned());
+    flags
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,6 +313,58 @@ mod tests {
        "arguments":["cc","-I/proj/include","-DHAVE_CONFIG_H=1","-std=c11",
                     "-Wall","-c","/proj/src/dns.c","-o","dns.o"]}
     ]"#;
+
+    #[test]
+    fn include_dirs_are_rewritten_to_staged_container_paths() {
+        let ctx = BuildContext {
+            include_dirs: vec![PathBuf::from("/proj/include"), PathBuf::from("/proj/src")],
+            defines: vec!["-DA=1".to_owned()],
+            std_flag: Some("-std=c11".to_owned()),
+            extra_flags: vec!["-fno-strict-aliasing".to_owned()],
+            entry_count: 1,
+            dropped: Vec::new(),
+        };
+        let flags = staged_compile_flags(&ctx, &PathBuf::from("/proj"), "/work");
+        assert_eq!(
+            flags,
+            vec![
+                "-I/work/include",
+                "-I/work/src",
+                "-DA=1",
+                "-std=c11",
+                "-fno-strict-aliasing",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_project_root_itself_maps_to_the_container_root() {
+        let ctx = BuildContext {
+            include_dirs: vec![PathBuf::from("/proj")],
+            ..BuildContext::default()
+        };
+        assert_eq!(
+            staged_compile_flags(&ctx, &PathBuf::from("/proj"), "/work"),
+            vec!["-I/work"]
+        );
+    }
+
+    #[test]
+    fn an_include_dir_outside_the_project_is_not_rendered() {
+        let ctx = BuildContext {
+            include_dirs: vec![PathBuf::from("/elsewhere/include")],
+            ..BuildContext::default()
+        };
+        assert!(staged_compile_flags(&ctx, &PathBuf::from("/proj"), "/work").is_empty());
+    }
+
+    #[test]
+    fn an_empty_context_renders_no_flags() {
+        assert!(
+            staged_compile_flags(&BuildContext::default(), &PathBuf::from("/proj"), "/work")
+                .is_empty()
+        );
+    }
 
     #[test]
     fn parses_arguments_form_entries() {
