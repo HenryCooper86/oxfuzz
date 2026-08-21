@@ -1070,6 +1070,42 @@ async fn cmd_discover(
     .await
 }
 
+/// Summarize the native static-analysis overlay for the operator.
+///
+/// Advisory, and written to stderr by the caller so stdout stays pure JSON: the
+/// boost changes which targets are worth fuzzing first, and the base score stays
+/// visible so it is clear what the signal moved.
+#[cfg(feature = "native-analysis")]
+fn native_overlay_lines(analyzed: &hf_service::AnalyzedInventory) -> Vec<String> {
+    if analyzed.signal_count == 0 {
+        return Vec::new();
+    }
+    let mut boosted: Vec<_> = analyzed
+        .scores
+        .iter()
+        .filter(|score| score.matched_rule_count > 0)
+        .collect();
+    boosted.sort_by(|a, b| b.effective_score.total_cmp(&a.effective_score));
+    let mut lines = vec![format!(
+        "static analysis: {} signal(s) across {} target(s)",
+        analyzed.signal_count,
+        boosted.len()
+    )];
+    for score in boosted.iter().take(10) {
+        let symbol = analyzed
+            .inventory
+            .candidates
+            .iter()
+            .find(|candidate| candidate.id == score.target_id)
+            .map_or("(unknown)", |candidate| candidate.symbol.as_str());
+        lines.push(format!(
+            "  {symbol}: {:.2} -> {:.2} ({} rule(s))",
+            score.base_score, score.effective_score, score.matched_rule_count
+        ));
+    }
+    lines
+}
+
 #[cfg(feature = "semgrep-enrichment")]
 #[async_trait::async_trait]
 trait DiscoverCommandService {
@@ -1078,6 +1114,17 @@ trait DiscoverCommandService {
         project: &std::path::Path,
         language: TargetLanguage,
     ) -> Result<hf_service::TargetInventory, hf_service::ClassifiedError>;
+
+    /// Discovery that also returns the native static-analysis overlay.
+    ///
+    /// `None` falls back to `discover_targets`, which is what a double that
+    /// does not model the analyzer returns.
+    #[cfg(feature = "native-analysis")]
+    async fn discover_analyzed_targets(
+        &self,
+        project: &std::path::Path,
+        language: TargetLanguage,
+    ) -> Result<Option<hf_service::AnalyzedInventory>, hf_service::ClassifiedError>;
 
     async fn rank_targets(
         &self,
@@ -1106,6 +1153,15 @@ trait DiscoverCommandService {
 #[cfg(feature = "semgrep-enrichment")]
 #[async_trait::async_trait]
 impl DiscoverCommandService for ServiceContainer {
+    #[cfg(feature = "native-analysis")]
+    async fn discover_analyzed_targets(
+        &self,
+        project: &std::path::Path,
+        language: TargetLanguage,
+    ) -> Result<Option<hf_service::AnalyzedInventory>, hf_service::ClassifiedError> {
+        self.discover_analyzed(project, language).await.map(Some)
+    }
+
     async fn discover_targets(
         &self,
         project: &std::path::Path,
@@ -1290,6 +1346,20 @@ where
     Delay: FnMut() -> DelayFuture,
     DelayFuture: std::future::Future<Output = ()>,
 {
+    #[cfg(feature = "native-analysis")]
+    let mut inventory = match service
+        .discover_analyzed_targets(&project, language)
+        .await?
+    {
+        Some(analyzed) => {
+            for line in native_overlay_lines(&analyzed) {
+                output.stderr_line(line);
+            }
+            analyzed.inventory
+        }
+        None => service.discover_targets(&project, language).await?,
+    };
+    #[cfg(not(feature = "native-analysis"))]
     let mut inventory = service.discover_targets(&project, language).await?;
     if rank {
         if service.has_provider() {
@@ -3149,6 +3219,17 @@ mod semgrep_cli_tests {
 
     #[async_trait::async_trait]
     impl DiscoverCommandService for FakeDiscoverService {
+        #[cfg(feature = "native-analysis")]
+        async fn discover_analyzed_targets(
+            &self,
+            _project: &std::path::Path,
+            _language: TargetLanguage,
+        ) -> Result<Option<hf_service::AnalyzedInventory>, hf_service::ClassifiedError> {
+            // This double models the discovery command, not the analyzer, so it
+            // takes the plain path and keeps its existing assertions meaningful.
+            Ok(None)
+        }
+
         async fn discover_targets(
             &self,
             _project: &std::path::Path,

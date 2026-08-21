@@ -8,7 +8,7 @@ description = "Business logic orchestrating discovery, harness, engine, crash, c
 # Automotive on by default; `--no-default-features` drops the optional
 # hf-automotive dependency and compiles the feature-absent orchestration paths.
 [features]
-default = ["automotive-scapy", "build-context", "proof-carrying", "semgrep-enrichment"]
+default = ["automotive-scapy", "build-context", "native-analysis", "proof-carrying", "semgrep-enrichment"]
 automotive-scapy = ["dep:hf-automotive", "hf-automotive/automotive-scapy"]
 build-context = ["hf-discovery/build-context"]
 native-analysis = ["hf-discovery/native-analysis"]

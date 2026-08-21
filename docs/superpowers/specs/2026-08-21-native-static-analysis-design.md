@@ -1,6 +1,12 @@
 # Native Static Analysis Design
 
-Status: **draft**. Owner: `hf-analysis` and `hf-discovery`.
+Status: **superseded in part**. Owner: `hf-analysis` and `hf-discovery`.
+
+**Read section 22 first.** Sections 1 through 20 were written to replace
+Semgrep. Measurement in phase 1c showed that replacing it would lose most of
+its coverage, so the decision changed: the native analyzer ships *alongside*
+Semgrep. Everything about the analyzer's design still holds; every statement
+about deleting Semgrep does not.
 
 ## 1. Goal
 
@@ -842,3 +848,77 @@ Correcting section 18.5 downward rather than leaving it at 34 matters more than
 the number: the table is the evidence phase 1d reads, and a table describing
 intent rather than measured behavior is how a subsystem gets deleted on a
 promise.
+
+## 22. Decision: Ship Alongside, Do Not Replace
+
+Taken 2026-08-21 after the phase 1c measurement.
+
+The native analyzer ships enabled by default and runs during every C and C++
+discovery. **Semgrep stays**, unchanged, as the explicitly requested deeper
+enrichment operation. Nothing is deleted: `third_party/semgrep-rules`,
+`third_party/semgrep`, the sandbox layer, and the three service modules all
+remain.
+
+### 22.1 Why
+
+The replacement plan rested on the reconciliation table in section 18.5, which
+recorded 33 of 49 upstream classes as covered. Measured against the upstream
+corpus, those classes catch 42.7% of what their counterparts catch. Deleting
+Semgrep would have traded a mature rule set for one that finds fewer than half
+as many defects, and four widening rounds moved recall about two points each --
+a rate that puts the 90% bar many sessions away, with part of it unreachable
+without type information (section 18.4).
+
+The premise that made replacement attractive was that owning the analysis means
+removing the alternative. It does not. The costs the design set out to avoid --
+a pinned foreign binary, a registry fetch, 9,865 lines of subprocess machinery --
+are costs of Semgrep being *the only* analyzer, and they are unchanged by adding
+a second one. What the native analyzer buys is real and independent of deletion:
+
+- **C++ goes from zero coverage to 36 rules.** Semgrep's bundled rule set is
+  C-only, so this is coverage that did not exist in any form before.
+- **Every discovery gets a signal at no cost.** The analyzer reuses the parse
+  `scan_c` already performs, so it needs no operator action, no sandbox, no
+  subprocess, and no staleness model. Semgrep enrichment remains an explicit
+  operation because it is an expensive one.
+- **Zero false positives on the corpus.** A signal an operator can trust
+  without checking is worth more than a broader one they cannot.
+
+### 22.2 How the two coexist
+
+They do not merge, and that is deliberate. Two overlays are produced at
+different times from different evidence:
+
+- **Native**: computed during `discover_analyzed`, from the same parse as the
+  candidates, always current with the sources.
+- **Semgrep**: computed by an explicit operation over a staged snapshot, and
+  able to be stale relative to sources that moved under it.
+
+Merging them would either double-count a defect both found or hide that both
+found it, and the second is the more useful fact: agreement between two
+independent analyzers is evidence about a target, not noise. Both overlays
+leave `TargetCandidate.fit_score` untouched, so a consumer can always see the
+base score and what each producer moved it to.
+
+### 22.3 What this changes in the sections above
+
+- **Section 1**: the goal is a second analyzer, not a replacement. The two-phase
+  framing stands; "then Semgrep is deleted" does not.
+- **Section 2**: the three superseded decisions from the Semgrep design remain
+  superseded *for the native path only*. Semgrep keeps its opt-in operation, its
+  all-or-nothing failure semantics, and its absence from ordinary discovery.
+- **Section 13**: phase 1d is withdrawn. There is no deletion, no storage
+  migration, and no removal of the `semgrep-enrichment` feature.
+- **Section 20**: the gate stands as a measurement and no longer gates anything.
+  Recall is now a quality target for the native analyzer rather than a
+  precondition for deleting a subsystem.
+
+### 22.4 What is still worth doing
+
+Widening remains valuable, at a lower priority and without a deadline: every
+rule added is signal oxfuzz did not have, and the corpus harness makes each
+round measurable. The bar in section 20.2 is retained as a quality goal.
+
+The one thing that should not be revisited without new evidence is deletion. If
+some later phase reaches parity, that is when to reopen it -- with a
+measurement, not a table of intent.

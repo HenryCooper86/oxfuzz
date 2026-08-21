@@ -6,7 +6,7 @@ license.workspace = true
 description = "Target discovery: static analysis, semantic ranking, Target Inventory"
 
 [features]
-default = []
+default = ["native-analysis"]
 build-context = []
 native-analysis = ["dep:hf-analysis"]
 semgrep-enrichment = []
