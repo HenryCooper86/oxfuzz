@@ -16,6 +16,7 @@ members = [
     "crates/hf-diagnostics",
     "crates/hf-guardrails",
     "crates/hf-discovery",
+    "crates/hf-analysis",
     "crates/hf-harness",
     "crates/hf-engine",
     "crates/hf-crash",
@@ -117,6 +118,7 @@ grep-matcher = "0.1"
 
 # Parsing (target discovery)
 tree-sitter = "0.26"
+streaming-iterator = "0.1.9"
 tree-sitter-c = "0.24"
 tree-sitter-cpp = "0.23"
 
@@ -153,6 +155,7 @@ hf-spill = { path = "crates/hf-spill" }
 hf-diagnostics = { path = "crates/hf-diagnostics" }
 hf-guardrails = { path = "crates/hf-guardrails" }
 hf-discovery = { path = "crates/hf-discovery" }
+hf-analysis = { path = "crates/hf-analysis" }
 hf-harness = { path = "crates/hf-harness" }
 hf-engine = { path = "crates/hf-engine" }
 hf-crash = { path = "crates/hf-crash" }

@@ -12,6 +12,23 @@ use hf_guardrails::Action;
 use super::project_identity::{project_lookup_identity, stored_project_matches};
 use super::{fuzzing_policy_error, LlmProviderBridge, SchedulableTarget, ServiceContainer};
 
+/// A target inventory with the native static-analysis overlay computed from the
+/// same parse.
+///
+/// The overlay is advisory and separate from the candidates: base fit scores
+/// stay exactly as discovery produced them, and a consumer can always see what
+/// a candidate scored before any signal touched it.
+#[cfg(feature = "native-analysis")]
+#[derive(Debug, Clone)]
+pub struct AnalyzedInventory {
+    /// Candidates, with base scores untouched.
+    pub inventory: hf_core::target::TargetInventory,
+    /// One score row per candidate.
+    pub scores: Vec<hf_discovery::enrichment::TargetScore>,
+    /// Signals the analyzer produced, for reporting how much evidence there was.
+    pub signal_count: usize,
+}
+
 impl ServiceContainer {
     /// Discover fuzzing targets in a project.
     ///
@@ -31,6 +48,39 @@ impl ServiceContainer {
         Ok(inv)
     }
 
+    /// Discover targets and the native static-analysis overlay together.
+    ///
+    /// The signals come from the trees the scan already built, so this costs a
+    /// query-cursor pass rather than a second walk of the project.
+    ///
+    /// Independent of the Semgrep enrichment operation, which remains a separate,
+    /// explicitly requested, deeper analysis. The two overlays are deliberately
+    /// not merged: they are produced at different times from different evidence,
+    /// and combining them would either double-count a defect both found or hide
+    /// that both found it.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the project cannot be read, or the
+    /// authorization for discovery is denied.
+    #[cfg(feature = "native-analysis")]
+    pub async fn discover_analyzed(
+        &self,
+        project: &Path,
+        lang: TargetLanguage,
+    ) -> Result<AnalyzedInventory, ClassifiedError> {
+        self.authorize_recorded(Action::Discover, "discover", Some(project))
+            .await?;
+        let (inventory, signals) = hf_discovery::discover_with_signals(project, lang).await?;
+        if let Some(store) = &self.store {
+            store.save_inventory(&inventory, Utc::now()).await?;
+        }
+        let overlay = hf_discovery::enrichment::score_overlay(&inventory, &signals);
+        Ok(AnalyzedInventory {
+            inventory,
+            scores: overlay.scores,
+            signal_count: signals.len(),
+        })
+    }
     /// Re-rank a target inventory using the configured LLM provider pool.
     ///
     /// # Errors
