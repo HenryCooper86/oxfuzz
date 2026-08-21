@@ -285,6 +285,27 @@ pub(crate) const SHARED_RULES: &[Rule] = &[
         kind: RuleKind::Shape,
         query: include_str!("../rules/c/allocation-missing-terminator.scm"),
     },
+    Rule {
+        id: "assert-used-as-bound-check",
+        cwe: "CWE-754",
+        severity: Severity::Warning,
+        kind: RuleKind::Shape,
+        query: include_str!("../rules/c/assert-used-as-bound-check.scm"),
+    },
+    Rule {
+        id: "strncat-constant-bound",
+        cwe: "CWE-787",
+        severity: Severity::Error,
+        kind: RuleKind::Shape,
+        query: include_str!("../rules/c/strncat-constant-bound.scm"),
+    },
+    Rule {
+        id: "length-compared-to-size",
+        cwe: "CWE-193",
+        severity: Severity::Warning,
+        kind: RuleKind::Shape,
+        query: include_str!("../rules/c/length-compared-to-size.scm"),
+    },
 ];
 
 /// Rules that only compile against the C grammar.

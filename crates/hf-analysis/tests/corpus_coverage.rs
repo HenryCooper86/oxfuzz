@@ -84,7 +84,7 @@ fn the_coverage_map_only_names_rules_that_exist() {
 #[test]
 fn the_covered_count_matches_the_spec() {
     let covered = COVERAGE.iter().filter(|(_, ours)| !ours.is_empty()).count();
-    assert_eq!(covered, 33, "spec 18.5 records 33 of 49 covered");
+    assert_eq!(covered, 34, "spec 18.5 records 34 of 49 covered");
 }
 
 /// Measure native coverage against the annotated upstream corpus.
