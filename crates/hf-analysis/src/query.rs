@@ -26,7 +26,105 @@ pub(crate) fn run_rule(
     match rule.kind {
         RuleKind::Shape => run_shape_rule(rule, query, tree, source, out),
         RuleKind::PairedSites => run_paired_sites_rule(rule, query, tree, source, out),
+        RuleKind::AfterEvent => run_after_event_rule(rule, query, tree, source, out),
     }
+}
+
+/// The capture naming the event a later site is measured against.
+const ORIGIN_CAPTURE: &str = "origin";
+
+/// Report the first site that follows an origin binding the same variable.
+///
+/// A site that is the target of an assignment is skipped: `p = NULL` after a
+/// free is the recommended fix, and counting it as a use would fire the rule on
+/// exactly the code it should encourage. A site inside the origin itself is
+/// skipped too, since the origin necessarily mentions the variable.
+fn run_after_event_rule(
+    rule: &'static Rule,
+    query: &Query,
+    tree: &Tree,
+    source: &str,
+    out: &mut Vec<Finding>,
+) {
+    let (Some(origin_index), Some(site_index), Some(var_index)) = (
+        query.capture_index_for_name(ORIGIN_CAPTURE),
+        query.capture_index_for_name(SITE_CAPTURE),
+        query.capture_index_for_name(VAR_CAPTURE),
+    ) else {
+        return;
+    };
+
+    let mut origins: std::collections::BTreeMap<String, Vec<Node>> =
+        std::collections::BTreeMap::new();
+    let mut sites: std::collections::BTreeMap<String, Vec<Node>> =
+        std::collections::BTreeMap::new();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(query, tree.root_node(), source.as_bytes());
+    while let Some(matched) = matches.next() {
+        let variable = matched
+            .captures
+            .iter()
+            .find(|capture| capture.index == var_index)
+            .and_then(|capture| capture.node.utf8_text(source.as_bytes()).ok());
+        let Some(variable) = variable else { continue };
+        for capture in matched.captures {
+            if capture.index == origin_index {
+                origins
+                    .entry(variable.to_owned())
+                    .or_default()
+                    .push(capture.node);
+            } else if capture.index == site_index && !is_assignment_target(capture.node) {
+                sites
+                    .entry(variable.to_owned())
+                    .or_default()
+                    .push(capture.node);
+            }
+        }
+    }
+
+    for (variable, mut variable_origins) in origins {
+        let Some(variable_sites) = sites.get(&variable) else {
+            continue;
+        };
+        let mut variable_sites = variable_sites.clone();
+        variable_origins.sort_by_key(Node::start_byte);
+        variable_sites.sort_by_key(Node::start_byte);
+        for origin in variable_origins {
+            let Some(site) = variable_sites
+                .iter()
+                .find(|site| site.start_byte() >= origin.end_byte())
+            else {
+                continue;
+            };
+            let (Some((origin_block, origin_index)), Some((site_block, site_index))) =
+                (enclosing_statement(origin), enclosing_statement(*site))
+            else {
+                continue;
+            };
+            if origin_block.id() != site_block.id() {
+                continue;
+            }
+            let between = statements_between(origin_block, origin_index, site_index);
+            if !is_killed(&between, source, &variable) {
+                out.push(Finding {
+                    rule_id: rule.id,
+                    cwe: rule.cwe,
+                    severity: rule.severity,
+                    span: span_of(*site),
+                });
+            }
+        }
+    }
+}
+
+/// Whether a node is the left-hand side of an assignment.
+fn is_assignment_target(node: Node) -> bool {
+    node.parent().is_some_and(|parent| {
+        parent.kind() == "assignment_expression"
+            && parent
+                .child_by_field_name("left")
+                .is_some_and(|left| left.id() == node.id())
+    })
 }
 
 /// The capture naming the variable two sites must share.
