@@ -15,6 +15,10 @@ pub(crate) enum RuleKind {
     /// one block, with no kill between them. Used where the two ends are
     /// different events rather than repetitions of one.
     AfterEvent,
+    /// Every `@hit` whose `@var` names a parameter of the enclosing function.
+    /// Separates a dangerous call on caller-chosen data from the same call on
+    /// a local constant.
+    TaintedArgument,
 }
 
 /// One embedded rule: its identity, how it decides, and the query that finds
@@ -110,7 +114,7 @@ pub(crate) const SHARED_RULES: &[Rule] = &[
         id: "os-command-execution",
         cwe: "CWE-78",
         severity: Severity::Error,
-        kind: RuleKind::Shape,
+        kind: RuleKind::TaintedArgument,
         query: include_str!("../rules/c/os-command-execution.scm"),
     },
     Rule {
@@ -233,13 +237,6 @@ pub(crate) const SHARED_RULES: &[Rule] = &[
         query: include_str!("../rules/c/unterminated-strncpy.scm"),
     },
     Rule {
-        id: "environment-from-variable",
-        cwe: "CWE-686",
-        severity: Severity::Info,
-        kind: RuleKind::Shape,
-        query: include_str!("../rules/c/environment-from-variable.scm"),
-    },
-    Rule {
         id: "catastrophic-regex",
         cwe: "CWE-1333",
         severity: Severity::Warning,
@@ -252,6 +249,20 @@ pub(crate) const SHARED_RULES: &[Rule] = &[
         severity: Severity::Warning,
         kind: RuleKind::Shape,
         query: include_str!("../rules/c/pointer-subtraction-size.scm"),
+    },
+    Rule {
+        id: "unbounded-string-scan",
+        cwe: "CWE-676",
+        severity: Severity::Error,
+        kind: RuleKind::TaintedArgument,
+        query: include_str!("../rules/c/unbounded-string-scan.scm"),
+    },
+    Rule {
+        id: "unbounded-format-write",
+        cwe: "CWE-676",
+        severity: Severity::Error,
+        kind: RuleKind::Shape,
+        query: include_str!("../rules/c/unbounded-format-write.scm"),
     },
 ];
 
