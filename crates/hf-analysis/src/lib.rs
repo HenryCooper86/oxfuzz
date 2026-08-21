@@ -303,6 +303,11 @@ mod tests {
             // Four negative cases of its own: reassignment between the sites,
             // different variables, different blocks, and a single free.
             "double-free",
+            // Three negatives: assignment target, use before the free, and a
+            // different variable.
+            "use-after-free",
+            // Negative: free(*pp), which is ordinary code.
+            "free-of-non-heap",
         ];
         let covered: std::collections::HashSet<&str> = FIXTURES
             .iter()
@@ -392,6 +397,66 @@ mod tests {
         let findings = analyze_c("void f(char*p){ free(p); }");
         assert!(
             !findings.iter().any(|f| f.rule_id == "double-free"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_use_after_free_is_reported() {
+        let findings = analyze_c("void f(char*p){ free(p); g(p); }");
+        assert!(
+            findings.iter().any(|f| f.rule_id == "use-after-free"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn nulling_the_pointer_after_free_is_not_a_use() {
+        // `p = NULL` after a free is the recommended fix, not a use. An
+        // assignment target must never count as a site or the rule fires on
+        // exactly the code it should be encouraging.
+        let findings = analyze_c("void f(char*p){ free(p); p = 0; }");
+        assert!(
+            !findings.iter().any(|f| f.rule_id == "use-after-free"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_use_before_the_free_is_not_a_use_after_free() {
+        let findings = analyze_c("void f(char*p){ g(p); free(p); }");
+        assert!(
+            !findings.iter().any(|f| f.rule_id == "use-after-free"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn using_a_different_variable_after_a_free_is_not_a_use_after_free() {
+        let findings = analyze_c("void f(char*p, char*q){ free(p); g(q); }");
+        assert!(
+            !findings.iter().any(|f| f.rule_id == "use-after-free"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn freeing_an_address_of_a_local_is_reported() {
+        let findings = analyze_c("void f(void){ int x = 0; free(&x); }");
+        assert!(
+            findings.iter().any(|f| f.rule_id == "free-of-non-heap"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn freeing_a_dereferenced_pointer_is_not_a_non_heap_free() {
+        // `free(*pp)` frees what the pointer points at, which is ordinary.
+        // `&x` and `*x` are the same node kind, so this is the fixture that
+        // proves the operator is actually being read.
+        let findings = analyze_c("void f(char**pp){ free(*pp); }");
+        assert!(
+            !findings.iter().any(|f| f.rule_id == "free-of-non-heap"),
             "{findings:?}"
         );
     }

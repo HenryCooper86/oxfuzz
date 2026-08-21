@@ -11,6 +11,10 @@ pub(crate) enum RuleKind {
     /// Two `@site` captures binding the same `@var`, in one block, with no kill
     /// between them. The second site is reported, because that is the defect.
     PairedSites,
+    /// The first `@site` following an `@origin` that binds the same `@var`, in
+    /// one block, with no kill between them. Used where the two ends are
+    /// different events rather than repetitions of one.
+    AfterEvent,
 }
 
 /// One embedded rule: its identity, how it decides, and the query that finds
@@ -178,6 +182,20 @@ pub(crate) const SHARED_RULES: &[Rule] = &[
         severity: Severity::Error,
         kind: RuleKind::PairedSites,
         query: include_str!("../rules/c/double-free.scm"),
+    },
+    Rule {
+        id: "use-after-free",
+        cwe: "CWE-416",
+        severity: Severity::Error,
+        kind: RuleKind::AfterEvent,
+        query: include_str!("../rules/c/use-after-free.scm"),
+    },
+    Rule {
+        id: "free-of-non-heap",
+        cwe: "CWE-590",
+        severity: Severity::Error,
+        kind: RuleKind::Shape,
+        query: include_str!("../rules/c/free-of-non-heap.scm"),
     },
 ];
 
