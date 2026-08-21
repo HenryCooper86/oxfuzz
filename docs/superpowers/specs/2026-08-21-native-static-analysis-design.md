@@ -555,3 +555,24 @@ sharper rules need.
 
 The bug classes it gestures at that *are* fuzzing-relevant are already covered
 by specific rules with real severities.
+
+### 18.3 Deferred to phase 1b, not uncovered (phase 1a)
+
+Four bug classes are query-expressible only as the *absence* of something, and
+tree-sitter queries have no negation. Each needs the same Rust pass phase 1b
+builds for the sequence rules, so they are deferred rather than approximated:
+
+- **Omitted break in a switch case** (CWE-484). Requires "this case clause does
+  not end in break, return, or goto", which is a property of the last statement
+  in a block.
+- **Missing default case** (CWE-478). Requires "no default label among these
+  children".
+- **Missing return on a path** (CWE-393). Requires a path-sensitive walk of the
+  function body.
+- **Incorrect unsigned comparison** (CWE-697). Requires knowing an operand is
+  unsigned. Without types, matching `x < 0` would flag every correct signed
+  comparison in the project, which is the false-positive posture section 7.2
+  rejects.
+
+Phase 1a therefore ships 21 of the 29 shape rules: 27 in scope less these four.
+The section 12 gate must treat a delta traced to one of these as explained.

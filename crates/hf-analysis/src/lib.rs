@@ -190,6 +190,51 @@ mod tests {
     /// that over-matches gets caught, and a rule without one is not done.
     const FIXTURES: &[(&str, &str, &str)] = &[
         (
+            "assignment-in-assertion",
+            "void f(int a, int b){ assert(a = b); }",
+            "void f(int a, int b){ assert(a == b); }",
+        ),
+        (
+            "assignment-in-condition",
+            "int f(int a, int b){ if (a = b) { return 1; } return 0; }",
+            "int f(int a, int b){ if (a == b) { return 1; } return 0; }",
+        ),
+        (
+            "unchecked-privilege-drop",
+            "void f(void){ setuid(1000); }",
+            "void f(void){ if (setuid(1000) != 0) return; }",
+        ),
+        (
+            "unchecked-truncating-write",
+            "void f(char*b, char*s){ snprintf(b, 8, \"%s\", s); }",
+            "void f(char*b, char*s){ int n = snprintf(b, 8, \"%s\", s); (void)n; }",
+        ),
+        (
+            "memset-argument-order",
+            "void f(char*b, int n){ memset(b, n, 0); }",
+            "void f(char*b, int n){ memset(b, 0, n); }",
+        ),
+        (
+            "overlapping-copy",
+            "void f(char*b, int n){ memcpy(b, b, n); }",
+            "void f(char*d, char*s, int n){ memcpy(d, s, n); }",
+        ),
+        (
+            "non-literal-format-string",
+            "void f(char*fmt){ printf(fmt); }",
+            "void f(char*s){ printf(\"%s\", s); }",
+        ),
+        (
+            "environment-input",
+            "char* f(void){ return getenv(\"PATH\"); }",
+            "char* f(void){ return my_getenv(\"PATH\"); }",
+        ),
+        (
+            "address-disclosure",
+            "void f(void*p){ printf(\"ptr %p\", p); }",
+            "void f(int n){ printf(\"n %d\", n); }",
+        ),
+        (
             "dangerous-function-alloca",
             "void f(int n){ char *p = alloca(n); (void)p; }",
             "void f(int n){ char *p = my_alloca(n); int alloca_size = n; (void)p; (void)alloca_size; }",
@@ -237,6 +282,30 @@ mod tests {
             "unsigned long f(char*s){ return strlen(s) + 1; }",
         ),
     ];
+
+    #[test]
+    fn every_rule_carries_a_negative_fixture() {
+        // Makes the per-rule discipline enforceable rather than aspirational: a
+        // rule added without a fixture that proves it does not over-match fails
+        // here instead of shipping unproven.
+        const DEDICATED: &[&str] = &[
+            "dangerous-function-gets",
+            "unchecked-conversion-ato",
+            "unchecked-return-scanf",
+        ];
+        let covered: std::collections::HashSet<&str> = FIXTURES
+            .iter()
+            .map(|(rule_id, _, _)| *rule_id)
+            .chain(DEDICATED.iter().copied())
+            .collect();
+        for rule in catalog::C_RULES {
+            assert!(
+                covered.contains(rule.id),
+                "rule '{}' has no negative fixture",
+                rule.id
+            );
+        }
+    }
 
     #[test]
     fn every_rule_matches_its_positive_fixture() {
