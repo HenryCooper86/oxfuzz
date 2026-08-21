@@ -2426,6 +2426,7 @@ dependencies = [
  "chrono",
  "futures",
  "globset",
+ "hf-analysis",
  "hf-core",
  "hf-prompt",
  "hf-provider",

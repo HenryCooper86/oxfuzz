@@ -10,6 +10,7 @@ description = "REST API + SSE streaming"
 default = ["automotive-scapy", "build-context", "proof-carrying", "semgrep-enrichment"]
 automotive-scapy = ["hf-service/automotive-scapy"]
 build-context = ["hf-service/build-context"]
+native-analysis = ["hf-service/native-analysis"]
 proof-carrying = ["hf-service/proof-carrying"]
 semgrep-enrichment = ["hf-service/semgrep-enrichment"]
 

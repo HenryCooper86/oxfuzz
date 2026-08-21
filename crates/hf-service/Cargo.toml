@@ -11,6 +11,7 @@ description = "Business logic orchestrating discovery, harness, engine, crash, c
 default = ["automotive-scapy", "build-context", "proof-carrying", "semgrep-enrichment"]
 automotive-scapy = ["dep:hf-automotive", "hf-automotive/automotive-scapy"]
 build-context = ["hf-discovery/build-context"]
+native-analysis = ["hf-discovery/native-analysis"]
 proof-carrying = ["hf-coverage/campaign-advisor", "hf-crash/remediation-handoff"]
 semgrep-enrichment = ["hf-discovery/semgrep-enrichment"]
 test-support = []

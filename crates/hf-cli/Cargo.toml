@@ -12,6 +12,7 @@ description = "CLI + TUI for oxfuzz"
 default = ["automotive-scapy", "build-context", "proof-carrying", "semgrep-enrichment"]
 automotive-scapy = ["hf-service/automotive-scapy", "hf-web/automotive-scapy"]
 build-context = ["hf-service/build-context", "hf-web/build-context"]
+native-analysis = ["hf-service/native-analysis", "hf-web/native-analysis"]
 proof-carrying = ["hf-service/proof-carrying", "hf-web/proof-carrying"]
 semgrep-enrichment = [
     "hf-service/semgrep-enrichment",
