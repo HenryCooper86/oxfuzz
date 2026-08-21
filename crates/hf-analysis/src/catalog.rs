@@ -31,6 +31,60 @@ pub(crate) const C_RULES: &[Rule] = &[
         severity: Severity::Warning,
         query: include_str!("../rules/c/unchecked-return-scanf.scm"),
     },
+    Rule {
+        id: "dangerous-function-alloca",
+        cwe: "CWE-676",
+        severity: Severity::Error,
+        query: include_str!("../rules/c/dangerous-function-alloca.scm"),
+    },
+    Rule {
+        id: "unbounded-string-copy",
+        cwe: "CWE-676",
+        severity: Severity::Error,
+        query: include_str!("../rules/c/unbounded-string-copy.scm"),
+    },
+    Rule {
+        id: "unbounded-scanf-conversion",
+        cwe: "CWE-676",
+        severity: Severity::Error,
+        query: include_str!("../rules/c/unbounded-scanf-conversion.scm"),
+    },
+    Rule {
+        id: "insecure-temporary-file",
+        cwe: "CWE-377",
+        severity: Severity::Warning,
+        query: include_str!("../rules/c/insecure-temporary-file.scm"),
+    },
+    Rule {
+        id: "weak-pseudo-random",
+        cwe: "CWE-338",
+        severity: Severity::Warning,
+        query: include_str!("../rules/c/weak-pseudo-random.scm"),
+    },
+    Rule {
+        id: "signal-handler-race",
+        cwe: "CWE-364",
+        severity: Severity::Warning,
+        query: include_str!("../rules/c/signal-handler-race.scm"),
+    },
+    Rule {
+        id: "toctou-access-check",
+        cwe: "CWE-367",
+        severity: Severity::Warning,
+        query: include_str!("../rules/c/toctou-access-check.scm"),
+    },
+    Rule {
+        id: "os-command-execution",
+        cwe: "CWE-78",
+        severity: Severity::Error,
+        query: include_str!("../rules/c/os-command-execution.scm"),
+    },
+    Rule {
+        id: "strlen-sum-overflow",
+        cwe: "CWE-190",
+        severity: Severity::Warning,
+        query: include_str!("../rules/c/strlen-sum-overflow.scm"),
+    },
 ];
 
 /// Rules matched against C++ translation units. C++ gains its own rules once
