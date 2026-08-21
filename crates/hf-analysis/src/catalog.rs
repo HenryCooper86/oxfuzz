@@ -85,6 +85,60 @@ pub(crate) const C_RULES: &[Rule] = &[
         severity: Severity::Warning,
         query: include_str!("../rules/c/strlen-sum-overflow.scm"),
     },
+    Rule {
+        id: "unchecked-privilege-drop",
+        cwe: "CWE-252",
+        severity: Severity::Warning,
+        query: include_str!("../rules/c/unchecked-privilege-drop.scm"),
+    },
+    Rule {
+        id: "unchecked-truncating-write",
+        cwe: "CWE-131",
+        severity: Severity::Warning,
+        query: include_str!("../rules/c/unchecked-truncating-write.scm"),
+    },
+    Rule {
+        id: "memset-argument-order",
+        cwe: "CWE-683",
+        severity: Severity::Error,
+        query: include_str!("../rules/c/memset-argument-order.scm"),
+    },
+    Rule {
+        id: "overlapping-copy",
+        cwe: "CWE-1260",
+        severity: Severity::Warning,
+        query: include_str!("../rules/c/overlapping-copy.scm"),
+    },
+    Rule {
+        id: "non-literal-format-string",
+        cwe: "CWE-134",
+        severity: Severity::Error,
+        query: include_str!("../rules/c/non-literal-format-string.scm"),
+    },
+    Rule {
+        id: "environment-input",
+        cwe: "CWE-15",
+        severity: Severity::Info,
+        query: include_str!("../rules/c/environment-input.scm"),
+    },
+    Rule {
+        id: "address-disclosure",
+        cwe: "CWE-209",
+        severity: Severity::Info,
+        query: include_str!("../rules/c/address-disclosure.scm"),
+    },
+    Rule {
+        id: "assignment-in-assertion",
+        cwe: "CWE-754",
+        severity: Severity::Warning,
+        query: include_str!("../rules/c/assignment-in-assertion.scm"),
+    },
+    Rule {
+        id: "assignment-in-condition",
+        cwe: "CWE-480",
+        severity: Severity::Info,
+        query: include_str!("../rules/c/assignment-in-condition.scm"),
+    },
 ];
 
 /// Rules matched against C++ translation units. C++ gains its own rules once
