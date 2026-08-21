@@ -61,6 +61,7 @@ impl RuleSet {
         for (rule, query) in &self.compiled {
             query::run_rule(rule, query, tree, source, &mut findings);
         }
+        query::order_findings(&mut findings);
         findings
     }
 
@@ -148,6 +149,88 @@ mod tests {
         rules_for(TargetLanguage::C)
             .expect("C has rules")
             .analyze(&tree, source)
+    }
+
+    #[test]
+    fn ordering_sorts_findings_that_arrive_out_of_order() {
+        // The integration fixtures above pass incidentally: with three rules
+        // whose catalog order already matches their alphabetical order, no
+        // source can distinguish a sorted result from an unsorted one. This
+        // exercises the ordering directly, so it keeps meaning once Task 8
+        // adds rules whose catalog order differs.
+        let mut findings = vec![
+            finding_at("z-rule", 5, 0),
+            finding_at("a-rule", 5, 0),
+            finding_at("m-rule", 2, 8),
+            finding_at("m-rule", 2, 1),
+        ];
+        super::query::order_findings(&mut findings);
+
+        let order: Vec<(&str, u32, u32)> = findings
+            .iter()
+            .map(|f| (f.rule_id, f.span.start_line, f.span.start_col))
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                ("m-rule", 2, 1),
+                ("m-rule", 2, 8),
+                ("a-rule", 5, 0),
+                ("z-rule", 5, 0),
+            ]
+        );
+    }
+
+    fn finding_at(rule_id: &'static str, line: u32, col: u32) -> Finding {
+        Finding {
+            rule_id,
+            cwe: "CWE-000",
+            severity: Severity::Info,
+            span: SourceSpan {
+                start_line: line,
+                start_col: col,
+                end_line: line,
+                end_col: col + 1,
+            },
+        }
+    }
+
+    #[test]
+    fn findings_are_ordered_by_span_then_rule() {
+        let findings = analyze_c("void f(char*b){\n  gets(b);\n  scanf(\"%s\", b);\n}");
+        let order: Vec<(u32, &str)> = findings
+            .iter()
+            .map(|finding| (finding.span.start_line, finding.rule_id))
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                (2, "dangerous-function-gets"),
+                (3, "unchecked-return-scanf")
+            ]
+        );
+    }
+
+    #[test]
+    fn the_same_source_analyzes_identically_twice() {
+        // Rule iteration and query-match order must not leak into output: a
+        // non-deterministic overlay would make the phase 1c A/B unreadable.
+        let source = "void f(char*b){ gets(b); scanf(\"%s\", b); atoi(b); }";
+        assert_eq!(analyze_c(source), analyze_c(source));
+    }
+
+    #[test]
+    fn two_calls_on_one_line_both_report() {
+        let findings = analyze_c("void f(char*b){ gets(b); gets(b); }");
+        assert_eq!(findings.len(), 2, "{findings:?}");
+    }
+
+    #[test]
+    fn one_rule_matching_twice_at_one_position_reports_once() {
+        // Distinct-rule counting drives the boost, so a rule whose query yields
+        // overlapping matches at the same node must not inflate it.
+        let findings = analyze_c("void f(char*b){ gets(b); }");
+        assert_eq!(findings.len(), 1, "{findings:?}");
     }
 
     #[test]
