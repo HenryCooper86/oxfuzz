@@ -15,7 +15,7 @@
 //! | [`session`] | `SessionStore`, `TranscriptStore` | - |
 //! | [`memory`] | `MemoryClient`, `ExperienceStore` | - |
 //! | [`checkpoint`] | `CheckpointStorage` | - |
-//! | [`build`] | `BuildContext`, `CompileEntry` | - |
+//! | [`build`] | `BuildContext`, `CompileEntry` | harness-generation-design.md |
 //! | [`target`] | `TargetCandidate`, `TargetInventory` | TARGET_TAXONOMY.md |
 //! | [`harness`] | `Harness`, `HarnessDraft` | HARNESS_STANDARD.md |
 //! | [`engine`] | `EngineKind`, `FuzzRunConfig`, `FuzzProgress` | ENGINE_ADAPTER_STANDARD.md |
