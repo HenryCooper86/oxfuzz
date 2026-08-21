@@ -198,6 +198,31 @@ mod tests {
     /// that over-matches gets caught, and a rule without one is not done.
     const FIXTURES: &[(&str, &str, &str)] = &[
         (
+            "returned-stack-address",
+            "char* f(void){ char b[8]; return &b; }",
+            "char* f(char*heap){ return heap; }",
+        ),
+        (
+            "unterminated-strncpy",
+            "void f(char*d, char*s){ strncpy(d, s, sizeof(d)); }",
+            "void f(char*d, char*s){ strncpy(d, s, sizeof(d) - 1); }",
+        ),
+        (
+            "environment-from-variable",
+            "void f(char*e){ putenv(e); }",
+            "void f(void){ putenv(\"A=1\"); }",
+        ),
+        (
+            "catastrophic-regex",
+            "void f(void*re){ regcomp(re, \"(a+)+b\", 0); }",
+            "void f(void*re){ regcomp(re, \"^[a-z]+$\", 0); }",
+        ),
+        (
+            "pointer-subtraction-size",
+            "void f(char*a, char*b, char*d){ memcpy(d, a, a - b); }",
+            "void f(char*a, char*d, int n){ memcpy(d, a, n); }",
+        ),
+        (
             "allocation-size-multiplication",
             "void* f(int a, int b){ return malloc(a * b); }",
             "void* f(int a, int b){ return calloc(a, b); }",

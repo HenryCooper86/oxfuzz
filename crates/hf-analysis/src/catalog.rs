@@ -218,6 +218,41 @@ pub(crate) const SHARED_RULES: &[Rule] = &[
         kind: RuleKind::Shape,
         query: include_str!("../rules/c/loop-bound-off-by-one.scm"),
     },
+    Rule {
+        id: "returned-stack-address",
+        cwe: "CWE-562",
+        severity: Severity::Warning,
+        kind: RuleKind::Shape,
+        query: include_str!("../rules/c/returned-stack-address.scm"),
+    },
+    Rule {
+        id: "unterminated-strncpy",
+        cwe: "CWE-170",
+        severity: Severity::Warning,
+        kind: RuleKind::Shape,
+        query: include_str!("../rules/c/unterminated-strncpy.scm"),
+    },
+    Rule {
+        id: "environment-from-variable",
+        cwe: "CWE-686",
+        severity: Severity::Info,
+        kind: RuleKind::Shape,
+        query: include_str!("../rules/c/environment-from-variable.scm"),
+    },
+    Rule {
+        id: "catastrophic-regex",
+        cwe: "CWE-1333",
+        severity: Severity::Warning,
+        kind: RuleKind::Shape,
+        query: include_str!("../rules/c/catastrophic-regex.scm"),
+    },
+    Rule {
+        id: "pointer-subtraction-size",
+        cwe: "CWE-469",
+        severity: Severity::Warning,
+        kind: RuleKind::Shape,
+        query: include_str!("../rules/c/pointer-subtraction-size.scm"),
+    },
 ];
 
 /// Rules that only compile against the C grammar.
