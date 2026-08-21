@@ -65,6 +65,7 @@ fn sample_crash() -> Crash {
             stack: vec!["parse_header".to_owned(), "main".to_owned()],
             cluster: Some(1),
         }),
+        origin: hf_core::crash::CrashOrigin::Unknown,
     }
 }
 

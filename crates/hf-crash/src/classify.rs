@@ -347,6 +347,7 @@ mod tests {
             minimized: false,
             bug_report: None,
             casr: None,
+            origin: hf_core::crash::CrashOrigin::Unknown,
         };
 
         let kept = dedup(vec![make(sig_a), make(sig_b)]);

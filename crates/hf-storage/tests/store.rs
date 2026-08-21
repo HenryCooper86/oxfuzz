@@ -1402,6 +1402,7 @@ async fn dedupe_crashes_collapses_same_run_and_signature() {
         minimized: false,
         bug_report: None,
         casr: None,
+        origin: hf_core::crash::CrashOrigin::Unknown,
     };
     // Two rows share a signature (legacy duplicate); one distinct signature;
     // two empty-signature rows that must NOT be collapsed.
@@ -1452,6 +1453,7 @@ async fn list_all_crashes_is_newest_first_by_insertion_order() {
         minimized: false,
         bug_report: None,
         casr: None,
+        origin: hf_core::crash::CrashOrigin::Unknown,
     };
 
     // IDs deliberately sort in the opposite order from insertion. `Crash`
@@ -1784,6 +1786,7 @@ async fn crash_batch_persistence_is_atomic() {
         minimized: false,
         bug_report: None,
         casr: None,
+        origin: hf_core::crash::CrashOrigin::Unknown,
     };
     sqlx::query(
         "CREATE TRIGGER reject_crash_batch
@@ -2037,6 +2040,7 @@ async fn clear_knowledge_empties_all_domain_tables() {
         minimized: false,
         bug_report: None,
         casr: None,
+        origin: hf_core::crash::CrashOrigin::Unknown,
     };
     store.upsert_crash(&crash).await.unwrap();
 
@@ -2089,6 +2093,7 @@ async fn delete_project_cascades_and_isolates_other_projects() {
                     minimized: false,
                     bug_report: None,
                     casr: None,
+                    origin: hf_core::crash::CrashOrigin::Unknown,
                 })
                 .await
                 .unwrap();
@@ -2209,6 +2214,7 @@ async fn delete_orphans_removes_dangling_children_keeps_valid() {
             minimized: false,
             bug_report: None,
             casr: None,
+            origin: hf_core::crash::CrashOrigin::Unknown,
         })
         .await
         .unwrap();
@@ -2240,6 +2246,7 @@ async fn crash_and_corpus_roundtrip() {
         minimized: true,
         bug_report: None,
         casr: None,
+        origin: hf_core::crash::CrashOrigin::Unknown,
     };
     store.upsert_crash(&crash).await.unwrap();
     let crashes = store.list_crashes_by_run(run_id).await.unwrap();

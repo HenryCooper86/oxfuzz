@@ -24,6 +24,7 @@ fn crash(kind: CrashKind, severity: CrashSeverity, short: &str, crashline: &str)
             stack: vec![],
             cluster: None,
         }),
+        origin: hf_core::crash::CrashOrigin::Unknown,
     }
 }
 
