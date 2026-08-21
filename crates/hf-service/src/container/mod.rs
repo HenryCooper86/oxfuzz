@@ -6,6 +6,8 @@
 //! ensures every build / fuzz run goes through `hf-runtime` sandboxing
 //! (AGENTS.md 2.12).
 
+#[cfg(feature = "build-context")]
+mod build_context;
 mod chat;
 mod corpus;
 mod coverage_cache;
