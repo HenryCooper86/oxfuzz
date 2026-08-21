@@ -26,7 +26,12 @@ pub(crate) struct Rule {
 }
 
 /// Rules matched against C translation units.
-pub(crate) const C_RULES: &[Rule] = &[
+/// Rules whose queries compile and match against both grammars.
+///
+/// tree-sitter-cpp is largely a superset of tree-sitter-c, so a rule about a
+/// call shape is identical in both. Sharing them is what gives C++ real
+/// coverage; a separate C++ list would have started empty and stayed that way.
+pub(crate) const SHARED_RULES: &[Rule] = &[
     Rule {
         id: "dangerous-function-gets",
         cwe: "CWE-242",
@@ -168,13 +173,6 @@ pub(crate) const C_RULES: &[Rule] = &[
         query: include_str!("../rules/c/assignment-in-assertion.scm"),
     },
     Rule {
-        id: "assignment-in-condition",
-        cwe: "CWE-480",
-        severity: Severity::Info,
-        kind: RuleKind::Shape,
-        query: include_str!("../rules/c/assignment-in-condition.scm"),
-    },
-    Rule {
         id: "double-free",
         cwe: "CWE-415",
         severity: Severity::Error,
@@ -183,7 +181,20 @@ pub(crate) const C_RULES: &[Rule] = &[
     },
 ];
 
-/// Rules matched against C++ translation units. C++ gains its own rules once
-/// the shape rules that need C++-only grammar nodes are written; until then the
-/// set is empty and analysis of a C++ unit yields nothing.
-pub(crate) const CPP_RULES: &[Rule] = &[];
+/// Rules that only compile against the C grammar.
+pub(crate) const C_ONLY_RULES: &[Rule] = &[Rule {
+    id: "assignment-in-condition",
+    cwe: "CWE-480",
+    severity: Severity::Info,
+    kind: RuleKind::Shape,
+    query: include_str!("../rules/c/assignment-in-condition.scm"),
+}];
+
+/// Rules that only compile against the C++ grammar.
+pub(crate) const CPP_ONLY_RULES: &[Rule] = &[Rule {
+    id: "assignment-in-condition",
+    cwe: "CWE-480",
+    severity: Severity::Info,
+    kind: RuleKind::Shape,
+    query: include_str!("../rules/cpp/assignment-in-condition.scm"),
+}];
