@@ -1,5 +1,8 @@
 //! Prompt rendering functions.
 
+use std::path::Path;
+
+use hf_core::build::BuildContext;
 use hf_core::engine::EngineKind;
 use hf_core::target::{TargetCandidate, TargetLanguage};
 
@@ -157,12 +160,84 @@ pub fn render_harness_prompt_with_context(
     target: &TargetCandidate,
     engine: EngineKind,
     related: &[RelatedContext],
+    build: Option<&BuildContext>,
 ) -> String {
-    let base = render_harness_prompt(target, engine);
-    if related.is_empty() {
-        return base;
+    let mut prompt = render_harness_prompt(target, engine);
+    if !related.is_empty() {
+        prompt.push_str("\n\n");
+        prompt.push_str(&render_related_context_section(related));
     }
-    format!("{base}\n\n{}", render_related_context_section(related))
+    if let Some(context) = build {
+        let section = render_build_context_section(context, &target.project_root);
+        if !section.is_empty() {
+            prompt.push_str("\n\n");
+            prompt.push_str(&section);
+        }
+    }
+    prompt
+}
+
+/// Include directories listed in a prompt. Past this the list stops helping the
+/// model choose a header and starts consuming the budget (AGENTS.md 2.4).
+const MAX_PROMPT_INCLUDE_DIRS: usize = 20;
+
+/// Preprocessor defines listed in a prompt, bounded for the same reason.
+const MAX_PROMPT_DEFINES: usize = 30;
+
+/// Render the project's compile context as prompt lines.
+///
+/// The compiler already receives these values; the model drafting the harness
+/// does not, so it guesses header paths and guesses whether a configuration
+/// macro is set. Each wrong guess costs a build-and-repair round.
+///
+/// Include directories are shown relative to the project root: an absolute host
+/// path tells the model nothing it can use and invites it to write a path that
+/// does not exist inside the sandbox. Returns an empty string for an empty
+/// context, so a project without a compile database renders unchanged.
+#[must_use]
+pub fn render_build_context_section(ctx: &BuildContext, project_root: &Path) -> String {
+    let includes: Vec<String> = ctx
+        .include_dirs
+        .iter()
+        .take(MAX_PROMPT_INCLUDE_DIRS)
+        .map(|directory| {
+            let relative = directory.strip_prefix(project_root).unwrap_or(directory);
+            if relative.as_os_str().is_empty() {
+                ".".to_owned()
+            } else {
+                relative.to_string_lossy().into_owned()
+            }
+        })
+        .collect();
+    let defines: Vec<&str> = ctx
+        .defines
+        .iter()
+        .take(MAX_PROMPT_DEFINES)
+        .map(|define| define.strip_prefix("-D").unwrap_or(define))
+        .collect();
+    let standard = ctx
+        .std_flag
+        .as_deref()
+        .map(|flag| flag.strip_prefix("-std=").unwrap_or(flag));
+
+    let mut lines = Vec::new();
+    if !includes.is_empty() {
+        lines.push(format!("- include directories: {}", includes.join(", ")));
+    }
+    if !defines.is_empty() {
+        lines.push(format!("- preprocessor defines: {}", defines.join(", ")));
+    }
+    if let Some(standard) = standard {
+        lines.push(format!("- language standard: {standard}"));
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    format!(
+        "Project build context (these are the project's real build settings; \
+         use them and do not invent header paths):\n{}",
+        lines.join("\n")
+    )
 }
 
 /// Render a harness *repair* prompt: the original generation instructions plus
@@ -396,6 +471,64 @@ fn engine_name(engine: EngineKind) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn build_context_section_lists_relative_include_dirs_and_defines() {
+        let ctx = hf_core::build::BuildContext {
+            include_dirs: vec![std::path::PathBuf::from("/proj/include")],
+            defines: vec!["-DHAVE_CONFIG_H=1".to_owned()],
+            std_flag: Some("-std=c11".to_owned()),
+            ..hf_core::build::BuildContext::default()
+        };
+        let section = render_build_context_section(&ctx, std::path::Path::new("/proj"));
+        assert!(section.contains("include"), "{section}");
+        assert!(section.contains("HAVE_CONFIG_H=1"), "{section}");
+        assert!(section.contains("c11"), "{section}");
+        // A host absolute path tells the model nothing useful and invites it to
+        // write an include path that does not exist inside the sandbox.
+        assert!(!section.contains("/proj/include"), "{section}");
+    }
+
+    #[test]
+    fn build_context_section_strips_the_define_flag_prefix() {
+        let ctx = hf_core::build::BuildContext {
+            defines: vec!["-DA=1".to_owned()],
+            ..hf_core::build::BuildContext::default()
+        };
+        let section = render_build_context_section(&ctx, std::path::Path::new("/proj"));
+        assert!(section.contains("A=1"), "{section}");
+        assert!(!section.contains("-DA=1"), "{section}");
+    }
+
+    #[test]
+    fn an_empty_build_context_renders_nothing() {
+        let ctx = hf_core::build::BuildContext::default();
+        assert!(render_build_context_section(&ctx, std::path::Path::new("/proj")).is_empty());
+    }
+
+    #[test]
+    fn a_harness_prompt_without_build_context_is_unchanged() {
+        let target = sample_target();
+        assert_eq!(
+            render_harness_prompt_with_context(&target, EngineKind::LibFuzzer, &[], None),
+            render_harness_prompt(&target, EngineKind::LibFuzzer),
+        );
+    }
+
+    #[test]
+    fn a_harness_prompt_carries_the_build_context_when_present() {
+        let ctx = hf_core::build::BuildContext {
+            include_dirs: vec![std::path::PathBuf::from("/proj/include")],
+            ..hf_core::build::BuildContext::default()
+        };
+        let prompt = render_harness_prompt_with_context(
+            &sample_target(),
+            EngineKind::LibFuzzer,
+            &[],
+            Some(&ctx),
+        );
+        assert!(prompt.contains("include"), "{prompt}");
+    }
+
     use super::*;
     use hf_core::target::{
         InputSurface, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
@@ -549,7 +682,8 @@ mod tests {
             file: "src/caller.c".to_owned(),
             snippet: "void handle(void) { parse_header(buf, len); }".to_owned(),
         }];
-        let prompt = render_harness_prompt_with_context(&target, EngineKind::LibFuzzer, &related);
+        let prompt =
+            render_harness_prompt_with_context(&target, EngineKind::LibFuzzer, &related, None);
         // The related-context section carries the retrieved chunk.
         assert!(prompt.contains("Related project context"));
         assert!(prompt.contains("src/caller.c"));
@@ -563,7 +697,7 @@ mod tests {
     fn harness_prompt_with_empty_context_is_byte_identical_to_base() {
         let target = sample_target();
         assert_eq!(
-            render_harness_prompt_with_context(&target, EngineKind::LibFuzzer, &[]),
+            render_harness_prompt_with_context(&target, EngineKind::LibFuzzer, &[], None),
             render_harness_prompt(&target, EngineKind::LibFuzzer),
             "no retrieved chunks must render the un-augmented prompt"
         );

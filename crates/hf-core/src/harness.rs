@@ -25,6 +25,15 @@ pub struct BuildCommand {
     pub compiler: String,
     pub args: Vec<String>,
     pub output: PathBuf,
+    /// Project-derived compile flags (include directories, defines, language
+    /// standard), already validated by `hf_discovery::build_context` and
+    /// expressed as container-internal paths. Empty when the project ships no
+    /// compile database.
+    ///
+    /// Carried on the build command rather than passed alongside it so the
+    /// flags a harness was built with travel with the harness record.
+    #[serde(default)]
+    pub extra_flags: Vec<String>,
 }
 
 /// Summary of a smoke fuzz run.

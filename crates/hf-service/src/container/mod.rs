@@ -6,6 +6,8 @@
 //! ensures every build / fuzz run goes through `hf-runtime` sandboxing
 //! (AGENTS.md 2.12).
 
+#[cfg(feature = "build-context")]
+mod build_context;
 mod chat;
 mod corpus;
 mod coverage_cache;
@@ -1188,6 +1190,9 @@ pub struct CompileOutcome {
     pub status: HarnessStatus,
     pub binary_name: String,
     pub workspace: PathBuf,
+    /// Non-blocking harness lint findings for the compiled source. Blocking
+    /// findings never produce an outcome: they fail the compile instead.
+    pub lint: Vec<hf_harness::LintFinding>,
 }
 
 /// Outcome of an end-to-end harness generation with automatic repair: the
@@ -1200,6 +1205,8 @@ pub struct HarnessGenOutcome {
     /// Number of LLM repair passes applied before the harness compiled (0 when
     /// the first draft built cleanly).
     pub repairs_used: usize,
+    /// Non-blocking harness lint findings for the source that compiled.
+    pub lint: Vec<hf_harness::LintFinding>,
 }
 
 /// A generated seed entry.
