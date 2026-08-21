@@ -5448,8 +5448,7 @@ mod tests {
             .await;
 
         let scheduler = fixture.start().await.unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let recoveries = scheduler.list_one_time_recoveries().await.unwrap();
+        let recoveries = wait_for_one_time_recoveries(&scheduler).await;
         assert_eq!(recoveries.len(), 1);
         assert_eq!(recoveries[0].occurrence_id, "occ-1");
         assert_eq!(
@@ -5470,7 +5469,7 @@ mod tests {
         scheduler.arm();
 
         assert!(scheduler.manager.is_running());
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        wait_for_execution(&scheduler, "recurring").await;
         assert!(
             !scheduler
                 .manager
@@ -5505,7 +5504,7 @@ mod tests {
         legacy.last_fire = Some(Utc::now() - chrono::Duration::seconds(1));
         fixture.push_schedule(legacy);
         let scheduler = fixture.start().await.unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        wait_for_durability_status(&scheduler, CampaignDurabilityStatus::Consumed).await;
         assert_eq!(
             scheduler.list_views().await.unwrap()[0].durability_status,
             CampaignDurabilityStatus::Consumed
@@ -5615,11 +5614,15 @@ mod tests {
                     .reserve_receipt("restart-once", "occ-restart", "exec-restart", state)
                     .await;
             }
+            // These two are settle windows, not waits for a condition: the
+            // property is that a restart dispatches *nothing* more, and absence
+            // cannot be polled for. Stopping too early would make the test pass
+            // for the wrong reason, so the window is named rather than inlined.
             let first = fixture.start().await.unwrap();
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(RESTART_DISPATCH_WINDOW).await;
             first.stop().await;
             let restarted = fixture.start().await.unwrap();
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(RESTART_DISPATCH_WINDOW).await;
             restarted.stop().await;
 
             let store = fixture.store.as_ref().unwrap();
@@ -5667,7 +5670,13 @@ mod tests {
         // Recurring recovery is held until armed; this test is about one-time
         // occurrences being blocked while recurring ones still run.
         scheduler.arm();
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Two independent conditions, and the fixed sleep this replaced was
+        // covering both by accident: the one-time occurrence must reach
+        // RecoveryRequired *and* the healthy recurring schedule must still
+        // dispatch. Waiting only for the first returns sooner than the old
+        // sleep did and leaves the second unmet, so both are waited for.
+        wait_for_recovery_required(&scheduler, "corrupt-once").await;
+        wait_for_execution(&scheduler, "healthy-interval").await;
         assert!(matches!(
             scheduler
                 .manager
@@ -6418,6 +6427,53 @@ mod tests {
         scheduler.stop().await;
     }
 
+    /// Poll until the scheduler reports at least one one-time recovery.
+    async fn wait_for_one_time_recoveries(
+        scheduler: &CampaignScheduler,
+    ) -> Vec<OneTimeRecoveryView> {
+        for _ in 0..500 {
+            let recoveries = scheduler.list_one_time_recoveries().await.unwrap();
+            if !recoveries.is_empty() {
+                return recoveries;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("no one-time recovery was reported");
+    }
+
+    /// Poll until the first schedule view reports `expected`.
+    async fn wait_for_durability_status(
+        scheduler: &CampaignScheduler,
+        expected: CampaignDurabilityStatus,
+    ) {
+        for _ in 0..500 {
+            let views = scheduler.list_views().await.unwrap();
+            if views
+                .first()
+                .is_some_and(|view| view.durability_status == expected)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("schedule never reached durability status {expected:?}");
+    }
+
+    /// Poll until `schedule_id` reports a one-time runtime status needing
+    /// recovery.
+    async fn wait_for_recovery_required(scheduler: &CampaignScheduler, schedule_id: &str) {
+        for _ in 0..500 {
+            if matches!(
+                scheduler.manager.one_time_runtime_status(schedule_id).await,
+                OneTimeRuntimeStatus::RecoveryRequired { .. }
+            ) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("{schedule_id} never reported RecoveryRequired");
+    }
+
     /// Poll until `schedule_id` has at least `expected` occurrence rows.
     ///
     /// Returns as soon as the condition holds, so an unloaded run costs one
@@ -6463,6 +6519,12 @@ mod tests {
     /// polled for. Uniqueness is enforced by the store; this only widens the
     /// window in which a regression would be observed.
     const DUPLICATE_DISPATCH_WINDOW: Duration = Duration::from_millis(250);
+
+    /// How long a scheduler is left running for a restart to redispatch in.
+    ///
+    /// Also a settle window rather than a wait: the assertion is that nothing
+    /// further was dispatched.
+    const RESTART_DISPATCH_WINDOW: Duration = Duration::from_millis(250);
 
     #[tokio::test]
     async fn two_service_schedulers_dispatch_one_time_at_most_once() {
