@@ -106,6 +106,7 @@ fn measure_coverage_against_the_upstream_corpus() {
 
     let (mut hit, mut miss, mut not_attempted, mut false_positive, mut improvement) =
         (0_u32, 0_u32, 0_u32, 0_u32, 0_u32);
+    let mut any_rule_hit = 0_u32;
     let mut misses: Vec<String> = Vec::new();
     let mut false_positives: Vec<String> = Vec::new();
     let mut improvements: Vec<String> = Vec::new();
@@ -139,9 +140,24 @@ fn measure_coverage_against_the_upstream_corpus() {
             // Annotations name the rule as `raptor-<id>`; the fixture file name
             // is the upstream id.
             let ours = coverage.get(name.as_str()).copied().unwrap_or(&[]);
+            // Two questions, reported separately rather than blended, because
+            // they answer different things and only one of them can be made to
+            // look better by editing a table.
+            //
+            //   mapped: did the rule we recorded as covering this upstream rule
+            //           fire here? This is rule-for-rule parity.
+            //   any:    did the analyzer flag this defective line at all? This
+            //           is what an operator actually experiences, and a defect
+            //           found by a differently-named rule is still found.
             let reported = findings
                 .iter()
                 .any(|f| f.span.start_line == annotation.line && ours.contains(&f.rule_id));
+            let reported_by_any = findings
+                .iter()
+                .any(|f| f.span.start_line == annotation.line);
+            if annotation.expectation == Expectation::Finding && reported_by_any {
+                any_rule_hit += 1;
+            }
             match annotation.expectation {
                 Expectation::Finding if ours.is_empty() => not_attempted += 1,
                 Expectation::Finding if reported => hit += 1,
@@ -172,8 +188,12 @@ fn measure_coverage_against_the_upstream_corpus() {
     let attempted = hit + miss;
     if attempted > 0 {
         println!(
-            "recall on attempted: {:.1}%",
+            "recall (mapped rule): {:.1}%",
             f64::from(hit) * 100.0 / f64::from(attempted)
+        );
+        println!(
+            "recall (any rule)   : {:.1}%   [{any_rule_hit} of {attempted} defective lines flagged]",
+            f64::from(any_rule_hit) * 100.0 / f64::from(attempted)
         );
     }
     for (label, items) in [
