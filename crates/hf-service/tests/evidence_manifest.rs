@@ -210,6 +210,7 @@ async fn service_assembles_a_manifest_from_durable_run_and_approval_evidence() {
             compiler: "clang".to_owned(),
             args: Vec::new(),
             output: PathBuf::from("fuzz_bin"),
+            extra_flags: Vec::new(),
         },
         sanitizer: Sanitizer::Address,
         status: HarnessStatus::Promoted,

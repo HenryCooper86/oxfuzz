@@ -1817,6 +1817,7 @@ fn sample_harness(target_id: Uuid) -> Harness {
             compiler: "clang".to_owned(),
             args: vec!["-fsanitize=fuzzer,address".to_owned()],
             output: PathBuf::from("fuzz_parse_value"),
+            extra_flags: Vec::new(),
         },
         sanitizer: Sanitizer::Address,
         status: HarnessStatus::Draft,
