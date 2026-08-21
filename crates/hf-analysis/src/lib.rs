@@ -332,6 +332,19 @@ mod tests {
     ];
 
     #[test]
+    fn the_rule_count_is_asserted_rather_than_drifting() {
+        // Written as a literal so adding or dropping a rule is a deliberate
+        // edit with a commit message, not a silent change in coverage. The
+        // reconciliation table in spec section 18.5 is keyed to these numbers.
+        assert_eq!(compile_all(TargetLanguage::C).unwrap(), 32, "C rule count");
+        assert_eq!(
+            compile_all(TargetLanguage::Cpp).unwrap(),
+            32,
+            "C++ rule count"
+        );
+    }
+
+    #[test]
     fn every_rule_carries_a_negative_fixture() {
         // Makes the per-rule discipline enforceable rather than aspirational: a
         // rule added without a fixture that proves it does not over-match fails
