@@ -505,9 +505,9 @@ set is C/C++ only; there is no other language coverage to lose.
    agreed before phase 1c.
 2. **Which upstream bug classes end up uncovered?** Section 7.2 caps the
    sequence pass at one function body with no aliasing. Some upstream rules may
-   need more to fire usefully. Each such rule is recorded as uncovered, with the
-   reason, rather than approximated into a false-positive source. The list is
-   not knowable until phase 1b.
+   need more to fire usefully. Each such rule is recorded in section 18 rather
+   than approximated into a false-positive source. The full list is not knowable
+   until phase 1b.
 3. **Does the native overlay need persistence at all?** Section 13 assumes not,
    since it is cheap to recompute and never stale. If the GUI needs overlay
    history across sessions, that assumption changes and the migration in phase 1d
@@ -515,3 +515,43 @@ set is C/C++ only; there is no other language coverage to lose.
 4. **Does `hf-analysis` belong to the C/C++ scanner only?** `scan_go` and
    `scan_python` are lexical, not tree-sitter, so there is no tree to hand over.
    Native analysis is C/C++ only, exactly as Semgrep enrichment is today.
+
+## 18. Recorded as Uncovered
+
+Bug classes present in the upstream rule set that this design deliberately does
+not cover. Each entry is a decision, not a gap to close later: a ranking delta
+in the section 12 gate traced to an entry here is explained, not a failure.
+
+Phase 1a and 1b append to this list as coverage decisions are made.
+
+### 18.1 `high-entropy-assignment` (phase 1a)
+
+Upstream flags string literals whose Shannon entropy suggests an embedded
+credential or key. Not covered.
+
+It is a heuristic over literal content, not a bug class: entropy is a property
+of the bytes, and the same threshold that catches a hardcoded key also catches a
+base64 test vector, a lookup table, and a UUID. More importantly it is not a
+*fuzzing* signal. A hardcoded secret does not make a function a better fuzz
+target, so even a correct finding would move the ranking for a reason unrelated
+to what the ranking is for.
+
+Secret detection is a real need and a different tool's job. If oxfuzz ever wants
+it, it belongs in its own subsystem with its own output, not as a prioritization
+boost.
+
+### 18.2 `interesting-api-calls` (phase 1a)
+
+Upstream flags calls to a broad list of APIs a reviewer might want to look at.
+Not covered.
+
+It is an attention-directing heuristic for a human auditor, and its severity is
+`INFO` for that reason. As a ranking input it is close to noise: the list is
+wide enough that a large fraction of non-trivial C functions match something,
+which pushes every candidate's boost up by the same amount and moves no
+candidate relative to another. A signal that shifts everything equally carries
+no ranking information while still consuming part of the `0.20` cap that
+sharper rules need.
+
+The bug classes it gestures at that *are* fuzzing-relevant are already covered
+by specific rules with real severities.
