@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::Utc;
+use hf_core::build::BuildContext;
 use hf_core::engine::{EngineKind, FuzzRunConfig};
 use hf_core::error::ClassifiedError;
 use hf_core::harness::{Harness, HarnessDraft, HarnessStatus};
@@ -36,6 +37,32 @@ use super::{
     heuristic_draft, require_fuzzing_harness_engine, resolve_internal_run, CompileOutcome,
     HarnessGenOutcome, LlmProviderBridge, SeedEntry, ServiceContainer, SMOKE_FUZZ_SECS,
 };
+
+/// The project's compile context for prompt rendering, or `None` when it ships
+/// no database or the database cannot be read.
+///
+/// Drafting is best-effort and never fails, so an unreadable database degrades
+/// to a prompt without build context. `project_compile_flags` still fails the
+/// build for that same project, which is where an operator needs to see it.
+#[cfg(feature = "build-context")]
+fn project_build_context(container: &ServiceContainer, project: &Path) -> Option<BuildContext> {
+    match container.resolve_build_context(project) {
+        Ok(context) => context,
+        Err(error) => {
+            tracing::warn!(
+                "compile database for {} is unusable ({error}); drafting without build context",
+                project.display()
+            );
+            None
+        }
+    }
+}
+
+/// Compile-database support is not built in, so prompts carry no build context.
+#[cfg(not(feature = "build-context"))]
+fn project_build_context(_container: &ServiceContainer, _project: &Path) -> Option<BuildContext> {
+    None
+}
 
 /// The container path the sandbox stages the project at. Compile-database
 /// include directories are rewritten against it.
@@ -120,8 +147,15 @@ impl ServiceContainer {
             let provider = LlmProviderBridge::new(pool)
                 .with_diagnostics(Arc::clone(&self.diagnostics), "harness_draft");
             let related = crate::knowledge::harness_related_context(project, candidate);
-            match hf_harness::draft_with_context(candidate, engine, &related, Box::new(provider))
-                .await
+            let build = project_build_context(self, project);
+            match hf_harness::draft_with_context(
+                candidate,
+                engine,
+                &related,
+                build.as_ref(),
+                Box::new(provider),
+            )
+            .await
             {
                 Ok(draft) => return draft.source,
                 Err(e) => tracing::warn!(
@@ -279,8 +313,15 @@ impl ServiceContainer {
             // project has been indexed; empty on any failure, which renders
             // the un-augmented prompt.
             let related = crate::knowledge::harness_related_context(project, &candidate);
-            match hf_harness::draft_with_context(&candidate, engine, &related, Box::new(provider))
-                .await
+            let build = project_build_context(self, project);
+            match hf_harness::draft_with_context(
+                &candidate,
+                engine,
+                &related,
+                build.as_ref(),
+                Box::new(provider),
+            )
+            .await
             {
                 Ok(draft) => Ok(draft),
                 // The LLM is configured but the call failed (provider down, auth,

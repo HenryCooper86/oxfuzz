@@ -848,8 +848,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = fixture_target();
         let related = harness_related_context(dir.path(), &target);
-        let prompt =
-            hf_prompt::render_harness_prompt_with_context(&target, EngineKind::LibFuzzer, &related);
+        let prompt = hf_prompt::render_harness_prompt_with_context(
+            &target,
+            EngineKind::LibFuzzer,
+            &related,
+            None,
+        );
         assert_eq!(
             prompt,
             hf_prompt::render_harness_prompt(&target, EngineKind::LibFuzzer)
@@ -863,8 +867,12 @@ mod tests {
         let target = fixture_target();
 
         let related = harness_related_context(dir.path(), &target);
-        let prompt =
-            hf_prompt::render_harness_prompt_with_context(&target, EngineKind::LibFuzzer, &related);
+        let prompt = hf_prompt::render_harness_prompt_with_context(
+            &target,
+            EngineKind::LibFuzzer,
+            &related,
+            None,
+        );
 
         assert!(prompt.contains("Related project context"), "{prompt}");
         assert!(prompt.contains("caller.c"), "{prompt}");
