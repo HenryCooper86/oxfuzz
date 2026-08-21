@@ -174,6 +174,31 @@ impl ServiceContainer {
     /// # Errors
     /// Returns `ClassifiedError::Harness` if the harness still fails to build
     /// after `max_repairs` attempts, or an infrastructure error from the sandbox.
+    /// One LLM repair pass over failing harness source.
+    ///
+    /// `None` when there is no provider configured to repair with, or the
+    /// repair call itself failed; either makes the current failure terminal.
+    /// Shared by the lint gate and the compiler-failure path so both feed the
+    /// model the same way.
+    async fn repair_harness_source(
+        &self,
+        candidate: &TargetCandidate,
+        engine: EngineKind,
+        source: &str,
+        diagnostics: &str,
+    ) -> Option<String> {
+        let pool = self.provider_pool()?;
+        let provider = LlmProviderBridge::new(pool)
+            .with_diagnostics(Arc::clone(&self.diagnostics), "harness_repair");
+        match hf_harness::repair(candidate, engine, source, diagnostics, Box::new(provider)).await {
+            Ok(draft) => Some(draft.source),
+            Err(error) => {
+                tracing::warn!("harness repair for '{}' failed: {error}", candidate.symbol);
+                None
+            }
+        }
+    }
+
     async fn compile_source_with_repair(
         &self,
         candidate: &TargetCandidate,
@@ -190,6 +215,25 @@ impl ServiceContainer {
         let mut last_diagnostics = String::new();
 
         loop {
+            let lint = hf_harness::lint_harness_source(&source, lang);
+            if hf_harness::has_blocking_finding(&lint) {
+                // A lint error is a build failure the compiler would have
+                // accepted. Route it into the same repair path, skipping the
+                // container round-trip that would have produced a clean build
+                // of an unusable harness.
+                last_diagnostics = hf_harness::render_findings(&lint);
+                match self
+                    .repair_harness_source(candidate, engine, &source, &last_diagnostics)
+                    .await
+                {
+                    Some(repaired) if repairs_used < max_repairs => {
+                        source = repaired;
+                        repairs_used += 1;
+                        continue;
+                    }
+                    _ => break,
+                }
+            }
             let mut build_cmd =
                 hf_harness::build_command(engine, lang, &harness_binary_name(target));
             build_cmd.output = PathBuf::from(harness_binary_name(target));
@@ -233,6 +277,7 @@ impl ServiceContainer {
                         binary_name,
                         workspace: workspace.to_path_buf(),
                         repairs_used,
+                        lint,
                     });
                 }
                 hf_harness::CompileResult::Failed(failure) => {
@@ -240,27 +285,15 @@ impl ServiceContainer {
                     if repairs_used >= max_repairs {
                         break;
                     }
-                    let Some(pool) = self.provider_pool() else {
-                        // No LLM to repair with; the first failure is terminal.
-                        break;
-                    };
-                    let provider = LlmProviderBridge::new(pool)
-                        .with_diagnostics(Arc::clone(&self.diagnostics), "harness_repair");
-                    match hf_harness::repair(
-                        candidate,
-                        engine,
-                        &source,
-                        &last_diagnostics,
-                        Box::new(provider),
-                    )
-                    .await
+                    match self
+                        .repair_harness_source(candidate, engine, &source, &last_diagnostics)
+                        .await
                     {
-                        Ok(draft) => {
-                            source = draft.source;
+                        Some(repaired) => {
+                            source = repaired;
                             repairs_used += 1;
                         }
-                        Err(e) => {
-                            tracing::warn!("harness repair for '{target}' failed: {e}");
+                        None => {
                             break;
                         }
                     }
@@ -359,6 +392,15 @@ impl ServiceContainer {
         require_fuzzing_harness_engine(engine, lang)?;
         self.authorize_recorded(Action::CompileHarness, "harness_compile", Some(project))
             .await?;
+        // Cheapest check first: a harness that terminates the process, spawns a
+        // shell, or opens a socket is rejected before a container starts.
+        let lint = hf_harness::lint_harness_source(&source, lang);
+        if hf_harness::has_blocking_finding(&lint) {
+            return Err(ClassifiedError::Harness(format!(
+                "harness lint failed:\n{}",
+                hf_harness::render_findings(&lint)
+            )));
+        }
         prepare_configured_workspace_root()?;
         let workspace = workspace_dir(project, target);
         std::fs::create_dir_all(&workspace)
@@ -401,6 +443,7 @@ impl ServiceContainer {
                 .unwrap_or(target)
                 .to_string(),
             workspace,
+            lint,
         })
     }
 
