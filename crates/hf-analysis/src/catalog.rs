@@ -264,6 +264,20 @@ pub(crate) const SHARED_RULES: &[Rule] = &[
         kind: RuleKind::Shape,
         query: include_str!("../rules/c/unbounded-format-write.scm"),
     },
+    Rule {
+        id: "truncating-write-return-used",
+        cwe: "CWE-131",
+        severity: Severity::Warning,
+        kind: RuleKind::Shape,
+        query: include_str!("../rules/c/truncating-write-return-used.scm"),
+    },
+    Rule {
+        id: "snprintf-size-mismatch",
+        cwe: "CWE-806",
+        severity: Severity::Error,
+        kind: RuleKind::Shape,
+        query: include_str!("../rules/c/snprintf-size-mismatch.scm"),
+    },
 ];
 
 /// Rules that only compile against the C grammar.
