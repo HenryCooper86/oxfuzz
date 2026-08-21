@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use hf_core::crash::{Crash, CrashKind};
+use hf_core::crash::{Crash, CrashKind, CrashOrigin};
 use hf_core::engine::EngineKind;
 use hf_core::error::ClassifiedError;
 use uuid::Uuid;
@@ -127,6 +127,11 @@ fn ingest_with_mode(
         let (kind, sig, summary) = log
             .as_deref()
             .map_or((CrashKind::Other, String::new(), String::new()), classify);
+        // Same report text, one read: the layer the fault lies in comes from
+        // the stack the classifier already looked at.
+        let origin = log
+            .as_deref()
+            .map_or(CrashOrigin::Unknown, crate::frames::crash_origin);
         crashes.push(Crash {
             id: Uuid::new_v4(),
             run_id,
@@ -138,6 +143,7 @@ fn ingest_with_mode(
             minimized: false,
             bug_report: None,
             casr: None,
+            origin,
         });
     }
 
@@ -523,6 +529,57 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
         std::fs::create_dir_all(&base).unwrap();
         base
+    }
+
+    #[test]
+    fn a_fault_inside_the_harness_is_ingested_as_harness_origin() {
+        let dir = tmp();
+        std::fs::write(dir.join("crash-aaa"), b"x").unwrap();
+        std::fs::write(dir.join("report.txt"), crate::frames::tests::HARNESS_FAULT).unwrap();
+
+        let result =
+            ingest_for_engine(&dir, EngineKind::LibFuzzer, Uuid::nil(), Uuid::nil()).unwrap();
+
+        assert_eq!(result.crashes.len(), 1, "{:?}", result.crashes);
+        assert_eq!(result.crashes[0].origin, CrashOrigin::Harness);
+    }
+
+    #[test]
+    fn a_fault_inside_the_target_is_ingested_as_target_origin() {
+        let dir = tmp();
+        std::fs::write(dir.join("crash-aaa"), b"x").unwrap();
+        std::fs::write(dir.join("report.txt"), crate::frames::tests::TARGET_FAULT).unwrap();
+
+        let result =
+            ingest_for_engine(&dir, EngineKind::LibFuzzer, Uuid::nil(), Uuid::nil()).unwrap();
+
+        assert_eq!(result.crashes[0].origin, CrashOrigin::Target);
+    }
+
+    #[test]
+    fn a_crash_without_symbolized_frames_has_unknown_origin() {
+        let dir = tmp();
+        std::fs::write(dir.join("crash-aaa"), b"x").unwrap();
+        std::fs::write(dir.join("report.txt"), ASAN).unwrap();
+
+        let result =
+            ingest_for_engine(&dir, EngineKind::LibFuzzer, Uuid::nil(), Uuid::nil()).unwrap();
+
+        assert_eq!(result.crashes[0].origin, CrashOrigin::Unknown);
+    }
+
+    #[test]
+    fn a_crash_persisted_before_this_field_decodes_as_unknown() {
+        // Exactly the JSON shape `crashes.data_json` holds for rows written
+        // before this field existed. If this fails, the field lost its
+        // `#[serde(default)]` and every stored crash stops decoding.
+        let json = r#"{"id":"00000000-0000-0000-0000-000000000000",
+          "run_id":"00000000-0000-0000-0000-000000000000",
+          "target_id":"00000000-0000-0000-0000-000000000000",
+          "input_path":"/tmp/x","stack_signature":"abc","kind":"Asan",
+          "summary":"s","minimized":false,"bug_report":null}"#;
+        let crash: hf_core::crash::Crash = serde_json::from_str(json).unwrap();
+        assert_eq!(crash.origin, CrashOrigin::Unknown);
     }
 
     #[test]

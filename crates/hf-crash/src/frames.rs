@@ -12,6 +12,7 @@
 
 use std::sync::OnceLock;
 
+use hf_core::crash::CrashOrigin;
 use regex::Regex;
 
 /// Function names that are the harness entry point itself.
@@ -150,6 +151,26 @@ pub fn root_target_frame(frames: &[StackFrame]) -> Option<&StackFrame> {
     frames
         .iter()
         .find(|frame| frame_origin(frame) == FrameOrigin::Target)
+}
+
+/// Which layer a whole sanitizer report blames.
+///
+/// Keys on the first frame that is not runtime. An `ASan` frame `#0` is the
+/// faulting access, so a target bug reached through the harness still reports
+/// `#0` inside the target; only a fault whose innermost non-runtime frame is
+/// the harness is a harness defect.
+#[must_use]
+pub fn crash_origin(log: &str) -> CrashOrigin {
+    parse_frames(log)
+        .iter()
+        .map(frame_origin)
+        .find(|origin| *origin != FrameOrigin::Runtime)
+        .map_or(CrashOrigin::Unknown, |origin| match origin {
+            FrameOrigin::Harness => CrashOrigin::Harness,
+            FrameOrigin::Target => CrashOrigin::Target,
+            // Filtered out above; a runtime frame never decides the verdict.
+            FrameOrigin::Runtime => CrashOrigin::Runtime,
+        })
 }
 
 #[cfg(test)]

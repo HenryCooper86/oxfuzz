@@ -585,6 +585,7 @@ mod tests {
             minimized: true,
             bug_report: None,
             casr: None,
+            origin: hf_core::crash::CrashOrigin::Unknown,
         }
     }
 

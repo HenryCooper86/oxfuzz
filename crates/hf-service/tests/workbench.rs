@@ -114,6 +114,7 @@ async fn dashboard_summarizes_targets_harnesses_runs_and_crashes() {
         minimized: true,
         bug_report: None,
         casr: None,
+        origin: hf_core::crash::CrashOrigin::Unknown,
     };
 
     store.upsert_target(&target, Utc::now()).await.unwrap();
@@ -223,6 +224,7 @@ async fn dashboard_project_filter_does_not_leak_other_project_reviews() {
         minimized: false,
         bug_report: None,
         casr: None,
+        origin: hf_core::crash::CrashOrigin::Unknown,
     };
 
     store.upsert_target(&target, Utc::now()).await.unwrap();
@@ -312,6 +314,7 @@ async fn issue_export_returns_reviewable_payload() {
         minimized: false,
         bug_report: None,
         casr: None,
+        origin: hf_core::crash::CrashOrigin::Unknown,
     };
 
     store.upsert_target(&target, Utc::now()).await.unwrap();
