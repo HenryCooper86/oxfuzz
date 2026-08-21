@@ -3,8 +3,9 @@
 use streaming_iterator::StreamingIterator as _;
 use tree_sitter::{Node, Query, QueryCursor, Tree};
 
-use crate::catalog::Rule;
+use crate::catalog::{Rule, RuleKind};
 use crate::finding::{Finding, SourceSpan};
+use crate::sequence::{enclosing_statement, is_killed, statements_between};
 
 /// The capture every rule marks as the span to report.
 const HIT_CAPTURE: &str = "hit";
@@ -16,6 +17,94 @@ const HIT_CAPTURE: &str = "hit";
 /// attribute a signal to a candidate, so guessing it would silently misattribute
 /// the boost.
 pub(crate) fn run_rule(
+    rule: &'static Rule,
+    query: &Query,
+    tree: &Tree,
+    source: &str,
+    out: &mut Vec<Finding>,
+) {
+    match rule.kind {
+        RuleKind::Shape => run_shape_rule(rule, query, tree, source, out),
+        RuleKind::PairedSites => run_paired_sites_rule(rule, query, tree, source, out),
+    }
+}
+
+/// The capture naming the variable two sites must share.
+const VAR_CAPTURE: &str = "var";
+/// The capture naming a participating site in a paired-site rule.
+const SITE_CAPTURE: &str = "site";
+
+/// Report two sites binding the same variable, in one block, with nothing
+/// between them that could have changed what the variable refers to.
+///
+/// The *second* site is reported: it is the defect, and pointing a reader at
+/// the first would point them at correct code.
+fn run_paired_sites_rule(
+    rule: &'static Rule,
+    query: &Query,
+    tree: &Tree,
+    source: &str,
+    out: &mut Vec<Finding>,
+) {
+    let (Some(site_index), Some(var_index)) = (
+        query.capture_index_for_name(SITE_CAPTURE),
+        query.capture_index_for_name(VAR_CAPTURE),
+    ) else {
+        return;
+    };
+
+    // Sites grouped by the variable text they bind, in source order.
+    let mut by_variable: std::collections::BTreeMap<String, Vec<Node>> =
+        std::collections::BTreeMap::new();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(query, tree.root_node(), source.as_bytes());
+    while let Some(matched) = matches.next() {
+        let site = matched
+            .captures
+            .iter()
+            .find(|capture| capture.index == site_index)
+            .map(|capture| capture.node);
+        let variable = matched
+            .captures
+            .iter()
+            .find(|capture| capture.index == var_index)
+            .and_then(|capture| capture.node.utf8_text(source.as_bytes()).ok());
+        if let (Some(site), Some(variable)) = (site, variable) {
+            by_variable
+                .entry(variable.to_owned())
+                .or_default()
+                .push(site);
+        }
+    }
+
+    for (variable, mut sites) in by_variable {
+        sites.sort_by_key(Node::start_byte);
+        for pair in sites.windows(2) {
+            let (Some((first_block, first)), Some((second_block, second))) =
+                (enclosing_statement(pair[0]), enclosing_statement(pair[1]))
+            else {
+                continue;
+            };
+            // Different blocks means the pass cannot judge the ordering, so it
+            // stays silent rather than guessing.
+            if first_block.id() != second_block.id() {
+                continue;
+            }
+            let between = statements_between(first_block, first, second);
+            if !is_killed(&between, source, &variable) {
+                out.push(Finding {
+                    rule_id: rule.id,
+                    cwe: rule.cwe,
+                    severity: rule.severity,
+                    span: span_of(pair[1]),
+                });
+            }
+        }
+    }
+}
+
+/// Report every `@hit` capture.
+fn run_shape_rule(
     rule: &'static Rule,
     query: &Query,
     tree: &Tree,
