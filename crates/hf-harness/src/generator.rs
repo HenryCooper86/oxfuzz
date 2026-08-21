@@ -1051,27 +1051,83 @@ fn source_filename(lang: TargetLanguage) -> &'static str {
 
 /// List all C/C++ source files in the workspace (excluding the harness source
 /// itself) as container-internal paths, so multi-file targets link correctly.
+/// Workspace directories that never hold project source.
+///
+/// `corpus` and `out` hold attacker-controlled bytes, which may carry a source
+/// file's name; compiling one would build the fuzzer's own input. `fuzz` is the
+/// generated cargo-fuzz scaffold.
+const NON_SOURCE_DIRS: [&str; 3] = ["corpus", "out", "fuzz"];
+
+/// Cap on extra translation units handed to one compile. A project past this is
+/// not something a single-command harness build links.
+const MAX_EXTRA_SOURCES: usize = 5_000;
+
+/// List the staged C/C++ translation units, excluding the harness itself, as
+/// container-internal paths so a multi-file target links.
+///
+/// Recursive because `copy_project_sources` preserves the project's directory
+/// layout: listing only the workspace root would leave every nested translation
+/// unit out of the link, which surfaces as an undefined-symbol error naming the
+/// very function the harness was written for. Symlinks are not followed, and
+/// the walk is bounded and sorted so one project always produces one command.
 fn list_c_files(workspace: &Path, container_ws: &str, source_name: &str) -> String {
-    let mut files = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(workspace) {
-        for entry in entries.flatten() {
-            if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
-                let is_source = matches!(ext, "c" | "cc" | "cpp" | "cxx");
-                if is_source && entry.file_name() != source_name {
-                    // The filename is attacker-influenced (it comes from the
-                    // project under test), and this string is interpolated into
-                    // a `bash -c` script, so each path must be shell-quoted to
-                    // prevent command injection. The `/work` prefix is a literal
-                    // we control, so only the filename component needs quoting.
-                    files.push(format!(
-                        "{container_ws}/{}",
-                        sh_quote(&entry.file_name().to_string_lossy())
-                    ));
-                }
+    let mut relative = Vec::new();
+    collect_source_files(workspace, workspace, source_name, &mut relative);
+    relative.sort();
+    relative.truncate(MAX_EXTRA_SOURCES);
+    relative
+        .iter()
+        .map(|path| {
+            // The path comes from the project under test and is interpolated
+            // into a `bash -c` script, so it is shell-quoted. The `/work`
+            // prefix is a literal we control.
+            format!("{container_ws}/{}", sh_quote(path))
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Collect workspace-relative source paths beneath `directory`.
+fn collect_source_files(root: &Path, directory: &Path, source_name: &str, found: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if found.len() >= MAX_EXTRA_SOURCES {
+            return;
+        }
+        let path = entry.path();
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_symlink() {
+            continue;
+        }
+        if kind.is_dir() {
+            let name = entry.file_name();
+            if NON_SOURCE_DIRS
+                .iter()
+                .any(|skipped| std::ffi::OsStr::new(skipped) == name)
+            {
+                continue;
             }
+            collect_source_files(root, &path, source_name, found);
+            continue;
+        }
+        if !kind.is_file() || entry.file_name() == source_name {
+            continue;
+        }
+        let is_source = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| matches!(extension, "c" | "cc" | "cpp" | "cxx"));
+        if !is_source {
+            continue;
+        }
+        if let Ok(rel) = path.strip_prefix(root) {
+            found.push(hf_core::runtime::posix_relative(rel));
         }
     }
-    files.join(" ")
 }
 
 /// Build the `bash -c` script that compiles a harness inside the sandbox.
@@ -1665,6 +1721,75 @@ Iterations : 12345
         assert_eq!(sh_quote("a'b"), "'a'\\''b'");
         // Shell metacharacters are inert inside single quotes.
         assert_eq!(sh_quote("a; rm -rf /"), "'a; rm -rf /'");
+    }
+
+    #[test]
+    fn nested_sources_are_listed_at_their_relative_paths() {
+        // `copy_project_sources` stages a project's layout, so the compiler
+        // must be handed the nested translation units too; listing only the
+        // workspace root leaves every one of them out of the link.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src/parser")).unwrap();
+        std::fs::write(
+            dir.path().join("src/parser/dns.c"),
+            "int p(void){return 0;}",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("top.c"), "int t(void){return 0;}").unwrap();
+
+        let listed = list_c_files(dir.path(), "/work", "harness.c");
+
+        assert!(listed.contains("/work/'src/parser/dns.c'"), "{listed}");
+        assert!(listed.contains("/work/'top.c'"), "{listed}");
+    }
+
+    #[test]
+    fn corpus_and_run_output_are_never_compiled() {
+        // A corpus input is attacker-controlled bytes that may be named like a
+        // source file. Compiling one would build the fuzzer's own input.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("corpus")).unwrap();
+        std::fs::create_dir_all(dir.path().join("out")).unwrap();
+        std::fs::write(
+            dir.path().join("corpus/seed.c"),
+            "int evil(void){return 0;}",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("out/crash.c"), "int evil2(void){return 0;}").unwrap();
+        std::fs::write(dir.path().join("real.c"), "int r(void){return 0;}").unwrap();
+
+        let listed = list_c_files(dir.path(), "/work", "harness.c");
+
+        assert!(listed.contains("/work/'real.c'"), "{listed}");
+        assert!(!listed.contains("seed.c"), "corpus compiled: {listed}");
+        assert!(!listed.contains("crash.c"), "run output compiled: {listed}");
+    }
+
+    #[test]
+    fn the_harness_source_is_never_listed_as_an_extra_source() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("harness.c"), "int main(void){return 0;}").unwrap();
+        std::fs::write(dir.path().join("real.c"), "int r(void){return 0;}").unwrap();
+
+        let listed = list_c_files(dir.path(), "/work", "harness.c");
+
+        assert!(!listed.contains("harness.c"), "{listed}");
+        assert!(listed.contains("/work/'real.c'"), "{listed}");
+    }
+
+    #[test]
+    fn listed_sources_are_deterministically_ordered() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("b")).unwrap();
+        std::fs::write(dir.path().join("b/two.c"), "int two(void){return 0;}").unwrap();
+        std::fs::write(dir.path().join("a.c"), "int a(void){return 0;}").unwrap();
+
+        let first = list_c_files(dir.path(), "/work", "harness.c");
+        assert_eq!(first, list_c_files(dir.path(), "/work", "harness.c"));
+        assert!(
+            first.find("a.c").unwrap() < first.find("two.c").unwrap(),
+            "{first}"
+        );
     }
 
     #[test]
