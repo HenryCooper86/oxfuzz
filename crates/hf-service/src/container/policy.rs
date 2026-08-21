@@ -267,6 +267,9 @@ impl ServiceContainer {
             status: HarnessStatus::Promoted,
             binary_name: harness_binary_name(&symbol),
             workspace,
+            // Promotion re-qualifies an already-compiled harness; it does not
+            // re-lint the source, which passed the gate when it was compiled.
+            lint: Vec::new(),
         })
     }
 

@@ -29,10 +29,11 @@ all under human-in-the-loop supervision.
 | LLM provider pool | hf-provider | `LlmProvider`, `ProviderPool` | (reuse y-agent) |
 | Target discovery | hf-discovery | `TargetCandidate`, `TargetInventory` | target-discovery-design.md |
 | Semgrep target enrichment | hf-discovery + hf-service | `SemgrepFinding`, `SemgrepTargetScore`, `SemgrepInventoryView` | target-discovery-design.md + service-orchestration-design.md |
+| Project build context | hf-discovery + hf-core | `BuildContext`, `CompileEntry` | harness-generation-design.md |
 | Harness generation | hf-harness | `Harness`, `HarnessDraft` | harness-generation-design.md |
 | Engine integration | hf-engine | `EngineAdapter`, `FuzzRunConfig`, `FuzzProgress` | engine-integration-design.md |
 | Automotive protocol contracts | hf-automotive | versioned DTO + `Validate` contract | automotive-protocol-fuzzing-design.md |
-| Crash triage | hf-crash | `Crash`, `CrashReport` | crash-triage-design.md |
+| Crash triage | hf-crash | `Crash`, `CrashReport`, `CrashOrigin` | crash-triage-design.md |
 | Corpus management | hf-corpus | `Corpus`, `CorpusEntry` | corpus-coverage-design.md |
 | Coverage tracking | hf-coverage | `CoverageReport` | corpus-coverage-design.md |
 | Campaign evidence and advice | hf-service + hf-coverage | versioned evidence/advice DTOs | proof-carrying-campaign-intelligence.md |

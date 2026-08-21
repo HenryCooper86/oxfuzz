@@ -136,6 +136,7 @@ async fn triage_fixture(name: &str, crash_files: &[String]) -> TriageFixture {
             compiler: "clang".to_owned(),
             args: Vec::new(),
             output: PathBuf::from("fuzz_parse_input"),
+            extra_flags: Vec::new(),
         },
         sanitizer: Sanitizer::Address,
         status: HarnessStatus::Promoted,

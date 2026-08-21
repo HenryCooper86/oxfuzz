@@ -118,6 +118,7 @@ fn stored_harness(target_id: uuid::Uuid, symbol: &str) -> hf_core::harness::Harn
             compiler: "clang".to_owned(),
             args: Vec::new(),
             output: std::path::PathBuf::from(format!("fuzz_{symbol}")),
+            extra_flags: Vec::new(),
         },
         sanitizer: hf_core::target::Sanitizer::Address,
         status: hf_core::harness::HarnessStatus::Promoted,
@@ -173,6 +174,7 @@ fn stored_crash(run_id: uuid::Uuid, target_id: uuid::Uuid, marker: &str) -> hf_c
         minimized: false,
         bug_report: None,
         casr: None,
+        origin: hf_core::crash::CrashOrigin::Unknown,
     }
 }
 

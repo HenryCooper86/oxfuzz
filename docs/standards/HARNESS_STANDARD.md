@@ -15,27 +15,67 @@ A harness is acceptable only if it satisfies all of:
 4. **Compiles** with the selected sanitizer + engine flags in the sandbox.
 5. **Smoke fuzz passes** -- 60s run, no crash on empty input, execs/sec > 0.
 
-## 2. Naming
+## 2. Static Rules
+
+Requirement 3 above, and the process and network half of requirement 2, are
+checked before the harness reaches the sandbox by
+`hf_harness::lint_harness_source`. The check is lexical, deterministic, and
+free: no model call and no container. It covers C and C++; other languages have
+no rule set yet and return no findings, which means unchecked rather than clean.
+
+An `Error` finding blocks the build and is handed to the repair loop in section
+5 as if it were compiler output. That is strictly cheaper than building first,
+and it catches a class of defect the compiler accepts happily. A `Warning` is
+recorded on the compile outcome and surfaced to the operator without blocking.
+
+| Rule | Severity | Why |
+| --- | --- | --- |
+| `no-process-exit` | Error | `exit`/`_exit`/`abort` on malformed input makes every such input look like a crash and ends the fuzz process. |
+| `no-shell` | Error | `system`/`popen`/`exec*` move execution outside the sandbox that is measuring the target. |
+| `no-sleep` | Error | Sleeping in the fuzz loop destroys throughput, and a slow input is reported as a hang. |
+| `no-network` | Error | A socket reaches outside the sandbox and makes the result depend on a service the run does not control. |
+| `no-signal-handler` | Warning | A handler can swallow the fault the sanitizer exists to report. |
+| `no-nondeterminism` | Warning | A clock or RNG branch makes a crash irreproducible and breaks corpus minimization. |
+| `no-catch-all` | Warning | `catch (...)` hides target failures the fuzzer exists to observe (C++ only). |
+| `no-strlen-on-fuzz-data` | Warning | Fuzz input is not NUL-terminated, so treating it as a C string reads out of bounds inside the harness itself. |
+
+Each call rule requires a non-identifier character before the name and an
+opening parenthesis after it, so `exit_code` and `parse_time` are not calls.
+Comment-only lines are skipped; a rule name in a string literal or a trailing
+comment still matches, which is the safe direction for findings that only
+advise a repair prompt.
+
+Two deliberate omissions. File I/O is not a rule: an AFL++ file-mode harness
+must open `argv[1]`, so the rule would fire on correct code, and a check with
+false positives on the common case gets ignored. The lint is not feature-gated:
+a safety check that a build configuration can remove is not one.
+
+## 3. Naming
 
 - Source file: `fuzz_<symbol>.<ext>` in `fuzz_workspace/harnesses/<target>/`.
 - Build artifact: `fuzz_<symbol>_<engine>` binary.
 
-## 3. Templates
+## 4. Templates
 
 Templates live in `config/prompts/harness_<lang>_<engine>.md`. They contain:
 
 - The engine entry point skeleton.
-- Include/import guidance.
+- Include/import guidance, and the project's real include directories, defines,
+  and language standard when it ships a compile database (see
+  `docs/design/harness-generation-design.md` section 3).
 - A placeholder for the LLM to fill the target call.
-- Safety assertions (no `system()`, no file writes).
+- Safety assertions (no `system()`, no file writes). Section 2 enforces these
+  rather than trusting the template to have carried them.
 
-## 4. Iteration Policy
+## 5. Iteration Policy
 
+- On a lint error: feed the findings back to the LLM without building (max 3
+  rounds, shared with the compile budget below).
 - On compile failure: feed compiler diagnostics back to the LLM (max 3 rounds).
 - On smoke failure: feed engine log back (max 3 rounds).
 - After 3 failed rounds: mark `Failed`, surface to user for guidance.
 
-## 5. Promotion Gate
+## 6. Promotion Gate
 
 A harness moves to `SmokePassed` only after its smoke evidence is persisted on
 the exact active revision. That evidence records the full SHA-256 digest of the

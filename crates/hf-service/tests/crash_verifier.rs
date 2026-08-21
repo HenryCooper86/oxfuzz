@@ -67,6 +67,7 @@ fn asan_crash() -> Crash {
             stack: vec!["parse_header".to_owned(), "main".to_owned()],
             cluster: None,
         }),
+        origin: hf_core::crash::CrashOrigin::Unknown,
     }
 }
 

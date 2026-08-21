@@ -218,6 +218,7 @@ mod semgrep_ranking_consumer_tests {
                 compiler: "clang".to_owned(),
                 args: Vec::new(),
                 output: PathBuf::from("harness"),
+                extra_flags: Vec::new(),
             },
             sanitizer: Sanitizer::Address,
             status: HarnessStatus::Promoted,

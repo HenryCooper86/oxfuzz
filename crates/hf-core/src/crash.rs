@@ -69,6 +69,27 @@ pub struct CasrReport {
     pub cluster: Option<u32>,
 }
 
+/// Which layer the fault that produced a crash lies in.
+///
+/// oxfuzz's harnesses are LLM-authored, so a fault inside the harness is an
+/// expected failure mode rather than an unusual one. Recording the layer keeps
+/// a harness defect out of findings about the project under test, where it
+/// would otherwise be indistinguishable from a real bug.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CrashOrigin {
+    /// The fault is in the project under test. This is a finding.
+    Target,
+    /// The fault is in the generated harness. This is a harness defect, not a
+    /// finding about the target.
+    Harness,
+    /// The fault is inside the fuzzer driver or sanitizer runtime.
+    Runtime,
+    /// No symbolized frames, so the origin cannot be determined.
+    #[default]
+    Unknown,
+}
+
 /// A crash artifact from a fuzz run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Crash {
@@ -84,4 +105,8 @@ pub struct Crash {
     /// CASR severity/analysis report, when triage ran CASR.
     #[serde(default)]
     pub casr: Option<CasrReport>,
+    /// Which layer the fault lies in. Defaults to `Unknown` so crashes
+    /// persisted before this field existed decode unchanged.
+    #[serde(default)]
+    pub origin: CrashOrigin,
 }

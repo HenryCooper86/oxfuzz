@@ -10,6 +10,7 @@ hf-core = { workspace = true }
 hf-prompt = { workspace = true }
 hf-engine = { workspace = true }
 hf-crash = { workspace = true }
+regex = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

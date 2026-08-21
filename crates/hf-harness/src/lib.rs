@@ -5,6 +5,11 @@
 
 pub mod cargo_fuzz;
 pub mod generator;
+pub mod lint;
+
+pub use lint::{
+    has_blocking_finding, lint_harness_source, render_findings, LintFinding, LintSeverity,
+};
 
 pub use generator::{
     build_command, compile, draft, draft_with_context, generate_seeds, refine, repair, smoke_fuzz,

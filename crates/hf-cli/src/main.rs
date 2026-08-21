@@ -1374,6 +1374,7 @@ async fn cmd_harness(
             "compile: status={:?} repairs_used={}",
             outcome.status, outcome.repairs_used
         );
+        print_lint_findings(&outcome.lint);
         qualify_harness(&container, &project, target, engine, lang, promote).await?;
         return Ok(());
     }
@@ -1391,8 +1392,24 @@ async fn cmd_harness(
         .harness_compile(draft.source, &project, engine, target, lang)
         .await?;
     println!("compile: status={:?}", outcome.status);
+    print_lint_findings(&outcome.lint);
     qualify_harness(&container, &project, target, engine, lang, promote).await?;
     Ok(())
+}
+
+/// Print non-blocking harness lint findings. A blocking finding never reaches
+/// here: it fails the compile with the same text in the error.
+fn print_lint_findings(findings: &[hf_service::LintFinding]) {
+    for finding in findings {
+        let severity = match finding.severity {
+            hf_service::LintSeverity::Error => "error",
+            hf_service::LintSeverity::Warning => "warning",
+        };
+        println!(
+            "lint {severity} {} (line {}): {}",
+            finding.rule, finding.line, finding.message
+        );
+    }
 }
 
 async fn qualify_harness(

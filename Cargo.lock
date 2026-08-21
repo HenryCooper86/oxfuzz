@@ -2496,6 +2496,7 @@ dependencies = [
  "hf-engine",
  "hf-prompt",
  "hf-test-utils",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",

@@ -15,6 +15,7 @@
 //! | [`session`] | `SessionStore`, `TranscriptStore` | - |
 //! | [`memory`] | `MemoryClient`, `ExperienceStore` | - |
 //! | [`checkpoint`] | `CheckpointStorage` | - |
+//! | [`build`] | `BuildContext`, `CompileEntry` | harness-generation-design.md |
 //! | [`target`] | `TargetCandidate`, `TargetInventory` | TARGET_TAXONOMY.md |
 //! | [`harness`] | `Harness`, `HarnessDraft` | HARNESS_STANDARD.md |
 //! | [`engine`] | `EngineKind`, `FuzzRunConfig`, `FuzzProgress` | ENGINE_ADAPTER_STANDARD.md |
@@ -25,6 +26,7 @@
 
 pub mod agent;
 pub mod armed;
+pub mod build;
 pub mod checkpoint;
 pub mod corpus;
 pub mod coverage;
