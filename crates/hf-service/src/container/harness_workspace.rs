@@ -358,35 +358,130 @@ pub(super) fn container_input_path(workspace: &Path, host_path: &Path) -> String
 /// `Cargo.lock`, and the `src/` tree -- so the cargo-fuzz project's path
 /// dependency on the crate resolves inside the sandbox.
 pub fn copy_project_sources(project: &Path, workspace: &Path) {
-    let exts = ["c", "h", "cc", "cpp", "cxx", "hpp"];
-    if let Ok(entries) = std::fs::read_dir(project) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_file() {
+    let mut staged = 0_usize;
+    stage_tree(
+        project,
+        project,
+        workspace,
+        &|path| {
+            path.extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| STAGED_SOURCE_EXTENSIONS.contains(&extension))
+        },
+        &mut staged,
+    );
+    stage_rust_crate(project, workspace, &mut staged);
+}
+
+/// Source and header extensions staged for a C/C++ build.
+const STAGED_SOURCE_EXTENSIONS: [&str; 6] = ["c", "h", "cc", "cpp", "cxx", "hpp"];
+
+/// Directory names never staged: version control, build output, and fetched
+/// dependencies. Compiling a stale copy out of `build/` is worse than not
+/// finding the source at all, because the resulting crash points at code the
+/// operator is not editing.
+const STAGING_SKIP_DIRS: [&str; 4] = [".git", "target", "build", "node_modules"];
+
+/// Cap on staged files. A project past this is not something we can stage into
+/// a sandbox workspace and compile as one unit, and an untrusted project must
+/// not be able to turn staging into an unbounded host traversal.
+const MAX_STAGED_FILES: usize = 20_000;
+
+/// Recursively copy files accepted by `accept` from `directory` into
+/// `workspace`, preserving each file's path relative to `root`.
+///
+/// Symlinks are refused rather than followed, so a link inside the project
+/// cannot pull a file from elsewhere on the host into the sandbox workspace.
+/// Returns `false` when [`MAX_STAGED_FILES`] stopped the walk early.
+fn stage_tree(
+    root: &Path,
+    directory: &Path,
+    workspace: &Path,
+    accept: &dyn Fn(&Path) -> bool,
+    staged: &mut usize,
+) -> bool {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        // An unreadable directory is not fatal on its own, but a missing source
+        // surfaces later as a confusing compile error -- surface it here.
+        tracing::warn!("failed to read project directory {}", directory.display());
+        return true;
+    };
+    let mut entries: Vec<_> = entries.flatten().collect();
+    // Sorted so staging a given project always visits files in the same order,
+    // which keeps the file cap deterministic about what it drops.
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        if *staged >= MAX_STAGED_FILES {
+            tracing::warn!(
+                "stopped staging {} at the {MAX_STAGED_FILES} file limit",
+                root.display()
+            );
+            return false;
+        }
+        let path = entry.path();
+        let Ok(kind) = entry.file_type() else {
+            tracing::warn!("failed to inspect {}", path.display());
+            continue;
+        };
+        if kind.is_symlink() {
+            tracing::warn!("refusing to stage symlink {}", path.display());
+            continue;
+        }
+        if kind.is_dir() {
+            let name = entry.file_name();
+            if STAGING_SKIP_DIRS
+                .iter()
+                .any(|skipped| std::ffi::OsStr::new(skipped) == name)
+            {
                 continue;
             }
-            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                if exts.contains(&ext) {
-                    let dest = workspace.join(entry.file_name());
-                    if let Err(e) = std::fs::copy(&path, &dest) {
-                        // Not fatal on its own, but a missing source surfaces
-                        // later as a confusing compile error -- surface it here.
-                        tracing::warn!(
-                            "failed to copy source {} into workspace: {e}",
-                            path.display()
-                        );
-                    }
-                }
+            if !stage_tree(root, &path, workspace, accept, staged) {
+                return false;
             }
+        } else if kind.is_file() && accept(&path) {
+            stage_file(root, &path, workspace, staged);
         }
     }
-    stage_rust_crate(project, workspace);
+    true
+}
+
+/// Copy one staged file, recreating its project-relative directories under
+/// `workspace`.
+fn stage_file(root: &Path, path: &Path, workspace: &Path, staged: &mut usize) {
+    let Ok(relative) = path.strip_prefix(root) else {
+        // `stage_tree` only ever descends from `root`, so this cannot happen;
+        // skipping is still the safe response to a path outside the project.
+        tracing::warn!("skipping {} from outside the project root", path.display());
+        return;
+    };
+    let dest = workspace.join(relative);
+    if let Some(parent) = dest.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::warn!(
+                "failed to create staging directory {}: {e}",
+                parent.display()
+            );
+            return;
+        }
+    }
+    if let Err(e) = std::fs::copy(path, &dest) {
+        tracing::warn!(
+            "failed to copy source {} into workspace: {e}",
+            path.display()
+        );
+        return;
+    }
+    *staged += 1;
 }
 
 /// Stage a Rust crate (its manifest + `src/` tree) from `project` into
 /// `workspace` so a cargo-fuzz project can depend on it by path. A no-op when the
 /// project has no `Cargo.toml` (i.e. is not a Rust crate).
-fn stage_rust_crate(project: &Path, workspace: &Path) {
+///
+/// The `src/` walk goes through [`stage_tree`] like the C/C++ one: two staging
+/// walks with different symlink and bound rules would leave the Rust path as
+/// the weaker of the two for no reason.
+fn stage_rust_crate(project: &Path, workspace: &Path, staged: &mut usize) {
     let manifest = project.join("Cargo.toml");
     if !manifest.is_file() {
         return;
@@ -401,25 +496,8 @@ fn stage_rust_crate(project: &Path, workspace: &Path) {
     }
     let src_dir = project.join("src");
     if src_dir.is_dir() {
-        if let Err(e) = copy_dir_recursive(&src_dir, &workspace.join("src")) {
-            tracing::warn!("failed to stage crate src/ into workspace: {e}");
-        }
+        stage_tree(project, &src_dir, workspace, &|_| true, staged);
     }
-}
-
-/// Recursively copy a directory tree, creating destination directories as needed.
-fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(to)?;
-    for entry in std::fs::read_dir(from)?.flatten() {
-        let path = entry.path();
-        let dest = to.join(entry.file_name());
-        if path.is_dir() {
-            copy_dir_recursive(&path, &dest)?;
-        } else if path.is_file() {
-            std::fs::copy(&path, &dest)?;
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -661,5 +739,72 @@ mod rust_staging_tests {
         assert!(workspace.path().join("parse.c").is_file());
         assert!(!workspace.path().join("Cargo.toml").exists());
         assert!(!workspace.path().join("src").exists());
+    }
+}
+
+#[cfg(test)]
+mod c_staging_tests {
+    use super::copy_project_sources;
+
+    #[test]
+    fn nested_c_sources_stage_at_their_relative_paths() {
+        let project = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join("src/parser")).unwrap();
+        std::fs::create_dir_all(project.path().join("include")).unwrap();
+        std::fs::write(
+            project.path().join("src/parser/dns.c"),
+            "int p(void){return 0;}",
+        )
+        .unwrap();
+        std::fs::write(project.path().join("include/dns.h"), "int p(void);").unwrap();
+        std::fs::write(project.path().join("top.c"), "int t(void){return 0;}").unwrap();
+
+        copy_project_sources(project.path(), workspace.path());
+
+        assert!(workspace.path().join("src/parser/dns.c").is_file());
+        assert!(workspace.path().join("include/dns.h").is_file());
+        assert!(workspace.path().join("top.c").is_file());
+    }
+
+    #[test]
+    fn staging_refuses_a_symlinked_source_tree() {
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.c"), "int s(void){return 0;}").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), project.path().join("linked")).unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+
+        copy_project_sources(project.path(), workspace.path());
+
+        // A symlinked directory is never followed, so nothing outside the
+        // project root can be staged into the sandbox workspace.
+        assert!(!workspace.path().join("linked/secret.c").exists());
+    }
+
+    #[test]
+    fn build_output_directories_are_not_staged() {
+        let project = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        for skipped in [".git", "target", "build", "node_modules"] {
+            std::fs::create_dir_all(project.path().join(skipped)).unwrap();
+            std::fs::write(
+                project.path().join(skipped).join("stale.c"),
+                "int stale(void){return 0;}",
+            )
+            .unwrap();
+        }
+        std::fs::write(project.path().join("real.c"), "int r(void){return 0;}").unwrap();
+
+        copy_project_sources(project.path(), workspace.path());
+
+        assert!(workspace.path().join("real.c").is_file());
+        for skipped in [".git", "target", "build", "node_modules"] {
+            assert!(
+                !workspace.path().join(skipped).exists(),
+                "staged {skipped}, which is build output or version control"
+            );
+        }
     }
 }
