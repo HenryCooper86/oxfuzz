@@ -5,6 +5,7 @@
 pub mod casr;
 pub mod classify;
 pub mod dedup;
+pub mod frames;
 pub mod ingest;
 pub mod minimize;
 #[cfg(feature = "remediation-handoff")]
@@ -14,6 +15,7 @@ pub mod report;
 pub use casr::{casr_command, cluster_from_path, kind_from_short, parse_casrep, severity_from_str};
 pub use classify::{classify, looks_like_crash};
 pub use dedup::dedup;
+pub use frames::{frame_origin, parse_frames, root_target_frame, FrameOrigin, StackFrame};
 pub use ingest::{
     ingest, ingest_for_engine, CrashIngestResult, MAX_AGGREGATE_REPORT_BYTES, MAX_CRASH_ARTIFACTS,
     MAX_SANITIZER_REPORT_BYTES,
