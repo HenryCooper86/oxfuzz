@@ -576,3 +576,98 @@ builds for the sequence rules, so they are deferred rather than approximated:
 
 Phase 1a therefore ships 21 of the 29 shape rules: 27 in scope less these four.
 The section 12 gate must treat a delta traced to one of these as explained.
+
+### 18.4 Uncovered pending type information (phase 1b)
+
+The pass has no type information: it sees an identifier, not whether that
+identifier is signed, unsigned, or a pointer. Four upstream classes need exactly
+that, and matching them without it would flag correct code far more often than
+defective code.
+
+- **Incorrect unsigned comparison** (CWE-697). `x < 0` is a defect only when `x`
+  is unsigned; without types, matching it flags every correct signed comparison
+  in the project.
+- **Integer truncation** (CWE-197). Needs the widths of both sides of an
+  assignment.
+- **Signed to unsigned conversion** (CWE-195). Needs the signedness of an
+  argument against the parameter it is passed to.
+- **`sizeof` on a pointer** (CWE-467). `sizeof(p)` is a defect only when `p` is a
+  pointer rather than an array, and the two are spelled identically at a use
+  site.
+
+These are not deferred-for-effort. They are blocked on information the design
+does not gather, and unblocking them means adding type resolution, which is a
+larger change than the analyzer itself. Revisit only with a separate design.
+
+### 18.5 Reconciliation against the upstream checklist
+
+All 49 upstream rules, each with exactly one disposition. This is the input the
+phase 1c gate needs: a ranking delta traced to a row here is explained, not a
+failure.
+
+**Covered: 34 of 49**, by 32 oxfuzz rules. Three upstream pairs collapse, because
+re-derivation grouped by defect rather than by function name:
+`strcpy`/`strcat` with `sprintf`/`vsprintf` into `unbounded-string-copy`;
+`snprintf`/`vsnprintf` with `strlcpy`/`strlcat` into
+`unchecked-truncating-write`.
+
+| Upstream | oxfuzz rule |
+| --- | --- |
+| insecure-api-gets | `dangerous-function-gets` |
+| insecure-api-ato | `unchecked-conversion-ato` |
+| unchecked-ret-scanf | `unchecked-return-scanf` |
+| insecure-api-scanf | `unbounded-scanf-conversion` |
+| insecure-api-alloca | `dangerous-function-alloca` |
+| insecure-api-strcpy-strcat | `unbounded-string-copy` |
+| insecure-api-sprintf-vsprintf | `unbounded-string-copy` |
+| insecure-api-mktemp-tmpnam-tempnam | `insecure-temporary-file` |
+| insecure-api-rand-srand | `weak-pseudo-random` |
+| insecure-api-signal | `signal-handler-race` |
+| insecure-api-access-stat | `toctou-access-check` |
+| command-injection | `os-command-execution` |
+| unsafe-strlen | `strlen-sum-overflow` |
+| unchecked-ret-setuid-seteuid | `unchecked-privilege-drop` |
+| unsafe-ret-snprintf-vsnprintf | `unchecked-truncating-write` |
+| unsafe-ret-strlcpy-strlcat | `unchecked-truncating-write` |
+| incorrect-use-of-memset | `memset-argument-order` |
+| overlapping-source-destination | `overlapping-copy` |
+| format-string-bugs | `non-literal-format-string` |
+| argv-envp-access | `environment-input` |
+| memory-address-exposure | `address-disclosure` |
+| suspicious-assert | `assignment-in-assertion` |
+| typos | `assignment-in-condition` |
+| double-free | `double-free` |
+| use-after-free | `use-after-free` |
+| incorrect-use-of-free | `free-of-non-heap` |
+| integer-wraparound | `allocation-size-multiplication` |
+| use-of-source-size-in-copy | `source-size-in-copy` |
+| off-by-one | `loop-bound-off-by-one` |
+| ret-stack-address | `returned-stack-address` |
+| unterminated-string-strncpy | `unterminated-strncpy` |
+| putenv-stack-var | `environment-from-variable` |
+| regex-dos | `catastrophic-regex` |
+| pointer-subtraction | `pointer-subtraction-size` |
+
+**Not covered: 15 of 49**, each with a reason.
+
+| Upstream | Disposition |
+| --- | --- |
+| high-entropy-assignment | Permanently uncovered, 18.1 |
+| interesting-api-calls | Permanently uncovered, 18.2 |
+| incorrect-unsigned-comparison | Pending type information, 18.4 |
+| integer-truncation | Pending type information, 18.4 |
+| signed-unsigned-conversion | Pending type information, 18.4 |
+| incorrect-use-of-sizeof | Pending type information, 18.4 |
+| missing-break-in-switch | Needs absence analysis; queries have no negation |
+| missing-default-in-switch | Needs absence analysis; queries have no negation |
+| missing-return | Needs a path-sensitive walk of the function body |
+| mismatched-memory-management | Needs new/delete to allocation pairing across a variable |
+| mismatched-memory-management-cpp | Same as above |
+| incorrect-order-setuid-setgid | Needs ordering between two *different* events; the pass pairs a repeated event or an event and a use, not two distinct calls |
+| unchecked-ret-malloc | Needs a null-check kill the kill set does not yet model |
+| incorrect-use-of-strncat | Needs remaining-destination-space reasoning |
+| write-into-stack-buffer | Needs to know an object is a stack allocation |
+
+The last five are effort, not information: each is reachable by extending the
+pass, and none was worth extending it for inside phase 1b. They are the natural
+content of a phase 1e if the section 12 gate shows the coverage gap matters.
