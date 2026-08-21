@@ -1,9 +1,9 @@
 //! Strict normalization for pinned-version Semgrep CE JSON output.
 
-use std::collections::{hash_map::Entry, BTreeMap, BTreeSet, HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::collections::{hash_map::Entry, BTreeSet, HashMap, HashSet};
+use std::path::PathBuf;
 
-use hf_core::target::{TargetCandidate, TargetInventory, TargetLanguage};
+use hf_core::target::{TargetInventory, TargetLanguage};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -117,19 +117,11 @@ pub struct SemgrepFinding {
 }
 
 /// Immutable-base score overlay derived from matched Semgrep rules.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SemgrepTargetScore {
-    /// Stable target candidate identifier.
-    pub target_id: Uuid,
-    /// Candidate fit score observed in the input inventory.
-    pub base_score: f64,
-    /// Distinct-rule Semgrep boost, capped at `0.20`.
-    pub boost: f64,
-    /// Base plus boost, capped at `1.0`.
-    pub effective_score: f64,
-    /// Number of distinct matched rule identifiers.
-    pub matched_rule_count: u32,
-}
+///
+/// An alias for the shared [`crate::enrichment::TargetScore`]: the scoring is
+/// producer-agnostic, so Semgrep and the native analyzer must not be able to
+/// drift apart in the arithmetic.
+pub type SemgrepTargetScore = crate::enrichment::TargetScore;
 
 /// Normalized findings plus deterministic score overlays for one inventory.
 #[derive(Debug, Clone, PartialEq)]
@@ -221,59 +213,26 @@ pub fn map_and_score(
 ) -> Result<SemgrepAnalysis, SemgrepValidationError> {
     validate_inventory(inventory)?;
 
-    let mut rule_severities = BTreeMap::<(Uuid, String), SemgrepSeverity>::new();
-    for finding in &mut findings {
-        finding.matched_target_id = uniquely_containing_candidate(inventory, finding);
-        if let Some(target_id) = finding.matched_target_id {
-            rule_severities
-                .entry((target_id, finding.rule_id.clone()))
-                .and_modify(|severity| *severity = (*severity).max(finding.severity))
-                .or_insert(finding.severity);
-        }
-    }
-
-    let mut scores = inventory
-        .candidates
+    let signals = findings
         .iter()
-        .map(|candidate| {
-            (
-                candidate.id,
-                SemgrepTargetScore {
-                    target_id: candidate.id,
-                    base_score: candidate.fit_score,
-                    boost: 0.0,
-                    effective_score: candidate.fit_score,
-                    matched_rule_count: 0,
-                },
-            )
+        .map(|finding| crate::enrichment::EnrichmentSignal {
+            relative_path: finding.relative_path.clone(),
+            start_line: finding.range.start_line,
+            start_col: finding.range.start_col,
+            rule_key: finding.rule_id.clone(),
+            weight: finding.severity.weight(),
         })
-        .collect::<BTreeMap<_, _>>();
+        .collect::<Vec<_>>();
 
-    for ((target_id, _), severity) in rule_severities {
-        let score = scores.get_mut(&target_id).ok_or_else(|| {
-            invalid_inventory("mapped target is absent from the validated inventory")
-        })?;
-        score.boost += severity.weight();
-        score.matched_rule_count += 1;
+    let overlay = crate::enrichment::score_overlay(inventory, &signals);
+    for (finding, matched) in findings.iter_mut().zip(&overlay.matches) {
+        finding.matched_target_id = *matched;
     }
-
-    for score in scores.values_mut() {
-        score.boost = ((score.boost.min(0.20) * 100.0).round()) / 100.0;
-        score.effective_score = (score.base_score + score.boost).min(1.0);
-    }
-
-    let scores = scores.into_values().collect::<Vec<_>>();
-    let matched_candidate_count = scores
-        .iter()
-        .filter(|score| score.matched_rule_count > 0)
-        .count()
-        .try_into()
-        .map_err(|_| invalid_inventory("candidate count exceeds the supported u32 range"))?;
 
     Ok(SemgrepAnalysis {
         findings,
-        scores,
-        matched_candidate_count,
+        scores: overlay.scores,
+        matched_candidate_count: overlay.matched_candidate_count,
     })
 }
 
@@ -305,39 +264,6 @@ fn validate_inventory(inventory: &TargetInventory) -> Result<(), SemgrepValidati
 
 fn invalid_inventory(reason: &str) -> SemgrepValidationError {
     SemgrepValidationError::InvalidInventory(String::from(reason))
-}
-
-fn uniquely_containing_candidate(
-    inventory: &TargetInventory,
-    finding: &SemgrepFinding,
-) -> Option<Uuid> {
-    let mut matches = inventory.candidates.iter().filter(|candidate| {
-        candidate_relative_path(candidate) == finding.relative_path
-            && contains_start(candidate, finding)
-    });
-    let candidate_id = matches.next()?.id;
-    matches.next().is_none().then_some(candidate_id)
-}
-
-fn candidate_relative_path(candidate: &TargetCandidate) -> &Path {
-    candidate
-        .location
-        .file
-        .strip_prefix(&candidate.project_root)
-        .unwrap_or(&candidate.location.file)
-}
-
-fn contains_start(candidate: &TargetCandidate, finding: &SemgrepFinding) -> bool {
-    let Some(end_line) = candidate.location.end_line else {
-        return false;
-    };
-    let Some(end_col) = candidate.location.end_col else {
-        return false;
-    };
-    let start = (candidate.location.line, candidate.location.col);
-    let end = (end_line, end_col);
-    let point = (finding.range.start_line, finding.range.start_col);
-    start <= point && point <= end
 }
 
 fn parse_findings_with_fingerprint<F>(
