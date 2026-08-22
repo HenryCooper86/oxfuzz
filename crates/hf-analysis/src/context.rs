@@ -40,8 +40,12 @@ const STRING_BUILDERS: [&str; 8] = [
 ];
 
 /// Known sources of caller- or attacker-chosen bytes.
-const UNTRUSTED_SOURCES: [&str; 7] = [
+const UNTRUSTED_SOURCES: [&str; 8] = [
     "getenv", "fgets", "gets", "read", "recv", "recvfrom", "fread",
+    // Not a call but a stream: fscanf(stdin, "%s", buf) reads caller-chosen
+    // bytes exactly as scanf does, and treating the name as uninfluenced made
+    // every such read invisible to the tainted-argument rules.
+    "stdin",
 ];
 
 /// Whether `name` holds a value a caller or attacker chose, at `node`.
@@ -56,16 +60,11 @@ const UNTRUSTED_SOURCES: [&str; 7] = [
 /// function and turn a restriction meant to remove false positives back into a
 /// source of them.
 pub(crate) fn is_attacker_influenced(node: Node, source: &str, name: &str) -> bool {
-    if is_function_parameter(node, source, name) {
-        return false_if_shadowed(node, source, name);
-    }
-    influenced_names(node, source).contains(name)
-}
-
-/// A parameter is influenced unless a later local declaration shadows it, which
-/// would make the name refer to something the caller did not choose.
-fn false_if_shadowed(_node: Node, _source: &str, _name: &str) -> bool {
-    true
+    // A standard stream is influenced wherever it appears; there is no
+    // assignment to trace it back to.
+    UNTRUSTED_SOURCES.contains(&name)
+        || is_function_parameter(node, source, name)
+        || influenced_names(node, source).contains(name)
 }
 
 /// Every name in the enclosing function that carries a caller-chosen value.

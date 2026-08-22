@@ -306,6 +306,22 @@ mod tests {
             "void f(char*d, char*s){ strncpy(d, s, 8); strlcpy(d, s, 8); }",
         ),
         (
+            "assert-used-as-bound-check",
+            "void f(unsigned n){ assert(n <= 8); }",
+            // An equality invariant is not input validation.
+            "void f(unsigned n){ assert((n & 1) == 0); }",
+        ),
+        (
+            "strncat-constant-bound",
+            "void f(char*d, char*s){ strncat(d, s, 40); }",
+            "void f(char*d, char*s, unsigned n){ strncat(d, s, n); }",
+        ),
+        (
+            "length-compared-to-size",
+            "int f(char*u, char*b){ return strlen(u) > sizeof(b); }",
+            "int f(char*u, char*b){ return strlen(u) >= sizeof(b); }",
+        ),
+        (
             "index-at-buffer-size",
             "void f(void){ char b[8]; b[sizeof(b)] = 0; }",
             "void f(void){ char b[8]; b[sizeof(b) - 1] = 0; }",
@@ -383,10 +399,10 @@ mod tests {
         // Written as a literal so adding or dropping a rule is a deliberate
         // edit with a commit message, not a silent change in coverage. The
         // reconciliation table in spec section 18.5 is keyed to these numbers.
-        assert_eq!(compile_all(TargetLanguage::C).unwrap(), 37, "C rule count");
+        assert_eq!(compile_all(TargetLanguage::C).unwrap(), 40, "C rule count");
         assert_eq!(
             compile_all(TargetLanguage::Cpp).unwrap(),
-            36,
+            39,
             "C++ rule count; one C-only rule, see catalog"
         );
     }
