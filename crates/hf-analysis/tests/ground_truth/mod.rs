@@ -98,7 +98,7 @@ pub const COVERAGE: &[(&str, &[&str])] = &[
     ("incorrect-use-of-free", &["free-of-non-heap"]),
     ("incorrect-use-of-memset", &["memset-argument-order"]),
     ("incorrect-use-of-sizeof", &[]),
-    ("incorrect-use-of-strncat", &[]),
+    ("incorrect-use-of-strncat", &["strncat-constant-bound"]),
     ("insecure-api-access-stat", &["toctou-access-check"]),
     ("insecure-api-alloca", &["dangerous-function-alloca"]),
     ("insecure-api-ato", &["unchecked-conversion-ato"]),
@@ -110,7 +110,13 @@ pub const COVERAGE: &[(&str, &[&str])] = &[
     ("insecure-api-rand-srand", &["weak-pseudo-random"]),
     (
         "insecure-api-scanf",
-        &["unbounded-scanf-conversion", "unbounded-string-scan"],
+        &[
+            "unbounded-scanf-conversion",
+            "unbounded-string-scan",
+            // A non-literal scan format is reported by this rule, and a map
+            // that omits it counts a real report as a miss.
+            "non-literal-format-string",
+        ],
     ),
     ("insecure-api-signal", &["signal-handler-race"]),
     ("insecure-api-sprintf-vsprintf", &["unbounded-format-write"]),
@@ -130,6 +136,8 @@ pub const COVERAGE: &[(&str, &[&str])] = &[
             "loop-bound-off-by-one",
             "index-at-buffer-size",
             "allocation-missing-terminator",
+            "length-compared-to-size",
+            "strncat-constant-bound",
         ],
     ),
     ("overlapping-source-destination", &["overlapping-copy"]),
@@ -138,7 +146,10 @@ pub const COVERAGE: &[(&str, &[&str])] = &[
     ("regex-dos", &["catastrophic-regex"]),
     ("ret-stack-address", &["returned-stack-address"]),
     ("signed-unsigned-conversion", &[]),
-    ("suspicious-assert", &["assignment-in-assertion"]),
+    (
+        "suspicious-assert",
+        &["assignment-in-assertion", "assert-used-as-bound-check"],
+    ),
     ("typos", &["assignment-in-condition"]),
     ("unchecked-ret-malloc", &[]),
     ("unchecked-ret-scanf", &["unchecked-return-scanf"]),
@@ -148,7 +159,7 @@ pub const COVERAGE: &[(&str, &[&str])] = &[
     ),
     (
         "unsafe-ret-snprintf-vsnprintf",
-        &["unchecked-truncating-write"],
+        &["unchecked-truncating-write", "truncating-write-return-used"],
     ),
     (
         "unsafe-ret-strlcpy-strlcat",
