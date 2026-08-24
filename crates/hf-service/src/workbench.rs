@@ -17,6 +17,8 @@ use hf_storage::{RunRecord, RunStatus, Store};
 use serde::Serialize;
 use uuid::Uuid;
 
+use crate::finding_proof::{finding_proof_card, FindingProofCard};
+
 /// Aggregate counts for the internal dashboard.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct WorkbenchTotals {
@@ -111,6 +113,7 @@ pub struct CrashReviewItem {
     pub severity: String,
     pub minimized: bool,
     pub has_bug_report: bool,
+    pub proof: FindingProofCard,
 }
 
 /// Dashboard data for the active project or whole database.
@@ -586,6 +589,7 @@ fn crash_review_items(
     crashes
         .into_iter()
         .map(|c| {
+            let proof = finding_proof_card(&c);
             let target_symbol = target_by_id
                 .get(&c.target_id)
                 .map_or_else(|| "unknown".to_owned(), |t| t.symbol.clone());
@@ -603,6 +607,7 @@ fn crash_review_items(
                 severity,
                 minimized: c.minimized,
                 has_bug_report: c.bug_report.is_some(),
+                proof,
             }
         })
         .collect()
