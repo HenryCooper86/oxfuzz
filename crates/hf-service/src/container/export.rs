@@ -67,10 +67,10 @@ impl ServiceContainer {
                 "empty report from provider".to_owned(),
             ));
         }
-        // Guarantee the campaign graphs survive even if the model dropped them.
-        // The re-injected graphs and the footer this stamps must match the
-        // language the model was asked to compose in, not a fixed English set.
-        Ok(crate::report::ensure_graphs(
+        // Guarantee the campaign evidence survives even if the model dropped
+        // it. Re-injected content and the footer must match the language the
+        // model was asked to compose in, not a fixed English set.
+        Ok(crate::report::ensure_required_evidence(
             text,
             data,
             &crate::report::Labels::for_language(language),
