@@ -3,8 +3,14 @@ import { getTransport, isTauriEnvironment, emitDataChanged } from "../lib";
 import { useProject } from "../providers/project";
 import { usePipeline } from "../providers/pipeline";
 import { useRunOutput } from "../providers/runOutput";
-import type { Crash, CrashVerdict } from "../types";
+import type {
+  Crash,
+  CrashVerdict,
+  FindingProofCard as FindingProofCardView,
+  WorkbenchDashboard,
+} from "../types";
 import { Button, ViewHeader, SeverityBadge } from "../components/ui";
+import { FindingProofCard } from "../components/FindingProofCard";
 import { Bug, ChevronRight, Download, FileText, Share2 } from "lucide-react";
 import { PathActions } from "../components/PathActions";
 import { useI18n } from "../i18nContext";
@@ -33,6 +39,8 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
   const [reportMsg, setReportMsg] = useState<string | null>(null);
   const [reportMd, setReportMd] = useState<string | null>(null);
   const [triageError, setTriageError] = useState<string | null>(null);
+  const [proofs, setProofs] = useState<Record<string, FindingProofCardView>>({});
+  const [proofLoadFailed, setProofLoadFailed] = useState(false);
   // On-demand LLM crash verdicts (L2 4c), keyed by crash id: "loading" while a
   // verdict is being fetched, "none" when verified with no provider configured,
   // or the verdict itself. Opt-in per crash so a scan is never blocked on it.
@@ -60,12 +68,36 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
         target: lastTarget,
       });
       setCrashes(result);
+      if (result.length > 0) {
+        try {
+          const dashboard = await getTransport().invoke<WorkbenchDashboard>("workbench_dashboard", {
+            project: activeProject || undefined,
+            target: lastTarget || undefined,
+          });
+          const triagedIds = new Set(result.map((crash) => crash.id));
+          const proofById = Object.fromEntries(
+            dashboard.crash_reviews
+              .filter((crash) => triagedIds.has(crash.crash_id))
+              .map((crash) => [crash.crash_id, crash.proof]),
+          );
+          setProofs(proofById);
+          setProofLoadFailed(result.some((crash) => proofById[crash.id] === undefined));
+        } catch {
+          setProofs({});
+          setProofLoadFailed(true);
+        }
+      } else {
+        setProofs({});
+        setProofLoadFailed(false);
+      }
       if (result.length > 0) markDone("triage");
       else markSkipped("triage");
       return result;
     } catch (e) {
       // A failed scan previously looked identical to "no crashes found".
       setCrashes([]);
+      setProofs({});
+      setProofLoadFailed(false);
       setTriageError(String(e));
       return [];
     } finally {
@@ -402,6 +434,8 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
             <div className="surface-card flex-1" style={{ padding: "var(--space-md)" }}>
               <CrashDetail
                 crash={crashes[selected]}
+                proof={proofs[crashes[selected].id]}
+                proofUnavailable={proofLoadFailed}
                 verdict={verdicts[crashes[selected].id]}
                 onVerify={() => verifyCrash(crashes[selected])}
               />
@@ -426,10 +460,14 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
 
 function CrashDetail({
   crash,
+  proof,
+  proofUnavailable,
   verdict,
   onVerify,
 }: {
   crash: Crash;
+  proof: FindingProofCardView | undefined;
+  proofUnavailable: boolean;
   verdict: CrashVerdict | "loading" | "none" | undefined;
   onVerify: () => void;
 }) {
@@ -448,6 +486,7 @@ function CrashDetail({
         <PathActions path={crash.input_path} />
       </div>
       {crash.summary && <p className="text-sm text-text-secondary">{crash.summary}</p>}
+      <FindingProofCard proof={proof} unavailable={proofUnavailable} />
       {/* On-demand LLM crash verdict (L2 4c): opt in per crash. */}
       <div className="border-t border-border pt-3">
         {verdict === undefined && (

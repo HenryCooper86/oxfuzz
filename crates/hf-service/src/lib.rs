@@ -27,6 +27,7 @@ pub mod defectdojo_lifecycle;
 pub mod diagnostics;
 #[cfg(feature = "proof-carrying")]
 pub mod evidence;
+pub mod finding_proof;
 pub mod init;
 pub mod issue_tracker;
 pub mod knowledge;
@@ -93,6 +94,12 @@ pub use container::{
 };
 pub use defectdojo::{DefectDojoConfig, PushOutcome};
 pub use defectdojo_lifecycle::{DefectDojoState, DefectDojoStatus};
+pub use finding_proof::{
+    finding_proof_card, CasrExploitabilityDetermination, FindingEvidenceKind,
+    FindingEvidenceReference, FindingProofCard, FindingProofClaim, FindingProofStatus,
+    FixVerificationDetermination, ReachabilityDetermination, ReproductionDetermination,
+    FINDING_PROOF_SCHEMA_VERSION,
+};
 pub use hf_storage::{AutoRevertEvent, GuardrailDecisionRecord, ProjectAutoRevert};
 pub use init::{init_at, init_workspace, InitReport};
 pub use issue_tracker::{CreatedIssue, IssueTrackerConfig};

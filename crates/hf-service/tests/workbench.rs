@@ -6,13 +6,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::Utc;
-use hf_core::crash::{Crash, CrashKind};
+use hf_core::crash::{CasrReport, Crash, CrashKind, CrashOrigin, CrashSeverity};
 use hf_core::engine::{EngineKind, FuzzRunConfig};
 use hf_core::harness::{BuildCommand, Harness, HarnessStatus, SmokeRunSummary};
 use hf_core::target::{
     InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
 };
-use hf_service::ServiceContainer;
+use hf_service::{
+    finding_proof_card, CasrExploitabilityDetermination, FindingEvidenceKind, FindingProofStatus,
+    FixVerificationDetermination, ReachabilityDetermination, ReproductionDetermination,
+    ServiceContainer,
+};
 use hf_storage::{RunRecord, RunStatus, Store};
 use uuid::Uuid;
 
@@ -136,6 +140,167 @@ async fn dashboard_summarizes_targets_harnesses_runs_and_crashes() {
     assert_eq!(dashboard.top_targets[0].symbol, "parse_packet");
     assert_eq!(dashboard.harness_reviews[0].next_action, "Run smoke fuzz");
     assert_eq!(dashboard.crash_reviews[0].kind, "Asan");
+    let proof = &dashboard.crash_reviews[0].proof;
+    assert_eq!(proof.schema_version, 1);
+    assert_eq!(proof.fault_origin.determination, CrashOrigin::Unknown);
+    assert_eq!(proof.fault_origin.status, FindingProofStatus::Unavailable);
+    assert_eq!(
+        proof.deterministic_reproduction.determination,
+        ReproductionDetermination::NotVerified
+    );
+    assert_eq!(
+        proof.deterministic_reproduction.status,
+        FindingProofStatus::NotVerified
+    );
+    assert_eq!(
+        proof.casr_exploitability.determination,
+        CasrExploitabilityDetermination::Unavailable
+    );
+    assert_eq!(
+        proof.casr_exploitability.status,
+        FindingProofStatus::Unavailable
+    );
+    assert_eq!(
+        proof.external_reachability.determination,
+        ReachabilityDetermination::NotVerified
+    );
+    assert_eq!(
+        proof.fix_verification.determination,
+        FixVerificationDetermination::NotVerified
+    );
+}
+
+#[tokio::test]
+async fn finding_proof_preserves_harness_origin_and_undefined_casr() {
+    let (container, _dir) = test_container().await;
+    let store = container.store().unwrap();
+    let target = sample_target("/proj");
+    let harness = sample_harness(target.id);
+    let run = sample_run("/proj", harness.id);
+    let crash = Crash {
+        id: Uuid::new_v4(),
+        run_id: run.id,
+        target_id: target.id,
+        input_path: PathBuf::from("out/crash-harness"),
+        stack_signature: "harness-sig".to_owned(),
+        kind: CrashKind::Asan,
+        summary: "generated harness overflow".to_owned(),
+        minimized: true,
+        bug_report: None,
+        casr: Some(CasrReport {
+            severity: CrashSeverity::Undefined,
+            severity_short: "unknown".to_owned(),
+            crashline: "harness.c:12:4".to_owned(),
+            stack: vec!["harness.c:12".to_owned()],
+            cluster: Some(3),
+        }),
+        origin: CrashOrigin::Harness,
+    };
+
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    store.upsert_harness(&harness).await.unwrap();
+    store.insert_run(&run).await.unwrap();
+    store.upsert_crash(&crash).await.unwrap();
+
+    let project = PathBuf::from("/proj");
+    let dashboard = container
+        .workbench_dashboard(Some(project.as_path()), Some("parse_packet"))
+        .await
+        .unwrap();
+    let proof = &dashboard.crash_reviews[0].proof;
+
+    assert_eq!(proof.fault_origin.determination, CrashOrigin::Harness);
+    assert_eq!(proof.fault_origin.status, FindingProofStatus::Supported);
+    assert_eq!(
+        proof.casr_exploitability.determination,
+        CasrExploitabilityDetermination::Undefined
+    );
+    assert_eq!(
+        proof.casr_exploitability.status,
+        FindingProofStatus::Supported
+    );
+    assert!(proof
+        .casr_exploitability
+        .evidence
+        .iter()
+        .any(|reference| reference.kind == FindingEvidenceKind::CasrReport));
+    assert_eq!(
+        proof.deterministic_reproduction.determination,
+        ReproductionDetermination::NotVerified,
+        "a CASR result and minimized input do not prove repeated reproduction"
+    );
+
+    let json = serde_json::to_value(proof).unwrap();
+    assert_eq!(json["schema_version"], 1);
+    assert_eq!(json["fault_origin"]["determination"], "harness");
+    assert_eq!(json["fault_origin"]["status"], "supported");
+    assert_eq!(json["casr_exploitability"]["determination"], "undefined");
+    assert_eq!(
+        json["deterministic_reproduction"]["determination"],
+        "not_verified"
+    );
+}
+
+#[test]
+fn finding_proof_maps_every_persisted_origin_and_casr_classification() {
+    let mut crash = Crash {
+        id: Uuid::new_v4(),
+        run_id: Uuid::new_v4(),
+        target_id: Uuid::new_v4(),
+        input_path: PathBuf::from("out/crash"),
+        stack_signature: "signature".to_owned(),
+        kind: CrashKind::Asan,
+        summary: "summary".to_owned(),
+        minimized: false,
+        bug_report: None,
+        casr: None,
+        origin: CrashOrigin::Unknown,
+    };
+
+    for origin in [
+        CrashOrigin::Target,
+        CrashOrigin::Harness,
+        CrashOrigin::Runtime,
+    ] {
+        crash.origin = origin;
+        let proof = finding_proof_card(&crash);
+        assert_eq!(proof.fault_origin.determination, origin);
+        assert_eq!(proof.fault_origin.status, FindingProofStatus::Supported);
+    }
+
+    let severities = [
+        (
+            CrashSeverity::Exploitable,
+            CasrExploitabilityDetermination::Exploitable,
+        ),
+        (
+            CrashSeverity::ProbablyExploitable,
+            CasrExploitabilityDetermination::ProbablyExploitable,
+        ),
+        (
+            CrashSeverity::NotExploitable,
+            CasrExploitabilityDetermination::NotExploitable,
+        ),
+        (
+            CrashSeverity::Undefined,
+            CasrExploitabilityDetermination::Undefined,
+        ),
+    ];
+    for (severity, expected) in severities {
+        crash.casr = Some(CasrReport {
+            severity,
+            severity_short: String::new(),
+            crashline: String::new(),
+            stack: Vec::new(),
+            cluster: None,
+        });
+        let proof = finding_proof_card(&crash);
+        assert_eq!(proof.casr_exploitability.determination, expected);
+        assert_eq!(
+            proof.casr_exploitability.status,
+            FindingProofStatus::Supported
+        );
+    }
 }
 
 #[tokio::test]

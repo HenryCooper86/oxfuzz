@@ -261,6 +261,45 @@ export interface HarnessReviewItem {
   source_preview: string;
 }
 
+export type FindingProofStatus = "supported" | "not_verified" | "unavailable";
+export type FindingEvidenceKind = "crash_record" | "run_record" | "casr_report";
+export type FaultOriginDetermination = "target" | "harness" | "runtime" | "unknown";
+export type ReproductionDetermination = "deterministic" | "not_verified";
+export type CasrExploitabilityDetermination =
+  | "exploitable"
+  | "probably_exploitable"
+  | "not_exploitable"
+  | "undefined"
+  | "unavailable";
+export type ReachabilityDetermination = "demonstrated" | "not_verified";
+export type FixVerificationDetermination =
+  | "verified"
+  | "rejected"
+  | "inconclusive"
+  | "not_verified";
+
+export interface FindingEvidenceReference {
+  kind: FindingEvidenceKind;
+  record_id: string;
+}
+
+export interface FindingProofClaim<T extends string> {
+  determination: T;
+  status: FindingProofStatus;
+  detail_code: string;
+  detail: string;
+  evidence: FindingEvidenceReference[];
+}
+
+export interface FindingProofCard {
+  schema_version: number;
+  fault_origin: FindingProofClaim<FaultOriginDetermination>;
+  deterministic_reproduction: FindingProofClaim<ReproductionDetermination>;
+  casr_exploitability: FindingProofClaim<CasrExploitabilityDetermination>;
+  external_reachability: FindingProofClaim<ReachabilityDetermination>;
+  fix_verification: FindingProofClaim<FixVerificationDetermination>;
+}
+
 export interface CrashReviewItem {
   crash_id: string;
   run_id: string;
@@ -271,6 +310,7 @@ export interface CrashReviewItem {
   severity: string;
   minimized: boolean;
   has_bug_report: boolean;
+  proof: FindingProofCard;
 }
 
 /** A localizable readiness/next-action note: a stable code plus a count. */

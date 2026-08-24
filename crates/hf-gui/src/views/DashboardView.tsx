@@ -24,6 +24,7 @@ import {
   Wrench,
 } from "lucide-react";
 import { AutoRevertBadge, type AutoRevertPolicyView } from "../components/AutoRevertBadge";
+import { FindingProofCard } from "../components/FindingProofCard";
 import { Button, EmptyState, Input, LoadingState, Select, Textarea, ViewHeader } from "../components/ui";
 import { useToast } from "../components/ui/toastContext";
 import { useConfirm } from "../providers/confirm";
@@ -768,6 +769,9 @@ function CrashCard({ crash, onExport }: { crash: CrashReviewItem; onExport: () =
       <p className="text-xs text-text-secondary mt-3" style={{ minHeight: 34 }}>
         {crash.summary || t("dashboard.noSummary")}
       </p>
+      <div className="mt-3">
+        <FindingProofCard proof={crash.proof} />
+      </div>
       <div className="flex flex-wrap items-center justify-between gap-2 mt-3">
         <span className="text-xs text-text-muted font-mono">{shortId(crash.crash_id)}</span>
         <Button variant="outline" size="sm" onClick={onExport}>
