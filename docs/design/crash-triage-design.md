@@ -48,7 +48,11 @@ pub struct Crash {
 3. **Dedup** -- group by `stack_signature`; keep one representative per group.
 4. **Minimize** -- call `engine.minimize` (afl-tmin / libFuzzer `-minimize_crash`).
 5. **Draft report** -- LLM produces a bug report: title, summary, repro steps,
-   stack, severity guess.
+   stack, severity guess. Every campaign report also carries a deterministic
+   `CASR Vulnerability Verdicts` section. It records CASR's exploitability
+   classification for every target finding, or states that CASR evidence is
+   unavailable; it does not treat that classification as independent proof
+   that the crash is a target vulnerability.
 6. **HITL** -- human reviews, edits, and approves/closes.
 
 ## 4. Reporting Origin
@@ -67,6 +71,14 @@ maximum severity, which would otherwise let a harness defect raise a rule's
 score with no result of its own. `DefectDojo` has its own mapper rather than
 reusing the SARIF path and carries the same filter; filing a finding is not
 reversible.
+
+The deterministic CASR verdict section is rendered by `hf-service`, not left to
+provider prose. Provider-composed campaign reports are checked at the operation
+that returns them and receive the exact deterministic section when the provider
+drops or changes it. This applies equally to dashboard, triage, CLI, REST, and
+scheduled callers because they all use the same service operation. A report
+with no target findings still includes the section and explicitly states that
+there is no crash to classify.
 
 An optional remediation handoff may bind the reviewed finding, patch candidate,
 minimized reproducer, exact run evidence manifest, and a later sandbox
@@ -113,6 +125,9 @@ and regression evidence as specified by
 - Integration: a harness-origin crash appears in the report's harness-defect
   section and in neither the findings list, the SARIF results, nor the
   `DefectDojo` findings.
+- Unit: deterministic and provider-composed reports contain the complete CASR
+  vulnerability-verdict section, including explicit unavailable and no-crash
+  states.
 - Integration: ingest engine-specific real/false-positive fixtures, directory
   floods, and oversized reports from a mocked engine output dir.
 - Integration: mocked AFL++/libFuzzer minimizers receive only run-owned paths;

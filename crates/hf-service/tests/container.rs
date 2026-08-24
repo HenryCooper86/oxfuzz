@@ -1512,7 +1512,8 @@ async fn generate_report_renders_the_fact_sheet_in_the_requested_language() {
 }
 
 /// A pool that always composes the same narrative, carrying no Mermaid block --
-/// exactly the "the model dropped the graphs" case `ensure_graphs` repairs.
+/// exactly the "the model dropped required evidence" case the report
+/// post-processor repairs.
 struct NarrativePool;
 
 #[async_trait::async_trait]
@@ -1562,7 +1563,7 @@ async fn ai_composed_report_stamps_the_footer_in_the_requested_language() {
 
     // With a pool configured the narrative comes from the model and the
     // fact-sheet is not returned, so the only labels in the output are the ones
-    // `ensure_graphs` stamps inside `compose_ai_report`.
+    // The required-evidence post-processor stamps inside `compose_ai_report`.
     let container = ServiceContainer::new(
         Arc::new(hf_runtime::StubRuntime),
         Some(Arc::new(NarrativePool)),
@@ -1582,6 +1583,14 @@ async fn ai_composed_report_stamps_the_footer_in_the_requested_language() {
         "the composed report's footer must match its language: {zh}"
     );
     assert!(
+        zh.contains("## CASR 漏洞判定 (CASR Vulnerability Verdicts)"),
+        "the composed report must restore the deterministic CASR verdict section: {zh}"
+    );
+    assert!(
+        zh.contains("没有可供 CASR 进行漏洞判定的目标崩溃。"),
+        "the composed no-crash report must carry an explicit CASR verdict state: {zh}"
+    );
+    assert!(
         !zh.contains("Composed by oxfuzz"),
         "an English footer means compose_ai_report still hardcodes the label set"
     );
@@ -1591,7 +1600,7 @@ async fn ai_composed_report_stamps_the_footer_in_the_requested_language() {
 /// it was handed, so a test can assert what the model was actually asked for.
 ///
 /// `NarrativePool` cannot cover this: it ignores its request entirely, so a
-/// test built on it pins `ensure_graphs`' labels rather than the prompts, and
+/// test built on it pins the post-processor's labels rather than the prompts, and
 /// stays green with the prompt builders' `language` argument severed.
 struct CapturingPool {
     captured: std::sync::Mutex<Vec<hf_core::types::Message>>,

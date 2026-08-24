@@ -7,8 +7,8 @@ use hf_core::engine::EngineKind;
 use hf_core::target::{InputSurface, SourceLocation, TargetCandidate, TargetKind, TargetLanguage};
 use hf_coverage::CoverageSummary;
 use hf_service::report::{
-    ensure_graphs, render_markdown, report_system_prompt, report_user_prompt, CorpusStats, Labels,
-    ReportData, ReportLanguage,
+    ensure_required_evidence, render_markdown, report_system_prompt, report_user_prompt,
+    CorpusStats, Labels, ReportData, ReportLanguage,
 };
 use hf_service::report_export::markdown_to_html;
 use hf_storage::{RunRecord, RunStatus};
@@ -230,6 +230,14 @@ fn report_renders_crash_detail_and_severity() {
     assert!(md.contains("Exploitable"), "CASR severity");
     assert!(md.contains("heap-buffer-overflow(write)"));
     assert!(md.contains("src/parse.c:48:5"), "crash line");
+    assert!(
+        md.contains("## CASR Vulnerability Verdicts"),
+        "the verdict must be explicit rather than implied by a severity table: {md}"
+    );
+    assert!(
+        md.contains("CASR vulnerability verdict: **Exploitable**"),
+        "the finding must carry CASR's verdict: {md}"
+    );
     // Coverage percentages appear.
     assert!(
         md.contains("60.0%") || md.contains("60%"),
@@ -368,18 +376,48 @@ fn both_prompts_still_ground_the_model_in_the_data_sheet() {
 }
 
 #[test]
-fn ensure_graphs_appends_when_model_drops_them() {
+fn required_evidence_is_restored_when_the_model_drops_it() {
     let data = populated();
-    // Model output with no mermaid blocks -> graphs must be re-added.
-    let without = "# Report\n\nSome AI prose without any charts.";
-    let fixed = ensure_graphs(without, &data, &Labels::english());
+    let without = "# Report\n\nSome AI prose without campaign evidence.";
+    let fixed = ensure_required_evidence(without, &data, &Labels::english());
     assert!(fixed.contains("```mermaid"), "graphs guaranteed");
+    assert!(
+        fixed.contains("## CASR Vulnerability Verdicts"),
+        "the canonical CASR verdict section is guaranteed: {fixed}"
+    );
+    assert!(
+        fixed.contains("CASR vulnerability verdict: **Exploitable**"),
+        "the canonical section carries the finding verdict: {fixed}"
+    );
     assert!(fixed.contains("Composed by oxfuzz"), "footer stamped");
 
-    // Model output that already has a graph -> not duplicated.
-    let with = "# Report\n\n```mermaid\npie showData\n    \"X\" : 1\n```\n";
-    let kept = ensure_graphs(with, &data, &Labels::english());
-    assert_eq!(kept.matches("```mermaid").count(), 1, "no duplicate graphs");
+    // Evidence already preserved verbatim is not duplicated.
+    let with = render_markdown(&data, &Labels::english());
+    let graph_count = with.matches("```mermaid").count();
+    let kept = ensure_required_evidence(&with, &data, &Labels::english());
+    assert_eq!(
+        kept.matches("## CASR Vulnerability Verdicts").count(),
+        1,
+        "no duplicate CASR section"
+    );
+    assert_eq!(
+        kept.matches("```mermaid").count(),
+        graph_count,
+        "no duplicate graphs"
+    );
+}
+
+#[test]
+fn a_missing_casr_result_has_an_explicit_unavailable_verdict() {
+    let mut data = populated();
+    data.crashes[0].casr = None;
+
+    let md = render_markdown(&data, &Labels::english());
+
+    assert!(
+        md.contains("CASR vulnerability verdict: **Unavailable**"),
+        "absence of CASR evidence must not omit the verdict field: {md}"
+    );
 }
 
 #[test]
@@ -405,6 +443,14 @@ fn empty_report_is_honest_not_fabricated() {
     assert!(
         !md.contains("### Finding"),
         "must not emit a crash detail block when there are no findings"
+    );
+    assert!(
+        md.contains("## CASR Vulnerability Verdicts"),
+        "even an empty report carries the required verdict section: {md}"
+    );
+    assert!(
+        md.contains("No target crashes were available for a CASR vulnerability verdict."),
+        "the empty verdict state must be explicit: {md}"
     );
     assert!(
         md.contains("not available")
