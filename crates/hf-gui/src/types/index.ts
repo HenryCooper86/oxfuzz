@@ -532,6 +532,38 @@ export interface BuildPlanRunOutcome {
   build_context: unknown | null;
 }
 
+/// Harness Tournament, owned by hf-service. The presentation layer renders the
+/// service ranking; it never recomputes one, and a tournament never promotes.
+export type CandidateOrigin = "heuristic" | "llm";
+
+export type VerdictLevel = "Pass" | "Suspect" | "Fail";
+
+export interface SmokeEvidence {
+  verdict: VerdictLevel;
+  execs_per_sec: number;
+  crashes: number;
+}
+
+export interface HarnessCandidateEvidence {
+  index: number;
+  origin: CandidateOrigin;
+  source_sha256: string;
+  compiled: boolean;
+  repairs_used: number;
+  compile_error: string | null;
+  smoke: SmokeEvidence | null;
+}
+
+export interface HarnessTournamentResult {
+  schema_version: number;
+  candidates: HarnessCandidateEvidence[];
+  /** Candidate indices, best first. */
+  ranking: number[];
+  winner_index: number | null;
+  /** Always false: promotion stays an explicit human step. */
+  promoted: boolean;
+}
+
 export interface CrashReviewItem {
   crash_id: string;
   run_id: string;

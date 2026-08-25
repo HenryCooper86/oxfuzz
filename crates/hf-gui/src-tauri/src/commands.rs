@@ -2528,6 +2528,65 @@ fn build_doctor_feature_unavailable() -> String {
     "build diagnosis is not included in this application build".to_owned()
 }
 
+/// Explain that the tournament surface was excluded from this build.
+#[cfg(not(feature = "harness-tournament"))]
+fn harness_tournament_feature_unavailable() -> String {
+    "harness tournament is not included in this application build".to_owned()
+}
+
+/// Evaluate several harness candidates and rank them on sandbox evidence.
+#[cfg(feature = "harness-tournament")]
+#[tauri::command]
+pub async fn harness_tournament(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    target: String,
+    engine: String,
+    lang: String,
+    candidates: usize,
+    max_repairs: usize,
+) -> Result<serde_json::Value, String> {
+    let engine = parse_engine(&engine)?;
+    let lang = parse_lang(&lang)?;
+    let result = state
+        .container
+        .run_harness_tournament(hf_service::HarnessTournamentRequest {
+            project,
+            target,
+            engine,
+            lang,
+            candidates,
+            max_repairs,
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(result).map_err(|error| error.to_string())
+}
+
+/// Explain that the tournament surface was excluded from this build.
+#[cfg(not(feature = "harness-tournament"))]
+#[tauri::command]
+pub async fn harness_tournament(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    target: String,
+    engine: String,
+    lang: String,
+    candidates: usize,
+    max_repairs: usize,
+) -> Result<serde_json::Value, String> {
+    let _ = (
+        state,
+        project,
+        target,
+        engine,
+        lang,
+        candidates,
+        max_repairs,
+    );
+    Err(harness_tournament_feature_unavailable())
+}
+
 /// Diagnose the project's build systems. Executes nothing.
 #[cfg(feature = "build-doctor")]
 #[tauri::command]

@@ -34,6 +34,8 @@ pub mod diagnostics;
 #[cfg(feature = "proof-carrying")]
 pub mod evidence;
 pub mod finding_proof;
+#[cfg(feature = "harness-tournament")]
+pub mod harness_tournament;
 pub mod init;
 pub mod issue_tracker;
 pub mod knowledge;
@@ -120,6 +122,11 @@ pub use finding_proof::{
     FindingEvidenceReference, FindingProofCard, FindingProofClaim, FindingProofStatus,
     FixVerificationDetermination, ReachabilityDetermination, ReproductionDetermination,
     FINDING_PROOF_SCHEMA_VERSION,
+};
+#[cfg(feature = "harness-tournament")]
+pub use harness_tournament::{
+    HarnessCandidateEvidence, HarnessTournamentRequest, HarnessTournamentResult,
+    HARNESS_TOURNAMENT_SCHEMA_VERSION,
 };
 pub use hf_storage::{AutoRevertEvent, GuardrailDecisionRecord, ProjectAutoRevert};
 #[cfg(feature = "patch-to-proof")]

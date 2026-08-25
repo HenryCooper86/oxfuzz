@@ -9,10 +9,11 @@ description = "CLI + TUI for oxfuzz"
 # of every build (including `cargo build`/dev). Build with `--no-default-features`
 # to drop the pure-Rust automotive dependency and use the feature-absent paths.
 [features]
-default = ["automotive-scapy", "build-context", "build-doctor", "change-aware", "native-analysis", "patch-to-proof", "proof-carrying", "semgrep-enrichment"]
+default = ["automotive-scapy", "build-context", "build-doctor", "change-aware", "harness-tournament", "native-analysis", "patch-to-proof", "proof-carrying", "semgrep-enrichment"]
 automotive-scapy = ["hf-service/automotive-scapy", "hf-web/automotive-scapy"]
 build-context = ["hf-service/build-context", "hf-web/build-context"]
 build-doctor = ["build-context", "hf-service/build-doctor", "hf-web/build-doctor"]
+harness-tournament = ["hf-service/harness-tournament", "hf-web/harness-tournament"]
 change-aware = ["proof-carrying", "hf-service/change-aware", "hf-web/change-aware"]
 native-analysis = ["hf-service/native-analysis", "hf-web/native-analysis"]
 proof-carrying = ["hf-service/proof-carrying", "hf-web/proof-carrying"]

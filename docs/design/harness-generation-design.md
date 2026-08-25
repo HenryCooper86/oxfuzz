@@ -95,12 +95,90 @@ fills the template; the template guarantees the engine entry point is present.
   creates a new active revision and invalidates prior approval.
 - Agents may prepare and smoke-test a harness, but they cannot promote it.
 
-## 6. Open Questions
+## 6. Harness Tournament
+
+Status: **active implementation**. Owner: `hf-service`, behind the
+`harness-tournament` feature.
+
+### 6.1 Goal
+
+One draft is a sample of one. The tournament generates several harness
+candidates for the same target, takes each through the existing compile and
+smoke paths, and ranks them on what actually happened, so the operator promotes
+a harness that was chosen against alternatives rather than the first one the
+model produced.
+
+### 6.2 Candidates
+
+A tournament of `n` candidates produces one deterministic heuristic draft and
+`n - 1` LLM drafts. The heuristic baseline is always included: it costs no
+model call, and a tournament where every LLM draft fails should still leave the
+operator something that builds. LLM variation comes from independent draft
+calls, not from prompt mutation, so a candidate is never handicapped by a
+prompt the others did not get.
+
+The candidate count is bounded. Each candidate costs a model call, a sandbox
+compile, and a sandbox smoke run, so an unbounded tournament is an unbounded
+bill.
+
+### 6.3 Evidence
+
+Every candidate is compiled through the existing repair loop, and every
+candidate that compiles is smoke-qualified. Both results are retained for every
+candidate, not only the winner:
+
+- source digest, so a candidate is reconstructable;
+- whether it compiled, and how many repair passes it needed;
+- the compile diagnostics when it did not; and
+- the smoke verdict, executions per second, and crash count when it did.
+
+A tournament that produces no compiling candidate is a result with its
+diagnostics, not an error.
+
+### 6.4 Ranking
+
+Ranking is deterministic and objective. Candidates are ordered by, in sequence:
+
+1. compiled before not compiled;
+2. smoke verdict `Pass` before `Suspect` before `Fail` or absent;
+3. fewer repair passes;
+4. higher executions per second; and
+5. lower candidate index, so equal evidence yields a stable order.
+
+No model opinion enters the ranking. Executions per second is a tie-break among
+candidates that already passed, never a primary signal: a harness that does
+nothing quickly is not better than one that does the right thing.
+
+### 6.5 What the Tournament Does Not Do
+
+It does not promote. Promotion stays the existing explicit human step against
+the existing approval evidence, and the tournament's ranking is an input to that
+decision rather than a substitute for it.
+
+Because each compile writes the workspace's active-harness marker and binary,
+the tournament recompiles the winner after ranking so the workspace holds the
+winner's artifacts rather than the last candidate's. That recompile is bookkeeping
+over an already-evaluated source, not new evidence.
+
+### 6.6 Rejected Alternatives
+
+- **Ranking with an LLM judge** -- the product position is that model opinions
+  are advisory; a promotion decision must rest on what was observed.
+- **Skipping smoke for all but the front-runner** -- a candidate that compiles
+  but does nothing at runtime would win on static signals alone.
+- **Prompt-mutating each candidate** -- differences would then reflect the
+  prompt rather than the draft, and a losing candidate could not be attributed.
+- **Auto-promoting the winner** -- promotion is a human approval bound to
+  qualification evidence, and the tournament does not create that authority.
+- **Dropping losing candidates' evidence** -- an operator cannot judge a
+  selection without seeing what it beat.
+
+## 7. Open Questions
 
 - Should we support custom mutators (libFuzzer `custom_mutator`)?
 - How to share harness scaffolding across engines for the same target?
 
-## 7. Tests
+## 8. Tests
 
 - Unit: draft -> compile -> smoke loop with a mocked LLM and a trivial
   target function.
@@ -115,3 +193,8 @@ fills the template; the template guarantees the engine entry point is present.
 - End-to-end: a project with sources under `src/`, headers under `include/`,
   and a compile database compiles; the same project without the build-context
   feature fails on the missing header.
+- Unit: tournament ranking orders compiled over uncompiled, `Pass` over
+  `Suspect` over `Fail`, then fewer repairs, then higher throughput, then index.
+- Integration: every candidate's evidence is retained, a tournament with no
+  compiling candidate is a result rather than an error, and the tournament
+  promotes nothing.

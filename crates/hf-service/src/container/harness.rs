@@ -1069,3 +1069,170 @@ mod build_context_wiring_tests {
         assert!(project_compile_flags(&container, project.path()).is_err());
     }
 }
+
+#[cfg(feature = "harness-tournament")]
+impl ServiceContainer {
+    /// Evaluate several harness candidates for one target and rank them on
+    /// sandbox evidence.
+    ///
+    /// Generates one deterministic baseline plus LLM drafts, compiles each
+    /// through the existing repair loop, smoke-qualifies each that compiled,
+    /// and retains every candidate's evidence. Ranking is deterministic and
+    /// objective; the tournament never promotes.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError::Validation` when the candidate count is out of
+    /// range or the target is unknown, or an authorization error. A tournament
+    /// in which nothing compiled is a result, not an error.
+    pub async fn run_harness_tournament(
+        &self,
+        req: crate::harness_tournament::HarnessTournamentRequest,
+    ) -> Result<crate::harness_tournament::HarnessTournamentResult, ClassifiedError> {
+        use crate::harness_tournament::{
+            rank_candidates, CandidateOrigin, HarnessCandidateEvidence, HarnessTournamentResult,
+            SmokeEvidence, HARNESS_TOURNAMENT_SCHEMA_VERSION, MAX_CANDIDATES,
+        };
+
+        // Bound first: each candidate costs a model call and two sandbox runs,
+        // so an out-of-range request must not reach either.
+        if req.candidates == 0 || req.candidates > MAX_CANDIDATES {
+            return Err(ClassifiedError::Validation(format!(
+                "a tournament needs between 1 and {MAX_CANDIDATES} candidates, not {}",
+                req.candidates
+            )));
+        }
+        let project = std::path::Path::new(&req.project);
+        require_fuzzing_harness_engine(req.engine, req.lang)?;
+        self.authorize_recorded(Action::CompileHarness, "harness_tournament", Some(project))
+            .await?;
+
+        let inv = self.discover(project, req.lang).await?;
+        let candidate = select_target_candidate(&inv.candidates, &req.target)?
+            .ok_or_else(|| {
+                ClassifiedError::Validation(format!("target '{}' not found", req.target))
+            })?
+            .clone();
+
+        prepare_configured_workspace_root()?;
+        let workspace = workspace_dir(project, &req.target);
+        std::fs::create_dir_all(&workspace)
+            .map_err(|e| ClassifiedError::Internal(format!("mkdir: {e}")))?;
+        copy_project_sources(project, &workspace);
+
+        // The deterministic baseline first, then independent model drafts. The
+        // drafts differ by sampling, not by prompt, so a losing candidate is
+        // never handicapped by a prompt the others did not get.
+        let mut sources: Vec<(CandidateOrigin, String)> = Vec::with_capacity(req.candidates);
+        sources.push((
+            CandidateOrigin::Heuristic,
+            heuristic_draft(&candidate, req.engine).source,
+        ));
+        for _ in 1..req.candidates {
+            sources.push((
+                CandidateOrigin::Llm,
+                self.draft_harness_source(project, &candidate, req.engine)
+                    .await,
+            ));
+        }
+
+        let mut evidence: Vec<HarnessCandidateEvidence> = Vec::with_capacity(sources.len());
+        let mut winning_sources: Vec<(usize, String)> = Vec::new();
+        for (index, (origin, source)) in sources.into_iter().enumerate() {
+            let source_sha256 = sha256_hex(source.as_bytes());
+            match self
+                .compile_source_with_repair(
+                    &candidate,
+                    req.engine,
+                    req.lang,
+                    &workspace,
+                    source.clone(),
+                    req.max_repairs,
+                )
+                .await
+            {
+                Ok(outcome) => {
+                    // Smoke is what separates a hollow harness from a working
+                    // one. A smoke that cannot run leaves the evidence absent
+                    // rather than inventing a verdict.
+                    let smoke = self
+                        .harness_smoke(project, &req.target, req.engine, req.lang)
+                        .await
+                        .ok()
+                        .map(|outcome| SmokeEvidence {
+                            verdict: outcome.verdict.level,
+                            execs_per_sec: outcome.summary.execs_per_sec,
+                            crashes: outcome.summary.crashes,
+                        });
+                    winning_sources.push((index, source));
+                    evidence.push(HarnessCandidateEvidence {
+                        index,
+                        origin,
+                        source_sha256,
+                        compiled: true,
+                        repairs_used: outcome.repairs_used,
+                        compile_error: None,
+                        smoke,
+                    });
+                }
+                Err(error) => {
+                    let mut message = error.to_string();
+                    message.truncate(MAX_CANDIDATE_ERROR_BYTES);
+                    evidence.push(HarnessCandidateEvidence {
+                        index,
+                        origin,
+                        source_sha256,
+                        compiled: false,
+                        repairs_used: 0,
+                        compile_error: Some(message),
+                        smoke: None,
+                    });
+                }
+            }
+        }
+
+        let ranking = rank_candidates(&evidence);
+        let winner_index = ranking
+            .iter()
+            .copied()
+            .find(|index| evidence[*index].compiled);
+
+        // Each compile overwrote the workspace's active-harness marker and
+        // binary, so the last candidate's artifacts are in place. Recompile the
+        // winner so the workspace holds the selection. Bookkeeping over an
+        // already-evaluated source, not new evidence.
+        if let Some(winner) = winner_index {
+            if let Some((_, source)) = winning_sources
+                .iter()
+                .find(|(index, _)| *index == winner)
+                .cloned()
+            {
+                if let Err(error) = self
+                    .compile_source_with_repair(
+                        &candidate, req.engine, req.lang, &workspace, source, 0,
+                    )
+                    .await
+                {
+                    tracing::warn!(%error, "could not restore the tournament winner's artifacts");
+                }
+            }
+        }
+
+        Ok(HarnessTournamentResult {
+            schema_version: HARNESS_TOURNAMENT_SCHEMA_VERSION,
+            candidates: evidence,
+            ranking,
+            winner_index,
+            promoted: false,
+        })
+    }
+}
+
+/// Bound on retained per-candidate compile diagnostics.
+#[cfg(feature = "harness-tournament")]
+const MAX_CANDIDATE_ERROR_BYTES: usize = 2048;
+
+#[cfg(feature = "harness-tournament")]
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    hex::encode(sha2::Sha256::digest(bytes))
+}
