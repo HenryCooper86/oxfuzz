@@ -69,6 +69,8 @@ const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   coverage_blockers: { method: "POST", path: "/coverage/blockers" },
   automotive_lab_coverage: { method: "POST", path: "/automotive/lab/coverage" },
   automotive_lab_plan: { method: "POST", path: "/automotive/lab/plan" },
+  automotive_lab_simulate: { method: "POST", path: "/automotive/lab/simulate" },
+  automotive_lab_reset: { method: "POST", path: "/automotive/lab/reset" },
   oracle_scaffold: { method: "POST", path: "/oracles/scaffold" },
   oracle_violation: { method: "GET", path: "/findings/{crash_id}/oracle-violation" },
   project_auto_revert_override: { method: "POST", path: "/projects/auto-revert" },

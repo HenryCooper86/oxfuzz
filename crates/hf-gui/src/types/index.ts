@@ -685,6 +685,36 @@ export interface SequencePlan {
   refusal: PlanRefusal | null;
 }
 
+/// The responder is a model driven by a reviewed script, not a bus
+/// participant. Its verdicts are statements about the script, never about
+/// hardware.
+export type StepReachability = "reachable" | "unreachable_under_script";
+
+export interface SimulatedStep {
+  index: number;
+  operation: string;
+  state_before: string;
+  state_after: string | null;
+  reachability: StepReachability;
+}
+
+export interface PlanSimulation {
+  schema_version: number;
+  script_name: string;
+  steps: SimulatedStep[];
+}
+
+export type ResetOutcome = "confirmed" | "mismatched" | "unconfirmed";
+
+export interface ResetEvidence {
+  outcome: ResetOutcome;
+  baseline_digest: string | null;
+  observed_digest: string | null;
+  reason_code: string;
+  /** False unless the reset was confirmed. */
+  attributable: boolean;
+}
+
 export interface CrashReviewItem {
   crash_id: string;
   run_id: string;

@@ -190,6 +190,22 @@ reviewed state model: retained evidence shows which states were reached but
 cannot show how many exist, and treating the observed set as the total would
 report every campaign as complete coverage of itself.
 
+**Checking a plan and a reset.** You can supply a responder script -- an initial
+state plus rules mapping a state and request to a response and next state -- and
+the lab walks the plan against it, reporting which steps the script could take.
+Read that result for exactly what it is: the responder is a **model**, not a real
+ECU. It does not answer requests on a bus, and a step it marks reachable tells
+you what the script would do, not what hardware will do. A step marked "not in
+the script" usually means the script is incomplete, which is what you want to
+see rather than an error.
+
+Reset evidence checks the claim that the target returned to a known state: the
+state observed after a reset must equal a recorded baseline. There are three
+outcomes and only three -- restored, not restored, and unconfirmed when a digest
+is missing so nothing was compared. An unconfirmed reset is never shown as a
+successful one, and findings after it are marked as not attributable to the
+sequence that followed, because the starting state was never established.
+
 
 ### Talk to it instead
 

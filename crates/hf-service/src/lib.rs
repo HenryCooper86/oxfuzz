@@ -99,9 +99,10 @@ pub use hf_harness::{LintFinding, LintSeverity};
 
 #[cfg(feature = "automotive-lab")]
 pub use automotive_lab::{
-    plan_sequence, protocol_state_coverage, LabCoverageRequest, LabPlanRequest, PlanRefusal,
-    ProtocolStateCoverage, SequencePlan, SequencePlanRequest, StateModel,
-    AUTOMOTIVE_LAB_SCHEMA_VERSION,
+    plan_sequence, protocol_state_coverage, reset_evidence, simulate_plan, EcuRule, EcuScript,
+    LabCoverageRequest, LabPlanRequest, LabResetRequest, LabSimulateRequest, PlanRefusal,
+    PlanSimulation, ProtocolStateCoverage, ResetEvidence, ResetOutcome, SequencePlan,
+    SequencePlanRequest, StateModel, AUTOMOTIVE_LAB_SCHEMA_VERSION,
 };
 #[cfg(feature = "build-doctor")]
 pub use build_doctor::{

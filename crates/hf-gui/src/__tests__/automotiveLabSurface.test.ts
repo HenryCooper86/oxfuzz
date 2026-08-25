@@ -61,6 +61,32 @@ describe("service-owned stateful automotive lab surface", () => {
     expect(source("../views/AutomotiveView.tsx")).toContain("AutomotiveLabPanel");
   });
 
+  it("declares the responder model and reset evidence views", () => {
+    const types = source("../types/index.ts");
+    expect(types).toContain("interface PlanSimulation");
+    expect(types).toContain("interface ResetEvidence");
+    expect(types).toContain("StepReachability");
+    expect(types).toContain("ResetOutcome");
+    expect(types).toContain("attributable");
+    expect(types).toContain("script_name");
+  });
+
+  it("says plainly that the responder is a model, not hardware", () => {
+    const panel = source("../components/AutomotiveLabPanel.tsx");
+    expect(panel).toContain("automotiveLab.modelNotice");
+    expect(panel).toContain("simulation.script_name");
+    expect(panel).toContain("step.reachability");
+  });
+
+  it("never renders an unconfirmed reset as a successful one", () => {
+    const panel = source("../components/AutomotiveLabPanel.tsx");
+    expect(panel).toContain("reset.outcome");
+    expect(panel).toContain("reset.attributable");
+    expect(panel).toContain("automotiveLab.notAttributable");
+    // Attributability is the service's, not recomputed from the outcome here.
+    expect(panel).not.toMatch(/outcome\s*===\s*["']confirmed["']\s*\?\s*true/);
+  });
+
   it("keeps English and Chinese lab labels paired", () => {
     const translations = source("../i18n.extra.ts");
     expect(translations).toContain('"automotiveLab.title": "Stateful Lab"');
@@ -71,5 +97,7 @@ describe("service-owned stateful automotive lab surface", () => {
     expect(translations).toContain(
       '"automotiveLab.refusal.physical_bench_not_sequenceable": "物理台架无法运行序列。每次物理发送都需要单独的新批准。"',
     );
+    expect(translations).toContain('"automotiveLab.reset.unconfirmed": "Unconfirmed"');
+    expect(translations).toContain('"automotiveLab.reset.unconfirmed": "未确认"');
   });
 });
