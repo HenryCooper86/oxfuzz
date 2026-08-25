@@ -9,6 +9,7 @@ import { Button, Input, Select, ViewHeader, EmptyState } from "../components/ui"
 import { SandboxBanner } from "../components/SandboxBanner";
 import { BuildDoctorPanel } from "../components/BuildDoctorPanel";
 import { HarnessTournamentPanel } from "../components/HarnessTournamentPanel";
+import { OracleStudioPanel } from "../components/OracleStudioPanel";
 import {
   Crosshair, FolderOpen, Loader2, FileCode, Terminal, Database,
   CheckCircle2, XCircle, ArrowRight, Sparkles, Archive, GitCompare, AlertTriangle,
@@ -610,6 +611,13 @@ export function HarnessView({
                   engine={engine}
                   lang={lang}
                 />
+              </div>
+            )}
+            {/* An oracle is an alternative harness for the same target, so it
+                belongs with the other harness choices. */}
+            {selectedTarget && (
+              <div className="mt-3">
+                <OracleStudioPanel target={selectedTarget} />
               </div>
             )}
           </Step>

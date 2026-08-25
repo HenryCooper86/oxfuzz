@@ -511,6 +511,46 @@ fn find_sanitizer_log(crash_path: &Path, run_dir: &Path, crash_name: &str) -> Op
     )
 }
 
+/// The raw report text retained beside one crash input, if the run kept any.
+///
+/// Ingest pairs a crash artifact with its report to classify the crash, but
+/// only when the text looks like a sanitizer report, and it retains just the
+/// distilled kind, signature, and summary on the [`Crash`]. A caller looking
+/// for evidence the summary does not carry -- and which need not be a sanitizer
+/// report at all -- needs the text itself, so this reuses the same
+/// `log-<stem>.txt` naming convention without that filter.
+///
+/// The read is bounded. Returns `None` when no paired file was retained or it
+/// cannot be read.
+#[must_use]
+pub fn crash_log_for_input(input_path: &Path, run_dir: &Path) -> Option<String> {
+    let name = input_path.file_name()?.to_string_lossy().into_owned();
+    let stem = name.split_once('-').map_or(name.as_str(), |(_, stem)| stem);
+
+    let mut dirs: Vec<PathBuf> = Vec::with_capacity(2);
+    if let Some(parent) = input_path.parent() {
+        dirs.push(parent.to_path_buf());
+    }
+    if !dirs.iter().any(|dir| dir == run_dir) {
+        dirs.push(run_dir.to_path_buf());
+    }
+    for dir in dirs {
+        let candidate = dir.join(format!("log-{stem}.txt"));
+        if !is_regular_file(&candidate) {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        let read = File::open(&candidate).and_then(|file| {
+            file.take(MAX_SANITIZER_REPORT_BYTES as u64)
+                .read_to_end(&mut bytes)
+        });
+        if read.is_ok() {
+            return Some(String::from_utf8_lossy(&bytes).into_owned());
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

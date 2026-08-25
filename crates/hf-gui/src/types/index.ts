@@ -598,6 +598,39 @@ export interface CoverageBlockerView {
   experiment: NextExperiment;
 }
 
+/// Oracle Studio, owned by hf-service. The scaffold is rendered by the service
+/// and shown in full before anything is built; the panel assembles no C source.
+export type OracleKind = "differential" | "round_trip" | "invariant";
+
+export type OracleProperty =
+  | { kind: "differential"; reference: string }
+  | { kind: "round_trip"; encode: string; decode: string }
+  | { kind: "invariant"; predicate: string };
+
+export interface OracleSpec {
+  id: string;
+  target_symbol: string;
+  property: OracleProperty;
+  /** What the property means, in the author's words. */
+  description: string;
+}
+
+export interface OracleScaffoldView {
+  schema_version: number;
+  spec: OracleSpec;
+  kind: OracleKind;
+  /** The exact source that will be built. */
+  source: string;
+  lint: string[];
+  /** A scaffold the lint would refuse is not worth reviewing. */
+  blocking_lint: boolean;
+}
+
+export interface OracleViolation {
+  oracle_id: string;
+  kind: OracleKind;
+}
+
 export interface CrashReviewItem {
   crash_id: string;
   run_id: string;

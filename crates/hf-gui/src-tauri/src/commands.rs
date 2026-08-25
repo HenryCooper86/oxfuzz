@@ -2540,6 +2540,66 @@ fn coverage_blockers_feature_unavailable() -> String {
     "coverage blocker exploration is not included in this application build".to_owned()
 }
 
+/// Explain that the oracle studio was excluded from this build.
+#[cfg(not(feature = "oracle-studio"))]
+fn oracle_studio_feature_unavailable() -> String {
+    "the oracle studio is not included in this application build".to_owned()
+}
+
+/// Render an oracle specification into the harness it produces, for review.
+#[cfg(feature = "oracle-studio")]
+#[tauri::command]
+pub async fn oracle_scaffold(
+    state: tauri::State<'_, crate::state::AppState>,
+    spec: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let spec: hf_service::OracleSpec =
+        serde_json::from_value(spec).map_err(|error| format!("invalid oracle: {error}"))?;
+    let view = state
+        .container
+        .oracle_scaffold(hf_service::OracleScaffoldRequest { spec })
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(view).map_err(|error| error.to_string())
+}
+
+/// Explain that the oracle studio was excluded from this build.
+#[cfg(not(feature = "oracle-studio"))]
+#[tauri::command]
+pub async fn oracle_scaffold(
+    state: tauri::State<'_, crate::state::AppState>,
+    spec: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let _ = (state, spec);
+    Err(oracle_studio_feature_unavailable())
+}
+
+/// Classify one retained finding as an oracle violation, if its log says so.
+#[cfg(feature = "oracle-studio")]
+#[tauri::command]
+pub async fn oracle_violation(
+    state: tauri::State<'_, crate::state::AppState>,
+    crash_id: String,
+) -> Result<serde_json::Value, String> {
+    let crash_id = uuid::Uuid::parse_str(&crash_id).map_err(|error| error.to_string())?;
+    let violation = state
+        .container
+        .oracle_violation_for_crash(crash_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(violation).map_err(|error| error.to_string())
+}
+
+/// Explain that the oracle studio was excluded from this build.
+#[cfg(not(feature = "oracle-studio"))]
+#[tauri::command]
+pub async fn oracle_violation(
+    state: tauri::State<'_, crate::state::AppState>,
+    crash_id: String,
+) -> Result<serde_json::Value, String> {
+    let _ = (state, crash_id);
+    Err(oracle_studio_feature_unavailable())
+}
+
 /// Explore a target's coverage blockers and next experiment. Executes nothing
 /// beyond the cached coverage measurement it reads.
 #[cfg(feature = "coverage-blockers")]
