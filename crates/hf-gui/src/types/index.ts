@@ -600,12 +600,25 @@ export interface CoverageBlockerView {
 
 /// Oracle Studio, owned by hf-service. The scaffold is rendered by the service
 /// and shown in full before anything is built; the panel assembles no C source.
-export type OracleKind = "differential" | "round_trip" | "invariant";
+export type OracleKind =
+  | "differential"
+  | "round_trip"
+  | "invariant"
+  | "metamorphic"
+  | "stateful"
+  | "resource";
+
+/// A closed vocabulary, never an expression: an expression would be code
+/// supplied as a string and interpolated into the harness.
+export type MetamorphicRelation = "equal" | "not_less" | "not_greater";
 
 export type OracleProperty =
   | { kind: "differential"; reference: string }
   | { kind: "round_trip"; encode: string; decode: string }
-  | { kind: "invariant"; predicate: string };
+  | { kind: "invariant"; predicate: string }
+  | { kind: "metamorphic"; transform: string; relation: MetamorphicRelation }
+  | { kind: "stateful"; apply: string; check: string; max_steps: number }
+  | { kind: "resource"; measure: string; max_growth: number };
 
 export interface OracleSpec {
   id: string;
@@ -629,6 +642,8 @@ export interface OracleScaffoldView {
 export interface OracleViolation {
   oracle_id: string;
   kind: OracleKind;
+  /** Evidence distinguishing this violation from another of the same kind. */
+  detail: string | null;
 }
 
 export interface CrashReviewItem {

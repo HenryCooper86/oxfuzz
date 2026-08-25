@@ -34,9 +34,16 @@ describe("service-owned oracle studio surface", () => {
 
   it("collects each property's symbols and never builds from the panel", () => {
     const panel = source("../components/OracleStudioPanel.tsx");
-    expect(panel).toContain("differential");
-    expect(panel).toContain("round_trip");
-    expect(panel).toContain("invariant");
+    for (const kind of [
+      "differential",
+      "round_trip",
+      "invariant",
+      "metamorphic",
+      "stateful",
+      "resource",
+    ]) {
+      expect(panel).toContain(kind);
+    }
     // Building and running stay on the existing approved paths.
     expect(panel).not.toContain('invoke("harness_compile"');
     expect(panel).not.toContain('invoke("run_fuzzer"');
@@ -56,11 +63,31 @@ describe("service-owned oracle studio surface", () => {
     expect(source("../views/HarnessView.tsx")).toContain("OracleStudioPanel");
   });
 
+  it("declares the stateful and resource vocabulary and their bounds", () => {
+    const types = source("../types/index.ts");
+    expect(types).toContain("MetamorphicRelation");
+    expect(types).toContain("max_steps");
+    expect(types).toContain("max_growth");
+    expect(types).toContain('"not_greater"');
+    // A violation can carry evidence distinguishing it from another of its kind.
+    expect(types).toContain("detail");
+  });
+
+  it("offers the metamorphic relation as a closed choice, never an expression", () => {
+    const panel = source("../components/OracleStudioPanel.tsx");
+    expect(panel).toContain("not_less");
+    expect(panel).toContain("not_greater");
+    // The relation is chosen, not typed as code.
+    expect(panel).not.toMatch(/placeholder=\{t\("oracleStudio\.relation"\)\}/);
+  });
+
   it("keeps English and Chinese oracle labels paired", () => {
     const translations = source("../i18n.extra.ts");
     expect(translations).toContain('"oracleStudio.title": "Oracle Studio"');
     expect(translations).toContain('"oracleStudio.title": "断言工作台"');
     expect(translations).toContain('"oracleStudio.kind.round_trip": "Round trip"');
     expect(translations).toContain('"oracleStudio.kind.round_trip": "往返一致性"');
+    expect(translations).toContain('"oracleStudio.kind.resource": "Resource"');
+    expect(translations).toContain('"oracleStudio.kind.resource": "资源占用"');
   });
 });

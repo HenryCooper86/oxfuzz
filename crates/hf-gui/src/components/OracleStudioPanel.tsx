@@ -3,9 +3,27 @@ import { ScrollText } from "lucide-react";
 import { Badge, Button, Input, Textarea } from "./ui";
 import { getTransport } from "../lib";
 import { useI18n } from "../i18nContext";
-import type { OracleKind, OracleProperty, OracleScaffoldView } from "../types";
+import type {
+  MetamorphicRelation,
+  OracleKind,
+  OracleProperty,
+  OracleScaffoldView,
+} from "../types";
 
-const KINDS: OracleKind[] = ["differential", "round_trip", "invariant"];
+const KINDS: OracleKind[] = [
+  "differential",
+  "round_trip",
+  "invariant",
+  "metamorphic",
+  "stateful",
+  "resource",
+];
+
+const RELATIONS: MetamorphicRelation[] = ["equal", "not_less", "not_greater"];
+
+/// Mirrors the service bounds; the service revalidates.
+const DEFAULT_STEPS = 32;
+const DEFAULT_GROWTH = 4096;
 
 /// A nil UUID until the operator saves the oracle; the service assigns
 /// identity, and the scaffold records whatever id it was given.
@@ -18,24 +36,53 @@ export function OracleStudioPanel({ target }: { target: string }) {
   const [encode, setEncode] = useState("");
   const [decode, setDecode] = useState("");
   const [predicate, setPredicate] = useState("");
+  const [transform, setTransform] = useState("");
+  const [relation, setRelation] = useState<MetamorphicRelation>("equal");
+  const [apply, setApply] = useState("");
+  const [check, setCheck] = useState("");
+  const [maxSteps, setMaxSteps] = useState(DEFAULT_STEPS);
+  const [measure, setMeasure] = useState("");
+  const [maxGrowth, setMaxGrowth] = useState(DEFAULT_GROWTH);
   const [description, setDescription] = useState("");
   const [view, setView] = useState<OracleScaffoldView | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   function property(): OracleProperty {
-    if (kind === "differential") return { kind: "differential", reference };
-    if (kind === "round_trip") return { kind: "round_trip", encode, decode };
-    return { kind: "invariant", predicate };
+    switch (kind) {
+      case "differential":
+        return { kind: "differential", reference };
+      case "round_trip":
+        return { kind: "round_trip", encode, decode };
+      case "invariant":
+        return { kind: "invariant", predicate };
+      case "metamorphic":
+        return { kind: "metamorphic", transform, relation };
+      case "stateful":
+        return { kind: "stateful", apply, check, max_steps: maxSteps };
+      case "resource":
+        return { kind: "resource", measure, max_growth: maxGrowth };
+    }
   }
 
-  const ready =
-    description.trim().length > 0 &&
-    (kind === "differential"
-      ? reference.trim().length > 0
-      : kind === "round_trip"
-        ? encode.trim().length > 0 && decode.trim().length > 0
-        : predicate.trim().length > 0);
+  function symbolsGiven(): boolean {
+    switch (kind) {
+      case "differential":
+        return reference.trim().length > 0;
+      case "round_trip":
+        return encode.trim().length > 0 && decode.trim().length > 0;
+      case "invariant":
+        return predicate.trim().length > 0;
+      case "metamorphic":
+        return transform.trim().length > 0;
+      case "stateful":
+        return apply.trim().length > 0 && check.trim().length > 0;
+      case "resource":
+        return measure.trim().length > 0;
+    }
+  }
+
+  const ready = description.trim().length > 0 && symbolsGiven();
 
   async function render() {
     setBusy(true);
@@ -118,6 +165,77 @@ export function OracleStudioPanel({ target }: { target: string }) {
             value={predicate}
             onChange={(event) => setPredicate(event.target.value)}
           />
+        )}
+        {kind === "metamorphic" && (
+          <>
+            <Input
+              mono
+              placeholder={t("oracleStudio.transform")}
+              value={transform}
+              onChange={(event) => setTransform(event.target.value)}
+            />
+            {/* The relation is chosen from a closed vocabulary, never typed as
+                an expression that would be interpolated into the harness. */}
+            <div className="flex flex-wrap items-center gap-2">
+              {RELATIONS.map((option) => (
+                <Button
+                  key={option}
+                  variant={option === relation ? "primary" : "outline"}
+                  size="sm"
+                  onClick={() => setRelation(option)}
+                >
+                  {t(`oracleStudio.relation.${option}`)}
+                </Button>
+              ))}
+            </div>
+          </>
+        )}
+        {kind === "stateful" && (
+          <>
+            <Input
+              mono
+              placeholder={t("oracleStudio.apply")}
+              value={apply}
+              onChange={(event) => setApply(event.target.value)}
+            />
+            <Input
+              mono
+              placeholder={t("oracleStudio.check")}
+              value={check}
+              onChange={(event) => setCheck(event.target.value)}
+            />
+            <label className="flex items-center gap-2 text-xs text-text-secondary">
+              {t("oracleStudio.maxSteps")}
+              <input
+                type="number"
+                min={1}
+                max={256}
+                value={maxSteps}
+                onChange={(event) => setMaxSteps(Number(event.target.value))}
+                className="w-24 px-2 py-1 text-11px border border-solid border-[var(--border)] rounded-[var(--radius-md)] bg-[var(--surface-primary)] text-text-primary outline-none"
+              />
+            </label>
+          </>
+        )}
+        {kind === "resource" && (
+          <>
+            <Input
+              mono
+              placeholder={t("oracleStudio.measure")}
+              value={measure}
+              onChange={(event) => setMeasure(event.target.value)}
+            />
+            <label className="flex items-center gap-2 text-xs text-text-secondary">
+              {t("oracleStudio.maxGrowth")}
+              <input
+                type="number"
+                min={1}
+                value={maxGrowth}
+                onChange={(event) => setMaxGrowth(Number(event.target.value))}
+                className="w-32 px-2 py-1 text-11px border border-solid border-[var(--border)] rounded-[var(--radius-md)] bg-[var(--surface-primary)] text-text-primary outline-none"
+              />
+            </label>
+          </>
         )}
         <Textarea
           rows={2}
