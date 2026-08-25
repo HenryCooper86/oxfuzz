@@ -47,6 +47,21 @@ an active sandboxed run.
 
 ![Run -- approved target, bounded campaign configuration, and retained metrics](../screenshots/run.png)
 
+**Choosing between harnesses.** One draft is a sample of one. The compile step
+offers a tournament: oxfuzz generates several candidates for the same target --
+one deterministic template baseline plus independent model drafts -- compiles
+each in the sandbox, and smoke-qualifies each that built. Every candidate's
+evidence is kept, not just the winner's, so you can see what the selection beat:
+whether it built, how many repair passes it needed, its compile diagnostics if it
+failed, and its smoke verdict and throughput if it ran.
+
+Ranking is deterministic and uses only what was observed -- built before not
+built, then smoke verdict, then fewer repairs, then throughput. No model opinion
+enters it, and throughput never outranks a better verdict, because a harness that
+does nothing quickly is not better than one that does the right thing. A
+tournament selects; it does not promote. Promotion stays the explicit step you
+take after reviewing the winner.
+
 **When the harness will not build.** A failed compile usually means oxfuzz does
 not know the include directories, defines, and language standard the project's
 own build uses. The compile step then offers Build Doctor: it reads the project
