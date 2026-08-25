@@ -274,3 +274,186 @@ pub async fn patch_to_proof_fixture(
         finding_id,
     })
 }
+
+/// Owns the resources for a Change-Aware presentation test.
+#[cfg(feature = "change-aware")]
+pub struct ChangeAwareTestFixture {
+    directory: tempfile::TempDir,
+    container: ServiceContainer,
+    base_run: uuid::Uuid,
+    head_run: uuid::Uuid,
+    target_symbol: String,
+}
+
+#[cfg(feature = "change-aware")]
+impl ChangeAwareTestFixture {
+    /// Returns the service container wired to the fixture's durable store.
+    pub fn container(&self) -> ServiceContainer {
+        self.container.clone()
+    }
+
+    /// Returns the retained base run.
+    #[must_use]
+    pub fn base_run(&self) -> uuid::Uuid {
+        self.base_run
+    }
+
+    /// Returns the retained head run, which regressed coverage and introduced
+    /// one finding relative to the base.
+    #[must_use]
+    pub fn head_run(&self) -> uuid::Uuid {
+        self.head_run
+    }
+
+    /// Returns the discovered target's symbol.
+    #[must_use]
+    pub fn target_symbol(&self) -> &str {
+        &self.target_symbol
+    }
+
+    /// Returns the project root used by the fixture.
+    #[must_use]
+    pub fn project_root(&self) -> &Path {
+        self.directory.path()
+    }
+}
+
+/// Builds a store-backed fixture with one discovered target and two comparable
+/// retained runs: a base, and a head that introduced a finding and lost
+/// coverage. Presentation layers can exercise the comparison without running a
+/// campaign.
+///
+/// # Errors
+/// Returns an error when the temporary store or its records cannot be created.
+#[cfg(feature = "change-aware")]
+pub async fn change_aware_fixture() -> Result<ChangeAwareTestFixture, Box<dyn Error + Send + Sync>>
+{
+    use hf_core::crash::{Crash, CrashKind, CrashOrigin};
+    use hf_core::engine::{EngineKind, FuzzRunConfig};
+    use hf_core::harness::{BuildCommand, Harness, HarnessStatus};
+    use hf_core::target::{
+        InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
+    };
+    use hf_storage::{HarnessApprovalKind, RunRecord, RunStatus};
+
+    let directory = tempfile::tempdir()?;
+    std::fs::write(
+        directory.path().join("parser.c"),
+        b"int parse_packet(void);\n",
+    )?;
+    let store = Arc::new(Store::connect(directory.path().join("change.db")).await?);
+
+    let target = TargetCandidate {
+        id: uuid::Uuid::new_v4(),
+        project_root: directory.path().to_path_buf(),
+        symbol: "parse_packet".to_owned(),
+        language: TargetLanguage::C,
+        kind: TargetKind::Parser,
+        location: SourceLocation {
+            file: directory.path().join("parser.c"),
+            line: 1,
+            col: 1,
+            end_line: Some(20),
+            end_col: None,
+        },
+        signature: None,
+        input_surface: InputSurface::Bytes,
+        complexity: 3,
+        accumulated_complexity: 3,
+        reachable_functions: Vec::new(),
+        fit_score: 0.9,
+        sanitizers: vec![Sanitizer::Address],
+        rationale: "fixture".to_owned(),
+    };
+    store.upsert_target(&target, chrono::Utc::now()).await?;
+
+    let harness = Harness {
+        id: uuid::Uuid::new_v4(),
+        target_id: target.id,
+        engine: EngineKind::LibFuzzer,
+        source: "int LLVMFuzzerTestOneInput(const unsigned char*d,unsigned long n){return 0;}"
+            .to_owned(),
+        language: TargetLanguage::C,
+        build_cmd: BuildCommand {
+            compiler: "clang".to_owned(),
+            args: Vec::new(),
+            output: std::path::PathBuf::from("fuzz_parse_packet"),
+            extra_flags: Vec::new(),
+        },
+        sanitizer: Sanitizer::Address,
+        status: HarnessStatus::Promoted,
+        smoke_run: None,
+    };
+    store
+        .promote_harness_with_approval(
+            &harness,
+            HarnessApprovalKind::CleanSmoke,
+            &"a".repeat(64),
+            &"b".repeat(64),
+            chrono::Utc::now(),
+        )
+        .await?;
+
+    let config = FuzzRunConfig {
+        harness_id: harness.id,
+        engine: EngineKind::LibFuzzer,
+        duration: Some(std::time::Duration::from_secs(60)),
+        max_mem_mb: 2048,
+        max_cpus: 1,
+        seed_corpus: None,
+        sanitizer: Sanitizer::Address,
+        env: Vec::new(),
+        extra_args: Vec::new(),
+        seed: Some(7),
+        replay_of: None,
+    };
+    let image = format!("docker-image-id-sha256:{}", "f".repeat(64));
+    let make_run = |source: &str, edges: u64| {
+        let mut run = RunRecord::new(
+            directory.path().to_string_lossy(),
+            EngineKind::LibFuzzer,
+            Some(config.clone()),
+            chrono::Utc::now(),
+        );
+        run.status = RunStatus::Done;
+        run.ended_at = Some(chrono::Utc::now());
+        run.edges = Some(edges);
+        run.harness_rev = Some("a".repeat(64));
+        run.binary_rev = Some("b".repeat(64));
+        run.source_rev = Some(source.to_owned());
+        run.corpus_rev = Some("2".repeat(64));
+        run.sandbox_rev = Some(image.clone());
+        run.context_rev = Some("c".repeat(64));
+        run
+    };
+    let base = make_run(&"1".repeat(64), 1000);
+    let head = make_run(&"3".repeat(64), 900);
+    store.insert_run(&base).await?;
+    store.insert_run(&head).await?;
+
+    let crash = |run_id: uuid::Uuid, signature: &str| Crash {
+        id: uuid::Uuid::new_v4(),
+        run_id,
+        target_id: target.id,
+        input_path: std::path::PathBuf::from("runs/input/crash"),
+        stack_signature: signature.to_owned(),
+        kind: CrashKind::Asan,
+        summary: "overflow".to_owned(),
+        minimized: true,
+        bug_report: None,
+        casr: None,
+        origin: CrashOrigin::Target,
+    };
+    store.upsert_crash(&crash(base.id, "shared")).await?;
+    store.upsert_crash(&crash(head.id, "shared")).await?;
+    store.upsert_crash(&crash(head.id, "fresh")).await?;
+
+    let container = ServiceContainer::stubbed().with_store(Arc::clone(&store));
+    Ok(ChangeAwareTestFixture {
+        directory,
+        container,
+        base_run: base.id,
+        head_run: head.id,
+        target_symbol: target.symbol,
+    })
+}

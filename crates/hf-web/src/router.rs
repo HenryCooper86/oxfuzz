@@ -397,6 +397,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .route("/runs/{id}/cancel", post(cancel_run_by_id))
         .merge(proof_carrying_routes())
         .merge(patch_to_proof_routes())
+        .merge(change_aware_routes())
         .merge(semgrep_routes())
         .route(
             "/projects/auto-revert",
@@ -606,6 +607,19 @@ fn patch_to_proof_routes() -> Router<AppState> {
 
 #[cfg(not(feature = "patch-to-proof"))]
 fn patch_to_proof_routes() -> Router<AppState> {
+    Router::new()
+}
+
+#[cfg(feature = "change-aware")]
+fn change_aware_routes() -> Router<AppState> {
+    Router::new()
+        .route("/change/impact", post(change_impact))
+        .route("/change/compare", post(change_compare))
+        .route("/change/publish", post(change_publish))
+}
+
+#[cfg(not(feature = "change-aware"))]
+fn change_aware_routes() -> Router<AppState> {
     Router::new()
 }
 
@@ -886,6 +900,45 @@ async fn remediation_draft(
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(handoff)))
+}
+
+#[cfg(feature = "change-aware")]
+async fn change_impact(
+    State(state): State<AppState>,
+    Json(request): Json<hf_service::ChangeImpactRequest>,
+) -> ApiResult<serde_json::Value> {
+    let view = state
+        .container
+        .change_impact(request)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(view)))
+}
+
+#[cfg(feature = "change-aware")]
+async fn change_compare(
+    State(state): State<AppState>,
+    Json(request): Json<hf_service::RevisionComparisonRequest>,
+) -> ApiResult<serde_json::Value> {
+    let view = state
+        .container
+        .compare_revisions(request)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(view)))
+}
+
+#[cfg(feature = "change-aware")]
+async fn change_publish(
+    State(state): State<AppState>,
+    Json(request): Json<hf_service::PublishComparisonRequest>,
+) -> ApiResult<serde_json::Value> {
+    let published = state
+        .container
+        .publish_change_comparison(request)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(published)))
 }
 
 #[cfg(feature = "patch-to-proof")]

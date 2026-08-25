@@ -14,6 +14,7 @@ export type ViewType =
   | "artifacts"
   | "reports"
   | "runs"
+  | "changes"
   | "audit"
   | "agents"
   | "skills"
@@ -394,6 +395,88 @@ export interface RemediationOperationView {
 export interface RemediationDraftView {
   operation_id: string;
   status: RemediationOperationStatus;
+}
+
+/// Change-Aware Pull-Request Fuzzing, owned by hf-service. The presentation
+/// layer renders these determinations; it never recomputes one.
+///
+/// There is deliberately no "unaffected" impact: the retained reachable set is
+/// bounded and syntactic, so absence from it is missing analysis, not proof.
+export type TargetImpact = "changed" | "reaches_change" | "unknown";
+
+export type FindingChange = "introduced" | "carried_over" | "resolved" | "unknown";
+
+export type ComparabilityRefusal =
+  | "base_not_terminal"
+  | "head_not_terminal"
+  | "missing_revision"
+  | "sandbox_not_exact"
+  | "different_target"
+  | "different_engine"
+  | "different_corpus"
+  | "different_sandbox"
+  | "same_source_revision";
+
+export interface LineRange {
+  start: number;
+  end: number;
+}
+
+export interface ChangedFile {
+  old_path: string | null;
+  new_path: string | null;
+  ranges: LineRange[];
+  binary: boolean;
+}
+
+export interface AffectedTarget {
+  target_id: string;
+  symbol: string;
+  impact: TargetImpact;
+  reason_code: string;
+  approximate: boolean;
+}
+
+export interface ChangeAwarePlanEntry {
+  target_id: string;
+  symbol: string;
+  impact: TargetImpact;
+  reason_code: string;
+  baseline_run_id: string | null;
+}
+
+export interface ChangeImpactView {
+  schema_version: number;
+  files: ChangedFile[];
+  affected: AffectedTarget[];
+  plan: ChangeAwarePlanEntry[];
+}
+
+export interface ClassifiedFinding {
+  stack_signature: string;
+  change: FindingChange;
+}
+
+export type CoverageComparison =
+  | { status: "unavailable" }
+  | { status: "stable"; delta_pct: number }
+  | { status: "regressed"; delta_pct: number };
+
+export interface RevisionComparisonView {
+  schema_version: number;
+  base_run_id: string;
+  head_run_id: string;
+  comparable: boolean;
+  refusal: ComparabilityRefusal | null;
+  findings: ClassifiedFinding[];
+  coverage: CoverageComparison;
+}
+
+export interface PublishedComparison {
+  destination: string;
+  introduced: number;
+  coverage_regressed: boolean;
+  url: string | null;
 }
 
 export interface CrashReviewItem {

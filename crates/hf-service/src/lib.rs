@@ -18,6 +18,10 @@ pub mod automotive_report;
 #[cfg(feature = "proof-carrying")]
 pub mod campaign_intelligence;
 pub mod campaign_state;
+#[cfg(feature = "change-aware")]
+pub mod change_comparison;
+#[cfg(feature = "change-aware")]
+pub mod change_impact;
 pub mod checkpoints;
 pub mod config;
 pub mod container;
@@ -83,6 +87,12 @@ pub use agent::{AgentRegistryInfo, AgentToolDefinition, AgentTurnRequest};
 /// without depending on `hf-harness` directly.
 pub use hf_harness::{LintFinding, LintSeverity};
 
+#[cfg(feature = "change-aware")]
+pub use change_comparison::{
+    ChangeAwarePlanEntry, ChangeImpactRequest, ChangeImpactView, PublishComparisonRequest,
+    PublishDestination, PublishedComparison, RevisionComparisonRequest, RevisionComparisonView,
+    RevisionRange, CHANGE_AWARE_SCHEMA_VERSION,
+};
 #[cfg(feature = "native-analysis")]
 pub use container::AnalyzedInventory;
 pub use container::{
