@@ -2546,6 +2546,68 @@ fn oracle_studio_feature_unavailable() -> String {
     "the oracle studio is not included in this application build".to_owned()
 }
 
+/// Explain that the stateful lab was excluded from this build.
+#[cfg(not(feature = "automotive-lab"))]
+fn automotive_lab_feature_unavailable() -> String {
+    "the stateful automotive lab is not included in this application build".to_owned()
+}
+
+/// Observed protocol states for a project, from retained evidence.
+#[cfg(feature = "automotive-lab")]
+#[tauri::command]
+pub async fn automotive_lab_coverage(
+    state: tauri::State<'_, crate::state::AppState>,
+    request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let request: hf_service::LabCoverageRequest =
+        serde_json::from_value(request).map_err(|error| format!("invalid request: {error}"))?;
+    let view = state
+        .container
+        .automotive_state_coverage(request)
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(view).map_err(|error| error.to_string())
+}
+
+/// Explain that the stateful lab was excluded from this build.
+#[cfg(not(feature = "automotive-lab"))]
+#[tauri::command]
+pub async fn automotive_lab_coverage(
+    state: tauri::State<'_, crate::state::AppState>,
+    request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let _ = (state, request);
+    Err(automotive_lab_feature_unavailable())
+}
+
+/// An ordered, reviewable sequence plan. Executes nothing.
+#[cfg(feature = "automotive-lab")]
+#[tauri::command]
+pub async fn automotive_lab_plan(
+    state: tauri::State<'_, crate::state::AppState>,
+    request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let request: hf_service::LabPlanRequest =
+        serde_json::from_value(request).map_err(|error| format!("invalid request: {error}"))?;
+    let plan = state
+        .container
+        .automotive_sequence_plan(request)
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(plan).map_err(|error| error.to_string())
+}
+
+/// Explain that the stateful lab was excluded from this build.
+#[cfg(not(feature = "automotive-lab"))]
+#[tauri::command]
+pub async fn automotive_lab_plan(
+    state: tauri::State<'_, crate::state::AppState>,
+    request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let _ = (state, request);
+    Err(automotive_lab_feature_unavailable())
+}
+
 /// Render an oracle specification into the harness it produces, for review.
 #[cfg(feature = "oracle-studio")]
 #[tauri::command]

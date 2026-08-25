@@ -176,6 +176,21 @@ run history, policy audit, and evidence export provide the wider audit trail.
 
 ![Artifacts -- crashes and corpus](../screenshots/artifacts.png)
 
+**Automotive state sequences.** For a protocol whose defects depend on the order
+of calls, the Automotive view's Stateful Lab shows which protocol states the
+retained evidence actually reached and proposes an ordered plan for reaching what
+it has not. The plan is advisory: you run its steps through the usual automotive
+operations, and the lab itself opens no interface.
+
+Two things are deliberate. Only virtual CAN and offline capture can be
+sequenced -- the physical bench cannot, because each physical transmission
+requires its own fresh approval and a sequence would turn one approval into many
+transmissions. And the lab reports no coverage percentage unless you supply a
+reviewed state model: retained evidence shows which states were reached but
+cannot show how many exist, and treating the observed set as the total would
+report every campaign as complete coverage of itself.
+
+
 ### Talk to it instead
 
 Everything above is also available conversationally. The **AI Assistant** uses
