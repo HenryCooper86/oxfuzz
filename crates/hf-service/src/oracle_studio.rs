@@ -33,6 +33,15 @@ const MAX_SYMBOL_LEN: usize = 128;
 /// Longest accepted property description.
 const MAX_DESCRIPTION_LEN: usize = 1024;
 
+/// Most operations a stateful oracle may drive from one input. Without a
+/// ceiling a large input becomes an unbounded loop inside a single fuzzer
+/// iteration, stalling the campaign rather than finding anything.
+pub const MAX_STATEFUL_STEPS: u32 = 256;
+
+/// Largest growth a resource oracle may allow across one call. An allowance
+/// this large proves nothing, so it bounds the reviewed specification.
+pub const MAX_RESOURCE_GROWTH: u64 = 1 << 30;
+
 /// Which property an oracle checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -40,6 +49,9 @@ pub enum OracleKind {
     Differential,
     RoundTrip,
     Invariant,
+    Metamorphic,
+    Stateful,
+    Resource,
 }
 
 impl OracleKind {
@@ -50,6 +62,9 @@ impl OracleKind {
             Self::Differential => "differential",
             Self::RoundTrip => "round_trip",
             Self::Invariant => "invariant",
+            Self::Metamorphic => "metamorphic",
+            Self::Stateful => "stateful",
+            Self::Resource => "resource",
         }
     }
 
@@ -58,7 +73,37 @@ impl OracleKind {
             "differential" => Some(Self::Differential),
             "round_trip" => Some(Self::RoundTrip),
             "invariant" => Some(Self::Invariant),
+            "metamorphic" => Some(Self::Metamorphic),
+            "stateful" => Some(Self::Stateful),
+            "resource" => Some(Self::Resource),
             _ => None,
+        }
+    }
+}
+
+/// How a transformed input's result must relate to the original's.
+///
+/// A closed vocabulary, not an expression: an expression would be code supplied
+/// as a string and interpolated into the harness, which is exactly what symbol
+/// validation exists to prevent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetamorphicRelation {
+    /// The transformation should not change the result.
+    Equal,
+    /// The transformation adds information, so the result must not shrink.
+    NotLess,
+    /// The transformation removes information, so the result must not grow.
+    NotGreater,
+}
+
+impl MetamorphicRelation {
+    /// The C condition that is true when the relation is *violated*.
+    const fn violation_condition(self) -> &'static str {
+        match self {
+            Self::Equal => "transformed_result != base_result",
+            Self::NotLess => "transformed_result < base_result",
+            Self::NotGreater => "transformed_result > base_result",
         }
     }
 }
@@ -73,6 +118,24 @@ pub enum OracleProperty {
     RoundTrip { encode: String, decode: String },
     /// `predicate` must hold after every call to the target.
     Invariant { predicate: String },
+    /// `target` applied to a transformed input must relate to the original.
+    Metamorphic {
+        transform: String,
+        relation: MetamorphicRelation,
+    },
+    /// `check` must hold after every operation in a sequence driven by `apply`.
+    Stateful {
+        apply: String,
+        check: String,
+        /// Bounded by [`MAX_STATEFUL_STEPS`].
+        max_steps: u32,
+    },
+    /// `measure` must not grow by more than `max_growth` across one call.
+    Resource {
+        measure: String,
+        /// Bounded by [`MAX_RESOURCE_GROWTH`].
+        max_growth: u64,
+    },
 }
 
 /// One human-authored, reviewable oracle.
@@ -94,6 +157,9 @@ impl OracleSpec {
             OracleProperty::Differential { .. } => OracleKind::Differential,
             OracleProperty::RoundTrip { .. } => OracleKind::RoundTrip,
             OracleProperty::Invariant { .. } => OracleKind::Invariant,
+            OracleProperty::Metamorphic { .. } => OracleKind::Metamorphic,
+            OracleProperty::Stateful { .. } => OracleKind::Stateful,
+            OracleProperty::Resource { .. } => OracleKind::Resource,
         }
     }
 
@@ -111,16 +177,30 @@ impl OracleSpec {
             OracleProperty::Invariant { predicate } => {
                 symbols.push(("predicate", predicate.as_str()));
             }
+            OracleProperty::Metamorphic { transform, .. } => {
+                symbols.push(("transform", transform.as_str()));
+            }
+            OracleProperty::Stateful { apply, check, .. } => {
+                symbols.push(("apply", apply.as_str()));
+                symbols.push(("check", check.as_str()));
+            }
+            OracleProperty::Resource { measure, .. } => {
+                symbols.push(("measure", measure.as_str()));
+            }
         }
         symbols
     }
 }
 
 /// A recorded violation of a named property.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct OracleViolation {
     pub oracle_id: Uuid,
     pub kind: OracleKind,
+    /// One whitespace-free token distinguishing this violation from another of
+    /// the same kind: the step a sequence failed at, the growth observed. The
+    /// stateless kinds carry none, because the input alone identifies them.
+    pub detail: Option<String>,
 }
 
 /// Why a specification was refused.
@@ -135,6 +215,9 @@ pub enum OracleError {
     /// The description is empty or over-long.
     #[error("the property description must be present and under {MAX_DESCRIPTION_LEN} characters")]
     Description,
+    /// A step ceiling or growth allowance is outside its bounded range.
+    #[error("{field} must be between 1 and {max}")]
+    Bound { field: &'static str, max: u64 },
 }
 
 /// Validate a specification before it can reach generated source.
@@ -149,6 +232,25 @@ pub fn validate_spec(spec: &OracleSpec) -> Result<(), OracleError> {
         if !is_plain_identifier(symbol) {
             return Err(OracleError::Symbol { role });
         }
+    }
+    match &spec.property {
+        OracleProperty::Stateful { max_steps, .. } => {
+            if *max_steps == 0 || *max_steps > MAX_STATEFUL_STEPS {
+                return Err(OracleError::Bound {
+                    field: "the step ceiling",
+                    max: u64::from(MAX_STATEFUL_STEPS),
+                });
+            }
+        }
+        OracleProperty::Resource { max_growth, .. } => {
+            if *max_growth == 0 || *max_growth > MAX_RESOURCE_GROWTH {
+                return Err(OracleError::Bound {
+                    field: "the growth allowance",
+                    max: MAX_RESOURCE_GROWTH,
+                });
+            }
+        }
+        _ => {}
     }
     let description = spec.description.trim();
     if description.is_empty() || spec.description.len() > MAX_DESCRIPTION_LEN {
@@ -207,7 +309,7 @@ pub fn render_oracle_harness(spec: &OracleSpec) -> Result<String, OracleError> {
                  \x20   int actual = {target}(data, size);\n\
                  \x20   int expected = {reference}(data, size);\n\
                  \x20   if (actual != expected) {{\n\
-                 \x20       oxfuzz_oracle_violation();\n\
+                 \x20       oxfuzz_oracle_violation(\"\");\n\
                  \x20   }}\n\
                  \x20   return 0;\n\
                  }}\n"
@@ -241,7 +343,7 @@ pub fn render_oracle_harness(spec: &OracleSpec) -> Result<String, OracleError> {
                  \x20   /* A rejected input is not a violation; a round trip that\n\
                  \x20      succeeds and changes the value is. */\n\
                  \x20   if (decoded_len != size || memcmp(decoded, data, size) != 0) {{\n\
-                 \x20       oxfuzz_oracle_violation();\n\
+                 \x20       oxfuzz_oracle_violation(\"\");\n\
                  \x20   }}\n\
                  \x20   return 0;\n\
                  }}\n"
@@ -255,7 +357,98 @@ pub fn render_oracle_harness(spec: &OracleSpec) -> Result<String, OracleError> {
                 "\nint LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {{\n\
                  \x20   {target}(data, size);\n\
                  \x20   if ({predicate}() == 0) {{\n\
-                 \x20       oxfuzz_oracle_violation();\n\
+                 \x20       oxfuzz_oracle_violation(\"\");\n\
+                 \x20   }}\n\
+                 \x20   return 0;\n\
+                 }}\n"
+            );
+        }
+        OracleProperty::Metamorphic {
+            transform,
+            relation,
+        } => {
+            let _ = writeln!(source, "int {target}(const uint8_t *data, size_t size);");
+            let _ = writeln!(
+                source,
+                "int {transform}(const uint8_t *in, size_t in_len, uint8_t *out, size_t *out_len);"
+            );
+            let condition = relation.violation_condition();
+            let _ = write!(
+                source,
+                "\nint LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {{\n\
+                 \x20   if (size == 0 || size > OXFUZZ_ORACLE_MAX) {{\n\
+                 \x20       return 0;\n\
+                 \x20   }}\n\
+                 \x20   static uint8_t transformed[OXFUZZ_ORACLE_MAX * 2];\n\
+                 \x20   size_t transformed_len = sizeof(transformed);\n\
+                 \x20   /* A transformation that refuses the input is not a violation. */\n\
+                 \x20   if ({transform}(data, size, transformed, &transformed_len) != 0) {{\n\
+                 \x20       return 0;\n\
+                 \x20   }}\n\
+                 \x20   int base_result = {target}(data, size);\n\
+                 \x20   int transformed_result = {target}(transformed, transformed_len);\n\
+                 \x20   if ({condition}) {{\n\
+                 \x20       oxfuzz_oracle_violation(\"\");\n\
+                 \x20   }}\n\
+                 \x20   return 0;\n\
+                 }}\n"
+            );
+        }
+        OracleProperty::Stateful {
+            apply,
+            check,
+            max_steps,
+        } => {
+            let _ = writeln!(
+                source,
+                "int {apply}(uint8_t op, const uint8_t *data, size_t size);"
+            );
+            let _ = writeln!(source, "int {check}(void);");
+            let _ = write!(
+                source,
+                "\n#define OXFUZZ_ORACLE_STEPS {max_steps}\n\
+                 #define OXFUZZ_ORACLE_CHUNK 16\n\
+                 \nint LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {{\n\
+                 \x20   /* Each step takes one operation byte and a bounded payload. The\n\
+                 \x20      step ceiling is part of the reviewed specification: without it a\n\
+                 \x20      large input becomes an unbounded loop in one iteration. */\n\
+                 \x20   for (unsigned step = 0; step < OXFUZZ_ORACLE_STEPS && size > 0; step++) {{\n\
+                 \x20       uint8_t op = data[0];\n\
+                 \x20       data++;\n\
+                 \x20       size--;\n\
+                 \x20       size_t chunk = size < OXFUZZ_ORACLE_CHUNK ? size : OXFUZZ_ORACLE_CHUNK;\n\
+                 \x20       {apply}(op, data, chunk);\n\
+                 \x20       data += chunk;\n\
+                 \x20       size -= chunk;\n\
+                 \x20       if ({check}() == 0) {{\n\
+                 \x20           char detail[32];\n\
+                 \x20           snprintf(detail, sizeof(detail), \" step=%u\", step);\n\
+                 \x20           oxfuzz_oracle_violation(detail);\n\
+                 \x20       }}\n\
+                 \x20   }}\n\
+                 \x20   return 0;\n\
+                 }}\n"
+            );
+        }
+        OracleProperty::Resource {
+            measure,
+            max_growth,
+        } => {
+            let _ = writeln!(source, "int {target}(const uint8_t *data, size_t size);");
+            let _ = writeln!(source, "unsigned long {measure}(void);");
+            let _ = write!(
+                source,
+                "\n#define OXFUZZ_ORACLE_GROWTH {max_growth}UL\n\
+                 \nint LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {{\n\
+                 \x20   /* A target-reported measurement, not process memory: process\n\
+                 \x20      memory includes the fuzzer, the sanitizer, and the corpus. */\n\
+                 \x20   unsigned long before = {measure}();\n\
+                 \x20   {target}(data, size);\n\
+                 \x20   unsigned long after = {measure}();\n\
+                 \x20   if (after > before && (after - before) > OXFUZZ_ORACLE_GROWTH) {{\n\
+                 \x20       char detail[48];\n\
+                 \x20       snprintf(detail, sizeof(detail), \" growth=%lu\", after - before);\n\
+                 \x20       oxfuzz_oracle_violation(detail);\n\
                  \x20   }}\n\
                  \x20   return 0;\n\
                  }}\n"
@@ -278,7 +471,14 @@ pub fn classify_oracle_violation(output: &str) -> Option<OracleViolation> {
         let mut fields = rest.split_whitespace();
         let oracle_id = Uuid::parse_str(fields.next()?).ok()?;
         let kind = OracleKind::parse(fields.next()?)?;
-        Some(OracleViolation { oracle_id, kind })
+        // A missing or unparseable detail does not stop the line classifying:
+        // the oracle and kind are what make it a violation.
+        let detail = fields.next().map(str::to_owned);
+        Some(OracleViolation {
+            oracle_id,
+            kind,
+            detail,
+        })
     })
 }
 
@@ -292,8 +492,8 @@ const PRELUDE: &str = "\n#include <stddef.h>\n#include <stdint.h>\n#include <std
 /// leave an oracle that silently checks nothing.
 fn violation_macro(id: Uuid, kind: OracleKind) -> String {
     format!(
-        "static void oxfuzz_oracle_violation(void) {{\n\
-         \x20   fprintf(stderr, \"{ORACLE_VIOLATION_MARKER} {id} {}\\n\");\n\
+        "static void oxfuzz_oracle_violation(const char *detail) {{\n\
+         \x20   fprintf(stderr, \"{ORACLE_VIOLATION_MARKER} {id} {}%s\\n\", detail);\n\
          \x20   fflush(stderr);\n\
          \x20   __builtin_trap();\n\
          }}\n",
