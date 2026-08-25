@@ -47,6 +47,25 @@ an active sandboxed run.
 
 ![Run -- approved target, bounded campaign configuration, and retained metrics](../screenshots/run.png)
 
+**Finding defects that do not crash.** A sanitizer finds memory faults. It does
+not find a decoder that returns the wrong answer, a round trip that loses data,
+or an invariant that quietly stops holding. The Oracle Studio lets you state such
+a property and check it on every input.
+
+Three kinds are available: differential (the target and a reference
+implementation must agree), round trip (decoding an encoded value must reproduce
+it), and invariant (a predicate must hold after every call). You name the
+functions and describe what the property means; oxfuzz shows the exact harness
+that produces, which you review before building it through the usual compile and
+run steps. Each kind expects a specific signature for the functions it calls --
+shown next to the fields -- and a mismatch fails the build naming the symbol,
+rather than compiling into an oracle that tests nothing.
+
+An oracle harness deliberately stops the process when the property is violated;
+that is the signal. A resulting finding is identified as a violation of that
+named property. A memory-safety crash in the same harness stays a memory-safety
+finding, because only the recorded property marker makes it an oracle violation.
+
 **Choosing between harnesses.** One draft is a sample of one. The compile step
 offers a tournament: oxfuzz generates several candidates for the same target --
 one deterministic template baseline plus independent model drafts -- compiles
