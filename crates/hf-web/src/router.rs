@@ -399,6 +399,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .merge(patch_to_proof_routes())
         .merge(change_aware_routes())
         .merge(build_doctor_routes())
+        .merge(harness_tournament_routes())
         .merge(semgrep_routes())
         .route(
             "/projects/auto-revert",
@@ -633,6 +634,16 @@ fn build_doctor_routes() -> Router<AppState> {
 
 #[cfg(not(feature = "build-doctor"))]
 fn build_doctor_routes() -> Router<AppState> {
+    Router::new()
+}
+
+#[cfg(feature = "harness-tournament")]
+fn harness_tournament_routes() -> Router<AppState> {
+    Router::new().route("/harness/tournament", post(harness_tournament))
+}
+
+#[cfg(not(feature = "harness-tournament"))]
+fn harness_tournament_routes() -> Router<AppState> {
     Router::new()
 }
 
@@ -913,6 +924,19 @@ async fn remediation_draft(
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(handoff)))
+}
+
+#[cfg(feature = "harness-tournament")]
+async fn harness_tournament(
+    State(state): State<AppState>,
+    Json(request): Json<hf_service::HarnessTournamentRequest>,
+) -> ApiResult<serde_json::Value> {
+    let result = state
+        .container
+        .run_harness_tournament(request)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(result)))
 }
 
 #[cfg(feature = "build-doctor")]

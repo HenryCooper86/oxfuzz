@@ -8,6 +8,7 @@ import type { TargetInventory, HarnessReviewItem } from "../types";
 import { Button, Input, Select, ViewHeader, EmptyState } from "../components/ui";
 import { SandboxBanner } from "../components/SandboxBanner";
 import { BuildDoctorPanel } from "../components/BuildDoctorPanel";
+import { HarnessTournamentPanel } from "../components/HarnessTournamentPanel";
 import {
   Crosshair, FolderOpen, Loader2, FileCode, Terminal, Database,
   CheckCircle2, XCircle, ArrowRight, Sparkles, Archive, GitCompare, AlertTriangle,
@@ -597,6 +598,18 @@ export function HarnessView({
             {compileResult && compileResult.status !== "Compiled" && project && (
               <div className="mt-3">
                 <BuildDoctorPanel project={project} />
+              </div>
+            )}
+            {/* Evaluating several candidates is a choice about the compile step,
+                so it sits alongside it rather than in its own view. */}
+            {project && selectedTarget && (
+              <div className="mt-3">
+                <HarnessTournamentPanel
+                  project={project}
+                  target={selectedTarget}
+                  engine={engine}
+                  lang={lang}
+                />
               </div>
             )}
           </Step>
