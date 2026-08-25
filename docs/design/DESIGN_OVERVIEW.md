@@ -47,6 +47,7 @@ all under human-in-the-loop supervision.
 | Agent loop | hf-agent | `AgentDelegator` | agent-prompt-security-design.md |
 | Web API security / transport | hf-web | - | web-api-security-design.md |
 | Remediation handoff | hf-crash + hf-service | versioned remediation DTO | proof-carrying-campaign-intelligence.md |
+| Patch verification | hf-service + hf-crash + hf-storage | durable remediation operation and exact sandbox evidence | patch-to-proof-design.md |
 
 ## 4. Crate Dependency Rules
 

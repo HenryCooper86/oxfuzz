@@ -54,6 +54,24 @@ result can be exported or handed off to DefectDojo.
 
 ![Triage -- deduplicated sanitizer crash and exploitability classification](../screenshots/triage.png)
 
+**Prove a fix, do not assert one.** The selected finding carries a Patch to
+Proof panel. Paste a candidate unified diff and a bounded follow-up fuzzing
+duration, and oxfuzz persists an unverified draft. The draft shows the exact
+scope approval will bind: the patch, minimized reproducer, harness, original
+binary, sandbox image, and verification specification digests. Nothing is
+built or executed until you approve that scope and confirm the run.
+
+Verification then runs entirely in the sandbox, in five recorded stages:
+original replay, patch and build, patched replay, regression corpus, and
+bounded follow-up fuzzing. The result is `verified` only when all five stages
+pass against the approved inputs; a reproduced crash after patching is
+`rejected`, and missing or interrupted evidence is `inconclusive` with a named
+reason rather than a silent pass. The outcome is persisted, so closing the
+application does not lose it -- a run interrupted by a restart is reported as
+inconclusive and can be attempted again. The finding's proof card reflects that
+same service-owned result; a draft, a model response, or a clean patched replay
+on its own never marks a finding fixed.
+
 **Review retained evidence.** The Artifacts view collects persisted crash
 reproducers and corpus inputs across the selected project in one place. Reports,
 run history, policy audit, and evidence export provide the wider audit trail.

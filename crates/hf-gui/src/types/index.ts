@@ -262,7 +262,11 @@ export interface HarnessReviewItem {
 }
 
 export type FindingProofStatus = "supported" | "not_verified" | "unavailable";
-export type FindingEvidenceKind = "crash_record" | "run_record" | "casr_report";
+export type FindingEvidenceKind =
+  | "crash_record"
+  | "run_record"
+  | "casr_report"
+  | "remediation_record";
 export type FaultOriginDetermination = "target" | "harness" | "runtime" | "unknown";
 export type ReproductionDetermination = "deterministic" | "not_verified";
 export type CasrExploitabilityDetermination =
@@ -298,6 +302,98 @@ export interface FindingProofCard {
   casr_exploitability: FindingProofClaim<CasrExploitabilityDetermination>;
   external_reachability: FindingProofClaim<ReachabilityDetermination>;
   fix_verification: FindingProofClaim<FixVerificationDetermination>;
+}
+
+/// Durable Patch-to-Proof workflow state, owned by hf-service. The presentation
+/// layer renders these values; it never derives them from stage results.
+export type RemediationOperationStatus =
+  | "draft"
+  | "approved"
+  | "running"
+  | "verified"
+  | "rejected"
+  | "inconclusive";
+
+export type RemediationOperationStage =
+  | "review"
+  | "original_replay"
+  | "patch_build"
+  | "patched_replay"
+  | "regression"
+  | "follow_up"
+  | "complete";
+
+export type VerificationStageStatus = "passed" | "failed" | "inconclusive" | "skipped";
+
+export interface VerificationStageEvidence {
+  status: VerificationStageStatus;
+  detail_code: string;
+  cases: number;
+  failures: number;
+  findings: number;
+}
+
+export interface SandboxVerificationEvidence {
+  verification_id: string;
+  source_revision_sha256: string;
+  patch_sha256: string;
+  reproducer_sha256: string;
+  harness_sha256: string;
+  original_binary_sha256: string;
+  patched_binary_sha256: string | null;
+  sandbox_image_sha256: string;
+  regression_corpus_sha256: string;
+  verification_spec_sha256: string;
+  original_replay: VerificationStageEvidence;
+  patch_build: VerificationStageEvidence;
+  patched_replay: VerificationStageEvidence;
+  regression: VerificationStageEvidence;
+  follow_up_fuzz: VerificationStageEvidence;
+}
+
+export interface RemediationVerificationSpec {
+  schema_version: number;
+  engine: string;
+  replay_timeout_secs: number;
+  max_regression_cases: number;
+  follow_up_fuzz_seconds: number;
+  max_mem_mb: number;
+  max_cpus: number;
+  seed: number;
+}
+
+/// The exact scope an operator approves before any sandbox execution.
+export interface RemediationBinding {
+  finding_id: string;
+  run_id: string;
+  source_revision_sha256: string;
+  patch_sha256: string;
+  patch: string;
+  reproducer_sha256: string;
+  harness_sha256: string;
+  original_binary_sha256: string;
+  sandbox_image_sha256: string;
+  evidence_manifest_sha256: string;
+  regression_corpus_sha256: string;
+  verification_spec_sha256: string;
+  verification_spec: RemediationVerificationSpec;
+}
+
+export interface RemediationOperationView {
+  operation_id: string;
+  run_id: string;
+  finding_id: string;
+  status: RemediationOperationStatus;
+  current_stage: RemediationOperationStage;
+  binding: RemediationBinding;
+  verification: SandboxVerificationEvidence | null;
+  failure_code: string | null;
+  failure_message: string | null;
+}
+
+export interface RemediationDraftView {
+  operation_id: string;
+  status: RemediationOperationStatus;
 }
 
 export interface CrashReviewItem {

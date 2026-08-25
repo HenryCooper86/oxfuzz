@@ -62,6 +62,8 @@ use hf_storage::{GuardrailDecisionRecord, RunRecord, RunStatus, Store};
 use project_identity::{
     canonical_project_root, project_slug, select_target_candidate, stored_project_matches,
 };
+#[cfg(feature = "patch-to-proof")]
+pub(crate) use staging::run_context_source_digest;
 use staging::{qualification_evidence, sha256_file, RunArtifacts};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -732,7 +734,11 @@ impl ServiceContainer {
 
     /// Runtime adapter used by service-owned optional subsystems.
     #[must_use]
-    #[cfg(any(feature = "automotive-scapy", feature = "semgrep-enrichment"))]
+    #[cfg(any(
+        feature = "automotive-scapy",
+        feature = "semgrep-enrichment",
+        feature = "patch-to-proof"
+    ))]
     pub(crate) fn runtime_adapter(&self) -> &Arc<dyn RuntimeAdapter> {
         &self.runtime
     }

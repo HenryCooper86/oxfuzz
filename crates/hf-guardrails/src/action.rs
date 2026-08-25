@@ -30,6 +30,13 @@ pub enum Action {
         /// Requested wall-clock duration in seconds.
         duration_secs: u64,
     },
+    /// Apply and verify an approved remediation inside the sandbox.
+    VerifyRemediation {
+        /// The fuzzing engine used for the bounded follow-up campaign.
+        engine: String,
+        /// Requested follow-up campaign duration in seconds.
+        duration_secs: u64,
+    },
     /// Parse or transform automotive artifacts without opening a bus interface.
     AutomotiveOffline {
         /// Sidecar operation such as `analyze_pcap` or `generate_mutations`.
@@ -89,6 +96,7 @@ impl Action {
             Action::CompileHarness => "compile_harness",
             Action::RunHarness => "run_harness",
             Action::RunFuzzer { .. } => "run_fuzzer",
+            Action::VerifyRemediation { .. } => "verify_remediation",
             Action::AutomotiveOffline { .. } => "automotive_offline",
             Action::AutomotiveVirtualCan { .. } => "automotive_virtual_can",
             Action::AutomotivePhysicalBench { .. } => "automotive_physical_bench",
@@ -114,6 +122,10 @@ impl Action {
                 engine,
                 duration_secs,
             } => format!("run {engine} for {duration_secs}s"),
+            Action::VerifyRemediation {
+                engine,
+                duration_secs,
+            } => format!("verify {engine} remediation for {duration_secs}s"),
             Action::AutomotiveOffline { operation } => {
                 format!("automotive offline {operation}")
             }
@@ -151,6 +163,7 @@ impl Action {
             | Action::AgentTool { .. } => RiskTier::Medium,
             Action::RunHarness
             | Action::RunFuzzer { .. }
+            | Action::VerifyRemediation { .. }
             | Action::AutomotiveVirtualCan { .. }
             | Action::AutomotivePhysicalBench { .. }
             | Action::WriteHostFile { .. } => RiskTier::High,

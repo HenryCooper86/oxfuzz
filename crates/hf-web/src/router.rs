@@ -396,6 +396,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .route("/runs/{id}/status", get(run_status))
         .route("/runs/{id}/cancel", post(cancel_run_by_id))
         .merge(proof_carrying_routes())
+        .merge(patch_to_proof_routes())
         .merge(semgrep_routes())
         .route(
             "/projects/auto-revert",
@@ -575,6 +576,36 @@ fn proof_carrying_routes() -> Router<AppState> {
 
 #[cfg(not(feature = "proof-carrying"))]
 fn proof_carrying_routes() -> Router<AppState> {
+    Router::new()
+}
+
+#[cfg(feature = "patch-to-proof")]
+fn patch_to_proof_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/remediation/operations",
+            post(remediation_operation_create),
+        )
+        .route(
+            "/remediation/operations/{id}/approve",
+            post(remediation_operation_approve),
+        )
+        .route(
+            "/remediation/operations/{id}/verify",
+            post(remediation_operation_verify),
+        )
+        .route(
+            "/remediation/operations/{id}",
+            get(remediation_operation_get),
+        )
+        .route(
+            "/findings/{id}/proof-card",
+            get(finding_proof_card_for_crash),
+        )
+}
+
+#[cfg(not(feature = "patch-to-proof"))]
+fn patch_to_proof_routes() -> Router<AppState> {
     Router::new()
 }
 
@@ -855,6 +886,80 @@ async fn remediation_draft(
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(handoff)))
+}
+
+#[cfg(feature = "patch-to-proof")]
+async fn remediation_operation_create(
+    State(state): State<AppState>,
+    Json(request): Json<hf_service::RemediationDraftRequest>,
+) -> ApiResult<serde_json::Value> {
+    let view = state
+        .container
+        .create_remediation_operation(request)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(view)))
+}
+
+#[cfg(feature = "patch-to-proof")]
+#[derive(Debug, Deserialize)]
+struct RemediationApproveRequest {
+    operator: String,
+}
+
+#[cfg(feature = "patch-to-proof")]
+async fn remediation_operation_approve(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+    Json(request): Json<RemediationApproveRequest>,
+) -> ApiResult<serde_json::Value> {
+    let view = state
+        .container
+        .approve_remediation_operation(id, &request.operator)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(view)))
+}
+
+#[cfg(feature = "patch-to-proof")]
+async fn remediation_operation_verify(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> ApiResult<serde_json::Value> {
+    state
+        .container
+        .start_remediation_verification(hf_service::RemediationStartRequest { operation_id: id })
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(
+        serde_json::json!({ "operation_id": id, "accepted": true }),
+    )))
+}
+
+#[cfg(feature = "patch-to-proof")]
+async fn remediation_operation_get(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> ApiResult<serde_json::Value> {
+    let view = state
+        .container
+        .remediation_operation(id)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(view)))
+}
+
+#[cfg(feature = "patch-to-proof")]
+async fn finding_proof_card_for_crash(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> ApiResult<serde_json::Value> {
+    let card = state
+        .container
+        .finding_proof_card_for_crash(id)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(card)))
 }
 
 #[derive(Debug, Deserialize)]

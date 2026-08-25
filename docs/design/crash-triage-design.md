@@ -87,6 +87,11 @@ verified only when the service supplies matching original-crash, patched-replay,
 and regression evidence as specified by
 `proof-carrying-campaign-intelligence.md`.
 
+When `patch-to-proof` is enabled, Triage can persist that handoff, record an
+exact-scope human approval, and start the service-owned sandbox workflow
+described in `patch-to-proof-design.md`. Draft or running state never changes a
+finding's fix-verification determination.
+
 ## 5. Safety
 
 - Crash inputs are untrusted; minimization runs in sandbox.

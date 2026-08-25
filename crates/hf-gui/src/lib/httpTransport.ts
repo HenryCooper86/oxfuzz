@@ -49,6 +49,17 @@ const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   campaign_advice: { method: "POST", path: "/campaign/advice" },
   campaign_evidence: { method: "POST", path: "/campaign/evidence" },
   remediation_draft: { method: "POST", path: "/remediation/draft" },
+  create_remediation_operation: { method: "POST", path: "/remediation/operations" },
+  approve_remediation_operation: {
+    method: "POST",
+    path: "/remediation/operations/{operation_id}/approve",
+  },
+  start_remediation_verification: {
+    method: "POST",
+    path: "/remediation/operations/{operation_id}/verify",
+  },
+  remediation_operation: { method: "GET", path: "/remediation/operations/{operation_id}" },
+  finding_proof_card_for_crash: { method: "GET", path: "/findings/{crash_id}/proof-card" },
   project_auto_revert_override: { method: "POST", path: "/projects/auto-revert" },
   project_auto_revert_overrides: { method: "GET", path: "/projects/auto-revert/all" },
   effective_auto_revert_policy: { method: "POST", path: "/projects/auto-revert/effective" },

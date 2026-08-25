@@ -306,6 +306,40 @@ and `target_id` are logical references; the migration does not declare SQL
 foreign keys. The cross-run list uses SQLite row insertion order because the
 model has no creation timestamp.
 
+### `remediation_operations`
+
+Migration `0026_patch_to_proof.sql` creates the durable Patch-to-Proof workflow.
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | service-owned operation UUID |
+| `run_id` | `TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE` | exact campaign |
+| `finding_id` | `TEXT NOT NULL REFERENCES crashes(id) ON DELETE CASCADE` | exact finding |
+| `project_root` | `TEXT NOT NULL` | canonical project root |
+| `target` | `TEXT NOT NULL` | persisted target symbol |
+| `status` | `TEXT NOT NULL CHECK (...)` | draft/approved/running/verified/rejected/inconclusive |
+| `current_stage` | `TEXT NOT NULL CHECK (...)` | review/original_replay/patch_build/patched_replay/regression/follow_up/complete |
+| `binding_json` | `TEXT NOT NULL` | immutable serialized remediation binding |
+| `approval_json` | `TEXT` | immutable exact-scope human approval |
+| `verification_json` | `TEXT` | terminal sandbox evidence |
+| `artifact_dir` | `TEXT NOT NULL` | workspace-relative operation directory |
+| `created_at` | `TEXT NOT NULL` | RFC 3339 |
+| `updated_at` | `TEXT NOT NULL` | RFC 3339 |
+| `ended_at` | `TEXT` | terminal timestamp |
+| `failure_code` | `TEXT` | bounded stable terminal reason |
+| `failure_message` | `TEXT` | bounded sanitized terminal detail |
+
+The row checks require approval for every state after `draft`, terminal fields
+only for terminal states, and verification evidence for `verified` or
+`rejected`. Triggers reject changes to identity, binding, approval, artifact
+directory, and creation time after they are first written. Store transitions
+use the expected prior state in the `UPDATE` predicate and require exactly one
+affected row.
+
+Indexes:
+`idx_remediation_finding(finding_id, created_at DESC)` and
+`idx_remediation_status(status, updated_at)`.
+
 ### `corpus_entries`
 
 | column | SQLite declaration |
@@ -689,6 +723,7 @@ Index: `idx_guardrail_decisions_ts(decided_at DESC)`.
 | `0023_schedule_occurrences.sql` | creates permanent schedule occurrence receipts with paired execution transitions and retention protection |
 | `0024_retired_engine_records.sql` | archives complete retired-engine records as immutable, non-executable evidence before typed deserialization |
 | `0025_schedule_retirement_operations.sql` | adds canonical lowercase RFC 4122 v4, shape-checked immutable operation proofs and exact normalized permanent-ID tombstones committed with linked schedule-history retirement; hardens retired archive and history insert/update immutability |
+| `0026_patch_to_proof.sql` | creates durable remediation attempts with immutable review scope, compare-and-set lifecycle states, and terminal sandbox evidence |
 
 ## 7. Read failure contract
 

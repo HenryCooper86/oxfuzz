@@ -70,6 +70,11 @@ but is not the lifecycle lock. An absent root is a successful no-op.
   unique container name for reliable teardown.
 - Crash triage: the hardened profile plus the minimum ptrace capability needed
   by CASR.
+- Patch verification: fixed patch application, harness compilation, original
+  and patched replay, bounded corpus regression, and bounded follow-up fuzzing
+  in operation-owned directories. Networking is disabled; original run inputs
+  and corpus are read-only; only candidate source, build output, and follow-up
+  output directories are writable.
 - Syzkaller: the hardened profile with a target platform, staged mounts, and at
   most `/dev/kvm` declared per call. Container networking remains disabled;
   qemu user networking is constrained by that outer boundary. The profile does

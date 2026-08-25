@@ -2516,6 +2516,176 @@ fn proof_carrying_feature_unavailable() -> String {
     "proof-carrying campaign intelligence is not included in this application build".to_owned()
 }
 
+/// Create a durable, visibly unverified Patch-to-Proof remediation draft.
+#[cfg(feature = "patch-to-proof")]
+#[tauri::command]
+pub async fn create_remediation_operation(
+    state: tauri::State<'_, crate::state::AppState>,
+    run_id: String,
+    finding_id: String,
+    patch: String,
+    follow_up_fuzz_seconds: u64,
+    compute_usd_per_hour: f64,
+    model_cost_usd: f64,
+) -> Result<serde_json::Value, String> {
+    let run_id = uuid::Uuid::parse_str(&run_id).map_err(|error| error.to_string())?;
+    let finding_id = uuid::Uuid::parse_str(&finding_id).map_err(|error| error.to_string())?;
+    let view = state
+        .container
+        .create_remediation_operation(hf_service::RemediationDraftRequest {
+            run_id,
+            finding_id,
+            patch,
+            follow_up_fuzz_seconds,
+            pricing: hf_service::evidence::CampaignEvidencePricing {
+                compute_usd_per_hour,
+                model_cost_usd,
+            },
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(view).map_err(|error| error.to_string())
+}
+
+/// Explain that remediation drafts were excluded from this build.
+#[cfg(not(feature = "patch-to-proof"))]
+#[tauri::command]
+pub async fn create_remediation_operation(
+    state: tauri::State<'_, crate::state::AppState>,
+    run_id: String,
+    finding_id: String,
+    patch: String,
+    follow_up_fuzz_seconds: u64,
+    compute_usd_per_hour: f64,
+    model_cost_usd: f64,
+) -> Result<serde_json::Value, String> {
+    let _ = (
+        state,
+        run_id,
+        finding_id,
+        patch,
+        follow_up_fuzz_seconds,
+        compute_usd_per_hour,
+        model_cost_usd,
+    );
+    Err(patch_to_proof_feature_unavailable())
+}
+
+/// Approve a draft remediation operation for sandbox verification.
+#[cfg(feature = "patch-to-proof")]
+#[tauri::command]
+pub async fn approve_remediation_operation(
+    state: tauri::State<'_, crate::state::AppState>,
+    operation_id: String,
+    operator: String,
+) -> Result<serde_json::Value, String> {
+    let operation_id = uuid::Uuid::parse_str(&operation_id).map_err(|error| error.to_string())?;
+    let view = state
+        .container
+        .approve_remediation_operation(operation_id, &operator)
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(view).map_err(|error| error.to_string())
+}
+
+/// Explain that remediation approval was excluded from this build.
+#[cfg(not(feature = "patch-to-proof"))]
+#[tauri::command]
+pub async fn approve_remediation_operation(
+    state: tauri::State<'_, crate::state::AppState>,
+    operation_id: String,
+    operator: String,
+) -> Result<serde_json::Value, String> {
+    let _ = (state, operation_id, operator);
+    Err(patch_to_proof_feature_unavailable())
+}
+
+/// Start the sandbox verification workflow for an approved remediation.
+#[cfg(feature = "patch-to-proof")]
+#[tauri::command]
+pub async fn start_remediation_verification(
+    state: tauri::State<'_, crate::state::AppState>,
+    operation_id: String,
+) -> Result<(), String> {
+    let operation_id = uuid::Uuid::parse_str(&operation_id).map_err(|error| error.to_string())?;
+    state
+        .container
+        .start_remediation_verification(hf_service::RemediationStartRequest { operation_id })
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Explain that remediation verification was excluded from this build.
+#[cfg(not(feature = "patch-to-proof"))]
+#[tauri::command]
+pub async fn start_remediation_verification(
+    state: tauri::State<'_, crate::state::AppState>,
+    operation_id: String,
+) -> Result<(), String> {
+    let _ = (state, operation_id);
+    Err(patch_to_proof_feature_unavailable())
+}
+
+/// Load one remediation operation as a read-only view.
+#[cfg(feature = "patch-to-proof")]
+#[tauri::command]
+pub async fn remediation_operation(
+    state: tauri::State<'_, crate::state::AppState>,
+    operation_id: String,
+) -> Result<serde_json::Value, String> {
+    let operation_id = uuid::Uuid::parse_str(&operation_id).map_err(|error| error.to_string())?;
+    let view = state
+        .container
+        .remediation_operation(operation_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(view).map_err(|error| error.to_string())
+}
+
+/// Explain that remediation operations were excluded from this build.
+#[cfg(not(feature = "patch-to-proof"))]
+#[tauri::command]
+pub async fn remediation_operation(
+    state: tauri::State<'_, crate::state::AppState>,
+    operation_id: String,
+) -> Result<serde_json::Value, String> {
+    let _ = (state, operation_id);
+    Err(patch_to_proof_feature_unavailable())
+}
+
+/// Build the enriched Finding Proof Card for one finding.
+#[cfg(feature = "patch-to-proof")]
+#[tauri::command]
+pub async fn finding_proof_card_for_crash(
+    state: tauri::State<'_, crate::state::AppState>,
+    finding_id: String,
+) -> Result<serde_json::Value, String> {
+    let finding_id = uuid::Uuid::parse_str(&finding_id).map_err(|error| error.to_string())?;
+    let card = state
+        .container
+        .finding_proof_card_for_crash(finding_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(card).map_err(|error| error.to_string())
+}
+
+/// Explain that the enriched proof card was excluded from this build.
+#[cfg(not(feature = "patch-to-proof"))]
+#[tauri::command]
+pub async fn finding_proof_card_for_crash(
+    state: tauri::State<'_, crate::state::AppState>,
+    finding_id: String,
+) -> Result<serde_json::Value, String> {
+    let _ = (state, finding_id);
+    Err(patch_to_proof_feature_unavailable())
+}
+
+#[cfg(not(feature = "patch-to-proof"))]
+fn patch_to_proof_feature_unavailable() -> String {
+    "patch-to-proof remediation verification is not included in this application build".to_owned()
+}
+
 /// Export already-composed report `content` (e.g. a saved draft) in `format`
 /// via a native save dialog. Returns the saved path or `None` if cancelled.
 ///

@@ -11,6 +11,13 @@ fn run_fuzzer() -> Action {
     }
 }
 
+fn verify_remediation() -> Action {
+    Action::VerifyRemediation {
+        engine: "libfuzzer".to_owned(),
+        duration_secs: 60,
+    }
+}
+
 fn analyze_source() -> Action {
     Action::AnalyzeSource {
         analyzer: "semgrep".to_owned(),
@@ -37,6 +44,7 @@ fn risk_tiers_are_ordered() {
     assert_eq!(Action::Discover.risk(), RiskTier::Low);
     assert_eq!(Action::CompileHarness.risk(), RiskTier::Medium);
     assert_eq!(run_fuzzer().risk(), RiskTier::High);
+    assert_eq!(verify_remediation().risk(), RiskTier::High);
     assert_eq!(
         Action::AutomotiveOffline {
             operation: "analyze_pcap".to_owned(),
@@ -101,6 +109,11 @@ fn action_kinds_are_stable_snake_case_audit_labels() {
     assert_eq!(Action::CompileHarness.kind(), "compile_harness");
     assert_eq!(Action::RunHarness.kind(), "run_harness");
     assert_eq!(run_fuzzer().kind(), "run_fuzzer");
+    assert_eq!(verify_remediation().kind(), "verify_remediation");
+    assert_eq!(
+        verify_remediation().label(),
+        "verify libfuzzer remediation for 60s"
+    );
     assert_eq!(
         Action::AutomotiveOffline {
             operation: "analyze_pcap".to_owned(),

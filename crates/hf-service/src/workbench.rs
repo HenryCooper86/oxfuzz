@@ -13,10 +13,12 @@ use hf_core::crash::Crash;
 use hf_core::error::ClassifiedError;
 use hf_core::harness::{Harness, HarnessStatus};
 use hf_core::target::TargetCandidate;
-use hf_storage::{RunRecord, RunStatus, Store};
+use hf_storage::{RemediationOperationRecord, RunRecord, RunStatus, Store};
 use serde::Serialize;
 use uuid::Uuid;
 
+#[cfg(feature = "patch-to-proof")]
+use crate::finding_proof::enrich_fix_verification;
 use crate::finding_proof::{finding_proof_card, FindingProofCard};
 
 /// Aggregate counts for the internal dashboard.
@@ -286,7 +288,26 @@ pub async fn dashboard<S: std::hash::BuildHasher>(
         usize::from(!project_scoped_targets.is_empty() || !filtered_runs.is_empty());
 
     let harness_reviews = harness_review_items(filtered_harnesses, &target_by_id);
-    let crash_reviews = crash_review_items(filtered_crashes, &target_by_id);
+    // Patch-to-Proof: pre-fetch the latest terminal remediation per finding so the
+    // proof card's fix-verification claim can reflect sandbox evidence. No-op
+    // (empty map) when the feature is off; the base card stays `not_verified`.
+    let remediation_by_crash: HashMap<Uuid, RemediationOperationRecord> = {
+        #[cfg(feature = "patch-to-proof")]
+        {
+            let mut map = HashMap::new();
+            for crash in &filtered_crashes {
+                if let Ok(Some(record)) = store.latest_remediation_for_finding(crash.id).await {
+                    map.insert(crash.id, record);
+                }
+            }
+            map
+        }
+        #[cfg(not(feature = "patch-to-proof"))]
+        {
+            HashMap::new()
+        }
+    };
+    let crash_reviews = crash_review_items(filtered_crashes, &target_by_id, &remediation_by_crash);
     // A project is always selected past the early return above, so scope the
     // corpus count to this project's targets rather than loading every row.
     let mut corpus_entry_count = 0;
@@ -585,11 +606,20 @@ fn harness_review_items(
 fn crash_review_items(
     crashes: Vec<Crash>,
     target_by_id: &HashMap<Uuid, TargetCandidate>,
+    remediation_by_crash: &HashMap<Uuid, RemediationOperationRecord>,
 ) -> Vec<CrashReviewItem> {
+    #[cfg(not(feature = "patch-to-proof"))]
+    let _ = remediation_by_crash;
     crashes
         .into_iter()
         .map(|c| {
             let proof = finding_proof_card(&c);
+            #[cfg(feature = "patch-to-proof")]
+            let proof = if let Some(record) = remediation_by_crash.get(&c.id) {
+                enrich_fix_verification(proof, Some(record))
+            } else {
+                proof
+            };
             let target_symbol = target_by_id
                 .get(&c.target_id)
                 .map_or_else(|| "unknown".to_owned(), |t| t.symbol.clone());
