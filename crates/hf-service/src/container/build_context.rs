@@ -17,11 +17,14 @@ use hf_core::error::ClassifiedError;
 use super::ServiceContainer;
 
 /// Where a compile database is looked for, in order. The project root is the
-/// conventional location; `CMake` and Bear commonly write into a build tree.
-const COMPILE_DATABASE_PATHS: [&str; 3] = [
+/// conventional location; `CMake` and Bear commonly write into a build tree, and
+/// an approved Build Doctor plan writes into the oxfuzz-owned build directory.
+const COMPILE_DATABASE_PATHS: [&str; 4] = [
     "compile_commands.json",
     "build/compile_commands.json",
     "out/compile_commands.json",
+    // Written by an approved Build Doctor plan run.
+    ".oxfuzz-build/compile_commands.json",
 ];
 
 /// Cap on the compile database read. A real database for a large project runs to

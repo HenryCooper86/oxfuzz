@@ -398,6 +398,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .merge(proof_carrying_routes())
         .merge(patch_to_proof_routes())
         .merge(change_aware_routes())
+        .merge(build_doctor_routes())
         .merge(semgrep_routes())
         .route(
             "/projects/auto-revert",
@@ -620,6 +621,18 @@ fn change_aware_routes() -> Router<AppState> {
 
 #[cfg(not(feature = "change-aware"))]
 fn change_aware_routes() -> Router<AppState> {
+    Router::new()
+}
+
+#[cfg(feature = "build-doctor")]
+fn build_doctor_routes() -> Router<AppState> {
+    Router::new()
+        .route("/build/diagnose", post(build_diagnose))
+        .route("/build/run", post(build_run))
+}
+
+#[cfg(not(feature = "build-doctor"))]
+fn build_doctor_routes() -> Router<AppState> {
     Router::new()
 }
 
@@ -900,6 +913,37 @@ async fn remediation_draft(
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(handoff)))
+}
+
+#[cfg(feature = "build-doctor")]
+#[derive(Debug, Deserialize)]
+struct BuildDiagnoseRequest {
+    project: String,
+}
+
+#[cfg(feature = "build-doctor")]
+async fn build_diagnose(
+    State(state): State<AppState>,
+    Json(request): Json<BuildDiagnoseRequest>,
+) -> ApiResult<serde_json::Value> {
+    let diagnosis = state
+        .container
+        .diagnose_build(std::path::Path::new(&request.project))
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(diagnosis)))
+}
+
+#[cfg(feature = "build-doctor")]
+async fn build_run(
+    State(state): State<AppState>,
+    Json(request): Json<hf_service::RunBuildPlanRequest>,
+) -> ApiResult<serde_json::Value> {
+    let outcome = state
+        .container
+        .run_build_plan(request)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(outcome)))
 }
 
 #[cfg(feature = "change-aware")]
