@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { getTransport, onDataChanged } from "../lib";
 import { useConfirm } from "../providers/confirm";
 import { PathActions } from "../components/PathActions";
+import { CoverageBlockerPanel } from "../components/CoverageBlockerPanel";
 import { useProject } from "../providers/project";
 import { useTarget } from "../providers/target";
 import type { CorpusEntry } from "../types";
@@ -122,6 +123,15 @@ export function CorpusView({ embedded = false }: { embedded?: boolean }) {
 
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
+      {/* Corpus work is where a coverage plateau is felt, so the blockers and
+          the proposed experiment sit alongside it. */}
+      {activeProject && target && (
+        <CoverageBlockerPanel
+          project={activeProject}
+          target={target}
+          lang={lang || "c"}
+        />
+      )}
       <div className="flex items-center justify-between">
         {embedded ? (
           <span />

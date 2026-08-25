@@ -27,6 +27,8 @@ pub mod change_impact;
 pub mod checkpoints;
 pub mod config;
 pub mod container;
+#[cfg(feature = "coverage-blockers")]
+pub mod coverage_blockers;
 mod crash_minimization;
 pub mod defectdojo;
 pub mod defectdojo_lifecycle;
@@ -112,6 +114,11 @@ pub use container::{
     MinimizeOutcome, ProviderSnapshot, RegressionResult, RunCancelOutcome, RunControlStatus,
     RunHistoryItem, RunLifecycleStatus, RunSummary, SchedulableTarget, SeedEntry, ServiceContainer,
     SystemSnapshot, SyzkallerRunOpts, SyzkallerSummary,
+};
+#[cfg(feature = "coverage-blockers")]
+pub use coverage_blockers::{
+    CoverageBlocker, CoverageBlockerRequest, CoverageBlockerView, MeasurementStatus,
+    NextExperiment, NextExperimentKind, COVERAGE_BLOCKER_SCHEMA_VERSION,
 };
 pub use defectdojo::{DefectDojoConfig, PushOutcome};
 pub use defectdojo_lifecycle::{DefectDojoState, DefectDojoStatus};

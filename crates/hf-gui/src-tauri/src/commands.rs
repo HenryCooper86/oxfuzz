@@ -2534,6 +2534,48 @@ fn harness_tournament_feature_unavailable() -> String {
     "harness tournament is not included in this application build".to_owned()
 }
 
+/// Explain that the blocker explorer was excluded from this build.
+#[cfg(not(feature = "coverage-blockers"))]
+fn coverage_blockers_feature_unavailable() -> String {
+    "coverage blocker exploration is not included in this application build".to_owned()
+}
+
+/// Explore a target's coverage blockers and next experiment. Executes nothing
+/// beyond the cached coverage measurement it reads.
+#[cfg(feature = "coverage-blockers")]
+#[tauri::command]
+pub async fn coverage_blockers(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    target: String,
+    lang: String,
+) -> Result<serde_json::Value, String> {
+    let lang = parse_lang(&lang)?;
+    let view = state
+        .container
+        .explore_coverage_blockers(hf_service::CoverageBlockerRequest {
+            project,
+            target,
+            lang,
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(view).map_err(|error| error.to_string())
+}
+
+/// Explain that the blocker explorer was excluded from this build.
+#[cfg(not(feature = "coverage-blockers"))]
+#[tauri::command]
+pub async fn coverage_blockers(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    target: String,
+    lang: String,
+) -> Result<serde_json::Value, String> {
+    let _ = (state, project, target, lang);
+    Err(coverage_blockers_feature_unavailable())
+}
+
 /// Evaluate several harness candidates and rank them on sandbox evidence.
 #[cfg(feature = "harness-tournament")]
 #[tauri::command]

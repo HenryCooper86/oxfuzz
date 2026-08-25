@@ -961,3 +961,66 @@ impl ServiceContainer {
         hf_coverage::parse_llvm_cov_summary(&json)
     }
 }
+
+#[cfg(feature = "coverage-blockers")]
+impl ServiceContainer {
+    /// Explore a target's coverage blockers and propose one next experiment.
+    ///
+    /// Reads the cached `llvm-cov` export and the discovery call graph. Starts
+    /// no campaign, refines no harness, and grows no corpus. An absent
+    /// measurement is a result naming why it is absent, with no blocker list.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError::Validation` when the target is unknown, or a
+    /// discovery error.
+    pub async fn explore_coverage_blockers(
+        &self,
+        req: crate::coverage_blockers::CoverageBlockerRequest,
+    ) -> Result<crate::coverage_blockers::CoverageBlockerView, ClassifiedError> {
+        use crate::coverage_blockers::{
+            explore_blockers, propose_experiment, CoverageBlockerView, MeasurementStatus,
+            NextExperiment, NextExperimentKind, COVERAGE_BLOCKER_SCHEMA_VERSION,
+        };
+
+        let project = std::path::Path::new(&req.project);
+        let inventory = self.discover(project, req.lang).await?;
+        // An unknown target is a mistake to surface, not an empty exploration.
+        if super::project_identity::select_target_candidate(&inventory.candidates, &req.target)?
+            .is_none()
+        {
+            return Err(ClassifiedError::Validation(format!(
+                "target '{}' not found",
+                req.target
+            )));
+        }
+
+        let Some(json) = self.coverage_export_json_cached(project, &req.target).await else {
+            return Ok(CoverageBlockerView {
+                schema_version: COVERAGE_BLOCKER_SCHEMA_VERSION,
+                measurement: MeasurementStatus::Unavailable {
+                    reason_code: "no_coverage_measurement".to_owned(),
+                },
+                blockers: Vec::new(),
+                experiment: NextExperiment {
+                    kind: NextExperimentKind::NoExperimentAvailable,
+                    target_function: None,
+                    reason_code: "no_coverage_measurement".to_owned(),
+                },
+            });
+        };
+
+        let covered = parse_covered_functions(&json);
+        let uncovered = hf_coverage::parse_llvm_cov_uncovered(&json);
+        let blockers = explore_blockers(&covered, &uncovered, &inventory.call_graph);
+        let experiment = propose_experiment(&blockers);
+        let signature = coverage_signature(&workspace_dir(project, &req.target));
+        Ok(CoverageBlockerView {
+            schema_version: COVERAGE_BLOCKER_SCHEMA_VERSION,
+            measurement: MeasurementStatus::Available {
+                signature: format!("{signature:016x}"),
+            },
+            blockers,
+            experiment,
+        })
+    }
+}
