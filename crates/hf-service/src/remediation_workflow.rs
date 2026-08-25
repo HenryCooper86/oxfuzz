@@ -202,6 +202,34 @@ impl ServiceContainer {
         let store = self.store().ok_or_else(|| {
             ClassifiedError::Storage("remediation operations require persistent storage".to_owned())
         })?;
+        // Guardrail authorization precedes the claim: a denied action must
+        // leave the approved row exactly as it was rather than stranding it in
+        // `running` with no executor.
+        let record = store
+            .remediation_operation(req.operation_id)
+            .await
+            .map_err(|error| ClassifiedError::Storage(error.to_string()))?
+            .ok_or_else(|| {
+                ClassifiedError::Validation(format!(
+                    "remediation operation {} not found",
+                    req.operation_id
+                ))
+            })?;
+        let binding: RemediationBinding =
+            serde_json::from_str(&record.binding_json).map_err(|error| {
+                ClassifiedError::Internal(format!("decode remediation binding: {error}"))
+            })?;
+        let spec = &binding.verification_spec;
+        self.authorize_recorded(
+            hf_guardrails::Action::VerifyRemediation {
+                engine: spec.engine.as_str().to_owned(),
+                duration_secs: spec.follow_up_fuzz_seconds,
+            },
+            "verify_remediation",
+            Some(std::path::Path::new(&record.project_root)),
+        )
+        .await
+        .map_err(|error| ClassifiedError::Validation(error.to_string()))?;
         store
             .claim_remediation_operation(req.operation_id, chrono::Utc::now())
             .await

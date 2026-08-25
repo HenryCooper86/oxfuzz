@@ -37,6 +37,11 @@ pub enum Action {
         /// Requested follow-up campaign duration in seconds.
         duration_secs: u64,
     },
+    /// Publish a change comparison to an external tracker outside the workspace.
+    PublishChangeComparison {
+        /// Stable destination identifier, such as `issue-tracker`.
+        destination: String,
+    },
     /// Parse or transform automotive artifacts without opening a bus interface.
     AutomotiveOffline {
         /// Sidecar operation such as `analyze_pcap` or `generate_mutations`.
@@ -97,6 +102,7 @@ impl Action {
             Action::RunHarness => "run_harness",
             Action::RunFuzzer { .. } => "run_fuzzer",
             Action::VerifyRemediation { .. } => "verify_remediation",
+            Action::PublishChangeComparison { .. } => "publish_change_comparison",
             Action::AutomotiveOffline { .. } => "automotive_offline",
             Action::AutomotiveVirtualCan { .. } => "automotive_virtual_can",
             Action::AutomotivePhysicalBench { .. } => "automotive_physical_bench",
@@ -126,6 +132,9 @@ impl Action {
                 engine,
                 duration_secs,
             } => format!("verify {engine} remediation for {duration_secs}s"),
+            Action::PublishChangeComparison { destination } => {
+                format!("publish change comparison to {destination}")
+            }
             Action::AutomotiveOffline { operation } => {
                 format!("automotive offline {operation}")
             }
@@ -164,6 +173,7 @@ impl Action {
             Action::RunHarness
             | Action::RunFuzzer { .. }
             | Action::VerifyRemediation { .. }
+            | Action::PublishChangeComparison { .. }
             | Action::AutomotiveVirtualCan { .. }
             | Action::AutomotivePhysicalBench { .. }
             | Action::WriteHostFile { .. } => RiskTier::High,
