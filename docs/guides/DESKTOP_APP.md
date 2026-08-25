@@ -123,6 +123,21 @@ coverage delta. Publishing the comparison to the configured issue tracker or
 DefectDojo is a separate step that you approve explicitly; the comparison never
 publishes itself.
 
+**When coverage stops climbing.** "62% of lines" does not say what to do next.
+The Corpus view offers a blocker exploration: it names the uncovered functions
+that would unlock the most still-unreached code, shows how far each sits from
+where the fuzzer actually got to, and gives the call path from that frontier to
+the blocker. A blocker with no observed route from covered code is reported as
+having none -- which is a different and more serious statement than "it is
+nearby", and usually means the harness itself cannot get there.
+
+It also proposes one concrete next experiment: grow the corpus when the fuzzer
+reaches a caller but never takes the branch, or refine the harness when nothing
+covered has a route at all. The proposal names the function to aim at and the
+reason behind it. It is advisory and starts nothing; you run the existing refine
+or corpus step yourself. If no coverage measurement exists yet, that is what it
+says, rather than showing an empty blocker list.
+
 **Review retained evidence.** The Artifacts view collects persisted crash
 reproducers and corpus inputs across the selected project in one place. Reports,
 run history, policy audit, and evidence export provide the wider audit trail.
