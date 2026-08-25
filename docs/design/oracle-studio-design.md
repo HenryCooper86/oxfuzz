@@ -15,10 +15,11 @@ subsystem lets an operator state such a property as a typed specification, see
 exactly what harness it produces before anything is built, and have a resulting
 finding identified as a violation of that named property.
 
-The first release covers the three stateless kinds: differential, round-trip,
-and invariant. Metamorphic, stateful, and resource oracles follow separately;
-they need sequence modelling and resource accounting that the stateless three do
-not.
+Six kinds are supported. Differential, round-trip, and invariant are stateless:
+one input, one check. Metamorphic relates the result of one input to the result
+of a transformed input. Stateful drives a sequence of operations derived from the
+input and checks after each. Resource watches a reported measurement across a
+call rather than the value returned.
 
 ## 2. Feature and Ownership
 
@@ -40,6 +41,19 @@ A specification names the target and one property:
   corruption that never touch invalid memory.
 - **Invariant** -- a `predicate()` must hold after every call to the target.
   Catches state that degrades over a campaign rather than failing at once.
+- **Metamorphic** -- transforming an input must relate its result to the
+  original's in a stated way. The relation is one of `equal`, `not_less`, or
+  `not_greater`: a transformation that adds data must not shrink a count, one
+  that removes data must not grow it, and one that should not matter must not
+  change it. Catches wrong answers where no reference implementation exists to
+  compare against.
+- **Stateful** -- a sequence of operations derived from the input, with a check
+  after every step. The input's first byte selects an operation and the next
+  bytes are its payload, repeatedly, up to a bounded step count. Catches defects
+  that need a particular order of calls rather than a particular input.
+- **Resource** -- a reported measurement must not grow by more than a stated
+  amount across one call. Catches leaks and blowups, which return correct
+  answers and never touch invalid memory.
 
 Every symbol in a specification is interpolated into generated C source, so each
 must be a plain identifier: a leading letter or underscore, then letters,
@@ -61,6 +75,9 @@ design records them:
 | Differential | `int target(const uint8_t *, size_t)`, `int reference(const uint8_t *, size_t)` |
 | Round-trip | `int encode(const uint8_t *, size_t, uint8_t *, size_t *)`, `int decode(const uint8_t *, size_t, uint8_t *, size_t *)` |
 | Invariant | `int target(const uint8_t *, size_t)`, `int predicate(void)` |
+| Metamorphic | `int target(const uint8_t *, size_t)`, `int transform(const uint8_t *, size_t, uint8_t *, size_t *)` |
+| Stateful | `int apply(uint8_t, const uint8_t *, size_t)`, `int check(void)` |
+| Resource | `int target(const uint8_t *, size_t)`, `unsigned long measure(void)` |
 
 oxfuzz does not parse C, so a mismatch is caught by the compiler rather than by
 validation. That is deliberate. A build failure naming the symbol is visible and
@@ -99,8 +116,15 @@ the existing lint as part of the test suite.
 On violation the scaffold writes one line:
 
 ```text
-OXFUZZ_ORACLE_VIOLATION <oracle-id> <kind>
+OXFUZZ_ORACLE_VIOLATION <oracle-id> <kind> [detail]
 ```
+
+The optional detail is one whitespace-free token carrying the evidence that
+distinguishes one violation of a kind from another: `step=3` for the operation
+index a stateful sequence failed at, `growth=4096` for the amount a resource
+measurement grew. The stateless kinds carry no detail, because the input alone
+identifies the violation. A detail that is absent or unparseable does not stop
+the line from classifying: the oracle and kind are what make it a violation.
 
 The service classifies a finding as an oracle violation by finding that marker
 in the finding's retained output. No `CrashKind` variant is added: that would
@@ -125,7 +149,16 @@ Two consequences are stated deliberately:
 - **Absence of a marker is not evidence that the property holds.** It means no
   violation was recorded, which is what the view says.
 
-## 8. Rejected Alternatives
+## 8. Bounds
+
+A stateful oracle consumes its input as a sequence, so it needs a step ceiling:
+without one a large input becomes an unbounded loop inside a single fuzzer
+iteration, which stalls the campaign rather than finding anything. A resource
+oracle needs a growth allowance, since no real function grows nothing. Both are
+part of the reviewed specification and both are validated to a bounded range, so
+a specification cannot ask for a step count that never terminates.
+
+## 9. Rejected Alternatives
 
 - **Adding `CrashKind::OracleViolation`** -- modifies a core contract, breaks
   exhaustive matches, and requires migrating persisted crashes, to express
@@ -146,8 +179,17 @@ Two consequences are stated deliberately:
   without sanitizer output would be discarded before the marker was ever seen.
 - **Running the oracle harness from the studio** -- compile, smoke, and campaign
   already have approved paths.
+- **An open-ended metamorphic relation expression** -- it would be code supplied
+  as a string and interpolated into the harness, which is exactly what the symbol
+  validation exists to prevent. A closed relation vocabulary is checkable.
+- **Deriving a stateful operation alphabet automatically** -- which calls are
+  legal in which order is domain knowledge; guessing it would produce sequences
+  that fail for reasons that are not defects.
+- **Measuring resources from outside the harness** -- process-level memory
+  includes the fuzzer, the sanitizer, and the corpus, so a target-reported
+  measurement is the only one attributable to the target.
 
-## 9. Verification Criteria
+## 10. Verification Criteria
 
 - A symbol that is not a plain identifier is rejected before rendering, and the
   rejection names the offending symbol.
@@ -160,5 +202,10 @@ Two consequences are stated deliberately:
 - A memory-safety crash in an oracle harness is not an oracle violation.
 - A retained log carrying the marker classifies even when it contains no
   sanitizer output.
+- A stateful violation carries the step index and a resource violation the
+  observed growth; a marker without detail still classifies.
+- A step ceiling or growth allowance outside its bounded range is refused.
+- A metamorphic relation is drawn from the closed vocabulary, never supplied as
+  an expression.
 - The studio executes nothing.
 - Feature-disabled builds compile and hide the surface.
