@@ -34,6 +34,8 @@ pub mod knowledge;
 pub mod recovery;
 #[cfg(feature = "proof-carrying")]
 pub mod remediation;
+#[cfg(feature = "patch-to-proof")]
+pub mod remediation_workflow;
 pub mod report;
 pub mod report_export;
 pub mod report_store;
@@ -94,6 +96,8 @@ pub use container::{
 };
 pub use defectdojo::{DefectDojoConfig, PushOutcome};
 pub use defectdojo_lifecycle::{DefectDojoState, DefectDojoStatus};
+#[cfg(feature = "patch-to-proof")]
+pub use finding_proof::enrich_fix_verification;
 pub use finding_proof::{
     finding_proof_card, CasrExploitabilityDetermination, FindingEvidenceKind,
     FindingEvidenceReference, FindingProofCard, FindingProofClaim, FindingProofStatus,
@@ -101,8 +105,15 @@ pub use finding_proof::{
     FINDING_PROOF_SCHEMA_VERSION,
 };
 pub use hf_storage::{AutoRevertEvent, GuardrailDecisionRecord, ProjectAutoRevert};
+#[cfg(feature = "patch-to-proof")]
+pub use hf_storage::{RemediationOperationStage, RemediationOperationStatus};
 pub use init::{init_at, init_workspace, InitReport};
 pub use issue_tracker::{CreatedIssue, IssueTrackerConfig};
+#[cfg(feature = "patch-to-proof")]
+pub use remediation_workflow::{
+    RemediationApprovalView, RemediationDraftRequest, RemediationDraftView,
+    RemediationOperationView, RemediationStartRequest,
+};
 pub use report::ReportLanguage;
 pub use report_store::ReportDraft;
 #[cfg(feature = "semgrep-enrichment")]

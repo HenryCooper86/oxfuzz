@@ -11,6 +11,7 @@ import type {
 } from "../types";
 import { Button, ViewHeader, SeverityBadge } from "../components/ui";
 import { FindingProofCard } from "../components/FindingProofCard";
+import { PatchToProofPanel } from "../components/PatchToProofPanel";
 import { Bug, ChevronRight, Download, FileText, Share2 } from "lucide-react";
 import { PathActions } from "../components/PathActions";
 import { useI18n } from "../i18nContext";
@@ -487,6 +488,9 @@ function CrashDetail({
       </div>
       {crash.summary && <p className="text-sm text-text-secondary">{crash.summary}</p>}
       <FindingProofCard proof={proof} unavailable={proofUnavailable} />
+      {/* Keyed by finding: a new selection starts a fresh review rather than
+          inheriting the previous finding's draft state. */}
+      <PatchToProofPanel key={crash.id} findingId={crash.id} runId={crash.run_id} />
       {/* On-demand LLM crash verdict (L2 4c): opt in per crash. */}
       <div className="border-t border-border pt-3">
         {verdict === undefined && (

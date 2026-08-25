@@ -1,117 +1,149 @@
-//! Versioned remediation-handoff evidence and verification state machine.
+//! Versioned remediation handoff evidence and verification state machine.
 //!
-//! The contract records verification results but performs no patch application,
-//! build, replay, or filesystem operation.
+//! These types derive a remediation status from exact sandbox evidence. They
+//! perform no patch application, build, replay, or filesystem operation.
 
+use std::path::{Component, Path};
+
+use hf_core::engine::EngineKind;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
-/// Current remediation contract version.
-pub const REMEDIATION_SCHEMA_VERSION: u32 = 2;
+/// Current remediation evidence version.
+pub const REMEDIATION_SCHEMA_VERSION: u32 = 3;
+/// Current verification-specification version.
+pub const REMEDIATION_VERIFICATION_SPEC_VERSION: u32 = 1;
 /// Maximum inline unified-diff size.
 pub const MAX_PATCH_BYTES: usize = 1_048_576;
 
-/// Immutable finding, patch, and reproducer identities in a handoff.
+/// Exact limits and engine settings approved for one verification attempt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RemediationBinding {
-    /// Finding being remediated.
-    pub finding_id: Uuid,
-    /// Target source revision the candidate changes.
-    pub source_revision_sha256: String,
-    /// SHA-256 of `patch` bytes.
-    pub patch_sha256: String,
-    /// Bounded unified diff proposed for review.
-    pub patch: String,
-    /// Exact minimized reproducer identity.
-    pub reproducer_sha256: String,
-    /// Approved harness-source identity used for verification.
-    pub harness_sha256: String,
-    /// Staged binary identity used for verification.
-    pub binary_sha256: String,
-    /// Pinned sandbox image identity required for verification.
-    #[serde(default)]
-    pub sandbox_image_sha256: String,
-    /// Proof-carrying campaign evidence manifest identity.
-    pub evidence_manifest_sha256: String,
+pub struct RemediationVerificationSpec {
+    pub schema_version: u32,
+    pub engine: EngineKind,
+    pub replay_timeout_secs: u64,
+    pub max_regression_cases: usize,
+    pub follow_up_fuzz_seconds: u64,
+    pub max_mem_mb: u64,
+    pub max_cpus: u32,
+    pub seed: u64,
 }
 
-/// Service-owned result of a bounded sandbox remediation check.
+impl RemediationVerificationSpec {
+    /// Return the canonical SHA-256 of this specification.
+    ///
+    /// # Errors
+    /// Returns an error when the specification is invalid or cannot serialize.
+    pub fn sha256(&self) -> Result<String, RemediationError> {
+        validate_verification_spec(self)?;
+        serde_json::to_vec(self)
+            .map(|bytes| hex::encode(Sha256::digest(bytes)))
+            .map_err(|_| RemediationError::Serialization)
+    }
+}
+
+/// Immutable finding, patch, artifact, and verification identities.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemediationBinding {
+    pub finding_id: Uuid,
+    pub run_id: Uuid,
+    pub source_revision_sha256: String,
+    pub patch_sha256: String,
+    pub patch: String,
+    pub reproducer_sha256: String,
+    pub harness_sha256: String,
+    pub original_binary_sha256: String,
+    pub sandbox_image_sha256: String,
+    pub evidence_manifest_sha256: String,
+    pub regression_corpus_sha256: String,
+    pub verification_spec_sha256: String,
+    pub verification_spec: RemediationVerificationSpec,
+}
+
+/// Outcome of one required verification stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationStageStatus {
+    Passed,
+    Failed,
+    Inconclusive,
+    Skipped,
+}
+
+/// Bounded result for one required verification stage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationStageEvidence {
+    pub status: VerificationStageStatus,
+    pub detail_code: String,
+    pub cases: usize,
+    pub failures: usize,
+    pub findings: usize,
+}
+
+/// Service-owned result of the complete sandbox verification attempt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxVerificationEvidence {
-    /// Durable verification operation id.
     pub verification_id: Uuid,
-    /// Exact source revision checked.
     pub source_revision_sha256: String,
-    /// Exact patch checked.
     pub patch_sha256: String,
-    /// Exact reproducer replayed.
     pub reproducer_sha256: String,
-    /// Exact harness source checked.
     pub harness_sha256: String,
-    /// Exact resulting binary checked.
-    pub binary_sha256: String,
-    /// Pinned sandbox image digest.
+    pub original_binary_sha256: String,
+    pub patched_binary_sha256: Option<String>,
     pub sandbox_image_sha256: String,
-    /// Whether the sandbox operation reached a normal terminal result.
-    pub completed: bool,
-    /// Whether the original build reproduced the finding.
-    pub original_reproduced: bool,
-    /// Whether the patched build still reproduced the finding.
-    pub patched_reproduced: bool,
-    /// Number of bounded regression cases executed.
-    pub regression_cases: usize,
-    /// Regression cases that failed.
-    pub regression_failures: usize,
+    pub regression_corpus_sha256: String,
+    pub verification_spec_sha256: String,
+    pub original_replay: VerificationStageEvidence,
+    pub patch_build: VerificationStageEvidence,
+    pub patched_replay: VerificationStageEvidence,
+    pub regression: VerificationStageEvidence,
+    pub follow_up_fuzz: VerificationStageEvidence,
 }
 
 /// Review state of a remediation handoff.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RemediationStatus {
-    /// Patch candidate exists but has no matching verification evidence.
     Draft,
-    /// All exact evidence matched and both replay and regressions passed.
     Verified,
-    /// Verification did not complete or could not establish the original fault.
     Inconclusive,
-    /// The patched replay or regression set failed.
     Rejected,
 }
 
 /// Versioned remediation handoff.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemediationHandoff {
-    /// Serialization contract version.
     pub schema_version: u32,
-    /// Immutable patch/finding binding.
     pub binding: RemediationBinding,
-    /// Current evidence-derived state.
     pub status: RemediationStatus,
-    /// Sandbox result, when one has been recorded.
     pub verification: Option<SandboxVerificationEvidence>,
 }
 
 /// Invalid remediation evidence or state transition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum RemediationError {
-    /// Handoff schema cannot be safely interpreted by this implementation.
     #[error("unsupported remediation schema")]
     UnsupportedSchema,
-    /// One of the required SHA-256 values is malformed.
     #[error("remediation contains a malformed SHA-256 digest")]
     InvalidDigest,
-    /// Patch is empty, oversized, or not a unified diff.
     #[error("remediation patch must be a bounded unified diff")]
     InvalidPatch,
-    /// Declared patch digest does not match its bytes.
+    #[error("remediation patch contains an unsafe path")]
+    InvalidPatchPath,
     #[error("remediation patch digest mismatch")]
     PatchDigestMismatch,
-    /// Sandbox evidence names different immutable inputs.
+    #[error("remediation verification specification is invalid")]
+    InvalidVerificationSpec,
+    #[error("remediation verification specification digest mismatch")]
+    VerificationSpecDigestMismatch,
     #[error("sandbox verification evidence does not match the remediation binding")]
     EvidenceMismatch,
-    /// The handoff does not carry a complete verified result.
+    #[error("sandbox verification evidence is malformed")]
+    InvalidEvidence,
+    #[error("remediation evidence could not be serialized")]
+    Serialization,
     #[error("remediation handoff is not verified")]
     NotVerified,
 }
@@ -120,7 +152,7 @@ impl RemediationHandoff {
     /// Create a visibly unverified handoff after validating immutable inputs.
     ///
     /// # Errors
-    /// Returns [`RemediationError`] for malformed digests or patch content.
+    /// Returns an error for malformed digests, patch content, paths, or limits.
     pub fn draft(binding: RemediationBinding) -> Result<Self, RemediationError> {
         validate_binding(&binding)?;
         Ok(Self {
@@ -134,8 +166,8 @@ impl RemediationHandoff {
     /// Record matching service-owned sandbox evidence and derive status.
     ///
     /// # Errors
-    /// Returns [`RemediationError::EvidenceMismatch`] without changing the
-    /// handoff when any immutable identity differs.
+    /// Returns an error without changing the handoff when evidence is invalid or
+    /// any immutable identity differs.
     pub fn record_verification(
         &mut self,
         evidence: SandboxVerificationEvidence,
@@ -150,12 +182,11 @@ impl RemediationHandoff {
         Ok(())
     }
 
-    /// Verify that a retained `verified` claim still satisfies every condition.
+    /// Revalidate that a retained verified claim still meets every condition.
     ///
     /// # Errors
-    /// Returns [`RemediationError::NotVerified`] for draft, inconclusive, or
-    /// rejected evidence and [`RemediationError::EvidenceMismatch`] after an
-    /// immutable-field mutation.
+    /// Returns `NotVerified` for any non-verified result and an identity error
+    /// for mutated evidence.
     pub fn verify_claim(&self) -> Result<(), RemediationError> {
         self.validate_schema()?;
         validate_binding(&self.binding)?;
@@ -191,24 +222,99 @@ fn validate_binding(binding: &RemediationBinding) -> Result<(), RemediationError
         binding.patch_sha256.as_str(),
         binding.reproducer_sha256.as_str(),
         binding.harness_sha256.as_str(),
-        binding.binary_sha256.as_str(),
+        binding.original_binary_sha256.as_str(),
         binding.sandbox_image_sha256.as_str(),
         binding.evidence_manifest_sha256.as_str(),
+        binding.regression_corpus_sha256.as_str(),
+        binding.verification_spec_sha256.as_str(),
     ]
     .iter()
     .any(|value| !is_sha256(value))
     {
         return Err(RemediationError::InvalidDigest);
     }
-    if binding.patch.is_empty()
-        || binding.patch.len() > MAX_PATCH_BYTES
-        || !binding.patch.lines().any(|line| line.starts_with("--- "))
-        || !binding.patch.lines().any(|line| line.starts_with("+++ "))
-    {
-        return Err(RemediationError::InvalidPatch);
-    }
+    validate_patch(&binding.patch)?;
     if hex::encode(Sha256::digest(binding.patch.as_bytes())) != binding.patch_sha256 {
         return Err(RemediationError::PatchDigestMismatch);
+    }
+    if binding.verification_spec.sha256()? != binding.verification_spec_sha256 {
+        return Err(RemediationError::VerificationSpecDigestMismatch);
+    }
+    Ok(())
+}
+
+fn validate_patch(patch: &str) -> Result<(), RemediationError> {
+    if patch.is_empty() || patch.len() > MAX_PATCH_BYTES || patch.contains('\0') {
+        return Err(RemediationError::InvalidPatch);
+    }
+    let old_paths: Vec<&str> = patch
+        .lines()
+        .filter_map(|line| line.strip_prefix("--- "))
+        .collect();
+    let new_paths: Vec<&str> = patch
+        .lines()
+        .filter_map(|line| line.strip_prefix("+++ "))
+        .collect();
+    if old_paths.is_empty() || old_paths.len() != new_paths.len() {
+        return Err(RemediationError::InvalidPatch);
+    }
+    for path in old_paths.into_iter().chain(new_paths) {
+        validate_patch_path(path)?;
+    }
+    Ok(())
+}
+
+fn validate_patch_path(raw: &str) -> Result<(), RemediationError> {
+    let path = raw.split('\t').next().unwrap_or_default();
+    if path == "/dev/null" {
+        return Ok(());
+    }
+    if path.is_empty()
+        || path.contains('\\')
+        || path.chars().any(char::is_whitespace)
+        || Path::new(path).is_absolute()
+    {
+        return Err(RemediationError::InvalidPatchPath);
+    }
+    let relative = path
+        .strip_prefix("a/")
+        .or_else(|| path.strip_prefix("b/"))
+        .unwrap_or(path);
+    let denied = [".git", "target", "build", "out", "runs", "fuzz_workspace"];
+    let mut saw_component = false;
+    for component in Path::new(relative).components() {
+        match component {
+            Component::Normal(name) => {
+                saw_component = true;
+                if denied.iter().any(|denied| name == *denied) {
+                    return Err(RemediationError::InvalidPatchPath);
+                }
+            }
+            Component::Prefix(_)
+            | Component::RootDir
+            | Component::CurDir
+            | Component::ParentDir => {
+                return Err(RemediationError::InvalidPatchPath);
+            }
+        }
+    }
+    if saw_component {
+        Ok(())
+    } else {
+        Err(RemediationError::InvalidPatchPath)
+    }
+}
+
+fn validate_verification_spec(spec: &RemediationVerificationSpec) -> Result<(), RemediationError> {
+    if spec.schema_version != REMEDIATION_VERIFICATION_SPEC_VERSION
+        || spec.engine == EngineKind::Syzkaller
+        || !(1..=300).contains(&spec.replay_timeout_secs)
+        || !(1..=4_096).contains(&spec.max_regression_cases)
+        || !(1..=3_600).contains(&spec.follow_up_fuzz_seconds)
+        || !(1..=1_048_576).contains(&spec.max_mem_mb)
+        || !(1..=64).contains(&spec.max_cpus)
+    {
+        return Err(RemediationError::InvalidVerificationSpec);
     }
     Ok(())
 }
@@ -219,15 +325,55 @@ fn validate_evidence(evidence: &SandboxVerificationEvidence) -> Result<(), Remed
         evidence.patch_sha256.as_str(),
         evidence.reproducer_sha256.as_str(),
         evidence.harness_sha256.as_str(),
-        evidence.binary_sha256.as_str(),
+        evidence.original_binary_sha256.as_str(),
         evidence.sandbox_image_sha256.as_str(),
+        evidence.regression_corpus_sha256.as_str(),
+        evidence.verification_spec_sha256.as_str(),
     ]
     .iter()
     .any(|value| !is_sha256(value))
+        || evidence
+            .patched_binary_sha256
+            .as_deref()
+            .is_some_and(|value| !is_sha256(value))
     {
         return Err(RemediationError::InvalidDigest);
     }
+    for stage in evidence.stages() {
+        if stage.detail_code.is_empty()
+            || stage.detail_code.len() > 128
+            || stage.failures > stage.cases
+            || (stage.status == VerificationStageStatus::Passed
+                && (stage.failures > 0 || stage.findings > 0))
+        {
+            return Err(RemediationError::InvalidEvidence);
+        }
+    }
+    if evidence.patch_build.status == VerificationStageStatus::Passed
+        && evidence.patched_binary_sha256.is_none()
+    {
+        return Err(RemediationError::InvalidEvidence);
+    }
+    if matches!(
+        evidence.regression.status,
+        VerificationStageStatus::Passed | VerificationStageStatus::Failed
+    ) && evidence.regression.cases == 0
+    {
+        return Err(RemediationError::InvalidEvidence);
+    }
     Ok(())
+}
+
+impl SandboxVerificationEvidence {
+    fn stages(&self) -> [&VerificationStageEvidence; 5] {
+        [
+            &self.original_replay,
+            &self.patch_build,
+            &self.patched_replay,
+            &self.regression,
+            &self.follow_up_fuzz,
+        ]
+    }
 }
 
 fn matches_binding(binding: &RemediationBinding, evidence: &SandboxVerificationEvidence) -> bool {
@@ -235,17 +381,31 @@ fn matches_binding(binding: &RemediationBinding, evidence: &SandboxVerificationE
         && binding.patch_sha256 == evidence.patch_sha256
         && binding.reproducer_sha256 == evidence.reproducer_sha256
         && binding.harness_sha256 == evidence.harness_sha256
-        && binding.binary_sha256 == evidence.binary_sha256
+        && binding.original_binary_sha256 == evidence.original_binary_sha256
         && binding.sandbox_image_sha256 == evidence.sandbox_image_sha256
+        && binding.regression_corpus_sha256 == evidence.regression_corpus_sha256
+        && binding.verification_spec_sha256 == evidence.verification_spec_sha256
 }
 
 fn verification_status(evidence: &SandboxVerificationEvidence) -> RemediationStatus {
-    if !evidence.completed || !evidence.original_reproduced || evidence.regression_cases == 0 {
+    let stages = evidence.stages();
+    if stages
+        .iter()
+        .any(|stage| stage.status == VerificationStageStatus::Inconclusive)
+    {
         RemediationStatus::Inconclusive
-    } else if evidence.patched_reproduced || evidence.regression_failures > 0 {
+    } else if stages
+        .iter()
+        .any(|stage| stage.status == VerificationStageStatus::Failed)
+    {
         RemediationStatus::Rejected
-    } else {
+    } else if stages
+        .iter()
+        .all(|stage| stage.status == VerificationStageStatus::Passed)
+    {
         RemediationStatus::Verified
+    } else {
+        RemediationStatus::Inconclusive
     }
 }
 

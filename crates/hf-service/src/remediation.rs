@@ -4,12 +4,29 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use hf_core::error::ClassifiedError;
-use hf_crash::remediation::{RemediationBinding, RemediationHandoff};
+use hf_crash::remediation::{
+    RemediationBinding, RemediationHandoff, RemediationVerificationSpec,
+    REMEDIATION_VERIFICATION_SPEC_VERSION,
+};
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::container::ServiceContainer;
 use crate::evidence::{read_run_crash_file, CampaignEvidencePricing};
+
+const DEFAULT_REMEDIATION_FOLLOW_UP_SECS: u64 = 60;
+const REMEDIATION_REPLAY_TIMEOUT_SECS: u64 = 30;
+const MAX_REMEDIATION_REGRESSION_CASES: usize = 256;
+
+/// Reusable output of [`ServiceContainer::prepare_remediation_draft`]: the
+/// unverified handoff plus the durable identity a Patch-to-Proof operation
+/// record needs (project root, target) and the reproducer bytes for export.
+pub(crate) struct RemediationDraftParts {
+    pub handoff: RemediationHandoff,
+    pub reproducer: Vec<u8>,
+    pub project_root: String,
+    pub target: String,
+}
 
 impl ServiceContainer {
     /// Assemble a visibly unverified remediation contract without writing it.
@@ -24,10 +41,16 @@ impl ServiceContainer {
         patch: &str,
         pricing: CampaignEvidencePricing,
     ) -> Result<RemediationHandoff, ClassifiedError> {
-        let (handoff, _) = self
-            .prepare_remediation_draft(run_id, finding_id, patch, pricing)
-            .await?;
-        Ok(handoff)
+        Ok(self
+            .prepare_remediation_draft(
+                run_id,
+                finding_id,
+                patch,
+                pricing,
+                DEFAULT_REMEDIATION_FOLLOW_UP_SECS,
+            )
+            .await?
+            .handoff)
     }
 
     /// Export a bounded remediation candidate whose status is explicitly
@@ -49,20 +72,27 @@ impl ServiceContainer {
         destination: &Path,
         pricing: CampaignEvidencePricing,
     ) -> Result<RemediationHandoff, ClassifiedError> {
-        let (handoff, reproducer) = self
-            .prepare_remediation_draft(run_id, finding_id, patch, pricing)
+        let parts = self
+            .prepare_remediation_draft(
+                run_id,
+                finding_id,
+                patch,
+                pricing,
+                DEFAULT_REMEDIATION_FOLLOW_UP_SECS,
+            )
             .await?;
-        write_draft_bundle_atomic(destination, &handoff, &reproducer)?;
-        Ok(handoff)
+        write_draft_bundle_atomic(destination, &parts.handoff, &parts.reproducer)?;
+        Ok(parts.handoff)
     }
 
-    async fn prepare_remediation_draft(
+    pub(crate) async fn prepare_remediation_draft(
         &self,
         run_id: Uuid,
         finding_id: Uuid,
         patch: &str,
         pricing: CampaignEvidencePricing,
-    ) -> Result<(RemediationHandoff, Vec<u8>), ClassifiedError> {
+        follow_up_fuzz_seconds: u64,
+    ) -> Result<RemediationDraftParts, ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
         let managed_workspace_root = crate::container::initialize_workspace_root()?;
         let manifest = self.campaign_evidence_manifest(run_id, pricing).await?;
@@ -96,6 +126,9 @@ impl ServiceContainer {
             .get_run(run_id)
             .await?
             .ok_or_else(|| ClassifiedError::Validation(format!("run {run_id} was not found")))?;
+        let run_config = run.config.as_ref().ok_or_else(|| {
+            ClassifiedError::Validation("run has no retained configuration".to_owned())
+        })?;
         let (reproducer, reproducer_sha256) = read_run_crash_file(
             &managed_workspace_root,
             Path::new(&run.project_root),
@@ -109,21 +142,63 @@ impl ServiceContainer {
             ));
         }
 
+        let patch_sha256 = hex::encode(Sha256::digest(patch.as_bytes()));
+        let verification_spec = resolve_remediation_verification_spec(
+            run_config,
+            &patch_sha256,
+            follow_up_fuzz_seconds,
+        )?;
+        let verification_spec_sha256 = verification_spec
+            .sha256()
+            .map_err(|error| ClassifiedError::Validation(error.to_string()))?;
         let handoff = RemediationHandoff::draft(RemediationBinding {
             finding_id,
+            run_id,
             source_revision_sha256: manifest.body.source_revision.clone(),
-            patch_sha256: hex::encode(Sha256::digest(patch.as_bytes())),
+            patch_sha256,
             patch: patch.to_owned(),
             reproducer_sha256,
             harness_sha256: manifest.body.harness_sha256.clone(),
-            binary_sha256: manifest.body.binary_sha256.clone(),
+            original_binary_sha256: manifest.body.binary_sha256.clone(),
             sandbox_image_sha256: manifest.body.sandbox_image_sha256.clone(),
             evidence_manifest_sha256: manifest.manifest_sha256.clone(),
+            regression_corpus_sha256: manifest.body.corpus_sha256.clone(),
+            verification_spec_sha256,
+            verification_spec,
         })
         .map_err(|error| ClassifiedError::Validation(error.to_string()))?;
 
-        Ok((handoff, reproducer))
+        Ok(RemediationDraftParts {
+            handoff,
+            reproducer,
+            project_root: run.project_root.clone(),
+            target: manifest.body.target.clone(),
+        })
     }
+}
+
+fn resolve_remediation_verification_spec(
+    run: &hf_core::engine::FuzzRunConfig,
+    patch_sha256: &str,
+    follow_up_fuzz_seconds: u64,
+) -> Result<RemediationVerificationSpec, ClassifiedError> {
+    let seed =
+        u64::from_str_radix(patch_sha256.get(..16).unwrap_or_default(), 16).map_err(|error| {
+            ClassifiedError::Validation(format!("derive remediation seed: {error}"))
+        })?;
+    let spec = RemediationVerificationSpec {
+        schema_version: REMEDIATION_VERIFICATION_SPEC_VERSION,
+        engine: run.engine,
+        replay_timeout_secs: REMEDIATION_REPLAY_TIMEOUT_SECS,
+        max_regression_cases: MAX_REMEDIATION_REGRESSION_CASES,
+        follow_up_fuzz_seconds,
+        max_mem_mb: run.max_mem_mb,
+        max_cpus: run.max_cpus,
+        seed,
+    };
+    spec.sha256()
+        .map(|_| spec)
+        .map_err(|error| ClassifiedError::Validation(error.to_string()))
 }
 
 fn write_draft_bundle_atomic(

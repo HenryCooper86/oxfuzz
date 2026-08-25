@@ -276,6 +276,28 @@ impl ServiceContainer {
                 }
             }
         }
+        // Patch-to-Proof: a `running` remediation operation has no live sandbox
+        // workflow after a restart. Fail it closed to `inconclusive` so it is
+        // never stuck `running` forever. Best-effort: a failure is logged and
+        // never blocks startup.
+        #[cfg(feature = "patch-to-proof")]
+        if let Some(store) = &store {
+            match store.recover_interrupted_remediations(Utc::now()).await {
+                Ok(affected) if affected > 0 => {
+                    tracing::info!(
+                        affected,
+                        "marked interrupted remediation operations inconclusive after restart"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "could not recover interrupted remediation operations"
+                    );
+                }
+            }
+        }
         // Persist diagnostics to the database when one is configured, so LLM
         // cost/usage accumulates across restarts; otherwise keep it in-memory.
         let diagnostics = Arc::new(match &store {

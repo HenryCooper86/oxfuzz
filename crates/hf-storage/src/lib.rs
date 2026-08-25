@@ -8,6 +8,7 @@
 mod store;
 
 pub mod checkpoint_store;
+mod remediation_store;
 mod retired_engine;
 mod schedule_occurrence_store;
 pub mod session_store;
@@ -15,6 +16,10 @@ pub mod transcript;
 pub mod transcript_display;
 
 pub use checkpoint_store::SqliteChatCheckpointStore;
+pub use remediation_store::{
+    RemediationOperationCompletion, RemediationOperationRecord, RemediationOperationStage,
+    RemediationOperationStatus,
+};
 pub use retired_engine::{
     validate_schedule_retirement_ids, validate_schedule_retirement_manifest,
     validate_schedule_retirement_operation_id, ScheduleRetirementHistoryProof,

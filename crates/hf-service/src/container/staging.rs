@@ -430,6 +430,17 @@ pub(super) fn run_context_digests(
     })
 }
 
+/// Just the source component of [`run_context_digests`], for the remediation
+/// pre-flight that revalidates a patch candidate against the run's retained
+/// source revision without recomputing the corpus or sandbox components.
+#[cfg(feature = "patch-to-proof")]
+pub(crate) fn run_context_source_digest(
+    workspace: &Path,
+    sandbox_image_sha256: &str,
+) -> Result<String, ClassifiedError> {
+    Ok(run_context_digests(workspace, sandbox_image_sha256)?.source)
+}
+
 /// Resolve one runtime image reference before persisting or executing a run.
 /// Docker returns a content-addressed `sha256:` ID. Proof-carrying runs reject
 /// adapters without an immutable image identity.

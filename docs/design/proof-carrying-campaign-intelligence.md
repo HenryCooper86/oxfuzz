@@ -121,6 +121,13 @@ Markdown summary. Draft export is useful but visibly unverified. A verified
 claim can only be assembled from a service-owned sandbox verification result;
 presentation-supplied booleans are never accepted as authority.
 
+The `patch-to-proof` feature extends this handoff into a durable, approved
+workflow. Remediation evidence version 3 names the original binary in the
+binding and the patched binary in execution evidence; these identities must not
+be equal by assumption. Original replay, patched replay, a non-empty retained
+regression corpus, and bounded follow-up fuzzing are separate required stages.
+See `patch-to-proof-design.md`.
+
 ## 6. Automotive State Intelligence
 
 `hf-automotive` extends its pure offline analysis with collision-safe
