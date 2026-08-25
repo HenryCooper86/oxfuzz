@@ -28,6 +28,7 @@ import { ProjectsView } from "./views/ProjectsView";
 import { ArtifactsView } from "./views/ArtifactsView";
 import { ReportsView } from "./views/ReportsView";
 import { RunsView } from "./views/RunsView";
+import { ChangesView } from "./views/ChangesView";
 import { AuditView } from "./views/AuditView";
 import { DefectDojoView } from "./views/DefectDojoView";
 import { CommandPalette } from "./components/CommandPalette";
@@ -45,7 +46,7 @@ import { RunOutputProvider } from "./providers/RunOutputContext";
 import { TargetProvider } from "./providers/TargetContext";
 import { ProgressPanel } from "./components/ProgressPanel";
 import { isTauriEnvironment, pickFolder } from "./lib";
-import { MessageSquare, Crosshair, Play, Bug, Database, Settings, FileCode, FileText, History, Activity, Gauge, Info, FolderOpen, Boxes, ListChecks, Bot, Puzzle, BookOpen, Zap, LayoutDashboard, ScrollText, ShieldCheck, LifeBuoy, CarFront } from "lucide-react";
+import { MessageSquare, Crosshair, Play, Bug, Database, Settings, FileCode, FileText, History, Activity, Gauge, Info, FolderOpen, Boxes, ListChecks, Bot, Puzzle, BookOpen, Zap, LayoutDashboard, ScrollText, ShieldCheck, LifeBuoy, CarFront , GitCompare} from "lucide-react";
 
 const AutomotiveView = lazy(() =>
   import("./views/AutomotiveView").then(({ AutomotiveView: View }) => ({ default: View })),
@@ -219,6 +220,11 @@ function AppInner() {
                 {activeView === "runs" && (
                   <ViewCanvas>
                     <RunsView />
+                  </ViewCanvas>
+                )}
+                {activeView === "changes" && (
+                  <ViewCanvas>
+                    <ChangesView />
                   </ViewCanvas>
                 )}
                 {activeView === "audit" && (
@@ -395,6 +401,7 @@ const viewIcons: Record<ViewType, React.ReactNode> = {
   artifacts: <Boxes size={18} />,
   reports: <FileText size={18} />,
   runs: <History size={18} />,
+  changes: <GitCompare size={18} />,
   audit: <ScrollText size={18} />,
   agents: <Bot size={18} />,
   skills: <Puzzle size={18} />,

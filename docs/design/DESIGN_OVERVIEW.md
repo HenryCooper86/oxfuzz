@@ -48,6 +48,7 @@ all under human-in-the-loop supervision.
 | Web API security / transport | hf-web | - | web-api-security-design.md |
 | Remediation handoff | hf-crash + hf-service | versioned remediation DTO | proof-carrying-campaign-intelligence.md |
 | Patch verification | hf-service + hf-crash + hf-storage | durable remediation operation and exact sandbox evidence | patch-to-proof-design.md |
+| Change-aware comparison | hf-service | parsed diff, affected targets, base/head comparison | change-aware-pr-fuzzing-design.md |
 
 ## 4. Crate Dependency Rules
 

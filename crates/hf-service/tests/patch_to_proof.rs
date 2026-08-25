@@ -358,3 +358,65 @@ async fn unapproved_operation_cannot_start_or_claim_verified_status() {
     assert!(error.to_string().contains("approved"));
     assert!(runtime.calls().is_empty());
 }
+
+/// The design requires guardrail authorization before the first sandbox
+/// command. A denial must refuse the start and leave the approved operation
+/// exactly as it was, rather than claiming it and stranding it in `running`.
+#[tokio::test]
+async fn verification_does_not_start_without_guardrail_authorization() {
+    use hf_guardrails::{DenyAll, GuardrailPolicy, Guardrails, RiskTier};
+
+    let (container, runtime, _project, run_id, finding_id) = fixture().await;
+    let draft = container
+        .create_remediation_operation(RemediationDraftRequest {
+            run_id,
+            finding_id,
+            patch: "--- a/parser.c\n+++ b/parser.c\n@@ -1 +1 @@\n-unsafe();\n+safe();\n".to_owned(),
+            follow_up_fuzz_seconds: 1,
+            pricing: CampaignEvidencePricing {
+                compute_usd_per_hour: 0.0,
+                model_cost_usd: 0.0,
+            },
+        })
+        .await
+        .unwrap();
+    container
+        .approve_remediation_operation(draft.operation_id, "local-operator")
+        .await
+        .unwrap();
+
+    // The same durable store, under a policy that denies every high-risk action.
+    let denied = ServiceContainer::new(runtime.clone(), None)
+        .with_store(Arc::clone(container.store().expect("fixture store")))
+        .with_guardrails(Guardrails::new(
+            GuardrailPolicy {
+                auto_allow_max: RiskTier::Low,
+                deny_at: Some(RiskTier::Low),
+            },
+            Arc::new(DenyAll),
+        ));
+    let error = denied
+        .start_remediation_verification(RemediationStartRequest {
+            operation_id: draft.operation_id,
+        })
+        .await
+        .expect_err("a denied action never starts sandbox verification");
+    assert!(
+        error.to_string().contains("guardrail"),
+        "the refusal names the guardrail: {error}"
+    );
+
+    let view = container
+        .remediation_operation(draft.operation_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        view.status,
+        RemediationOperationStatus::Approved,
+        "a denied start leaves the operation approved, never claimed"
+    );
+    assert!(
+        runtime.calls().is_empty(),
+        "a denied start executes nothing"
+    );
+}

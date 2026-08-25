@@ -18,6 +18,12 @@ fn verify_remediation() -> Action {
     }
 }
 
+fn publish_change_comparison() -> Action {
+    Action::PublishChangeComparison {
+        destination: "issue-tracker".to_owned(),
+    }
+}
+
 fn analyze_source() -> Action {
     Action::AnalyzeSource {
         analyzer: "semgrep".to_owned(),
@@ -37,6 +43,18 @@ fn analyze_source_has_stable_medium_risk_contract() {
 }
 
 #[test]
+fn publishing_a_comparison_has_a_stable_outward_facing_contract() {
+    let action = publish_change_comparison();
+    assert_eq!(action.kind(), "publish_change_comparison");
+    assert_eq!(action.label(), "publish change comparison to issue-tracker");
+    // The default policy must not silently allow an outward-facing publish.
+    assert_ne!(
+        GuardrailPolicy::default().evaluate(&action),
+        Decision::Allow
+    );
+}
+
+#[test]
 fn risk_tiers_are_ordered() {
     assert!(RiskTier::Low < RiskTier::Medium);
     assert!(RiskTier::Medium < RiskTier::High);
@@ -45,6 +63,8 @@ fn risk_tiers_are_ordered() {
     assert_eq!(Action::CompileHarness.risk(), RiskTier::Medium);
     assert_eq!(run_fuzzer().risk(), RiskTier::High);
     assert_eq!(verify_remediation().risk(), RiskTier::High);
+    // Publishing leaves the workspace and reaches an external service.
+    assert_eq!(publish_change_comparison().risk(), RiskTier::High);
     assert_eq!(
         Action::AutomotiveOffline {
             operation: "analyze_pcap".to_owned(),

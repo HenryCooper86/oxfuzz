@@ -2516,6 +2516,138 @@ fn proof_carrying_feature_unavailable() -> String {
     "proof-carrying campaign intelligence is not included in this application build".to_owned()
 }
 
+/// Explain that the change-aware surface was excluded from this build.
+#[cfg(not(feature = "change-aware"))]
+fn change_aware_feature_unavailable() -> String {
+    "change-aware pull-request comparison is not included in this application build".to_owned()
+}
+
+/// Map a source change onto the project's discovered targets.
+#[cfg(feature = "change-aware")]
+#[tauri::command]
+pub async fn change_impact(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    diff: Option<String>,
+    base: Option<String>,
+    head: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let revisions = match (base, head) {
+        (Some(base), Some(head)) => Some(hf_service::RevisionRange { base, head }),
+        _ => None,
+    };
+    let view = state
+        .container
+        .change_impact(hf_service::ChangeImpactRequest {
+            project,
+            revisions,
+            diff,
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(view).map_err(|error| error.to_string())
+}
+
+/// Explain that the change-aware surface was excluded from this build.
+#[cfg(not(feature = "change-aware"))]
+#[tauri::command]
+pub async fn change_impact(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    diff: Option<String>,
+    base: Option<String>,
+    head: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let _ = (state, project, diff, base, head);
+    Err(change_aware_feature_unavailable())
+}
+
+/// Compare two retained runs across a source change.
+#[cfg(feature = "change-aware")]
+#[tauri::command]
+pub async fn change_compare(
+    state: tauri::State<'_, crate::state::AppState>,
+    base_run_id: String,
+    head_run_id: String,
+    regression_threshold_pct: f64,
+) -> Result<serde_json::Value, String> {
+    let base_run_id = uuid::Uuid::parse_str(&base_run_id).map_err(|error| error.to_string())?;
+    let head_run_id = uuid::Uuid::parse_str(&head_run_id).map_err(|error| error.to_string())?;
+    let view = state
+        .container
+        .compare_revisions(hf_service::RevisionComparisonRequest {
+            base_run_id,
+            head_run_id,
+            regression_threshold_pct,
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(view).map_err(|error| error.to_string())
+}
+
+/// Explain that the change-aware surface was excluded from this build.
+#[cfg(not(feature = "change-aware"))]
+#[tauri::command]
+pub async fn change_compare(
+    state: tauri::State<'_, crate::state::AppState>,
+    base_run_id: String,
+    head_run_id: String,
+    regression_threshold_pct: f64,
+) -> Result<serde_json::Value, String> {
+    let _ = (state, base_run_id, head_run_id, regression_threshold_pct);
+    Err(change_aware_feature_unavailable())
+}
+
+/// Publish a completed comparison through an existing integration.
+#[cfg(feature = "change-aware")]
+#[tauri::command]
+pub async fn change_publish(
+    state: tauri::State<'_, crate::state::AppState>,
+    base_run_id: String,
+    head_run_id: String,
+    regression_threshold_pct: f64,
+    destination: String,
+) -> Result<serde_json::Value, String> {
+    let base_run_id = uuid::Uuid::parse_str(&base_run_id).map_err(|error| error.to_string())?;
+    let head_run_id = uuid::Uuid::parse_str(&head_run_id).map_err(|error| error.to_string())?;
+    let destination = match destination.as_str() {
+        "issue_tracker" => hf_service::PublishDestination::IssueTracker,
+        "defectdojo" => hf_service::PublishDestination::DefectDojo,
+        other => return Err(format!("unknown publication destination: {other}")),
+    };
+    let published = state
+        .container
+        .publish_change_comparison(hf_service::PublishComparisonRequest {
+            base_run_id,
+            head_run_id,
+            regression_threshold_pct,
+            destination,
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(published).map_err(|error| error.to_string())
+}
+
+/// Explain that the change-aware surface was excluded from this build.
+#[cfg(not(feature = "change-aware"))]
+#[tauri::command]
+pub async fn change_publish(
+    state: tauri::State<'_, crate::state::AppState>,
+    base_run_id: String,
+    head_run_id: String,
+    regression_threshold_pct: f64,
+    destination: String,
+) -> Result<serde_json::Value, String> {
+    let _ = (
+        state,
+        base_run_id,
+        head_run_id,
+        regression_threshold_pct,
+        destination,
+    );
+    Err(change_aware_feature_unavailable())
+}
+
 /// Create a durable, visibly unverified Patch-to-Proof remediation draft.
 #[cfg(feature = "patch-to-proof")]
 #[tauri::command]
