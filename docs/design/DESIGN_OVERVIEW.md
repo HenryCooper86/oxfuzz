@@ -51,6 +51,7 @@ all under human-in-the-loop supervision.
 | Change-aware comparison | hf-service | parsed diff, affected targets, base/head comparison | change-aware-pr-fuzzing-design.md |
 | Build diagnosis | hf-service | detected build system, sandbox build plan | build-doctor-design.md |
 | Coverage blockers | hf-service | ranked uncovered blockers, next experiment | coverage-blocker-design.md |
+| Non-crash oracles | hf-service | typed oracle specification, scaffold, violation | oracle-studio-design.md |
 
 ## 4. Crate Dependency Rules
 

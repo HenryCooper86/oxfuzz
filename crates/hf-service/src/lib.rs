@@ -41,6 +41,8 @@ pub mod harness_tournament;
 pub mod init;
 pub mod issue_tracker;
 pub mod knowledge;
+#[cfg(feature = "oracle-studio")]
+pub mod oracle_studio;
 pub mod recovery;
 #[cfg(feature = "proof-carrying")]
 pub mod remediation;
@@ -140,6 +142,11 @@ pub use hf_storage::{AutoRevertEvent, GuardrailDecisionRecord, ProjectAutoRevert
 pub use hf_storage::{RemediationOperationStage, RemediationOperationStatus};
 pub use init::{init_at, init_workspace, InitReport};
 pub use issue_tracker::{CreatedIssue, IssueTrackerConfig};
+#[cfg(feature = "oracle-studio")]
+pub use oracle_studio::{
+    OracleKind, OracleProperty, OracleScaffoldRequest, OracleScaffoldView, OracleSpec,
+    OracleViolation, ORACLE_SCHEMA_VERSION, ORACLE_VIOLATION_MARKER,
+};
 #[cfg(feature = "patch-to-proof")]
 pub use remediation_workflow::{
     RemediationApprovalView, RemediationDraftRequest, RemediationDraftView,

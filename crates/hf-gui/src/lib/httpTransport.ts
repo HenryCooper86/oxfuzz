@@ -67,6 +67,8 @@ const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   build_run: { method: "POST", path: "/build/run" },
   harness_tournament: { method: "POST", path: "/harness/tournament" },
   coverage_blockers: { method: "POST", path: "/coverage/blockers" },
+  oracle_scaffold: { method: "POST", path: "/oracles/scaffold" },
+  oracle_violation: { method: "GET", path: "/findings/{crash_id}/oracle-violation" },
   project_auto_revert_override: { method: "POST", path: "/projects/auto-revert" },
   project_auto_revert_overrides: { method: "GET", path: "/projects/auto-revert/all" },
   effective_auto_revert_policy: { method: "POST", path: "/projects/auto-revert/effective" },
