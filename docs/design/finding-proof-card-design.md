@@ -75,12 +75,12 @@ external-input-to-fault path and is therefore not used.
 
 ### 3.5 Fix verification
 
-Schema version 1 reports `not_verified` because remediation handoffs are
-currently exported artifacts rather than indexed durable service state. A
-draft patch, a clean replay alone, or a model recommendation cannot produce a
-verified result. The Patch-to-Proof phase may expose `verified`, `rejected`, or
-`inconclusive` only from the existing exact-input remediation state machine
-after its records are retained and addressable by finding id.
+Without `patch-to-proof`, schema version 1 reports `not_verified` because draft
+handoffs are exported artifacts rather than indexed durable service state. With
+that feature enabled, it reads the latest terminal remediation operation for
+the finding and exposes `verified`, `rejected`, or `inconclusive` only after
+revalidating exact-input sandbox evidence. A draft patch, running operation,
+clean replay alone, or model recommendation remains `not_verified`.
 
 ## 4. Evidence References
 
@@ -90,7 +90,8 @@ The initial kinds are:
 - `crash_record` with the persisted crash UUID;
 - `run_record` with the persisted run UUID; and
 - `casr_report` with the crash UUID, identifying the CASR payload embedded in
-  that crash record.
+  that crash record; and
+- `remediation_operation` with the durable Patch-to-Proof operation UUID.
 
 The service attaches only the references relevant to each claim. The GUI may
 shorten UUIDs for display but must retain the complete value in accessible

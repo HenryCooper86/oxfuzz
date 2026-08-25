@@ -133,3 +133,144 @@ pub async fn one_time_recovery_fixture(
         scheduler,
     })
 }
+
+/// Owns the resources for a Patch-to-Proof presentation test.
+#[cfg(feature = "patch-to-proof")]
+pub struct PatchToProofTestFixture {
+    directory: tempfile::TempDir,
+    container: ServiceContainer,
+    operation_id: uuid::Uuid,
+    finding_id: uuid::Uuid,
+}
+
+#[cfg(feature = "patch-to-proof")]
+impl PatchToProofTestFixture {
+    /// Returns the service container wired to the fixture's durable store.
+    pub fn container(&self) -> ServiceContainer {
+        self.container.clone()
+    }
+
+    /// Returns the persisted `draft` remediation operation.
+    #[must_use]
+    pub fn operation_id(&self) -> uuid::Uuid {
+        self.operation_id
+    }
+
+    /// Returns the finding the draft operation is bound to.
+    #[must_use]
+    pub fn finding_id(&self) -> uuid::Uuid {
+        self.finding_id
+    }
+
+    /// Returns the temporary root used by the fixture.
+    #[must_use]
+    pub fn directory_path(&self) -> &Path {
+        self.directory.path()
+    }
+}
+
+/// Builds a store-backed fixture holding one persisted `draft` remediation
+/// operation, so presentation layers can exercise the durable Patch-to-Proof
+/// transitions without running a sandbox.
+///
+/// # Errors
+/// Returns an error when the temporary store cannot be created or the draft
+/// record cannot be persisted.
+#[cfg(feature = "patch-to-proof")]
+pub async fn patch_to_proof_fixture(
+) -> Result<PatchToProofTestFixture, Box<dyn Error + Send + Sync>> {
+    use hf_core::crash::{Crash, CrashKind, CrashOrigin};
+    use hf_core::engine::EngineKind;
+    use hf_crash::remediation::{RemediationBinding, RemediationVerificationSpec};
+    use hf_storage::{
+        RemediationOperationRecord, RemediationOperationStage, RemediationOperationStatus,
+        RunRecord,
+    };
+
+    let directory = tempfile::tempdir()?;
+    let project_root = directory.path().display().to_string();
+    let store = Arc::new(Store::connect(directory.path().join("remediation.db")).await?);
+    let run = RunRecord::new(
+        &project_root,
+        EngineKind::LibFuzzer,
+        None,
+        chrono::Utc::now(),
+    );
+    store.insert_run(&run).await?;
+    let finding_id = uuid::Uuid::new_v4();
+    store
+        .upsert_crash(&Crash {
+            id: finding_id,
+            run_id: run.id,
+            target_id: uuid::Uuid::new_v4(),
+            input_path: directory.path().join("crash-input"),
+            stack_signature: "parse_packet".to_owned(),
+            kind: CrashKind::Asan,
+            summary: "heap-buffer-overflow in parse_packet".to_owned(),
+            minimized: true,
+            bug_report: None,
+            casr: None,
+            origin: CrashOrigin::Target,
+        })
+        .await?;
+
+    let spec = RemediationVerificationSpec {
+        schema_version: hf_crash::remediation::REMEDIATION_VERIFICATION_SPEC_VERSION,
+        engine: EngineKind::LibFuzzer,
+        replay_timeout_secs: 30,
+        max_regression_cases: 64,
+        follow_up_fuzz_seconds: 60,
+        max_mem_mb: 2048,
+        max_cpus: 1,
+        seed: 7,
+    };
+    let digest = |label: &str| -> String {
+        use sha2::Digest as _;
+        hex::encode(sha2::Sha256::digest(label.as_bytes()))
+    };
+    let binding = RemediationBinding {
+        finding_id,
+        run_id: run.id,
+        source_revision_sha256: digest("source"),
+        patch_sha256: digest("patch"),
+        patch: "--- a/parser.c\n+++ b/parser.c\n".to_owned(),
+        reproducer_sha256: digest("reproducer"),
+        harness_sha256: digest("harness"),
+        original_binary_sha256: digest("original-binary"),
+        sandbox_image_sha256: digest("image"),
+        evidence_manifest_sha256: digest("manifest"),
+        regression_corpus_sha256: digest("corpus"),
+        verification_spec_sha256: spec.sha256()?,
+        verification_spec: spec,
+    };
+    let operation_id = uuid::Uuid::new_v4();
+    let now = chrono::Utc::now();
+    store
+        .insert_remediation_operation(&RemediationOperationRecord {
+            id: operation_id,
+            run_id: run.id,
+            finding_id,
+            project_root,
+            target: "parse_packet".to_owned(),
+            status: RemediationOperationStatus::Draft,
+            current_stage: RemediationOperationStage::Review,
+            binding_json: serde_json::to_string(&binding)?,
+            approval_json: None,
+            verification_json: None,
+            artifact_dir: format!("remediations/{operation_id}"),
+            created_at: now,
+            updated_at: now,
+            ended_at: None,
+            failure_code: None,
+            failure_message: None,
+        })
+        .await?;
+
+    let container = ServiceContainer::stubbed().with_store(Arc::clone(&store));
+    Ok(PatchToProofTestFixture {
+        directory,
+        container,
+        operation_id,
+        finding_id,
+    })
+}

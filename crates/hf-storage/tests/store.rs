@@ -13,11 +13,13 @@ use hf_core::target::{
 use hf_storage::{
     AutoRevertEvent, AutomotiveOperationRecord, AutomotiveOperationStatus,
     AutomotiveStateCorpusRecord, GuardrailDecisionRecord, HarnessApprovalKind,
-    NewScheduleOccurrence, ProjectAutoRevert, RunKind, RunRecord, RunStatus,
-    ScheduleOccurrenceAcknowledgement, ScheduleOccurrenceInspection, ScheduleOccurrenceReservation,
-    ScheduleOccurrenceTransition, ScheduleOccurrenceTransitionResult, SemgrepFindingRecord,
-    SemgrepFindingSeverity, SemgrepPublication, SemgrepRunRecord, SemgrepRunStatus,
-    SemgrepTargetScoreRecord, StorageError, Store,
+    NewScheduleOccurrence, ProjectAutoRevert, RemediationOperationCompletion,
+    RemediationOperationRecord, RemediationOperationStage, RemediationOperationStatus, RunKind,
+    RunRecord, RunStatus, ScheduleOccurrenceAcknowledgement, ScheduleOccurrenceInspection,
+    ScheduleOccurrenceReservation, ScheduleOccurrenceTransition,
+    ScheduleOccurrenceTransitionResult, SemgrepFindingRecord, SemgrepFindingSeverity,
+    SemgrepPublication, SemgrepRunRecord, SemgrepRunStatus, SemgrepTargetScoreRecord, StorageError,
+    Store,
 };
 use uuid::Uuid;
 
@@ -26,6 +28,166 @@ async fn temp_store() -> (Store, tempfile::TempDir) {
     let path = dir.path().join("test.db");
     let store = Store::connect(&path).await.expect("connect");
     (store, dir)
+}
+
+async fn remediation_fixture(store: &Store, project: &str) -> RemediationOperationRecord {
+    let run = RunRecord::new(project, EngineKind::LibFuzzer, None, Utc::now());
+    store.insert_run(&run).await.unwrap();
+    let finding_id = Uuid::new_v4();
+    store
+        .upsert_crash(&Crash {
+            id: finding_id,
+            run_id: run.id,
+            target_id: Uuid::new_v4(),
+            input_path: PathBuf::from("runs/input/crash"),
+            stack_signature: "signature".to_owned(),
+            kind: CrashKind::Asan,
+            summary: "overflow".to_owned(),
+            minimized: true,
+            bug_report: None,
+            casr: None,
+            origin: hf_core::crash::CrashOrigin::Target,
+        })
+        .await
+        .unwrap();
+    RemediationOperationRecord {
+        id: Uuid::new_v4(),
+        run_id: run.id,
+        finding_id,
+        project_root: project.to_owned(),
+        target: "parse_packet".to_owned(),
+        status: RemediationOperationStatus::Draft,
+        current_stage: RemediationOperationStage::Review,
+        binding_json: serde_json::json!({"schema_version": 3}).to_string(),
+        approval_json: None,
+        verification_json: None,
+        artifact_dir: format!("remediations/{finding_id}"),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        ended_at: None,
+        failure_code: None,
+        failure_message: None,
+    }
+}
+
+#[tokio::test]
+async fn remediation_transitions_are_compare_and_set_and_scope_is_immutable() {
+    let (store, _dir) = temp_store().await;
+    let draft = remediation_fixture(&store, "/projects/remediation").await;
+    store.insert_remediation_operation(&draft).await.unwrap();
+
+    let approval = serde_json::json!({"approval_id": Uuid::new_v4()}).to_string();
+    store
+        .approve_remediation_operation(draft.id, &approval, Utc::now())
+        .await
+        .unwrap();
+    assert!(matches!(
+        store
+            .approve_remediation_operation(draft.id, &approval, Utc::now())
+            .await,
+        Err(StorageError::InvalidData(_))
+    ));
+
+    store
+        .claim_remediation_operation(draft.id, Utc::now())
+        .await
+        .unwrap();
+    store
+        .advance_remediation_stage(
+            draft.id,
+            RemediationOperationStage::OriginalReplay,
+            RemediationOperationStage::PatchBuild,
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        store
+            .advance_remediation_stage(
+                draft.id,
+                RemediationOperationStage::OriginalReplay,
+                RemediationOperationStage::Regression,
+                Utc::now(),
+            )
+            .await,
+        Err(StorageError::InvalidData(_))
+    ));
+
+    let error = sqlx::query("UPDATE remediation_operations SET binding_json = '{}' WHERE id = ?1")
+        .bind(draft.id.to_string())
+        .execute(store.pool())
+        .await
+        .expect_err("immutable binding must reject direct mutation");
+    assert!(error.to_string().contains("immutable"));
+}
+
+#[tokio::test]
+async fn remediation_terminal_evidence_is_queryable_and_running_work_recovers() {
+    let (store, _dir) = temp_store().await;
+    let completed = remediation_fixture(&store, "/projects/remediation").await;
+    store
+        .insert_remediation_operation(&completed)
+        .await
+        .unwrap();
+    store
+        .approve_remediation_operation(completed.id, "{}", Utc::now())
+        .await
+        .unwrap();
+    store
+        .claim_remediation_operation(completed.id, Utc::now())
+        .await
+        .unwrap();
+    store
+        .finish_remediation_operation(
+            completed.id,
+            &RemediationOperationCompletion {
+                status: RemediationOperationStatus::Verified,
+                verification_json: Some("{\"status\":\"verified\"}"),
+                failure_code: None,
+                failure_message: None,
+                completed_at: Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+    let latest = store
+        .latest_remediation_for_finding(completed.finding_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(latest.status, RemediationOperationStatus::Verified);
+    assert_eq!(latest.current_stage, RemediationOperationStage::Complete);
+
+    let interrupted = remediation_fixture(&store, "/projects/remediation").await;
+    store
+        .insert_remediation_operation(&interrupted)
+        .await
+        .unwrap();
+    store
+        .approve_remediation_operation(interrupted.id, "{}", Utc::now())
+        .await
+        .unwrap();
+    store
+        .claim_remediation_operation(interrupted.id, Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .recover_interrupted_remediations(Utc::now())
+            .await
+            .unwrap(),
+        1
+    );
+    let recovered = store
+        .remediation_operation(interrupted.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.status, RemediationOperationStatus::Inconclusive);
+    assert_eq!(
+        recovered.failure_code.as_deref(),
+        Some("interrupted_after_restart")
+    );
 }
 
 fn execution_json(

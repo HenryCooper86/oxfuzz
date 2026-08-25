@@ -24,6 +24,8 @@ pub enum FindingEvidenceKind {
     CrashRecord,
     RunRecord,
     CasrReport,
+    /// A Patch-to-Proof remediation operation and its terminal sandbox evidence.
+    RemediationRecord,
 }
 
 /// One stable reference to retained evidence.
@@ -227,4 +229,96 @@ fn casr_exploitability(severity: CrashSeverity) -> CasrExploitabilityDeterminati
         CrashSeverity::NotExploitable => CasrExploitabilityDetermination::NotExploitable,
         CrashSeverity::Undefined => CasrExploitabilityDetermination::Undefined,
     }
+}
+
+/// Override the base `fix_verification` claim from the latest terminal
+/// Patch-to-Proof remediation for a finding. A terminal operation (verified,
+/// rejected, inconclusive) replaces the base `not_verified` claim with a
+/// supported determination backed by the remediation record. A non-terminal
+/// operation (draft/approved/running) or a missing record leaves the base
+/// `not_verified` claim untouched.
+///
+/// A `verified` row is revalidated from its immutable binding and terminal
+/// evidence before it is trusted; a mismatch fails closed to `inconclusive`
+/// rather than reporting a stale verified claim.
+#[cfg(feature = "patch-to-proof")]
+pub fn enrich_fix_verification(
+    mut card: FindingProofCard,
+    record: Option<&hf_storage::RemediationOperationRecord>,
+) -> FindingProofCard {
+    use hf_storage::RemediationOperationStatus;
+
+    let Some(record) = record else {
+        return card;
+    };
+    let evidence_ref = FindingEvidenceReference {
+        kind: FindingEvidenceKind::RemediationRecord,
+        record_id: record.id.to_string(),
+    };
+    let (determination, status, detail_code, detail) = match record.status {
+        RemediationOperationStatus::Verified => {
+            if revalidate_verified_record(record) {
+                (
+                    FixVerificationDetermination::Verified,
+                    FindingProofStatus::Supported,
+                    "fix_verified",
+                    "A sandbox verification workflow reproduced the finding before the patch and confirmed it no longer crashes after the patch.",
+                )
+            } else {
+                (
+                    FixVerificationDetermination::Inconclusive,
+                    FindingProofStatus::Supported,
+                    "fix_verified_revalidation_failed",
+                    "The retained verified remediation evidence failed revalidation; the claim is not trusted.",
+                )
+            }
+        }
+        RemediationOperationStatus::Rejected => (
+            FixVerificationDetermination::Rejected,
+            FindingProofStatus::Supported,
+            "fix_rejected",
+            "A sandbox verification workflow rejected the patch: the finding still reproduces after the patch or a regression was found.",
+        ),
+        RemediationOperationStatus::Inconclusive => (
+            FixVerificationDetermination::Inconclusive,
+            FindingProofStatus::Supported,
+            "fix_inconclusive",
+            "A sandbox verification workflow could not reach a conclusive result for this patch.",
+        ),
+        RemediationOperationStatus::Draft
+        | RemediationOperationStatus::Approved
+        | RemediationOperationStatus::Running => return card,
+    };
+    card.fix_verification = proof_claim(
+        determination,
+        status,
+        detail_code,
+        detail,
+        vec![evidence_ref],
+    );
+    card
+}
+
+#[cfg(feature = "patch-to-proof")]
+fn revalidate_verified_record(record: &hf_storage::RemediationOperationRecord) -> bool {
+    use hf_crash::remediation::{
+        RemediationBinding, RemediationHandoff, RemediationStatus, SandboxVerificationEvidence,
+        REMEDIATION_SCHEMA_VERSION,
+    };
+    let Ok(binding) = serde_json::from_str::<RemediationBinding>(&record.binding_json) else {
+        return false;
+    };
+    let Some(json) = record.verification_json.as_deref() else {
+        return false;
+    };
+    let Ok(evidence) = serde_json::from_str::<SandboxVerificationEvidence>(json) else {
+        return false;
+    };
+    let handoff = RemediationHandoff {
+        schema_version: REMEDIATION_SCHEMA_VERSION,
+        binding,
+        status: RemediationStatus::Verified,
+        verification: Some(evidence),
+    };
+    handoff.verify_claim().is_ok()
 }

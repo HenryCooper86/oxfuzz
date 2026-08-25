@@ -2279,6 +2279,18 @@ impl Store {
         rows.iter().map(|r| json_col(r, "data_json")).collect()
     }
 
+    /// Load a single persisted crash by id, or `None` if it is absent.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure or malformed stored data.
+    pub async fn get_crash(&self, crash_id: Uuid) -> Result<Option<Crash>, StorageError> {
+        let row = sqlx::query("SELECT data_json FROM crashes WHERE id = ?1")
+            .bind(crash_id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|r| json_col(&r, "data_json")).transpose()
+    }
+
     // -- scheduler execution history ---------------------------------------
 
     /// Insert or update a persisted scheduler execution record.

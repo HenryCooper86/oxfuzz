@@ -337,6 +337,13 @@ claim becomes verified only from service-owned sandbox evidence tied to the
 exact patch and reproducer digests. See
 `proof-carrying-campaign-intelligence.md` for the versioned contracts.
 
+Behind `patch-to-proof`, the service persists remediation drafts and immutable
+approval scope, claims approved work with an atomic transition, executes the
+five required stages through `hf-runtime`, and publishes one terminal result.
+Presentation callers cannot submit stage outcomes. Startup recovery marks an
+orphaned running operation inconclusive before it can be retried. See
+`patch-to-proof-design.md`.
+
 ### 4.7 Semgrep Target Enrichment
 
 Semgrep enrichment is an explicit, feature-gated service operation for a
