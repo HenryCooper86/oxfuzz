@@ -219,9 +219,15 @@ pub fn plan_sequence(
             .map(|state| (state.digest.clone(), "least_recently_observed")),
     );
 
-    // A plan with no known states still exercises the operations once.
+    // With no retained state there is nothing to aim at, so exercise each
+    // available operation once rather than only the first: without evidence,
+    // breadth is the only thing that distinguishes one plan from another.
     if targets.is_empty() {
-        targets.push((String::new(), "no_retained_state"));
+        targets.extend(
+            req.operations
+                .iter()
+                .map(|_| (String::new(), "no_retained_state")),
+        );
     }
 
     let steps: Vec<SequenceStep> = targets
@@ -332,5 +338,265 @@ impl crate::container::ServiceContainer {
             }
         }
         Ok(observed)
+    }
+}
+
+/// Cap on script rules, so a reviewed script stays reviewable.
+pub const MAX_SCRIPT_RULES: usize = 256;
+
+/// Cap on any script identifier.
+const MAX_SCRIPT_IDENT: usize = 128;
+
+/// One scripted transition: in `from_state`, `request` yields `response` and
+/// moves to `to_state`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EcuRule {
+    pub from_state: String,
+    pub request: String,
+    pub response: String,
+    pub to_state: String,
+}
+
+/// A reviewed responder script.
+///
+/// This drives a **model**, not a bus participant. Every verdict derived from it
+/// is a statement about the script, never about a real ECU: the sidecar has no
+/// responder operation, so nothing here answers a real request on an interface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EcuScript {
+    pub name: String,
+    pub initial_state: String,
+    pub rules: Vec<EcuRule>,
+}
+
+/// Why a script could not be used.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ScriptError {
+    #[error("script identifiers must be present and under {MAX_SCRIPT_IDENT} characters")]
+    Identifier,
+    #[error("a script must have between 1 and {MAX_SCRIPT_RULES} rules")]
+    RuleCount,
+    #[error("a script must be deterministic: {state} and {request} have more than one rule")]
+    NotDeterministic { state: String, request: String },
+    #[error("the initial state {state} appears in no rule, so the model starts nowhere")]
+    InitialStateUnknown { state: String },
+}
+
+impl EcuScript {
+    /// Validate the script. Fails closed.
+    ///
+    /// # Errors
+    /// Returns the first problem found.
+    pub fn validate(&self) -> Result<(), ScriptError> {
+        let bounded = |value: &str| !value.is_empty() && value.len() <= MAX_SCRIPT_IDENT;
+        if !bounded(&self.name) || !bounded(&self.initial_state) {
+            return Err(ScriptError::Identifier);
+        }
+        if self.rules.is_empty() || self.rules.len() > MAX_SCRIPT_RULES {
+            return Err(ScriptError::RuleCount);
+        }
+        let mut seen: BTreeSet<(&str, &str)> = BTreeSet::new();
+        for rule in &self.rules {
+            if !bounded(&rule.from_state)
+                || !bounded(&rule.request)
+                || !bounded(&rule.response)
+                || !bounded(&rule.to_state)
+            {
+                return Err(ScriptError::Identifier);
+            }
+            // A non-deterministic model cannot validate anything, because it
+            // could not decide what it would do.
+            if !seen.insert((rule.from_state.as_str(), rule.request.as_str())) {
+                return Err(ScriptError::NotDeterministic {
+                    state: rule.from_state.clone(),
+                    request: rule.request.clone(),
+                });
+            }
+        }
+        let known = self.rules.iter().any(|rule| {
+            rule.from_state == self.initial_state || rule.to_state == self.initial_state
+        });
+        if !known {
+            return Err(ScriptError::InitialStateUnknown {
+                state: self.initial_state.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    /// The transition for a request in a state, if the script has one.
+    fn transition(&self, state: &str, request: &str) -> Option<&EcuRule> {
+        self.rules
+            .iter()
+            .find(|rule| rule.from_state == state && rule.request == request)
+    }
+}
+
+/// Whether the model could take a planned step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepReachability {
+    Reachable,
+    /// The script has no transition here. Usually an incomplete script, which
+    /// is what a reviewer needs to see, rather than a defect.
+    UnreachableUnderScript,
+}
+
+/// One step, as the model would have taken it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SimulatedStep {
+    pub index: usize,
+    pub operation: String,
+    pub state_before: String,
+    pub state_after: Option<String>,
+    pub reachability: StepReachability,
+}
+
+/// What a script says about a plan. A statement about the script, not hardware.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PlanSimulation {
+    pub schema_version: u32,
+    /// Retained so a later reader can see what the model assumed.
+    pub script_name: String,
+    pub steps: Vec<SimulatedStep>,
+}
+
+/// Walk a plan against a script, reporting what the model would do.
+///
+/// The plan's order is preserved: the planner owns ordering from retained
+/// evidence, and a model rewriting it would substitute the script's assumptions
+/// for the campaign's.
+///
+/// # Errors
+/// Returns a [`ScriptError`] when the script does not validate.
+pub fn simulate_plan(
+    script: &EcuScript,
+    plan: &SequencePlan,
+) -> Result<PlanSimulation, ScriptError> {
+    script.validate()?;
+    let mut state = script.initial_state.clone();
+    let mut steps = Vec::with_capacity(plan.steps.len());
+    for step in &plan.steps {
+        match script.transition(&state, &step.operation) {
+            Some(rule) => {
+                steps.push(SimulatedStep {
+                    index: step.index,
+                    operation: step.operation.clone(),
+                    state_before: state.clone(),
+                    state_after: Some(rule.to_state.clone()),
+                    reachability: StepReachability::Reachable,
+                });
+                state = rule.to_state.clone();
+            }
+            None => steps.push(SimulatedStep {
+                index: step.index,
+                operation: step.operation.clone(),
+                state_before: state.clone(),
+                state_after: None,
+                reachability: StepReachability::UnreachableUnderScript,
+            }),
+        }
+    }
+    Ok(PlanSimulation {
+        schema_version: AUTOMOTIVE_LAB_SCHEMA_VERSION,
+        script_name: script.name.clone(),
+        steps,
+    })
+}
+
+/// Whether a reset restored the recorded baseline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResetOutcome {
+    /// The observed digest equals the baseline.
+    Confirmed,
+    /// Both digests are present and differ.
+    Mismatched,
+    /// A digest is missing, so nothing was compared. Never a success.
+    Unconfirmed,
+}
+
+/// The result of checking a reset claim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ResetEvidence {
+    pub outcome: ResetOutcome,
+    pub baseline_digest: Option<String>,
+    pub observed_digest: Option<String>,
+    pub reason_code: String,
+    /// Whether findings after this reset can be attributed to the sequence that
+    /// followed it. False unless the reset was confirmed: without a known
+    /// starting state, an attribution would be a guess presented as evidence.
+    pub attributable: bool,
+}
+
+/// Check a reset claim against a recorded baseline.
+#[must_use]
+pub fn reset_evidence(baseline: Option<&str>, observed: Option<&str>) -> ResetEvidence {
+    let (outcome, reason) = match (baseline, observed) {
+        (Some(expected), Some(actual)) if expected == actual => {
+            (ResetOutcome::Confirmed, "baseline_restored")
+        }
+        (Some(_), Some(_)) => (ResetOutcome::Mismatched, "baseline_not_restored"),
+        (None, _) => (ResetOutcome::Unconfirmed, "no_recorded_baseline"),
+        (_, None) => (ResetOutcome::Unconfirmed, "no_observed_state_after_reset"),
+    };
+    ResetEvidence {
+        outcome,
+        baseline_digest: baseline.map(str::to_owned),
+        observed_digest: observed.map(str::to_owned),
+        reason_code: reason.to_owned(),
+        attributable: outcome == ResetOutcome::Confirmed,
+    }
+}
+
+/// Request to walk a plan against a reviewed script.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LabSimulateRequest {
+    pub project: String,
+    pub script: EcuScript,
+    #[serde(flatten)]
+    pub plan: SequencePlanRequest,
+}
+
+/// Request to check a reset claim against a recorded baseline.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LabResetRequest {
+    #[serde(default)]
+    pub baseline_digest: Option<String>,
+    #[serde(default)]
+    pub observed_digest: Option<String>,
+}
+
+impl crate::container::ServiceContainer {
+    /// Walk a plan against a reviewed script and report what the model would do.
+    ///
+    /// A statement about the script, never about hardware. Executes nothing.
+    ///
+    /// # Errors
+    /// Returns a classified error when the script does not validate or the
+    /// retained evidence cannot be read.
+    pub async fn automotive_simulate_plan(
+        &self,
+        req: LabSimulateRequest,
+    ) -> Result<PlanSimulation, hf_core::error::ClassifiedError> {
+        use hf_core::error::ClassifiedError;
+
+        let plan = self
+            .automotive_sequence_plan(LabPlanRequest {
+                project: req.project,
+                plan: req.plan,
+            })
+            .await?;
+        simulate_plan(&req.script, &plan)
+            .map_err(|error| ClassifiedError::Validation(error.to_string()))
+    }
+
+    /// Check a reset claim. Pure over the supplied digests; executes nothing.
+    #[must_use]
+    pub fn automotive_reset_evidence(&self, req: &LabResetRequest) -> ResetEvidence {
+        reset_evidence(
+            req.baseline_digest.as_deref(),
+            req.observed_digest.as_deref(),
+        )
     }
 }

@@ -282,6 +282,80 @@ opens no interface.
 - **Executing the plan from the planner** -- automotive execution has an
   approval path per mode; a second entrypoint would duplicate it.
 
+## 8b. Stateful Lab: Responder Model and Reset Evidence
+
+### 8b.1 What this is, and what it is not
+
+A virtual ECU here is a **model**, not a bus participant. It is a deterministic
+responder implemented in Rust and driven by a reviewed script, used to check
+whether a sequence plan is coherent before anyone runs it, and to give reset a
+definition that can be checked.
+
+It does not answer real requests on a virtual CAN interface. The sidecar's
+operation vocabulary has no responder, and adding one is cross-language work in
+the image whose distribution licensing is still open. Every verdict the model
+produces is therefore a statement about the script, not about any real ECU, and
+the surface says so. Confusing the two would be the worst failure available
+here: a plan that the model says is fine tells you nothing about hardware.
+
+### 8b.2 The script
+
+A script names an initial state and a set of rules. Each rule maps a state and a
+request to a response and a next state. Validation is deterministic and fails
+closed:
+
+- names and identifiers are bounded and non-empty;
+- no two rules share a state and request, since a non-deterministic model cannot
+  validate anything; and
+- the initial state must appear in the rules, so a script cannot start nowhere.
+
+The script is reviewed evidence. It is retained with any result derived from it,
+so a later reader can see what the model assumed.
+
+### 8b.3 Plan simulation
+
+A sequence plan is walked against the script. Each step is reported as reachable
+or unreachable *under this script*, with the state the model was in when it got
+there. An unreachable step is not a defect: it usually means the script is
+incomplete, which is exactly what a reviewer needs to see.
+
+A plan is never rewritten by the simulation. The planner owns ordering; the
+model only reports what it would do.
+
+### 8b.4 Reset evidence
+
+Reset is the claim that the target was returned to a known state between
+sequences. That claim is checkable: the state signature observed after a reset
+must equal a recorded baseline signature.
+
+Three outcomes, and only three:
+
+- **`confirmed`** -- the observed digest equals the baseline.
+- **`mismatched`** -- both digests are present and differ. The reset did not
+  restore the baseline.
+- **`unconfirmed`** -- a digest is missing, so nothing was compared.
+
+An unconfirmed reset is never treated as a successful one. Findings produced
+after a reset that was not confirmed are marked as not attributable to the
+sequence that followed it, because the starting state is unknown and any
+attribution would be a guess presented as evidence.
+
+### 8b.5 Rejected alternatives
+
+- **Calling the responder a virtual ECU without qualification** -- it does not
+  answer on a bus, and a reader who believed otherwise would trust a plan the
+  model approved as if hardware had approved it.
+- **Adding the responder to the Scapy sidecar now** -- cross-language work in an
+  image whose distribution licensing is unresolved; it belongs in its own phase.
+- **Treating an unconfirmed reset as confirmed** -- it would attribute findings
+  to a sequence whose starting state was never established.
+- **Letting the simulation reorder a plan** -- the planner owns ordering from
+  retained evidence; a model rewriting it would substitute the script's
+  assumptions for the campaign's evidence.
+- **Failing a plan because the model could not reach a step** -- an incomplete
+  script is the common case, and refusing on it would train operators to ignore
+  the result.
+
 ## 9. Distribution and Licensing
 
 The Rust core remains MIT and links no Scapy code. Enabling the

@@ -677,6 +677,8 @@ fn automotive_lab_routes() -> Router<AppState> {
     Router::new()
         .route("/automotive/lab/coverage", post(automotive_lab_coverage))
         .route("/automotive/lab/plan", post(automotive_lab_plan))
+        .route("/automotive/lab/simulate", post(automotive_lab_simulate))
+        .route("/automotive/lab/reset", post(automotive_lab_reset))
 }
 
 #[cfg(not(feature = "automotive-lab"))]
@@ -961,6 +963,29 @@ async fn remediation_draft(
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(handoff)))
+}
+
+#[cfg(feature = "automotive-lab")]
+async fn automotive_lab_simulate(
+    State(state): State<AppState>,
+    Json(request): Json<hf_service::LabSimulateRequest>,
+) -> ApiResult<serde_json::Value> {
+    let simulation = state
+        .container
+        .automotive_simulate_plan(request)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(simulation)))
+}
+
+#[cfg(feature = "automotive-lab")]
+async fn automotive_lab_reset(
+    State(state): State<AppState>,
+    Json(request): Json<hf_service::LabResetRequest>,
+) -> ApiResult<serde_json::Value> {
+    Ok(Json(public_value(
+        state.container.automotive_reset_evidence(&request),
+    )))
 }
 
 #[cfg(feature = "automotive-lab")]

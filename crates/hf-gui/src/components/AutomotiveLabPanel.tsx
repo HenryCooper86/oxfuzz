@@ -1,9 +1,15 @@
 import { useState } from "react";
 import { Workflow } from "lucide-react";
-import { Badge, Button } from "./ui";
+import { Badge, Button, Textarea } from "./ui";
 import { getTransport } from "../lib";
 import { useI18n } from "../i18nContext";
-import type { LabMode, ProtocolStateCoverage, SequencePlan } from "../types";
+import type {
+  LabMode,
+  PlanSimulation,
+  ProtocolStateCoverage,
+  ResetEvidence,
+  SequencePlan,
+} from "../types";
 
 /// Only the sequenceable modes. The physical bench is deliberately absent:
 /// each physical transmission needs its own fresh approval, so a sequence
@@ -21,6 +27,9 @@ export function AutomotiveLabPanel({
   const [mode, setMode] = useState<LabMode>("virtual_can");
   const [coverage, setCoverage] = useState<ProtocolStateCoverage | null>(null);
   const [plan, setPlan] = useState<SequencePlan | null>(null);
+  const [simulation, setSimulation] = useState<PlanSimulation | null>(null);
+  const [reset, setReset] = useState<ResetEvidence | null>(null);
+  const [scriptJson, setScriptJson] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -43,9 +52,49 @@ export function AutomotiveLabPanel({
         },
       });
       setPlan(proposed);
+      // The reset claim is checked against whatever baseline the evidence
+      // recorded; a missing digest stays unconfirmed rather than assumed good.
+      const baseline = observed.observed[0]?.digest ?? null;
+      const latest = observed.observed[observed.observed.length - 1]?.digest ?? null;
+      setReset(
+        await transport.invoke<ResetEvidence>("automotive_lab_reset", {
+          request: { baseline_digest: baseline, observed_digest: latest },
+        }),
+      );
     } catch (e) {
       setCoverage(null);
       setPlan(null);
+      setSimulation(null);
+      setReset(null);
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function simulate() {
+    setBusy(true);
+    setError(null);
+    try {
+      // The script is reviewed evidence supplied by the operator; a malformed
+      // one is refused here rather than sent as something the service must
+      // guess at.
+      const script: unknown = JSON.parse(scriptJson);
+      const simulated = await getTransport().invoke<PlanSimulation>(
+        "automotive_lab_simulate",
+        {
+          request: {
+            project,
+            script,
+            protocol,
+            mode,
+            operations: ["scan_uds", "replay"],
+          },
+        },
+      );
+      setSimulation(simulated);
+    } catch (e) {
+      setSimulation(null);
       setError(String(e));
     } finally {
       setBusy(false);
@@ -152,6 +201,86 @@ export function AutomotiveLabPanel({
               )}
             </div>
           ))}
+        </div>
+      )}
+
+      {plan && !plan.refusal && (
+        <div className="flex flex-col gap-2 mt-3">
+          <span className="text-xs font-medium text-text-secondary">
+            {t("automotiveLab.scriptTitle")}
+          </span>
+          <p className="text-xs text-text-muted">{t("automotiveLab.scriptHelp")}</p>
+          <Textarea
+            mono
+            rows={4}
+            value={scriptJson}
+            placeholder={t("automotiveLab.scriptPlaceholder")}
+            onChange={(event) => setScriptJson(event.target.value)}
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            className="self-start"
+            loading={busy}
+            disabled={scriptJson.trim().length === 0}
+            onClick={() => void simulate()}
+          >
+            {t("automotiveLab.simulate")}
+          </Button>
+        </div>
+      )}
+
+      {simulation && (
+        <div className="flex flex-col gap-1 mt-2">
+          <span className="text-xs font-medium text-text-secondary">
+            {t("automotiveLab.simulation")} ({simulation.script_name})
+          </span>
+          <p className="text-xs text-text-muted">{t("automotiveLab.modelNotice")}</p>
+          {simulation.steps.map((step) => (
+            <div key={step.index} className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-mono text-text-secondary mr-auto">
+                {step.operation}
+              </span>
+              <Badge
+                variant={step.reachability === "reachable" ? "success" : "warning"}
+              >
+                {t(`automotiveLab.reachability.${step.reachability}`)}
+              </Badge>
+              <span className="text-xs font-mono text-text-muted">{step.state_before}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {reset && (
+        <div
+          className="rounded-sm border border-border mt-2"
+          style={{ padding: "var(--space-sm)", background: "var(--surface-secondary)" }}
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs font-medium text-text-secondary mr-auto">
+              {t("automotiveLab.resetTitle")}
+            </span>
+            <Badge
+              variant={
+                reset.outcome === "confirmed"
+                  ? "success"
+                  : reset.outcome === "mismatched"
+                    ? "error"
+                    : "warning"
+              }
+            >
+              {t(`automotiveLab.reset.${reset.outcome}`)}
+            </Badge>
+          </div>
+          <p className="text-xs text-text-muted mt-1">
+            {t(`automotiveLab.resetReason.${reset.reason_code}`)}
+          </p>
+          {!reset.attributable && (
+            <p className="text-xs mt-1" style={{ color: "var(--warning)" }}>
+              {t("automotiveLab.notAttributable")}
+            </p>
+          )}
         </div>
       )}
 
