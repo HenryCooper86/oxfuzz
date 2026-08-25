@@ -2552,6 +2552,59 @@ fn automotive_lab_feature_unavailable() -> String {
     "the stateful automotive lab is not included in this application build".to_owned()
 }
 
+/// Walk a plan against a reviewed script. A statement about the script, never
+/// about hardware.
+#[cfg(feature = "automotive-lab")]
+#[tauri::command]
+pub async fn automotive_lab_simulate(
+    state: tauri::State<'_, crate::state::AppState>,
+    request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let request: hf_service::LabSimulateRequest =
+        serde_json::from_value(request).map_err(|error| format!("invalid request: {error}"))?;
+    let simulation = state
+        .container
+        .automotive_simulate_plan(request)
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(simulation).map_err(|error| error.to_string())
+}
+
+/// Explain that the stateful lab was excluded from this build.
+#[cfg(not(feature = "automotive-lab"))]
+#[tauri::command]
+pub async fn automotive_lab_simulate(
+    state: tauri::State<'_, crate::state::AppState>,
+    request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let _ = (state, request);
+    Err(automotive_lab_feature_unavailable())
+}
+
+/// Check a reset claim against a recorded baseline.
+#[cfg(feature = "automotive-lab")]
+#[tauri::command]
+pub async fn automotive_lab_reset(
+    state: tauri::State<'_, crate::state::AppState>,
+    request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let request: hf_service::LabResetRequest =
+        serde_json::from_value(request).map_err(|error| format!("invalid request: {error}"))?;
+    serde_json::to_value(state.container.automotive_reset_evidence(&request))
+        .map_err(|error| error.to_string())
+}
+
+/// Explain that the stateful lab was excluded from this build.
+#[cfg(not(feature = "automotive-lab"))]
+#[tauri::command]
+pub async fn automotive_lab_reset(
+    state: tauri::State<'_, crate::state::AppState>,
+    request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let _ = (state, request);
+    Err(automotive_lab_feature_unavailable())
+}
+
 /// Observed protocol states for a project, from retained evidence.
 #[cfg(feature = "automotive-lab")]
 #[tauri::command]
