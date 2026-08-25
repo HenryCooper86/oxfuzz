@@ -37,6 +37,12 @@ pub enum Action {
         /// Requested follow-up campaign duration in seconds.
         duration_secs: u64,
     },
+    /// Run the project's own build system in the sandbox to produce build
+    /// context. The build scripts are untrusted project content.
+    RunProjectBuild {
+        /// Detected build system, such as `cmake`.
+        build_system: String,
+    },
     /// Publish a change comparison to an external tracker outside the workspace.
     PublishChangeComparison {
         /// Stable destination identifier, such as `issue-tracker`.
@@ -102,6 +108,7 @@ impl Action {
             Action::RunHarness => "run_harness",
             Action::RunFuzzer { .. } => "run_fuzzer",
             Action::VerifyRemediation { .. } => "verify_remediation",
+            Action::RunProjectBuild { .. } => "run_project_build",
             Action::PublishChangeComparison { .. } => "publish_change_comparison",
             Action::AutomotiveOffline { .. } => "automotive_offline",
             Action::AutomotiveVirtualCan { .. } => "automotive_virtual_can",
@@ -132,6 +139,9 @@ impl Action {
                 engine,
                 duration_secs,
             } => format!("verify {engine} remediation for {duration_secs}s"),
+            Action::RunProjectBuild { build_system } => {
+                format!("run the project's {build_system} build")
+            }
             Action::PublishChangeComparison { destination } => {
                 format!("publish change comparison to {destination}")
             }
@@ -173,6 +183,7 @@ impl Action {
             Action::RunHarness
             | Action::RunFuzzer { .. }
             | Action::VerifyRemediation { .. }
+            | Action::RunProjectBuild { .. }
             | Action::PublishChangeComparison { .. }
             | Action::AutomotiveVirtualCan { .. }
             | Action::AutomotivePhysicalBench { .. }
