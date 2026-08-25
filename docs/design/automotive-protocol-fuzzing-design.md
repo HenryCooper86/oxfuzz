@@ -215,7 +215,74 @@ DTO. Export uses the existing service-owned report exporters. Presentation
 layers may choose a destination or render a preview, but they do not recompute
 totals, readiness, findings, citations, or safety posture.
 
-## 8. Distribution and Licensing
+## 8. Stateful Lab: Sequence Planning and Protocol-State Coverage
+
+Status: **active implementation**, behind the `automotive-lab` feature.
+
+### 8.1 Goal
+
+A single request tells you little about a protocol implementation whose defects
+depend on the order of calls. This extends the retained state corpus with two
+things an operator can act on: what the evidence shows was actually reached, and
+an ordered plan for reaching what it has not.
+
+### 8.2 Modes, and why the bench is excluded
+
+A plan may name only `OfflinePcap` or `VirtualCan`. A plan naming
+`PhysicalBench` is refused, and the refusal says why.
+
+This is not conservatism for its own sake. The existing rule is that each
+physical transmission requires a fresh, single-use human approval, and the
+service fails closed if one reaches execution without it. A sequence runner on
+the bench would convert one approval into many transmissions -- exactly the
+property that rule exists to prevent. The stateful lab therefore adds no
+physical code path at all, rather than adding one with a gate that has to keep
+holding.
+
+### 8.3 Protocol-state coverage
+
+Coverage is computed from retained evidence: the promoted state corpus and the
+state signatures recorded on completed operations. It reports each distinct
+state observed, its digest, and the operation that first produced it.
+
+It does **not** report a percentage by default. Retained evidence establishes
+which states were observed; it cannot establish how many exist. A denominator
+requires a reviewed state model, supplied explicitly, and when one is supplied
+the view names it and reports covered and unreached against it. Without a model
+there is no total, no percentage, and no unreached list -- an absent denominator
+is reported as absent rather than filled in with the observed count, which would
+render every campaign as complete coverage of itself.
+
+### 8.4 Sequence plan
+
+A plan is an ordered list of steps. Each step names the operation to run, the
+retained state it is expected to start from when one is known, and a stable
+reason code for why it was chosen. Ordering is deterministic: unreached states
+from the supplied model first, then states observed least recently, then digest
+order for stability.
+
+The plan is advisory. Running it uses the existing approved automotive execution
+path, with its existing per-mode rules. Planning itself executes nothing and
+opens no interface.
+
+### 8.5 Rejected alternatives
+
+- **Allowing bench sequences under one scoped approval** -- it would multiply a
+  single-use approval into many transmissions, and a sequence that diverged
+  mid-run would transmit frames the approval never described.
+- **Allowing bench sequences with a per-step approval** -- it preserves the rule
+  literally, but builds a physical execution loop whose safety depends on a gate
+  never regressing. No bench path is safer than a guarded one.
+- **Reporting observed states as full coverage** -- with no model the observed
+  set is its own denominator, so every campaign would report complete coverage
+  of itself.
+- **Inferring the state model from captures** -- an inferred model is exactly as
+  incomplete as the evidence that produced it, and presenting it as a
+  denominator would give that incompleteness the appearance of a measurement.
+- **Executing the plan from the planner** -- automotive execution has an
+  approval path per mode; a second entrypoint would duplicate it.
+
+## 9. Distribution and Licensing
 
 The Rust core remains MIT and links no Scapy code. Enabling the
 `automotive-scapy` feature in the product crates' default set does not change
@@ -228,7 +295,7 @@ notices and source-availability obligations. Release review must verify those
 obligations before publishing the sidecar image; this design is an engineering
 boundary, not legal advice.
 
-## 9. Rejected Alternatives
+## 10. Rejected Alternatives
 
 - **Vendoring Scapy into the Rust/core distribution** -- couples the default
   MIT artifact to an optional GPL component and obscures upgrade provenance.
@@ -245,7 +312,7 @@ boundary, not legal advice.
 - **Calling the model from CLI, REST, Tauri, or React directly** -- duplicates
   prompts and policy outside `hf-service` and produces inconsistent reports.
 
-## 10. Verification
+## 11. Verification
 
 The implemented contract is covered by feature-enabled pure Rust tests for the
 complete vocabulary, serde names, mode/approval validation, capability reports,

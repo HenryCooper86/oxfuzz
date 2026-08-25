@@ -8,11 +8,12 @@ description = "Tauri v2 desktop GUI for oxfuzz"
 # Product capabilities are on by default; `--no-default-features` drops their
 # presentation entrypoints.
 [features]
-default = ["automotive-scapy", "build-context", "build-doctor", "change-aware", "coverage-blockers", "harness-tournament", "native-analysis", "oracle-studio", "patch-to-proof", "proof-carrying", "semgrep-enrichment"]
+default = ["automotive-lab", "automotive-scapy", "build-context", "build-doctor", "change-aware", "coverage-blockers", "harness-tournament", "native-analysis", "oracle-studio", "patch-to-proof", "proof-carrying", "semgrep-enrichment"]
 automotive-scapy = ["hf-service/automotive-scapy"]
 build-context = ["hf-service/build-context"]
 build-doctor = ["build-context", "hf-service/build-doctor"]
 coverage-blockers = ["hf-service/coverage-blockers"]
+automotive-lab = ["automotive-scapy", "hf-service/automotive-lab"]
 oracle-studio = ["hf-service/oracle-studio"]
 harness-tournament = ["hf-service/harness-tournament"]
 change-aware = ["proof-carrying", "hf-service/change-aware"]

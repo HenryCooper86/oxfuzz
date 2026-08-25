@@ -646,6 +646,45 @@ export interface OracleViolation {
   detail: string | null;
 }
 
+/// Stateful Automotive Lab, owned by hf-service. The physical bench is not a
+/// sequenceable mode and does not appear here.
+export type LabMode = "offline_pcap" | "virtual_can";
+
+export type PlanRefusal = "physical_bench_not_sequenceable" | "no_operations";
+
+export interface ObservedState {
+  digest: string;
+  source_operation_id: string;
+  first_observed_at: string;
+  last_observed_at: string;
+}
+
+export interface ProtocolStateCoverage {
+  schema_version: number;
+  protocol: string;
+  observed: ObservedState[];
+  /** Present only when a reviewed model supplied one. */
+  expected_total: number | null;
+  model_name: string | null;
+  /** Empty without a model. */
+  unreached: string[];
+}
+
+export interface SequenceStep {
+  index: number;
+  operation: string;
+  expected_start_state: string | null;
+  reason_code: string;
+}
+
+export interface SequencePlan {
+  schema_version: number;
+  protocol: string;
+  mode: string;
+  steps: SequenceStep[];
+  refusal: PlanRefusal | null;
+}
+
 export interface CrashReviewItem {
   crash_id: string;
   run_id: string;

@@ -402,6 +402,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .merge(harness_tournament_routes())
         .merge(coverage_blocker_routes())
         .merge(oracle_studio_routes())
+        .merge(automotive_lab_routes())
         .merge(semgrep_routes())
         .route(
             "/projects/auto-revert",
@@ -668,6 +669,18 @@ fn oracle_studio_routes() -> Router<AppState> {
 
 #[cfg(not(feature = "oracle-studio"))]
 fn oracle_studio_routes() -> Router<AppState> {
+    Router::new()
+}
+
+#[cfg(feature = "automotive-lab")]
+fn automotive_lab_routes() -> Router<AppState> {
+    Router::new()
+        .route("/automotive/lab/coverage", post(automotive_lab_coverage))
+        .route("/automotive/lab/plan", post(automotive_lab_plan))
+}
+
+#[cfg(not(feature = "automotive-lab"))]
+fn automotive_lab_routes() -> Router<AppState> {
     Router::new()
 }
 
@@ -948,6 +961,32 @@ async fn remediation_draft(
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(handoff)))
+}
+
+#[cfg(feature = "automotive-lab")]
+async fn automotive_lab_coverage(
+    State(state): State<AppState>,
+    Json(request): Json<hf_service::LabCoverageRequest>,
+) -> ApiResult<serde_json::Value> {
+    let view = state
+        .container
+        .automotive_state_coverage(request)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(view)))
+}
+
+#[cfg(feature = "automotive-lab")]
+async fn automotive_lab_plan(
+    State(state): State<AppState>,
+    Json(request): Json<hf_service::LabPlanRequest>,
+) -> ApiResult<serde_json::Value> {
+    let plan = state
+        .container
+        .automotive_sequence_plan(request)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(plan)))
 }
 
 #[cfg(feature = "oracle-studio")]

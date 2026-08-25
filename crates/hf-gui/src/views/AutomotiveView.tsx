@@ -34,6 +34,7 @@ import { AutomotiveOfflineWorkspace } from "../components/AutomotiveOfflineWorks
 import { AutomotiveLiveMonitor } from "../components/AutomotiveLiveMonitor";
 import { AutomotiveUdsScan } from "../components/AutomotiveUdsScan";
 import { AutomotiveFrameSender } from "../components/AutomotiveFrameSender";
+import { AutomotiveLabPanel } from "../components/AutomotiveLabPanel";
 import {
   Badge,
   Button,
@@ -406,6 +407,9 @@ export function AutomotiveView() {
 
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
+      {activeProject && (
+        <AutomotiveLabPanel project={activeProject} protocol={protocol} />
+      )}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="flex items-start gap-3">
           <div
