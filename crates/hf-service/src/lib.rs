@@ -15,6 +15,8 @@ pub mod automotive;
 pub mod automotive_offline;
 #[cfg(feature = "automotive-scapy")]
 pub mod automotive_report;
+#[cfg(feature = "build-doctor")]
+pub mod build_doctor;
 #[cfg(feature = "proof-carrying")]
 pub mod campaign_intelligence;
 pub mod campaign_state;
@@ -87,6 +89,11 @@ pub use agent::{AgentRegistryInfo, AgentToolDefinition, AgentTurnRequest};
 /// without depending on `hf-harness` directly.
 pub use hf_harness::{LintFinding, LintSeverity};
 
+#[cfg(feature = "build-doctor")]
+pub use build_doctor::{
+    BuildPlan, BuildPlanRunOutcome, BuildPlanRunStatus, BuildPlanStep, BuildSystem,
+    BuildSystemDiagnosis, BuildSystemStatus, RunBuildPlanRequest,
+};
 #[cfg(feature = "change-aware")]
 pub use change_comparison::{
     ChangeAwarePlanEntry, ChangeImpactRequest, ChangeImpactView, PublishComparisonRequest,

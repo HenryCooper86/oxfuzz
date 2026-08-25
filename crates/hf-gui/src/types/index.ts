@@ -479,6 +479,59 @@ export interface PublishedComparison {
   url: string | null;
 }
 
+/// Build Doctor diagnosis, owned by hf-service. The presentation layer renders
+/// these determinations; it never decides that a build system is supported.
+export type BuildSystem =
+  | "cmake"
+  | "meson"
+  | "autotools"
+  | "make"
+  | "bazel"
+  | "cargo"
+  | "unknown";
+
+export type BuildSystemStatus =
+  | "ready"
+  | "supported"
+  | "unsupported_in_image"
+  | "not_needed"
+  | "unknown";
+
+export interface BuildPlanStep {
+  argv: string[];
+  working_dir: string;
+  purpose: string;
+}
+
+export interface BuildPlan {
+  steps: BuildPlanStep[];
+  expected_artifact: string;
+}
+
+export interface BuildSystemDiagnosis {
+  build_system: BuildSystem;
+  status: BuildSystemStatus;
+  markers: string[];
+  missing_tool: string | null;
+  plan: BuildPlan | null;
+}
+
+export type BuildPlanRunStatus = "succeeded" | "step_failed" | "artifact_missing";
+
+export interface FailedBuildStep {
+  index: number;
+  exit_code: number;
+  output: string;
+}
+
+export interface BuildPlanRunOutcome {
+  status: BuildPlanRunStatus;
+  build_system: BuildSystem;
+  steps_run: number;
+  failed_step: FailedBuildStep | null;
+  build_context: unknown | null;
+}
+
 export interface CrashReviewItem {
   crash_id: string;
   run_id: string;

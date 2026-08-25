@@ -47,6 +47,23 @@ an active sandboxed run.
 
 ![Run -- approved target, bounded campaign configuration, and retained metrics](../screenshots/run.png)
 
+**When the harness will not build.** A failed compile usually means oxfuzz does
+not know the include directories, defines, and language standard the project's
+own build uses. The compile step then offers Build Doctor: it reads the project
+root, reports which build system it found and on what marker files, and says
+whether a compile database can be generated here. If it can, the exact commands
+are shown in full before anything happens; you approve them, and they run in the
+sandbox, not on your machine. Running the plan creates an oxfuzz-owned
+`.oxfuzz-build/` directory inside your project, which is part of what you are
+approving.
+
+Not every build system can be handled in the current sandbox image. Make and
+Autotools need `bear` to observe a build, and Meson and Bazel need their own
+tools; none of those are installed. In those cases Build Doctor names the
+missing tool rather than offering a plan that would fail. A run whose commands
+all succeed but produces no compile database is reported as a failure, because
+the database is the evidence, not the exit code.
+
 **4. Triage the crashes.** Crashes are ingested, deduplicated by stack
 signature, minimized, and classified with CASR for severity and exploitability.
 The agent can draft a report from retained evidence for human review, and the

@@ -59,9 +59,11 @@ use hf_core::target::{TargetCandidate, TargetLanguage};
 use hf_guardrails::{Action, Decision, Guardrails};
 use hf_runtime::{RuntimeConfig, SANDBOX_IMAGE};
 use hf_storage::{GuardrailDecisionRecord, RunRecord, RunStatus, Store};
-use project_identity::{
-    canonical_project_root, project_slug, select_target_candidate, stored_project_matches,
-};
+#[cfg(feature = "build-doctor")]
+pub(crate) use project_identity::canonical_project_root;
+#[cfg(not(feature = "build-doctor"))]
+use project_identity::canonical_project_root;
+use project_identity::{project_slug, select_target_candidate, stored_project_matches};
 #[cfg(feature = "patch-to-proof")]
 pub(crate) use staging::run_context_source_digest;
 use staging::{qualification_evidence, sha256_file, RunArtifacts};

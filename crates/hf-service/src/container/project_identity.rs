@@ -20,7 +20,7 @@ pub(super) fn defectdojo_project_name(project: &Path) -> String {
         .unwrap_or_else(|| project.to_string_lossy().into_owned())
 }
 
-pub(super) fn canonical_project_root(project: &Path) -> Result<PathBuf, ClassifiedError> {
+pub(crate) fn canonical_project_root(project: &Path) -> Result<PathBuf, ClassifiedError> {
     let canonical = std::fs::canonicalize(project).map_err(|error| {
         ClassifiedError::Validation(format!(
             "resolve project root {}: {error}",

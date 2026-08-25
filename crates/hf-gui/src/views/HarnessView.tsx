@@ -7,6 +7,7 @@ import { useTarget } from "../providers/target";
 import type { TargetInventory, HarnessReviewItem } from "../types";
 import { Button, Input, Select, ViewHeader, EmptyState } from "../components/ui";
 import { SandboxBanner } from "../components/SandboxBanner";
+import { BuildDoctorPanel } from "../components/BuildDoctorPanel";
 import {
   Crosshair, FolderOpen, Loader2, FileCode, Terminal, Database,
   CheckCircle2, XCircle, ArrowRight, Sparkles, Archive, GitCompare, AlertTriangle,
@@ -589,6 +590,13 @@ export function HarnessView({
                 <span style={{ color: compileResult.status === "Compiled" ? "var(--success)" : "var(--error)" }}>
                   {compileResult.message}
                 </span>
+              </div>
+            )}
+            {/* A failed compile is exactly when missing build context matters,
+                so the diagnosis appears at the point of failure. */}
+            {compileResult && compileResult.status !== "Compiled" && project && (
+              <div className="mt-3">
+                <BuildDoctorPanel project={project} />
               </div>
             )}
           </Step>

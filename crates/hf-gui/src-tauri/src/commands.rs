@@ -2522,6 +2522,71 @@ fn change_aware_feature_unavailable() -> String {
     "change-aware pull-request comparison is not included in this application build".to_owned()
 }
 
+/// Explain that the build-doctor surface was excluded from this build.
+#[cfg(not(feature = "build-doctor"))]
+fn build_doctor_feature_unavailable() -> String {
+    "build diagnosis is not included in this application build".to_owned()
+}
+
+/// Diagnose the project's build systems. Executes nothing.
+#[cfg(feature = "build-doctor")]
+#[tauri::command]
+pub async fn build_diagnose(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+) -> Result<serde_json::Value, String> {
+    let diagnosis = state
+        .container
+        .diagnose_build(std::path::Path::new(&project))
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(diagnosis).map_err(|error| error.to_string())
+}
+
+/// Explain that the build-doctor surface was excluded from this build.
+#[cfg(not(feature = "build-doctor"))]
+#[tauri::command]
+pub async fn build_diagnose(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+) -> Result<serde_json::Value, String> {
+    let _ = (state, project);
+    Err(build_doctor_feature_unavailable())
+}
+
+/// Run an approved build plan through the sandbox.
+#[cfg(feature = "build-doctor")]
+#[tauri::command]
+pub async fn build_run(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    build_system: String,
+) -> Result<serde_json::Value, String> {
+    let build_system: hf_service::BuildSystem =
+        serde_json::from_value(serde_json::Value::String(build_system))
+            .map_err(|error| format!("unknown build system: {error}"))?;
+    let outcome = state
+        .container
+        .run_build_plan(hf_service::RunBuildPlanRequest {
+            project,
+            build_system,
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(outcome).map_err(|error| error.to_string())
+}
+
+/// Explain that the build-doctor surface was excluded from this build.
+#[cfg(not(feature = "build-doctor"))]
+#[tauri::command]
+pub async fn build_run(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    build_system: String,
+) -> Result<serde_json::Value, String> {
+    let _ = (state, project, build_system);
+    Err(build_doctor_feature_unavailable())
+}
+
 /// Map a source change onto the project's discovered targets.
 #[cfg(feature = "change-aware")]
 #[tauri::command]

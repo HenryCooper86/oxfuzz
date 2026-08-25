@@ -24,6 +24,12 @@ fn publish_change_comparison() -> Action {
     }
 }
 
+fn run_project_build() -> Action {
+    Action::RunProjectBuild {
+        build_system: "cmake".to_owned(),
+    }
+}
+
 fn analyze_source() -> Action {
     Action::AnalyzeSource {
         analyzer: "semgrep".to_owned(),
@@ -55,6 +61,18 @@ fn publishing_a_comparison_has_a_stable_outward_facing_contract() {
 }
 
 #[test]
+fn running_a_project_build_has_a_stable_untrusted_execution_contract() {
+    let action = run_project_build();
+    assert_eq!(action.kind(), "run_project_build");
+    assert_eq!(action.label(), "run the project's cmake build");
+    // The default policy must not silently run a project's own build system.
+    assert_ne!(
+        GuardrailPolicy::default().evaluate(&action),
+        Decision::Allow
+    );
+}
+
+#[test]
 fn risk_tiers_are_ordered() {
     assert!(RiskTier::Low < RiskTier::Medium);
     assert!(RiskTier::Medium < RiskTier::High);
@@ -65,6 +83,8 @@ fn risk_tiers_are_ordered() {
     assert_eq!(verify_remediation().risk(), RiskTier::High);
     // Publishing leaves the workspace and reaches an external service.
     assert_eq!(publish_change_comparison().risk(), RiskTier::High);
+    // Running a project's own build system executes untrusted code.
+    assert_eq!(run_project_build().risk(), RiskTier::High);
     assert_eq!(
         Action::AutomotiveOffline {
             operation: "analyze_pcap".to_owned(),
