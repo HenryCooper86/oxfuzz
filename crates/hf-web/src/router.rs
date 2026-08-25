@@ -400,6 +400,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .merge(change_aware_routes())
         .merge(build_doctor_routes())
         .merge(harness_tournament_routes())
+        .merge(coverage_blocker_routes())
         .merge(semgrep_routes())
         .route(
             "/projects/auto-revert",
@@ -644,6 +645,16 @@ fn harness_tournament_routes() -> Router<AppState> {
 
 #[cfg(not(feature = "harness-tournament"))]
 fn harness_tournament_routes() -> Router<AppState> {
+    Router::new()
+}
+
+#[cfg(feature = "coverage-blockers")]
+fn coverage_blocker_routes() -> Router<AppState> {
+    Router::new().route("/coverage/blockers", post(coverage_blockers))
+}
+
+#[cfg(not(feature = "coverage-blockers"))]
+fn coverage_blocker_routes() -> Router<AppState> {
     Router::new()
 }
 
@@ -924,6 +935,19 @@ async fn remediation_draft(
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(handoff)))
+}
+
+#[cfg(feature = "coverage-blockers")]
+async fn coverage_blockers(
+    State(state): State<AppState>,
+    Json(request): Json<hf_service::CoverageBlockerRequest>,
+) -> ApiResult<serde_json::Value> {
+    let view = state
+        .container
+        .explore_coverage_blockers(request)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(view)))
 }
 
 #[cfg(feature = "harness-tournament")]

@@ -564,6 +564,40 @@ export interface HarnessTournamentResult {
   promoted: boolean;
 }
 
+/// Coverage Blocker Explorer, owned by hf-service. The presentation layer
+/// renders the service ranking and proposal; it derives neither, and it starts
+/// nothing.
+export type MeasurementStatus =
+  | { status: "available"; signature: string }
+  | { status: "unavailable"; reason_code: string };
+
+export type NextExperimentKind = "grow_corpus" | "refine_harness" | "no_experiment_available";
+
+export interface CoverageBlocker {
+  function: string;
+  location: string | null;
+  /** Still-uncovered functions transitively reachable from here. */
+  unlocked_uncovered: number;
+  /** null means no observed route at all, not "nearby". */
+  frontier_distance: number | null;
+  nearest_covered: string | null;
+  path: string[];
+}
+
+export interface NextExperiment {
+  kind: NextExperimentKind;
+  target_function: string | null;
+  reason_code: string;
+}
+
+export interface CoverageBlockerView {
+  schema_version: number;
+  measurement: MeasurementStatus;
+  /** Empty whenever no measurement backs the view. */
+  blockers: CoverageBlocker[];
+  experiment: NextExperiment;
+}
+
 export interface CrashReviewItem {
   crash_id: string;
   run_id: string;

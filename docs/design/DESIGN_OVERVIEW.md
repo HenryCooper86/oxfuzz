@@ -50,6 +50,7 @@ all under human-in-the-loop supervision.
 | Patch verification | hf-service + hf-crash + hf-storage | durable remediation operation and exact sandbox evidence | patch-to-proof-design.md |
 | Change-aware comparison | hf-service | parsed diff, affected targets, base/head comparison | change-aware-pr-fuzzing-design.md |
 | Build diagnosis | hf-service | detected build system, sandbox build plan | build-doctor-design.md |
+| Coverage blockers | hf-service | ranked uncovered blockers, next experiment | coverage-blocker-design.md |
 
 ## 4. Crate Dependency Rules
 
