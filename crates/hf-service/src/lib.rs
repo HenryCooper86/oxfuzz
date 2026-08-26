@@ -65,6 +65,8 @@ pub mod system;
 mod syzkaller;
 #[cfg(feature = "test-support")]
 pub mod test_support;
+#[cfg(feature = "triage-disposition")]
+pub mod triage_disposition;
 pub mod verification;
 pub mod workbench;
 
@@ -169,6 +171,11 @@ pub use semgrep::{
     SemgrepOperationView, SemgrepOverlayState, SemgrepTargetView,
 };
 pub use system::{system_status, SystemStatus};
+#[cfg(feature = "triage-disposition")]
+pub use triage_disposition::{
+    triage_disposition, triage_order_key, ClaimCeiling, Disposition, DispositionAction,
+    TriageDisposition, TriageOrderKey, TRIAGE_DISPOSITION_SCHEMA_VERSION,
+};
 pub use workbench::{
     CrashReviewItem, HarnessReviewItem, IssueExport, WorkbenchDashboard, WorkbenchReadiness,
     WorkbenchRun, WorkbenchTarget, WorkbenchTotals,

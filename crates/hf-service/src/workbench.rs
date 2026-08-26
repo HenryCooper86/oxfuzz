@@ -116,6 +116,11 @@ pub struct CrashReviewItem {
     pub minimized: bool,
     pub has_bug_report: bool,
     pub proof: FindingProofCard,
+    /// What this crash needs next and what may be claimed about it, derived
+    /// from `proof`. The list this item belongs to is ordered by the same
+    /// derivation, so the first entry is the one to open first.
+    #[cfg(feature = "triage-disposition")]
+    pub disposition: crate::triage_disposition::TriageDisposition,
 }
 
 /// Dashboard data for the active project or whole database.
@@ -610,7 +615,7 @@ fn crash_review_items(
 ) -> Vec<CrashReviewItem> {
     #[cfg(not(feature = "patch-to-proof"))]
     let _ = remediation_by_crash;
-    crashes
+    let items: Vec<_> = crashes
         .into_iter()
         .map(|c| {
             let proof = finding_proof_card(&c);
@@ -627,7 +632,12 @@ fn crash_review_items(
                 || "Unclassified".to_owned(),
                 |r| format!("{:?}", r.severity),
             );
-            CrashReviewItem {
+            #[cfg(feature = "triage-disposition")]
+            let disposition = crate::triage_disposition::triage_disposition(&c, &proof);
+            #[cfg(feature = "triage-disposition")]
+            let order = crate::triage_disposition::triage_order_key(&c, &proof);
+
+            let item = CrashReviewItem {
                 crash_id: c.id.to_string(),
                 run_id: c.run_id.to_string(),
                 target_id: c.target_id.to_string(),
@@ -638,9 +648,26 @@ fn crash_review_items(
                 minimized: c.minimized,
                 has_bug_report: c.bug_report.is_some(),
                 proof,
-            }
+                #[cfg(feature = "triage-disposition")]
+                disposition,
+            };
+            #[cfg(feature = "triage-disposition")]
+            return (order, item);
+            #[cfg(not(feature = "triage-disposition"))]
+            item
         })
-        .collect()
+        .collect();
+
+    // Attention order, so the first entry is the crash to open first. Without
+    // the feature the store's order is preserved rather than invented.
+    #[cfg(feature = "triage-disposition")]
+    {
+        let mut items: Vec<(crate::triage_disposition::TriageOrderKey, CrashReviewItem)> = items;
+        items.sort_by_key(|(order, _)| *order);
+        items.into_iter().map(|(_, item)| item).collect()
+    }
+    #[cfg(not(feature = "triage-disposition"))]
+    items
 }
 
 fn next_harness_action(status: HarnessStatus, smoke_passed: bool) -> String {
