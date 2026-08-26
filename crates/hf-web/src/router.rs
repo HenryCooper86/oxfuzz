@@ -403,6 +403,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .merge(coverage_blocker_routes())
         .merge(campaign_trust_routes())
         .merge(unreached_surface_routes())
+        .merge(concolic_routes())
         .merge(campaign_health_routes())
         .merge(run_closeout_routes())
         .merge(harness_work_order_routes())
@@ -692,6 +693,16 @@ fn unreached_surface_routes() -> Router<AppState> {
 
 #[cfg(not(feature = "unreached-surface"))]
 fn unreached_surface_routes() -> Router<AppState> {
+    Router::new()
+}
+
+#[cfg(feature = "concolic-enrichment")]
+fn concolic_routes() -> Router<AppState> {
+    Router::new().route("/corpus/concolic", post(corpus_concolic))
+}
+
+#[cfg(not(feature = "concolic-enrichment"))]
+fn concolic_routes() -> Router<AppState> {
     Router::new()
 }
 
@@ -1318,6 +1329,26 @@ async fn unreached_surface(
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(view)))
+}
+
+#[cfg(feature = "concolic-enrichment")]
+#[derive(Debug, Deserialize)]
+struct ConcolicRequestBody {
+    project: PathBuf,
+    target: String,
+}
+
+#[cfg(feature = "concolic-enrichment")]
+async fn corpus_concolic(
+    State(state): State<AppState>,
+    Json(req): Json<ConcolicRequestBody>,
+) -> ApiResult<serde_json::Value> {
+    let outcome = state
+        .container
+        .corpus_concolic(&req.project, &req.target)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(outcome)))
 }
 
 #[cfg(feature = "campaign-trust")]

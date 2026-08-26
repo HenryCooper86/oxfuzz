@@ -141,7 +141,7 @@ enum Commands {
         /// Target symbol.
         #[arg(long)]
         target: String,
-        /// Operation: seed, grow, prune, minimize, absorb, list.
+        /// Operation: seed, grow, prune, minimize, absorb, concolic, list.
         #[arg(long)]
         op: String,
     },
@@ -1723,6 +1723,18 @@ async fn cmd_corpus(project: PathBuf, target: &str, op: &str) -> anyhow::Result<
             let n = container.corpus_absorb_crashes(&project, target).await?;
             println!("Absorbed {n} crash reproducer(s) into the corpus.");
         }
+        #[cfg(feature = "concolic-enrichment")]
+        "concolic" => {
+            let outcome = container.corpus_concolic(&project, target).await?;
+            println!(
+                "Explored {} input(s), skipped {} ({:?}).",
+                outcome.inputs_explored, outcome.inputs_skipped, outcome.stop_reason
+            );
+            println!(
+                "Solver produced {} input(s), {} of them novel.",
+                outcome.inputs_solved, outcome.inputs_novel
+            );
+        }
         "list" => {
             let corpus = container.corpus_list(&project, target)?;
             println!("{}", serde_json::to_string_pretty(&corpus.entries)?);
@@ -1730,7 +1742,7 @@ async fn cmd_corpus(project: PathBuf, target: &str, op: &str) -> anyhow::Result<
         other => {
             anyhow::bail!(
                 "unknown corpus op: {other} \
-                 (use seed|llmseed|grow|prune|cprune|minimize|absorb|list)"
+                 (use seed|llmseed|grow|prune|cprune|minimize|absorb|concolic|list)"
             )
         }
     }
