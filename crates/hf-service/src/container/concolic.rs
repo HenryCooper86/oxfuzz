@@ -78,8 +78,12 @@ impl ServiceContainer {
     /// Run one bounded concolic enrichment pass over the target's corpus.
     ///
     /// # Errors
-    /// Returns `ClassifiedError::Validation` when the toolchain is unavailable,
-    /// the target has no promoted harness, or the bounds are invalid.
+    /// Returns `ClassifiedError::Validation` when the toolchain is unavailable
+    /// or the bounds are invalid, and `ClassifiedError::Sandbox` when the
+    /// instrumented build does not produce a binary. A build failure is
+    /// always an error: reporting it as a completed pass that solved nothing
+    /// would be indistinguishable from a pass that legitimately solved
+    /// nothing (`docs/design/concolic-enrichment-design.md` section 9).
     pub async fn corpus_concolic(
         &self,
         project: &Path,
@@ -119,7 +123,7 @@ impl ServiceContainer {
 
         let (solved, timed_out) = self
             .run_concolic_pass(&workspace, &selected, &settings)
-            .await;
+            .await?;
 
         let stop = if timed_out {
             ConcolicStopReason::TotalTimeout
@@ -143,12 +147,27 @@ impl ServiceContainer {
     /// `SYMCC_INPUT_FILE` is set for every exploration and is not optional:
     /// `SymCC` marks only stdin symbolic by default, so a file-reading harness
     /// run without it solves nothing, writes nothing, and exits zero.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError::Sandbox` when the instrumented build does not
+    /// complete successfully. A build failure is never folded into an `Ok`
+    /// result: doing so would report a pass that never ran as one that ran
+    /// and solved nothing, which is indistinguishable from a legitimate empty
+    /// result (`docs/design/concolic-enrichment-design.md` section 9).
     async fn run_concolic_pass(
         &self,
         workspace: &Path,
         selected: &[std::path::PathBuf],
         settings: &crate::config::ConcolicSettings,
-    ) -> (Vec<Vec<u8>>, bool) {
+    ) -> Result<(Vec<Vec<u8>>, bool), ClassifiedError> {
+        // One deadline for the whole pass, fixed before the build starts.
+        // Spec section 5 bounds the whole pass, not only the explore loop:
+        // giving the build its own full `total_timeout_secs` and then handing
+        // the explore loop a second, freshly-started budget let the worst
+        // case run to roughly twice the configured bound.
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(settings.total_timeout_secs);
+
         let build = vec![
             "sh".to_owned(),
             "-c".to_owned(),
@@ -157,51 +176,64 @@ impl ServiceContainer {
         let build_limits = hf_core::runtime::ResourceLimits {
             max_mem_mb: 4096,
             max_cpus: 2,
-            max_duration_secs: settings.total_timeout_secs,
+            max_duration_secs: deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .as_secs(),
             env: HashMap::new(),
             ptrace: false,
         };
-        // A build failure yields no solved inputs, which the outcome reports as
-        // a pass that solved nothing rather than as a silent success.
-        if self
+        match self
             .runtime
             .run_command(&build, workspace, &build_limits)
             .await
-            .is_err()
         {
-            return (Vec::new(), false);
+            Ok(result)
+                if result.termination == hf_core::runtime::CommandTermination::Completed
+                    && result.exit_code == 0 => {}
+            Ok(result) => {
+                return Err(ClassifiedError::Sandbox(format!(
+                    "concolic instrumented build did not complete: termination={:?}, exit_code={}",
+                    result.termination, result.exit_code
+                )));
+            }
+            Err(error) => {
+                return Err(ClassifiedError::Sandbox(format!(
+                    "concolic instrumented build failed: {error}"
+                )));
+            }
         }
 
-        // Spec section 5 bounds the whole pass, not only each input, so the
-        // loop carries its own deadline. Without it a pass over `max_inputs`
-        // inputs could exceed `total_timeout_secs` by one input's timeout per
-        // input.
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_secs(settings.total_timeout_secs);
         let mut solved = Vec::new();
-        let mut timed_out = false;
-        for input in selected {
-            if std::time::Instant::now() >= deadline {
-                timed_out = true;
-                break;
+        // The build can itself consume the whole pass budget. Checking the
+        // same deadline here, before the loop runs at all, means a corpus too
+        // small to enter the loop still reports `TotalTimeout` rather than
+        // `CorpusExhausted` when there was in fact no time left to explore.
+        let mut timed_out = std::time::Instant::now() >= deadline;
+        if !timed_out {
+            for input in selected {
+                if std::time::Instant::now() >= deadline {
+                    timed_out = true;
+                    break;
+                }
+                let Some(name) = input.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                let mut env = HashMap::new();
+                env.insert("SYMCC_OUTPUT_DIR".to_owned(), "concolic-out".to_owned());
+                env.insert("SYMCC_INPUT_FILE".to_owned(), format!("corpus/{name}"));
+                let limits = hf_core::runtime::ResourceLimits {
+                    max_mem_mb: 4096,
+                    max_cpus: 1,
+                    max_duration_secs: settings.per_input_timeout_secs,
+                    env,
+                    ptrace: false,
+                };
+                let cmd = vec!["./concolic_target".to_owned(), format!("corpus/{name}")];
+                // An input that times out or faults is one input's loss, not
+                // the pass's: the loop continues and the outcome counts what
+                // was found.
+                let _ = self.runtime.run_command(&cmd, workspace, &limits).await;
             }
-            let Some(name) = input.file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
-            let mut env = HashMap::new();
-            env.insert("SYMCC_OUTPUT_DIR".to_owned(), "concolic-out".to_owned());
-            env.insert("SYMCC_INPUT_FILE".to_owned(), format!("corpus/{name}"));
-            let limits = hf_core::runtime::ResourceLimits {
-                max_mem_mb: 4096,
-                max_cpus: 1,
-                max_duration_secs: settings.per_input_timeout_secs,
-                env,
-                ptrace: false,
-            };
-            let cmd = vec!["./concolic_target".to_owned(), format!("corpus/{name}")];
-            // An input that times out or faults is one input's loss, not the
-            // pass's: the loop continues and the outcome counts what was found.
-            let _ = self.runtime.run_command(&cmd, workspace, &limits).await;
         }
 
         let out_dir = workspace.join("concolic-out");
@@ -217,6 +249,6 @@ impl ServiceContainer {
                 }
             }
         }
-        (solved, timed_out)
+        Ok((solved, timed_out))
     }
 }
