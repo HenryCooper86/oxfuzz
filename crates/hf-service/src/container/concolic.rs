@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::concolic::{
-    content_digest, select_inputs, summarize, ConcolicAvailability, ConcolicOutcome,
+    content_digest, select_inputs, summarize_with_corpus, ConcolicAvailability, ConcolicOutcome,
     ConcolicStopReason,
 };
 use crate::container::workspace::workspace_dir;
@@ -132,13 +132,38 @@ impl ServiceContainer {
         } else {
             ConcolicStopReason::CorpusExhausted
         };
-        Ok(summarize(
+
+        // Novel inputs are written into the corpus directory and persisted
+        // through the existing corpus path, so every later consumer sees them
+        // as ordinary corpus entries (spec section 4 step 4).
+        let mut novel_written = 0usize;
+        for bytes in &solved {
+            let digest = content_digest(bytes);
+            if existing.contains(&digest) {
+                continue;
+            }
+            if novel_written >= settings.max_solved_inputs {
+                break;
+            }
+            let path = corpus_dir.join(format!("concolic-{digest}.bin"));
+            if std::fs::write(&path, bytes).is_ok() {
+                novel_written += 1;
+            }
+        }
+        let grown = hf_corpus::list(&corpus_dir)?;
+        let target_id = self.resolve_target_id_any_language(project, target).await?;
+        let mut persisted = grown;
+        persisted.target_id = target_id;
+        self.persist_corpus(target_id, &persisted).await?;
+
+        Ok(summarize_with_corpus(
             selected.len(),
             skipped,
             &solved,
             &existing,
             &settings,
             stop,
+            inputs.len(),
         ))
     }
 

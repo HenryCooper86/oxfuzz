@@ -124,3 +124,51 @@ fn a_pass_that_solved_nothing_is_a_success_with_zero_novel() {
 fn blake_of(bytes: &[u8]) -> String {
     hf_service::concolic::content_digest(bytes)
 }
+
+#[test]
+fn the_outcome_reports_the_corpus_size_on_both_sides_of_the_fold() {
+    let out = summarize_with_sizes(
+        2,
+        0,
+        &[b"fresh".to_vec()],
+        &HashSet::new(),
+        &ConcolicSettings::default(),
+        ConcolicStopReason::CorpusExhausted,
+        7,
+    );
+    assert_eq!(out.corpus_size_before, 7);
+    assert_eq!(
+        out.corpus_size_after, 8,
+        "one novel input folded in grows the corpus by exactly one"
+    );
+}
+
+#[test]
+fn a_pass_with_no_novel_inputs_leaves_the_corpus_size_unchanged() {
+    let existing: HashSet<String> = [blake_of(b"dup")].into_iter().collect();
+    let out = summarize_with_sizes(
+        2,
+        0,
+        &[b"dup".to_vec()],
+        &existing,
+        &ConcolicSettings::default(),
+        ConcolicStopReason::CorpusExhausted,
+        7,
+    );
+    assert_eq!(out.inputs_novel, 0);
+    assert_eq!(out.corpus_size_after, out.corpus_size_before);
+}
+
+fn summarize_with_sizes(
+    explored: usize,
+    skipped: usize,
+    solved: &[Vec<u8>],
+    existing: &HashSet<String>,
+    settings: &ConcolicSettings,
+    stop: ConcolicStopReason,
+    before: usize,
+) -> hf_service::ConcolicOutcome {
+    hf_service::concolic::summarize_with_corpus(
+        explored, skipped, solved, existing, settings, stop, before,
+    )
+}
