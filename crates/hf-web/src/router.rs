@@ -402,6 +402,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .merge(harness_tournament_routes())
         .merge(coverage_blocker_routes())
         .merge(campaign_trust_routes())
+        .merge(unreached_surface_routes())
         .merge(oracle_studio_routes())
         .merge(automotive_lab_routes())
         .merge(semgrep_routes())
@@ -648,6 +649,16 @@ fn harness_tournament_routes() -> Router<AppState> {
 
 #[cfg(not(feature = "harness-tournament"))]
 fn harness_tournament_routes() -> Router<AppState> {
+    Router::new()
+}
+
+#[cfg(feature = "unreached-surface")]
+fn unreached_surface_routes() -> Router<AppState> {
+    Router::new().route("/coverage/unreached", post(unreached_surface))
+}
+
+#[cfg(not(feature = "unreached-surface"))]
+fn unreached_surface_routes() -> Router<AppState> {
     Router::new()
 }
 
@@ -1202,6 +1213,27 @@ async fn remediation_operation_get(
     let view = state
         .container
         .remediation_operation(id)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(view)))
+}
+
+#[cfg(feature = "unreached-surface")]
+#[derive(Debug, Deserialize)]
+struct UnreachedSurfaceRequestBody {
+    project: PathBuf,
+    lang: String,
+}
+
+#[cfg(feature = "unreached-surface")]
+async fn unreached_surface(
+    State(state): State<AppState>,
+    Json(req): Json<UnreachedSurfaceRequestBody>,
+) -> ApiResult<serde_json::Value> {
+    let lang = parse_lang(&req.lang).map_err(map_err(StatusCode::BAD_REQUEST))?;
+    let view = state
+        .container
+        .unreached_surface(&req.project, lang)
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(view)))

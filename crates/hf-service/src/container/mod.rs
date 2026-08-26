@@ -28,6 +28,8 @@ mod run;
 mod staging;
 mod system;
 mod triage;
+#[cfg(feature = "unreached-surface")]
+mod unreached_surface;
 mod workspace;
 
 #[cfg(feature = "native-analysis")]
