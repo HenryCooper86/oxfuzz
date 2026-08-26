@@ -52,8 +52,19 @@ host.
    harness has nothing to instrument, and the pass reports that rather than
    instrumenting a draft: human promotion stays bound to the exact harness
    revision, and a concolic pass is not a way around it.
-2. **Explore.** Run each selected corpus input under that binary. The runtime
-   writes the inputs its solver produced to an output directory.
+2. **Explore.** Run each selected corpus input under that binary with
+   `SYMCC_OUTPUT_DIR` naming a staged output directory, and with
+   `SYMCC_INPUT_FILE` naming the input. The runtime writes solved inputs to the
+   output directory.
+
+   `SYMCC_INPUT_FILE` is not optional for a file-reading harness, and omitting
+   it is the subsystem's sharpest failure mode: SymCC treats only stdin as
+   symbolic by default, so a file-based harness run without it marks nothing
+   symbolic, solves nothing, writes nothing, and exits zero. Measured: the same
+   harness and input yield one solved input with the variable set and none
+   without it, with no diagnostic in either case. oxfuzz's generated harnesses
+   read a file, so this is the default path rather than an edge case, and the
+   run step sets the variable rather than trusting a caller to.
 3. **Collect.** Read the produced inputs, discard those already present in the
    corpus by content digest, and count what remains.
 4. **Fold.** Add the novel inputs to the retained corpus through the existing
@@ -136,12 +147,20 @@ absent capability when guessed wrong.
   nested inside it as a further submodule. A plain clone yields an empty
   `runtime/` directory and a cmake failure that names the directory rather than
   the cause.
-- **Backend selection is `SYMCC_RT_BACKEND`.** The runtime accepts `simple` or
-  `qsym` and **defaults to `qsym`**. The layer sets `simple` explicitly. `qsym`
-  is x86-centric while the sandbox image is built per architecture including
-  arm64, and a layer whose capability differs by architecture is worse than one
-  that is the same everywhere. Note that `QSYM_BACKEND` is not an option in
-  current SymCC; passing it does nothing and leaves the default in place.
+- **Backend selection is `SYMCC_RT_BACKEND`, and it must be `qsym`.** The
+  runtime accepts `simple` or `qsym` and defaults to `qsym`. Only `qsym`
+  writes solved inputs to `SYMCC_OUTPUT_DIR`. The `simple` backend solves the
+  constraint and prints the diverging assignment to stdout without writing a
+  file; SymCC itself prints "for anything but debugging SymCC itself, you will
+  want to use the QSYM backend instead" when it starts. A layer built on
+  `simple` would produce a subsystem that never enriches anything, and would
+  report empty passes indefinitely without erroring.
+
+  `qsym` is commonly described as x86-centric. Measured on this workspace's
+  own arm64 image it builds and solves correctly, so the layer selects it on
+  every architecture rather than branching. Note that `QSYM_BACKEND` is not an
+  option in current SymCC; passing it does nothing and leaves the default in
+  place.
 - **LLVM's cmake exports need zlib and zstd.** LLVM's exported targets reference
   `ZLIB::ZLIB`, so the dev packages must be present or `find_package(LLVM)`
   fails while configuring the runtime.
@@ -162,7 +181,11 @@ absent capability when guessed wrong.
   one invocation, and in both cases the per-process resource limits AGENTS.md
   2.12 relies on stop describing what actually runs. Recorded here as a possible
   later phase so this design does not have to be redone if that model is added.
-- **The QSYM backend** -- section 8.
+- **The `simple` runtime backend** -- section 8. It was chosen in an earlier
+  revision of this design on the assumption that both backends produce the same
+  artifact and differ only in speed. They do not: `simple` writes no solved
+  inputs at all. The assumption was corrected by building both and running
+  them, not by reading about them.
 - **Running SymCC on the host** -- every build and every execution of an
   instrumented target goes through `hf-runtime` (AGENTS.md 2.12). An
   instrumented build of an untrusted project is untrusted code.
@@ -180,9 +203,13 @@ absent capability when guessed wrong.
   fails loudly if the wrapper is absent, matching the existing toolchain
   verification step.
 - The layer's compiler wrapper instruments a trivial program with a
-  magic-value branch, and running it produces at least one solved input. An
+  magic-value branch, and running it writes at least one solved input file. An
   image whose wrapper builds but solves nothing is a layer that will report
   empty passes forever, and the image build is where that is cheapest to catch.
+  Checking that the wrapper compiles is not sufficient: both backends compile,
+  and only one writes a file.
+- A file-reading harness explored without `SYMCC_INPUT_FILE` produces no solved
+  inputs, so the run step sets it and a test asserts it is set.
 - An absent toolchain yields `Unavailable` with a reason code and leaves the
   corpus byte-identical.
 - Every bound in section 5 is enforced, and a pass that hits one reports which.
