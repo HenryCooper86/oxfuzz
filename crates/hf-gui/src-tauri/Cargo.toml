@@ -8,7 +8,7 @@ description = "Tauri v2 desktop GUI for oxfuzz"
 # Product capabilities are on by default; `--no-default-features` drops their
 # presentation entrypoints.
 [features]
-default = ["automotive-lab", "automotive-scapy", "campaign-health", "build-context", "build-doctor", "campaign-trust", "change-aware", "coverage-blockers", "harness-tournament", "native-analysis", "oracle-studio", "patch-to-proof", "proof-carrying", "run-closeout", "semgrep-enrichment", "triage-disposition", "unreached-surface"]
+default = ["automotive-lab", "automotive-scapy", "campaign-health", "build-context", "build-doctor", "campaign-trust", "change-aware", "coverage-blockers", "harness-tournament", "harness-work-order", "native-analysis", "oracle-studio", "patch-to-proof", "proof-carrying", "run-closeout", "semgrep-enrichment", "triage-disposition", "unreached-surface"]
 automotive-scapy = ["hf-service/automotive-scapy"]
 build-context = ["hf-service/build-context"]
 build-doctor = ["build-context", "hf-service/build-doctor"]
@@ -26,6 +26,7 @@ campaign-trust = ["triage-disposition", "hf-service/campaign-trust"]
 unreached-surface = ["coverage-blockers", "hf-service/unreached-surface"]
 campaign-health = ["hf-service/campaign-health"]
 run-closeout = ["campaign-trust", "campaign-health", "unreached-surface", "hf-service/run-closeout"]
+harness-work-order = ["build-context", "hf-service/harness-work-order"]
 
 [lib]
 name = "hf_gui_lib"

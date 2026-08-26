@@ -135,6 +135,37 @@ const RULES: [Rule; 8] = [
     },
 ];
 
+/// One harness rule, as a reader needs to see it before writing code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarnessRuleSummary {
+    /// Stable rule identifier, matching the finding a violation produces.
+    pub id: String,
+    /// Whether a violation blocks compilation or only warns.
+    pub severity: LintSeverity,
+    /// What is wrong and why it matters.
+    pub message: String,
+    /// Whether the rule applies only to C++ sources.
+    pub cpp_only: bool,
+}
+
+/// Every harness rule the lint enforces.
+///
+/// Exposed so an authoring packet can state the constraints up front instead of
+/// letting an author discover them as compile failures, and so the packet
+/// cannot drift from what the lint actually checks (AGENTS.md 2.18).
+#[must_use]
+pub fn harness_rules() -> Vec<HarnessRuleSummary> {
+    RULES
+        .iter()
+        .map(|rule| HarnessRuleSummary {
+            id: rule.id.to_owned(),
+            severity: rule.severity,
+            message: rule.message.to_owned(),
+            cpp_only: rule.cpp_only,
+        })
+        .collect()
+}
+
 /// The rule patterns, compiled once.
 fn compiled_rules() -> &'static Vec<Regex> {
     static COMPILED: OnceLock<Vec<Regex>> = OnceLock::new();

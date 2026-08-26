@@ -405,6 +405,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .merge(unreached_surface_routes())
         .merge(campaign_health_routes())
         .merge(run_closeout_routes())
+        .merge(harness_work_order_routes())
         .merge(oracle_studio_routes())
         .merge(automotive_lab_routes())
         .merge(semgrep_routes())
@@ -651,6 +652,16 @@ fn harness_tournament_routes() -> Router<AppState> {
 
 #[cfg(not(feature = "harness-tournament"))]
 fn harness_tournament_routes() -> Router<AppState> {
+    Router::new()
+}
+
+#[cfg(feature = "harness-work-order")]
+fn harness_work_order_routes() -> Router<AppState> {
+    Router::new().route("/harness/work-order", post(harness_work_order))
+}
+
+#[cfg(not(feature = "harness-work-order"))]
+fn harness_work_order_routes() -> Router<AppState> {
     Router::new()
 }
 
@@ -1238,6 +1249,28 @@ async fn remediation_operation_get(
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(view)))
+}
+
+#[cfg(feature = "harness-work-order")]
+#[derive(Debug, Deserialize)]
+struct HarnessWorkOrderRequestBody {
+    project: PathBuf,
+    target: String,
+    lang: String,
+}
+
+#[cfg(feature = "harness-work-order")]
+async fn harness_work_order(
+    State(state): State<AppState>,
+    Json(req): Json<HarnessWorkOrderRequestBody>,
+) -> ApiResult<serde_json::Value> {
+    let lang = parse_lang(&req.lang).map_err(map_err(StatusCode::BAD_REQUEST))?;
+    let order = state
+        .container
+        .harness_work_order(&req.project, &req.target, lang)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(order)))
 }
 
 #[cfg(feature = "run-closeout")]
