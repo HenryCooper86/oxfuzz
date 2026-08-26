@@ -19,6 +19,8 @@ pub mod automotive_offline;
 pub mod automotive_report;
 #[cfg(feature = "build-doctor")]
 pub mod build_doctor;
+#[cfg(feature = "campaign-health")]
+pub mod campaign_health;
 #[cfg(feature = "proof-carrying")]
 pub mod campaign_intelligence;
 pub mod campaign_state;
@@ -114,6 +116,12 @@ pub use automotive_lab::{
 pub use build_doctor::{
     BuildPlan, BuildPlanRunOutcome, BuildPlanRunStatus, BuildPlanStep, BuildSystem,
     BuildSystemDiagnosis, BuildSystemStatus, RunBuildPlanRequest,
+};
+#[cfg(feature = "campaign-health")]
+pub use campaign_health::{
+    assess_campaign_health, undelivered, CampaignHealthInput, CampaignHealthReport,
+    CampaignHealthSettings, HealthCondition, HealthEvent, HealthSeverity, PlateauCheck,
+    CAMPAIGN_HEALTH_SCHEMA_VERSION,
 };
 #[cfg(feature = "campaign-trust")]
 pub use campaign_trust::{
