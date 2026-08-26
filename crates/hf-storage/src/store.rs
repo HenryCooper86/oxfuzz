@@ -1443,6 +1443,64 @@ impl Store {
     ///
     /// # Errors
     /// Returns an error on a SQL failure.
+    /// Record one closeout step outcome for a run, replacing any earlier
+    /// outcome for the same step.
+    ///
+    /// Written before the next step begins, so an interrupted closeout resumes
+    /// at the first step that never reached a terminal outcome.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure.
+    pub async fn record_closeout_step(
+        &self,
+        run_id: Uuid,
+        step: &str,
+        outcome: &str,
+        detail: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO run_closeout_steps (run_id, step, outcome, detail, recorded_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5) \
+             ON CONFLICT(run_id, step) DO UPDATE SET \
+                 outcome = excluded.outcome, \
+                 detail = excluded.detail, \
+                 recorded_at = excluded.recorded_at",
+        )
+        .bind(run_id.to_string())
+        .bind(step)
+        .bind(outcome)
+        .bind(detail)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Every recorded closeout step for a run, as `(step, outcome, detail)`.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure.
+    pub async fn closeout_steps(
+        &self,
+        run_id: Uuid,
+    ) -> Result<Vec<(String, String, String)>, StorageError> {
+        let rows =
+            sqlx::query("SELECT step, outcome, detail FROM run_closeout_steps WHERE run_id = ?1")
+                .bind(run_id.to_string())
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                (
+                    row.get::<String, _>("step"),
+                    row.get::<String, _>("outcome"),
+                    row.get::<String, _>("detail"),
+                )
+            })
+            .collect())
+    }
+
     pub async fn record_auto_revert_event(&self, ev: &AutoRevertEvent) -> Result<(), StorageError> {
         sqlx::query(
             "INSERT INTO auto_revert_events \

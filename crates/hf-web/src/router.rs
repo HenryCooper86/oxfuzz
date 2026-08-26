@@ -404,6 +404,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .merge(campaign_trust_routes())
         .merge(unreached_surface_routes())
         .merge(campaign_health_routes())
+        .merge(run_closeout_routes())
         .merge(oracle_studio_routes())
         .merge(automotive_lab_routes())
         .merge(semgrep_routes())
@@ -650,6 +651,16 @@ fn harness_tournament_routes() -> Router<AppState> {
 
 #[cfg(not(feature = "harness-tournament"))]
 fn harness_tournament_routes() -> Router<AppState> {
+    Router::new()
+}
+
+#[cfg(feature = "run-closeout")]
+fn run_closeout_routes() -> Router<AppState> {
+    Router::new().route("/runs/{id}/closeout", post(run_closeout))
+}
+
+#[cfg(not(feature = "run-closeout"))]
+fn run_closeout_routes() -> Router<AppState> {
     Router::new()
 }
 
@@ -1227,6 +1238,19 @@ async fn remediation_operation_get(
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(view)))
+}
+
+#[cfg(feature = "run-closeout")]
+async fn run_closeout(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> ApiResult<serde_json::Value> {
+    let report = state
+        .container
+        .close_out_run(id)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(report)))
 }
 
 #[cfg(feature = "campaign-health")]
