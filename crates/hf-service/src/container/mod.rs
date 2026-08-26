@@ -13,6 +13,8 @@ mod campaign_health;
 #[cfg(feature = "campaign-trust")]
 mod campaign_trust;
 mod chat;
+#[cfg(feature = "concolic-enrichment")]
+mod concolic;
 mod corpus;
 mod coverage_cache;
 mod crash_inputs;
