@@ -52,6 +52,12 @@ all under human-in-the-loop supervision.
 | Build diagnosis | hf-service | detected build system, sandbox build plan | build-doctor-design.md |
 | Coverage blockers | hf-service | ranked uncovered blockers, next experiment | coverage-blocker-design.md |
 | Non-crash oracles | hf-service | typed oracle specification, scaffold, violation | oracle-studio-design.md |
+| Crash disposition | hf-service | ordered disposition, next action, claim ceiling | triage-disposition-design.md |
+| Campaign trust | hf-service | per-run claim gates and overall determination | campaign-trust-report-design.md |
+| Unreached surface | hf-service + hf-discovery | never-covered candidates and attempt history | unreached-surface-design.md |
+| Campaign health | hf-service | typed health conditions with dedup keys | campaign-health-design.md |
+| Run closeout | hf-service | durable, resumable post-run step chain | run-closeout-design.md |
+| Harness work order | hf-service | provider-free harness authoring packet | harness-work-order-design.md |
 
 ## 4. Crate Dependency Rules
 
