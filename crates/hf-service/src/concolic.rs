@@ -67,6 +67,12 @@ pub struct ConcolicOutcome {
     pub inputs_novel: usize,
     /// Which bound stopped the pass.
     pub stop_reason: ConcolicStopReason,
+    /// Corpus entry count before the fold.
+    pub corpus_size_before: usize,
+    /// Corpus entry count after it. Equal to `corpus_size_before` when nothing
+    /// novel was found, which is the honest reading of a pass that enriched
+    /// nothing.
+    pub corpus_size_after: usize,
 }
 
 /// The corpus content digest, matching what the corpus uses for identity.
@@ -115,5 +121,24 @@ pub fn summarize<S: std::hash::BuildHasher>(
         } else {
             stop
         },
+        corpus_size_before: 0,
+        corpus_size_after: 0,
     }
+}
+
+/// [`summarize`] with the corpus size the fold started from.
+#[must_use]
+pub fn summarize_with_corpus<S: std::hash::BuildHasher>(
+    explored: usize,
+    skipped: usize,
+    solved: &[Vec<u8>],
+    existing_digests: &HashSet<String, S>,
+    settings: &ConcolicSettings,
+    stop: ConcolicStopReason,
+    corpus_size_before: usize,
+) -> ConcolicOutcome {
+    let mut outcome = summarize(explored, skipped, solved, existing_digests, settings, stop);
+    outcome.corpus_size_before = corpus_size_before;
+    outcome.corpus_size_after = corpus_size_before + outcome.inputs_novel;
+    outcome
 }
