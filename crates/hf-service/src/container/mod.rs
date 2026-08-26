@@ -8,6 +8,8 @@
 
 #[cfg(feature = "build-context")]
 mod build_context;
+#[cfg(feature = "campaign-health")]
+mod campaign_health;
 #[cfg(feature = "campaign-trust")]
 mod campaign_trust;
 mod chat;
@@ -1364,7 +1366,7 @@ pub struct ArtifactSummary {
 }
 
 /// One point on a run's intra-run coverage/throughput curve.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CoverageSample {
     /// Seconds elapsed since the run started.
     pub t: f64,
