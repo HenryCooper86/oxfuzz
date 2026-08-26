@@ -179,6 +179,15 @@ enum Commands {
         #[arg(long)]
         run: String,
     },
+    /// Run the post-run analysis chain for a finished run: triage, minimize,
+    /// corpus absorb, coverage, blockers, disposition, trust report. Resumes at
+    /// the first step that never finished.
+    #[cfg(feature = "run-closeout")]
+    Closeout {
+        /// Run identifier to close out.
+        #[arg(long)]
+        run: String,
+    },
     /// CI gate: harness + short fuzz + triage; write SARIF and exit non-zero
     /// if any crash is found. Intended for PR pipelines.
     Ci {
@@ -1784,6 +1793,36 @@ async fn cmd_health(run: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Run and print the closeout chain for one run.
+///
+/// Rendering only: every step, outcome, and sentence arrives decided by
+/// `hf-service` (AGENTS.md 2.9).
+#[cfg(feature = "run-closeout")]
+async fn cmd_closeout(run: &str) -> anyhow::Result<()> {
+    use hf_service::StepOutcome;
+
+    let run_id = uuid::Uuid::parse_str(run)
+        .map_err(|_| anyhow::anyhow!("run id '{run}' is not a valid UUID"))?;
+    let container = ServiceContainer::bootstrap().await;
+    let report = container.close_out_run(run_id).await?;
+
+    if let Some(step) = report.resumed_at {
+        println!("Closeout for run {} resumed at {step:?}:", report.run_id);
+    } else {
+        println!("Closeout for run {}:", report.run_id);
+    }
+    for record in &report.steps {
+        let (label, text) = match &record.outcome {
+            StepOutcome::Completed { detail } => ("completed", detail.as_str()),
+            StepOutcome::Skipped { reason } => ("skipped  ", reason.as_str()),
+            StepOutcome::Failed { error } => ("failed   ", error.as_str()),
+        };
+        println!("  {label} {:?}", record.step);
+        println!("            {text}");
+    }
+    Ok(())
+}
+
 /// Print the campaign trust audit for one run.
 ///
 /// Rendering only: every verdict, sentence, and withheld claim arrives decided
@@ -2571,6 +2610,8 @@ async fn main() -> anyhow::Result<()> {
         Commands::Unreached { project, lang } => cmd_unreached(project, &lang).await?,
         #[cfg(feature = "campaign-health")]
         Commands::Health { run } => cmd_health(&run).await?,
+        #[cfg(feature = "run-closeout")]
+        Commands::Closeout { run } => cmd_closeout(&run).await?,
         Commands::Ci {
             project,
             target,

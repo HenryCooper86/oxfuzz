@@ -361,6 +361,29 @@ the latest on-disk snapshot are deleted, while retained rows preserve known
 source and coverage metadata when a filesystem rescan can classify them only
 as manual. Single-entry deletion is keyed by both target and hash.
 
+### `run_closeout_steps`
+
+Per-run outcomes for the post-run closeout chain, so an interrupted closeout
+resumes at the first step that never reached a terminal outcome instead of
+repeating the corpus replay that coverage measurement performs.
+
+Deliberately not held in the run WAL: that journal is compacted on open to the
+still-open run events, so notes against a finished run would not survive a
+restart, and a finished run is exactly what closeout operates on.
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `run_id` | `TEXT NOT NULL` | the run being closed out |
+| `step` | `TEXT NOT NULL` | Triage/Minimize/CorpusAbsorb/Coverage/Blockers/Disposition/TrustReport |
+| `outcome` | `TEXT NOT NULL` | `completed`, `skipped`, or `failed` |
+| `detail` | `TEXT NOT NULL DEFAULT ''` | what it produced, why it was skipped, or what went wrong |
+| `recorded_at` | `TEXT NOT NULL` | RFC3339 write time |
+
+Primary key: `(run_id, step)`, so a retried step replaces its earlier outcome.
+Index: `idx_run_closeout_steps_run(run_id)`. `completed` and `skipped` are
+terminal; a `failed` step is retried by a later closeout, which is what
+separates "there was nothing to do" from "it broke".
+
 ### `retired_engine_records`
 
 Immutable, evidence-only storage for complete rows archived when a fuzzing
@@ -724,6 +747,7 @@ Index: `idx_guardrail_decisions_ts(decided_at DESC)`.
 | `0024_retired_engine_records.sql` | archives complete retired-engine records as immutable, non-executable evidence before typed deserialization |
 | `0025_schedule_retirement_operations.sql` | adds canonical lowercase RFC 4122 v4, shape-checked immutable operation proofs and exact normalized permanent-ID tombstones committed with linked schedule-history retirement; hardens retired archive and history insert/update immutability |
 | `0026_patch_to_proof.sql` | creates durable remediation attempts with immutable review scope, compare-and-set lifecycle states, and terminal sandbox evidence |
+| `0027_run_closeout.sql` | records per-run closeout step outcomes so an interrupted chain resumes rather than repeating terminal work |
 
 ## 7. Read failure contract
 

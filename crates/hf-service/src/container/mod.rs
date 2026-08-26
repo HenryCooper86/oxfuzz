@@ -27,6 +27,8 @@ mod output_budget;
 mod policy;
 mod project_identity;
 mod run;
+#[cfg(feature = "run-closeout")]
+mod run_closeout;
 mod staging;
 mod system;
 mod triage;
