@@ -1750,6 +1750,10 @@ async fn cmd_corpus(project: PathBuf, target: &str, op: &str) -> anyhow::Result<
                 "Solver produced {} input(s), {} of them novel.",
                 outcome.inputs_solved, outcome.inputs_novel
             );
+            println!(
+                "Corpus {} -> {} entries.",
+                outcome.corpus_size_before, outcome.corpus_size_after
+            );
         }
         "list" => {
             let corpus = container.corpus_list(&project, target)?;

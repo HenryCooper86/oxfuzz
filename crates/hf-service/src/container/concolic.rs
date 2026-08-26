@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use hf_core::harness::HarnessStatus;
+use hf_guardrails::Action;
 
 use crate::concolic::{
     select_inputs, summarize, ConcolicAvailability, ConcolicOutcome, ConcolicStopReason,
@@ -119,6 +120,8 @@ impl ServiceContainer {
         // The pass builds into, and writes into, the shared workspace, so it
         // takes the same lease every sibling corpus operation takes.
         let _workspace_operation = self.acquire_workspace_operation().await?;
+        self.authorize_recorded(Action::CorpusOp, "corpus_concolic", Some(project))
+            .await?;
         if let ConcolicAvailability::Unavailable { reason } = self.concolic_availability().await {
             return Err(ClassifiedError::Validation(format!(
                 "concolic enrichment is unavailable: {reason}"
@@ -155,6 +158,15 @@ impl ServiceContainer {
         std::fs::write(workspace.join("symcc_driver.c"), DRIVER_SOURCE)
             .map_err(|e| ClassifiedError::Validation(format!("stage driver: {e}")))?;
 
+        self.authorize_recorded(
+            Action::RunFuzzer {
+                engine: "SymCC concolic enrichment".to_owned(),
+                duration_secs: settings.total_timeout_secs,
+            },
+            "corpus_concolic",
+            Some(project),
+        )
+        .await?;
         let record = self
             .run_concolic_pass(&workspace, &selected, &settings)
             .await?;
