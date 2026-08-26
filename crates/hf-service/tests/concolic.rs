@@ -37,3 +37,90 @@ fn a_valid_override_is_accepted() {
         .expect("a positive bound is valid");
     assert_eq!(parsed.max_inputs, 40);
 }
+
+use hf_service::concolic::{select_inputs, summarize, ConcolicStopReason, CONCOLIC_SCHEMA_VERSION};
+use std::collections::HashSet;
+use std::path::PathBuf;
+
+fn paths(n: usize) -> Vec<PathBuf> {
+    (0..n)
+        .map(|i| PathBuf::from(format!("in{i}.bin")))
+        .collect()
+}
+
+fn bounded(max_inputs: usize, max_solved: usize) -> ConcolicSettings {
+    ConcolicSettings {
+        max_inputs,
+        max_solved_inputs: max_solved,
+        ..ConcolicSettings::default()
+    }
+}
+
+#[test]
+fn selection_stops_at_max_inputs_and_reports_what_it_skipped() {
+    let (selected, skipped) = select_inputs(&paths(10), &bounded(4, 100));
+    assert_eq!(selected.len(), 4);
+    assert_eq!(
+        skipped, 6,
+        "skipped inputs are reported, never silently dropped"
+    );
+}
+
+#[test]
+fn a_corpus_within_the_bound_skips_nothing() {
+    let (selected, skipped) = select_inputs(&paths(3), &bounded(10, 100));
+    assert_eq!(selected.len(), 3);
+    assert_eq!(skipped, 0);
+}
+
+#[test]
+fn a_solved_input_already_in_the_corpus_is_counted_but_not_novel() {
+    let existing: HashSet<String> = [blake_of(b"dup")].into_iter().collect();
+    let out = summarize(
+        4,
+        0,
+        &[b"dup".to_vec(), b"fresh".to_vec()],
+        &existing,
+        &bounded(10, 100),
+        ConcolicStopReason::CorpusExhausted,
+    );
+    assert_eq!(out.inputs_solved, 2);
+    assert_eq!(
+        out.inputs_novel, 1,
+        "a solver returning inputs the corpus already holds has enriched nothing"
+    );
+}
+
+#[test]
+fn solved_inputs_are_capped_and_the_stop_reason_says_so() {
+    let out = summarize(
+        4,
+        0,
+        &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()],
+        &HashSet::new(),
+        &bounded(10, 2),
+        ConcolicStopReason::CorpusExhausted,
+    );
+    assert_eq!(out.inputs_novel, 2);
+    assert_eq!(out.stop_reason, ConcolicStopReason::SolvedInputCap);
+}
+
+#[test]
+fn a_pass_that_solved_nothing_is_a_success_with_zero_novel() {
+    let out = summarize(
+        5,
+        0,
+        &[],
+        &HashSet::new(),
+        &ConcolicSettings::default(),
+        ConcolicStopReason::CorpusExhausted,
+    );
+    assert_eq!(out.inputs_solved, 0);
+    assert_eq!(out.inputs_novel, 0);
+    assert_eq!(out.schema_version, CONCOLIC_SCHEMA_VERSION);
+}
+
+/// The digest the corpus uses to decide whether an input is already held.
+fn blake_of(bytes: &[u8]) -> String {
+    hf_service::concolic::content_digest(bytes)
+}
