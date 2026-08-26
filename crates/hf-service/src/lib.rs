@@ -44,6 +44,8 @@ pub mod evidence;
 pub mod finding_proof;
 #[cfg(feature = "harness-tournament")]
 pub mod harness_tournament;
+#[cfg(feature = "harness-work-order")]
+pub mod harness_work_order;
 pub mod init;
 pub mod issue_tracker;
 pub mod knowledge;
@@ -167,6 +169,11 @@ pub use finding_proof::{
 pub use harness_tournament::{
     HarnessCandidateEvidence, HarnessTournamentRequest, HarnessTournamentResult,
     HARNESS_TOURNAMENT_SCHEMA_VERSION,
+};
+#[cfg(feature = "harness-work-order")]
+pub use harness_work_order::{
+    build_work_order, render_work_order, HarnessWorkOrder, WorkOrderInputs, WorkOrderRule,
+    HARNESS_WORK_ORDER_SCHEMA_VERSION,
 };
 pub use hf_storage::{AutoRevertEvent, GuardrailDecisionRecord, ProjectAutoRevert};
 #[cfg(feature = "patch-to-proof")]

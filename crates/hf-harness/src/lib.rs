@@ -8,7 +8,8 @@ pub mod generator;
 pub mod lint;
 
 pub use lint::{
-    has_blocking_finding, lint_harness_source, render_findings, LintFinding, LintSeverity,
+    harness_rules, has_blocking_finding, lint_harness_source, render_findings, HarnessRuleSummary,
+    LintFinding, LintSeverity,
 };
 
 pub use generator::{
