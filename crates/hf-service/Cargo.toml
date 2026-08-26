@@ -8,7 +8,7 @@ description = "Business logic orchestrating discovery, harness, engine, crash, c
 # Automotive on by default; `--no-default-features` drops the optional
 # hf-automotive dependency and compiles the feature-absent orchestration paths.
 [features]
-default = ["automotive-lab", "automotive-scapy", "campaign-health", "build-context", "build-doctor", "campaign-trust", "change-aware", "coverage-blockers", "harness-tournament", "harness-work-order", "native-analysis", "oracle-studio", "patch-to-proof", "proof-carrying", "run-closeout", "semgrep-enrichment", "triage-disposition", "unreached-surface"]
+default = ["automotive-lab", "automotive-scapy", "campaign-health", "build-context", "concolic-enrichment", "build-doctor", "campaign-trust", "change-aware", "coverage-blockers", "harness-tournament", "harness-work-order", "native-analysis", "oracle-studio", "patch-to-proof", "proof-carrying", "run-closeout", "semgrep-enrichment", "triage-disposition", "unreached-surface"]
 automotive-scapy = ["dep:hf-automotive", "hf-automotive/automotive-scapy"]
 build-context = ["hf-discovery/build-context"]
 build-doctor = ["build-context"]
@@ -25,6 +25,7 @@ triage-disposition = ["proof-carrying"]
 campaign-trust = ["triage-disposition"]
 unreached-surface = ["coverage-blockers"]
 campaign-health = []
+concolic-enrichment = []
 run-closeout = ["campaign-trust", "campaign-health", "unreached-surface", "coverage-blockers"]
 harness-work-order = ["build-context"]
 test-support = []

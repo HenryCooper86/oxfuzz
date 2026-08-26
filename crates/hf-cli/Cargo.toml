@@ -9,7 +9,7 @@ description = "CLI + TUI for oxfuzz"
 # of every build (including `cargo build`/dev). Build with `--no-default-features`
 # to drop the pure-Rust automotive dependency and use the feature-absent paths.
 [features]
-default = ["automotive-lab", "automotive-scapy", "campaign-health", "build-context", "build-doctor", "campaign-trust", "change-aware", "coverage-blockers", "harness-tournament", "harness-work-order", "native-analysis", "oracle-studio", "patch-to-proof", "proof-carrying", "run-closeout", "semgrep-enrichment", "triage-disposition", "unreached-surface"]
+default = ["automotive-lab", "automotive-scapy", "campaign-health", "build-context", "concolic-enrichment", "build-doctor", "campaign-trust", "change-aware", "coverage-blockers", "harness-tournament", "harness-work-order", "native-analysis", "oracle-studio", "patch-to-proof", "proof-carrying", "run-closeout", "semgrep-enrichment", "triage-disposition", "unreached-surface"]
 automotive-scapy = ["hf-service/automotive-scapy", "hf-web/automotive-scapy"]
 build-context = ["hf-service/build-context", "hf-web/build-context"]
 build-doctor = ["build-context", "hf-service/build-doctor", "hf-web/build-doctor"]
@@ -43,6 +43,10 @@ unreached-surface = [
 campaign-health = [
     "hf-service/campaign-health",
     "hf-web/campaign-health",
+]
+concolic-enrichment = [
+    "hf-service/concolic-enrichment",
+    "hf-web/concolic-enrichment",
 ]
 run-closeout = [
     "campaign-trust",
