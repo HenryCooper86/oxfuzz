@@ -32,6 +32,15 @@ Each carries a stable code, a severity, cited evidence, and one next action.
   floor.
 - **`RunFailed`** -- the run reached a terminal failure state.
 
+`DiskPressure` is assessed but not yet supplied by the service gathering step.
+Reading free space needs a cross-platform call the workspace has no dependency
+for -- `statvfs` on Unix and `GetDiskFreeSpaceExW` on Windows -- and adding
+platform-specific `unsafe` is its own change rather than a rider on this one.
+Until then the gatherer passes no figure, which yields no condition; a caller
+that has the figure gets the condition. Reporting an unknown free-space value as
+"below the floor" would be exactly the unavailable-as-failure substitution this
+subsystem exists to avoid.
+
 ## 4. Stalling Is A Coverage Question, Not An Exec-Count Question
 
 fuzzctl declares a campaign stalled when `execs_done` and `paths_total` are
@@ -91,3 +100,5 @@ window, and a `DEFAULT_*` constant would make that a code change.
 - Retained dedup state survives a service restart.
 - No condition is emitted for a run with no retained coverage measurement; the
   plateau check reports unavailable instead.
+- An unknown worker count or free-space figure yields no condition, rather than
+  a condition asserting the worst case.

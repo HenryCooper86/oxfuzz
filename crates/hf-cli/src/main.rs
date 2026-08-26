@@ -171,6 +171,14 @@ enum Commands {
         #[arg(long, default_value = "c")]
         lang: String,
     },
+    /// Report campaign health conditions for a run. Reads retained state;
+    /// never stops, restarts, or resizes a campaign.
+    #[cfg(feature = "campaign-health")]
+    Health {
+        /// Run identifier to assess.
+        #[arg(long)]
+        run: String,
+    },
     /// CI gate: harness + short fuzz + triage; write SARIF and exit non-zero
     /// if any crash is found. Intended for PR pipelines.
     Ci {
@@ -1743,6 +1751,39 @@ async fn cmd_unreached(project: PathBuf, lang: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Print campaign health conditions for one run.
+///
+/// Rendering only: every condition, severity, and sentence arrives decided by
+/// `hf-service` (AGENTS.md 2.9).
+#[cfg(feature = "campaign-health")]
+async fn cmd_health(run: &str) -> anyhow::Result<()> {
+    use hf_service::PlateauCheck;
+
+    let run_id = uuid::Uuid::parse_str(run)
+        .map_err(|_| anyhow::anyhow!("run id '{run}' is not a valid UUID"))?;
+    let container = ServiceContainer::bootstrap().await;
+    let report = container.campaign_health(run_id).await?;
+
+    match &report.plateau_check {
+        PlateauCheck::Unavailable { reason } => {
+            println!("Coverage plateau: not evaluated ({reason})");
+        }
+        PlateauCheck::Evaluated { window } => {
+            println!("Coverage plateau: evaluated over the last {window} measurements");
+        }
+    }
+    if report.events.is_empty() {
+        println!("No campaign health conditions for run {}.", report.run_id);
+        return Ok(());
+    }
+    println!();
+    for event in &report.events {
+        println!("  {:?} [{:?}]", event.condition, event.severity);
+        println!("      {}", event.detail);
+    }
+    Ok(())
+}
+
 /// Print the campaign trust audit for one run.
 ///
 /// Rendering only: every verdict, sentence, and withheld claim arrives decided
@@ -2528,6 +2569,8 @@ async fn main() -> anyhow::Result<()> {
         Commands::Trust { run } => cmd_trust(&run).await?,
         #[cfg(feature = "unreached-surface")]
         Commands::Unreached { project, lang } => cmd_unreached(project, &lang).await?,
+        #[cfg(feature = "campaign-health")]
+        Commands::Health { run } => cmd_health(&run).await?,
         Commands::Ci {
             project,
             target,

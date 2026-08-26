@@ -184,6 +184,52 @@ impl Default for FuzzingSettings {
     }
 }
 
+/// Operator thresholds for campaign health conditions.
+///
+/// A deployment fuzzing a slow target and one fuzzing a fast parser do not
+/// share a plateau window, so these are validated configuration rather than
+/// constants (AGENTS.md 2.15).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CampaignHealthSettings {
+    /// Consecutive coverage measurements that must show no growth before a
+    /// plateau is reported.
+    pub plateau_window: usize,
+    /// Seconds an engine progress record may go unchanged while a run is
+    /// active.
+    pub stale_progress_secs: u64,
+    /// Free workspace bytes below which the disk is reported as under
+    /// pressure.
+    pub disk_floor_bytes: u64,
+}
+
+impl Default for CampaignHealthSettings {
+    fn default() -> Self {
+        Self {
+            plateau_window: 3,
+            stale_progress_secs: 180,
+            disk_floor_bytes: 3 * 1024 * 1024 * 1024,
+        }
+    }
+}
+
+impl CampaignHealthSettings {
+    fn validate(&self) -> Result<(), String> {
+        // A window of one would call every measurement a plateau, since a
+        // single sample is trivially equal to itself.
+        if self.plateau_window < 2 {
+            return Err("campaign_health.plateau_window must be at least 2".to_owned());
+        }
+        if self.stale_progress_secs == 0 {
+            return Err("campaign_health.stale_progress_secs must be greater than zero".to_owned());
+        }
+        if self.disk_floor_bytes == 0 {
+            return Err("campaign_health.disk_floor_bytes must be greater than zero".to_owned());
+        }
+        Ok(())
+    }
+}
+
 /// One immutable policy snapshot resolved before a fuzz run starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolvedFuzzingRun {
@@ -721,6 +767,7 @@ struct OxfuzzRuntimeConfig {
     auto_revert_threshold_pct: f64,
     auto_revert_notify_only: bool,
     fuzzing: FuzzingSettings,
+    campaign_health: CampaignHealthSettings,
     automotive: AutomotiveSettings,
     knowledge: KnowledgeRuntimeConfig,
     session: hf_session::SessionConfig,
@@ -737,6 +784,7 @@ impl Default for OxfuzzRuntimeConfig {
             auto_revert_threshold_pct: DEFAULT_AUTO_REVERT_THRESHOLD_PCT,
             auto_revert_notify_only: false,
             fuzzing: FuzzingSettings::default(),
+            campaign_health: CampaignHealthSettings::default(),
             automotive: AutomotiveSettings::default(),
             knowledge: KnowledgeRuntimeConfig::default(),
             session: hf_session::SessionConfig::default(),
@@ -760,6 +808,7 @@ impl OxfuzzRuntimeConfig {
             );
         }
         self.fuzzing.validate()?;
+        self.campaign_health.validate()?;
         self.automotive.validate()?;
         self.knowledge.validate()?;
         if self.session.max_depth == 0 {
@@ -820,6 +869,30 @@ pub fn effective_scheduler_config() -> hf_scheduler::SchedulerConfig {
 pub fn effective_fuzzing_settings() -> Result<FuzzingSettings, String> {
     let raw = read_config("oxfuzz")?;
     Ok(parse_oxfuzz_runtime_config(&raw)?.fuzzing)
+}
+
+/// Parse and validate campaign health thresholds from a config document.
+///
+/// Separate from [`effective_campaign_health_settings`] so the validation rules
+/// can be exercised without a global config file on disk.
+///
+/// # Errors
+/// Returns an error when the document is malformed or a threshold is invalid.
+pub fn parse_campaign_health_settings(raw: &str) -> Result<CampaignHealthSettings, String> {
+    Ok(parse_oxfuzz_runtime_config(raw)?.campaign_health)
+}
+
+/// Read and validate the campaign health thresholds.
+///
+/// An invalid manually-edited threshold fails closed rather than silently
+/// reverting to the default window, which would report plateaus against a
+/// policy the operator did not choose.
+///
+/// # Errors
+/// Returns an error when the global config cannot be read or validated.
+pub fn effective_campaign_health_settings() -> Result<CampaignHealthSettings, String> {
+    let raw = read_config("oxfuzz")?;
+    Ok(parse_oxfuzz_runtime_config(&raw)?.campaign_health)
 }
 
 /// Read and validate the automotive sidecar policy for the next operation.
