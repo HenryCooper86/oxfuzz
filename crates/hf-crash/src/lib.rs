@@ -15,6 +15,7 @@ pub mod report;
 pub use casr::{casr_command, cluster_from_path, kind_from_short, parse_casrep, severity_from_str};
 pub use classify::{classify, looks_like_crash};
 pub use dedup::dedup;
+pub use frames::is_harness_function;
 pub use frames::{
     crash_origin, frame_origin, parse_frames, root_target_frame, FrameOrigin, StackFrame,
 };

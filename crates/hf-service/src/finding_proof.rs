@@ -26,6 +26,10 @@ pub enum FindingEvidenceKind {
     CasrReport,
     /// A Patch-to-Proof remediation operation and its terminal sandbox evidence.
     RemediationRecord,
+    /// A retained harness record, cited by a campaign trust gate.
+    HarnessRecord,
+    /// A retained coverage measurement, cited by a campaign trust gate.
+    CoverageMeasurement,
 }
 
 /// One stable reference to retained evidence.
