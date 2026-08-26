@@ -199,9 +199,9 @@ absent capability when guessed wrong.
 ## 10. Verification Criteria
 
 - The SymCC layer builds in the sandbox image against LLVM 17, with the runtime
-  submodule checked out and the `simple` backend selected, and the image build
-  fails loudly if the wrapper is absent, matching the existing toolchain
-  verification step.
+  submodule checked out and the `qsym` backend selected (section 8: only `qsym`
+  writes solved inputs), and the image build fails loudly if the wrapper is
+  absent, matching the existing toolchain verification step.
 - The layer's compiler wrapper instruments a trivial program with a
   magic-value branch, and running it writes at least one solved input file. An
   image whose wrapper builds but solves nothing is a layer that will report
