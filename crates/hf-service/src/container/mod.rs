@@ -20,6 +20,8 @@ mod discovery;
 mod export;
 mod guards;
 mod harness;
+#[cfg(feature = "harness-work-order")]
+mod harness_work_order;
 mod harness_workspace;
 mod history;
 mod lifecycle;

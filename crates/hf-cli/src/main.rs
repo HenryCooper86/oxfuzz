@@ -188,6 +188,22 @@ enum Commands {
         #[arg(long)]
         run: String,
     },
+    /// Write a self-contained harness authoring packet for one candidate.
+    /// Needs no LLM provider; performs no build and starts no process.
+    #[cfg(feature = "harness-work-order")]
+    WorkOrder {
+        /// Project root path.
+        project: PathBuf,
+        /// Target symbol.
+        #[arg(long)]
+        target: String,
+        /// Source language.
+        #[arg(long, default_value = "c")]
+        lang: String,
+        /// Write the packet here instead of standard output.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// CI gate: harness + short fuzz + triage; write SARIF and exit non-zero
     /// if any crash is found. Intended for PR pipelines.
     Ci {
@@ -1823,6 +1839,33 @@ async fn cmd_closeout(run: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Write the provider-free harness authoring packet for one candidate.
+///
+/// Rendering only: the packet is assembled by `hf-service` (AGENTS.md 2.9).
+#[cfg(feature = "harness-work-order")]
+async fn cmd_work_order(
+    project: PathBuf,
+    target: &str,
+    lang: &str,
+    out: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    let language = parse_lang(lang)?;
+    let container = ServiceContainer::bootstrap().await;
+    let order = container
+        .harness_work_order(&project, target, language)
+        .await?;
+    let rendered = hf_service::render_work_order(&order);
+
+    match out {
+        Some(path) => {
+            std::fs::write(path, &rendered)?;
+            println!("work order written to {}", path.display());
+        }
+        None => print!("{rendered}"),
+    }
+    Ok(())
+}
+
 /// Print the campaign trust audit for one run.
 ///
 /// Rendering only: every verdict, sentence, and withheld claim arrives decided
@@ -2612,6 +2655,13 @@ async fn main() -> anyhow::Result<()> {
         Commands::Health { run } => cmd_health(&run).await?,
         #[cfg(feature = "run-closeout")]
         Commands::Closeout { run } => cmd_closeout(&run).await?,
+        #[cfg(feature = "harness-work-order")]
+        Commands::WorkOrder {
+            project,
+            target,
+            lang,
+            out,
+        } => cmd_work_order(project, &target, &lang, out.as_deref()).await?,
         Commands::Ci {
             project,
             target,
