@@ -9,7 +9,7 @@ description = "CLI + TUI for oxfuzz"
 # of every build (including `cargo build`/dev). Build with `--no-default-features`
 # to drop the pure-Rust automotive dependency and use the feature-absent paths.
 [features]
-default = ["automotive-lab", "automotive-scapy", "build-context", "build-doctor", "change-aware", "coverage-blockers", "harness-tournament", "native-analysis", "oracle-studio", "patch-to-proof", "proof-carrying", "semgrep-enrichment", "triage-disposition"]
+default = ["automotive-lab", "automotive-scapy", "build-context", "build-doctor", "campaign-trust", "change-aware", "coverage-blockers", "harness-tournament", "native-analysis", "oracle-studio", "patch-to-proof", "proof-carrying", "semgrep-enrichment", "triage-disposition"]
 automotive-scapy = ["hf-service/automotive-scapy", "hf-web/automotive-scapy"]
 build-context = ["hf-service/build-context", "hf-web/build-context"]
 build-doctor = ["build-context", "hf-service/build-doctor", "hf-web/build-doctor"]
@@ -29,6 +29,11 @@ triage-disposition = [
     "proof-carrying",
     "hf-service/triage-disposition",
     "hf-web/triage-disposition",
+]
+campaign-trust = [
+    "triage-disposition",
+    "hf-service/campaign-trust",
+    "hf-web/campaign-trust",
 ]
 
 [[bin]]
