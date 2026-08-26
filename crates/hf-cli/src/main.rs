@@ -719,6 +719,19 @@ async fn cmd_doctor(json: bool) -> anyhow::Result<()> {
         for line in doctor_lines(&status) {
             println!("{line}");
         }
+
+        #[cfg(feature = "concolic-enrichment")]
+        {
+            use hf_service::ConcolicAvailability;
+            let container = ServiceContainer::bootstrap().await;
+            let line = match container.concolic_availability().await {
+                ConcolicAvailability::Available => "concolic enrichment: available",
+                ConcolicAvailability::Unavailable { .. } => {
+                    "concolic enrichment: unavailable (sandbox image missing the SymCC layer)"
+                }
+            };
+            println!("{line}");
+        }
     }
 
     if !status.fuzzing_ready() {
