@@ -31,6 +31,8 @@ pub mod change_comparison;
 #[cfg(feature = "change-aware")]
 pub mod change_impact;
 pub mod checkpoints;
+#[cfg(feature = "concolic-enrichment")]
+pub mod concolic;
 pub mod config;
 pub mod container;
 #[cfg(feature = "coverage-blockers")]
@@ -138,6 +140,11 @@ pub use change_comparison::{
     ChangeAwarePlanEntry, ChangeImpactRequest, ChangeImpactView, PublishComparisonRequest,
     PublishDestination, PublishedComparison, RevisionComparisonRequest, RevisionComparisonView,
     RevisionRange, CHANGE_AWARE_SCHEMA_VERSION,
+};
+#[cfg(feature = "concolic-enrichment")]
+pub use concolic::{
+    content_digest, select_inputs, summarize, ConcolicAvailability, ConcolicOutcome,
+    ConcolicStopReason, CONCOLIC_SCHEMA_VERSION,
 };
 #[cfg(feature = "native-analysis")]
 pub use container::AnalyzedInventory;
