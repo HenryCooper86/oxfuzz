@@ -724,10 +724,13 @@ async fn cmd_doctor(json: bool) -> anyhow::Result<()> {
         {
             use hf_service::ConcolicAvailability;
             let container = ServiceContainer::bootstrap().await;
+            // The service returns a typed reason code; the CLI renders it and
+            // does not assert a cause it cannot know (an absent SymCC layer is
+            // only one of the ways the probe comes back unavailable).
             let line = match container.concolic_availability().await {
-                ConcolicAvailability::Available => "concolic enrichment: available",
-                ConcolicAvailability::Unavailable { .. } => {
-                    "concolic enrichment: unavailable (sandbox image missing the SymCC layer)"
+                ConcolicAvailability::Available => "concolic enrichment: available".to_owned(),
+                ConcolicAvailability::Unavailable { reason } => {
+                    format!("concolic enrichment: unavailable ({reason})")
                 }
             };
             println!("{line}");
