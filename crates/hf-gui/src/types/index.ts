@@ -715,6 +715,45 @@ export interface ResetEvidence {
   attributable: boolean;
 }
 
+/**
+ * What a crash needs next and what may be claimed about it, derived by the
+ * service from the finding proof card. The UI renders these values and never
+ * derives a disposition, an action, or a claim of its own.
+ *
+ * `disposition` is ordered most-urgent first; the crash list arrives already
+ * sorted by it. See `docs/design/triage-disposition-design.md`.
+ */
+export interface TriageDisposition {
+  schema_version: number;
+  disposition:
+    | "resolved"
+    | "report_ready"
+    | "reachability_unproven"
+    | "minimization_pending"
+    | "symbolization_pending"
+    | "runtime_artifact"
+    | "harness_defect";
+  action:
+    | "no_action"
+    | "write_report"
+    | "demonstrate_reachability"
+    | "minimize_input"
+    | "rebuild_with_symbols"
+    | "review_engine_configuration"
+    | "repair_harness";
+  action_detail: string;
+  claim_ceiling:
+    | "no_target_claim"
+    | "fault_observed"
+    | "target_fault_observed"
+    | "target_fault_minimized"
+    | "exploitability_classified"
+    | "remediation_verified";
+  /** What the evidence does not support. Never omit this when showing a claim. */
+  claim_limit: string;
+  evidence: FindingEvidenceReference[];
+}
+
 export interface CrashReviewItem {
   crash_id: string;
   run_id: string;
@@ -726,6 +765,7 @@ export interface CrashReviewItem {
   minimized: boolean;
   has_bug_report: boolean;
   proof: FindingProofCard;
+  disposition: TriageDisposition;
 }
 
 /** A localizable readiness/next-action note: a stable code plus a count. */

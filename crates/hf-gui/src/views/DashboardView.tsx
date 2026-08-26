@@ -38,6 +38,7 @@ import { useTarget } from "../providers/target";
 import { useI18n, type TParams } from "../i18nContext";
 import type {
   CrashReviewItem,
+  TriageDisposition,
   CreatedIssue,
   DefectDojoStatus,
   IssueExport,
@@ -770,6 +771,9 @@ function CrashCard({ crash, onExport }: { crash: CrashReviewItem; onExport: () =
         {crash.summary || t("dashboard.noSummary")}
       </p>
       <div className="mt-3">
+        <DispositionLine disposition={crash.disposition} />
+      </div>
+      <div className="mt-3">
         <FindingProofCard proof={crash.proof} />
       </div>
       <div className="flex flex-wrap items-center justify-between gap-2 mt-3">
@@ -1407,6 +1411,46 @@ function ViewAllLink({ onClick }: { onClick?: () => void }) {
   );
 }
 
+
+/**
+ * The service's decision for one crash: where it sits in the attention order,
+ * the single next step, and the ceiling on what may be claimed.
+ *
+ * The claim limit is rendered alongside the ceiling and never on its own
+ * hover/expand, because a ceiling shown without its limit invites a reader to
+ * treat the gap above it as merely unstated rather than unsupported.
+ */
+function DispositionLine({ disposition }: { disposition: TriageDisposition }) {
+  const { t } = useI18n();
+  if (!disposition) return null;
+  const label = loc(t, `triage.disposition.${disposition.disposition}`, humanizeCode(disposition.disposition));
+  // Nothing to do and everything to do are the two states worth colouring; the
+  // rest are ordinary queue positions.
+  const tone =
+    disposition.disposition === "resolved" || disposition.disposition === "report_ready"
+      ? "ok"
+      : disposition.disposition === "harness_defect" || disposition.disposition === "runtime_artifact"
+        ? undefined
+        : "warn";
+  return (
+    <div className="rounded-md border border-border" style={{ padding: "var(--space-sm)", background: "var(--surface-primary)" }}>
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs font-semibold text-text-secondary">
+          {loc(t, "triage.nextStep", "Next step")}
+        </span>
+        <StatusBadge value={label} tone={tone} />
+      </div>
+      <p className="text-xs text-text-secondary mt-2">{disposition.action_detail}</p>
+      <p className="text-xs text-text-muted mt-2">{disposition.claim_limit}</p>
+    </div>
+  );
+}
+
+/** `harness_defect` -> `Harness defect`, for locales with no dictionary entry. */
+function humanizeCode(code: string): string {
+  const spaced = code.replace(/_/g, " ");
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}
 
 function StatusBadge({ value, tone }: { value: string; tone?: "ok" | "warn" }) {
   const lower = value.toLowerCase();

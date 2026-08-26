@@ -54,7 +54,11 @@ pub enum ReproductionDetermination {
 }
 
 /// CASR exploitability determination, including absence of a CASR report.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+///
+/// Variants are declared most severe first, so the derived order sorts the
+/// most severe classification first and an absent report last. That order is
+/// the triage queue's tie-break; see `triage_disposition::TriageOrderKey`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CasrExploitabilityDetermination {
     Exploitable,

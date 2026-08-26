@@ -7,7 +7,7 @@ description = "REST API + SSE streaming"
 
 # Automotive on by default; `--no-default-features` drops it (see hf-cli note).
 [features]
-default = ["automotive-lab", "automotive-scapy", "build-context", "build-doctor", "change-aware", "coverage-blockers", "harness-tournament", "native-analysis", "oracle-studio", "patch-to-proof", "proof-carrying", "semgrep-enrichment"]
+default = ["automotive-lab", "automotive-scapy", "build-context", "build-doctor", "change-aware", "coverage-blockers", "harness-tournament", "native-analysis", "oracle-studio", "patch-to-proof", "proof-carrying", "semgrep-enrichment", "triage-disposition"]
 automotive-scapy = ["hf-service/automotive-scapy"]
 build-context = ["hf-service/build-context"]
 build-doctor = ["build-context", "hf-service/build-doctor"]
@@ -20,6 +20,7 @@ native-analysis = ["hf-service/native-analysis"]
 proof-carrying = ["hf-service/proof-carrying"]
 patch-to-proof = ["proof-carrying", "hf-service/patch-to-proof"]
 semgrep-enrichment = ["hf-service/semgrep-enrichment"]
+triage-disposition = ["proof-carrying", "hf-service/triage-disposition"]
 
 [dependencies]
 hf-service = { workspace = true }
