@@ -334,6 +334,26 @@ async fn strict_policy_denies_corpus_operations() {
     assert_guardrail_denied(&error, "corpus operation");
 }
 
+/// `corpus_concolic` authorizes `CorpusOp` before it does anything else --
+/// before the toolchain availability probe, before it looks for a promoted
+/// harness, before it touches the sandbox at all -- so a policy that denies
+/// `CorpusOp` blocks it exactly like every sibling corpus operation, with no
+/// project store or promoted harness required to reach the denial.
+#[cfg(feature = "concolic-enrichment")]
+#[tokio::test]
+async fn strict_policy_denies_corpus_concolic() {
+    isolate_workspace();
+    let (container, _gate) = strict_container(None);
+    let project = fixture_project();
+    let target = "parse_value";
+
+    let error = container
+        .corpus_concolic(project.path(), target)
+        .await
+        .unwrap_err();
+    assert_guardrail_denied(&error, "corpus operation");
+}
+
 #[tokio::test]
 async fn default_policy_allows_chat_send_without_prompting() {
     let (container, gate) = default_container(Some(Arc::new(ChatPool)));
