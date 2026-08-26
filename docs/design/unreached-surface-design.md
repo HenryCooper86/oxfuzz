@@ -60,9 +60,10 @@ against it:
   the attempt count.
 - **`AttemptedSmokeFailed`** -- a harness compiled and failed smoke
   qualification.
-- **`AttemptedCovered`** -- a harness reached qualification, yet the function is
-  absent from every coverage union. This is the most informative state in the
-  subsystem: the harness runs and does not exercise what it was written for.
+- **`QualifiedYetUnreached`** -- a harness reached qualification, yet the
+  function is absent from every coverage union. This is the most informative
+  state in the subsystem: the harness runs and does not exercise what it was
+  written for, so the next harness needs a different shape rather than a fix.
 
 ## 6. Ranking
 
@@ -71,15 +72,22 @@ Deterministic, in sequence:
 1. `hf-discovery`'s existing candidate rank, preserved -- the discovery layer
    already weighs input-facing surface, semgrep findings, and complexity, and
    restating that judgment here would give one meaning two homes;
-2. attempt history, in the section 5 order, so a never-attempted candidate
-   precedes one that has already consumed effort; then
+2. attempt history, in the section 5 order; then
 3. function name, for stability.
 
 Discovery rank leads because this subsystem adds exactly one fact discovery
 cannot know -- that nothing has ever covered this -- and that fact is a filter,
-not a re-ranking. fuzzctl instead adds unexplained constants (`+26` for absence
-from a report, `+18` for coverage under twenty per cent) directly onto the
-discovery score, which overwrites the discovery judgment with arithmetic.
+not a re-ranking. A high-value parser whose one harness failed to compile is
+still the better next target than an untried helper, because a compile failure
+is usually cheap to fix and the value gap is not.
+
+Attempt history is therefore reported for every candidate but only orders the
+ties, which are real: candidates frequently share a discovery score. Within one
+score, effort already spent is the sensible discriminator.
+
+fuzzctl instead adds unexplained constants (`+26` for absence from a report,
+`+18` for coverage under twenty per cent) directly onto the discovery score,
+which overwrites the discovery judgment with arithmetic.
 
 ## 7. Rejected Alternatives
 
@@ -103,6 +111,8 @@ discovery score, which overwrites the discovery judgment with arithmetic.
 - A function covered in any retained measurement never appears as unreached.
 - Discovery's relative order is preserved among candidates with equal attempt
   history.
-- `AttemptedCovered` is reported when a qualified harness names the candidate
-  and the function is absent from every coverage union.
+- `QualifiedYetUnreached` is reported when a qualified harness names the
+  candidate and the function is absent from every coverage union.
+- Attempt history changes the order only between candidates of equal discovery
+  rank; it never reorders candidates whose discovery ranks differ.
 - Ranking is total and stable.
