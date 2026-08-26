@@ -143,8 +143,8 @@ pub use change_comparison::{
 };
 #[cfg(feature = "concolic-enrichment")]
 pub use concolic::{
-    content_digest, select_inputs, summarize, summarize_with_corpus, ConcolicAvailability,
-    ConcolicOutcome, ConcolicStopReason, CONCOLIC_SCHEMA_VERSION,
+    content_digest, select_inputs, summarize, ConcolicAvailability, ConcolicOutcome,
+    ConcolicStopReason, CONCOLIC_SCHEMA_VERSION,
 };
 #[cfg(feature = "native-analysis")]
 pub use container::AnalyzedInventory;

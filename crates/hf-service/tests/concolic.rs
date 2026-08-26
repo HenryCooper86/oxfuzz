@@ -99,10 +99,27 @@ fn solved_inputs_are_capped_and_the_stop_reason_says_so() {
         &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()],
         &HashSet::new(),
         &bounded(10, 2),
-        ConcolicStopReason::CorpusExhausted,
+        ConcolicStopReason::SolvedInputCap,
     );
-    assert_eq!(out.inputs_novel, 2);
+    assert_eq!(out.inputs_novel, 2, "only the retained solutions are novel");
     assert_eq!(out.stop_reason, ConcolicStopReason::SolvedInputCap);
+}
+
+#[test]
+fn a_cap_that_only_truncated_does_not_overwrite_the_bound_that_stopped_the_pass() {
+    // The pass ran out of wall-clock; the cap merely limited how many of the
+    // solutions it had already produced were retained. Section 6 asks the
+    // reason to name the bound that actually ended the pass.
+    let out = summarize(
+        1,
+        2,
+        &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()],
+        &HashSet::new(),
+        &bounded(10, 2),
+        ConcolicStopReason::TotalTimeout,
+    );
+    assert_eq!(out.inputs_solved, 3);
+    assert_eq!(out.stop_reason, ConcolicStopReason::TotalTimeout);
 }
 
 #[test]
@@ -134,12 +151,32 @@ fn the_outcome_reports_the_corpus_size_on_both_sides_of_the_fold() {
         &HashSet::new(),
         &ConcolicSettings::default(),
         ConcolicStopReason::CorpusExhausted,
-        7,
+        (7, 8),
     );
     assert_eq!(out.corpus_size_before, 7);
     assert_eq!(
         out.corpus_size_after, 8,
-        "one novel input folded in grows the corpus by exactly one"
+        "the post-fold size is the one the caller measured"
+    );
+}
+
+#[test]
+fn the_post_fold_size_is_measured_rather_than_added_up_from_novel_inputs() {
+    // Two byte-identical solutions each count as novel yet occupy one corpus
+    // path. Deriving the size would claim growth of two where one landed.
+    let out = summarize_with_sizes(
+        1,
+        0,
+        &[b"same".to_vec(), b"same".to_vec()],
+        &HashSet::new(),
+        &ConcolicSettings::default(),
+        ConcolicStopReason::CorpusExhausted,
+        (7, 8),
+    );
+    assert_eq!(out.inputs_novel, 2);
+    assert_eq!(
+        out.corpus_size_after, 8,
+        "the measured size wins over before + inputs_novel"
     );
 }
 
@@ -153,7 +190,7 @@ fn a_pass_with_no_novel_inputs_leaves_the_corpus_size_unchanged() {
         &existing,
         &ConcolicSettings::default(),
         ConcolicStopReason::CorpusExhausted,
-        7,
+        (7, 7),
     );
     assert_eq!(out.inputs_novel, 0);
     assert_eq!(out.corpus_size_after, out.corpus_size_before);
@@ -166,9 +203,8 @@ fn summarize_with_sizes(
     existing: &HashSet<String>,
     settings: &ConcolicSettings,
     stop: ConcolicStopReason,
-    before: usize,
+    sizes: (usize, usize),
 ) -> hf_service::ConcolicOutcome {
-    hf_service::concolic::summarize_with_corpus(
-        explored, skipped, solved, existing, settings, stop, before,
-    )
+    summarize(explored, skipped, solved, existing, settings, stop)
+        .with_corpus_sizes(sizes.0, sizes.1)
 }

@@ -69,9 +69,9 @@ pub struct ConcolicOutcome {
     pub stop_reason: ConcolicStopReason,
     /// Corpus entry count before the fold.
     pub corpus_size_before: usize,
-    /// Corpus entry count after it. Equal to `corpus_size_before` when nothing
-    /// novel was found, which is the honest reading of a pass that enriched
-    /// nothing.
+    /// Corpus entry count after it, counted from the corpus rather than added
+    /// up from `inputs_novel`. A pass that enriched nothing leaves this equal
+    /// to `corpus_size_before`, which is the honest reading of it.
     pub corpus_size_after: usize,
 }
 
@@ -94,7 +94,14 @@ pub fn select_inputs(corpus: &[PathBuf], settings: &ConcolicSettings) -> (Vec<Pa
     (corpus[..take].to_vec(), corpus.len() - take)
 }
 
-/// Summarize a pass, capping solved inputs and counting the novel ones.
+/// Summarize a pass, capping retained solved inputs and counting the novel ones.
+///
+/// `stop` is reported verbatim. The caller runs the exploration loop and is the
+/// only party that knows which bound it stopped on; deriving
+/// [`ConcolicStopReason::SolvedInputCap`] here from `solved.len()` would
+/// overwrite a real [`ConcolicStopReason::TotalTimeout`] with a cap that had
+/// merely truncated a collection, and section 6 asks the reason to name the
+/// bound that actually ended the pass.
 #[must_use]
 pub fn summarize<S: std::hash::BuildHasher>(
     explored: usize,
@@ -104,7 +111,6 @@ pub fn summarize<S: std::hash::BuildHasher>(
     settings: &ConcolicSettings,
     stop: ConcolicStopReason,
 ) -> ConcolicOutcome {
-    let capped = solved.len() > settings.max_solved_inputs;
     let novel = solved
         .iter()
         .filter(|bytes| !existing_digests.contains(&content_digest(bytes)))
@@ -116,29 +122,25 @@ pub fn summarize<S: std::hash::BuildHasher>(
         inputs_skipped: skipped,
         inputs_solved: solved.len(),
         inputs_novel: novel,
-        stop_reason: if capped {
-            ConcolicStopReason::SolvedInputCap
-        } else {
-            stop
-        },
+        stop_reason: stop,
         corpus_size_before: 0,
         corpus_size_after: 0,
     }
 }
 
-/// [`summarize`] with the corpus size the fold started from.
-#[must_use]
-pub fn summarize_with_corpus<S: std::hash::BuildHasher>(
-    explored: usize,
-    skipped: usize,
-    solved: &[Vec<u8>],
-    existing_digests: &HashSet<String, S>,
-    settings: &ConcolicSettings,
-    stop: ConcolicStopReason,
-    corpus_size_before: usize,
-) -> ConcolicOutcome {
-    let mut outcome = summarize(explored, skipped, solved, existing_digests, settings, stop);
-    outcome.corpus_size_before = corpus_size_before;
-    outcome.corpus_size_after = corpus_size_before + outcome.inputs_novel;
-    outcome
+impl ConcolicOutcome {
+    /// Record the corpus sizes measured on both sides of the fold.
+    ///
+    /// Both sizes are counted from the corpus itself rather than derived from
+    /// `corpus_size_before + inputs_novel`. The two diverge whenever solved
+    /// inputs within one batch are byte-identical -- they each count as novel
+    /// yet collapse onto one corpus path -- or when a write does not land.
+    /// Reporting growth that did not happen is the single thing section 6
+    /// exists to stop.
+    #[must_use]
+    pub fn with_corpus_sizes(mut self, before: usize, after: usize) -> Self {
+        self.corpus_size_before = before;
+        self.corpus_size_after = after;
+        self
+    }
 }
