@@ -78,8 +78,11 @@ it and no consumer changes.
 
 ## 5. Next Action
 
-Exactly one per disposition, from a fixed vocabulary, carrying a stable
-`reason_code` for localization and a human sentence:
+Exactly one per disposition, from a fixed vocabulary. The action is a typed
+value whose serialized name is the stable identifier a consumer localizes
+against; it carries a human sentence alongside. There is no separate reason code,
+because a second identifier for the same meaning would be a second home for it
+(AGENTS.md 2.18).
 
 | Disposition | Action | Meaning |
 | --- | --- | --- |
@@ -113,9 +116,12 @@ Ceilings, ordered:
   minimized.
 - **`TargetFaultMinimized`** -- an attributed, minimized target fault.
 - **`ExploitabilityClassified`** -- CASR produced a supported exploitability
-  determination. This ceiling is granted by CASR evidence, not by crash kind,
-  and it raises a `TargetFaultMinimized` ceiling only when the fault is already
-  attributed to the target.
+  determination. This ceiling is granted by CASR evidence, never by crash kind.
+  It is reached only by raising a `TargetFaultMinimized` ceiling, so it requires
+  a fault attributed to the target *and* a minimized input. CASR run against an
+  unminimized input does not raise the ceiling: the ladder is ordered, and a
+  claim above `TargetFaultMinimized` on an input that was never minimized would
+  assert more than the rung below it.
 - **`RemediationVerified`** -- `Resolved`.
 
 The paired `claim_limit` sentence states what is not supported. For every

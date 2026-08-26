@@ -574,3 +574,70 @@ async fn dashboard_without_active_project_is_empty_not_global_aggregate() {
     assert_eq!(scoped.totals.targets, 1);
     assert_eq!(scoped.totals.harnesses, 1);
 }
+
+/// The dashboard's crash queue is the triage queue: the crash a person should
+/// open first is first, and each entry carries what to do and what may be
+/// claimed. Ordering here rather than in a parallel view keeps one meaning in
+/// one home (AGENTS.md 2.18).
+#[cfg(feature = "triage-disposition")]
+#[tokio::test]
+async fn the_crash_queue_is_ordered_by_disposition_and_carries_one_next_action() {
+    use hf_service::{ClaimCeiling, Disposition, DispositionAction};
+
+    let (container, _dir) = test_container().await;
+    let store = container.store().unwrap().clone();
+    let target = sample_target("/proj");
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+
+    let harness = sample_harness(target.id);
+    store.upsert_harness(&harness).await.unwrap();
+    let run = sample_run("/proj", harness.id);
+    store.insert_run(&run).await.unwrap();
+
+    // A harness defect, an unminimized target fault, and a minimized one.
+    let mut expected = Vec::new();
+    for (origin, minimized, disposition) in [
+        (CrashOrigin::Harness, true, Disposition::HarnessDefect),
+        (CrashOrigin::Target, false, Disposition::MinimizationPending),
+        (CrashOrigin::Target, true, Disposition::ReachabilityUnproven),
+    ] {
+        let crash = Crash {
+            id: Uuid::new_v4(),
+            run_id: run.id,
+            target_id: target.id,
+            input_path: PathBuf::from("input.bin"),
+            stack_signature: format!("{origin:?}-{minimized}"),
+            kind: CrashKind::Asan,
+            summary: "heap-buffer-overflow".to_owned(),
+            minimized,
+            bug_report: None,
+            casr: None,
+            origin,
+        };
+        store.upsert_crash(&crash).await.unwrap();
+        expected.push(disposition);
+    }
+    expected.sort_unstable();
+
+    let dashboard = container
+        .workbench_dashboard(Some(Path::new("/proj")), Some("parse_packet"))
+        .await
+        .unwrap();
+
+    let seen: Vec<Disposition> = dashboard
+        .crash_reviews
+        .iter()
+        .map(|item| item.disposition.disposition)
+        .collect();
+    assert_eq!(seen, expected, "queue must be in attention order");
+
+    let first = &dashboard.crash_reviews[0].disposition;
+    assert_eq!(first.disposition, Disposition::ReachabilityUnproven);
+    assert_eq!(first.action, DispositionAction::DemonstrateReachability);
+    assert_eq!(first.claim_ceiling, ClaimCeiling::TargetFaultMinimized);
+    assert!(!first.claim_limit.trim().is_empty());
+
+    let last = dashboard.crash_reviews.last().unwrap();
+    assert_eq!(last.disposition.disposition, Disposition::HarnessDefect);
+    assert_eq!(last.disposition.claim_ceiling, ClaimCeiling::NoTargetClaim);
+}
