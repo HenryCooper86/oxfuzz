@@ -16,23 +16,20 @@ import { ObservabilityPanel } from "./components/observation/ObservabilityPanel"
 import { InfoPanel } from "./components/observation/InfoPanel";
 import { SetupWizard } from "./components/wizard/SetupWizard";
 import { SettingsView } from "./components/settings/SettingsView";
-import { ChatView } from "./views/ChatView";
 import { WorkflowView } from "./views/WorkflowView";
-import { DashboardView } from "./views/DashboardView";
 import { DiscoverView } from "./views/DiscoverView";
 import { HarnessView } from "./views/HarnessView";
 import { RunView } from "./views/RunView";
 import { TriageView } from "./views/TriageView";
+import { DashboardView } from "./views/DashboardView";
 import { CorpusView } from "./views/CorpusView";
 import { ProjectsView } from "./views/ProjectsView";
 import { ArtifactsView } from "./views/ArtifactsView";
 import { ReportsView } from "./views/ReportsView";
-import { RunsView } from "./views/RunsView";
 import { ChangesView } from "./views/ChangesView";
 import { AuditView } from "./views/AuditView";
 import { DefectDojoView } from "./views/DefectDojoView";
 import { CommandPalette } from "./components/CommandPalette";
-import { AgentsView, SkillsView, KnowledgeView, AutomationView } from "./views/FeatureViews";
 import { LoadingState } from "./components/ui/Loading";
 import { ProjectProvider } from "./providers/ProjectContext";
 import { useProject } from "./providers/project";
@@ -54,6 +51,41 @@ const AutomotiveView = lazy(() =>
 
 const HelpView = lazy(() =>
   import("./views/HelpView").then(({ HelpView: View }) => ({ default: View })),
+);
+
+// Chat, Runs, and the four Feature views are reached only by navigation and
+// are large enough that Rollup emits a real chunk for each, so they are kept
+// out of the entry chunk. Dashboard is deliberately eager: it is the startup
+// view, and loading it lazily would show a fallback on every launch.
+//
+// The other navigation-only views are imported statically on purpose. Splitting
+// them was measured and made the entry chunk larger: their own code is small
+// once the shared components they use -- which the entry chunk already carries
+// -- are excluded, so the lazy wrapper cost more than the split saved.
+const ChatView = lazy(() =>
+  import("./views/ChatView").then(({ ChatView: View }) => ({ default: View })),
+);
+
+const RunsView = lazy(() =>
+  import("./views/RunsView").then(({ RunsView: View }) => ({ default: View })),
+);
+
+// Agents, Skills, Knowledge, and Automation share one module, so the four
+// dynamic imports resolve to a single chunk.
+const AgentsView = lazy(() =>
+  import("./views/FeatureViews").then(({ AgentsView: View }) => ({ default: View })),
+);
+
+const SkillsView = lazy(() =>
+  import("./views/FeatureViews").then(({ SkillsView: View }) => ({ default: View })),
+);
+
+const KnowledgeView = lazy(() =>
+  import("./views/FeatureViews").then(({ KnowledgeView: View }) => ({ default: View })),
+);
+
+const AutomationView = lazy(() =>
+  import("./views/FeatureViews").then(({ AutomationView: View }) => ({ default: View })),
 );
 
 /** Detect the host OS for platform-conditional window chrome. */
@@ -166,7 +198,11 @@ function AppInner() {
               <main className="flex-1 min-w-0 overflow-hidden flex flex-col">
                 <RecoveryBanner />
                 <ErrorBoundary resetKey={activeView}>
-                {activeView === "chat" && <ChatView key={chatResetKey} />}
+                {activeView === "chat" && (
+                  <Suspense fallback={<LoadingState />}>
+                    <ChatView key={chatResetKey} />
+                  </Suspense>
+                )}
                 {activeView === "dashboard" && (
                   <ViewCanvas>
                     <DashboardView onNavigate={navigate} />
@@ -219,7 +255,9 @@ function AppInner() {
                 )}
                 {activeView === "runs" && (
                   <ViewCanvas>
-                    <RunsView />
+                    <Suspense fallback={<LoadingState />}>
+                      <RunsView />
+                    </Suspense>
                   </ViewCanvas>
                 )}
                 {activeView === "changes" && (
@@ -234,22 +272,30 @@ function AppInner() {
                 )}
                 {activeView === "agents" && (
                   <ViewCanvas>
-                    <AgentsView />
+                    <Suspense fallback={<LoadingState />}>
+                      <AgentsView />
+                    </Suspense>
                   </ViewCanvas>
                 )}
                 {activeView === "skills" && (
                   <ViewCanvas>
-                    <SkillsView />
+                    <Suspense fallback={<LoadingState />}>
+                      <SkillsView />
+                    </Suspense>
                   </ViewCanvas>
                 )}
                 {activeView === "knowledge" && (
                   <ViewCanvas>
-                    <KnowledgeView />
+                    <Suspense fallback={<LoadingState />}>
+                      <KnowledgeView />
+                    </Suspense>
                   </ViewCanvas>
                 )}
                 {activeView === "automation" && (
                   <ViewCanvas>
-                    <AutomationView />
+                    <Suspense fallback={<LoadingState />}>
+                      <AutomationView />
+                    </Suspense>
                   </ViewCanvas>
                 )}
                 {activeView === "automotive" && (
