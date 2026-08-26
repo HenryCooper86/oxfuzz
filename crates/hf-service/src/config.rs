@@ -230,6 +230,57 @@ impl CampaignHealthSettings {
     }
 }
 
+/// Bounds for one concolic enrichment pass.
+///
+/// Path explosion is concolic execution's normal failure mode rather than its
+/// exceptional one, so a pass is bounded on four axes. These are validated
+/// configuration and not constants (AGENTS.md 2.15): a deployment enriching a
+/// small binary parser and one enriching a protocol stack do not share a
+/// per-input timeout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ConcolicSettings {
+    /// Corpus inputs explored in one pass.
+    pub max_inputs: usize,
+    /// Wall-clock for exploring one input.
+    pub per_input_timeout_secs: u64,
+    /// Solved inputs retained from one pass.
+    pub max_solved_inputs: usize,
+    /// Wall-clock for the whole pass.
+    pub total_timeout_secs: u64,
+}
+
+impl Default for ConcolicSettings {
+    fn default() -> Self {
+        Self {
+            max_inputs: 25,
+            per_input_timeout_secs: 30,
+            max_solved_inputs: 200,
+            total_timeout_secs: 900,
+        }
+    }
+}
+
+impl ConcolicSettings {
+    fn validate(&self) -> Result<(), String> {
+        // Zero is not "unlimited" here: it is a pass that does nothing while
+        // reporting success.
+        if self.max_inputs == 0 {
+            return Err("concolic.max_inputs must be greater than zero".to_owned());
+        }
+        if self.per_input_timeout_secs == 0 {
+            return Err("concolic.per_input_timeout_secs must be greater than zero".to_owned());
+        }
+        if self.max_solved_inputs == 0 {
+            return Err("concolic.max_solved_inputs must be greater than zero".to_owned());
+        }
+        if self.total_timeout_secs == 0 {
+            return Err("concolic.total_timeout_secs must be greater than zero".to_owned());
+        }
+        Ok(())
+    }
+}
+
 /// One immutable policy snapshot resolved before a fuzz run starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolvedFuzzingRun {
@@ -768,6 +819,7 @@ struct OxfuzzRuntimeConfig {
     auto_revert_notify_only: bool,
     fuzzing: FuzzingSettings,
     campaign_health: CampaignHealthSettings,
+    concolic: ConcolicSettings,
     automotive: AutomotiveSettings,
     knowledge: KnowledgeRuntimeConfig,
     session: hf_session::SessionConfig,
@@ -785,6 +837,7 @@ impl Default for OxfuzzRuntimeConfig {
             auto_revert_notify_only: false,
             fuzzing: FuzzingSettings::default(),
             campaign_health: CampaignHealthSettings::default(),
+            concolic: ConcolicSettings::default(),
             automotive: AutomotiveSettings::default(),
             knowledge: KnowledgeRuntimeConfig::default(),
             session: hf_session::SessionConfig::default(),
@@ -809,6 +862,7 @@ impl OxfuzzRuntimeConfig {
         }
         self.fuzzing.validate()?;
         self.campaign_health.validate()?;
+        self.concolic.validate()?;
         self.automotive.validate()?;
         self.knowledge.validate()?;
         if self.session.max_depth == 0 {
@@ -893,6 +947,29 @@ pub fn parse_campaign_health_settings(raw: &str) -> Result<CampaignHealthSetting
 pub fn effective_campaign_health_settings() -> Result<CampaignHealthSettings, String> {
     let raw = read_config("oxfuzz")?;
     Ok(parse_oxfuzz_runtime_config(&raw)?.campaign_health)
+}
+
+/// Parse and validate concolic bounds from a config document.
+///
+/// Separate from [`effective_concolic_settings`] so the validation rules can be
+/// exercised without a global config file on disk.
+///
+/// # Errors
+/// Returns an error when the document is malformed or a bound is invalid.
+pub fn parse_concolic_settings(raw: &str) -> Result<ConcolicSettings, String> {
+    Ok(parse_oxfuzz_runtime_config(raw)?.concolic)
+}
+
+/// Read and validate the concolic bounds for the next pass.
+///
+/// An invalid manually-edited bound fails closed rather than silently reverting
+/// to a default the operator did not choose.
+///
+/// # Errors
+/// Returns an error when the global config cannot be read or validated.
+pub fn effective_concolic_settings() -> Result<ConcolicSettings, String> {
+    let raw = read_config("oxfuzz")?;
+    Ok(parse_oxfuzz_runtime_config(&raw)?.concolic)
 }
 
 /// Read and validate the automotive sidecar policy for the next operation.
