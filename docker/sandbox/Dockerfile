@@ -161,6 +161,65 @@ RUN clang --version \
     && cargo fuzz --version \
     && cargo +"${RUST_NIGHTLY}" --version
 
+# ---------------------------------------------------------------------------
+# SymCC -- concolic execution for corpus enrichment.
+#
+# Built against LLVM 17, not the image default: SymCC's own CMakeLists warns it
+# targets LLVM 8 through 17 and is "unlikely to work" outside that range, and
+# Ubuntu 24.04 defaults to 18. LLVM 17 is packaged, so no external apt source.
+#
+# SYMCC_RT_BACKEND=qsym is required, not preferred: only the qsym backend writes
+# solved inputs to SYMCC_OUTPUT_DIR. The "simple" backend solves the constraint
+# and prints it to stdout without writing a file, and announces at startup that
+# it exists for debugging SymCC itself. Note QSYM_BACKEND is not an option in
+# current SymCC and does nothing if passed.
+#
+# The runtime is a git submodule, so a plain clone leaves it empty and cmake
+# fails naming the directory rather than the cause. zlib/zstd dev packages are
+# needed because LLVM's cmake exports reference ZLIB::ZLIB.
+# ---------------------------------------------------------------------------
+ARG SYMCC_COMMIT=3b8acabf06c83b92facccde7f6dfb191b1a163b3
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    clang-17 llvm-17 llvm-17-dev llvm-17-tools lld-17 \
+    libz3-dev z3 zlib1g-dev libzstd-dev \
+    && git init /opt/symcc \
+    && git -C /opt/symcc remote add origin https://github.com/eurecom-s3/symcc.git \
+    && git -C /opt/symcc fetch --depth=1 origin "${SYMCC_COMMIT}" \
+    && git -C /opt/symcc checkout --detach FETCH_HEAD \
+    && git -C /opt/symcc submodule update --init --recursive --depth=1 \
+    && cmake -S /opt/symcc -B /opt/symcc/build -G Ninja \
+       -DCMAKE_BUILD_TYPE=Release \
+       -DCMAKE_C_COMPILER=/usr/lib/llvm-17/bin/clang \
+       -DCMAKE_CXX_COMPILER=/usr/lib/llvm-17/bin/clang++ \
+       -DLLVM_DIR=/usr/lib/llvm-17/lib/cmake/llvm \
+       -DSYMCC_RT_BACKEND=qsym \
+       -DZ3_TRUST_SYSTEM_VERSION=ON \
+    && cmake --build /opt/symcc/build \
+    && ln -sf /opt/symcc/build/symcc /usr/local/bin/symcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Prove the wrapper instruments AND writes a solved input. Checking that it
+# compiles is not sufficient: both backends compile, only qsym writes a file,
+# and a layer that builds but never solves would report empty passes forever.
+RUN printf '%s\n' \
+      '#include <stdio.h>' \
+      '#include <stdlib.h>' \
+      'int main(int argc, char **argv) {' \
+      '    FILE *f = fopen(argv[1], "rb");' \
+      '    unsigned char b[8] = {0};' \
+      '    fread(b, 1, 4, f);' \
+      '    if (b[0] == 0xDE && b[1] == 0xAD) { abort(); }' \
+      '    return 0;' \
+      '}' > /tmp/symcc-selftest.c \
+    && symcc /tmp/symcc-selftest.c -o /tmp/symcc-selftest \
+    && printf 'AAAA' > /tmp/symcc-selftest.bin \
+    && mkdir -p /tmp/symcc-selftest-out \
+    && SYMCC_OUTPUT_DIR=/tmp/symcc-selftest-out \
+       SYMCC_INPUT_FILE=/tmp/symcc-selftest.bin \
+       /tmp/symcc-selftest /tmp/symcc-selftest.bin \
+    && test "$(ls -1 /tmp/symcc-selftest-out | wc -l)" -gt 0 \
+    && rm -rf /tmp/symcc-selftest*
+
 # Semgrep CE and its reviewed C rules are pinned and verified at image build
 # time. Runtime scanning uses only the fixed wrapper and bundled rules below.
 ARG SEMGREP_VERSION=1.169.0
