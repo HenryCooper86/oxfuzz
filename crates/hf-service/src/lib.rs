@@ -69,6 +69,8 @@ mod syzkaller;
 pub mod test_support;
 #[cfg(feature = "triage-disposition")]
 pub mod triage_disposition;
+#[cfg(feature = "unreached-surface")]
+pub mod unreached_surface;
 pub mod verification;
 pub mod workbench;
 
@@ -183,6 +185,11 @@ pub use system::{system_status, SystemStatus};
 pub use triage_disposition::{
     triage_disposition, triage_order_key, ClaimCeiling, Disposition, DispositionAction,
     TriageDisposition, TriageOrderKey, TRIAGE_DISPOSITION_SCHEMA_VERSION,
+};
+#[cfg(feature = "unreached-surface")]
+pub use unreached_surface::{
+    unreached_surface, AttemptHistory, SurfaceMeasurement, UnreachedCandidate,
+    UnreachedSurfaceRequest, UnreachedSurfaceView, UNREACHED_SURFACE_SCHEMA_VERSION,
 };
 pub use workbench::{
     CrashReviewItem, HarnessReviewItem, IssueExport, WorkbenchDashboard, WorkbenchReadiness,

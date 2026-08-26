@@ -161,6 +161,16 @@ enum Commands {
         #[arg(long)]
         run: String,
     },
+    /// Rank entry points no retained coverage measurement has ever covered.
+    /// Reads cached measurements; never triggers one.
+    #[cfg(feature = "unreached-surface")]
+    Unreached {
+        /// Project root path.
+        project: PathBuf,
+        /// Source language.
+        #[arg(long, default_value = "c")]
+        lang: String,
+    },
     /// CI gate: harness + short fuzz + triage; write SARIF and exit non-zero
     /// if any crash is found. Intended for PR pipelines.
     Ci {
@@ -1694,6 +1704,45 @@ async fn cmd_corpus(project: PathBuf, target: &str, op: &str) -> anyhow::Result<
     Ok(())
 }
 
+/// Print the entry points no retained measurement has covered.
+///
+/// Rendering only: the ranking, the attempt history, and the unavailable
+/// reason all arrive decided by `hf-service` (AGENTS.md 2.9).
+#[cfg(feature = "unreached-surface")]
+async fn cmd_unreached(project: PathBuf, lang: &str) -> anyhow::Result<()> {
+    use hf_service::SurfaceMeasurement;
+
+    let language = parse_lang(lang)?;
+    let container = ServiceContainer::bootstrap().await;
+    let view = container.unreached_surface(&project, language).await?;
+
+    match &view.measurement {
+        SurfaceMeasurement::Unavailable { reason } => {
+            eprintln!(
+                "No coverage measurement is retained for this project ({reason}); \
+                 nothing can be called unreached until something has been measured."
+            );
+            return Ok(());
+        }
+        SurfaceMeasurement::Retained { measurements } => {
+            println!(
+                "Unreached entry points (absent from {measurements} retained measurement(s)):"
+            );
+        }
+    }
+    if view.candidates.is_empty() {
+        println!("  none -- every discovered candidate has been covered.");
+        return Ok(());
+    }
+    for candidate in &view.candidates {
+        println!(
+            "  {:<40} score {:.2}  {:?}",
+            candidate.symbol, candidate.discovery_score, candidate.attempt
+        );
+    }
+    Ok(())
+}
+
 /// Print the campaign trust audit for one run.
 ///
 /// Rendering only: every verdict, sentence, and withheld claim arrives decided
@@ -2477,6 +2526,8 @@ async fn main() -> anyhow::Result<()> {
         Commands::Coverage { project, target } => cmd_coverage(project, &target).await?,
         #[cfg(feature = "campaign-trust")]
         Commands::Trust { run } => cmd_trust(&run).await?,
+        #[cfg(feature = "unreached-surface")]
+        Commands::Unreached { project, lang } => cmd_unreached(project, &lang).await?,
         Commands::Ci {
             project,
             target,
