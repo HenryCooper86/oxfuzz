@@ -22,6 +22,8 @@ pub mod build_doctor;
 #[cfg(feature = "proof-carrying")]
 pub mod campaign_intelligence;
 pub mod campaign_state;
+#[cfg(feature = "campaign-trust")]
+pub mod campaign_trust;
 #[cfg(feature = "change-aware")]
 pub mod change_comparison;
 #[cfg(feature = "change-aware")]
@@ -110,6 +112,12 @@ pub use automotive_lab::{
 pub use build_doctor::{
     BuildPlan, BuildPlanRunOutcome, BuildPlanRunStatus, BuildPlanStep, BuildSystem,
     BuildSystemDiagnosis, BuildSystemStatus, RunBuildPlanRequest,
+};
+#[cfg(feature = "campaign-trust")]
+pub use campaign_trust::{
+    assess_campaign_trust, CampaignTrustInput, CampaignTrustReport, CorpusEvidence,
+    CoverageEvidence, GateVerdict, HarnessEvidence, RunEvidence, TriageEvidence, TrustClaim,
+    TrustDetermination, TrustGate, CAMPAIGN_TRUST_SCHEMA_VERSION,
 };
 #[cfg(feature = "change-aware")]
 pub use change_comparison::{

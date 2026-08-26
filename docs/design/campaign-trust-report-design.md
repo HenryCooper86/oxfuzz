@@ -67,13 +67,17 @@ cites (harness, corpus, coverage measurement). A gate with no evidence is
 
 ## 5. Overall Determination
 
-- **`Untrustworthy`** -- any gate under "a harness exercises the target" or "the
-  fuzzer ran" is `Refuted`. Nothing downstream means anything.
-- **`Unqualified`** -- no gate is refuted, and at least one is `Unavailable`.
-  The campaign may be fine; it has not been measured.
-- **`Qualified`** -- every gate is `Supported` or `Unsupported`, and the
-  unsupported ones are named.
-- **`Trusted`** -- every gate is `Supported`.
+Evaluated in order, so the four are total and mutually exclusive:
+
+1. **`Untrustworthy`** -- the gate for "a harness exercises the target" or for
+   "the fuzzer ran" is `Refuted`. Nothing downstream means anything.
+2. **`Unqualified`** -- no core gate is refuted, and at least one gate is
+   `Unavailable`. The campaign may be fine; it has not been measured. This
+   outranks a refutation elsewhere, because an unmeasured gate could itself be a
+   refutation once measured.
+3. **`Qualified`** -- nothing is `Unavailable`, and at least one gate is
+   `Refuted` or `Unsupported`. Every such gate is named.
+4. **`Trusted`** -- every gate is `Supported`.
 
 The determination carries the list of claims the report does **not** license,
 so a consumer exporting a SARIF or DefectDojo record can refuse to assert

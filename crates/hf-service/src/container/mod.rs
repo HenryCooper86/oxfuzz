@@ -8,6 +8,8 @@
 
 #[cfg(feature = "build-context")]
 mod build_context;
+#[cfg(feature = "campaign-trust")]
+mod campaign_trust;
 mod chat;
 mod corpus;
 mod coverage_cache;

@@ -99,6 +99,15 @@ pub fn parse_frames(log: &str) -> Vec<StackFrame> {
         .collect()
 }
 
+/// Whether a function name is a harness entry point oxfuzz writes.
+///
+/// Exposed so coverage attribution asks the same question stack attribution
+/// does, against one list (AGENTS.md 2.18).
+#[must_use]
+pub fn is_harness_function(name: &str) -> bool {
+    HARNESS_FUNCTIONS.contains(&name)
+}
+
 /// Whether a frame's source file is the generated harness.
 fn is_harness_file(frame: &StackFrame) -> bool {
     frame.file.as_deref().is_some_and(|file| {

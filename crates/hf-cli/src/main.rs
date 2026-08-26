@@ -153,6 +153,14 @@ enum Commands {
         #[arg(long)]
         target: String,
     },
+    /// Audit which claims about a finished run its retained evidence supports.
+    /// Reads only; starts no build, run, or coverage measurement.
+    #[cfg(feature = "campaign-trust")]
+    Trust {
+        /// Run identifier to audit.
+        #[arg(long)]
+        run: String,
+    },
     /// CI gate: harness + short fuzz + triage; write SARIF and exit non-zero
     /// if any crash is found. Intended for PR pipelines.
     Ci {
@@ -1686,6 +1694,42 @@ async fn cmd_corpus(project: PathBuf, target: &str, op: &str) -> anyhow::Result<
     Ok(())
 }
 
+/// Print the campaign trust audit for one run.
+///
+/// Rendering only: every verdict, sentence, and withheld claim arrives decided
+/// by `hf-service` (AGENTS.md 2.9).
+#[cfg(feature = "campaign-trust")]
+async fn cmd_trust(run: &str) -> anyhow::Result<()> {
+    use hf_service::GateVerdict;
+
+    let run_id = uuid::Uuid::parse_str(run)
+        .map_err(|_| anyhow::anyhow!("run id '{run}' is not a valid UUID"))?;
+    let container = ServiceContainer::bootstrap().await;
+    let report = container.campaign_trust_report(run_id).await?;
+
+    println!("Campaign trust for run {}:", report.run_id);
+    println!("  determination: {:?}", report.determination);
+    println!();
+    for gate in &report.gates {
+        let mark = match gate.verdict {
+            GateVerdict::Supported => "supported  ",
+            GateVerdict::Refuted => "refuted    ",
+            GateVerdict::Unsupported => "unsupported",
+            GateVerdict::Unavailable => "unavailable",
+        };
+        println!("  {mark} {:?}", gate.claim);
+        println!("               {}", gate.detail);
+    }
+    if !report.unlicensed_claims.is_empty() {
+        println!();
+        println!("Not licensed by this evidence:");
+        for claim in &report.unlicensed_claims {
+            println!("  - {claim:?}");
+        }
+    }
+    Ok(())
+}
+
 async fn cmd_coverage(project: PathBuf, target: &str) -> anyhow::Result<()> {
     let container = ServiceContainer::bootstrap().await;
     match container.coverage_summary(&project, target).await {
@@ -2431,6 +2475,8 @@ async fn main() -> anyhow::Result<()> {
             op,
         } => cmd_corpus(project, &target, &op).await?,
         Commands::Coverage { project, target } => cmd_coverage(project, &target).await?,
+        #[cfg(feature = "campaign-trust")]
+        Commands::Trust { run } => cmd_trust(&run).await?,
         Commands::Ci {
             project,
             target,

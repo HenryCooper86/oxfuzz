@@ -401,6 +401,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .merge(build_doctor_routes())
         .merge(harness_tournament_routes())
         .merge(coverage_blocker_routes())
+        .merge(campaign_trust_routes())
         .merge(oracle_studio_routes())
         .merge(automotive_lab_routes())
         .merge(semgrep_routes())
@@ -647,6 +648,16 @@ fn harness_tournament_routes() -> Router<AppState> {
 
 #[cfg(not(feature = "harness-tournament"))]
 fn harness_tournament_routes() -> Router<AppState> {
+    Router::new()
+}
+
+#[cfg(feature = "campaign-trust")]
+fn campaign_trust_routes() -> Router<AppState> {
+    Router::new().route("/runs/{id}/trust", get(campaign_trust_report))
+}
+
+#[cfg(not(feature = "campaign-trust"))]
+fn campaign_trust_routes() -> Router<AppState> {
     Router::new()
 }
 
@@ -1194,6 +1205,19 @@ async fn remediation_operation_get(
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(view)))
+}
+
+#[cfg(feature = "campaign-trust")]
+async fn campaign_trust_report(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> ApiResult<serde_json::Value> {
+    let report = state
+        .container
+        .campaign_trust_report(id)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(report)))
 }
 
 #[cfg(feature = "patch-to-proof")]
