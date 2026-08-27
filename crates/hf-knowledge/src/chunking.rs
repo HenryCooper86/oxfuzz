@@ -463,23 +463,6 @@ fn is_cjk_char(ch: char) -> bool {
     )
 }
 
-/// Merge adjacent chunks when count exceeds `max_count`.
-///
-/// Groups consecutive chunks into evenly-sized batches and joins them
-/// with newlines. This keeps the total content intact while reducing
-/// chunk count to at most `max_count`.
-pub fn coalesce_chunks(chunks: Vec<String>, max_count: usize) -> Vec<String> {
-    if chunks.len() <= max_count || max_count == 0 {
-        return chunks;
-    }
-    // Divide into uniform groups of `group_size` adjacent chunks.
-    let group_size = chunks.len().div_ceil(max_count);
-    chunks
-        .chunks(group_size)
-        .map(|group| group.join("\n"))
-        .collect()
-}
-
 /// Extract a section title from the first line of a chunk's content.
 ///
 /// If the first non-empty line is a Markdown heading (`# …`, `## …`, etc.),

@@ -104,18 +104,6 @@ impl Default for KnowledgeConfig {
 }
 
 impl KnowledgeConfig {
-    /// Effective maximum tokens per chunk for embedding.
-    ///
-    /// Returns `embedding_max_tokens` if explicitly set (> 0),
-    /// otherwise falls back to `l2_max_tokens`.
-    pub fn effective_chunk_max_tokens(&self) -> u32 {
-        if self.embedding_max_tokens > 0 {
-            self.embedding_max_tokens
-        } else {
-            self.l2_max_tokens
-        }
-    }
-
     /// Effective L2 chunk token limit, capped by the embedding model's
     /// context window when embedding is enabled.
     ///
