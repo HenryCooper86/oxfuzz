@@ -224,6 +224,15 @@ fixed the following; open design decisions are listed at the end.
   metrics accessors + the prometheus renderer, `hf-engine`'s duplicate
   `build_tmin_args`, and `RunResult.coverage` (minted a random run id, no
   readers) with `parse_coverage`.
+- [x] hf-knowledge's ten unreachable modules (`indexer`, `ingestion`,
+  `maintenance`, `middleware`, `normalize`, `observability`, `progressive`,
+  `supported_formats`, `tagger`, `tools`, ~4.6k LOC), with the `vector_qdrant`
+  feature and the `qdrant-client`, `chardetng`, `encoding_rs`, `tokio`,
+  `tempfile`, and `hf-core` dependencies they were the only users of. Nothing
+  inside or outside the crate referenced them: `hf-service` uses only
+  `chunking`, `config`, `retrieval`, and `tokenizer` to build its per-project
+  BM25 index. The crate docs and `docs/ARCHITECTURE.md` now describe what the
+  crate is rather than the ported design it came from.
 
 ### Docs
 - [x] `ENGINE_ADAPTER_STANDARD.md` section 5 documents the real flat crash
@@ -236,8 +245,9 @@ fixed the following; open design decisions are listed at the end.
 - [~] Unwired-but-designed subsystems:
   - [x] guardrail authorization of discover/corpus/chat actions (batch 1);
   - [x] knowledge-augmented harness/triage prompts via the live retrieval path
-    (batch 2) -- the standalone `InjectKnowledge` middleware, ingestion
-    pipeline, and vector indexer remain unwired;
+    (batch 2); the standalone `InjectKnowledge` middleware, ingestion pipeline,
+    and vector indexer that stayed unwired were then cut -- see the
+    hf-knowledge entry under "Dead code removed" below;
   - [x] hf-context working-memory/pruning pipeline -- resolved by removal: the
     provider pipeline, context guard, store-backed pruning, and
     memory/working-memory subsystems (~7k LOC) were reachable only from the

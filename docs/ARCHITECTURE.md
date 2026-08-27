@@ -34,7 +34,7 @@ Core:                          hf-core            <- traits, types, contracts
 | `hf-storage` | SQLite storage (sqlx), transcript persistence. |
 | `hf-runtime` | Mandatory Docker sandbox, resource limits, and build isolation. |
 | `hf-scheduler` | Cron-style and one-shot campaign scheduling. |
-| `hf-knowledge` | Full-text (BM25) retrieval over project source and ingested documents; optional vector search behind the `vector_qdrant` feature. |
+| `hf-knowledge` | Full-text (BM25) retrieval over chunked project source and documentation. |
 | `hf-diagnostics` | Persistent LLM trace, token-usage, and cost evidence. |
 | `hf-guardrails` | Permission model, loop detection, risk scoring. |
 | `hf-discovery` | Target discovery: static analysis, semantic ranking, reachability. |
