@@ -1,15 +1,13 @@
-//! Engine runner: orchestrates build + run + progress/coverage parsing.
+//! Engine runner: orchestrates build + run + progress parsing.
 //!
 //! The `EngineRunner` is engine-agnostic: it delegates argument construction
 //! to the per-engine `build_run_args` functions and parses stdout uniformly.
 
 use std::path::Path;
 
-use hf_core::coverage::CoverageReport;
 use hf_core::engine::{EngineKind, FuzzProgress, FuzzRunConfig};
 use hf_core::error::ClassifiedError;
 use hf_core::runtime::{CommandTermination, RuntimeAdapter};
-use uuid::Uuid;
 
 /// Extra wall-clock seconds the sandbox is allowed beyond the fuzzer's own
 /// `-max_total_time`, covering corpus loading and sanitizer shutdown. Shared
@@ -24,7 +22,6 @@ pub const SANDBOX_TIMEOUT_HEADROOM_SECS: u64 = 60;
 const DEFAULT_RUN_SECS: u64 = 3600;
 #[derive(Default)]
 struct ProgressAggregate {
-    first_edges: Option<u64>,
     peak_edges: u64,
     peak_execs: f64,
     crashes: u64,
@@ -33,10 +30,7 @@ struct ProgressAggregate {
 impl ProgressAggregate {
     fn observe_event(&mut self, event: &FuzzProgress) {
         match event {
-            FuzzProgress::EdgesCovered(edges) => {
-                self.first_edges.get_or_insert(*edges);
-                self.peak_edges = self.peak_edges.max(*edges);
-            }
+            FuzzProgress::EdgesCovered(edges) => self.peak_edges = self.peak_edges.max(*edges),
             FuzzProgress::ExecsPerSec(execs) => self.peak_execs = self.peak_execs.max(*execs),
             // Generic engine logs often emit several lines for one finding
             // (sanitizer, SUMMARY, artifact path). Preserve the durable fact
@@ -48,7 +42,6 @@ impl ProgressAggregate {
     }
 
     fn observe_syzkaller(&mut self, cover: u64, crashes: u64) {
-        self.first_edges.get_or_insert(cover);
         self.peak_edges = self.peak_edges.max(cover);
         self.crashes = self.crashes.max(crashes);
     }
@@ -71,30 +64,17 @@ impl ProgressAggregate {
         }
         progress
     }
-
-    fn coverage(&self, run_id: Uuid) -> CoverageReport {
-        CoverageReport {
-            run_id,
-            edges: self.peak_edges,
-            blocks: 0,
-            delta_edges: self.peak_edges.cast_signed()
-                - self.first_edges.unwrap_or(0).cast_signed(),
-            stagnation_secs: 0,
-            new_edges_files: Vec::new(),
-        }
-    }
 }
 
 /// The result of a fuzz run.
 pub struct RunResult {
     pub progress: Vec<FuzzProgress>,
-    pub coverage: CoverageReport,
     /// The runtime-owned reason the command stopped.
     pub termination: CommandTermination,
 }
 
 /// An engine-agnostic runner that executes fuzz commands via a
-/// `RuntimeAdapter` and parses progress/coverage.
+/// `RuntimeAdapter` and parses progress events.
 pub struct EngineRunner;
 
 impl EngineRunner {
@@ -111,7 +91,7 @@ impl Default for EngineRunner {
 }
 
 impl EngineRunner {
-    /// Run a fuzz campaign, collecting progress/coverage from the output.
+    /// Run a fuzz campaign, collecting progress events from the output.
     ///
     /// # Errors
     /// Returns `ClassifiedError` if the engine is not supported or the
@@ -287,12 +267,8 @@ impl EngineRunner {
         // exit code, so inferring either state from those values is racy.
         match result.termination {
             CommandTermination::Cancelled => {
-                let run_id = Uuid::new_v4();
-                let progress = aggregate.progress(false);
-                let coverage = aggregate.coverage(run_id);
                 return Ok(RunResult {
-                    progress,
-                    coverage,
+                    progress: aggregate.progress(false),
                     termination: CommandTermination::Cancelled,
                 });
             }
@@ -322,13 +298,10 @@ impl EngineRunner {
                 result.stderr.chars().take(500).collect::<String>()
             )));
         }
-        let run_id = Uuid::new_v4();
         let progress = aggregate.progress(true);
-        let coverage = aggregate.coverage(run_id);
         on_progress(FuzzProgress::Done);
         Ok(RunResult {
             progress,
-            coverage,
             termination: CommandTermination::Completed,
         })
     }
