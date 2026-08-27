@@ -565,20 +565,19 @@ async fn run_completed_fires_matching_event_schedule() {
     scheduler.stop().await;
 
     let executions = scheduler.recent_executions(20).await.unwrap();
-    // Skipped entries are the overlap guard declining a re-trigger, not a
-    // second firing: this listener's own campaign emits run.completed when its
-    // run phase ends, while the surrounding execution is still in triage, so
-    // the guard records a skip. Counting those makes the assertion depend on
-    // how far the first execution progressed before stop() -- reliably one on
-    // macOS, sometimes two on Linux. Count admitted firings instead.
-    let admitted: Vec<_> = executions
+    // Exactly one execution, counting every status. The listener's own campaign
+    // emits run.completed when its run phase ends; that event carries the
+    // schedule that produced it, so the bridge never re-fires this schedule and
+    // no overlap-guard skip is recorded. Counting only admitted firings would
+    // hide a re-trigger that the guard happened to decline.
+    let own: Vec<_> = executions
         .iter()
-        .filter(|e| e.schedule_id == on_completed.id && e.status != "skipped")
+        .filter(|e| e.schedule_id == on_completed.id)
         .collect();
     assert_eq!(
-        admitted.len(),
+        own.len(),
         1,
-        "run.completed must fire its listener exactly once: {executions:?}"
+        "run.completed must fire its listener exactly once and never re-trigger it: {executions:?}"
     );
     assert!(
         executions.iter().all(|e| e.schedule_id != on_failed.id),

@@ -947,6 +947,23 @@ pub const EVENT_RUN_FAILED: &str = "run.failed";
 /// never fire.
 pub const KNOWN_EVENT_TYPES: &[&str] = &[EVENT_CRASH_FOUND, EVENT_RUN_COMPLETED, EVENT_RUN_FAILED];
 
+tokio::task_local! {
+    /// The campaign schedule whose execution owns the current task.
+    ///
+    /// Scoped over the whole of `FuzzCampaignDispatcher::dispatch`, which awaits
+    /// the campaign on this task, so every event the run and triage phases emit
+    /// is attributed to the schedule that caused them.
+    static DISPATCHING_SCHEDULE: String;
+}
+
+/// The campaign schedule whose execution owns the current task, if any.
+///
+/// `None` outside a scheduled dispatch -- an operator run, a CLI invocation, or
+/// the interactive `start_fuzzer` path, none of which are a cascade risk.
+pub(crate) fn dispatching_schedule() -> Option<String> {
+    DISPATCHING_SCHEDULE.try_with(Clone::clone).ok()
+}
+
 /// Parameters for a scheduled fuzz campaign (stored in `Schedule.parameter_values`).
 ///
 /// A campaign is a *portfolio*: `target: None` fuzzes every promoted target in the
@@ -1449,6 +1466,23 @@ impl WorkflowDispatcher for FuzzCampaignDispatcher {
             serde_json::from_value(parameter_values).map_err(|e| DispatchError::ParseError {
                 message: format!("campaign params: {e}"),
             })?;
+        // Name this execution for the whole dispatch, so every scheduler event
+        // the campaign emits carries the schedule that produced it and the
+        // event bridge can refuse to re-fire that same schedule.
+        let schedule_id = params.schedule_id.clone();
+        DISPATCHING_SCHEDULE
+            .scope(schedule_id, self.dispatch_campaign(workflow_id, params))
+            .await
+    }
+}
+
+impl FuzzCampaignDispatcher {
+    /// One campaign fire, run inside the [`DISPATCHING_SCHEDULE`] scope.
+    async fn dispatch_campaign(
+        &self,
+        workflow_id: &str,
+        params: CampaignParams,
+    ) -> Result<DispatchResult, DispatchError> {
         self.schedules
             .ensure_schedule_identity_active(&params.schedule_id)
             .await
@@ -2732,6 +2766,25 @@ mod tests {
     use hf_storage::ScheduleOccurrenceRecord;
 
     use super::*;
+
+    /// The dispatch scope is what lets an emitted event name the schedule that
+    /// caused it; outside a scheduled dispatch there is no cascade to break.
+    #[tokio::test]
+    async fn dispatching_schedule_is_scoped_to_one_dispatch() {
+        assert_eq!(super::dispatching_schedule(), None);
+        let inside = super::DISPATCHING_SCHEDULE
+            .scope("campaign-7".to_owned(), async {
+                let nested = tokio::spawn(async { super::dispatching_schedule() });
+                (super::dispatching_schedule(), nested.await.unwrap())
+            })
+            .await;
+        assert_eq!(inside.0, Some("campaign-7".to_owned()));
+        assert_eq!(
+            inside.1, None,
+            "a detached task is outside the dispatch scope, so its events stay unattributed"
+        );
+        assert_eq!(super::dispatching_schedule(), None);
+    }
 
     fn schedule_execution(
         execution_id: &str,
@@ -5746,6 +5799,7 @@ mod tests {
                     event_type: EVENT_RUN_COMPLETED.to_owned(),
                     payload: None,
                     timestamp: Utc::now(),
+                    source_schedule_id: None,
                 })
                 .await,
             vec!["affected-recurring"]
@@ -5845,6 +5899,7 @@ mod tests {
                 event_type: EVENT_RUN_COMPLETED.to_owned(),
                 payload: None,
                 timestamp: Utc::now(),
+                source_schedule_id: None,
             })
             .await;
         assert_eq!(fired, ["first-recurring", "second-recurring"]);
@@ -5922,6 +5977,7 @@ mod tests {
                     event_type: EVENT_RUN_COMPLETED.to_owned(),
                     payload: None,
                     timestamp: Utc::now(),
+                    source_schedule_id: None,
                 })
                 .await,
             vec!["recurring"]
@@ -5974,6 +6030,7 @@ mod tests {
                     event_type: EVENT_RUN_COMPLETED.to_owned(),
                     payload: None,
                     timestamp: Utc::now(),
+                    source_schedule_id: None,
                 })
                 .await,
             vec!["recurring"]
@@ -6049,6 +6106,7 @@ mod tests {
                     event_type: EVENT_RUN_COMPLETED.to_owned(),
                     payload: None,
                     timestamp: Utc::now(),
+                    source_schedule_id: None,
                 })
                 .await,
             vec!["recurring"]
@@ -6257,6 +6315,7 @@ mod tests {
                     event_type: EVENT_RUN_COMPLETED.to_owned(),
                     payload: None,
                     timestamp: Utc::now(),
+                    source_schedule_id: None,
                 })
                 .await,
             vec!["recurring"]
