@@ -32,13 +32,6 @@ use catalog::{Rule, CPP_ONLY_RULES, C_ONLY_RULES, SHARED_RULES};
 /// boost saturates at three distinct rules regardless.
 pub const MAX_FINDINGS_PER_FILE: usize = 5_000;
 
-/// Cap on findings retained across one analysis session.
-///
-/// Matches the limit the Semgrep normalization already applied, so behavior at
-/// the boundary is unchanged. `hf-analysis` owns the constant rather than
-/// borrowing it: the Semgrep one is deleted in phase 1d.
-pub const MAX_FINDINGS_TOTAL: usize = 50_000;
-
 /// The result of analyzing one or more translation units.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Analysis {

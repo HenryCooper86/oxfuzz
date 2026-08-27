@@ -206,40 +206,6 @@ impl<T: Tokenizer> HybridRetriever<T> {
         self.quality_scores.insert(id, quality_score);
     }
 
-    /// Remove all chunks belonging to a document from the retriever.
-    ///
-    /// Cleans up the chunks vec, BM25 index, quality scores, and embeddings.
-    /// Uses bulk removal for the BM25 index to avoid O(chunks × terms) scanning.
-    /// Returns the number of chunks removed.
-    pub fn remove_by_document(&mut self, document_id: &str) -> usize {
-        // Collect chunk IDs into a HashSet for O(1) lookups.
-        let chunk_ids: std::collections::HashSet<String> = self
-            .chunks
-            .iter()
-            .filter(|c| c.document_id == document_id)
-            .map(|c| c.id.clone())
-            .collect();
-
-        let removed = chunk_ids.len();
-        if removed == 0 {
-            return 0;
-        }
-
-        // Bulk-remove from BM25 index (single-pass over inverted index).
-        self.bm25.remove_bulk(&chunk_ids);
-
-        // Remove quality scores and embeddings.
-        for id in &chunk_ids {
-            self.quality_scores.remove(id);
-            self.embeddings.remove(id);
-        }
-
-        // Remove from chunks vec.
-        self.chunks.retain(|c| c.document_id != document_id);
-
-        removed
-    }
-
     /// Index a chunk with an embedding vector and quality score.
     pub fn index_with_embedding(&mut self, chunk: Chunk, embedding: Vec<f32>, quality_score: f32) {
         let id = chunk.id.clone();
@@ -311,14 +277,6 @@ impl<T: Tokenizer> HybridRetriever<T> {
     /// Get a reference to all stored embeddings (for persistence).
     pub fn embeddings(&self) -> &HashMap<String, Vec<f32>> {
         &self.embeddings
-    }
-
-    /// Remove all stored embedding vectors.
-    ///
-    /// Called when the embedding provider changes dimensions, making
-    /// old vectors incompatible. Chunks and BM25 index are preserved.
-    pub fn clear_embeddings(&mut self) {
-        self.embeddings.clear();
     }
 
     /// Search using the configured strategy.
@@ -664,44 +622,6 @@ impl<T: Tokenizer> HybridRetriever<T> {
         }
 
         best.into_values().collect()
-    }
-
-    /// Retrieve neighboring chunks for context window expansion.
-    ///
-    /// Given a chunk ID, returns the matched chunk plus surrounding chunks
-    /// from the same document, ordered by `section_index`. The `window`
-    /// parameter controls how many neighbors on each side to include.
-    ///
-    /// This implements the "parent/surrounding context" RAG pattern:
-    /// retrieve on small chunks for precision, but return broader context
-    /// for LLM comprehension.
-    pub fn get_neighboring_chunks(&self, chunk_id: &str, window: usize) -> Vec<&Chunk> {
-        // Find the target chunk.
-        let Some(target) = self.chunks.iter().find(|c| c.id == chunk_id) else {
-            return Vec::new();
-        };
-
-        let doc_id = &target.document_id;
-        let target_section = target.metadata.section_index;
-
-        // Determine the range of section indices to include.
-        let min_section = target_section.saturating_sub(window);
-        let max_section = target_section.saturating_add(window);
-
-        // Collect all chunks from the same document within the window.
-        let mut neighbors: Vec<&Chunk> = self
-            .chunks
-            .iter()
-            .filter(|c| {
-                c.document_id == *doc_id
-                    && c.metadata.section_index >= min_section
-                    && c.metadata.section_index <= max_section
-            })
-            .collect();
-
-        // Sort by section index to maintain reading order.
-        neighbors.sort_by_key(|c| c.metadata.section_index);
-        neighbors
     }
 }
 
