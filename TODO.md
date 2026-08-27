@@ -159,15 +159,18 @@ Status legend: [x] done - [~] partial - [ ] not started.
   named harness binaries: a workspace is now always one `[A-Za-z0-9_-]`
   component, hashed when the target is not that verbatim. Plain identifiers --
   everything the scanners emit -- keep their existing directory name.
-- [ ] Event schedules whose action is a campaign re-trigger themselves: a
+- [x] Event schedules whose action is a campaign re-trigger themselves: a
   campaign emits `run.completed` when its run phase ends, so an
-  `event: run.completed` schedule fires again while its own execution is still
-  in triage. Today only the overlap guard bounds this (the re-trigger is
-  recorded `skipped`), and nothing stops a fresh firing once the execution
-  finishes. Surfaced by `run_completed_fires_matching_event_schedule` failing
-  twice on the Linux runner (reproduced 1/10 in a Linux container, 0/12 on
-  macOS under load). Needs a design decision -- suppress self-emitted events
-  for the triggering schedule, or make the cascade explicit and bounded.
+  `event: run.completed` schedule fired again while its own execution was still
+  in triage, and nothing stopped a fresh firing once the execution finished.
+  Resolved by suppressing self-emitted events: `IncomingEvent` carries the
+  `source_schedule_id` whose execution produced it (a `DISPATCHING_SCHEDULE`
+  task-local scoped over `FuzzCampaignDispatcher::dispatch`), and `EventBridge`
+  never fires a schedule on its own event. Chaining between *different*
+  schedules is unchanged. Known limitation: two campaign schedules listening on
+  the same run event still chain into each other; bounding that needs cascade
+  depth carried through the fired trigger, which no configuration reaches
+  today.
 
 ## Audit backlog (refreshed 2026-07-17)
 

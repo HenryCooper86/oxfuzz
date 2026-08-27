@@ -741,6 +741,10 @@ impl ServiceContainer {
                     event_type: event_type.to_owned(),
                     payload: Some(payload),
                     timestamp: Utc::now(),
+                    // Names the schedule this operation is running for, when it
+                    // is running for one, so the bridge does not re-fire it with
+                    // its own event.
+                    source_schedule_id: crate::scheduler::dispatching_schedule(),
                 })
                 .await;
         }

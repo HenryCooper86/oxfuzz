@@ -4339,6 +4339,7 @@ mod tests {
                     event_type: "run.completed".to_owned(),
                     payload: Some(serde_json::json!({"run_id": "run-1"})),
                     timestamp: Utc::now(),
+                    source_schedule_id: None,
                 })
                 .await,
             ["recurring-event".to_owned()]
@@ -5005,6 +5006,7 @@ mod tests {
             event_type: event_type.to_owned(),
             payload: Some(payload),
             timestamp: Utc::now(),
+            source_schedule_id: None,
         }
     }
 
