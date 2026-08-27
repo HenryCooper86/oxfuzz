@@ -306,10 +306,19 @@ impl ServiceContainer {
         let deadline =
             std::time::Instant::now() + std::time::Duration::from_secs(settings.total_timeout_secs);
 
+        // The staged target sources (e.g. everything `copy_project_sources`
+        // laid out under `src/`) must be on the link line, or the build fails
+        // on every undefined reference the harness declares `extern` and
+        // never defines itself. `list_c_files` is the same recursive,
+        // symlink-refusing, shell-quoting walk the ordinary harness compile
+        // uses (AGENTS.md 2.18): the driver and harness are excluded here,
+        // where the ordinary compile excludes only the harness.
+        let extra_sources =
+            hf_harness::list_c_files(workspace, "/work", &["harness.c", "symcc_driver.c"]);
         let build = vec![
             "sh".to_owned(),
             "-c".to_owned(),
-            "symcc -O1 harness.c symcc_driver.c -o concolic_target".to_owned(),
+            format!("symcc -O1 harness.c symcc_driver.c {extra_sources} -o concolic_target"),
         ];
         let build_limits = hf_core::runtime::ResourceLimits {
             max_mem_mb: 4096,
