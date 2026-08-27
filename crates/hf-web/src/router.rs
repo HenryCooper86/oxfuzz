@@ -277,6 +277,20 @@ fn scheduler_recovery_api_error(error: CampaignSchedulerError) -> RecoveryApiErr
     recovery_api_error(error.into_public_recovery_error())
 }
 
+/// A `404` whose body names what was requested, so a probe cannot distinguish
+/// an absent id from one withheld for belonging to another project: the
+/// operation route returns it in both cases.
+fn not_found_error(message: &'static str) -> impl Fn() -> ApiError {
+    move || {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: message.to_owned(),
+            }),
+        )
+    }
+}
+
 fn missing_schedule_error(id: &str) -> ApiError {
     (
         StatusCode::NOT_FOUND,
@@ -570,6 +584,18 @@ fn automotive_routes() -> Router<AppState> {
         .route(
             "/automotive/operations",
             get(list_automotive_operations_query).post(list_automotive_operations),
+        )
+        .route(
+            "/automotive/state-corpus/promote",
+            post(automotive_state_promote),
+        )
+        .route(
+            "/automotive/state-corpus",
+            get(automotive_state_corpus_query).post(automotive_state_corpus),
+        )
+        .route(
+            "/automotive/operation/{operation_id}",
+            get(automotive_operation_route),
         )
 }
 
@@ -3529,6 +3555,97 @@ async fn automotive_operation_list(
         .await
         .map(Json)
         .map_err(classified_api_error)
+}
+
+#[cfg(feature = "automotive-scapy")]
+#[derive(Debug, Deserialize)]
+struct AutomotiveStatePromoteRequest {
+    project_root: PathBuf,
+    source_operation_id: uuid::Uuid,
+    state_signature: hf_service::automotive::StateSignature,
+    artifact: hf_service::automotive::AutomotiveStateArtifactSource,
+}
+
+#[cfg(feature = "automotive-scapy")]
+async fn automotive_state_promote(
+    State(state): State<AppState>,
+    Json(request): Json<AutomotiveStatePromoteRequest>,
+) -> ApiResult<hf_service::automotive::AutomotiveStateCorpusEntry> {
+    let project_root = approved_project(&state, &request.project_root)?;
+    state
+        .container
+        .promote_automotive_state_artifact(
+            hf_service::automotive::AutomotiveStatePromotionRequest {
+                project_root,
+                source_operation_id: request.source_operation_id,
+                state_signature: request.state_signature,
+                artifact: request.artifact,
+            },
+        )
+        .await
+        .map(Json)
+        .map_err(classified_api_error)
+}
+
+#[cfg(feature = "automotive-scapy")]
+#[derive(Debug, Deserialize)]
+struct AutomotiveStateCorpusListRequest {
+    project_root: PathBuf,
+    limit: Option<u32>,
+}
+
+#[cfg(feature = "automotive-scapy")]
+async fn automotive_state_corpus(
+    State(state): State<AppState>,
+    Json(request): Json<AutomotiveStateCorpusListRequest>,
+) -> ApiResult<Vec<hf_service::automotive::AutomotiveStateCorpusEntry>> {
+    automotive_state_corpus_list(&state, request).await
+}
+
+#[cfg(feature = "automotive-scapy")]
+async fn automotive_state_corpus_query(
+    State(state): State<AppState>,
+    Query(request): Query<AutomotiveStateCorpusListRequest>,
+) -> ApiResult<Vec<hf_service::automotive::AutomotiveStateCorpusEntry>> {
+    automotive_state_corpus_list(&state, request).await
+}
+
+#[cfg(feature = "automotive-scapy")]
+async fn automotive_state_corpus_list(
+    state: &AppState,
+    request: AutomotiveStateCorpusListRequest,
+) -> ApiResult<Vec<hf_service::automotive::AutomotiveStateCorpusEntry>> {
+    let project_root = approved_project(state, &request.project_root)?;
+    state
+        .container
+        .list_automotive_state_corpus(&project_root, request.limit.unwrap_or(50))
+        .await
+        .map(Json)
+        .map_err(classified_api_error)
+}
+
+/// Read one retained automotive operation by its service-owned id.
+///
+/// The route takes the project root alongside the id so an operation id alone
+/// never reads evidence outside the caller's approved projects: a summary is
+/// served only when its retained `project_root` matches the approved one.
+#[cfg(feature = "automotive-scapy")]
+async fn automotive_operation_route(
+    State(state): State<AppState>,
+    Path(operation_id): Path<uuid::Uuid>,
+    Query(request): Query<AutomotiveOperationListRequest>,
+) -> ApiResult<hf_service::automotive::AutomotiveOperationSummary> {
+    let project_root = approved_project(&state, &request.project_root)?;
+    let summary = state
+        .container
+        .automotive_operation(operation_id)
+        .await
+        .map_err(classified_api_error)?
+        .ok_or_else(not_found_error("retained operation not found"))?;
+    if std::path::Path::new(&summary.project_root) != project_root {
+        return Err(not_found_error("retained operation not found")());
+    }
+    Ok(Json(summary))
 }
 
 async fn get_defectdojo_config(
