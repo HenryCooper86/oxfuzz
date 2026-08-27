@@ -212,6 +212,15 @@ pub struct AutomotiveOperationSummary {
     pub error: Option<String>,
     /// Validated protocol-state observations retained from the typed result.
     pub state_signatures: Vec<StateSignature>,
+    /// Artifact selectors this operation's evidence can promote into the
+    /// protocol-state corpus, ready to be handed back verbatim as
+    /// [`AutomotiveStatePromotionRequest::artifact`].
+    ///
+    /// A caller browsing retained history has only this summary, so without it
+    /// there is no way to name a valid artifact. Naming one is necessary but
+    /// not sufficient: promotion also requires one of `state_signatures` and a
+    /// successfully completed operation, both of which it revalidates.
+    pub promotable_artifacts: Vec<AutomotiveStateArtifactSource>,
 }
 
 /// Service-owned artifact selector for protocol-state corpus promotion.
@@ -593,6 +602,19 @@ impl ServiceContainer {
             .map_err(|error| ClassifiedError::Validation(error.to_string()))?;
         validate_artifact_identifier(request.artifact.artifact_id())?;
         let project_root = canonical_project_root(&request.project_root)?;
+        // Promotion copies an artifact into the project's retained corpus and
+        // persists a row, so it is authorized as the corpus filesystem
+        // operation it is. This sits in the executor rather than the public
+        // wrapper: `_with_context` is what actually performs the copy, and a
+        // guard the direct caller can step around is not a guard
+        // (AGENTS.md 2.19).
+        self.authorize_recorded(
+            hf_guardrails::Action::CorpusOp,
+            "automotive_state_promote",
+            Some(&project_root),
+        )
+        .await
+        .map_err(|error| ClassifiedError::Validation(error.to_string()))?;
         let project_root_text = project_root.display().to_string();
         let store = self.store().cloned().ok_or_else(|| {
             ClassifiedError::Storage(
@@ -925,9 +947,11 @@ impl ServiceContainer {
 fn operation_summary(
     record: AutomotiveOperationRecord,
 ) -> Result<AutomotiveOperationSummary, ClassifiedError> {
-    let state_signatures = retained_operation_result(&record)?
+    let retained = retained_operation_result(&record)?;
+    let state_signatures = retained
         .as_ref()
         .map_or_else(Vec::new, |result| result_state_signatures(result).to_vec());
+    let promotable_artifacts = promotable_artifacts(&record, retained.as_ref());
     Ok(AutomotiveOperationSummary {
         id: record.id,
         project_root: record.project_root,
@@ -947,7 +971,40 @@ fn operation_summary(
             .as_deref()
             .map(crate::automotive_report::shareable_error),
         state_signatures,
+        promotable_artifacts,
     })
+}
+
+/// The artifact selectors promotion accepts for one retained operation.
+///
+/// The staged input is named by the operation kind through the same
+/// `operation_input_artifact_id` map promotion validates against, and the
+/// outputs come from the retained typed result. Both are operation-local
+/// identifiers; the digest and size each one must still match live in the
+/// operation's own evidence, and promotion rereads them from there.
+///
+/// Empty for an operation with no retained result: there is nothing to promote
+/// from a run that never produced one.
+fn promotable_artifacts(
+    record: &AutomotiveOperationRecord,
+    result: Option<&AutomotiveResult>,
+) -> Vec<AutomotiveStateArtifactSource> {
+    let Some(result) = result else {
+        return Vec::new();
+    };
+    let mut artifacts: Vec<AutomotiveStateArtifactSource> =
+        operation_input_artifact_id(&record.operation)
+            .map(|artifact_id| AutomotiveStateArtifactSource::Input {
+                artifact_id: artifact_id.to_owned(),
+            })
+            .into_iter()
+            .collect();
+    artifacts.extend(result_output_artifacts(result).into_iter().map(|artifact| {
+        AutomotiveStateArtifactSource::Output {
+            artifact_id: artifact.artifact_id.clone(),
+        }
+    }));
+    artifacts
 }
 
 fn report_operation(
@@ -1187,29 +1244,30 @@ fn result_state_signatures(result: &AutomotiveResult) -> &[StateSignature] {
     }
 }
 
+/// Every output artifact one typed result references, in result order.
+///
+/// The single home for "which outputs does this result own": both the
+/// promotable-artifact listing and the by-id lookup promotion validates with
+/// read it, so a caller can never be offered a selector that validation would
+/// then reject (AGENTS.md 2.18).
+fn result_output_artifacts(result: &AutomotiveResult) -> Vec<&ArtifactRef> {
+    match result {
+        AutomotiveResult::CaptureAnalysis(result) => vec![&result.transcript],
+        AutomotiveResult::UdsScan(result) => vec![&result.transcript],
+        AutomotiveResult::Mutations(result) => result.artifacts.iter().collect(),
+        AutomotiveResult::Capabilities(_)
+        | AutomotiveResult::ReplayPlan(_)
+        | AutomotiveResult::Replay(_) => Vec::new(),
+    }
+}
+
 fn result_output_artifact<'a>(
     result: &'a AutomotiveResult,
     artifact_id: &str,
 ) -> Option<&'a ArtifactRef> {
-    match result {
-        AutomotiveResult::CaptureAnalysis(result)
-            if result.transcript.artifact_id == artifact_id =>
-        {
-            Some(&result.transcript)
-        }
-        AutomotiveResult::Mutations(result) => result
-            .artifacts
-            .iter()
-            .find(|artifact| artifact.artifact_id == artifact_id),
-        AutomotiveResult::UdsScan(result) if result.transcript.artifact_id == artifact_id => {
-            Some(&result.transcript)
-        }
-        AutomotiveResult::Capabilities(_)
-        | AutomotiveResult::CaptureAnalysis(_)
-        | AutomotiveResult::ReplayPlan(_)
-        | AutomotiveResult::Replay(_)
-        | AutomotiveResult::UdsScan(_) => None,
-    }
+    result_output_artifacts(result)
+        .into_iter()
+        .find(|artifact| artifact.artifact_id == artifact_id)
 }
 
 fn operation_input_artifact_id(operation: &str) -> Option<&'static str> {
@@ -4489,6 +4547,97 @@ mod tests {
         assert_eq!(
             digest,
             "660296f1a2b63c7e341b0c23e414cc8c38e712ee0614f1fabc08870562b706fe"
+        );
+    }
+
+    #[tokio::test]
+    async fn retained_operations_name_the_artifacts_promotion_accepts() {
+        // A caller promoting from history holds only an operation summary. It
+        // must be able to name a valid artifact from that summary alone --
+        // otherwise the promotion API exists but nothing can call it.
+        let temp = tempfile::tempdir().unwrap();
+        let (service, _store, project, _workspace, operation_id, _state) =
+            completed_analysis_with_state(temp.path()).await;
+
+        let operations = service
+            .list_automotive_operations(&project, 10)
+            .await
+            .unwrap();
+        let summary = operations
+            .iter()
+            .find(|operation| operation.id == operation_id)
+            .expect("the executed operation is retained");
+
+        assert!(
+            summary
+                .promotable_artifacts
+                .contains(&AutomotiveStateArtifactSource::Input {
+                    artifact_id: "capture.pcap".to_owned(),
+                }),
+            "the staged capture must be offered: {:?}",
+            summary.promotable_artifacts
+        );
+        assert!(
+            summary
+                .promotable_artifacts
+                .contains(&AutomotiveStateArtifactSource::Output {
+                    artifact_id: "canonical-transcript.json".to_owned(),
+                }),
+            "the retained transcript must be offered: {:?}",
+            summary.promotable_artifacts
+        );
+    }
+
+    #[tokio::test]
+    async fn state_promotion_is_refused_when_the_policy_denies_a_corpus_operation() {
+        // Promotion copies an artifact into the project's retained corpus and
+        // persists a row, so it is a corpus filesystem operation and passes the
+        // same guardrail every other one does. The denial is asserted through
+        // the executor that actually performs the copy, not a wrapper a direct
+        // caller could bypass (AGENTS.md 2.19).
+        use hf_guardrails::{DenyAll, GuardrailPolicy, Guardrails, RiskTier};
+
+        let temp = tempfile::tempdir().unwrap();
+        let (service, store, project, workspace, operation_id, state) =
+            completed_analysis_with_state(temp.path()).await;
+        let denied = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None)
+            .with_store(Arc::clone(&store))
+            .with_guardrails(Guardrails::new(
+                GuardrailPolicy {
+                    auto_allow_max: RiskTier::Low,
+                    deny_at: Some(RiskTier::Low),
+                },
+                Arc::new(DenyAll),
+            ));
+
+        let error = denied
+            .promote_automotive_state_artifact_with_context(
+                AutomotiveStatePromotionRequest {
+                    project_root: project.clone(),
+                    source_operation_id: operation_id,
+                    state_signature: state,
+                    artifact: AutomotiveStateArtifactSource::Input {
+                        artifact_id: "capture.pcap".to_owned(),
+                    },
+                },
+                &workspace,
+            )
+            .await
+            .expect_err("a denied corpus operation must not promote");
+        assert!(
+            matches!(
+                error,
+                ClassifiedError::Validation(_) | ClassifiedError::Internal(_)
+            ),
+            "unexpected error kind: {error:?}"
+        );
+        assert!(
+            service
+                .list_automotive_state_corpus(&project, 20)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a denied promotion must persist nothing"
         );
     }
 
