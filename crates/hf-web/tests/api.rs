@@ -457,7 +457,7 @@ async fn semgrep_routes_are_absent_without_the_feature() {
             .oneshot(
                 Request::builder()
                     .uri(uri)
-                    .method(method)
+                    .method(method.as_str())
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -972,6 +972,168 @@ async fn automotive_replay_route_is_typed_and_rejects_an_incomplete_request() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+/// An approved project root for the state-corpus routes: `approve_project`
+/// needs a real directory, so every fixture hands it one.
+fn automotive_corpus_project() -> (tempfile::TempDir, std::path::PathBuf) {
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    (directory, project)
+}
+
+#[cfg(feature = "automotive-scapy")]
+#[tokio::test]
+async fn automotive_state_corpus_routes_are_typed_and_reject_an_incomplete_request() {
+    allow_open_dev_mode();
+    let (_dir, project) = automotive_corpus_project();
+    let security =
+        hf_web::WebSecurityConfig::new(None, true, Vec::new(), vec![project.clone()]).unwrap();
+    let app = hf_web::router::build_with_state_and_security(
+        hf_web::router::AppState::new(hf_service::ServiceContainer::stubbed()),
+        security,
+    );
+
+    // The two write routes take JSON bodies; an empty object fails typed
+    // deserialization before any gate or store runs.
+    let body_cases = [
+        "/automotive/state-corpus/promote",
+        "/automotive/state-corpus",
+    ];
+    for uri in body_cases {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{uri} must parse its typed request"
+        );
+    }
+
+    // The two read routes take query parameters; a missing project_root is
+    // rejected by typed deserialization, not by the project gate.
+    let operation_path = format!("/automotive/operation/{}", uuid::Uuid::new_v4());
+    for path in ["/automotive/state-corpus", operation_path.as_str()] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .method("GET")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // A `Query` rejection is 400 where a `Json` rejection is 422; what
+        // matters is that neither reaches the project gate or the store.
+        let status = response.status();
+        assert!(
+            status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY,
+            "{path} must parse its typed request, got {status}"
+        );
+    }
+}
+
+#[cfg(feature = "automotive-scapy")]
+#[tokio::test]
+async fn automotive_operation_route_never_reads_outside_the_approved_project() {
+    allow_open_dev_mode();
+    let (_directory, project) = automotive_corpus_project();
+    let outside_project =
+        std::env::temp_dir().join(format!("oxfuzz-denied-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&outside_project).unwrap();
+    let security =
+        hf_web::WebSecurityConfig::new(None, true, Vec::new(), vec![outside_project]).unwrap();
+    let app = hf_web::router::build_with_state_and_security(
+        hf_web::router::AppState::new(hf_service::ServiceContainer::stubbed()),
+        security,
+    );
+
+    // A valid operation id against a project this server does not serve: the
+    // project gate refuses before the store is consulted.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/automotive/operation/{}?project_root={}",
+                    uuid::Uuid::new_v4(),
+                    project.display()
+                ))
+                .method("GET")
+                .header("content-type", "application/json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[cfg(feature = "automotive-scapy")]
+#[tokio::test]
+async fn automotive_state_corpus_routes_reach_the_service_boundary() {
+    allow_open_dev_mode();
+
+    let (_directory, project) = automotive_corpus_project();
+    let security =
+        hf_web::WebSecurityConfig::new(None, true, Vec::new(), vec![project.clone()]).unwrap();
+    let app = hf_web::router::build_with_state_and_security(
+        hf_web::router::AppState::new(hf_service::ServiceContainer::stubbed()),
+        security,
+    );
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/automotive/state-corpus")
+                .method("POST")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "project_root": project }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // The stubbed container has no evidence store: reaching it proves the body
+    // parsed and the project was approved, and the missing store surfaces as its
+    // classified status rather than a parse or gate error.
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let (_directory, project) = automotive_corpus_project();
+    let security =
+        hf_web::WebSecurityConfig::new(None, true, Vec::new(), vec![project.clone()]).unwrap();
+    let app = hf_web::router::build_with_state_and_security(
+        hf_web::router::AppState::new(hf_service::ServiceContainer::stubbed()),
+        security,
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/automotive/operation/{}?project_root={}",
+                    uuid::Uuid::new_v4(),
+                    project.display()
+                ))
+                .method("GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }
 
 #[cfg(feature = "automotive-scapy")]
