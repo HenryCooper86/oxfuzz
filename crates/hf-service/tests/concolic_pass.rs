@@ -214,6 +214,8 @@ struct ScriptedRuntime {
     explore_delay: Duration,
     /// Every working directory the runtime was handed, in order.
     cwds: Mutex<Vec<PathBuf>>,
+    /// Every command the runtime was handed, in order.
+    commands: Mutex<Vec<Vec<String>>>,
     explores: Mutex<usize>,
 }
 
@@ -224,6 +226,7 @@ impl ScriptedRuntime {
             build_delay: Duration::ZERO,
             explore_delay: Duration::ZERO,
             cwds: Mutex::new(Vec::new()),
+            commands: Mutex::new(Vec::new()),
             explores: Mutex::new(0),
         }
     }
@@ -250,6 +253,19 @@ impl ScriptedRuntime {
     fn first_cwd(&self) -> PathBuf {
         self.cwds.lock().unwrap().first().cloned().unwrap()
     }
+
+    /// The `sh -c` script of the instrumented build, i.e. the one command that
+    /// actually invokes `symcc` to compile -- distinct from the availability
+    /// probe, which also mentions `symcc` but never compiles anything.
+    fn build_script(&self) -> String {
+        self.commands
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|cmd| cmd.iter().any(|arg| arg.contains("symcc -O1")))
+            .and_then(|cmd| cmd.last().cloned())
+            .expect("a symcc build command was run")
+    }
 }
 
 fn completed(cwd: &Path) -> CommandResult {
@@ -271,6 +287,7 @@ impl RuntimeAdapter for ScriptedRuntime {
         limits: &ResourceLimits,
     ) -> Result<CommandResult, ClassifiedError> {
         self.cwds.lock().unwrap().push(cwd.to_path_buf());
+        self.commands.lock().unwrap().push(cmd.to_vec());
         if cmd.iter().any(|arg| arg.contains("command -v symcc")) {
             return Ok(completed(cwd));
         }
@@ -620,4 +637,75 @@ async fn a_previous_passes_solved_inputs_are_not_counted_again() {
     );
     assert_eq!(outcome.inputs_novel, 0);
     assert_eq!(outcome.corpus_size_after, outcome.corpus_size_before);
+}
+
+// ---------------------------------------------------------------------------
+// 8. The instrumented build links the staged target sources
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_instrumented_build_links_staged_target_sources() {
+    // The harness only declares `extern int parse_packet(...)`; the real
+    // definition lives in the project source `copy_project_sources` stages
+    // into the workspace, preserving the project's directory layout. Leaving
+    // it off the `symcc` link line is exactly the bug this test guards: the
+    // build fails on an undefined reference to the very function the harness
+    // was written to fuzz.
+    let fixture = Fixture::new("nested_source", &[b"AAAA"])
+        .await
+        .with_promoted_harness()
+        .await;
+    std::fs::create_dir_all(fixture.workspace.join("src")).unwrap();
+    std::fs::write(
+        fixture.workspace.join("src/parser.c"),
+        "int parse_packet(void){return 0;}",
+    )
+    .unwrap();
+    let runtime = Arc::new(ScriptedRuntime::new());
+    let container = fixture.container(Arc::clone(&runtime) as Arc<dyn RuntimeAdapter>);
+
+    container
+        .corpus_concolic(&fixture.project, "parse_packet")
+        .await
+        .expect("the pass ran");
+
+    let build = runtime.build_script();
+    assert!(
+        build.contains("src/parser.c"),
+        "the staged target source must be on the symcc link line: {build}"
+    );
+    assert!(
+        build.contains("harness.c") && build.contains("symcc_driver.c"),
+        "the harness and driver must still be compiled too: {build}"
+    );
+}
+
+#[tokio::test]
+async fn a_malicious_staged_filename_is_quoted_not_executed() {
+    // Staged filenames come from the untrusted project under test. A name
+    // carrying a shell-injection payload must land in the build script as an
+    // inert, single-quoted argument rather than breaking out of the command.
+    let fixture = Fixture::new("malicious_filename", &[b"AAAA"])
+        .await
+        .with_promoted_harness()
+        .await;
+    let evil = "evil; touch pwned.c";
+    std::fs::write(fixture.workspace.join(evil), "int x;").unwrap();
+    let runtime = Arc::new(ScriptedRuntime::new());
+    let container = fixture.container(Arc::clone(&runtime) as Arc<dyn RuntimeAdapter>);
+
+    container
+        .corpus_concolic(&fixture.project, "parse_packet")
+        .await
+        .expect("the pass ran");
+
+    let build = runtime.build_script();
+    assert!(
+        build.contains("'evil; touch pwned.c'"),
+        "the malicious filename must be single-quoted: {build}"
+    );
+    assert!(
+        !fixture.workspace.join("pwned.c").exists(),
+        "the payload must never execute"
+    );
 }

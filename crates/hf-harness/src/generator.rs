@@ -319,7 +319,7 @@ pub async fn try_compile(
         container_ws,
         source_name,
         &output_name,
-        &list_c_files(workspace, container_ws, source_name),
+        &list_c_files(workspace, container_ws, &[source_name]),
     );
     let cmd = vec!["bash".to_owned(), "-c".to_owned(), script];
     let limits = hf_core::runtime::ResourceLimits {
@@ -1062,7 +1062,7 @@ const NON_SOURCE_DIRS: [&str; 3] = ["corpus", "out", "fuzz"];
 /// not something a single-command harness build links.
 const MAX_EXTRA_SOURCES: usize = 5_000;
 
-/// List the staged C/C++ translation units, excluding the harness itself, as
+/// List the staged C/C++ translation units, excluding `excluded_names`, as
 /// container-internal paths so a multi-file target links.
 ///
 /// Recursive because `copy_project_sources` preserves the project's directory
@@ -1070,9 +1070,14 @@ const MAX_EXTRA_SOURCES: usize = 5_000;
 /// unit out of the link, which surfaces as an undefined-symbol error naming the
 /// very function the harness was written for. Symlinks are not followed, and
 /// the walk is bounded and sorted so one project always produces one command.
-fn list_c_files(workspace: &Path, container_ws: &str, source_name: &str) -> String {
+///
+/// `excluded_names` holds bare filenames to leave out of the listing -- the
+/// harness source itself for an ordinary compile, and additionally a staged
+/// driver for a build (such as the concolic pass's `SymCC` build) that compiles
+/// more than one non-project file alongside the target's sources.
+pub fn list_c_files(workspace: &Path, container_ws: &str, excluded_names: &[&str]) -> String {
     let mut relative = Vec::new();
-    collect_source_files(workspace, workspace, source_name, &mut relative);
+    collect_source_files(workspace, workspace, excluded_names, &mut relative);
     relative.sort();
     relative.truncate(MAX_EXTRA_SOURCES);
     relative
@@ -1088,7 +1093,12 @@ fn list_c_files(workspace: &Path, container_ws: &str, source_name: &str) -> Stri
 }
 
 /// Collect workspace-relative source paths beneath `directory`.
-fn collect_source_files(root: &Path, directory: &Path, source_name: &str, found: &mut Vec<String>) {
+fn collect_source_files(
+    root: &Path,
+    directory: &Path,
+    excluded_names: &[&str],
+    found: &mut Vec<String>,
+) {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return;
     };
@@ -1111,10 +1121,14 @@ fn collect_source_files(root: &Path, directory: &Path, source_name: &str, found:
             {
                 continue;
             }
-            collect_source_files(root, &path, source_name, found);
+            collect_source_files(root, &path, excluded_names, found);
             continue;
         }
-        if !kind.is_file() || entry.file_name() == source_name {
+        if !kind.is_file()
+            || excluded_names
+                .iter()
+                .any(|&excluded| entry.file_name() == excluded)
+        {
             continue;
         }
         let is_source = path
@@ -1737,7 +1751,7 @@ Iterations : 12345
         .unwrap();
         std::fs::write(dir.path().join("top.c"), "int t(void){return 0;}").unwrap();
 
-        let listed = list_c_files(dir.path(), "/work", "harness.c");
+        let listed = list_c_files(dir.path(), "/work", &["harness.c"]);
 
         assert!(listed.contains("/work/'src/parser/dns.c'"), "{listed}");
         assert!(listed.contains("/work/'top.c'"), "{listed}");
@@ -1758,7 +1772,7 @@ Iterations : 12345
         std::fs::write(dir.path().join("out/crash.c"), "int evil2(void){return 0;}").unwrap();
         std::fs::write(dir.path().join("real.c"), "int r(void){return 0;}").unwrap();
 
-        let listed = list_c_files(dir.path(), "/work", "harness.c");
+        let listed = list_c_files(dir.path(), "/work", &["harness.c"]);
 
         assert!(listed.contains("/work/'real.c'"), "{listed}");
         assert!(!listed.contains("seed.c"), "corpus compiled: {listed}");
@@ -1771,9 +1785,30 @@ Iterations : 12345
         std::fs::write(dir.path().join("harness.c"), "int main(void){return 0;}").unwrap();
         std::fs::write(dir.path().join("real.c"), "int r(void){return 0;}").unwrap();
 
-        let listed = list_c_files(dir.path(), "/work", "harness.c");
+        let listed = list_c_files(dir.path(), "/work", &["harness.c"]);
 
         assert!(!listed.contains("harness.c"), "{listed}");
+        assert!(listed.contains("/work/'real.c'"), "{listed}");
+    }
+
+    #[test]
+    fn every_given_excluded_name_is_left_out() {
+        // The concolic build excludes two staged non-project files (the
+        // harness and a driver) rather than one, so the exclusion set must
+        // support more than a single name.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("harness.c"), "int main(void){return 0;}").unwrap();
+        std::fs::write(
+            dir.path().join("symcc_driver.c"),
+            "int main(void){return 0;}",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("real.c"), "int r(void){return 0;}").unwrap();
+
+        let listed = list_c_files(dir.path(), "/work", &["harness.c", "symcc_driver.c"]);
+
+        assert!(!listed.contains("harness.c"), "{listed}");
+        assert!(!listed.contains("symcc_driver.c"), "{listed}");
         assert!(listed.contains("/work/'real.c'"), "{listed}");
     }
 
@@ -1784,8 +1819,8 @@ Iterations : 12345
         std::fs::write(dir.path().join("b/two.c"), "int two(void){return 0;}").unwrap();
         std::fs::write(dir.path().join("a.c"), "int a(void){return 0;}").unwrap();
 
-        let first = list_c_files(dir.path(), "/work", "harness.c");
-        assert_eq!(first, list_c_files(dir.path(), "/work", "harness.c"));
+        let first = list_c_files(dir.path(), "/work", &["harness.c"]);
+        assert_eq!(first, list_c_files(dir.path(), "/work", &["harness.c"]));
         assert!(
             first.find("a.c").unwrap() < first.find("two.c").unwrap(),
             "{first}"
@@ -1800,7 +1835,7 @@ Iterations : 12345
         std::fs::write(dir.path().join(evil), "int x;").unwrap();
         std::fs::write(dir.path().join("plain.c"), "int y;").unwrap();
 
-        let listed = list_c_files(dir.path(), "/work", "harness.c");
+        let listed = list_c_files(dir.path(), "/work", &["harness.c"]);
 
         // The dangerous name is single-quoted so the `;` cannot break the shell.
         assert!(
