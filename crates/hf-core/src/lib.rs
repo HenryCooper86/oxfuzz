@@ -35,7 +35,6 @@ pub mod engine;
 pub mod error;
 pub mod exec;
 pub mod harness;
-pub mod permission_types;
 pub mod provider;
 pub mod retired_engine;
 pub mod runtime;

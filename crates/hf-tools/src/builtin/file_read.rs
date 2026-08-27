@@ -224,10 +224,6 @@ impl Tool for FileReadTool {
     fn definition(&self) -> &ToolDefinition {
         &self.def
     }
-
-    fn is_read_only(&self) -> bool {
-        true
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
