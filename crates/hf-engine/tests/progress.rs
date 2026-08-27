@@ -1,8 +1,7 @@
 //! Tests for progress and coverage parsing.
 
 use hf_core::engine::FuzzProgress;
-use hf_engine::progress::{parse_coverage, parse_progress};
-use uuid::Uuid;
+use hf_engine::progress::parse_progress;
 
 #[test]
 fn parse_libfuzzer_execs_line() {
@@ -71,20 +70,4 @@ fn parse_done_line() {
         events.iter().any(|e| matches!(e, FuzzProgress::Done)),
         "should detect done: {events:?}"
     );
-}
-
-#[test]
-fn coverage_report_extracts_max_edges() {
-    let stdout = "INFO: 100 edges covered.\nINFO: 500 edges covered.\nINFO: 250 edges covered.\n";
-    let run_id = Uuid::new_v4();
-    let report = parse_coverage(stdout, run_id);
-    assert_eq!(report.edges, 500, "should pick max edge count");
-    assert_eq!(report.run_id, run_id);
-}
-
-#[test]
-fn coverage_report_counts_crashes() {
-    let stdout = "INFO: 100 edges covered.\n==ERROR: crash\n==ERROR: crash\n";
-    let report = parse_coverage(stdout, Uuid::new_v4());
-    assert_eq!(report.edges, 100);
 }

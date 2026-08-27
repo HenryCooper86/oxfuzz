@@ -79,7 +79,6 @@ async fn runner_libfuzzer_parses_progress_and_coverage() {
         .expect("run should succeed");
     let RunResult {
         progress,
-        coverage,
         termination,
     } = result;
     assert_eq!(termination, CommandTermination::Completed);
@@ -90,7 +89,12 @@ async fn runner_libfuzzer_parses_progress_and_coverage() {
             .any(|e| matches!(e, hf_core::engine::FuzzProgress::Done)),
         "should have Done event"
     );
-    assert_eq!(coverage.edges, 1024, "should pick max edge count");
+    assert!(
+        progress
+            .iter()
+            .any(|e| matches!(e, hf_core::engine::FuzzProgress::EdgesCovered(1024))),
+        "should report the max edge count: {progress:?}"
+    );
     assert!(progress.iter().any(|event| {
         matches!(event, hf_core::engine::FuzzProgress::ExecsPerSec(value) if (*value - 3000.0).abs() < f64::EPSILON)
     }));
@@ -121,7 +125,10 @@ async fn runner_retains_late_metrics_after_log_capture_is_truncated() {
         .await
         .unwrap();
 
-    assert_eq!(result.coverage.edges, 4096);
+    assert!(result
+        .progress
+        .iter()
+        .any(|e| matches!(e, hf_core::engine::FuzzProgress::EdgesCovered(4096))));
     assert!(result.progress.iter().any(|event| {
         matches!(event, hf_core::engine::FuzzProgress::ExecsPerSec(value) if (*value - 777.0).abs() < f64::EPSILON)
     }));
@@ -203,8 +210,10 @@ async fn runner_afl_parses_progress() {
         )
         .await
         .expect("run should succeed");
-    assert!(!result.progress.is_empty());
-    assert_eq!(result.coverage.edges, 500);
+    assert!(result
+        .progress
+        .iter()
+        .any(|e| matches!(e, hf_core::engine::FuzzProgress::EdgesCovered(500))));
 }
 
 #[tokio::test]
@@ -232,7 +241,14 @@ async fn runner_accepts_libfuzzer_timeout_exit_without_a_summary_line() {
         )
         .await
         .expect("a libFuzzer timeout (exit 70) is a valid outcome, not an engine error");
-    assert_eq!(result.coverage.edges, 120, "coverage must be preserved");
+    assert!(
+        result
+            .progress
+            .iter()
+            .any(|e| matches!(e, hf_core::engine::FuzzProgress::EdgesCovered(120))),
+        "coverage must be preserved: {:?}",
+        result.progress
+    );
 }
 
 #[tokio::test]

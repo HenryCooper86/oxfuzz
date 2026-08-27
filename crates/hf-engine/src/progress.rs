@@ -2,9 +2,7 @@
 //!
 //! See `docs/standards/ENGINE_ADAPTER_STANDARD.md` section 4.
 
-use hf_core::coverage::CoverageReport;
 use hf_core::engine::FuzzProgress;
-use uuid::Uuid;
 
 /// Parse a single line of engine stdout into a `FuzzProgress` event.
 #[must_use]
@@ -137,43 +135,6 @@ pub fn parse_syzkaller_progress(stdout: &str) -> Vec<FuzzProgress> {
         ));
     }
     events
-}
-
-/// Parse a coverage report from engine stdout.
-///
-/// `edges` is the peak edge/PC count reported in the stream, and `delta_edges`
-/// is the coverage *gained over this run* (peak minus the first sample), both
-/// derived directly from the engine's progress lines.
-///
-/// The remaining fields are not derivable from a single stdout buffer and are
-/// left at their identity values here:
-/// - `blocks`: engines report edges/features, not a separate basic-block count.
-/// - `stagnation_secs`: a wall-clock measure across successive reports, owned by
-///   `hf_coverage::CoverageTracker`, which recomputes it from `edges` and
-///   ignores this field.
-/// - `new_edges_files`: which corpus inputs added coverage is tracked by the
-///   corpus layer when it grows the corpus, not from fuzzer stdout.
-#[must_use]
-pub fn parse_coverage(stdout: &str, run_id: Uuid) -> CoverageReport {
-    let mut edges = 0u64;
-    let mut first_edges: Option<u64> = None;
-    for line in stdout.lines() {
-        if let Some(n) = edges_from_line(line) {
-            first_edges.get_or_insert(n);
-            edges = edges.max(n);
-        }
-    }
-    // Coverage is monotonic within a run, so the gain is peak minus the first
-    // observed sample. `i64` because the model permits a (theoretical) regress.
-    let delta_edges = edges.cast_signed() - first_edges.unwrap_or(0).cast_signed();
-    CoverageReport {
-        run_id,
-        edges,
-        blocks: 0,
-        delta_edges,
-        stagnation_secs: 0,
-        new_edges_files: Vec::new(),
-    }
 }
 
 /// Extract an edge/coverage count from a single stdout line, if it reports one.
@@ -421,25 +382,6 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, FuzzProgress::EdgesCovered(_))),
             "AFL++ bits/tuple density must not be read as an edge count, got {bogus:?}"
-        );
-    }
-
-    #[test]
-    fn cov_update_line_does_not_latch_first_edges_at_zero() {
-        use super::parse_coverage;
-        // The staleness line precedes the real coverage lines. Reading 0 from it
-        // would latch first_edges=0 and inflate delta_edges to the full peak.
-        let log = "Cov Update : 0 days 00 hrs 00 mins 05 secs ago\n\
-                   Coverage : edge: 100/4567 [2%]\n\
-                   Coverage : edge: 150/4567 [3%]\n";
-        let report = parse_coverage(log, uuid::Uuid::nil());
-        assert_eq!(
-            report.edges, 150,
-            "peak edges should be the max Coverage line"
-        );
-        assert_eq!(
-            report.delta_edges, 50,
-            "delta must be peak-minus-first-real-sample (150-100), not the full peak"
         );
     }
 
