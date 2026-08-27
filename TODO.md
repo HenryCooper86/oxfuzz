@@ -172,6 +172,68 @@ Status legend: [x] done - [~] partial - [ ] not started.
   depth carried through the fired trigger, which no configuration reaches
   today.
 
+## Audit backlog (refreshed 2026-08-27)
+
+A workspace sweep for dead code and unreachable features. Method for the
+dead-code items: module-path uses, grouped and glob re-exports, and a
+`cargo check --workspace --all-targets --all-features` with the item removed.
+
+### Fixed
+- [x] An event schedule whose action is a campaign re-triggered itself; see the
+  `run.completed` entry under "Cross-cutting".
+- [x] `RunResult.coverage` and `hf_engine::progress::parse_coverage` minted a
+  `Uuid::new_v4()` per call, so the report named a run that does not exist.
+  Nothing in production read either: terminal edges/execs come from
+  `RunResult.progress`, live stagnation from `hf_coverage::CoverageTracker`, and
+  the durable delta from `evidence::comparable_coverage_delta`.
+- [x] The `Tool` trait advertised three permission hooks -- `check_permissions`,
+  `is_read_only`, `is_destructive` -- that nothing called. A contributor setting
+  `is_destructive` on a new tool would have got no gate. Removed with
+  `hf_core::permission_types`, the shadowed second permission model they used;
+  the live one is `hf-guardrails` plus `AgentBackend::approve_tool`.
+- [x] ~6.7k LOC of unreachable modules and public items removed: ten in
+  hf-knowledge, `hf_core::memory`/`trust`, `hf_session::scheduling`/`tree`,
+  `hf_knowledge::classifier`/`quality`, and seven stray public items. See
+  `docs/design/dead-framework-audit-20260719.md` for the per-item record.
+
+### Open
+- [ ] The automotive protocol-state corpus can never be filled. Three public
+  `ServiceContainer` methods have no caller on any surface (CLI, REST, Tauri):
+  `promote_automotive_state_artifact`, `list_automotive_state_corpus`, and
+  `automotive_operation`. Promotion is the only way a state-corpus row is
+  written, so `POST /automotive/report` and the lab coverage view -- both of
+  which read that corpus -- report zero promoted state evidence on every
+  project, while `automotive-protocol-fuzzing-design.md` sections 4 and 8.3
+  describe the corpus as a live input. Either wire the three methods to the
+  surfaces that already expose their siblings (`list_automotive_operations` is
+  wired to all three) or remove the capability and the design text with it.
+- [ ] hf-tools' `activation`, `dynamic`, `formatter`, `parser`, and `taxonomy`
+  modules (~3.8k LOC) are unreachable under every feature. The 2026-07-19
+  dead-framework audit examined four of them, recorded them as "RETAINED
+  (undocumented)", and called wire-or-delete an owner decision; the `parser`
+  module it did not examine is dead for a concrete reason -- the agent uses its
+  own JSON step protocol in the system prompt, not the `<tool_call>` XML syntax
+  `parse_tool_calls` reads, so `PROMPT_TOOL_CALL_SYNTAX` reaches no prompt.
+  Still awaiting that decision.
+- [ ] `hf_engine::progress::is_finding_signal` matches the bare substring
+  `asan`, which `addresssanitizer` already covers for every real report. The
+  bare token adds only false-positive surface: any engine line quoting a path
+  or binary name containing "asan" is counted as a finding, and the service
+  floors a run's crash count at one whenever a finding line was seen. Not
+  changed without a case that reproduces it.
+- [ ] A run the sandbox kills at its wall-clock cap (`CommandTermination::
+  TimedOut`) becomes a hard `ClassifiedError::Engine`, discarding the run's
+  parsed coverage and execs; a cancelled run, by contrast, returns its partial
+  progress. The headroom over the fuzzer's own self-limit is a fixed
+  `SANDBOX_TIMEOUT_HEADROOM_SECS = 60` regardless of how long the run or how
+  large the corpus, so a slow corpus load or ASan leak check at exit throws away
+  a whole campaign's coverage. Crashes survive (triage ingests the artifact
+  directory), coverage does not.
+- [ ] Every engine adapter applies `cfg.env` twice: `build_run_args` prepends an
+  `env K=V ...` command wrapper, and `EngineRunner` also passes the same map
+  through `ResourceLimits.env`, which the Docker adapter renders as `--env=K=V`.
+  Harmless today, but two homes for one meaning (AGENTS.md 2.18).
+
 ## Audit backlog (refreshed 2026-07-17)
 
 A second full-workspace audit (see `.claude/plans/2026-07-17-codebase-audit.md`)
