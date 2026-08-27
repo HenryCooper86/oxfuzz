@@ -13,7 +13,6 @@
 //! | [`runtime`] | `RuntimeAdapter` | runtime-design.md |
 //! | [`tool`] | `Tool`, `ToolRegistry` | TOOL_CALL_PROTOCOL.md |
 //! | [`session`] | `SessionStore`, `TranscriptStore` | - |
-//! | [`memory`] | `MemoryClient`, `ExperienceStore` | - |
 //! | [`checkpoint`] | `CheckpointStorage` | - |
 //! | [`build`] | `BuildContext`, `CompileEntry` | harness-generation-design.md |
 //! | [`target`] | `TargetCandidate`, `TargetInventory` | TARGET_TAXONOMY.md |
@@ -36,7 +35,6 @@ pub mod engine;
 pub mod error;
 pub mod exec;
 pub mod harness;
-pub mod memory;
 pub mod permission_types;
 pub mod provider;
 pub mod retired_engine;
@@ -44,5 +42,4 @@ pub mod runtime;
 pub mod session;
 pub mod target;
 pub mod tool;
-pub mod trust;
 pub mod types;

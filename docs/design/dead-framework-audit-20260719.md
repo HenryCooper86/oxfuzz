@@ -19,7 +19,7 @@ decision. A candidate is "orphaned" only with zero real uses AND no documented i
 |---|---|---|---|
 | `IntraTurnPruner` / `pruning` | hf-context | **WIRED** | `hf-agent/src/lib.rs:621` calls `IntraTurnPruner::from_config`. Report was stale. |
 | `simple::*`, `CompactionEngine`, `CompactionLlm` | hf-context | **WIRED** | the active agent context path (this session's L3 work). |
-| `MemoryClient`, `ExperienceStore` | hf-core | **USED** | 2 and 1 impl/dyn/bound uses outside hf-core. Report was stale. |
+| `MemoryClient`, `ExperienceStore` | hf-core | **REMOVED 2026-08-27** | Was used by the hf-context memory/working-memory subsystems; those were cut, leaving `hf_core::memory` with no consumer under any feature. |
 | `ContextPipeline`, `ContextManager`, `RecallStore`, `ContextWindowGuard`, `WorkingMemory` | hf-context | **DELIBERATELY RETAINED** | `hf-agent/src/lib.rs:9-20` documents these as "deliberately not wired" with a rationale. Exported + self-tested. |
 | `DynamicToolManager`, `ToolTaxonomy`, `ToolActivationSet`, `ResultFormatter` | hf-tools | **RETAINED (undocumented)** | 0 external uses, but each is exported and has its own unit tests. Self-contained, maintained. |
 | `SkillRegistry` (trait), `AgentRunner` (trait) | hf-core | **ORPHANED** | 0 real uses (only comments). Note: `hf-skills::SkillRegistry` is a *separate real struct* -- the hf-core trait is shadowed and unused. |
@@ -45,3 +45,20 @@ decision. A candidate is "orphaned" only with zero real uses AND no documented i
 2. Confirm no re-export is consumed (an unused `pub use` is itself removable).
 3. Remove the item (surgically -- keep sibling types in the same module), then
    `cargo build --workspace --all-features` and the full suite must stay green.
+
+## Follow-up -- 2026-08-27
+
+A re-run of the same method (module-path uses, grouped and glob re-exports, and a
+`cargo check --workspace --all-targets --all-features` with the module removed)
+found six modules that had become orphaned since this audit and carried no
+retention decision. They were removed: `hf_core::memory` and `hf_core::trust`
+(a `TrustTier` shadowed by the live `hf_skills::TrustTier`),
+`hf_session::scheduling` and `hf_session::tree`, and `hf_knowledge::classifier`
+and `hf_knowledge::quality`.
+
+The hf-tools framework this audit deliberately retained -- `DynamicToolManager`,
+`ToolTaxonomy`, `ToolActivationSet`, `ResultFormatter`, plus the `parser` module
+(`parse_tool_calls`, `PROMPT_TOOL_CALL_SYNTAX`, ~1.9k LOC) that this audit did not
+cover -- is still unreachable: the agent uses its own JSON step protocol in the
+system prompt, not the `<tool_call>` XML syntax the parser reads. It stays put
+pending the owner decision this audit called for.
