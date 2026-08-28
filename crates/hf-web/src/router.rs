@@ -1429,6 +1429,10 @@ struct HarnessDraftRequest {
     target: String,
     engine: String,
     lang: Option<String>,
+    /// Which generator writes the harness. Omitted means `auto`, so a client
+    /// written before this field keeps its behaviour.
+    #[serde(default)]
+    ai: hf_service::AiPolicy,
 }
 
 async fn harness_draft(
@@ -1443,7 +1447,7 @@ async fn harness_draft(
     };
     let draft = state
         .container
-        .harness_draft(&project, &req.target, engine, lang)
+        .harness_draft_with_policy(&project, &req.target, engine, lang, req.ai)
         .await
         .map_err(classified_api_error)?;
     Ok(Json(serde_json::json!({
@@ -1454,6 +1458,10 @@ async fn harness_draft(
             "compiler": draft.build_cmd.compiler,
             "args": draft.build_cmd.args,
         },
+        // Which generator answered. Under `auto` a provider outage silently
+        // substitutes the template, and the two are materially different, so a
+        // client must be able to tell them apart without guessing.
+        "generator": draft.generator,
         "status": "Draft",
     })))
 }

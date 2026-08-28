@@ -3,6 +3,12 @@
 // regenerate from the localized views.
 
 export const enExtra: Record<string, string> = {
+  "harness.generator": "Generator",
+  "harness.generatorAuto": "Auto (model if available)",
+  "harness.generatorRequire": "Require model",
+  "harness.generatorOff": "Template only",
+  "harness.wroteByLlm": "Written by the model.",
+  "harness.wroteByHeuristic": "Written by the built-in template -- no model produced this. Choose \"Require model\" to make that an error instead.",
   "automotive.advertisedCapabilities": "Advertised by the pinned adapter",
   "automotive.analysisComplete": "Capture analysis complete",
   "automotive.analysisFailed": "Capture analysis failed",
@@ -1648,6 +1654,12 @@ export const enExtra: Record<string, string> = {
 };
 
 export const zhExtra: Record<string, string> = {
+  "harness.generator": "\u751f\u6210\u5668",
+  "harness.generatorAuto": "\u81ea\u52a8\uff08\u53ef\u7528\u65f6\u4f7f\u7528\u6a21\u578b\uff09",
+  "harness.generatorRequire": "\u5fc5\u987b\u4f7f\u7528\u6a21\u578b",
+  "harness.generatorOff": "\u4ec5\u7528\u6a21\u677f",
+  "harness.wroteByLlm": "\u7531\u6a21\u578b\u7f16\u5199\u3002",
+  "harness.wroteByHeuristic": "\u7531\u5185\u7f6e\u6a21\u677f\u7f16\u5199\uff0c\u5e76\u975e\u6a21\u578b\u751f\u6210\u3002\u9009\u62e9\u201c\u5fc5\u987b\u4f7f\u7528\u6a21\u578b\u201d\u53ef\u5c06\u6b64\u60c5\u51b5\u89c6\u4e3a\u9519\u8bef\u3002",
   "automotive.advertisedCapabilities": "固定版本适配器声明的能力",
   "automotive.analysisComplete": "捕获文件分析完成",
   "automotive.analysisFailed": "捕获文件分析失败",
