@@ -71,17 +71,10 @@ pub fn build_run_args(cfg: &FuzzRunConfig, binary: &str, corpus: &str, out: &str
         args.push("-s".to_owned());
         args.push(seed.to_string());
     }
-    // Env vars as AFL_ prefixed options are set by the runtime; we pass them
-    // as `--env` equivalents via the command environment. Here we emit them
-    // as a leading `env` command so the docker exec applies them.
-    if !cfg.env.is_empty() {
-        let mut env_prefix = vec!["env".to_owned()];
-        for (k, v) in &cfg.env {
-            env_prefix.push(format!("{k}={v}"));
-        }
-        env_prefix.extend_from_slice(&args);
-        args = env_prefix;
-    }
+    // `cfg.env` is deliberately absent from the argument list: both callers pass
+    // the same map through `ResourceLimits.env`, which the sandbox renders onto
+    // the container. An `env K=V` wrapper here would be a second home for one
+    // meaning and would displace the fuzzer program from argv[0].
     // Extra args (e.g. -dict=...).
     args.extend(cfg.extra_args.iter().cloned());
     // The binary and its AFL-substituted input file. Omitting `@@` selects

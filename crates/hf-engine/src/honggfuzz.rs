@@ -30,14 +30,10 @@ pub fn build_run_args(cfg: &FuzzRunConfig, binary: &str, corpus: &str, out: &str
     args.push(out.to_owned());
     args.push("--crashdir".to_owned());
     args.push(out.to_owned());
-    if !cfg.env.is_empty() {
-        let mut env_prefix = vec!["env".to_owned()];
-        for (k, v) in &cfg.env {
-            env_prefix.push(format!("{k}={v}"));
-        }
-        env_prefix.extend_from_slice(&args);
-        args = env_prefix;
-    }
+    // `cfg.env` is deliberately absent from the argument list: both callers pass
+    // the same map through `ResourceLimits.env`, which the sandbox renders onto
+    // the container. An `env K=V` wrapper here would be a second home for one
+    // meaning and would displace the fuzzer program from argv[0].
     args.extend(cfg.extra_args.iter().cloned());
     args.push("--".to_owned());
     args.push(binary.to_owned());
