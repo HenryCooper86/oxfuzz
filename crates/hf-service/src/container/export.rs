@@ -14,6 +14,113 @@ use super::crash_inputs::is_regular_file;
 use super::harness_workspace::read_current_harness_source;
 use super::project_identity::{canonical_project_root, defectdojo_project_name};
 use super::workspace::workspace_dir;
+
+/// How many project translation units one reproduction bundle carries.
+///
+/// A bundle is meant to be small enough to attach to a bug report. Past this the
+/// manifest names the shortfall instead of shipping a build line that cannot
+/// link (see `sources_note`).
+const MAX_BUNDLE_SOURCES: usize = 64;
+
+/// Total bytes of project sources one bundle carries.
+const MAX_BUNDLE_SOURCE_BYTES: u64 = 4 * 1_024 * 1_024;
+
+/// Whether a bundled path is a header rather than a translation unit.
+fn is_header_path(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "h" | "hh" | "hpp" | "hxx"
+            )
+        })
+}
+
+/// Collect the staged project sources a bundle must carry, plus how many it had
+/// to leave out.
+///
+/// Reads the workspace the sandbox compiled from, so the bundle contains
+/// exactly the translation units that produced the finding. Headers come along
+/// with the sources: a nested `.c` compiles against its neighbours' `.h`, and
+/// omitting them turns a link error into a compile error.
+fn collect_bundle_sources(
+    workspace: &Path,
+    harness_filename: &str,
+) -> (Vec<crate::repro::BundledSource>, usize) {
+    let mut found = Vec::new();
+    collect_bundle_sources_in(workspace, workspace, harness_filename, &mut found);
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut sources = Vec::new();
+    let mut bytes = 0u64;
+    let mut omitted = 0usize;
+    for (relative, absolute) in found {
+        let size = std::fs::metadata(&absolute).map(|m| m.len()).unwrap_or(0);
+        if sources.len() >= MAX_BUNDLE_SOURCES
+            || bytes.saturating_add(size) > MAX_BUNDLE_SOURCE_BYTES
+        {
+            omitted += 1;
+            continue;
+        }
+        match std::fs::read(&absolute) {
+            Ok(contents) => {
+                bytes = bytes.saturating_add(size);
+                sources.push(crate::repro::BundledSource {
+                    relative_path: relative,
+                    contents,
+                });
+            }
+            Err(_) => omitted += 1,
+        }
+    }
+    (sources, omitted)
+}
+
+/// Walk the staged workspace for project sources and headers.
+///
+/// Skips the workspace's own machinery -- `runs/`, `corpus/`, the harness, the
+/// compiled binary -- so a bundle carries the project and nothing else. Symlinks
+/// are not followed: a bundle copies by value.
+fn collect_bundle_sources_in(
+    root: &Path,
+    directory: &Path,
+    harness_filename: &str,
+    found: &mut Vec<(PathBuf, PathBuf)>,
+) {
+    const SOURCE_EXTENSIONS: &[&str] = &["c", "cc", "cpp", "cxx", "h", "hh", "hpp", "hxx"];
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(metadata) = path.symlink_metadata() else {
+            continue;
+        };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if metadata.file_type().is_dir() {
+            if matches!(name.as_str(), "runs" | "corpus" | "coverage" | "triage") {
+                continue;
+            }
+            collect_bundle_sources_in(root, &path, harness_filename, found);
+            continue;
+        }
+        if !metadata.file_type().is_file() || name == harness_filename {
+            continue;
+        }
+        let is_source = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| SOURCE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()));
+        if !is_source {
+            continue;
+        }
+        if let Ok(relative) = path.strip_prefix(root) {
+            found.push((relative.to_path_buf(), path.clone()));
+        }
+    }
+}
 use super::ServiceContainer;
 
 impl ServiceContainer {
@@ -154,12 +261,33 @@ impl ServiceContainer {
             ))
         })?;
         let harness_filename = lang.harness_filename().to_owned();
+        // The harness declares the target `extern`, so the bundle has to carry
+        // the project's own translation units or the documented build command
+        // fails to link on the very function the finding is about. The staged
+        // workspace holds exactly what the sandbox compiled.
+        let (sources, omitted_sources) = collect_bundle_sources(&workspace, &harness_filename);
+        let bundled_sources: Vec<String> = sources
+            .iter()
+            .map(|source| source.relative_path.to_string_lossy().replace('\\', "/"))
+            .collect();
+        // Headers ride along so the translation units can include them, but
+        // only translation units go on the command line: handing clang a `.h`
+        // makes it build a precompiled header instead of compiling the target.
+        let compiled_sources: Vec<&String> = bundled_sources
+            .iter()
+            .filter(|path| !is_header_path(path))
+            .collect();
         let build = hf_harness::build_command(engine, lang, "fuzz_bin");
         let build_command = format!(
-            "{} {} {} -o {}",
+            "{} {} {} {} -o {}",
             build.compiler,
             build.args.join(" "),
             harness_filename,
+            compiled_sources
+                .iter()
+                .map(|path| path.as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
             build.output.display()
         );
         let manifest = crate::repro::ReproManifest {
@@ -172,13 +300,15 @@ impl ServiceContainer {
             build_command,
             harness_filename,
             input_filename: "crash_input".to_owned(),
+            bundled_sources,
+            omitted_sources,
             binary_name: "fuzz_bin".to_owned(),
             crash_kind: format!("{:?}", crash.kind),
             crash_summary: crash.summary.clone(),
             stack_signature: crash.stack_signature.clone(),
             minimized: crash.minimized,
         };
-        crate::repro::write_repro_bundle(dest, &manifest, &harness_source, &input)
+        crate::repro::write_repro_bundle(dest, &manifest, &harness_source, &input, &sources)
             .map_err(|e| ClassifiedError::Internal(format!("write repro bundle: {e}")))
     }
 
