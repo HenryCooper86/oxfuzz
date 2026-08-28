@@ -158,18 +158,69 @@ fn honggfuzz_args_have_run_time() {
     );
 }
 
+/// `cfg.env` reaches the fuzzer through the sandbox environment, never through
+/// the argument list.
+///
+/// Both `build_run_args` callers -- `hf_engine::runner` and the harness smoke
+/// step -- copy the same map into `ResourceLimits.env`, which the Docker
+/// adapter renders as `--env=K=V` on every sandboxed command. An `env K=V`
+/// wrapper in the argument list would be a second home for one meaning
+/// (AGENTS.md 2.18), and it would displace the fuzzer program from argv[0].
+///
+/// The surviving home is covered by `hf-runtime`'s `docker_args` tests, which
+/// assert the `--env=` rendering and the defaults-plus-overrides overlay.
 #[test]
-fn libfuzzer_args_include_sanitizer_env() {
-    let mut c = cfg(EngineKind::LibFuzzer, 60);
-    c.env
-        .push(("ASAN_OPTIONS".to_owned(), "abort_on_error=1".to_owned()));
-    let args =
-        hf_engine::libfuzzer::build_run_args(&c, "/work/fuzz_bin", "/work/corpus", "/work/out");
-    let joined = args.join(" ");
-    assert!(
-        joined.contains("ASAN_OPTIONS=abort_on_error=1"),
-        "libFuzzer must pass env vars: {joined}"
-    );
+fn engine_args_leave_the_environment_to_the_sandbox() {
+    let pair = ("ASAN_OPTIONS".to_owned(), "abort_on_error=1".to_owned());
+
+    let mut libfuzzer = cfg(EngineKind::LibFuzzer, 60);
+    libfuzzer.env.push(pair.clone());
+    let mut afl = cfg(EngineKind::AflPlusPlus, 60);
+    afl.env.push(pair.clone());
+    let mut honggfuzz = cfg(EngineKind::Honggfuzz, 60);
+    honggfuzz.env.push(pair);
+
+    for (label, args, program) in [
+        (
+            "libfuzzer",
+            hf_engine::libfuzzer::build_run_args(
+                &libfuzzer,
+                "/work/fuzz_bin",
+                "/work/corpus",
+                "/work/out",
+            ),
+            "/work/fuzz_bin",
+        ),
+        (
+            "afl",
+            hf_engine::afl::build_run_args(&afl, "/work/fuzz_bin", "/work/corpus", "/work/out"),
+            "afl-fuzz",
+        ),
+        (
+            "honggfuzz",
+            hf_engine::honggfuzz::build_run_args(
+                &honggfuzz,
+                "/work/fuzz_bin",
+                "/work/corpus",
+                "/work/out",
+            ),
+            "honggfuzz",
+        ),
+    ] {
+        assert_eq!(
+            args.first().map(String::as_str),
+            Some(program),
+            "{label} must keep its program at argv[0], not an env wrapper: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|arg| arg == "env"),
+            "{label} must not wrap the command in `env`: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|arg| arg.contains("ASAN_OPTIONS")),
+            "{label} must not carry the environment in its argument list: {args:?}"
+        );
+    }
 }
 
 #[test]

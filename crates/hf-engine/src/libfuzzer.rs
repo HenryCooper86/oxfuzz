@@ -39,14 +39,10 @@ pub fn build_run_args(cfg: &FuzzRunConfig, binary: &str, corpus: &str, out: &str
     // `-use_value_profile=0` (libFuzzer takes the last occurrence).
     args.push("-use_value_profile=1".to_owned());
     args.push(corpus.to_owned());
-    if !cfg.env.is_empty() {
-        let mut env_prefix = vec!["env".to_owned()];
-        for (k, v) in &cfg.env {
-            env_prefix.push(format!("{k}={v}"));
-        }
-        env_prefix.extend_from_slice(&args);
-        args = env_prefix;
-    }
+    // `cfg.env` is deliberately absent from the argument list: both callers pass
+    // the same map through `ResourceLimits.env`, which the sandbox renders onto
+    // the container. An `env K=V` wrapper here would be a second home for one
+    // meaning and would displace the fuzzer program from argv[0].
     args.extend(cfg.extra_args.iter().cloned());
     args
 }
