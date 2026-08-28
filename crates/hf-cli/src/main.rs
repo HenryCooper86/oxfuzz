@@ -14,6 +14,29 @@ use hf_service::{
 use std::path::PathBuf;
 
 /// AI fuzzing agent.
+/// Which harness generator to use, as a command-line value.
+///
+/// Mirrors [`hf_service::AiPolicy`]: the CLI parses, the service decides.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum AiOption {
+    /// Use the model when one is configured and reachable, else the template.
+    Auto,
+    /// Require the model: no provider, or a failed call, is an error.
+    Require,
+    /// Never call a model, even when one is configured.
+    Off,
+}
+
+impl From<AiOption> for hf_service::AiPolicy {
+    fn from(value: AiOption) -> Self {
+        match value {
+            AiOption::Auto => Self::Auto,
+            AiOption::Require => Self::Require,
+            AiOption::Off => Self::Off,
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "oxfuzz", version, about)]
 struct Cli {
@@ -41,6 +64,10 @@ enum Commands {
         /// Enable LLM-assisted ranking (requires `HF_PROVIDER_API_KEY`).
         #[arg(long)]
         rank: bool,
+        /// How `--rank` may use the model: `auto` warns and keeps heuristic
+        /// scores when none is configured, `require` fails instead.
+        #[arg(long, value_enum, default_value_t = AiOption::Auto)]
+        ai: AiOption,
         /// Enrich persisted C/C++ targets with advisory Semgrep signals.
         #[cfg(feature = "semgrep-enrichment")]
         #[arg(long)]
@@ -67,6 +94,11 @@ enum Commands {
         /// Skip compile and smoke fuzz (draft only).
         #[arg(long)]
         draft_only: bool,
+        /// Which generator writes the harness: `auto` uses the model when one
+        /// is configured, `require` fails rather than substituting the
+        /// template, `off` never calls a model.
+        #[arg(long, value_enum, default_value_t = AiOption::Auto)]
+        ai: AiOption,
         /// Auto-repair: on a compile failure, feed the diagnostics back to the
         /// LLM and retry up to N times before giving up (0 = no repair).
         #[arg(long, default_value_t = 0)]
@@ -1111,21 +1143,75 @@ async fn cmd_policy(op: PolicyOp) -> anyhow::Result<()> {
 }
 
 #[cfg(not(feature = "semgrep-enrichment"))]
-async fn cmd_discover(project: PathBuf, lang: &str, rank: bool) -> anyhow::Result<()> {
+async fn cmd_discover(
+    project: PathBuf,
+    lang: &str,
+    rank: bool,
+    ai: AiOption,
+) -> anyhow::Result<()> {
     let lang = parse_lang(lang)?;
     let container = ServiceContainer::bootstrap().await;
     let mut inv = container.discover(&project, lang).await?;
     if rank {
-        if container.provider_pool().is_some() {
-            inv = container.rank(inv).await?;
-        } else {
-            eprintln!(
-                "warning: --rank requested but HF_PROVIDER_API_KEY not set; using heuristic scores only"
-            );
+        let (ranked, note) = rank_inventory(&container, inv, ai).await?;
+        inv = ranked;
+        if let Some(note) = note {
+            eprintln!("{note}");
         }
     }
     println!("{}", serde_json::to_string_pretty(&inv)?);
     Ok(())
+}
+
+/// Apply `--rank` under an [`AiOption`], returning the inventory and an optional
+/// operator note.
+///
+/// One word means one thing on every command that takes it: `off` never calls a
+/// model even when one is configured, `require` turns an unavailable or failing
+/// model into an error, and `auto` keeps the heuristic scores and says so. The
+/// last case matters because a configured-but-unreachable provider previously
+/// failed the whole command, which is not what "use the model if you can"
+/// should do.
+#[cfg(not(feature = "semgrep-enrichment"))]
+async fn rank_inventory(
+    container: &ServiceContainer,
+    inventory: hf_service::TargetInventory,
+    ai: AiOption,
+) -> anyhow::Result<(hf_service::TargetInventory, Option<String>)> {
+    if ai == AiOption::Off {
+        return Ok((
+            inventory,
+            Some("note: --ai off; ranking with heuristic scores only".to_owned()),
+        ));
+    }
+    if container.provider_pool().is_none() {
+        if ai == AiOption::Require {
+            anyhow::bail!(
+                "--ai require: LLM ranking was required but no provider is configured; \
+                 set HF_PROVIDER_API_KEY"
+            );
+        }
+        return Ok((
+            inventory,
+            Some(
+                "warning: --rank requested but HF_PROVIDER_API_KEY not set; \
+                 using heuristic scores only"
+                    .to_owned(),
+            ),
+        ));
+    }
+    match container.rank(inventory.clone()).await {
+        Ok(ranked) => Ok((ranked, None)),
+        Err(error) if ai == AiOption::Require => Err(anyhow::anyhow!(
+            "--ai require: LLM ranking was required but the model call failed: {error}"
+        )),
+        Err(error) => Ok((
+            inventory,
+            Some(format!(
+                "warning: LLM ranking failed ({error}); using heuristic scores only"
+            )),
+        )),
+    }
 }
 
 #[cfg(feature = "semgrep-enrichment")]
@@ -1147,6 +1233,7 @@ async fn cmd_discover(
     project: PathBuf,
     lang: &str,
     rank: bool,
+    ai: AiOption,
     semgrep: bool,
 ) -> anyhow::Result<()> {
     let (language, container) =
@@ -1157,6 +1244,7 @@ async fn cmd_discover(
         project,
         language,
         rank,
+        ai,
         semgrep,
         &mut output,
         tokio::signal::ctrl_c(),
@@ -1429,6 +1517,7 @@ async fn run_discover_command<S, O, Signal, Delay, DelayFuture>(
     project: PathBuf,
     language: TargetLanguage,
     rank: bool,
+    ai: AiOption,
     semgrep: bool,
     output: &mut O,
     signal: Signal,
@@ -1457,8 +1546,27 @@ where
     #[cfg(not(feature = "native-analysis"))]
     let mut inventory = service.discover_targets(&project, language).await?;
     if rank {
-        if service.has_provider() {
-            inventory = service.rank_targets(inventory).await?;
+        // Same three meanings as the non-semgrep path; see `rank_inventory`.
+        if ai == AiOption::Off {
+            output.stderr_line("note: --ai off; ranking with heuristic scores only".to_owned());
+        } else if service.has_provider() {
+            match service.rank_targets(inventory.clone()).await {
+                Ok(ranked) => inventory = ranked,
+                Err(error) if ai == AiOption::Require => {
+                    anyhow::bail!(
+                        "--ai require: LLM ranking was required but the model call \
+                         failed: {error}"
+                    );
+                }
+                Err(error) => output.stderr_line(format!(
+                    "warning: LLM ranking failed ({error}); using heuristic scores only"
+                )),
+            }
+        } else if ai == AiOption::Require {
+            anyhow::bail!(
+                "--ai require: LLM ranking was required but no provider is configured; \
+                 set HF_PROVIDER_API_KEY"
+            );
         } else {
             output.stderr_line(
                 "warning: --rank requested but HF_PROVIDER_API_KEY not set; using heuristic scores only"
@@ -1488,6 +1596,7 @@ async fn cmd_harness(
     engine: &str,
     lang: &str,
     draft_only: bool,
+    ai: AiOption,
     repair: usize,
     refine: bool,
     promote: bool,
@@ -1545,10 +1654,26 @@ async fn cmd_harness(
     }
 
     let draft = container
-        .harness_draft(&project, target, engine, lang)
+        .harness_draft_with_policy(&project, target, engine, lang, ai.into())
         .await?;
     println!("--- Harness draft ---");
     println!("{}", draft.source);
+    // Say which generator answered. Under `auto` a provider outage silently
+    // substitutes the template, and the two are materially different: the
+    // template writes a signature-driven call and nothing else.
+    match draft.generator {
+        hf_service::DraftGenerator::Llm => println!("generator: llm"),
+        hf_service::DraftGenerator::Heuristic if ai == AiOption::Off => {
+            println!("generator: heuristic (--ai off)");
+        }
+        hf_service::DraftGenerator::Heuristic => {
+            println!("generator: heuristic");
+            eprintln!(
+                "note: no model wrote this harness (no provider configured, or the call \
+                 failed); pass --ai require to make that an error"
+            );
+        }
+    }
     if draft_only {
         return Ok(());
     }
@@ -2712,6 +2837,7 @@ async fn main() -> anyhow::Result<()> {
             project,
             lang,
             rank,
+            ai,
             #[cfg(feature = "semgrep-enrichment")]
             semgrep,
         } => {
@@ -2719,6 +2845,7 @@ async fn main() -> anyhow::Result<()> {
                 project,
                 &lang,
                 rank,
+                ai,
                 #[cfg(feature = "semgrep-enrichment")]
                 semgrep,
             )
@@ -2730,12 +2857,13 @@ async fn main() -> anyhow::Result<()> {
             engine,
             lang,
             draft_only,
+            ai,
             repair,
             refine,
             promote,
         } => {
             cmd_harness(
-                project, &target, &engine, &lang, draft_only, repair, refine, promote,
+                project, &target, &engine, &lang, draft_only, ai, repair, refine, promote,
             )
             .await?;
         }
@@ -3944,6 +4072,7 @@ mod semgrep_cli_tests {
             PathBuf::from("/tmp/project"),
             TargetLanguage::C,
             false,
+            super::AiOption::Auto,
             false,
             &mut output,
             pending_signal(),
@@ -3968,6 +4097,7 @@ mod semgrep_cli_tests {
             PathBuf::from("/tmp/project"),
             TargetLanguage::C,
             true,
+            super::AiOption::Auto,
             false,
             &mut output,
             pending_signal(),
@@ -4004,6 +4134,7 @@ mod semgrep_cli_tests {
             PathBuf::from("/tmp/project"),
             TargetLanguage::C,
             true,
+            super::AiOption::Auto,
             true,
             &mut output,
             pending_signal(),
@@ -4036,6 +4167,7 @@ mod semgrep_cli_tests {
             PathBuf::from("/tmp/project"),
             TargetLanguage::Rust,
             true,
+            super::AiOption::Auto,
             true,
             &mut output,
             pending_signal(),
@@ -4063,6 +4195,7 @@ mod semgrep_cli_tests {
             PathBuf::from("/tmp/project"),
             TargetLanguage::Cpp,
             false,
+            super::AiOption::Auto,
             true,
             &mut output,
             pending_signal(),
@@ -4097,6 +4230,7 @@ mod semgrep_cli_tests {
                 PathBuf::from("/tmp/project"),
                 TargetLanguage::C,
                 false,
+                super::AiOption::Auto,
                 true,
                 &mut output,
                 signal,
@@ -4147,6 +4281,7 @@ mod semgrep_cli_tests {
                 PathBuf::from("/tmp/project"),
                 TargetLanguage::C,
                 false,
+                super::AiOption::Auto,
                 true,
                 &mut output,
                 signal,

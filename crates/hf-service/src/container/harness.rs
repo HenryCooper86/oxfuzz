@@ -34,8 +34,9 @@ use super::workspace::{
     prepare_configured_workspace_root, workspace_dir, workspace_relative_record,
 };
 use super::{
-    heuristic_draft, require_fuzzing_harness_engine, resolve_internal_run, CompileOutcome,
-    HarnessGenOutcome, LlmProviderBridge, SeedEntry, ServiceContainer, SMOKE_FUZZ_SECS,
+    heuristic_draft, require_fuzzing_harness_engine, resolve_internal_run, AiPolicy,
+    CompileOutcome, HarnessGenOutcome, LlmProviderBridge, SeedEntry, ServiceContainer,
+    SMOKE_FUZZ_SECS,
 };
 
 /// The project's compile context for prompt rendering, or `None` when it ships
@@ -331,6 +332,31 @@ impl ServiceContainer {
         engine: EngineKind,
         lang: TargetLanguage,
     ) -> Result<HarnessDraft, ClassifiedError> {
+        self.harness_draft_with_policy(project, target, engine, lang, AiPolicy::Auto)
+            .await
+    }
+
+    /// Draft a harness under an explicit [`AiPolicy`].
+    ///
+    /// The generator is an operator decision, not an accident of whether a key
+    /// happens to be exported: the model and the template produce materially
+    /// different harnesses, so a caller can demand one, refuse the other, or
+    /// accept either. The draft records which one answered
+    /// ([`HarnessDraft::generator`]).
+    ///
+    /// # Errors
+    /// Returns a validation error for an engine/language that cannot carry a
+    /// generated harness, and -- under [`AiPolicy::Require`] -- a provider error
+    /// when no provider is configured or the model call fails, rather than
+    /// substituting a template harness the caller said it did not want.
+    pub async fn harness_draft_with_policy(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+        lang: TargetLanguage,
+        policy: AiPolicy,
+    ) -> Result<HarnessDraft, ClassifiedError> {
         require_fuzzing_harness_engine(engine, lang)?;
         self.authorize_recorded(Action::DraftHarness, "harness_draft", Some(project))
             .await?;
@@ -339,7 +365,22 @@ impl ServiceContainer {
             .ok_or_else(|| ClassifiedError::Validation(format!("target '{target}' not found")))?
             .clone();
 
-        if let Some(pool) = self.provider_pool() {
+        if policy == AiPolicy::Off {
+            return Ok(heuristic_draft(&candidate, engine));
+        }
+        let Some(pool) = self.provider_pool() else {
+            if policy == AiPolicy::Require {
+                return Err(ClassifiedError::Provider(
+                    "an AI harness was required but no LLM provider is configured; \
+                     set HF_PROVIDER_API_KEY, or pass the heuristic generator instead"
+                        .to_owned(),
+                ));
+            }
+            // No LLM configured: generate a heuristic draft so the GUI still
+            // produces something useful.
+            return Ok(heuristic_draft(&candidate, engine));
+        };
+        {
             let provider = LlmProviderBridge::new(pool)
                 .with_diagnostics(Arc::clone(&self.diagnostics), "harness_draft");
             // Augment the prompt with related project context when this
@@ -357,10 +398,15 @@ impl ServiceContainer {
             .await
             {
                 Ok(draft) => Ok(draft),
-                // The LLM is configured but the call failed (provider down, auth,
-                // bad model, network). Degrade to the heuristic draft so the
-                // pipeline still produces a usable harness instead of dead-ending
-                // on a red error; the warning makes the LLM failure visible.
+                // The LLM is configured but the call failed (provider down,
+                // auth, bad model, network). Under `Auto` degrade to the
+                // heuristic draft so the pipeline still produces a usable
+                // harness; under `Require` the caller said a template is not an
+                // acceptable substitute, so the failure surfaces instead of
+                // being quietly answered by a different generator.
+                Err(e) if policy == AiPolicy::Require => Err(ClassifiedError::Provider(format!(
+                    "an AI harness was required but the model call failed: {e}"
+                ))),
                 Err(e) => {
                     tracing::warn!(
                         "LLM harness draft for '{target}' failed ({e}); \
@@ -369,10 +415,6 @@ impl ServiceContainer {
                     Ok(heuristic_draft(&candidate, engine))
                 }
             }
-        } else {
-            // No LLM configured: generate a heuristic draft so the GUI still
-            // produces something useful.
-            Ok(heuristic_draft(&candidate, engine))
         }
     }
 

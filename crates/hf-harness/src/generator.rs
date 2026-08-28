@@ -59,6 +59,7 @@ pub async fn draft_with_context(
         source,
         rationale: String::new(),
         build_cmd: build_command(engine, target.language, &format!("fuzz_{}", target.symbol)),
+        generator: hf_core::harness::DraftGenerator::Llm,
     })
 }
 
@@ -98,6 +99,7 @@ pub async fn repair(
         source,
         rationale: "repair".to_owned(),
         build_cmd: build_command(engine, target.language, &format!("fuzz_{}", target.symbol)),
+        generator: hf_core::harness::DraftGenerator::Llm,
     })
 }
 
@@ -127,6 +129,7 @@ pub async fn refine(
         source,
         rationale: "refine".to_owned(),
         build_cmd: build_command(engine, target.language, &format!("fuzz_{}", target.symbol)),
+        generator: hf_core::harness::DraftGenerator::Llm,
     })
 }
 

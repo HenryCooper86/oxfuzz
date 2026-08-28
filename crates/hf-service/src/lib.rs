@@ -92,6 +92,7 @@ pub use hf_agent::{
 pub use hf_core::crash::Crash;
 pub use hf_core::engine::{EngineCapabilities, EngineKind, FuzzProgress};
 pub use hf_core::error::ClassifiedError;
+pub use hf_core::harness::DraftGenerator;
 pub use hf_core::provider::ProviderStatus;
 pub use hf_core::retired_engine::{RETIRED_ENGINE_ID, RETIRED_ENGINE_IDS};
 pub use hf_core::runtime::{
@@ -147,6 +148,7 @@ pub use concolic::{
     ConcolicStopReason, CONCOLIC_SCHEMA_VERSION,
 };
 #[cfg(feature = "native-analysis")]
+pub use container::AiPolicy;
 pub use container::AnalyzedInventory;
 pub use container::{
     build_sandbox_image, copy_project_sources, generate_target_seeds, initialize_workspace_root,

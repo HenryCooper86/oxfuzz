@@ -79,4 +79,23 @@ pub struct HarnessDraft {
     /// presentation layer shows the same command instead of re-deriving it (and
     /// drifting from) the harness naming convention.
     pub build_cmd: BuildCommand,
+    /// Which generator produced [`HarnessDraft::source`].
+    ///
+    /// Recorded rather than inferred: the two generators produce materially
+    /// different harnesses, and an operator who asked for the model's needs to
+    /// know when a fallback answered instead. Defaults so drafts stored before
+    /// this field existed still decode.
+    #[serde(default)]
+    pub generator: DraftGenerator,
+}
+
+/// Which generator wrote a harness draft.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DraftGenerator {
+    /// An LLM wrote it.
+    Llm,
+    /// The built-in template wrote it: signature-driven, no model involved.
+    #[default]
+    Heuristic,
 }
