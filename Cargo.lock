@@ -2671,8 +2671,6 @@ version = "0.2.1"
 dependencies = [
  "async-trait",
  "chardetng",
- "chrono",
- "encoding_rs",
  "globset",
  "grep-matcher",
  "grep-regex",
@@ -2685,9 +2683,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
- "toml 0.8.2",
  "tracing",
- "uuid",
 ]
 
 [[package]]

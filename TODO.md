@@ -239,16 +239,25 @@ dead-code items: module-path uses, grouped and glob re-exports, and a
   libFuzzer's documented "the first element is the harness binary path itself"
   and silently requiring an `env` binary in the image. Plan:
   `.claude/plans/engine-env-single-home-20260828.md`.
+- [x] hf-tools' `activation`, `dynamic`, `formatter`, `parser`, and `taxonomy`
+  modules are deleted -- 3,776 lines, of which ~1,780 were their own unit tests,
+  the only callers. The 2026-07-19 audit called wire-or-delete an owner
+  decision and recommended retention because the modules were exported and
+  self-tested; that is what made them look maintained, not evidence anything
+  needed them. Re-verified unreachable before removal under every feature flag
+  (there are none in `hf-tools` or `hf-agent`). Two were dead for reasons
+  retention could not fix: `parser` implements a `<tool_call>` XML grammar the
+  agent never emits (the prompt asks for one JSON object, decoded with
+  `serde_json`), and `taxonomy` parses a TOML tree that exists nowhere in the
+  repo. The seven live modules are untouched;
+  `docs/standards/TOOL_CALL_PROTOCOL.md` 2 and 5, which promised the removed
+  code as retained infrastructure, were corrected with it.
 
 ### Open
-- [ ] hf-tools' `activation`, `dynamic`, `formatter`, `parser`, and `taxonomy`
-  modules (~3.8k LOC) are unreachable under every feature. The 2026-07-19
-  dead-framework audit examined four of them, recorded them as "RETAINED
-  (undocumented)", and called wire-or-delete an owner decision; the `parser`
-  module it did not examine is dead for a concrete reason -- the agent uses its
-  own JSON step protocol in the system prompt, not the `<tool_call>` XML syntax
-  `parse_tool_calls` reads, so `PROMPT_TOOL_CALL_SYNTAX` reaches no prompt.
-  Still awaiting that decision.
+
+Nothing. The five items this audit opened on 2026-08-27 are all resolved above,
+including the hf-tools wire-or-delete decision the 2026-07-19 audit had left
+standing.
 
 ## Audit backlog (refreshed 2026-07-17)
 

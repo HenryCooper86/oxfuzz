@@ -1,8 +1,9 @@
 //! `ToolIndex`: compact tool entries for LLM context injection.
 //!
-//! The index contains only name, description, and category — enough for the
-//! LLM to decide whether to call `ToolSearch` for the full definition.
-//! This design reduces context window consumption by 60-90%.
+//! The index contains only name, description, and category, so a registry can
+//! be summarized without spending context on every parameter schema. The
+//! shipped agent advertises its small inspection surface in full instead; the
+//! index is for an owner whose registry outgrows one prompt.
 
 use std::collections::HashMap;
 

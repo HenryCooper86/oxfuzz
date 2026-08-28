@@ -1,10 +1,11 @@
 //! Tool traits and associated types.
 //!
-//! Design reference: tools-design.md
+//! Standard: `docs/standards/TOOL_CALL_PROTOCOL.md`.
 //!
-//! The tool system supports four types: built-in, MCP, custom, and dynamic.
-//! Tools are lazily loaded via `ToolIndex` + `ToolSearch` to minimize
-//! context window consumption (60-90% token reduction).
+//! A registry starts empty and its owner registers each executable tool
+//! explicitly. The shipped agent advertises its inspection tools in full and
+//! exposes no discovery meta-tool, so a definition reaches the model with the
+//! prompt rather than being fetched during a turn.
 
 use std::sync::Arc;
 
@@ -223,12 +224,13 @@ pub trait Tool: Send + Sync {
     }
 }
 
-/// Registry managing all available tools with lazy loading support.
+/// Registry managing all available tools.
 ///
-/// At session start, only the `ToolIndex` (name + description) is injected
-/// into the LLM context. Full definitions are loaded on demand via
-/// `ToolSearch`, and active tools are tracked in a session-scoped
-/// `ToolActivationSet` with LRU eviction.
+/// [`ToolRegistry::tool_index`] returns the compact name-plus-description view
+/// and [`ToolRegistry::search`] the full definitions. The shipped agent
+/// advertises its complete inspection surface up front and calls neither during
+/// a turn; both stay on the trait for an owner that registers a larger surface
+/// than one prompt can carry.
 #[async_trait]
 pub trait ToolRegistry: Send + Sync {
     /// Get the compact tool index for context injection.
