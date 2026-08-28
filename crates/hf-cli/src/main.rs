@@ -483,6 +483,34 @@ enum AutomotiveOp {
         #[arg(long, default_value_t = 50)]
         limit: u32,
     },
+    /// Read one retained automotive operation by its service-owned id.
+    Operation {
+        project: PathBuf,
+        #[arg(long)]
+        id: uuid::Uuid,
+    },
+    /// Promote one verified operation artifact into the protocol-state corpus.
+    ///
+    /// The typed promotion request (project binding, state signature) is read
+    /// from `--request`; `--input-artifact` or `--output-artifact` selects the
+    /// artifact the operation's evidence names.
+    PromoteState {
+        project: PathBuf,
+        #[arg(long)]
+        operation: uuid::Uuid,
+        #[arg(long)]
+        request: PathBuf,
+        #[arg(long, conflicts_with = "output_artifact")]
+        input_artifact: Option<String>,
+        #[arg(long)]
+        output_artifact: Option<String>,
+    },
+    /// List promoted protocol-state corpus entries for a project.
+    StateCorpus {
+        project: PathBuf,
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+    },
     /// Compose an evidence-backed automotive campaign report.
     Report {
         project: PathBuf,
@@ -2273,6 +2301,45 @@ fn parse_virtual_replay_plan(encoded: &str) -> anyhow::Result<hf_service::automo
     Ok(plan)
 }
 
+/// The two protocol-state commands that read a structured request from disk.
+///
+/// Behind a function so the parse and dispatch stay together: both subcommands
+/// shell out to service calls that are exercised end to end by hf-service's
+/// promotion tests, so the CLI adds only file reading and selection.
+#[cfg(feature = "automotive-scapy")]
+/// Build the typed promotion request the service takes from the CLI's inputs.
+///
+/// Project identity, the source operation, and the artifact selector come from
+/// the flags and supersede whatever the request file carries, so each of the
+/// three has exactly one home on the command line.
+fn automotive_promotion_request(
+    project: PathBuf,
+    operation: uuid::Uuid,
+    request: &std::path::Path,
+    input_artifact: Option<String>,
+    output_artifact: Option<String>,
+) -> anyhow::Result<hf_service::automotive::AutomotiveStatePromotionRequest> {
+    use hf_service::automotive::{AutomotiveStateArtifactSource, AutomotiveStatePromotionRequest};
+
+    let artifact = match (input_artifact, output_artifact) {
+        (Some(artifact_id), None) => AutomotiveStateArtifactSource::Input { artifact_id },
+        (None, Some(artifact_id)) => AutomotiveStateArtifactSource::Output { artifact_id },
+        _ => anyhow::bail!("select exactly one of --input-artifact / --output-artifact"),
+    };
+    let source = std::fs::read_to_string(request).map_err(|error| {
+        anyhow::anyhow!(
+            "read automotive promotion request {}: {error}",
+            request.display()
+        )
+    })?;
+    let mut parsed: AutomotiveStatePromotionRequest = serde_json::from_str(&source)
+        .map_err(|error| anyhow::anyhow!("invalid automotive promotion request: {error}"))?;
+    parsed.project_root = project;
+    parsed.source_operation_id = operation;
+    parsed.artifact = artifact;
+    Ok(parsed)
+}
+
 #[cfg(feature = "automotive-scapy")]
 async fn cmd_automotive(op: AutomotiveOp) -> anyhow::Result<()> {
     use hf_service::automotive::{
@@ -2462,6 +2529,46 @@ async fn cmd_automotive(op: AutomotiveOp) -> anyhow::Result<()> {
                 .list_automotive_operations(&project, limit)
                 .await?;
             println!("{}", serde_json::to_string_pretty(&operations)?);
+        }
+        AutomotiveOp::Operation { project, id } => {
+            use hf_service::automotive::AutomotiveOperationSummary;
+            let container = ServiceContainer::bootstrap().await;
+            let operation: AutomotiveOperationSummary =
+                container
+                    .automotive_operation(id)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("no retained automotive operation {id}"))?;
+            if std::path::Path::new(&operation.project_root) != project.canonicalize()?.as_path() {
+                anyhow::bail!("retained automotive operation {id} belongs to another project");
+            }
+            println!("{}", serde_json::to_string_pretty(&operation)?);
+        }
+        AutomotiveOp::StateCorpus { project, limit } => {
+            let container = ServiceContainer::bootstrap().await;
+            let entries = container
+                .list_automotive_state_corpus(&project, limit)
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&entries)?);
+        }
+        AutomotiveOp::PromoteState {
+            project,
+            operation,
+            request,
+            input_artifact,
+            output_artifact,
+        } => {
+            let promotion = automotive_promotion_request(
+                project,
+                operation,
+                &request,
+                input_artifact,
+                output_artifact,
+            )?;
+            let container = ServiceContainer::bootstrap().await;
+            let entry = container
+                .promote_automotive_state_artifact(promotion)
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&entry)?);
         }
         AutomotiveOp::Report {
             project,
@@ -2779,6 +2886,202 @@ mod automotive_tests {
         assert!(error.to_string().contains("virtual_can"));
 
         assert!(parse_virtual_replay_plan("{not-json").is_err());
+    }
+
+    fn promotion_request_json() -> String {
+        // Shape only: the parser validates the request the same way it
+        // validates a replay plan file.
+        r#"{
+            "project_root": "/tmp/project",
+            "source_operation_id": "00000000-0000-4000-8000-000000000001",
+            "state_signature": {
+                "protocol": "uds",
+                "digest": "660296f1a2b63c7e341b0c23e414cc8c38e712ee0614f1fabc08870562b706fe",
+                "observations": {"session": "extended"}
+            },
+            "artifact": {"location": "output", "artifact_id": "canonical-transcript.json"}
+        }"#
+        .to_owned()
+    }
+
+    #[test]
+    fn cli_promote_state_parses_a_typed_request_from_a_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let signature = directory.path().join("signature.json");
+        std::fs::write(&signature, promotion_request_json()).unwrap();
+
+        let cli = Cli::try_parse_from([
+            "oxfuzz",
+            "automotive",
+            "promote-state",
+            "/tmp/project",
+            "--operation",
+            "00000000-0000-4000-8000-000000000001",
+            "--request",
+            signature.to_str().unwrap(),
+            "--output-artifact",
+            "canonical-transcript.json",
+        ])
+        .unwrap();
+
+        let Commands::Automotive {
+            op:
+                AutomotiveOp::PromoteState {
+                    project,
+                    operation,
+                    request,
+                    output_artifact,
+                    input_artifact,
+                },
+        } = cli.command
+        else {
+            panic!("expected the automotive promote-state command");
+        };
+        assert_eq!(project, std::path::PathBuf::from("/tmp/project"));
+        assert_eq!(
+            operation,
+            uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap()
+        );
+        assert_eq!(request, signature);
+        assert_eq!(
+            output_artifact.as_deref(),
+            Some("canonical-transcript.json")
+        );
+        assert_eq!(input_artifact, None);
+
+        let promotion = super::automotive_promotion_request(
+            project,
+            operation,
+            &request,
+            input_artifact,
+            output_artifact,
+        )
+        .expect("a well-formed request file builds a promotion");
+        assert_eq!(
+            promotion.project_root,
+            std::path::PathBuf::from("/tmp/project")
+        );
+        assert_eq!(
+            promotion.source_operation_id,
+            uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap()
+        );
+        assert_eq!(
+            promotion.artifact,
+            hf_service::automotive::AutomotiveStateArtifactSource::Output {
+                artifact_id: "canonical-transcript.json".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn cli_promote_state_reports_an_unreadable_or_malformed_request_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("absent.json");
+        let error = super::automotive_promotion_request(
+            std::path::PathBuf::from("/tmp/project"),
+            uuid::Uuid::nil(),
+            &missing,
+            None,
+            Some("canonical-transcript.json".to_owned()),
+        )
+        .expect_err("an absent request file is an error");
+        assert!(
+            error
+                .to_string()
+                .contains("read automotive promotion request"),
+            "unexpected error: {error}"
+        );
+
+        let broken = directory.path().join("broken.json");
+        std::fs::write(&broken, "{not-json").unwrap();
+        let error = super::automotive_promotion_request(
+            std::path::PathBuf::from("/tmp/project"),
+            uuid::Uuid::nil(),
+            &broken,
+            None,
+            Some("canonical-transcript.json".to_owned()),
+        )
+        .expect_err("malformed JSON is an error");
+        assert!(
+            error
+                .to_string()
+                .contains("invalid automotive promotion request"),
+            "unexpected error: {error}"
+        );
+
+        let error = super::automotive_promotion_request(
+            std::path::PathBuf::from("/tmp/project"),
+            uuid::Uuid::nil(),
+            &broken,
+            None,
+            None,
+        )
+        .expect_err("neither artifact selector is an error");
+        assert!(
+            error.to_string().contains("exactly one of"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn cli_promote_state_rejects_two_artifact_selectors_at_once() {
+        let parsed = Cli::try_parse_from([
+            "oxfuzz",
+            "automotive",
+            "promote-state",
+            "/tmp/project",
+            "--operation",
+            "00000000-0000-4000-8000-000000000001",
+            "--request",
+            "does-not-exist.json",
+            "--input-artifact",
+            "capture.pcap",
+            "--output-artifact",
+            "canonical-transcript.json",
+        ]);
+        assert!(parsed.is_err(), "input and output are mutually exclusive");
+    }
+
+    #[test]
+    fn cli_lists_the_state_corpus_and_reads_one_operation() {
+        let list = Cli::try_parse_from([
+            "oxfuzz",
+            "automotive",
+            "state-corpus",
+            "/tmp/project",
+            "--limit",
+            "25",
+        ])
+        .unwrap();
+        let Commands::Automotive {
+            op: AutomotiveOp::StateCorpus { project, limit },
+        } = list.command
+        else {
+            panic!("expected the automotive state-corpus command");
+        };
+        assert_eq!(project, std::path::PathBuf::from("/tmp/project"));
+        assert_eq!(limit, 25);
+
+        let one = Cli::try_parse_from([
+            "oxfuzz",
+            "automotive",
+            "operation",
+            "/tmp/project",
+            "--id",
+            "00000000-0000-4000-8000-000000000001",
+        ])
+        .unwrap();
+        let Commands::Automotive {
+            op: AutomotiveOp::Operation { project, id },
+        } = one.command
+        else {
+            panic!("expected the automotive operation command");
+        };
+        assert_eq!(project, std::path::PathBuf::from("/tmp/project"));
+        assert_eq!(
+            id,
+            uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap()
+        );
     }
 
     #[test]
