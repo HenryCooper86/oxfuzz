@@ -1651,7 +1651,8 @@ pub struct EffectiveAutoRevert {
 /// decision anyone made: the model and the template produce materially
 /// different harnesses, and a caller who wanted one should not silently receive
 /// the other.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AiPolicy {
     /// Use the LLM when one is configured and reachable; fall back otherwise.
     #[default]

@@ -259,7 +259,12 @@ pub async fn open_file_dialog(
     Ok(result.map(|f| f.to_string()))
 }
 
-/// Draft a harness for a target using the LLM (or heuristic fallback).
+/// Draft a harness for a target.
+///
+/// `ai` selects the generator (`auto` / `require` / `off`); omitting it means
+/// `auto`, so a caller written before the argument keeps its behaviour. The
+/// response carries `generator`, because under `auto` a provider outage
+/// substitutes the template and the two harnesses are materially different.
 #[tauri::command]
 pub async fn harness_draft(
     state: tauri::State<'_, crate::state::AppState>,
@@ -267,6 +272,7 @@ pub async fn harness_draft(
     target: String,
     engine: String,
     lang: Option<String>,
+    ai: Option<hf_service::AiPolicy>,
 ) -> Result<serde_json::Value, String> {
     let engine_kind = parse_engine(&engine)?;
     let lang = match lang.as_deref() {
@@ -275,7 +281,7 @@ pub async fn harness_draft(
     };
     let draft = state
         .container
-        .harness_draft(&project, &target, engine_kind, lang)
+        .harness_draft_with_policy(&project, &target, engine_kind, lang, ai.unwrap_or_default())
         .await
         .map_err(|e| e.to_string())?;
     Ok(serde_json::json!({
@@ -286,6 +292,9 @@ pub async fn harness_draft(
             "compiler": draft.build_cmd.compiler,
             "args": draft.build_cmd.args,
         },
+        // Which generator answered: under `auto` a provider outage silently
+        // substitutes the template, and the two are materially different.
+        "generator": draft.generator,
         "status": "Draft",
     }))
 }

@@ -21,12 +21,20 @@ import { FuzzingPolicyNotice } from "../components/FuzzingPolicyNotice";
 import { TargetSelectionRepairNotice } from "../components/TargetSelectionRepairNotice";
 import { projectStorageKey } from "../lib/projectState";
 
+/** Which generator wrote a draft. Under `auto` a provider outage substitutes
+ *  the template, and the two harnesses are materially different. */
+type DraftGenerator = "llm" | "heuristic";
+
+/** Which generator the backend may use. Mirrors `hf_service::AiPolicy`. */
+type AiPolicy = "auto" | "require" | "off";
+
 interface HarnessResult {
   source: string;
   target: string;
   engine: string;
   build_cmd: { compiler: string; args: string[] };
   status: string;
+  generator?: DraftGenerator;
 }
 
 interface CompileResult {
@@ -107,6 +115,7 @@ export function HarnessView({
   const project = embedded ? activeProject : localProject;
   const [inventory, setInventory] = useState<TargetInventory | null>(null);
   const [harness, setHarness] = useState<HarnessResult | null>(null);
+  const [aiPolicy, setAiPolicy] = useState<AiPolicy>("auto");
   const [prevSource, setPrevSource] = useState<string | null>(null);
   const [showDiff, setShowDiff] = useState(false);
   const [compileResult, setCompileResult] = useState<CompileResult | null>(null);
@@ -212,7 +221,7 @@ export function HarnessView({
     setShowDiff(false);
     try {
       const result = await getTransport().invoke<HarnessResult>("harness_draft", {
-        project, target, engine, lang,
+        project, target, engine, lang, ai: aiPolicy,
       });
       setHarness(result);
       // Keep the prior revision so the user can see what regeneration changed.
@@ -472,6 +481,18 @@ export function HarnessView({
               options={engineOptions}
             />
           </div>
+          <div className="flex flex-col gap-1 w-36">
+            <label className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>{t("harness.generator")}</label>
+            <Select
+              value={aiPolicy}
+              onChange={(v) => setAiPolicy(v as AiPolicy)}
+              options={[
+                { value: "auto", label: t("harness.generatorAuto") },
+                { value: "require", label: t("harness.generatorRequire") },
+                { value: "off", label: t("harness.generatorOff") },
+              ]}
+            />
+          </div>
           <div className="flex flex-col gap-1 w-32">
             <label className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>{t("harness.language")}</label>
             <Select
@@ -524,6 +545,17 @@ export function HarnessView({
           >
             {harness && (
               <div className="mt-2">
+                {/* Which generator actually answered. Under `auto` a provider
+                    outage substitutes the template, and the template writes a
+                    signature-driven call and nothing else -- so a reader must
+                    not have to guess which one they are looking at. */}
+                {harness.generator && (
+                  <div className="mb-1.5 text-11px text-text-muted">
+                    {harness.generator === "llm"
+                      ? t("harness.wroteByLlm")
+                      : t("harness.wroteByHeuristic")}
+                  </div>
+                )}
                 {prevSource && (
                   <div className="flex items-center justify-end mb-1.5">
                     <Button
