@@ -19,12 +19,65 @@ use std::path::PathBuf;
 /// Mirrors [`hf_service::AiPolicy`]: the CLI parses, the service decides.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 enum AiOption {
-    /// Use the model when one is configured and reachable, else the template.
+    /// Use the model where it is available; carry on without it otherwise.
     Auto,
-    /// Require the model: no provider, or a failed call, is an error.
+    /// Require the model: an unavailable one is an error, not a silent
+    /// downgrade to whatever answers instead.
     Require,
     /// Never call a model, even when one is configured.
     Off,
+}
+
+/// Apply an [`AiOption`] to a container for a whole multi-step flow.
+///
+/// `campaign` and `ci` are composite, and reach a model at several steps:
+/// `campaign` at seed generation, the run dictionary, triage bug reports, and
+/// the coverage-plateau harness refine; `ci` at the run dictionary and triage
+/// bug reports. Threading a policy into each is how one gets forgotten -- the
+/// dictionary augmentation is the easy one to miss, since it fires inside every
+/// fuzz run rather than at a step anyone names. So `off` detaches the provider
+/// instead: every one of those sites already checks for a provider and has a
+/// no-model path, which makes "use no model" exact rather than aspirational.
+///
+/// `require` is a preflight, and only a preflight. A campaign can run for an
+/// hour, so it is worth refusing to start one whose enrichment cannot work --
+/// but the guarantee stops there. Each of those steps swallows a mid-flow
+/// provider failure with a warning, by design (a model outage should not
+/// discard a fuzzing campaign), so `require` cannot promise the model was
+/// actually consulted. It promises the run did not begin with the model
+/// already known to be unusable: none configured, or every one frozen by
+/// earlier failures. `off` is the side of this flag that is exact.
+///
+/// # Errors
+/// Returns an error under `require` when no provider is configured, or when
+/// every configured provider is frozen.
+async fn apply_ai_policy(
+    container: ServiceContainer,
+    ai: AiOption,
+    what: &str,
+) -> anyhow::Result<ServiceContainer> {
+    match ai {
+        // Operation-local: the detached container has its own provider cell, so
+        // a running server keeps serving every other request with its model.
+        AiOption::Off => Ok(container.without_provider_pool()),
+        AiOption::Require => {
+            let Some(pool) = container.provider_pool() else {
+                anyhow::bail!(
+                    "--ai require: {what} was asked to use the model but no provider is \
+                     configured; set HF_PROVIDER_API_KEY"
+                );
+            };
+            let statuses = pool.provider_statuses().await;
+            if !statuses.is_empty() && statuses.iter().all(|status| status.is_frozen) {
+                anyhow::bail!(
+                    "--ai require: {what} was asked to use the model but every configured \
+                     provider is frozen after earlier failures"
+                );
+            }
+            Ok(container)
+        }
+        AiOption::Auto => Ok(container),
+    }
 }
 
 impl From<AiOption> for hf_service::AiPolicy {
@@ -154,6 +207,15 @@ enum Commands {
         /// Max run -> triage iterations.
         #[arg(long, default_value_t = 3)]
         iterations: usize,
+        /// How the campaign may use the model. It reaches one in four places:
+        /// seed generation, the run dictionary, triage bug reports, and the
+        /// coverage-plateau harness refine. (Target auto-pick is a
+        /// deterministic fit-score sort, not a model call.) `off` calls no
+        /// model at all; `require` refuses to start when none is configured or
+        /// all are frozen, but cannot promise a mid-run outage did not degrade
+        /// a step, since each one warns and continues by design.
+        #[arg(long, value_enum, default_value_t = AiOption::Auto)]
+        ai: AiOption,
     },
     /// Triage crashes from a run.
     Triage {
@@ -256,6 +318,14 @@ enum Commands {
         /// SARIF output path. Defaults to `oxfuzz.sarif`.
         #[arg(long, default_value = "oxfuzz.sarif")]
         sarif: PathBuf,
+        /// How the gate may use the model. It reaches one in two places: the
+        /// run dictionary and triage bug reports. (Its seeds are the heuristic
+        /// generator, not the model.) `off` calls no model at all; `require`
+        /// refuses to start when none is configured or all are frozen. `off` is
+        /// the exact side of this flag: a CI gate that must not spend tokens
+        /// wants it.
+        #[arg(long, value_enum, default_value_t = AiOption::Auto)]
+        ai: AiOption,
     },
     /// Export the latest run's crashes as SARIF (`GitHub` code scanning).
     Sarif {
@@ -2128,11 +2198,16 @@ async fn cmd_ci(
     lang: &str,
     duration: &str,
     sarif: &std::path::Path,
+    ai: AiOption,
 ) -> anyhow::Result<()> {
     let engine_kind = parse_engine(engine)?;
     let _lang = parse_lang(lang)?;
     let duration_secs = parse_duration(duration)?;
-    let container = ServiceContainer::bootstrap().await;
+    let container =
+        apply_ai_policy(ServiceContainer::bootstrap().await, ai, "this CI gate").await?;
+    if ai == AiOption::Off {
+        println!("[ci] --ai off: no model is called at any step of this gate.");
+    }
 
     println!("[ci] requiring a previously smoke-qualified and promoted harness for {target}...");
     println!("[ci] fuzzing {target} for {duration_secs}s...");
@@ -2292,10 +2367,15 @@ async fn cmd_campaign(
     lang: &str,
     duration_secs: u64,
     iterations: usize,
+    ai: AiOption,
 ) -> anyhow::Result<()> {
     let engine = parse_engine(engine)?;
     let lang = parse_lang(lang)?;
-    let container = ServiceContainer::bootstrap().await;
+    let container =
+        apply_ai_policy(ServiceContainer::bootstrap().await, ai, "this campaign").await?;
+    if ai == AiOption::Off {
+        println!("--ai off: no model is called at any step of this campaign.");
+    }
     println!("--- Running autonomous campaign ---");
     let outcome = container
         .run_campaign(&project, target, engine, lang, duration_secs, iterations)
@@ -2892,6 +2972,7 @@ async fn main() -> anyhow::Result<()> {
             lang,
             duration_secs,
             iterations,
+            ai,
         } => {
             cmd_campaign(
                 project,
@@ -2900,6 +2981,7 @@ async fn main() -> anyhow::Result<()> {
                 &lang,
                 duration_secs,
                 iterations,
+                ai,
             )
             .await?;
         }
@@ -2936,7 +3018,8 @@ async fn main() -> anyhow::Result<()> {
             lang,
             duration,
             sarif,
-        } => cmd_ci(project, &target, &engine, &lang, &duration, &sarif).await?,
+            ai,
+        } => cmd_ci(project, &target, &engine, &lang, &duration, &sarif, ai).await?,
         Commands::Regress { project, target } => cmd_regress(project, &target).await?,
         Commands::Ingest { project, file } => cmd_ingest(project, &file).await?,
         Commands::Sarif {
@@ -3819,6 +3902,77 @@ mod providers_tests {
         assert!(lines[0].contains("requests=12"));
         assert!(lines[1].contains("FROZEN") && lines[1].contains("anthropic-main"));
         assert!(lines[1].contains("invalid api key"));
+    }
+}
+
+#[cfg(test)]
+mod ai_option_tests {
+    use clap::Parser as _;
+
+    use super::{AiOption, Cli, Commands};
+
+    /// Every command that can reach a model takes the same flag, with the same
+    /// default, so one word does not mean three things.
+    #[test]
+    fn every_ai_capable_command_defaults_to_auto() {
+        let harness = Cli::try_parse_from([
+            "oxfuzz",
+            "harness",
+            "/p",
+            "--target",
+            "t",
+            "--engine",
+            "libfuzzer",
+        ])
+        .unwrap();
+        let Commands::Harness { ai, .. } = harness.command else {
+            panic!("expected harness");
+        };
+        assert_eq!(ai, AiOption::Auto);
+
+        let campaign = Cli::try_parse_from(["oxfuzz", "campaign", "/p"]).unwrap();
+        let Commands::Campaign { ai, .. } = campaign.command else {
+            panic!("expected campaign");
+        };
+        assert_eq!(ai, AiOption::Auto);
+
+        let ci = Cli::try_parse_from(["oxfuzz", "ci", "/p", "--target", "t"]).unwrap();
+        let Commands::Ci { ai, .. } = ci.command else {
+            panic!("expected ci");
+        };
+        assert_eq!(ai, AiOption::Auto);
+
+        let discover = Cli::try_parse_from(["oxfuzz", "discover", "/p", "--lang", "c"]).unwrap();
+        let Commands::Discover { ai, .. } = discover.command else {
+            panic!("expected discover");
+        };
+        assert_eq!(ai, AiOption::Auto);
+    }
+
+    #[test]
+    fn the_three_choices_parse_on_the_composite_commands() {
+        for (value, expected) in [
+            ("auto", AiOption::Auto),
+            ("require", AiOption::Require),
+            ("off", AiOption::Off),
+        ] {
+            let campaign =
+                Cli::try_parse_from(["oxfuzz", "campaign", "/p", "--ai", value]).unwrap();
+            let Commands::Campaign { ai, .. } = campaign.command else {
+                panic!("expected campaign");
+            };
+            assert_eq!(ai, expected, "campaign --ai {value}");
+
+            let ci = Cli::try_parse_from(["oxfuzz", "ci", "/p", "--target", "t", "--ai", value])
+                .unwrap();
+            let Commands::Ci { ai, .. } = ci.command else {
+                panic!("expected ci");
+            };
+            assert_eq!(ai, expected, "ci --ai {value}");
+        }
+
+        // A value outside the three is refused rather than silently defaulted.
+        assert!(Cli::try_parse_from(["oxfuzz", "campaign", "/p", "--ai", "maybe"]).is_err());
     }
 }
 

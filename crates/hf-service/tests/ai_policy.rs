@@ -106,3 +106,73 @@ async fn off_uses_the_template_and_the_default_is_auto() {
     assert_eq!(default.source, off.source);
     assert_eq!(AiPolicy::default(), AiPolicy::Auto);
 }
+
+/// Detaching the provider is operation-local.
+///
+/// The pool sits behind a cell shared by every clone so a Settings edit reaches
+/// all of them. Clearing it through that cell would disable the LLM for the
+/// whole process -- in a running server, for every other request too -- so the
+/// detached container must get its own cell and leave the original alone.
+#[tokio::test]
+async fn detaching_the_provider_does_not_disturb_the_original() {
+    common::install_managed_workspace("oxfuzz_ai_policy_detach_it");
+    let container = ServiceContainer::new(Arc::new(hf_runtime::adapter::StubRuntime), None)
+        .with_provider_pool(Arc::new(NullPool));
+    assert!(container.provider_pool().is_some());
+
+    let detached = container.without_provider_pool();
+    assert!(
+        detached.provider_pool().is_none(),
+        "the detached container must reach no model"
+    );
+    assert!(
+        container.provider_pool().is_some(),
+        "detaching must not disable the LLM for every other consumer"
+    );
+
+    // A clone of the original keeps seeing the pool: the shared cell is intact.
+    assert!(container.clone().provider_pool().is_some());
+}
+
+/// A provider pool that would panic if any operation actually called it, so the
+/// test proves detachment by construction rather than by observing an absence.
+struct NullPool;
+
+#[async_trait::async_trait]
+impl hf_core::provider::ProviderPool for NullPool {
+    async fn chat_completion(
+        &self,
+        _request: &hf_core::provider::ChatRequest,
+        _route: &hf_core::provider::RouteRequest,
+    ) -> Result<hf_core::provider::ChatResponse, hf_core::provider::ProviderError> {
+        panic!("a detached container must never reach the provider");
+    }
+
+    async fn chat_completion_stream(
+        &self,
+        _request: &hf_core::provider::ChatRequest,
+        _route: &hf_core::provider::RouteRequest,
+    ) -> Result<hf_core::provider::ChatStreamResponse, hf_core::provider::ProviderError> {
+        panic!("a detached container must never reach the provider");
+    }
+
+    fn report_error(
+        &self,
+        _provider_id: &hf_core::types::ProviderId,
+        _error: &hf_core::provider::ProviderError,
+    ) {
+    }
+
+    async fn provider_statuses(&self) -> Vec<hf_core::provider::ProviderStatus> {
+        Vec::new()
+    }
+
+    async fn freeze(&self, _provider_id: &hf_core::types::ProviderId, _reason: String) {}
+
+    async fn thaw(
+        &self,
+        _provider_id: &hf_core::types::ProviderId,
+    ) -> Result<(), hf_core::provider::ProviderError> {
+        Ok(())
+    }
+}
