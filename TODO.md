@@ -220,6 +220,25 @@ dead-code items: module-path uses, grouped and glob re-exports, and a
   not `Done`, because nothing but the fuzzer enforces its own self-limit, so
   reaching the backstop can also mean a wedged harness. Plan:
   `.claude/plans/timed-out-run-keeps-its-evidence-20260828.md`.
+- [x] `hf_engine::progress::is_finding_signal` no longer matches the bare
+  substring `asan`. The reproducing case is ASan's own benign warnings, which
+  the runtime prints on healthy runs and which name themselves only as `ASan`:
+  `WARNING: ASan is ignoring requested __asan_handle_no_return` (longjmp, deep
+  recursion) and the makecontext notice. Each was counted as a finding, and the
+  service floors a run's crash count at one whenever a finding line was seen, so
+  one warning reported a phantom crash for the campaign. Every real ASan error
+  names itself in full (`ERROR: AddressSanitizer: ...`,
+  `AddressSanitizer:DEADLYSIGNAL`), already covered by `addresssanitizer`, so
+  the short token added no detection. `ubsan` stays: UBSan is the reverse case,
+  its reports say `UBSan` and nothing else in the list would catch them.
+- [x] `cfg.env` has one home. Every engine adapter used to apply it twice --
+  an `env K=V ...` wrapper prepended by `build_run_args`, and the same map
+  passed through `ResourceLimits.env` by both callers, which the Docker adapter
+  renders as `--env=K=V`. The wrapper was the wrong home and not only
+  redundantly: it displaced the fuzzer program from argv[0], breaking
+  libFuzzer's documented "the first element is the harness binary path itself"
+  and silently requiring an `env` binary in the image. Plan:
+  `.claude/plans/engine-env-single-home-20260828.md`.
 
 ### Open
 - [ ] hf-tools' `activation`, `dynamic`, `formatter`, `parser`, and `taxonomy`
@@ -230,16 +249,6 @@ dead-code items: module-path uses, grouped and glob re-exports, and a
   own JSON step protocol in the system prompt, not the `<tool_call>` XML syntax
   `parse_tool_calls` reads, so `PROMPT_TOOL_CALL_SYNTAX` reaches no prompt.
   Still awaiting that decision.
-- [ ] `hf_engine::progress::is_finding_signal` matches the bare substring
-  `asan`, which `addresssanitizer` already covers for every real report. The
-  bare token adds only false-positive surface: any engine line quoting a path
-  or binary name containing "asan" is counted as a finding, and the service
-  floors a run's crash count at one whenever a finding line was seen. Not
-  changed without a case that reproduces it.
-- [ ] Every engine adapter applies `cfg.env` twice: `build_run_args` prepends an
-  `env K=V ...` command wrapper, and `EngineRunner` also passes the same map
-  through `ResourceLimits.env`, which the Docker adapter renders as `--env=K=V`.
-  Harmless today, but two homes for one meaning (AGENTS.md 2.18).
 
 ## Audit backlog (refreshed 2026-07-17)
 

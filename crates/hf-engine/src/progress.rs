@@ -86,10 +86,18 @@ pub fn line_reports_finding(line: &str) -> bool {
 /// and header text (`last uniq crash : none seen yet`), producing phantom
 /// crashes on every clean run. The `crash-` prefix is safe because a counter
 /// never contains it (`crashes` is followed by a space/colon, not `-`).
+///
+/// Nor on the bare substring "asan". `ASan` names itself in full on every error
+/// it reports (`ERROR: AddressSanitizer: ...`, `AddressSanitizer:DEADLYSIGNAL`),
+/// which `addresssanitizer` already covers, so the short token adds no
+/// detection -- only the benign warnings the runtime prints on healthy runs
+/// (`WARNING: ASan is ignoring requested __asan_handle_no_return`, the
+/// makecontext notice) and any path or library name containing "asan"
+/// (`libasan.so`). `ubsan` stays because `UBSan` is the reverse case: its reports
+/// say `UBSan`, and nothing else in this list would catch them.
 fn is_finding_signal(lower: &str) -> bool {
     lower.contains("crash-")
         || lower.contains("addresssanitizer")
-        || lower.contains("asan")
         || lower.contains("ubsan")
         || lower.contains("sigsegv")
         || lower.contains("segv")
