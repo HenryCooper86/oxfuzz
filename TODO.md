@@ -195,18 +195,20 @@ dead-code items: module-path uses, grouped and glob re-exports, and a
   hf-knowledge, `hf_core::memory`/`trust`, `hf_session::scheduling`/`tree`,
   `hf_knowledge::classifier`/`quality`, and seven stray public items. See
   `docs/design/dead-framework-audit-20260719.md` for the per-item record.
+- [x] The automotive protocol-state corpus can now be filled. Promotion was the
+  only writer of a state-corpus row and had no caller on any surface, so
+  `POST /automotive/report` and the lab coverage view -- both of which read that
+  corpus -- reported zero promoted state on every project, against a design
+  (`automotive-protocol-fuzzing-design.md` sections 4 and 8.3) that treats it as
+  a live input. `promote_automotive_state_artifact` and
+  `list_automotive_state_corpus` now reach REST, the CLI, Tauri, and the desktop
+  workspace; `automotive_operation` reaches REST and the CLI. Promotion is
+  authorized as `Action::CorpusOp` inside the `_with_context` executor, and
+  `AutomotiveOperationSummary.promotable_artifacts` lets a caller browsing
+  retained history name an artifact the service will accept. Plan:
+  `.claude/plans/automotive-state-promotion-wiring-20260827.md`.
 
 ### Open
-- [ ] The automotive protocol-state corpus can never be filled. Three public
-  `ServiceContainer` methods have no caller on any surface (CLI, REST, Tauri):
-  `promote_automotive_state_artifact`, `list_automotive_state_corpus`, and
-  `automotive_operation`. Promotion is the only way a state-corpus row is
-  written, so `POST /automotive/report` and the lab coverage view -- both of
-  which read that corpus -- report zero promoted state evidence on every
-  project, while `automotive-protocol-fuzzing-design.md` sections 4 and 8.3
-  describe the corpus as a live input. Either wire the three methods to the
-  surfaces that already expose their siblings (`list_automotive_operations` is
-  wired to all three) or remove the capability and the design text with it.
 - [ ] hf-tools' `activation`, `dynamic`, `formatter`, `parser`, and `taxonomy`
   modules (~3.8k LOC) are unreachable under every feature. The 2026-07-19
   dead-framework audit examined four of them, recorded them as "RETAINED
