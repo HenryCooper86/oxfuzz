@@ -127,6 +127,29 @@ describe("automotive surface boundaries", () => {
     expect(source("../../../hf-service/src/automotive.rs")).toContain("READ_ONLY_UDS_SERVICES");
   });
 
+  it("lets retained operations fill the protocol-state corpus the report reads", () => {
+    const lib = source("../lib/automotive.ts");
+    expect(lib).toContain('"promote_automotive_state_artifact"');
+    expect(lib).toContain('"list_automotive_state_corpus"');
+    const panel = source("../components/AutomotiveStateCorpus.tsx");
+    expect(panel).toContain("promoteAutomotiveStateArtifact");
+    expect(panel).toContain("listAutomotiveStateCorpus");
+    // Promotion is offered only for evidence the service will accept: a
+    // completed operation carrying both a state signature and a promotable
+    // artifact. Anything else would produce a guaranteed rejection.
+    expect(panel).toContain("promotable_artifacts");
+    expect(panel).toContain("state_signatures");
+    expect(source("../views/AutomotiveView.tsx")).toContain("<AutomotiveStateCorpus");
+    const commands = source("../../src-tauri/src/commands.rs");
+    expect(commands).toContain("pub async fn promote_automotive_state_artifact");
+    expect(commands).toContain("pub async fn list_automotive_state_corpus");
+    expect(source("../../src-tauri/src/lib.rs")).toContain(
+      "promote_automotive_state_artifact,",
+    );
+    const strings = source("../i18n.extra.ts");
+    expect(strings).toContain("automotive.stateCorpus.title");
+  });
+
   it("wires signal graphing and a periodic frame sender that reuses replay", () => {
     expect(source("../components/AutomotiveOfflineWorkspace.tsx")).toContain(
       "<AutomotiveSignalGraph",
