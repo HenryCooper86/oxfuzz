@@ -27,7 +27,8 @@ use super::staging::{
     stage_run_artifacts, verify_run_artifacts, verify_staged_qualification, ReplayProvenance,
 };
 use super::workspace::{
-    prepare_configured_workspace_root, workspace_dir, workspace_relative_record,
+    prepare_configured_workspace_root, run_output_relative, workspace_dir,
+    workspace_relative_record,
 };
 use super::{
     auto_revert_baseline_compatible, auto_revert_decision, ensure_workspace_directory,
@@ -1323,7 +1324,10 @@ impl ServiceContainer {
         // No artifacts at all: surface what a campaign needs and stop (no error).
         if manager_cfg.is_none() && !have_artifacts {
             for line in [
-                format!("syzkaller (kernel fuzzing) -- project: {}", opts.project),
+                format!(
+                    "syzkaller (kernel fuzzing) -- project: {}",
+                    opts.project.display()
+                ),
                 "No campaign artifacts provided. syzkaller drives a VM against a".to_owned(),
                 "KCOV-instrumented kernel; it needs one of:".to_owned(),
                 "  (a) a kernel image (bzImage) + a rootfs disk image, or".to_owned(),
@@ -1348,7 +1352,37 @@ impl ServiceContainer {
         // orders of magnitude faster than TCG emulation. It drives both the
         // synthesized qemu args and the sole device passthrough below.
         let use_kvm = syz_kvm_usable(&platform);
-        let run_id = Uuid::new_v4();
+
+        // A kernel campaign becomes a real run here, not a local id: without a
+        // persisted record its crashes can never reach triage, which loads the
+        // run before anything else. Inserted after the artifact and daemon
+        // gates above, both of which return before a campaign starts -- a run
+        // that never launched should not appear in history.
+        let store = self.store.as_ref().ok_or_else(|| {
+            ClassifiedError::Validation(
+                "syzkaller campaigns require the persistent service store".to_owned(),
+            )
+        })?;
+        let project_root = canonical_project_root(&opts.project)?;
+        let target_label = crate::container::syzkaller_target_label(opts);
+        let kernel_workspace = workspace_dir(&project_root, &target_label);
+        let mut run_record = RunRecord::new(
+            project_root.to_string_lossy().to_string(),
+            EngineKind::Syzkaller,
+            None,
+            Utc::now(),
+        );
+        let run_id = run_record.id;
+        run_record.status = RunStatus::Running;
+        // No harness and no binary: a kernel campaign fuzzes an instrumented
+        // image, so `harness_rev`/`binary_rev` stay unset and triage skips the
+        // digest checks that exist to pin a userspace harness.
+        run_record.evidence_dir = Some(workspace_relative_record(&run_output_relative(run_id)));
+        store
+            .insert_run(&run_record)
+            .await
+            .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
+
         let provided_config = manager_cfg.is_some();
         let workspace_root = prepare_configured_workspace_root()?;
         let stage_request = crate::syzkaller::SyzkallerStageRequest {
@@ -1483,8 +1517,19 @@ impl ServiceContainer {
         // real failure that also happened to trip the scratch budget would be
         // reported as a generic budget error, hiding the root cause.
         let within_budget = writable_monitor.finish().await;
-        let result = run_result?;
+        // Every exit from here on is terminal for a run that is already durable,
+        // so each one records a status. A `Running` row left behind would make
+        // the campaign look live forever and would fail triage's terminal-run
+        // check with no explanation.
+        let result = match run_result {
+            Ok(result) => result,
+            Err(error) => {
+                self.finish_syzkaller_run(run_id, RunStatus::Failed).await?;
+                return Err(error);
+            }
+        };
         if !within_budget {
+            self.finish_syzkaller_run(run_id, RunStatus::Failed).await?;
             return Err(ClassifiedError::Sandbox(
                 "syzkaller scratch/workdir exceeded its 4 GiB growth or 100000-entry budget"
                     .to_owned(),
@@ -1500,10 +1545,9 @@ impl ServiceContainer {
                 if result.exit_code != 0 && result.exit_code != 124 =>
             {
                 let detail = result.stderr.lines().last().unwrap_or("no error output");
-                return Err(ClassifiedError::Sandbox(format!(
-                    "syz-manager exited with {}: {detail}",
-                    result.exit_code
-                )));
+                let message = format!("syz-manager exited with {}: {detail}", result.exit_code);
+                self.finish_syzkaller_run(run_id, RunStatus::Failed).await?;
+                return Err(ClassifiedError::Sandbox(message));
             }
             hf_core::runtime::CommandTermination::TimedOut => {
                 // The inner `timeout --kill-after` already bounds the campaign;
@@ -1521,28 +1565,34 @@ impl ServiceContainer {
         // found crashes reach retained evidence and the corpus can be reused.
         // Best-effort: a copy hiccup is logged, never a reason to discard a
         // valid campaign summary.
-        if let Some(evidence_dir) = workspace
-            .parent()
-            .map(|parent| parent.join("evidence").join(run_id.to_string()))
-        {
-            let stage_root = workspace.clone();
-            let evidence = tokio::task::spawn_blocking(move || {
-                crate::syzkaller::retain_campaign_evidence(&stage_root, &evidence_dir)
-            })
-            .await
-            .map_err(|error| {
-                ClassifiedError::Internal(format!("join syzkaller evidence task: {error}"))
-            })?;
-            match evidence {
-                Ok(Some(path)) => log(&format!(
-                    "Retained syzkaller crash reproducers and corpus under {}.",
-                    path.display()
-                )),
-                Ok(None) => {}
-                Err(error) => log(&format!(
-                    "Warning: could not retain syzkaller campaign evidence: {error}"
-                )),
+        // Into the run-owned output directory, so `run_output_dir` resolves the
+        // campaign's crashes from the persisted `evidence_dir` exactly as it
+        // does for a userspace run. The old sibling `syzkaller/evidence/<id>`
+        // tree was unreachable from triage.
+        match ensure_workspace_directory(&kernel_workspace, &run_output_relative(run_id)) {
+            Ok(evidence_dir) => {
+                let stage_root = workspace.clone();
+                let evidence = tokio::task::spawn_blocking(move || {
+                    crate::syzkaller::retain_campaign_evidence(&stage_root, &evidence_dir)
+                })
+                .await
+                .map_err(|error| {
+                    ClassifiedError::Internal(format!("join syzkaller evidence task: {error}"))
+                })?;
+                match evidence {
+                    Ok(Some(path)) => log(&format!(
+                        "Retained syzkaller crash reproducers and corpus under {}.",
+                        path.display()
+                    )),
+                    Ok(None) => {}
+                    Err(error) => log(&format!(
+                        "Warning: could not retain syzkaller campaign evidence: {error}"
+                    )),
+                }
             }
+            Err(error) => log(&format!(
+                "Warning: could not prepare the syzkaller evidence directory: {error}"
+            )),
         }
 
         if matches!(
@@ -1552,13 +1602,46 @@ impl ServiceContainer {
         ) {
             on_progress(FuzzProgress::Done);
         }
-        Ok(SyzkallerSummary {
+        let summary = SyzkallerSummary {
             edges: peak_edges.load(Ordering::Relaxed),
             execs: last_execs.load(Ordering::Relaxed) as f64,
             crashes: peak_crashes.load(Ordering::Relaxed),
             exit_code: Some(result.exit_code),
             termination: Some(result.termination),
-        })
+            run_id: Some(run_id),
+            project_root,
+            target: target_label,
+        };
+        // Stats before the terminal status, for the same reason a userspace run
+        // does it in that order: a `Done` record whose numbers were lost reads
+        // as a campaign that found nothing.
+        if let Some(store) = self.store.as_ref() {
+            store
+                .set_run_stats(run_id, summary.edges, summary.execs, summary.crashes)
+                .await
+                .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
+        }
+        self.finish_syzkaller_run(run_id, RunStatus::Done).await?;
+        Ok(summary)
+    }
+
+    /// Record a terminal status for a syzkaller campaign.
+    ///
+    /// Kept separate because `run_syzkaller` has four terminal exits and each
+    /// one must leave the run out of `Running`; inlining the write at each site
+    /// is how one of them ends up forgotten.
+    async fn finish_syzkaller_run(
+        &self,
+        run_id: Uuid,
+        status: RunStatus,
+    ) -> Result<(), ClassifiedError> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(());
+        };
+        store
+            .set_run_status(run_id, status, Some(Utc::now()))
+            .await
+            .map_err(|error| ClassifiedError::Storage(error.to_string()))
     }
 }
 

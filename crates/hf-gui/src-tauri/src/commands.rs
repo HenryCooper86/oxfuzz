@@ -3252,7 +3252,9 @@ fn sanitize_filename(s: &str) -> String {
 /// Artifacts for a real syzkaller kernel-fuzzing campaign.
 #[derive(Debug, Deserialize)]
 pub struct SyzkallerOpts {
-    project: String,
+    /// Project the campaign is recorded against. A real path now, not a label:
+    /// the run is persisted under it and its kernel crashes reach triage there.
+    project: PathBuf,
     arch: Option<String>,
     duration: u64,
     kernel_image: Option<String>,
@@ -3317,6 +3319,10 @@ pub async fn run_syzkaller(
             "crashes": summary.crashes,
             "execs": summary.execs,
             "exit_code": summary.exit_code,
+            // The run and target the campaign was recorded under, so the
+            // workspace can triage it without guessing either.
+            "run_id": summary.run_id.map(|id| id.to_string()),
+            "target": summary.target,
         })),
         Err(e) => Err(e.to_string()),
     }

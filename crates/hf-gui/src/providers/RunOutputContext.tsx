@@ -29,6 +29,8 @@ type RunResult = {
   termination: "completed" | "timed_out" | "cancelled";
   stagnation?: string | null;
   auto_revert?: AutoRevert | null;
+  /** Kernel campaigns report the workspace target their evidence was retained under. */
+  target?: string | null;
 };
 
 interface RunData {
@@ -250,8 +252,9 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
   const runSyzkaller = useCallback<RunOutputValue["runSyzkaller"]>(
     async (opts) => {
       // Key on the run's project (not just the active one) so a mid-run project
-      // switch doesn't split output; label the target "kernel" so downstream
-      // (Triage) knows this was a kernel campaign, not an empty per-target run.
+      // switch doesn't split output; label the target "kernel" until the
+      // campaign reports the workspace target it actually retained evidence
+      // under, which is what Triage needs to find its crashes.
       const k = (typeof opts.project === "string" && opts.project) || keyRef.current || "__none__";
       activeRunKeyRef.current = k;
       patch(k, () => ({ ...EMPTY, lastTarget: "kernel", lastEngine: "syzkaller", log: [`[${now()}] Starting syzkaller campaign`] }));
@@ -266,6 +269,7 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
         }
         patch(k, (d) => ({
           ...d,
+          lastTarget: result.target || d.lastTarget,
           summary: { edges: result.edges, crashes: result.crashes, execs: Math.round(result.execs) },
         }));
         appendLog(`[${now()}] Campaign step complete (exit ${result.exit_code ?? "?"})`);

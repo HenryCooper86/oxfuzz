@@ -4,7 +4,7 @@
 //! (`BUG: KASAN: ...`, `WARNING: CPU: ...`, `general protection fault ...`),
 //! and its stack is a `Call Trace:` of `symbol+0xoffset/0xsize file:line`
 //! entries rather than libFuzzer's `#N 0xADDR in symbol`. Running kernel text
-//! through [`crate::classify`] yields no frames and an empty signature, which
+//! through [`crate::classify()`] yields no frames and an empty signature, which
 //! makes dedup keep every duplicate, so this module parses it on its own terms.
 //!
 //! Design: `.claude/plans/syzkaller-kernel-crash-triage-20260828.md`.
@@ -103,8 +103,8 @@ pub struct KernelReport {
     pub title: String,
     /// Call-trace symbols, reporting machinery removed, faulting function first.
     pub frames: Vec<String>,
-    /// SHA-256 over the class and the top [`SIGNATURE_FRAMES`] symbols. Empty
-    /// only when no frame could be recovered.
+    /// SHA-256 over the class and the top three call-trace symbols. Empty only
+    /// when no frame could be recovered.
     pub signature: String,
 }
 
@@ -112,7 +112,7 @@ pub struct KernelReport {
 ///
 /// Returns `None` for text that does not announce a kernel bug, so a caller can
 /// tell "not a kernel report" from "a kernel report I could not classify" and
-/// leave userspace logs to [`crate::classify`].
+/// leave userspace logs to [`crate::classify()`].
 #[must_use]
 pub fn parse_kernel_report(log: &str) -> Option<KernelReport> {
     let (class, headline) = detect_class(log)?;
