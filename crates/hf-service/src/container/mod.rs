@@ -1646,8 +1646,10 @@ pub struct EffectiveAutoRevert {
 /// Inputs for a syzkaller kernel-fuzzing campaign.
 #[derive(Debug, Clone, Default)]
 pub struct SyzkallerRunOpts {
-    /// Project label (for logging only).
-    pub project: String,
+    /// Project the campaign belongs to. Canonicalized and used as the run's
+    /// `project_root`, so a kernel campaign appears in run history and reaches
+    /// triage the same way a userspace run does.
+    pub project: PathBuf,
     /// Target architecture (e.g. `"amd64"`); defaults to the host platform.
     pub arch: Option<String>,
     /// Campaign duration in seconds.
@@ -1669,6 +1671,37 @@ pub struct SyzkallerRunOpts {
     pub vm_count: Option<u32>,
 }
 
+/// The workspace target name for a kernel campaign.
+///
+/// A kernel campaign has no discovered symbol to key on, so the kernel image
+/// names the target. Campaigns against one kernel then share a workspace and
+/// their crashes group together, while a different kernel is a different
+/// target -- which is what an operator comparing two kernels expects.
+#[must_use]
+pub fn syzkaller_target_label(opts: &SyzkallerRunOpts) -> String {
+    let stem = opts
+        .kernel_image
+        .as_deref()
+        .or(opts.manager_cfg.as_deref())
+        .map(Path::new)
+        .and_then(Path::file_stem)
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("kernel");
+    format!("kernel-{stem}")
+}
+
+/// The synthetic target id a kernel campaign's crashes are attributed to.
+///
+/// Derived rather than discovered: there is no `targets` row for a kernel, and
+/// inventing a fresh id per run would scatter one kernel's crashes across every
+/// campaign. Same construction as the deterministic crash id, so the value is
+/// stable for a `(project, kernel)` pair.
+#[must_use]
+pub fn syzkaller_target_id(project: &Path, label: &str) -> uuid::Uuid {
+    let name = format!("syzkaller|{}|{label}", project.to_string_lossy());
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, name.as_bytes())
+}
+
 /// Result of a syzkaller campaign.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct SyzkallerSummary {
@@ -1678,6 +1711,16 @@ pub struct SyzkallerSummary {
     pub exit_code: Option<i32>,
     /// Authoritative reason the sandbox stopped.
     pub termination: Option<hf_core::runtime::CommandTermination>,
+    /// The persisted run, when a campaign actually launched. `None` when the
+    /// call returned setup guidance instead of fuzzing, which is not a run and
+    /// must not appear in history. Triage takes this id.
+    pub run_id: Option<uuid::Uuid>,
+    /// Canonical project the run was recorded against; empty when no campaign
+    /// launched.
+    pub project_root: PathBuf,
+    /// Workspace target name the kernel evidence lives under; empty when no
+    /// campaign launched.
+    pub target: String,
 }
 
 /// Build the syzkaller manager argv without a shell interpolation boundary.

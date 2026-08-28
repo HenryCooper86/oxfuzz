@@ -268,37 +268,25 @@ dead-code items: module-path uses, grouped and glob re-exports, and a
   `docs/standards/TOOL_CALL_PROTOCOL.md` 2 and 5, which promised the removed
   code as retained infrastructure, were corrected with it.
 
+- [x] Syzkaller kernel crashes reach triage. All four gaps are closed:
+  a campaign now persists a `RunRecord` (it minted a local id and stored
+  nothing, so `triage_run` could never load it) and records a terminal status
+  on each of its four exits; evidence is retained into `runs/<id>/out` under the
+  kernel workspace instead of a sibling tree triage never reads;
+  `SyzkallerRunOpts.project` is a real canonicalized path rather than a logging
+  label, and the kernel image names the target, with a derived stable target id
+  since no `targets` row exists for a kernel; and `hf_crash::kernel` parses the
+  reports on their own terms. A kernel run's target is proven by where its
+  evidence lives, so naming another kernel is refused. Chosen over reusing the
+  userspace pipeline because `patch-to-proof-design.md` holds that a kernel
+  finding must not inherit userspace assumptions. Plan:
+  `.claude/plans/syzkaller-kernel-crash-triage-20260828.md`.
+
 ### Open
 
-- [ ] Syzkaller crashes never reach triage or classification. TODO's E2E clause
-  read as a test gap; it is a feature gap. `collect_artifacts`
-  (`hf-crash/src/ingest.rs:174`) skips syzkaller entirely, `run_syzkaller`
-  (`container/run.rs:1282`) mints a local run id and persists no `RunRecord`
-  (so `triage_run`, which requires a persisted terminal run, cannot reach it),
-  and `triage.rs` names syzkaller nowhere. Kernel evidence is copied out of the
-  disposable stage (`retain_campaign_evidence`) and never read back, and a
-  campaign's crash count is scraped from `syz-manager` status lines rather than
-  from crash objects. Closing it means a kernel report parser
-  (`description`/`report0`/`log0`), crash-record creation, oops/BUG/KASAN
-  classification, and a persisted run -- with no report fixture in the repo to
-  build against.
-- [x] `LeakSanitizer` reports have their own `CrashKind::Leak`. They were
-  ingested (`looks_like_crash` accepts them, and `ingest.rs:260` collects
-  libFuzzer `leak-*` artifacts) and then filed as `Other`. Folding them into
-  `Asan` was the wrong repair: `sarif.rs` maps the kind straight onto a CWE and
-  a severity, so every leak would have reported as CWE-787 "Out-of-bounds
-  Write" at security-severity 6.0 in GitHub code scanning and the DefectDojo
-  export. A leak is an availability bug, so it maps to CWE-401 at a lower
-  severity. The variant cost no migration -- `crashes.kind` is TEXT. Ordering
-  matters as it did for UBSan: LSan is reported *by* the ASan runtime, so a real
-  leak report carries a `SUMMARY: AddressSanitizer:` line and allocates through
-  `asan_malloc_linux.cpp`; the leak check precedes the ASan one in both
-  `detect_kind` and `casr::kind_from_short`. Plan:
-  `.claude/plans/leak-crash-kind-20260828.md`.
-
-The five items this audit opened on 2026-08-27 are all resolved above,
+Nothing. The five items this audit opened on 2026-08-27 are all resolved above,
 including the hf-tools wire-or-delete decision the 2026-07-19 audit had left
-standing. The two above were found while closing them.
+standing, and the two further gaps found while closing them.
 
 ## Audit backlog (refreshed 2026-07-17)
 

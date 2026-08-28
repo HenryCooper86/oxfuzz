@@ -59,10 +59,26 @@ impl ServiceContainer {
         self.authorize_recorded(Action::Triage, "triage_run", Some(project))
             .await?;
         let workspace = workspace_dir(project, target);
-        let target_id = self.resolve_target_id_any_language(project, target).await?;
         let run_id = run.id;
         let engine = run.engine;
+        // A kernel campaign has no discovered symbol, so running discovery to
+        // resolve one would fail outright. Its crashes are attributed to a
+        // target id derived from the project and the kernel label, stable across
+        // campaigns so one kernel's findings group together.
+        let target_id = if engine == EngineKind::Syzkaller {
+            crate::container::syzkaller_target_id(project, target)
+        } else {
+            self.resolve_target_id_any_language(project, target).await?
+        };
         let out_dir = run_output_dir(&workspace, &run)?;
+        // A kernel campaign fuzzes an instrumented image, so there is no harness
+        // binary to resolve or digest-check, and no userspace input to replay.
+        // Its evidence is parsed where it lies.
+        if engine == EngineKind::Syzkaller {
+            return self
+                .triage_kernel_run(project, target, &run, &out_dir, target_id)
+                .await;
+        }
         let run_binary = run_binary_path(&workspace, &run, target)?;
         let source_context = if run.harness_rev.is_some() {
             let source = run_source_path(&workspace, &run)?;
@@ -667,16 +683,88 @@ impl ServiceContainer {
             .await
             .map_err(|e| ClassifiedError::Storage(e.to_string()))?
             .ok_or_else(|| ClassifiedError::Validation(format!("run not found: {run_id}")))?;
+        // Target ownership is proven differently for a kernel campaign. A
+        // userspace run is tied to its target through the harness it ran, but
+        // syzkaller fuzzes an instrumented image and has no harness, so its
+        // target id is derived from the project and the kernel label instead.
+        // The project and terminal-evidence checks apply to both.
+        let owns_target = if run.engine == EngineKind::Syzkaller {
+            // What binds a kernel run to a target is where its evidence lives:
+            // the campaign retained `runs/<id>/out` under this project's
+            // workspace for this kernel label. Naming a different target
+            // resolves a directory the run never wrote, so this refuses rather
+            // than triaging another kernel's crashes.
+            run_output_dir(&workspace_dir(project, target), &run).is_ok()
+        } else {
+            self.run_target_id(store, &run).await?
+                == Some(self.resolve_target_id_any_language(project, target).await?)
+        };
         if !stored_project_matches(Path::new(&run.project_root), project)
             || !run_has_crash_evidence(run.status)
-            || self.run_target_id(store, &run).await?
-                != Some(self.resolve_target_id_any_language(project, target).await?)
+            || !owns_target
         {
             return Err(ClassifiedError::Validation(format!(
                 "run {run_id} does not own terminal evidence for target '{target}'"
             )));
         }
         self.triage_run_record(project, target, run).await
+    }
+
+    /// Triage a syzkaller campaign's retained kernel evidence.
+    ///
+    /// Deliberately short next to the userspace path, because most of that path
+    /// does not apply: there is no binary to replay a crash against, so nothing
+    /// is reproduced; CASR is a userspace replay tool and would return nothing;
+    /// and syzkaller has no minimization (`syz-repro` is a separate workflow the
+    /// engine capabilities already decline). What remains is parse, dedup,
+    /// persist.
+    async fn triage_kernel_run(
+        &self,
+        project: &Path,
+        target: &str,
+        run: &hf_storage::RunRecord,
+        out_dir: &Path,
+        target_id: Uuid,
+    ) -> Result<Vec<hf_core::crash::Crash>, ClassifiedError> {
+        let run_id = run.id;
+        let ingested = hf_crash::ingest::ingest_syzkaller(out_dir, run_id, target_id)?;
+        if ingested.is_truncated() {
+            tracing::warn!(
+                run_id = %run_id,
+                artifact_limit_reached = ingested.artifact_limit_reached,
+                report_limit_reached = ingested.report_limit_reached,
+                "syzkaller crash ingestion reached a safety limit"
+            );
+        }
+        let mut crashes = hf_crash::dedup(ingested.crashes);
+        for crash in &mut crashes {
+            crash.id = deterministic_crash_id(run_id, &crash.stack_signature, &crash.input_path);
+        }
+        if let Some(store) = self.store.as_ref() {
+            store
+                .upsert_crashes(&crashes)
+                .await
+                .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
+        }
+        tracing::info!(
+            run_id = %run_id,
+            target = %target,
+            crashes = crashes.len(),
+            "triaged syzkaller kernel evidence"
+        );
+        if !crashes.is_empty() {
+            self.emit_scheduler_event(
+                crate::scheduler::EVENT_CRASH_FOUND,
+                serde_json::json!({
+                    "project": project.display().to_string(),
+                    "target": target,
+                    "run_id": run_id.to_string(),
+                    "crashes": crashes.len(),
+                }),
+            )
+            .await;
+        }
+        Ok(crashes)
     }
 
     /// LLM crash verifier (self-verification L2, increment 4): for each triaged
