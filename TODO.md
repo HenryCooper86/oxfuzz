@@ -329,7 +329,8 @@ fixed the following; open design decisions are listed at the end.
 - [x] Guardrail authorization decisions persist to storage (migration 0018) and
   surface through the CLI `policy decisions`, REST `/policy/decisions`, and the
   desktop Policy Audit view.
-- [~] Unwired-but-designed subsystems:
+- [x] Unwired-but-designed subsystems (all four resolved -- two by wiring, two
+  by removal):
   - [x] guardrail authorization of discover/corpus/chat actions (batch 1);
   - [x] knowledge-augmented harness/triage prompts via the live retrieval path
     (batch 2); the standalone `InjectKnowledge` middleware, ingestion pipeline,
