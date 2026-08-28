@@ -1643,6 +1643,27 @@ pub struct EffectiveAutoRevert {
     pub overridden: bool,
 }
 
+/// Whether an operation may, must, or must not use an LLM.
+///
+/// Kept in the service rather than in a CLI flag because it decides which
+/// generator runs, which is business logic (AGENTS.md 2.9). It exists because
+/// picking the generator from whether a key happens to be exported is not a
+/// decision anyone made: the model and the template produce materially
+/// different harnesses, and a caller who wanted one should not silently receive
+/// the other.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AiPolicy {
+    /// Use the LLM when one is configured and reachable; fall back otherwise.
+    #[default]
+    Auto,
+    /// The LLM must answer. No provider, or a failed call, is an error rather
+    /// than a silent downgrade to a different generator.
+    Require,
+    /// Never call the LLM, even when one is configured -- for a reproducible
+    /// run, an offline one, or a target the template already handles.
+    Off,
+}
+
 /// Inputs for a syzkaller kernel-fuzzing campaign.
 #[derive(Debug, Clone, Default)]
 pub struct SyzkallerRunOpts {
@@ -1896,6 +1917,7 @@ fn heuristic_draft(candidate: &TargetCandidate, engine: EngineKind) -> HarnessDr
             candidate.language,
             &harness_binary_name(&candidate.symbol),
         ),
+        generator: hf_core::harness::DraftGenerator::Heuristic,
     }
 }
 
