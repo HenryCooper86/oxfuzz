@@ -3605,6 +3605,75 @@ pub async fn list_automotive_operations(
     }
 }
 
+/// Promote one validated artifact from a completed operation into the
+/// protocol-state corpus the campaign report and lab coverage view read.
+#[tauri::command]
+pub async fn promote_automotive_state_artifact(
+    state: tauri::State<'_, crate::state::AppState>,
+    project_root: PathBuf,
+    source_operation_id: uuid::Uuid,
+    state_signature: serde_json::Value,
+    artifact: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    #[cfg(feature = "automotive-scapy")]
+    {
+        // The signature and the artifact selector are structured service types;
+        // deserializing them here keeps the desktop shell from reshaping either
+        // and surfaces a malformed request as a message rather than a panic.
+        let state_signature = serde_json::from_value(state_signature)
+            .map_err(|error| format!("invalid automotive state signature: {error}"))?;
+        let artifact = serde_json::from_value(artifact)
+            .map_err(|error| format!("invalid automotive artifact selector: {error}"))?;
+        let entry = state
+            .container
+            .promote_automotive_state_artifact(
+                hf_service::automotive::AutomotiveStatePromotionRequest {
+                    project_root,
+                    source_operation_id,
+                    state_signature,
+                    artifact,
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        serde_json::to_value(entry).map_err(|error| error.to_string())
+    }
+    #[cfg(not(feature = "automotive-scapy"))]
+    {
+        let _ = (
+            state,
+            project_root,
+            source_operation_id,
+            state_signature,
+            artifact,
+        );
+        Err(automotive_feature_unavailable())
+    }
+}
+
+/// List the redacted protocol-state corpus entries promoted for one project.
+#[tauri::command]
+pub async fn list_automotive_state_corpus(
+    state: tauri::State<'_, crate::state::AppState>,
+    project_root: PathBuf,
+    limit: Option<u32>,
+) -> Result<serde_json::Value, String> {
+    #[cfg(feature = "automotive-scapy")]
+    {
+        let entries = state
+            .container
+            .list_automotive_state_corpus(&project_root, limit.unwrap_or(50))
+            .await
+            .map_err(|error| error.to_string())?;
+        serde_json::to_value(entries).map_err(|error| error.to_string())
+    }
+    #[cfg(not(feature = "automotive-scapy"))]
+    {
+        let _ = (state, project_root, limit);
+        Err(automotive_feature_unavailable())
+    }
+}
+
 /// Compose the service-owned automotive campaign report without invoking the
 /// sidecar or contacting an interface. `language` is the caller's UI locale
 /// (`en` / `zh`); omitting it composes in English.

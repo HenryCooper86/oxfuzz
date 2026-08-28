@@ -194,6 +194,34 @@ export interface AutomotiveOperationSummary {
   artifact_dir: string;
   error: string | null;
   state_signatures: AutomotiveStateSignature[];
+  promotable_artifacts: AutomotiveStateArtifactSource[];
+}
+
+/**
+ * Service-owned selector naming one artifact of a retained operation. Callers
+ * choose an operation-local identifier, never a host path, and hand a value
+ * from `promotable_artifacts` back verbatim.
+ */
+export type AutomotiveStateArtifactSource =
+  | { location: "input"; artifact_id: string }
+  | { location: "output"; artifact_id: string };
+
+/** Redacted protocol-state corpus row the campaign report and lab view read. */
+export interface AutomotiveStateCorpusEntry {
+  project_root: string;
+  protocol: AutomotiveProtocol;
+  state_digest: string;
+  artifact_sha256: string;
+  source_operation_id: string;
+  artifact_path: string;
+  created_at: string;
+}
+
+export interface PromoteAutomotiveStateInput {
+  projectRoot: string;
+  sourceOperationId: string;
+  stateSignature: AutomotiveStateSignature;
+  artifact: AutomotiveStateArtifactSource;
 }
 
 export type AutomotiveReportAiStatus =
@@ -313,6 +341,32 @@ export function listAutomotiveOperations(
   transport: Transport = getTransport(),
 ): Promise<AutomotiveOperationSummary[]> {
   return transport.invoke<AutomotiveOperationSummary[]>("list_automotive_operations", {
+    projectRoot,
+    limit,
+  });
+}
+
+/**
+ * Promote one validated artifact of a completed operation into the
+ * protocol-state corpus. The signature and the artifact selector are handed
+ * back exactly as the operation summary reported them; the service revalidates
+ * both against its own retained evidence.
+ */
+export function promoteAutomotiveStateArtifact(
+  input: PromoteAutomotiveStateInput,
+  transport: Transport = getTransport(),
+): Promise<AutomotiveStateCorpusEntry> {
+  return transport.invoke<AutomotiveStateCorpusEntry>("promote_automotive_state_artifact", {
+    ...input,
+  });
+}
+
+export function listAutomotiveStateCorpus(
+  projectRoot: string,
+  limit: number,
+  transport: Transport = getTransport(),
+): Promise<AutomotiveStateCorpusEntry[]> {
+  return transport.invoke<AutomotiveStateCorpusEntry[]>("list_automotive_state_corpus", {
     projectRoot,
     limit,
   });

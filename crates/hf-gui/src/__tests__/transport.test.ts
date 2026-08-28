@@ -404,6 +404,16 @@ describe("transport", () => {
         projectRoot: "/tmp/project",
         limit: 25,
       });
+      await transport.invoke("promote_automotive_state_artifact", {
+        projectRoot: "/tmp/project",
+        sourceOperationId: "00000000-0000-4000-8000-000000000001",
+        stateSignature: { protocol: "uds", digest: "abc123", observations: {} },
+        artifact: { location: "output", artifact_id: "canonical-transcript.json" },
+      });
+      await transport.invoke("list_automotive_state_corpus", {
+        projectRoot: "/tmp/project",
+        limit: 25,
+      });
       await transport.invoke("generate_automotive_report", {
         projectRoot: "/tmp/project",
         includeAi: true,
@@ -419,6 +429,11 @@ describe("transport", () => {
           "GET",
           "http://localhost:8081/automotive/operations?project_root=%2Ftmp%2Fproject&limit=25",
         ],
+        ["POST", "http://localhost:8081/automotive/state-corpus/promote"],
+        [
+          "GET",
+          "http://localhost:8081/automotive/state-corpus?project_root=%2Ftmp%2Fproject&limit=25",
+        ],
         ["POST", "http://localhost:8081/automotive/report"],
       ]);
       expect(JSON.parse(String(calls[1].init.body))).toEqual({ settings });
@@ -430,10 +445,18 @@ describe("transport", () => {
         protocol: "uds",
         capture_path: "/tmp/capture.pcap",
       });
+      // The artifact selector is a service-owned tagged union, so its own
+      // `location` / `artifact_id` keys must survive the mirror untouched.
+      expect(JSON.parse(String(calls[5].init.body))).toEqual({
+        project_root: "/tmp/project",
+        source_operation_id: "00000000-0000-4000-8000-000000000001",
+        state_signature: { protocol: "uds", digest: "abc123", observations: {} },
+        artifact: { location: "output", artifact_id: "canonical-transcript.json" },
+      });
       // `language` is already the identifier the REST body deserializes, so
       // the camelCase-to-snake_case mirror leaves it alone: browser mode and
       // the desktop shell send the same field name.
-      expect(JSON.parse(String(calls[5].init.body))).toEqual({
+      expect(JSON.parse(String(calls[7].init.body))).toEqual({
         project_root: "/tmp/project",
         include_ai: true,
         language: "zh",
