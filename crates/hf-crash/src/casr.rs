@@ -75,7 +75,11 @@ pub fn cluster_from_path(path: &std::path::Path) -> Option<u32> {
 #[must_use]
 pub fn kind_from_short(short: &str) -> CrashKind {
     let s = short.to_ascii_lowercase();
-    if s.contains("overflow")
+    if s.contains("leak") {
+        // Before the `sanitizer` catch-all below: a CASR leak description names
+        // `LeakSanitizer`, which would otherwise be read as an `ASan` finding.
+        CrashKind::Leak
+    } else if s.contains("overflow")
         || s.contains("use-after")
         || s.contains("asan")
         || s.contains("sanitizer")
@@ -249,6 +253,11 @@ mod tests {
         assert_eq!(kind_from_short("SEGV on unknown address"), CrashKind::Segv);
         assert_eq!(kind_from_short("abort"), CrashKind::Abort);
         assert_eq!(kind_from_short("something else"), CrashKind::Other);
+        // Ahead of the `sanitizer` catch-all, which would read this as `ASan`.
+        assert_eq!(
+            kind_from_short("LeakSanitizer: detected memory leaks"),
+            CrashKind::Leak
+        );
     }
 
     #[test]

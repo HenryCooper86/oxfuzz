@@ -66,6 +66,20 @@ fn cwe_mapping_is_specific() {
     );
 }
 
+/// A leak is an availability bug, and reports map the kind straight onto a CWE
+/// and a severity, so it must not borrow the memory-safety classes'.
+#[test]
+fn a_leak_reports_as_a_leak_not_an_out_of_bounds_write() {
+    let leak = crash(CrashKind::Leak, CrashSeverity::Undefined, "", "");
+    assert_eq!(cwe_for(&leak).id, "CWE-401");
+    let overflow = crash(CrashKind::Asan, CrashSeverity::Undefined, "", "");
+    assert_ne!(cwe_for(&leak).id, cwe_for(&overflow).id);
+    assert!(
+        security_severity(&leak) < security_severity(&overflow),
+        "a leak must not carry a memory-safety severity"
+    );
+}
+
 #[test]
 fn severity_tracks_exploitability() {
     let exploitable = crash(CrashKind::Asan, CrashSeverity::Exploitable, "x", "");
