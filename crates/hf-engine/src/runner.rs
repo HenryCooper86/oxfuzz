@@ -160,9 +160,13 @@ impl EngineRunner {
 
     /// Run a fuzz campaign with an explicit sandbox mount/profile contract.
     ///
+    /// A force-stopped run -- cancelled, or killed at the sandbox wall-clock
+    /// cap -- is returned as `Ok` carrying the progress it had measured and the
+    /// termination that stopped it; only a clean completion emits `Done`.
+    ///
     /// # Errors
-    /// Returns `ClassifiedError` if the engine is unsupported, the runtime is
-    /// force-stopped, or a completed engine process reports an invalid exit.
+    /// Returns `ClassifiedError` if the engine is unsupported or a completed
+    /// engine process reports an invalid exit.
     pub async fn run_streaming_opts(
         &self,
         engine: EngineKind,
@@ -178,10 +182,11 @@ impl EngineRunner {
     ) -> Result<RunResult, ClassifiedError> {
         // A run with no explicit duration would otherwise get no self-limit
         // flag (`-max_total_time`/`-V`/`--run_time`) from the adapter and run
-        // forever, only to be killed at the sandbox wall-clock cap -- and a
-        // killed run is classified as an engine error, discarding its coverage.
-        // Fill in a concrete default so the adapter bounds the fuzzer and both
-        // layers agree: the fuzzer exits cleanly within the sandbox window.
+        // forever, only to be killed at the sandbox wall-clock cap -- which
+        // keeps its coverage but is recorded as a failed run rather than a
+        // finished campaign. Fill in a concrete default so the adapter bounds
+        // the fuzzer and both layers agree: the fuzzer exits cleanly within the
+        // sandbox window.
         let effective_cfg = if cfg.duration.is_some() {
             std::borrow::Cow::Borrowed(cfg)
         } else {
@@ -265,17 +270,21 @@ impl EngineRunner {
         // The runtime's typed terminal outcome is authoritative. A token can be
         // cancelled just after a process exits, and a forced stop has no useful
         // exit code, so inferring either state from those values is racy.
+        //
+        // A forced stop -- cancelled, or killed at the wall-clock cap -- is
+        // truncated, not empty: every edge count and exec rate in `aggregate`
+        // was parsed from the fuzzer's own stats lines long before the stop. Erroring here
+        // would discard all of it (and, upstream, the run's corpus discoveries
+        // and coverage curve with it), so both keep their partial progress and
+        // report the termination that produced it. `progress(false)` withholds
+        // the closing `Done`, which is what marks the run as not cleanly
+        // completed; the service records a wall-clock kill as a failed run.
         match result.termination {
-            CommandTermination::Cancelled => {
+            termination @ (CommandTermination::Cancelled | CommandTermination::TimedOut) => {
                 return Ok(RunResult {
                     progress: aggregate.progress(false),
-                    termination: CommandTermination::Cancelled,
+                    termination,
                 });
-            }
-            CommandTermination::TimedOut => {
-                return Err(ClassifiedError::Engine(
-                    "fuzz run exceeded the sandbox wall-clock limit".to_owned(),
-                ));
             }
             CommandTermination::Completed => {}
         }

@@ -699,7 +699,11 @@ impl ServiceContainer {
                 return Err(error);
             }
         };
-        let was_cancelled = result.termination == hf_core::runtime::CommandTermination::Cancelled;
+        // A run the runtime force-stopped -- cancelled, or killed at the sandbox
+        // wall-clock cap -- measured real coverage but did not run its full
+        // budget. Its evidence is persisted exactly like a clean run's; what it
+        // is not is a fair regression baseline.
+        let truncated = result.termination != hf_core::runtime::CommandTermination::Completed;
 
         // Keep the retained corpus immutable throughout execution. Engines
         // write only to this run's disposable snapshot/output; after the
@@ -757,10 +761,15 @@ impl ServiceContainer {
         } = metrics;
         // A run becomes terminal only after its summary evidence is durable.
         // This prevents a `Done` record whose stats or coverage curve were lost.
-        let status = if was_cancelled {
-            RunStatus::Cancelled
-        } else {
-            RunStatus::Done
+        let status = match result.termination {
+            hf_core::runtime::CommandTermination::Cancelled => RunStatus::Cancelled,
+            // The sandbox cap is a backstop over the fuzzer's own self-limit, and
+            // nothing enforces that limit but the fuzzer itself, so reaching the
+            // cap can mean a slow shutdown or a wedged harness. The evidence
+            // above is kept either way; the status keeps the overrun visible
+            // rather than reporting a campaign that never finished as `Done`.
+            hf_core::runtime::CommandTermination::TimedOut => RunStatus::Failed,
+            hf_core::runtime::CommandTermination::Completed => RunStatus::Done,
         };
         let status_update = store
             .set_run_status(run_record.id, status, Some(Utc::now()))
@@ -778,8 +787,8 @@ impl ServiceContainer {
         // Auto-revert policy: if this run's harness revision regressed coverage
         // past the threshold versus the latest comparable run for this target,
         // restore that last-good revision (HITL-gated recompile). Skipped for
-        // cancelled runs, whose truncated coverage is not a fair comparison.
-        let auto_revert = if was_cancelled {
+        // truncated runs, whose partial coverage is not a fair comparison.
+        let auto_revert = if truncated {
             None
         } else {
             self.maybe_auto_revert(

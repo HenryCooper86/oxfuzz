@@ -1,6 +1,6 @@
 //! Tests for the `EngineRunner` that orchestrates build + run + progress.
 
-use hf_core::engine::{EngineKind, FuzzRunConfig};
+use hf_core::engine::{EngineKind, FuzzProgress, FuzzRunConfig};
 use hf_core::error::ClassifiedError;
 use hf_core::runtime::{CommandResult, CommandTermination, ResourceLimits, RuntimeAdapter};
 use hf_core::target::Sanitizer;
@@ -273,8 +273,16 @@ async fn runner_returns_error_on_nonzero_exit() {
     assert!(result.is_err(), "should fail on non-zero exit");
 }
 
+/// A run killed at the sandbox wall-clock cap keeps the coverage it measured.
+///
+/// The edge counts and exec rates come from the fuzzer's own stats lines and
+/// were parsed long before the cap fired, so discarding them loses real
+/// evidence. Cancellation already keeps its partial progress; a wall-clock kill
+/// holds the same kind of evidence and is treated the same way here. The run is
+/// still not a clean completion -- `termination` says so, and no closing `Done`
+/// is emitted -- which is what the service records the run as failed on.
 #[tokio::test]
-async fn runner_rejects_a_sandbox_timeout_even_with_clean_output() {
+async fn runner_keeps_the_coverage_of_a_run_the_sandbox_timed_out() {
     let rt = MockRuntime {
         exit_code: 0,
         stdout: "cov: 100\nDONE\n".to_owned(),
@@ -291,9 +299,26 @@ async fn runner_rejects_a_sandbox_timeout_even_with_clean_output() {
             &rt,
             &PathBuf::from("/work"),
         )
-        .await;
+        .await
+        .expect("a wall-clock kill retains the run's measured evidence");
 
-    assert!(result.is_err(), "a forced timeout must not look completed");
+    assert_eq!(result.termination, CommandTermination::TimedOut);
+    assert!(
+        result
+            .progress
+            .iter()
+            .any(|event| matches!(event, FuzzProgress::EdgesCovered(100))),
+        "the parsed edge count must survive the kill: {:?}",
+        result.progress
+    );
+    assert!(
+        !result
+            .progress
+            .iter()
+            .any(|event| matches!(event, FuzzProgress::Done)),
+        "a timed-out run is not a clean completion: {:?}",
+        result.progress
+    );
 }
 
 #[tokio::test]
