@@ -207,6 +207,19 @@ dead-code items: module-path uses, grouped and glob re-exports, and a
   `AutomotiveOperationSummary.promotable_artifacts` lets a caller browsing
   retained history name an artifact the service will accept. Plan:
   `.claude/plans/automotive-state-promotion-wiring-20260827.md`.
+- [x] A run the sandbox kills at its wall-clock cap keeps the evidence it
+  measured. `CommandTermination::TimedOut` was a hard `ClassifiedError::Engine`,
+  so the service took its failure path and returned before the corpus merge,
+  `terminal_run_metrics`, and `persist_terminal_run_evidence` -- leaving `edges`,
+  `execs`, `crash_count`, and `samples_json` NULL and dropping the run's
+  coverage curve and corpus discoveries. A cancelled run, holding the same kind
+  of partial evidence, already returned `Ok`; the syzkaller path already treated
+  the identical value as a bounded completion (`run.rs:1499`). The runner now
+  returns both force-stops as `Ok` with their partial progress, and the service
+  persists a timed-out run's evidence in full while recording it `Failed` --
+  not `Done`, because nothing but the fuzzer enforces its own self-limit, so
+  reaching the backstop can also mean a wedged harness. Plan:
+  `.claude/plans/timed-out-run-keeps-its-evidence-20260828.md`.
 
 ### Open
 - [ ] hf-tools' `activation`, `dynamic`, `formatter`, `parser`, and `taxonomy`
@@ -223,14 +236,6 @@ dead-code items: module-path uses, grouped and glob re-exports, and a
   or binary name containing "asan" is counted as a finding, and the service
   floors a run's crash count at one whenever a finding line was seen. Not
   changed without a case that reproduces it.
-- [ ] A run the sandbox kills at its wall-clock cap (`CommandTermination::
-  TimedOut`) becomes a hard `ClassifiedError::Engine`, discarding the run's
-  parsed coverage and execs; a cancelled run, by contrast, returns its partial
-  progress. The headroom over the fuzzer's own self-limit is a fixed
-  `SANDBOX_TIMEOUT_HEADROOM_SECS = 60` regardless of how long the run or how
-  large the corpus, so a slow corpus load or ASan leak check at exit throws away
-  a whole campaign's coverage. Crashes survive (triage ingests the artifact
-  directory), coverage does not.
 - [ ] Every engine adapter applies `cfg.env` twice: `build_run_args` prepends an
   `env K=V ...` command wrapper, and `EngineRunner` also passes the same map
   through `ResourceLimits.env`, which the Docker adapter renders as `--env=K=V`.

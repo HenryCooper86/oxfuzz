@@ -465,6 +465,181 @@ async fn cancel_run_stops_an_in_flight_fuzz_run() {
     let _ = fs::remove_dir_all(&workspace);
 }
 
+/// A runtime whose streamed fuzz command reports progress and is then killed at
+/// the sandbox wall-clock cap. Non-streaming commands still complete, so the
+/// harness compile/smoke/promote setup a run needs is unaffected.
+#[derive(Default)]
+struct TimedOutRuntime;
+
+#[async_trait::async_trait]
+impl hf_core::runtime::RuntimeAdapter for TimedOutRuntime {
+    async fn resolve_image_reference(
+        &self,
+        _image: &str,
+    ) -> Result<Option<hf_core::runtime::ImmutableImageReference>, hf_core::error::ClassifiedError>
+    {
+        Ok(Some(hf_test_utils::immutable_test_image()?))
+    }
+
+    async fn run_command(
+        &self,
+        _cmd: &[String],
+        cwd: &std::path::Path,
+        _limits: &hf_core::runtime::ResourceLimits,
+    ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
+        Ok(hf_core::runtime::CommandResult {
+            exit_code: 0,
+            stdout: "DONE exec/s: 64".to_owned(),
+            stderr: String::new(),
+            workspace: cwd.to_path_buf(),
+            termination: hf_core::runtime::CommandTermination::Completed,
+        })
+    }
+
+    async fn run_command_streaming(
+        &self,
+        _cmd: &[String],
+        cwd: &std::path::Path,
+        _limits: &hf_core::runtime::ResourceLimits,
+        _cancel: &tokio_util::sync::CancellationToken,
+        on_line: &hf_core::runtime::LineSink<'_>,
+    ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
+        // Real stats lines the fuzzer printed before the cap fired.
+        on_line("#1024 pulse cov: 137 exec/s: 512");
+        Ok(hf_core::runtime::CommandResult {
+            exit_code: -1,
+            stdout: String::new(),
+            stderr: String::new(),
+            workspace: cwd.to_path_buf(),
+            termination: hf_core::runtime::CommandTermination::TimedOut,
+        })
+    }
+
+    async fn run_command_streaming_opts(
+        &self,
+        cmd: &[String],
+        cwd: &std::path::Path,
+        limits: &hf_core::runtime::ResourceLimits,
+        _opts: &hf_core::runtime::SandboxOptions,
+        cancel: &tokio_util::sync::CancellationToken,
+        on_line: &hf_core::runtime::LineSink<'_>,
+    ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
+        self.run_command_streaming(cmd, cwd, limits, cancel, on_line)
+            .await
+    }
+
+    async fn write_file(
+        &self,
+        _path: &std::path::Path,
+        _content: &str,
+    ) -> Result<(), hf_core::error::ClassifiedError> {
+        Ok(())
+    }
+
+    async fn read_file(
+        &self,
+        _path: &std::path::Path,
+    ) -> Result<String, hf_core::error::ClassifiedError> {
+        Ok(String::new())
+    }
+}
+
+/// A run killed at the sandbox wall-clock cap keeps the evidence it produced.
+///
+/// The cap is a backstop over the fuzzer's own self-limit, so reaching it means
+/// the fuzzer overran its budget -- during a slow corpus load or a sanitizer
+/// leak check at exit -- not that the coverage it already reported is fiction.
+/// Discarding it lost a whole campaign's measurement. The run is still not a
+/// clean completion, so it stays recorded as failed.
+#[tokio::test]
+async fn a_wall_clock_killed_run_persists_the_coverage_it_measured() {
+    use std::fs;
+    isolate_workspace();
+
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("timeout_proj");
+    fs::create_dir_all(&project).unwrap();
+    let target = "parse_entry";
+    fs::write(
+        project.join("parse.c"),
+        "#include <stddef.h>\nint parse_entry(const unsigned char *data, size_t size) { return size && data[0]; }\n",
+    )
+    .unwrap();
+
+    let workspace = hf_service::workspace_dir(&project, target);
+    let corpus = workspace.join("corpus");
+    fs::create_dir_all(&corpus).unwrap();
+    fs::write(workspace.join(format!("fuzz_{target}")), b"#!/bin/true").unwrap();
+
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("t.db"))
+            .await
+            .expect("connect store"),
+    );
+    let container = Arc::new(
+        ServiceContainer::new(Arc::new(TimedOutRuntime), None).with_store(Arc::clone(&store)),
+    );
+    container
+        .harness_compile(
+            "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }".to_owned(),
+            &project,
+            hf_core::engine::EngineKind::LibFuzzer,
+            target,
+            hf_core::target::TargetLanguage::C,
+        )
+        .await
+        .expect("compile harness");
+    container
+        .harness_smoke(
+            &project,
+            target,
+            hf_core::engine::EngineKind::LibFuzzer,
+            hf_core::target::TargetLanguage::C,
+        )
+        .await
+        .expect("smoke harness");
+    container
+        .harness_promote(&project, target, hf_core::engine::EngineKind::LibFuzzer)
+        .await
+        .expect("promote harness");
+
+    let summary = container
+        .run_fuzzer(
+            &project,
+            target,
+            hf_core::engine::EngineKind::LibFuzzer,
+            60,
+            &|_| {},
+        )
+        .await
+        .expect("a wall-clock kill is not a lost run");
+
+    assert_eq!(
+        summary.termination,
+        hf_core::runtime::CommandTermination::TimedOut
+    );
+    assert_eq!(summary.edges, 137, "the measured edge count must survive");
+
+    let run = store
+        .get_run(summary.run_id)
+        .await
+        .unwrap()
+        .expect("run persisted");
+    assert_eq!(
+        run.status,
+        hf_storage::RunStatus::Failed,
+        "a wall-clock kill is not a clean completion"
+    );
+    assert_eq!(run.edges, Some(137), "edges must be durable, not NULL");
+    assert!(run.execs.is_some(), "execs must be durable, not NULL");
+    assert!(
+        run.evidence_dir.is_some(),
+        "the run's evidence directory must still be recorded"
+    );
+
+    let _ = fs::remove_dir_all(&workspace);
+}
+
 #[tokio::test]
 async fn background_start_returns_a_durable_cancellable_run_id() {
     use std::fs;
