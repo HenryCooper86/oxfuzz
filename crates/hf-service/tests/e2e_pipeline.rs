@@ -67,6 +67,8 @@ SUMMARY: AddressSanitizer: heap-buffer-overflow /work/parser.c:7:9 in parse_valu
 const CRASH_ARTIFACT: &str = "crash-e2e-deadbeef";
 const CRASH_REPORT: &str = "log-e2e-deadbeef.txt";
 const CRASH_INPUT: &[u8] = b"FUZZ";
+/// What the stubbed minimizer publishes: strictly smaller than `CRASH_INPUT`.
+const MINIMIZED_INPUT: &[u8] = b"F";
 
 fn completed(exit_code: i32, stdout: &str, stderr: &str, cwd: &Path) -> CommandResult {
     CommandResult {
@@ -78,13 +80,37 @@ fn completed(exit_code: i32, stdout: &str, stderr: &str, cwd: &Path) -> CommandR
     }
 }
 
+/// Whether the stubbed crash minimizer converges.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Minimize {
+    /// The minimizer runs out its budget, so triage retains the original
+    /// reproducer.
+    NeverConverges,
+    /// The minimizer publishes a smaller input that still reproduces.
+    Converges,
+}
+
 /// One stub runtime covering every pipeline stage: compilation leaves a
 /// harness binary in the workspace, smoke qualification is a clean measured
 /// libFuzzer pass, the bounded campaign writes one crash artifact into its
-/// run-owned output mount, crash reproduction replays the `ASan` trace, CASR is
-/// unavailable (forcing the built-in triage path), and minimization times out
-/// so triage retains the original reproducer.
-struct PipelineRuntime;
+/// run-owned output mount, crash reproduction replays the `ASan` trace, and
+/// CASR is unavailable (forcing the built-in triage path). Minimization is the
+/// one stage the two pipeline arms disagree on, so it is a parameter.
+struct PipelineRuntime {
+    minimize: Minimize,
+    /// How many times the sandboxed minimizer was actually invoked. A second
+    /// triage pass over an already-published artifact must not add to this.
+    minimize_calls: std::sync::Mutex<usize>,
+}
+
+impl PipelineRuntime {
+    fn new(minimize: Minimize) -> Self {
+        Self {
+            minimize,
+            minimize_calls: std::sync::Mutex::new(0),
+        }
+    }
+}
 
 #[async_trait]
 impl RuntimeAdapter for PipelineRuntime {
@@ -112,22 +138,39 @@ impl RuntimeAdapter for PipelineRuntime {
         cmd: &[String],
         cwd: &Path,
         _limits: &ResourceLimits,
-        _opts: &SandboxOptions,
+        opts: &SandboxOptions,
     ) -> Result<CommandResult, ClassifiedError> {
         if cmd.first().is_some_and(|part| part.starts_with("casr-")) {
             return Err(ClassifiedError::Sandbox(
                 "CASR unavailable in test".to_owned(),
             ));
         }
-        if cmd
+        if let Some(output) = cmd
             .iter()
-            .any(|part| part.starts_with("-exact_artifact_path="))
+            .find_map(|part| part.strip_prefix("-exact_artifact_path="))
         {
-            // Minimization does not converge: triage keeps the original input.
-            return Ok(CommandResult {
-                termination: CommandTermination::TimedOut,
-                ..completed(1, "", "", cwd)
-            });
+            *self.minimize_calls.lock().unwrap() += 1;
+            if self.minimize == Minimize::NeverConverges {
+                // Minimization does not converge: triage keeps the original input.
+                return Ok(CommandResult {
+                    termination: CommandTermination::TimedOut,
+                    ..completed(1, "", "", cwd)
+                });
+            }
+            // Write through the writable derived-artifact mount the sandbox
+            // exposes, exactly as a real minimizer would: the container path
+            // triage passed must resolve back to a host path under it.
+            let mount = opts
+                .extra_mounts
+                .iter()
+                .find(|mount| output.starts_with(&mount.container_path))
+                .expect("minimized output must use the writable derived-artifact mount");
+            let relative = output
+                .strip_prefix(&mount.container_path)
+                .unwrap()
+                .trim_start_matches('/');
+            std::fs::write(mount.host_path.join(relative), MINIMIZED_INPUT).unwrap();
+            return Ok(completed(0, "", "", cwd));
         }
         if cmd.len() == 2 && cmd[1].contains("crash-") {
             // Crash reproduction: the stubbed harness reports the ASan error.
@@ -231,9 +274,11 @@ async fn discover_harness_run_triage_end_to_end() {
             .await
             .unwrap(),
     );
-    let container =
-        ServiceContainer::new(Arc::new(PipelineRuntime), Some(Arc::new(HarnessDraftPool)))
-            .with_store(Arc::clone(&store));
+    let container = ServiceContainer::new(
+        Arc::new(PipelineRuntime::new(Minimize::NeverConverges)),
+        Some(Arc::new(HarnessDraftPool)),
+    )
+    .with_store(Arc::clone(&store));
 
     // 1. Discovery: the fixture parser lands in the inventory and is persisted.
     let inventory = container
@@ -359,6 +404,151 @@ async fn discover_harness_run_triage_end_to_end() {
         "second triage pass must not duplicate the crash"
     );
     assert_eq!(after[0].id, persisted[0].id);
+
+    std::fs::remove_dir_all(&workspace).ok();
+}
+
+/// The full pipeline, ending in a crash that minimization actually reduced.
+///
+/// The sibling arm above runs the same discovery -> harness -> campaign ->
+/// triage loop but with a minimizer that never converges, so it asserts the
+/// original reproducer is retained. Successful minimization was covered only
+/// from a hand-staged run record, never from a run this pipeline produced, so
+/// nothing tied a reduced artifact back to the campaign that found it.
+#[tokio::test]
+async fn full_pipeline_minimizes_the_crash_it_found() {
+    common::install_managed_workspace("oxfuzz_e2e_minimize_it");
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("e2e_minimize_project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("parser.c"), FIXTURE).unwrap();
+
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("e2e_minimize.db"))
+            .await
+            .unwrap(),
+    );
+    let runtime = Arc::new(PipelineRuntime::new(Minimize::Converges));
+    let container = ServiceContainer::new(
+        Arc::clone(&runtime) as Arc<dyn RuntimeAdapter>,
+        Some(Arc::new(HarnessDraftPool)),
+    )
+    .with_store(Arc::clone(&store));
+
+    let inventory = container
+        .discover(&project, TargetLanguage::C)
+        .await
+        .unwrap();
+    assert!(
+        inventory
+            .candidates
+            .iter()
+            .any(|c| c.symbol == "parse_value"),
+        "the fixture parser is discovered"
+    );
+
+    let draft = container
+        .harness_draft(
+            &project,
+            "parse_value",
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+        )
+        .await
+        .unwrap();
+    container
+        .harness_compile(
+            draft.source.clone(),
+            &project,
+            EngineKind::LibFuzzer,
+            "parse_value",
+            TargetLanguage::C,
+        )
+        .await
+        .unwrap();
+    container
+        .harness_smoke(
+            &project,
+            "parse_value",
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+        )
+        .await
+        .unwrap();
+    container
+        .harness_promote(&project, "parse_value", EngineKind::LibFuzzer)
+        .await
+        .unwrap();
+
+    let summary = container
+        .run_fuzzer(&project, "parse_value", EngineKind::LibFuzzer, 1, &|_| {})
+        .await
+        .unwrap();
+    assert_eq!(summary.crashes, 1);
+
+    let crashes = container.triage(&project, "parse_value").await.unwrap();
+    assert_eq!(crashes.len(), 1);
+    let crash = &crashes[0];
+
+    // The classification is taken from the replay of the original input, before
+    // minimization, so reducing the input must not change the verdict.
+    assert_eq!(crash.kind, CrashKind::Asan);
+    assert!(!crash.stack_signature.is_empty());
+    assert_eq!(crash.run_id, summary.run_id);
+
+    assert!(crash.minimized, "the converged minimizer must be recorded");
+    assert_eq!(
+        std::fs::read(&crash.input_path).unwrap(),
+        MINIMIZED_INPUT,
+        "the crash must point at the reduced input, not the original"
+    );
+
+    // The reduced artifact lives in the run's own triage directory, and the
+    // original stays exactly where the campaign wrote it.
+    let workspace = std::fs::canonicalize(hf_service::workspace_dir(&project, "parse_value"))
+        .expect("workspace exists after the run");
+    let run_root = workspace.join("runs").join(summary.run_id.to_string());
+    assert!(
+        crash
+            .input_path
+            .starts_with(run_root.join("triage/minimized")),
+        "reduced artifact escaped the run-owned triage directory: {}",
+        crash.input_path.display()
+    );
+    assert_eq!(
+        std::fs::read(run_root.join("out").join(CRASH_ARTIFACT)).unwrap(),
+        CRASH_INPUT,
+        "minimization must not consume the original reproducer"
+    );
+
+    let persisted = store.list_crashes_by_run(summary.run_id).await.unwrap();
+    assert_eq!(persisted.len(), 1);
+    assert!(
+        persisted[0].minimized,
+        "the minimized flag must survive to storage, not just the returned value"
+    );
+    assert_eq!(persisted[0].id, crash.id);
+    assert_eq!(*runtime.minimize_calls.lock().unwrap(), 1);
+
+    // Re-triage reuses the published artifact instead of minimizing again: the
+    // deterministic crash id is re-derived, the row is replaced rather than
+    // duplicated, and the sandbox is not entered a second time.
+    let reprises = container.triage(&project, "parse_value").await.unwrap();
+    assert_eq!(reprises.len(), 1);
+    assert!(reprises[0].minimized);
+    assert_eq!(reprises[0].id, crash.id);
+    assert_eq!(
+        std::fs::read(&reprises[0].input_path).unwrap(),
+        MINIMIZED_INPUT
+    );
+    assert_eq!(
+        *runtime.minimize_calls.lock().unwrap(),
+        1,
+        "a published minimized artifact must be reused, not recomputed"
+    );
+    let after = store.list_crashes_by_run(summary.run_id).await.unwrap();
+    assert_eq!(after.len(), 1, "re-triage must not duplicate the crash");
+    assert!(after[0].minimized);
 
     std::fs::remove_dir_all(&workspace).ok();
 }
