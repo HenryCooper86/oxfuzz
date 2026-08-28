@@ -14,7 +14,15 @@ health_check_interval_secs = 30
 # ==============================================================================
 # Provider Definitions
 #
-# Same format as y-agent. Set `api_key` directly or use `api_key_env`.
+# Same format as y-agent. Prefer `api_key_env`, which names an environment
+# variable holding the secret, over an inline `api_key`: your real
+# `providers.toml` is gitignored, but a key written into a config file is one
+# `git add -f`, one copied directory, or one pasted snippet away from leaving
+# the machine. Nothing auto-loads `.env` -- oxfuzz runs against untrusted
+# projects and must not read their working-directory environment -- so export
+# the variable in your shell (`set -a; . ./.env; set +a`) before running.
+# An inline `api_key` is reasonable only where there is no real secret, such as
+# the local Ollama placeholder below.
 # ==============================================================================
 
 [[providers]]
