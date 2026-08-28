@@ -156,6 +156,10 @@ pub fn cwe_for(crash: &Crash) -> Cwe {
     match crash.kind {
         CrashKind::Asan => cwe("CWE-787", "Out-of-bounds Write"),
         CrashKind::Ubsan => cwe("CWE-758", "Reliance on Undefined Behavior"),
+        // The specific kernel class (KASAN, WARN_ON, GPF, ...) lives in the
+        // summary; one CWE cannot span them, and guessing a memory-safety CWE
+        // for a `WARN_ON` would be the mistake this variant exists to avoid.
+        CrashKind::KernelBug => cwe("CWE-noinfo", "Kernel Bug"),
         CrashKind::Leak => cwe(
             "CWE-401",
             "Missing Release of Memory after Effective Lifetime",
@@ -181,7 +185,9 @@ pub fn security_severity(crash: &Crash) -> f64 {
         }
     }
     match crash.kind {
-        CrashKind::Asan | CrashKind::Segv => 6.0,
+        // A kernel fault is reached from unprivileged syscalls, so it is at
+        // least as serious as the userspace memory-safety classes.
+        CrashKind::Asan | CrashKind::Segv | CrashKind::KernelBug => 6.0,
         CrashKind::Ubsan | CrashKind::Other | CrashKind::Panic => 5.0,
         CrashKind::Abort => 4.0,
         // A leak costs availability, not integrity: it is not a memory-safety

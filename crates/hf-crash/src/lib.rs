@@ -7,6 +7,7 @@ pub mod classify;
 pub mod dedup;
 pub mod frames;
 pub mod ingest;
+pub mod kernel;
 pub mod minimize;
 #[cfg(feature = "remediation-handoff")]
 pub mod remediation;

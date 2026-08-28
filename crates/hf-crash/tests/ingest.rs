@@ -200,3 +200,92 @@ fn engine_specific_ingestion_ignores_symlinked_artifacts_and_reports() {
     assert!(result.crashes.is_empty());
     assert_eq!(result.report_bytes_read, 0);
 }
+
+/// syz-manager writes each distinct kernel bug into its own `crashes/<hash>/`
+/// directory. That nested shape is the documented exception to the flat
+/// userspace artifact layout, so it needs its own walk.
+#[test]
+fn syzkaller_ingests_one_crash_per_kernel_report_directory() {
+    let dir = TempDir::new().unwrap();
+    let crashes = dir.path().join("crashes");
+
+    let with_repro = crashes.join("0123abcd");
+    fs::create_dir_all(&with_repro).unwrap();
+    fs::write(
+        with_repro.join("description"),
+        b"KASAN: slab-out-of-bounds Read in ext4_xattr_set_entry",
+    )
+    .unwrap();
+    fs::write(
+        with_repro.join("report0"),
+        b"BUG: KASAN: slab-out-of-bounds in ext4_xattr_set_entry+0x12/0x34 fs/ext4/xattr.c:1650\n\
+          Call Trace:\n ext4_xattr_set_entry+0x12/0x34 fs/ext4/xattr.c:1650\n",
+    )
+    .unwrap();
+    fs::write(with_repro.join("repro.prog"), b"syscall-sequence").unwrap();
+
+    let without_repro = crashes.join("beef0001");
+    fs::create_dir_all(&without_repro).unwrap();
+    fs::write(
+        without_repro.join("description"),
+        b"WARNING in ext4_write_inode",
+    )
+    .unwrap();
+    fs::write(
+        without_repro.join("report0"),
+        b"WARNING: CPU: 0 PID: 12 at fs/ext4/inode.c:99 ext4_write_inode+0x1/0x2\n\
+          Call Trace:\n ext4_write_inode+0x1/0x2 fs/ext4/inode.c:99\n",
+    )
+    .unwrap();
+
+    let run_id = uuid::Uuid::new_v4();
+    let target_id = uuid::Uuid::new_v4();
+    let result = hf_crash::ingest::ingest_syzkaller(dir.path(), run_id, target_id).unwrap();
+
+    assert_eq!(result.crashes.len(), 2, "one crash per hash directory");
+    for crash in &result.crashes {
+        assert_eq!(crash.kind, hf_core::crash::CrashKind::KernelBug);
+        assert_eq!(crash.run_id, run_id);
+        assert_eq!(crash.target_id, target_id);
+        assert!(
+            !crash.stack_signature.is_empty(),
+            "a kernel crash must dedup by its frames, not fall back to keep-all"
+        );
+        assert!(!crash.summary.is_empty());
+        assert!(!crash.minimized, "syzkaller has no minimization path");
+    }
+
+    // The reproducer is the input when syz-manager captured one; otherwise the
+    // report itself is the evidence the crash points at.
+    let kasan = result
+        .crashes
+        .iter()
+        .find(|c| c.summary.contains("slab-out-of-bounds"))
+        .expect("the KASAN crash is ingested");
+    assert_eq!(kasan.input_path, with_repro.join("repro.prog"));
+    let warning = result
+        .crashes
+        .iter()
+        .find(|c| c.summary.contains("ext4_write_inode"))
+        .expect("the WARNING crash is ingested");
+    assert_eq!(warning.input_path, without_repro.join("report0"));
+
+    // Distinct bugs must not collapse.
+    assert_ne!(
+        result.crashes[0].stack_signature,
+        result.crashes[1].stack_signature
+    );
+}
+
+#[test]
+fn syzkaller_ingest_skips_a_directory_with_no_kernel_report() {
+    let dir = TempDir::new().unwrap();
+    let empty = dir.path().join("crashes").join("cafe0002");
+    fs::create_dir_all(&empty).unwrap();
+    fs::write(empty.join("machineInfo"), b"qemu").unwrap();
+
+    let result =
+        hf_crash::ingest::ingest_syzkaller(dir.path(), uuid::Uuid::new_v4(), uuid::Uuid::new_v4())
+            .unwrap();
+    assert!(result.crashes.is_empty());
+}
