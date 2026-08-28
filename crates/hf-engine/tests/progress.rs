@@ -63,6 +63,55 @@ fn parse_crash_line() {
     );
 }
 
+/// `ASan`'s own benign warnings are not findings.
+///
+/// The runtime prints these on healthy runs -- `__asan_handle_no_return` fires
+/// on longjmp and deep recursion, and the makecontext notice on any program
+/// using ucontext -- and neither reports a bug. Every real `ASan` *error* names
+/// itself in full (`ERROR: AddressSanitizer: ...`, `AddressSanitizer:DEADLYSIGNAL`),
+/// so matching the bare token `asan` adds no detection and counts these as
+/// crashes. The service floors a run's crash count at one whenever a finding
+/// line was seen, so a single warning reports a phantom crash for the campaign.
+#[test]
+fn benign_sanitizer_warnings_are_not_findings() {
+    for line in [
+        "==1234==WARNING: ASan is ignoring requested __asan_handle_no_return: \
+         stack top: 0x7ffd0000; bottom 0x7ffc0000; size: 0x10000 (65536)",
+        "==1234==WARNING: ASan doesn't fully support makecontext/swapcontext \
+         functions and may produce false positives in some cases!",
+        "INFO: Running with libasan.so.6 preloaded",
+    ] {
+        let events = parse_progress(line);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, FuzzProgress::CrashesFound(_))),
+            "a benign ASan line must not be counted as a finding: {line:?} -> {events:?}"
+        );
+    }
+}
+
+/// Every sanitizer report this tool must not miss still registers.
+#[test]
+fn real_sanitizer_reports_are_findings() {
+    for line in [
+        "==1234==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x60200000eff4",
+        "==1234==ERROR: LeakSanitizer: detected memory leaks",
+        "AddressSanitizer:DEADLYSIGNAL",
+        "runtime error: signed integer overflow -- SUMMARY: UBSan: undefined-behavior",
+        "==1234==ERROR: AddressSanitizer: SEGV on unknown address",
+        "Test unit written to /work/out/crash-deadbeef",
+    ] {
+        let events = parse_progress(line);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, FuzzProgress::CrashesFound(_))),
+            "a real sanitizer report must register as a finding: {line:?} -> {events:?}"
+        );
+    }
+}
+
 #[test]
 fn parse_done_line() {
     let events = parse_progress("DONE\n");
