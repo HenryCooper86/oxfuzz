@@ -171,6 +171,143 @@ impl BoundedPaths {
     }
 }
 
+/// Ingest a syzkaller campaign's retained kernel crash evidence.
+///
+/// `syz-manager` writes one directory per distinct bug under
+/// `<run_dir>/crashes/<hash>/`, holding a one-line `description`, one or more
+/// `reportN` bodies, and -- only when it managed to reproduce the bug --
+/// `repro.prog` / `repro.cprog`. That nested shape is the documented exception
+/// to the flat userspace artifact layout (`ENGINE_ADAPTER_STANDARD.md`), and
+/// the reports are kernel oops text rather than sanitizer logs, so this walks
+/// and classifies on its own terms instead of reusing [`ingest_for_engine`].
+///
+/// A directory whose report does not parse as a kernel report is skipped rather
+/// than ingested as an unclassified crash: without a signature it would defeat
+/// dedup, and a syzkaller crash directory always carries a report.
+///
+/// # Errors
+/// Returns [`ClassifiedError::Internal`] if the crash root cannot be read.
+pub fn ingest_syzkaller(
+    run_dir: &Path,
+    run_id: Uuid,
+    target_id: Uuid,
+) -> Result<CrashIngestResult, ClassifiedError> {
+    let crashes_root = run_dir.join("crashes");
+    let mut result = CrashIngestResult {
+        crashes: Vec::new(),
+        artifact_limit_reached: false,
+        report_limit_reached: false,
+        report_bytes_read: 0,
+    };
+    if !crashes_root.is_dir() {
+        return Ok(result);
+    }
+
+    // Deterministic order: a run's crash list must not depend on readdir order.
+    let mut bug_dirs: Vec<PathBuf> = Vec::new();
+    let entries = std::fs::read_dir(&crashes_root).map_err(|error| {
+        ClassifiedError::Internal(format!(
+            "read syzkaller crash directory {}: {error}",
+            crashes_root.display()
+        ))
+    })?;
+    for entry in entries.flatten() {
+        // `symlink_metadata` so a symlinked bug directory cannot redirect the
+        // walk outside the retained evidence tree.
+        if entry
+            .path()
+            .symlink_metadata()
+            .is_ok_and(|metadata| metadata.file_type().is_dir())
+        {
+            bug_dirs.push(entry.path());
+        }
+    }
+    bug_dirs.sort();
+    if bug_dirs.len() > MAX_CRASH_ARTIFACTS {
+        bug_dirs.truncate(MAX_CRASH_ARTIFACTS);
+        result.artifact_limit_reached = true;
+    }
+
+    for bug_dir in bug_dirs {
+        let Some((report_path, report)) = read_kernel_report(&bug_dir, &mut result) else {
+            continue;
+        };
+        let Some(parsed) = crate::kernel::parse_kernel_report(&report) else {
+            continue;
+        };
+        // The reproducer is the actionable input when syz-manager captured one;
+        // otherwise the report is the only evidence the crash can point at.
+        let input_path = ["repro.prog", "repro.cprog"]
+            .iter()
+            .map(|name| bug_dir.join(name))
+            .find(|path| is_regular_file(path))
+            .unwrap_or(report_path);
+        let summary = read_description(&bug_dir).unwrap_or_else(|| parsed.title.clone());
+        result.crashes.push(Crash {
+            id: Uuid::new_v4(),
+            run_id,
+            target_id,
+            input_path,
+            stack_signature: parsed.signature,
+            kind: CrashKind::KernelBug,
+            summary,
+            minimized: false,
+            bug_report: None,
+            casr: None,
+            // The fault is in the kernel under test, never in a harness: a
+            // syzkaller campaign has no harness.
+            origin: CrashOrigin::Target,
+        });
+    }
+    Ok(result)
+}
+
+/// The first `report*` body in a bug directory, bounded like every other report
+/// read on this path.
+fn read_kernel_report(bug_dir: &Path, result: &mut CrashIngestResult) -> Option<(PathBuf, String)> {
+    let mut reports: Vec<PathBuf> = std::fs::read_dir(bug_dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            is_regular_file(path)
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("report"))
+        })
+        .collect();
+    reports.sort();
+    let path = reports.into_iter().next()?;
+    let text = read_bounded(&path, MAX_SANITIZER_REPORT_BYTES)?;
+    result.report_bytes_read = result.report_bytes_read.saturating_add(text.len());
+    if result.report_bytes_read > MAX_AGGREGATE_REPORT_BYTES {
+        result.report_limit_reached = true;
+        return None;
+    }
+    Some((path, text))
+}
+
+/// syz-manager's own one-line title for the bug, when present.
+fn read_description(bug_dir: &Path) -> Option<String> {
+    let text = read_bounded(&bug_dir.join("description"), 4 * 1_024)?;
+    let line = text.lines().next()?.trim();
+    (!line.is_empty()).then(|| line.to_owned())
+}
+
+fn read_bounded(path: &Path, limit: usize) -> Option<String> {
+    if !is_regular_file(path) {
+        return None;
+    }
+    let mut buffer = Vec::new();
+    File::open(path)
+        .ok()?
+        .take(limit as u64)
+        .read_to_end(&mut buffer)
+        .ok()?;
+    Some(String::from_utf8_lossy(&buffer).into_owned())
+}
+
 fn collect_artifacts(run_dir: &Path, mode: IngestMode) -> Result<BoundedPaths, ClassifiedError> {
     let mut artifacts = BoundedPaths::default();
 

@@ -11,6 +11,12 @@ use uuid::Uuid;
 pub enum CrashKind {
     Asan,
     Ubsan,
+    /// A kernel bug reported by a syzkaller campaign: a KASAN/KMSAN/KCSAN
+    /// report, a `BUG_ON`/`WARN_ON`, a fault, a hung task, or a panic. Kept
+    /// distinct from every userspace variant because a kernel oops is a
+    /// different evidence shape, not an `Asan` finding wearing a kernel hat.
+    /// The specific class is carried in the crash summary.
+    KernelBug,
     /// A memory leak reported by `LeakSanitizer`. Distinct from [`CrashKind::Asan`]
     /// because a leak is an availability bug (CWE-401), not a memory-safety
     /// violation, and reports map the kind straight onto a CWE and a severity.

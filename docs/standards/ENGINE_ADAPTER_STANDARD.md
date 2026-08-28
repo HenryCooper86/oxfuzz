@@ -118,17 +118,37 @@ location:
 | libFuzzer | `<run_dir>/` | `crash-*`, `leak-*`, `timeout-*`, `oom-*` |
 | honggfuzz | `<run_dir>/` (pass `--crashdir <run_dir>`) | `SIG<signal>.PC.<...>` |
 | AFL++ | `<run_dir>/crashes/` and `<run_dir>/<instance>/crashes/` (e.g. `default/crashes/`) | any regular file except `README.txt` |
-| syzkaller | manager-configured workdir | manager-produced crash evidence |
-
-Syzkaller is the manager-config exception: its manager owns the kernel-campaign
-workdir and crash evidence, so it does not use the userspace flat-artifact
-layout.
+| syzkaller | `<run_dir>/crashes/<hash>/` | `description`, `report*`, `repro.prog`, `repro.cprog` |
 
 A nested layout such as `<run_dir>/crashes/<crash_id>/{input,log.txt}` is NOT
-ingested: directories under the crash root are skipped (AFL++ instance
-directories are the one exception, and only their immediate `crashes/` child
-is scanned). A userspace adapter that receives a per-crash directory layout
-from its engine MUST flatten the input files into the locations above.
+ingested by the userspace path: directories under the crash root are skipped
+(AFL++ instance directories are the one exception, and only their immediate
+`crashes/` child is scanned). A userspace adapter that receives a per-crash
+directory layout from its engine MUST flatten the input files into the
+locations above.
+
+### Syzkaller is the exception, and has its own path
+
+`syz-manager` owns the kernel-campaign workdir and writes one directory per
+distinct bug, so a syzkaller campaign cannot flatten its output the way a
+userspace adapter must. It is ingested by `hf_crash::ingest::ingest_syzkaller`,
+not by `ingest_for_engine`, and the two do not share a code path:
+
+- The walk descends one level into `crashes/<hash>/` and takes the first
+  `report*` body, using `repro.prog` / `repro.cprog` as the crash input when
+  `syz-manager` reproduced the bug and the report itself when it did not.
+- The reports are kernel oops text, not sanitizer logs, so they are parsed by
+  `hf_crash::kernel` and classified as `CrashKind::KernelBug` with the specific
+  class (KASAN, KMSAN, KCSAN, `BUG_ON`, `WARN_ON`, fault, hung task, panic) in
+  the summary. `hf_crash::classify` is not involved.
+- Signatures come from kernel call-trace symbols with offsets, addresses, and
+  compiler suffixes stripped, and with the reporting machinery
+  (`dump_stack`, `kasan_report`, ...) skipped -- otherwise every KASAN bug
+  would share a top-of-stack and dedup would collapse distinct bugs.
+
+This is a deliberate second path rather than an extension of the first: a
+kernel finding must not inherit userspace assumptions
+(`docs/design/patch-to-proof-design.md`).
 
 Sanitizer/engine logs are optional siblings of the input file, matched by
 name convention (`log-<stem>.txt`, a stem-named `report-*`/`sanitizer-*`
