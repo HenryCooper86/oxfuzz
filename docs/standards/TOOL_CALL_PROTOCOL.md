@@ -18,11 +18,13 @@ pub trait Tool: Send + Sync {
 
 - A registry starts empty. Its owner registers executable implementations and
   definitions by name; JSON Schema is validated before execution.
-- The registry and activation APIs support search and lazy-loading for future
-  integrations. The active agent advertises its complete four-tool inspection
-  surface directly and does not expose a non-functional discovery meta-tool.
-- Dynamic tool definitions remain an extension API. They are not executable
-  until an owning integration supplies a safe implementation and registers it.
+- The active agent advertises its complete four-tool inspection surface
+  directly and exposes no discovery meta-tool. `ToolIndex` and
+  `ToolRegistry::search` remain available for an owner whose registry outgrows
+  what one prompt can carry; nothing in the shipped agent calls them.
+- There is no runtime API for creating tools. A new tool is added by
+  registering an implementation in the active registry -- in code, reviewed --
+  which is what keeps the executable surface enumerable.
 
 ## 3. Active Agent Inspection Tools
 
@@ -77,7 +79,12 @@ agent.
 ## 5. Agent Protocol and Parsing
 
 - The shipped agent uses the model-neutral, prompt-based JSON step contract
-  defined by `hf-prompt`, independent of provider-native tool calling.
-- `hf-tools` retains parsers for provider-specific and tagged tool-call formats
-  as integration infrastructure. Those parsers do not make a tool executable;
-  only an implementation registered in the active registry can run.
+  defined by `hf-prompt`, independent of provider-native tool calling. The
+  model is instructed to reply with exactly one JSON object
+  (`config/prompts/core_tool_protocol.txt`) and the reply is decoded as JSON.
+- That contract is the only tool-call syntax this codebase parses. Parsers for
+  provider-specific and tagged formats (`<tool_call>` and its dialects) were
+  removed on 2026-08-28: they had no caller, and the agent never emits the
+  syntax they read. A provider-native integration adds its parser alongside the
+  implementation that needs it, so a format this codebase claims to accept is
+  always one it exercises.

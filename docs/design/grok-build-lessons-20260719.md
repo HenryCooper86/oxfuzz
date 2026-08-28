@@ -249,11 +249,12 @@ error-classified backoff before returning `Err`; our `error_classifier.rs` alrea
 4. **Do NOT expand our unwired framework to match grok-build's breadth.** The opposite is the lesson.
 
 ### Meta-finding worth surfacing
-oxfuzz carries a large amount of built, unit-tested, but unreachable framework ported from an
+oxfuzz carried a large amount of built, unit-tested, but unreachable framework ported from an
 internal template: `ContextPipeline`, `InjectTools/Memory/Bootstrap`, `ContextManager`,
 `ContextWindowGuard`, `RecallStore`, LTM/STM memory clients, `DynamicToolManager`, `ToolTaxonomy`,
 `ToolActivationSet`, `ResultFormatter`, and `hf-core` traits (`AgentRunner`, `SkillRegistry`,
-`MemoryClient`) with zero implementations. Worse, `AGENTS.md`/`CLAUDE.md` and
+`MemoryClient`) with zero implementations. Most of it has since been removed
+(see `dead-framework-audit-20260719.md`); the hf-tools half went on 2026-08-28. Worse, `AGENTS.md`/`CLAUDE.md` and
 `config/prompts/core_self_evolution.txt` advertise "self-evolving skills" and
 `agent-architect`/`skill-creator`/`tool-engineer` meta-agents that do not exist in code (verified).
 grok-build's discipline is the contrast: it wires what it builds. Before adopting any new grok-build
