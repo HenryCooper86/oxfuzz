@@ -148,6 +148,27 @@ impl ServiceContainer {
         self
     }
 
+    /// A container with no LLM provider, leaving this one untouched.
+    ///
+    /// The pool lives behind an `Arc<RwLock<..>>` shared by every clone, so that
+    /// a Settings edit reaches every consumer without a restart. Clearing it
+    /// through that cell would therefore disable the LLM for the whole process
+    /// -- for every other request a running server is serving, not just this
+    /// operation. The detached container gets its own cell instead, so the
+    /// effect is operation-local, the same way `run_ci_gate` installs
+    /// operation-local guardrails.
+    ///
+    /// Every LLM call site checks [`Self::provider_pool`] first and already has
+    /// a no-provider path, so this is what makes "use no model" an exact
+    /// guarantee across a composite flow rather than a flag threaded through
+    /// each step and forgotten at one of them.
+    #[must_use]
+    pub fn without_provider_pool(&self) -> Self {
+        let mut detached = self.clone();
+        detached.provider_pool = Arc::new(std::sync::RwLock::new(None));
+        detached
+    }
+
     /// Reload the provider pool from the current on-disk config, swapping it in
     /// for every consumer of this container (and its clones) so Settings edits
     /// apply live without a restart. Returns `true` if a pool was loaded (i.e.
