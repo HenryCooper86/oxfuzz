@@ -21,7 +21,7 @@ pub fn classify(log: &str) -> (CrashKind, String, String) {
     } else {
         let mut hasher = Sha256::new();
         // Fold the crash kind into the hash so two distinct bugs that happen to
-        // share the same top-3 frames (e.g. a heap-overflow and a UBSan integer
+        // share the same top-3 frames (e.g. a heap-overflow and a `UBSan` integer
         // overflow reported at the same call site) do not collapse to one
         // signature. Frameless logs still yield an empty signature above, so the
         // dedup "no signature -> keep all" path is preserved.
@@ -66,7 +66,7 @@ fn detect_kind(log: &str) -> CrashKind {
     // A genuine timeout is reported as an error class ("libFuzzer: timeout",
     // a "SUMMARY: ... timeout"), so key on that rather than any "timeout"/
     // "alarm" substring -- a frame like `connect_timeout` or an incidental
-    // "alarm" elsewhere in the log must not reclassify an ASan/SEGV crash.
+    // "alarm" elsewhere in the log must not reclassify an `ASan`/SEGV crash.
     if reports_timeout(&lower) {
         return CrashKind::Timeout;
     }
@@ -77,10 +77,17 @@ fn detect_kind(log: &str) -> CrashKind {
     if reports_panic(&lower) {
         return CrashKind::Panic;
     }
-    if lower.contains("addresssanitizer") || lower.contains("asan") {
-        CrashKind::Asan
-    } else if lower.contains("undefinedbehaviorsanitizer") || lower.contains("ubsan") {
+    // Each sanitizer is keyed on the name it writes about itself, never on a
+    // token that can appear anywhere in the log. `-fsanitize=address,undefined`
+    // is the standard fuzzing build, so an `ASan` runtime frame (`__asan_memcpy`)
+    // or a linked `libasan.so` turns up in reports `ASan` did not author; keying
+    // on the bare token `asan` filed each of those as an `ASan` finding, and the
+    // kind is part of the dedup signature. `UBSan` is checked first because it is
+    // the one whose reports routinely carry the other's name.
+    if reports_undefined_behavior(&lower) {
         CrashKind::Ubsan
+    } else if lower.contains("addresssanitizer") {
+        CrashKind::Asan
     } else if lower.contains("segv") || lower.contains("sigsegv") {
         CrashKind::Segv
     } else if lower.contains("sigabrt") || lower.contains("abort") {
@@ -106,6 +113,20 @@ fn reports_timeout(lower: &str) -> bool {
             || line.contains("libfuzzer: timeout")
             || ((line.contains("summary:") || line.contains("error:"))
                 && line.contains("timeout after"))
+    })
+}
+
+/// Whether the log reports undefined behavior.
+///
+/// `UBSan` names itself only on a `SUMMARY:` line, which a halt-on-first-error or
+/// truncated log never reaches. Its per-finding form names no sanitizer at all:
+/// `<file>:<line>:<col>: runtime error: <description>`. Matched per line rather
+/// than as a bare `contains`, so an unrelated program printing the words
+/// "runtime error" in prose does not reclassify a crash.
+fn reports_undefined_behavior(lower: &str) -> bool {
+    lower.lines().any(|raw| {
+        let line = raw.trim_start();
+        line.contains("undefinedbehaviorsanitizer") || line.contains("runtime error:")
     })
 }
 
@@ -296,10 +317,80 @@ mod tests {
         );
     }
 
+    /// A sanitizer report is attributed to the sanitizer that wrote it, not to
+    /// any sanitizer runtime whose name appears somewhere in the log.
+    ///
+    /// `-fsanitize=address,undefined` is the standard fuzzing build, so a `UBSan`
+    /// finding whose stack passes through an `ASan` interceptor (`__asan_memcpy`)
+    /// or whose modules include `libasan.so` is the common case. Keying on the
+    /// bare token `asan` -- checked first -- filed every one of those as `Asan`.
+    /// The kind is part of the dedup signature, so the mislabel also split and
+    /// merged the wrong crashes.
+    #[test]
+    fn a_ubsan_report_is_not_relabelled_by_an_asan_runtime_frame() {
+        let ubsan_through_an_asan_interceptor = "\
+==2451==ERROR: UndefinedBehaviorSanitizer: undefined-behavior
+src/parse.c:12:5: runtime error: signed integer overflow: 2147483647 + 1
+    #0 0x5581aa in parse_header /src/parse.c:12:5
+    #1 0x5581bb in __asan_memcpy /llvm/compiler-rt/lib/asan/asan_interceptors.cpp:22
+SUMMARY: UndefinedBehaviorSanitizer: signed-integer-overflow /src/parse.c:12:5
+";
+        assert_eq!(
+            detect_kind(ubsan_through_an_asan_interceptor),
+            CrashKind::Ubsan,
+            "the sanitizer that reported the bug owns the classification"
+        );
+
+        let ubsan_from_an_asan_linked_binary = "\
+src/parse.c:12:5: runtime error: load of misaligned address
+    #0 0x44 in decode /src/parse.c:12:5
+    #1 0x55 in main /usr/lib/x86_64-linux-gnu/libasan.so.6
+";
+        assert_eq!(
+            detect_kind(ubsan_from_an_asan_linked_binary),
+            CrashKind::Ubsan,
+            "a linked ASan runtime does not make a UBSan finding an ASan finding"
+        );
+    }
+
+    /// `UBSan`'s per-finding output names no sanitizer at all.
+    ///
+    /// `runtime error:` is what it prints for each finding;
+    /// `UndefinedBehaviorSanitizer` appears only on a `SUMMARY:` line, which a
+    /// halt-on-first-error or truncated log never reaches. `looks_like_crash`
+    /// already accepts such a log as a crash, so it was ingested and then filed
+    /// as `Other`.
+    #[test]
+    fn a_bare_runtime_error_line_is_a_ubsan_finding() {
+        let runtime_error_only =
+            "src/parse.c:12:5: runtime error: signed integer overflow: 2147483647 + 1 \
+             cannot be represented in type 'int'\n";
+        assert_eq!(detect_kind(runtime_error_only), CrashKind::Ubsan);
+    }
+
+    /// The `ASan` cases the fix must not cost us.
+    ///
+    /// (`LeakSanitizer` reports are deliberately absent: they classify as
+    /// `Other` today, which is a separate gap from the `UBSan` edges this fixes.)
+    #[test]
+    fn asan_reports_still_classify_as_asan() {
+        for log in [
+            "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x60200000eff4",
+            "AddressSanitizer:DEADLYSIGNAL",
+            "==1==ERROR: AddressSanitizer: SEGV on unknown address 0x000000000000",
+        ] {
+            let kind = detect_kind(log);
+            assert!(
+                matches!(kind, CrashKind::Asan),
+                "{log:?} must stay an ASan-family finding, got {kind:?}"
+            );
+        }
+    }
+
     #[test]
     fn timeout_is_only_the_reported_error_class() {
-        // An ASan crash whose stack merely mentions a `connect_timeout` frame is
-        // an ASan finding, not a timeout.
+        // An `ASan` crash whose stack merely mentions a `connect_timeout` frame is
+        // an `ASan` finding, not a timeout.
         let asan_with_timeout_frame = "==1==ERROR: AddressSanitizer: SEGV on unknown address\n\
                                        #0 0xdead in connect_timeout /net.c:10:5\n\
                                        SUMMARY: AddressSanitizer: SEGV /net.c:10:5\n";
