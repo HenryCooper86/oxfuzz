@@ -8,6 +8,8 @@ import {
   getAutomotiveSettings,
   inspectAutomotiveCapabilities,
   listAutomotiveOperations,
+  listAutomotiveStateCorpus,
+  promoteAutomotiveStateArtifact,
   setAutomotiveSettings,
   type AutomotiveSettings,
 } from "../lib/automotive";
@@ -109,6 +111,16 @@ describe("automotive frontend transport", () => {
       transport,
     );
     await listAutomotiveOperations("/tmp/project", 25, transport);
+    await promoteAutomotiveStateArtifact(
+      {
+        projectRoot: "/tmp/project",
+        sourceOperationId: "00000000-0000-4000-8000-000000000001",
+        stateSignature: { protocol: "uds", digest: "abc123", observations: { session: "0x03" } },
+        artifact: { location: "output", artifact_id: "canonical-transcript.json" },
+      },
+      transport,
+    );
+    await listAutomotiveStateCorpus("/tmp/project", 25, transport);
     await generateAutomotiveReport("/tmp/project", true, "zh", transport);
 
     expect(invoke.mock.calls).toEqual([
@@ -169,6 +181,16 @@ describe("automotive frontend transport", () => {
         },
       ],
       ["list_automotive_operations", { projectRoot: "/tmp/project", limit: 25 }],
+      [
+        "promote_automotive_state_artifact",
+        {
+          projectRoot: "/tmp/project",
+          sourceOperationId: "00000000-0000-4000-8000-000000000001",
+          stateSignature: { protocol: "uds", digest: "abc123", observations: { session: "0x03" } },
+          artifact: { location: "output", artifact_id: "canonical-transcript.json" },
+        },
+      ],
+      ["list_automotive_state_corpus", { projectRoot: "/tmp/project", limit: 25 }],
       [
         "generate_automotive_report",
         { projectRoot: "/tmp/project", includeAi: true, language: "zh" },
