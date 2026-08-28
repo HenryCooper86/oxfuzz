@@ -1852,6 +1852,15 @@ fn heuristic_draft(candidate: &TargetCandidate, engine: EngineKind) -> HarnessDr
     let includes = generate_includes(candidate);
     let forward_decl = generate_forward_decl(&candidate.symbol, candidate.signature.as_deref());
     let body = generate_harness_body(&candidate.symbol, candidate.signature.as_deref());
+    // libFuzzer's `main` has C linkage, so a C++ harness must not let the
+    // entry point be name-mangled: without this every C++ target fails to link
+    // with `undefined reference to LLVMFuzzerTestOneInput`, whatever its
+    // signature.
+    let linkage = if candidate.language == TargetLanguage::Cpp {
+        "extern \"C\" "
+    } else {
+        ""
+    };
     let source = format!(
         r"// Auto-generated harness for {symbol}
 // Engine: {engine}
@@ -1861,7 +1870,7 @@ fn heuristic_draft(candidate: &TargetCandidate, engine: EngineKind) -> HarnessDr
 {includes}
 {forward_decl}
 
-int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {{
+{linkage}int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {{
     // Target signature: {sig}
 {body}
     return 0;
@@ -1875,6 +1884,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {{
         forward_decl = forward_decl,
         sig = candidate.signature.as_deref().unwrap_or("(unknown)"),
         body = body,
+        linkage = linkage,
     );
     HarnessDraft {
         target_id: candidate.id,
@@ -1900,12 +1910,30 @@ fn engine_label(engine: EngineKind) -> &'static str {
 
 /// Build the `#include` line for a target's header.
 fn generate_includes(candidate: &TargetCandidate) -> String {
-    let file = &candidate.location.file;
-    let stem = file
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("target");
-    format!("#include \"{stem}.h\"")
+    header_include_for(&candidate.location.file)
+}
+
+/// The `#include` line for a target's own header, when the target has one.
+///
+/// Emitted only if the header actually exists beside the source. Guessing
+/// `<stem>.h` unconditionally made the harness fail to compile with
+/// `fatal error: 'frame.h' file not found` for every target whose declarations
+/// do not live in a same-named header -- a single-file `.cc`, a header named
+/// after the module rather than the file, a project using one aggregate header.
+///
+/// Nothing is lost when it is absent: [`generate_forward_decl`] already
+/// declares the target, which is why it exists.
+fn header_include_for(source: &std::path::Path) -> String {
+    let Some(stem) = source.file_stem().and_then(|s| s.to_str()) else {
+        return String::new();
+    };
+    for extension in ["h", "hpp", "hh", "hxx"] {
+        let header = source.with_file_name(format!("{stem}.{extension}"));
+        if header.is_file() {
+            return format!("#include \"{stem}.{extension}\"");
+        }
+    }
+    String::new()
 }
 
 /// Build a forward declaration for the target function so the harness
@@ -1942,6 +1970,26 @@ fn generate_forward_decl(symbol: &str, signature: Option<&str>) -> String {
 }
 
 /// Build the body of `LLVMFuzzerTestOneInput` for a target.
+/// The declared pointer type of a parameter, for casting the fuzzer buffer to
+/// it: `const uint8_t *data` -> `const uint8_t *`.
+///
+/// Recovers the type by dropping the parameter name, so the cast follows the
+/// target rather than a guess. Falls back to `const char *` only when nothing
+/// resembling a type survives, which is the same guess the caller's `fallback`
+/// makes when the signature cannot be read at all.
+fn pointer_cast_type(param: &str) -> String {
+    let Some(star) = param.rfind('*') else {
+        return "const char *".to_owned();
+    };
+    let base = param[..star].trim();
+    if base.is_empty() {
+        return "const char *".to_owned();
+    }
+    // Everything after the last `*` is the parameter name (or nothing, for an
+    // unnamed parameter); the type is what precedes it.
+    format!("{base} *")
+}
+
 fn generate_harness_body(symbol: &str, signature: Option<&str>) -> String {
     let fallback = format!("    {symbol}((const char *)data, size);");
     let Some(sig) = signature else {
@@ -1975,7 +2023,13 @@ fn generate_harness_body(symbol: &str, signature: Option<&str>) -> String {
         let is_char_like =
             param.contains("char") || param.contains("uint8") || param.contains("void");
         if star_count == 1 && is_char_like && !buffer_used {
-            args.push("(const char *)data".to_string());
+            // Cast to the parameter's own declared type. Hardcoding
+            // `const char *` here is an incompatible-pointer warning in C (it
+            // still links, which is why it went unnoticed) and a hard error in
+            // C++, where harnesses build with `clang++` -- so a C++ target
+            // taking `const uint8_t *`, the commonest fuzzing signature there
+            // is, would not compile at all on this no-LLM path.
+            args.push(format!("({})data", pointer_cast_type(param)));
             buffer_used = true;
         } else if star_count >= 1 {
             let base = param[..param.find('*').unwrap_or(param.len())]
@@ -2086,6 +2140,137 @@ fn describe_proposal(proposal: &hf_coverage::StagnationProposal) -> &'static str
             "consider adding seeds, a dictionary, or a custom mutator"
         }
         hf_coverage::StagnationProposal::Stop => "consider stopping this target",
+    }
+}
+
+#[cfg(test)]
+mod heuristic_harness_tests {
+    use super::generate_harness_body;
+
+    /// The buffer is cast to the parameter's own type, not to one hardcoded
+    /// type.
+    ///
+    /// `const uint8_t *` is the commonest fuzzing signature there is. Casting
+    /// it to `const char *` is an incompatible-pointer warning in C -- which is
+    /// why this went unnoticed, since it still links -- and a hard compile
+    /// error in C++, where harnesses build with `clang++`. That made every C++
+    /// target with a byte-buffer parameter fail to build on the no-LLM path.
+    #[test]
+    fn the_buffer_cast_matches_the_declared_parameter_type() {
+        for (signature, expected) in [
+            (
+                "parse_frame(const uint8_t *data, size_t len)",
+                "parse_frame((const uint8_t *)data, size);",
+            ),
+            (
+                "parse_text(const char *buf, size_t len)",
+                "parse_text((const char *)data, size);",
+            ),
+            (
+                "parse_blob(void *p, size_t len)",
+                "parse_blob((void *)data, size);",
+            ),
+            (
+                "parse_u(unsigned char *b, size_t n)",
+                "parse_u((unsigned char *)data, size);",
+            ),
+        ] {
+            let symbol = signature.split('(').next().unwrap();
+            let body = generate_harness_body(symbol, Some(signature));
+            assert!(
+                body.contains(expected),
+                "for {signature}\n  expected: {expected}\n  got: {body}"
+            );
+        }
+    }
+
+    /// A C++ harness gives its entry point C linkage.
+    ///
+    /// libFuzzer's `main` has C linkage, so without `extern "C"` the mangled
+    /// `LLVMFuzzerTestOneInput` is invisible to it and every C++ target fails
+    /// to link, whatever its signature.
+    #[test]
+    fn a_cpp_harness_entry_point_is_not_name_mangled() {
+        let cpp = super::heuristic_draft(
+            &candidate(hf_core::target::TargetLanguage::Cpp),
+            hf_core::engine::EngineKind::LibFuzzer,
+        );
+        assert!(
+            cpp.source
+                .contains("extern \"C\" int LLVMFuzzerTestOneInput"),
+            "C++ entry point must have C linkage: {}",
+            cpp.source
+        );
+
+        let c = super::heuristic_draft(
+            &candidate(hf_core::target::TargetLanguage::C),
+            hf_core::engine::EngineKind::LibFuzzer,
+        );
+        assert!(
+            c.source.contains("int LLVMFuzzerTestOneInput") && !c.source.contains("extern \"C\""),
+            "a C harness needs no linkage specifier: {}",
+            c.source
+        );
+    }
+
+    fn candidate(language: hf_core::target::TargetLanguage) -> hf_core::target::TargetCandidate {
+        hf_core::target::TargetCandidate {
+            id: uuid::Uuid::new_v4(),
+            project_root: std::path::PathBuf::from("/p"),
+            language,
+            symbol: "parse_frame".to_owned(),
+            kind: hf_core::target::TargetKind::Parser,
+            location: hf_core::target::SourceLocation {
+                file: std::path::PathBuf::from("/p/frame.cc"),
+                line: 1,
+                col: 1,
+                end_line: Some(5),
+                end_col: Some(2),
+            },
+            signature: Some("parse_frame(const uint8_t *data, size_t len)".to_owned()),
+            input_surface: hf_core::target::InputSurface::Bytes,
+            complexity: 1,
+            fit_score: 0.9,
+            sanitizers: vec![hf_core::target::Sanitizer::Address],
+            rationale: String::new(),
+            reachable_functions: Vec::new(),
+            accumulated_complexity: 1,
+        }
+    }
+
+    /// A header is included only when it exists.
+    ///
+    /// Guessing `<stem>.h` from the source filename made the harness fail with
+    /// `fatal error: '<stem>.h' file not found` for any target whose
+    /// declarations are not in a same-named header. The forward declaration
+    /// already declares the target, so an absent header costs nothing.
+    #[test]
+    fn a_header_is_included_only_when_it_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("frame.cc");
+        std::fs::write(&source, "int f(void){return 0;}").unwrap();
+        assert_eq!(
+            super::header_include_for(&source),
+            "",
+            "no header on disk means no include"
+        );
+
+        std::fs::write(dir.path().join("frame.h"), "int f(void);").unwrap();
+        assert_eq!(super::header_include_for(&source), "#include \"frame.h\"");
+
+        // A C++ project may name it `.hpp`.
+        let other = dir.path().join("codec.cc");
+        std::fs::write(&other, "int g(void){return 0;}").unwrap();
+        std::fs::write(dir.path().join("codec.hpp"), "int g(void);").unwrap();
+        assert_eq!(super::header_include_for(&other), "#include \"codec.hpp\"");
+    }
+
+    /// With no signature to read, the old behaviour stands: a `const char *`
+    /// cast is the only defensible guess.
+    #[test]
+    fn an_unreadable_signature_still_falls_back() {
+        assert!(generate_harness_body("f", None).contains("f((const char *)data, size);"));
+        assert!(generate_harness_body("f", Some("garbage")).contains("(const char *)data"));
     }
 }
 
