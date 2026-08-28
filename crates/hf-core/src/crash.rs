@@ -11,6 +11,10 @@ use uuid::Uuid;
 pub enum CrashKind {
     Asan,
     Ubsan,
+    /// A memory leak reported by `LeakSanitizer`. Distinct from [`CrashKind::Asan`]
+    /// because a leak is an availability bug (CWE-401), not a memory-safety
+    /// violation, and reports map the kind straight onto a CWE and a severity.
+    Leak,
     Segv,
     Abort,
     Timeout,

@@ -282,12 +282,19 @@ dead-code items: module-path uses, grouped and glob re-exports, and a
   (`description`/`report0`/`log0`), crash-record creation, oops/BUG/KASAN
   classification, and a persisted run -- with no report fixture in the repo to
   build against.
-- [ ] `LeakSanitizer` reports classify as `CrashKind::Other`. `looks_like_crash`
-  accepts them (they contain "sanitizer") so they are ingested, but
-  `detect_kind` has no leak branch, and `CrashKind` has no `Leak` variant.
-  Surfaced while fixing the UBSan edges; left alone because picking between a
-  new variant (a storage-visible change) and folding leaks into `Asan` is a
-  call worth making deliberately.
+- [x] `LeakSanitizer` reports have their own `CrashKind::Leak`. They were
+  ingested (`looks_like_crash` accepts them, and `ingest.rs:260` collects
+  libFuzzer `leak-*` artifacts) and then filed as `Other`. Folding them into
+  `Asan` was the wrong repair: `sarif.rs` maps the kind straight onto a CWE and
+  a severity, so every leak would have reported as CWE-787 "Out-of-bounds
+  Write" at security-severity 6.0 in GitHub code scanning and the DefectDojo
+  export. A leak is an availability bug, so it maps to CWE-401 at a lower
+  severity. The variant cost no migration -- `crashes.kind` is TEXT. Ordering
+  matters as it did for UBSan: LSan is reported *by* the ASan runtime, so a real
+  leak report carries a `SUMMARY: AddressSanitizer:` line and allocates through
+  `asan_malloc_linux.cpp`; the leak check precedes the ASan one in both
+  `detect_kind` and `casr::kind_from_short`. Plan:
+  `.claude/plans/leak-crash-kind-20260828.md`.
 
 The five items this audit opened on 2026-08-27 are all resolved above,
 including the hf-tools wire-or-delete decision the 2026-07-19 audit had left

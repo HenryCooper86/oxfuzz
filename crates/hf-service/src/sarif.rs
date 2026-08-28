@@ -156,6 +156,10 @@ pub fn cwe_for(crash: &Crash) -> Cwe {
     match crash.kind {
         CrashKind::Asan => cwe("CWE-787", "Out-of-bounds Write"),
         CrashKind::Ubsan => cwe("CWE-758", "Reliance on Undefined Behavior"),
+        CrashKind::Leak => cwe(
+            "CWE-401",
+            "Missing Release of Memory after Effective Lifetime",
+        ),
         CrashKind::Segv => cwe("CWE-476", "NULL Pointer Dereference"),
         CrashKind::Abort => cwe("CWE-617", "Reachable Assertion"),
         CrashKind::Timeout => cwe("CWE-834", "Excessive Iteration"),
@@ -180,7 +184,10 @@ pub fn security_severity(crash: &Crash) -> f64 {
         CrashKind::Asan | CrashKind::Segv => 6.0,
         CrashKind::Ubsan | CrashKind::Other | CrashKind::Panic => 5.0,
         CrashKind::Abort => 4.0,
-        CrashKind::Timeout => 3.0,
+        // A leak costs availability, not integrity: it is not a memory-safety
+        // violation an attacker can steer, so it scores below the classes that
+        // are.
+        CrashKind::Leak | CrashKind::Timeout => 3.0,
     }
 }
 

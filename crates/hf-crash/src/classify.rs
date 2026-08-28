@@ -86,6 +86,12 @@ fn detect_kind(log: &str) -> CrashKind {
     // the one whose reports routinely carry the other's name.
     if reports_undefined_behavior(&lower) {
         CrashKind::Ubsan
+    } else if lower.contains("leaksanitizer") || lower.contains("detected memory leak") {
+        // Ahead of the `ASan` check for the same reason: `LSan` is reported by the
+        // `ASan` runtime, so a real leak report carries a
+        // `SUMMARY: AddressSanitizer:` line and allocates through
+        // `asan_malloc_linux.cpp`.
+        CrashKind::Leak
     } else if lower.contains("addresssanitizer") {
         CrashKind::Asan
     } else if lower.contains("segv") || lower.contains("sigsegv") {
@@ -366,6 +372,32 @@ src/parse.c:12:5: runtime error: load of misaligned address
             "src/parse.c:12:5: runtime error: signed integer overflow: 2147483647 + 1 \
              cannot be represented in type 'int'\n";
         assert_eq!(detect_kind(runtime_error_only), CrashKind::Ubsan);
+    }
+
+    /// A `LeakSanitizer` report is a leak, not an out-of-bounds write.
+    ///
+    /// `LSan` is reported by the `ASan` runtime, so a real leak report ends with a
+    /// `SUMMARY: AddressSanitizer:` line and allocates through
+    /// `asan_malloc_linux.cpp`. Attributing it to `ASan` would give every leak
+    /// CWE-787 ("Out-of-bounds Write") and a memory-safety severity in SARIF and
+    /// the `DefectDojo` export, so the leak check has to precede the `ASan` one --
+    /// for the same reason the `UBSan` check does.
+    #[test]
+    fn a_leak_report_is_not_an_address_safety_finding() {
+        let leak = "\
+=================================================================
+==1==ERROR: LeakSanitizer: detected memory leaks
+
+Direct leak of 4 byte(s) in 1 object(s) allocated from:
+    #0 0x4f1b in malloc /llvm/compiler-rt/lib/asan/asan_malloc_linux.cpp:69
+    #1 0x5581aa in parse_header /src/parse.c:12:5
+SUMMARY: AddressSanitizer: 4 byte(s) leaked in 1 allocation(s).
+";
+        assert_eq!(detect_kind(leak), CrashKind::Leak);
+        assert_eq!(
+            detect_kind("==1==ERROR: LeakSanitizer: detected memory leaks"),
+            CrashKind::Leak
+        );
     }
 
     /// The `ASan` cases the fix must not cost us.
