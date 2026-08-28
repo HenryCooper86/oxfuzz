@@ -127,7 +127,7 @@ Status legend: [x] done - [~] partial - [ ] not started.
   frontend-lint) run on every push/PR via `.github/workflows/ci.yml` (public
   GitHub) and `.gitlab-ci.yml` (OrbStack origin); `release.yml` builds the four
   desktop bundles on tag. See `docs/guides/CI.md`.
-- [~] Tests: storage, service, guardrails, agent covered. Crash/triage coverage
+- [x] Tests: storage, service, guardrails, agent covered. Crash/triage coverage
   expanded (`hf-service/tests/crash_triage_paths.rs`, `container.rs`): the
   CASR-clustered triage E2E (the default strategy, previously untested), the
   legacy-triage signature-stagnation early break + dedup collapse, the
@@ -143,9 +143,11 @@ Status legend: [x] done - [~] partial - [ ] not started.
   lossy millisecond serializers (chat checkpoint and session `created_at`)
   now store fixed-width nanosecond RFC 3339 with the checkpoint round-trip
   strengthened to full-record equality, and a workspace sweep confirmed no
-  other timestamp path truncates. Remaining
-  E2E arms: successful minimization through the full loop; UBSan /
-  syzkaller classification edges. The
+  other timestamp path truncates. The two remaining E2E arms are closed:
+  a successful minimization now runs through the full discover/harness/campaign/
+  triage loop (`e2e_pipeline.rs`), including the re-triage path that reuses a
+  published artifact instead of re-entering the sandbox, and the UBSan
+  classification edges are covered and fixed (see below). The
   `lifecycle_and_recovery_events_include_required_structured_fields` race is
   fixed: it asserted a transition-event floor that the workers emit
   independently of the status reads it waited on, so runner contention could
@@ -239,6 +241,19 @@ dead-code items: module-path uses, grouped and glob re-exports, and a
   libFuzzer's documented "the first element is the harness binary path itself"
   and silently requiring an `env` binary in the image. Plan:
   `.claude/plans/engine-env-single-home-20260828.md`.
+- [x] Two UBSan misclassifications in `hf_crash::detect_kind`, both verified
+  against realistic input before the fix. (1) A UBSan report carrying an ASan
+  runtime frame (`__asan_memcpy`) or a linked `libasan.so` was filed as `Asan`:
+  the bare token `asan` was checked first, and `-fsanitize=address,undefined`
+  is the standard fuzzing build, so this was the common case rather than a
+  corner. (2) A bare `runtime error:` line -- UBSan's per-finding output, which
+  names no sanitizer at all -- was filed as `Other`; `UndefinedBehaviorSanitizer`
+  appears only on a `SUMMARY:` line a halt-on-first-error log never reaches.
+  The kind is part of the dedup signature, so both split and merged the wrong
+  crashes. Each sanitizer is now keyed on the name it writes about itself, with
+  UBSan checked first because it is the one whose reports carry the other's
+  name. Same family as the `is_finding_signal` fix above, worse consequence.
+  Plan: `.claude/plans/e2e-arms-minimization-and-classification-20260828.md`.
 - [x] hf-tools' `activation`, `dynamic`, `formatter`, `parser`, and `taxonomy`
   modules are deleted -- 3,776 lines, of which ~1,780 were their own unit tests,
   the only callers. The 2026-07-19 audit called wire-or-delete an owner
@@ -255,9 +270,28 @@ dead-code items: module-path uses, grouped and glob re-exports, and a
 
 ### Open
 
-Nothing. The five items this audit opened on 2026-08-27 are all resolved above,
+- [ ] Syzkaller crashes never reach triage or classification. TODO's E2E clause
+  read as a test gap; it is a feature gap. `collect_artifacts`
+  (`hf-crash/src/ingest.rs:174`) skips syzkaller entirely, `run_syzkaller`
+  (`container/run.rs:1282`) mints a local run id and persists no `RunRecord`
+  (so `triage_run`, which requires a persisted terminal run, cannot reach it),
+  and `triage.rs` names syzkaller nowhere. Kernel evidence is copied out of the
+  disposable stage (`retain_campaign_evidence`) and never read back, and a
+  campaign's crash count is scraped from `syz-manager` status lines rather than
+  from crash objects. Closing it means a kernel report parser
+  (`description`/`report0`/`log0`), crash-record creation, oops/BUG/KASAN
+  classification, and a persisted run -- with no report fixture in the repo to
+  build against.
+- [ ] `LeakSanitizer` reports classify as `CrashKind::Other`. `looks_like_crash`
+  accepts them (they contain "sanitizer") so they are ingested, but
+  `detect_kind` has no leak branch, and `CrashKind` has no `Leak` variant.
+  Surfaced while fixing the UBSan edges; left alone because picking between a
+  new variant (a storage-visible change) and folding leaks into `Asan` is a
+  call worth making deliberately.
+
+The five items this audit opened on 2026-08-27 are all resolved above,
 including the hf-tools wire-or-delete decision the 2026-07-19 audit had left
-standing.
+standing. The two above were found while closing them.
 
 ## Audit backlog (refreshed 2026-07-17)
 
