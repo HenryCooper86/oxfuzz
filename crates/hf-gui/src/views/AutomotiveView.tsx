@@ -35,6 +35,7 @@ import { AutomotiveLiveMonitor } from "../components/AutomotiveLiveMonitor";
 import { AutomotiveUdsScan } from "../components/AutomotiveUdsScan";
 import { AutomotiveFrameSender } from "../components/AutomotiveFrameSender";
 import { AutomotiveLabPanel } from "../components/AutomotiveLabPanel";
+import { AutomotiveStateCorpus } from "../components/AutomotiveStateCorpus";
 import {
   Badge,
   Button,
@@ -749,6 +750,10 @@ export function AutomotiveView() {
           </div>
         </div>
       </section>
+
+      {activeProject && (
+        <AutomotiveStateCorpus projectRoot={activeProject} operations={operations} />
+      )}
 
       <section className="flex flex-col gap-2">
         <div className="flex items-center gap-2">
