@@ -697,8 +697,8 @@ mod workspace_tests {
     use super::{
         document_staging_dir, prepare_managed_workspace_root,
         prepare_managed_workspace_root_with_adoption, project_workspace_dir, run_output_relative,
-        workspace_dir, workspace_lock_file, workspace_manifest, workspace_root_selection,
-        ServiceContainer, WORKSPACE_MANIFEST_FILE,
+        target_revision_lock_file, workspace_dir, workspace_lock_file, workspace_manifest,
+        workspace_root_selection, ServiceContainer, WORKSPACE_MANIFEST_FILE,
     };
     use std::path::{Component, Path};
 
@@ -1034,6 +1034,28 @@ mod workspace_tests {
         drop(cleanup_file);
         drop(operation_file);
         workspace_lock_file(&root).unwrap().try_lock().unwrap();
+    }
+
+    #[test]
+    fn target_revision_file_lease_blocks_an_independent_handle() {
+        let parent = tempfile::tempdir().unwrap();
+        let workspace = parent.path().join("target-workspace");
+        std::fs::create_dir(&workspace).unwrap();
+
+        let first = target_revision_lock_file(&workspace).unwrap();
+        first.try_lock().unwrap();
+        let second = target_revision_lock_file(&workspace).unwrap();
+        assert!(matches!(
+            second.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+
+        drop(second);
+        drop(first);
+        target_revision_lock_file(&workspace)
+            .unwrap()
+            .try_lock()
+            .unwrap();
     }
 
     #[test]

@@ -199,15 +199,16 @@ impl ServiceContainer {
             ));
         }
 
+        let _target_revision = self.acquire_target_revision(project, target).await?;
         let qualified = self
-            .active_harness(project, target, EngineKind::AflPlusPlus)
+            .active_harness_locked(project, target, EngineKind::AflPlusPlus)
             .await?;
         if qualified.status != HarnessStatus::Promoted {
             return Err(ClassifiedError::Validation(
                 "coverage pruning requires an explicitly promoted AFL++ harness".to_owned(),
             ));
         }
-        self.verify_harness_qualification(project, target, &qualified)
+        self.verify_harness_qualification_locked(project, target, &qualified)
             .await?;
         self.authorize_recorded(
             Action::RunFuzzer {
@@ -368,15 +369,16 @@ impl ServiceContainer {
             });
         }
 
+        let _target_revision = self.acquire_target_revision(project, target).await?;
         let qualified = self
-            .active_harness(project, target, EngineKind::LibFuzzer)
+            .active_harness_locked(project, target, EngineKind::LibFuzzer)
             .await?;
         if qualified.status != HarnessStatus::Promoted {
             return Err(ClassifiedError::Validation(
                 "corpus minimization requires an explicitly promoted libFuzzer harness".to_owned(),
             ));
         }
-        self.verify_harness_qualification(project, target, &qualified)
+        self.verify_harness_qualification_locked(project, target, &qualified)
             .await?;
         self.authorize_recorded(
             Action::RunFuzzer {

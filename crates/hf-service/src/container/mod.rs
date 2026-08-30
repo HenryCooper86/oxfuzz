@@ -1037,20 +1037,6 @@ impl ServiceContainer {
             })
     }
 
-    /// Verify that the active source/executable and the persisted smoke run all
-    /// describe the same immutable qualification evidence.
-    async fn verify_harness_qualification(
-        &self,
-        project: &Path,
-        target: &str,
-        harness: &Harness,
-    ) -> Result<(), ClassifiedError> {
-        let _workspace_operation = self.acquire_workspace_operation().await?;
-        let _target_revision = self.acquire_target_revision(project, target).await?;
-        self.verify_harness_qualification_locked(project, target, harness)
-            .await
-    }
-
     /// Verify qualification while the caller holds workspace-operation followed
     /// by target-revision leases. Keeping this lock order avoids recursive
     /// read guards in promotion and protects the checked artifacts through the
