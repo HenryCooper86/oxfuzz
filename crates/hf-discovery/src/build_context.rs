@@ -12,7 +12,7 @@ use std::path::{Component, Path, PathBuf};
 
 use hf_core::{
     build::{BuildContext, CompileEntry},
-    runtime::is_fixed_sandbox_include_path,
+    runtime::{classify_fixed_sandbox_include_path, FixedSandboxIncludePath},
 };
 use serde::Deserialize;
 
@@ -194,8 +194,10 @@ fn record_dropped(context: &mut BuildContext, seen: &mut HashSet<String>, token:
 /// the directory through a different real path (a symlinked temporary directory
 /// is the usual case).
 fn confined_include_dir(raw: &Path, directory: &Path, project_root: &Path) -> Option<PathBuf> {
-    if raw.to_str().is_some_and(is_fixed_sandbox_include_path) {
-        return Some(raw.to_path_buf());
+    match raw.to_str().map(classify_fixed_sandbox_include_path) {
+        Some(FixedSandboxIncludePath::Canonical) => return Some(raw.to_path_buf()),
+        Some(FixedSandboxIncludePath::Invalid) => return None,
+        Some(FixedSandboxIncludePath::Outside) | None => {}
     }
     let joined = if raw.is_absolute() {
         raw.to_path_buf()
@@ -293,12 +295,13 @@ pub fn staged_compile_flags(
 ) -> Vec<String> {
     let mut flags = Vec::new();
     for directory in &ctx.include_dirs {
-        if directory
-            .to_str()
-            .is_some_and(is_fixed_sandbox_include_path)
-        {
-            flags.push(format!("-I{}", directory.display()));
-            continue;
+        match directory.to_str().map(classify_fixed_sandbox_include_path) {
+            Some(FixedSandboxIncludePath::Canonical) => {
+                flags.push(format!("-I{}", directory.display()));
+                continue;
+            }
+            Some(FixedSandboxIncludePath::Invalid) => continue,
+            Some(FixedSandboxIncludePath::Outside) | None => {}
         }
         let Ok(relative) = directory.strip_prefix(project_root) else {
             continue;
@@ -404,6 +407,21 @@ mod tests {
             staged_compile_flags(&context, &PathBuf::from("/project"), "/work"),
             vec!["-I/work/include"]
         );
+    }
+
+    #[test]
+    fn invalid_fixed_sandbox_paths_do_not_fall_back_under_a_work_project_root() {
+        let db = r#"[{"directory":"/work","file":"/work/a.c",
+                      "arguments":["cc","-I/work/./include","-c","/work/a.c"]}]"#;
+        let entries = parse_compile_database(db).expect("parse compile database");
+        assert!(extract_build_context(&entries, &PathBuf::from("/work"))
+            .include_dirs
+            .is_empty());
+        let direct = BuildContext {
+            include_dirs: vec![PathBuf::from("/work//include")],
+            ..BuildContext::default()
+        };
+        assert!(staged_compile_flags(&direct, &PathBuf::from("/work"), "/work").is_empty());
     }
 
     #[test]
