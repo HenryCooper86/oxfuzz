@@ -95,6 +95,14 @@ seed is represented by content digest and size, not its workspace path.
 Failure to normalize a path inside the project is a validation error, not a
 reason to emit the host path.
 
+Compiler definitions are at most `4,096` bytes each. Discovery drops and
+categorizes any definition value containing an embedded Unix, UNC, or
+drive-qualified Windows absolute path, including `file:///...` and
+punctuation-prefixed forms such as `prefix:/...`. Service packet normalization
+applies the same shared bounded linear scan and rejects a path-bearing value
+before persistence. Relative values and non-file URI values such as
+`https://example.test/api` remain portable.
+
 The database row separately stores the canonical project root and target id so
 the service can find and delete project-owned records. Those lookup fields are
 not model-visible packet content.
@@ -115,9 +123,16 @@ pub enum WorkOrderStep {
 ```
 
 The renderer derives argv from the step and the work-order data. Unknown values
-such as source filename, submission id, and attempt id use typed placeholders.
+such as project root, source filename, submission origin, submission id, and
+attempt id use typed placeholders.
 The CLI renderer quotes every concrete POSIX argument in one helper. JSON
 clients receive argv arrays and placeholder metadata, not a command string.
+
+Every emitted argv array parses through the real CLI. Import includes the
+required `--origin` value. Run uses `oxfuzz run <project>`, `--lang`, and
+`--duration <seconds>s`; coverage uses `oxfuzz coverage <project>`. Run and
+coverage both retain the exact `relative_source::symbol` selector rather than a
+bare symbol.
 
 The rendered order is import, qualify, rank, promote, campaign, coverage.
 Promotion is visibly an explicit human step. No generated command claims that a
@@ -205,9 +220,15 @@ reconstructable, and the existing `harness_ai_reviews` record retains the
 provider response metadata.
 
 Smoke uses the existing bounded `hf-runtime` path and persists the normal run
-and harness evidence. Qualification never promotes. Before accepting
-work-order operations at service startup, recovery marks every non-terminal
-attempt `interrupted`; retry creates a new attempt rather than rewriting
+and harness evidence. Qualification never promotes. Before inserting its
+running row, qualification acquires an OS advisory lease named by the new
+attempt UUID and holds it through the terminal transition. Before accepting
+work-order operations at service startup, recovery enumerates running attempts
+and attempts the same lease independently for each row. A busy lease proves the
+qualification is live and is skipped. Acquiring the lease proves the old owner
+is gone and permits a compare-and-set transition of that attempt alone to
+`interrupted`. Enumeration, lease, or transition errors fail the work-order
+recovery gate closed. Retry creates a new attempt rather than rewriting
 history.
 
 ## 8. Ranking and Promotion
@@ -348,6 +369,13 @@ Import request bodies are capped at `131,072` bytes. Public errors retain
 stable service codes and bounded sanitized messages. JSON responses contain
 argv arrays for validation steps and never return the canonical project root.
 
+The service also resolves a work-order, submission, or attempt identifier to
+its immutable owning project. REST uses only those service methods for owner
+resolution, then applies its approved-root policy before every ID-based read,
+mutation, or execution. Ranking authorizes every supplied attempt. An unscoped
+work-order list filters out owners outside the approved roots; handlers never
+read storage directly.
+
 Desktop commands and views are not part of the first implementation.
 
 ## 11. Errors
@@ -406,9 +434,10 @@ to `active implementation` when the first production task lands.
 - Identical retained evidence produces byte-identical packets and ids.
 - A changed source excerpt, complete source digest, compile context, rule, seed
   reference, engine, or language changes the id.
-- Absolute and escaping project paths fail before persistence.
-- Rendered argv quotes project paths containing spaces without interpreting
-  target or source text as shell syntax.
+- Absolute and escaping project paths fail before persistence, including
+  embedded Unix and Windows paths in compiler definitions.
+- Every substituted validation argv parses through the real Clap parser and
+  retains exact file-qualified, namespaced target selectors.
 - Import persists one exact retry idempotently and preserves distinct origin or
   parent records.
 - Empty, oversized, control-character provenance, cross-work-order parent, and
@@ -417,7 +446,8 @@ to `active implementation` when the first production task lands.
 - Qualification rejects stale evidence and blocking lint before runtime.
 - Compile, review, and smoke failures persist the correct terminal stage and
   bounded diagnostics.
-- A simulated restart converts a running attempt to `interrupted`.
+- A second store-backed container skips a truly live qualification while
+  recovering a simultaneous unowned attempt as `interrupted`.
 - Ranking is deterministic and starts no process.
 - Promotion rejects failed, non-active, digest-mismatched, and non-smoke-passed
   attempts and succeeds only through the existing atomic promotion operation.
@@ -437,6 +467,8 @@ to `active implementation` when the first production task lands.
 - CLI import refuses symlinks, directories, and oversized regular files before
   service invocation.
 - REST import enforces the body limit and returns stable service errors.
+- REST hides service-created outside-root records and denies every ID route
+  before mutation, provider use, or runtime dispatch.
 - CLI and REST render service-owned fields without recomputing ranking,
   approval, or execution decisions.
 
