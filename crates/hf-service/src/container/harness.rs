@@ -1948,8 +1948,14 @@ mod exact_qualification_tests {
             let pause = self.pause.lock().unwrap().take();
             if let Some(pause) = pause {
                 if pause.shell_command == (cmd.first().is_some_and(|part| part == "sh")) {
-                    let _ = pause.started.send(());
-                    let _ = pause.release.await;
+                    pause
+                        .started
+                        .send(())
+                        .expect("paused-command observer remains active");
+                    pause
+                        .release
+                        .await
+                        .expect("paused-command release sender remains active");
                 } else {
                     *self.pause.lock().unwrap() = Some(pause);
                 }
@@ -1984,7 +1990,8 @@ mod exact_qualification_tests {
         }
 
         async fn read_file(&self, path: &Path) -> Result<String, ClassifiedError> {
-            Ok(std::fs::read_to_string(path).unwrap_or_default())
+            std::fs::read_to_string(path)
+                .map_err(|error| ClassifiedError::Sandbox(error.to_string()))
         }
     }
 
@@ -2310,9 +2317,11 @@ mod exact_qualification_tests {
         let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel();
         let (acquired_tx, acquired_rx) = tokio::sync::oneshot::channel();
         let cleanup = tokio::spawn(async move {
-            let _ = waiting_tx.send(());
+            waiting_tx.send(()).expect("cleanup waiter remains active");
             let _cleanup = workspace_gate.write_owned().await;
-            let _ = acquired_tx.send(());
+            acquired_tx
+                .send(())
+                .expect("cleanup acquisition observer remains active");
         });
         waiting_rx.await.unwrap();
         tokio::task::yield_now().await;
@@ -2683,8 +2692,12 @@ mod exact_qualification_tests {
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
         let cleanup = tokio::spawn(async move {
             let _cleanup = workspace_gate.write_owned().await;
-            let _ = queued_tx.send(());
-            let _ = release_rx.await;
+            queued_tx
+                .send(())
+                .expect("queued-cleanup observer remains active");
+            release_rx
+                .await
+                .expect("queued-cleanup release sender remains active");
         });
         tokio::task::yield_now().await;
         drop(held);
@@ -2712,7 +2725,9 @@ mod exact_qualification_tests {
                 .is_err(),
             "normal auto-revert must wait behind the queued cleanup writer"
         );
-        let _ = release_tx.send(());
+        release_tx
+            .send(())
+            .expect("queued cleanup remains active until release");
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), &mut revert)
             .await
             .expect("normal auto-revert must complete after cleanup releases the writer lease")
@@ -2767,7 +2782,9 @@ mod exact_qualification_tests {
                 .await
                 .is_err()
         );
-        let _ = release.send(());
+        release
+            .send(())
+            .expect("paused coverage operation remains active until release");
         tokio::time::timeout(std::time::Duration::from_secs(1), &mut coverage)
             .await
             .unwrap()
@@ -2827,7 +2844,9 @@ mod exact_qualification_tests {
                 .await
                 .is_err()
         );
-        let _ = release.send(());
+        release
+            .send(())
+            .expect("paused regression replay remains active until release");
         tokio::time::timeout(std::time::Duration::from_secs(1), &mut replay)
             .await
             .unwrap()

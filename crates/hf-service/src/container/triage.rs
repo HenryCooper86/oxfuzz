@@ -313,8 +313,20 @@ impl ServiceContainer {
     /// accessor. `None` when no C harness was built or the pipeline did not
     /// complete cleanly (a transient failure is not cached, so it retries).
     async fn coverage_export_json_cached(&self, project: &Path, target: &str) -> Option<String> {
-        let _workspace_operation = self.acquire_workspace_operation().await.ok()?;
-        let _target_revision = self.acquire_target_revision(project, target).await.ok()?;
+        let _workspace_operation = match self.acquire_workspace_operation().await {
+            Ok(lease) => lease,
+            Err(error) => {
+                tracing::debug!(%error, "coverage export could not acquire the workspace lease");
+                return None;
+            }
+        };
+        let _target_revision = match self.acquire_target_revision(project, target).await {
+            Ok(lease) => lease,
+            Err(error) => {
+                tracing::debug!(%error, "coverage export could not acquire the target lease");
+                return None;
+            }
+        };
         self.coverage_export_json_cached_locked(project, target)
             .await
     }
@@ -936,10 +948,8 @@ impl ServiceContainer {
                 .await;
             let verified = trace.is_some();
             let still_crashes = trace.as_deref().is_some_and(hf_crash::looks_like_crash);
-            let summary = if still_crashes {
-                trace
-                    .as_deref()
-                    .unwrap_or_default()
+            let summary = match trace.as_deref() {
+                Some(trace) if still_crashes => trace
                     .lines()
                     .find(|l| {
                         let s = l.to_ascii_lowercase();
@@ -949,11 +959,9 @@ impl ServiceContainer {
                     .trim()
                     .chars()
                     .take(200)
-                    .collect()
-            } else if verified {
-                "no crash on replay (fixed)".to_owned()
-            } else {
-                "replay did not complete; result is inconclusive".to_owned()
+                    .collect(),
+                Some(_) => "no crash on replay (fixed)".to_owned(),
+                None => "replay did not complete; result is inconclusive".to_owned(),
             };
             results.push(RegressionResult {
                 crash_id,
@@ -975,8 +983,7 @@ impl ServiceContainer {
     pub async fn coverage_functions(&self, project: &Path, target: &str) -> Vec<String> {
         self.coverage_export_json_cached(project, target)
             .await
-            .map(|json| parse_covered_functions(&json))
-            .unwrap_or_default()
+            .map_or_else(Vec::new, |json| parse_covered_functions(&json))
     }
 
     /// The uncovered frontier for a target: the `file:line` locations the
@@ -992,8 +999,9 @@ impl ServiceContainer {
     ) -> Vec<hf_coverage::UncoveredRegion> {
         self.coverage_export_json_cached(project, target)
             .await
-            .map(|json| hf_coverage::parse_llvm_cov_uncovered(&json))
-            .unwrap_or_default()
+            .map_or_else(Vec::new, |json| {
+                hf_coverage::parse_llvm_cov_uncovered(&json)
+            })
     }
 
     pub(crate) async fn coverage_uncovered_locked(
@@ -1003,8 +1011,9 @@ impl ServiceContainer {
     ) -> Vec<hf_coverage::UncoveredRegion> {
         self.coverage_export_json_cached_locked(project, target)
             .await
-            .map(|json| hf_coverage::parse_llvm_cov_uncovered(&json))
-            .unwrap_or_default()
+            .map_or_else(Vec::new, |json| {
+                hf_coverage::parse_llvm_cov_uncovered(&json)
+            })
     }
 
     pub(crate) async fn coverage_functions_locked(
@@ -1014,8 +1023,7 @@ impl ServiceContainer {
     ) -> Vec<String> {
         self.coverage_export_json_cached_locked(project, target)
             .await
-            .map(|json| parse_covered_functions(&json))
-            .unwrap_or_default()
+            .map_or_else(Vec::new, |json| parse_covered_functions(&json))
     }
 
     /// Line/region/function coverage totals for a fuzz run.
