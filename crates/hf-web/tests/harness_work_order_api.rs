@@ -8,8 +8,12 @@ use std::sync::{Arc, OnceLock};
 
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
-use hf_core::provider::{ProviderError, ProviderPool};
 use hf_service::{
+    test_support::{
+        immutable_test_image, test_chat_response, ChatRequest, ChatResponse, ChatStreamResponse,
+        HarnessApprovalKind, ProviderError, ProviderId, ProviderPool, ProviderStatus, RouteRequest,
+        Store,
+    },
     ClassifiedError, CommandResult, CommandTermination, ResourceLimits, RuntimeAdapter,
 };
 use hf_web::{build_with_state_and_security, AppState, WebSecurityConfig};
@@ -45,7 +49,7 @@ impl RuntimeAdapter for ControlledRuntime {
         &self,
         _image: &str,
     ) -> Result<Option<hf_service::ImmutableImageReference>, ClassifiedError> {
-        Ok(Some(hf_test_utils::immutable_test_image()?))
+        Ok(Some(immutable_test_image()?))
     }
 
     async fn run_command(
@@ -100,33 +104,31 @@ struct ControlledReviewPool;
 impl ProviderPool for ControlledReviewPool {
     async fn chat_completion(
         &self,
-        _request: &hf_core::provider::ChatRequest,
-        _route: &hf_core::provider::RouteRequest,
-    ) -> Result<hf_core::provider::ChatResponse, ProviderError> {
-        Ok(hf_test_utils::fixtures::make_chat_response(
-            APPROVING_REVIEW,
-        ))
+        _request: &ChatRequest,
+        _route: &RouteRequest,
+    ) -> Result<ChatResponse, ProviderError> {
+        Ok(test_chat_response(APPROVING_REVIEW))
     }
 
     async fn chat_completion_stream(
         &self,
-        _request: &hf_core::provider::ChatRequest,
-        _route: &hf_core::provider::RouteRequest,
-    ) -> Result<hf_core::provider::ChatStreamResponse, ProviderError> {
+        _request: &ChatRequest,
+        _route: &RouteRequest,
+    ) -> Result<ChatStreamResponse, ProviderError> {
         Err(ProviderError::Other {
             message: "streaming is unused".to_owned(),
         })
     }
 
-    fn report_error(&self, _provider_id: &hf_core::types::ProviderId, _error: &ProviderError) {}
+    fn report_error(&self, _provider_id: &ProviderId, _error: &ProviderError) {}
 
-    async fn provider_statuses(&self) -> Vec<hf_core::provider::ProviderStatus> {
+    async fn provider_statuses(&self) -> Vec<ProviderStatus> {
         Vec::new()
     }
 
-    async fn freeze(&self, _provider_id: &hf_core::types::ProviderId, _reason: String) {}
+    async fn freeze(&self, _provider_id: &ProviderId, _reason: String) {}
 
-    async fn thaw(&self, _provider_id: &hf_core::types::ProviderId) -> Result<(), ProviderError> {
+    async fn thaw(&self, _provider_id: &ProviderId) -> Result<(), ProviderError> {
         Ok(())
     }
 }
@@ -250,7 +252,7 @@ struct ControlledApiFixture {
     _directory: tempfile::TempDir,
     project: PathBuf,
     managed_workspace: PathBuf,
-    store: Arc<hf_storage::Store>,
+    store: Arc<Store>,
     target_id: uuid::Uuid,
     app: axum::Router,
 }
@@ -270,7 +272,7 @@ impl ControlledApiFixture {
         )
         .expect("write controlled project source");
         let store = Arc::new(
-            hf_storage::Store::connect(directory.path().join("controlled-work-orders.db"))
+            Store::connect(directory.path().join("controlled-work-orders.db"))
                 .await
                 .expect("open controlled work-order store"),
         );
@@ -690,10 +692,7 @@ async fn successful_promotion_returns_an_explicit_path_free_promoted_view() {
         .expect("load REST promotion approval")
         .expect("REST promotion retained approval");
     assert_eq!(approval.harness_id.to_string(), harness_id);
-    assert_eq!(
-        approval.approval_kind,
-        hf_storage::HarnessApprovalKind::CleanSmoke
-    );
+    assert_eq!(approval.approval_kind, HarnessApprovalKind::CleanSmoke);
 }
 
 #[tokio::test]

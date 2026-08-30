@@ -4,11 +4,44 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+pub use hf_core::provider::{
+    ChatRequest, ChatResponse, ChatStreamResponse, ProviderError, ProviderPool, ProviderStatus,
+    RouteRequest,
+};
+pub use hf_core::types::ProviderId;
 use hf_scheduler::{ExecutionStatus, Schedule, ScheduleExecution, TriggerConfig};
-use hf_storage::{NewScheduleOccurrence, ScheduleOccurrenceTransition, Store};
+pub use hf_storage::{HarnessApprovalKind, Store};
+use hf_storage::{NewScheduleOccurrence, ScheduleOccurrenceTransition};
 
 use crate::scheduler::{CampaignParams, CampaignScheduler};
 use crate::ServiceContainer;
+
+/// Stable immutable image identity for controlled presentation tests.
+pub fn immutable_test_image() -> Result<crate::ImmutableImageReference, crate::ClassifiedError> {
+    crate::ImmutableImageReference::from_sha256_id(format!("sha256:{}", "a".repeat(64)))
+}
+
+/// Builds a successful provider response for controlled presentation tests.
+#[must_use]
+pub fn test_chat_response(content: &str) -> ChatResponse {
+    ChatResponse {
+        id: uuid::Uuid::new_v4().to_string(),
+        model: "test-model".to_owned(),
+        content: Some(content.to_owned()),
+        reasoning_content: None,
+        tool_calls: Vec::new(),
+        usage: hf_core::types::TokenUsage {
+            input_tokens: 10,
+            output_tokens: 20,
+            ..Default::default()
+        },
+        finish_reason: hf_core::provider::FinishReason::Stop,
+        raw_request: None,
+        raw_response: None,
+        provider_id: None,
+        generated_images: Vec::new(),
+    }
+}
 
 /// Owns the resources for a one-time recovery presentation test.
 pub struct OneTimeRecoveryTestFixture {
