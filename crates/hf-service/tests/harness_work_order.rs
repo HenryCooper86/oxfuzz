@@ -671,6 +671,55 @@ async fn service_export_persists_identical_packet_before_return_without_runtime_
 }
 
 #[tokio::test]
+async fn service_export_complete_source_digest_changes_packet_identity_outside_bounded_excerpt() {
+    let workspace = tempfile::tempdir().expect("create workspace");
+    let project = workspace.path().join("project");
+    std::fs::create_dir_all(&project).expect("create project");
+    let bounded_lines = std::iter::once("int parse_packet(void) { return 0; }")
+        .chain(std::iter::repeat_n("// retained excerpt line", 59))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let source_path = project.join("parser.c");
+    std::fs::write(
+        &source_path,
+        format!("// heading\n{bounded_lines}\nstatic int tail_value = 1;\n"),
+    )
+    .expect("write first source");
+    let store = Arc::new(
+        hf_storage::Store::connect(workspace.path().join("work-order.db"))
+            .await
+            .expect("create store"),
+    );
+    persist_target(
+        &store,
+        retained_target(&project, PathBuf::from("parser.c"), TargetLanguage::C),
+    )
+    .await;
+    let runtime = Arc::new(CountingRuntime::default());
+    let container = ServiceContainer::new(runtime.clone(), None).with_store(store);
+
+    let first = container
+        .export_harness_work_order(export_request(&project))
+        .await
+        .expect("export first work order");
+    std::fs::write(
+        &source_path,
+        format!("// heading\n{bounded_lines}\nstatic int tail_value = 2;\n"),
+    )
+    .expect("change source outside excerpt");
+    let second = container
+        .export_harness_work_order(export_request(&project))
+        .await
+        .expect("export changed work order");
+
+    assert!(first.payload.source.excerpt_truncated);
+    assert_eq!(first.payload.source.excerpt, second.payload.source.excerpt);
+    assert_ne!(first.payload.source.sha256, second.payload.source.sha256);
+    assert_ne!(first.id, second.id);
+    assert_eq!(runtime.calls.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
 async fn service_work_order_reads_and_lists_only_verified_durable_packets() {
     let workspace = tempfile::tempdir().expect("create workspace");
     let project = workspace.path().join("project");
