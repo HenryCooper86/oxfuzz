@@ -82,6 +82,7 @@ async fn smoke_budget_clamps_to_the_operator_ceiling_and_drives_runtime_and_pers
     let root = tempfile::tempdir().unwrap();
     std::env::set_var("HF_CONFIG_DIR", root.path().join("config"));
     std::env::set_var("HF_WORKSPACE_DIR", root.path().join("workspace"));
+    hf_service::initialize_workspace_root().unwrap();
     // The operator ceiling caps requested campaign durations; the fixed
     // internal smoke budget clamps down to it instead of failing the
     // mandatory qualification step outright.
