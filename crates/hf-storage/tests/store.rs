@@ -31,6 +31,86 @@ async fn temp_store() -> (Store, tempfile::TempDir) {
     (store, dir)
 }
 
+async fn insert_work_order_with_timestamp(
+    store: &Store,
+    id: String,
+    created_at: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO harness_work_orders
+            (id, target_id, project_root, schema_version, packet_json, created_at)
+         VALUES (?1, ?2, '/projects/timestamps', 2, '{\"schema_version\":2}', ?3)",
+    )
+    .bind(id)
+    .bind(Uuid::new_v4().to_string())
+    .bind(created_at)
+    .execute(store.pool())
+    .await
+    .map(|_| ())
+}
+
+async fn insert_work_order_submission(
+    store: &Store,
+    work_order_id: &str,
+    source_sha256: String,
+    origin_json: &str,
+    lint_json: &str,
+    submitted_at: &str,
+) -> Result<Uuid, sqlx::Error> {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO harness_work_order_submissions
+            (id, work_order_id, source, source_sha256, origin_json, parent_submission_id,
+             lint_json, submitted_at)
+         VALUES (?1, ?2, 'int LLVMFuzzerTestOneInput(void) { return 0; }', ?3, ?4, NULL, ?5, ?6)",
+    )
+    .bind(id.to_string())
+    .bind(work_order_id)
+    .bind(source_sha256)
+    .bind(origin_json)
+    .bind(lint_json)
+    .bind(submitted_at)
+    .execute(store.pool())
+    .await
+    .map(|_| id)
+}
+
+async fn insert_work_order_attempt(
+    store: &Store,
+    submission_id: Uuid,
+    result_json: Option<&str>,
+    failure_code: Option<&str>,
+    failure_message: Option<&str>,
+    started_at: &str,
+    updated_at: &str,
+    ended_at: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    let terminal = ended_at.is_some();
+    sqlx::query(
+        "INSERT INTO harness_work_order_attempts
+            (id, submission_id, status, current_stage, harness_id, smoke_run_id,
+             result_json, failure_code, failure_message, started_at, updated_at, ended_at)
+         VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, ?6, ?7, ?8, ?9, ?10)",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(submission_id.to_string())
+    .bind(if terminal { "smoke_passed" } else { "running" })
+    .bind(if terminal { "complete" } else { "compile" })
+    .bind(result_json)
+    .bind(failure_code)
+    .bind(failure_message)
+    .bind(started_at)
+    .bind(updated_at)
+    .bind(ended_at)
+    .execute(store.pool())
+    .await
+    .map(|_| ())
+}
+
+fn json_string_at_limit(limit: usize) -> String {
+    format!("\"{}\"", "x".repeat(limit - 2))
+}
+
 #[tokio::test]
 async fn store_connections_enable_sqlite_write_ahead_logging() {
     let (store, _dir) = temp_store().await;
@@ -220,6 +300,187 @@ async fn harness_work_order_migration_enforces_durable_row_constraints() {
     .execute(store.pool())
     .await
     .is_err());
+}
+
+#[tokio::test]
+async fn harness_work_order_timestamp_columns_require_real_utc_rfc3339_values() {
+    let (store, _dir) = temp_store().await;
+    let work_order_id = "e".repeat(64);
+    insert_work_order_with_timestamp(&store, work_order_id.clone(), "2024-02-29T23:59:59Z")
+        .await
+        .expect("accept canonical UTC timestamp");
+    let submission_id = insert_work_order_submission(
+        &store,
+        &work_order_id,
+        "f".repeat(64),
+        "{\"kind\":\"human\"}",
+        "[]",
+        "2024-02-29T23:59:59.123456789Z",
+    )
+    .await
+    .expect("accept fractional UTC timestamp");
+    insert_work_order_attempt(
+        &store,
+        submission_id,
+        Some("{}"),
+        None,
+        None,
+        "2024-02-29T23:59:59.123456789Z",
+        "2024-02-29T23:59:59.123456789Z",
+        Some("2024-02-29T23:59:59.123456789Z"),
+    )
+    .await
+    .expect("accept canonical attempt timestamps");
+
+    for (ordinal, timestamp) in [
+        "2026-99-01T00:00:00Z",
+        "2026-02-29T00:00:00Z",
+        "2024-02-30T00:00:00Z",
+        "2026-01-01T24:00:00Z",
+        "2026-01-01T23:60:00Z",
+        "2026-01-01T23:59:61Z",
+        "2026-01-01T00:00:00Z\0trailing",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert!(
+            insert_work_order_with_timestamp(&store, format!("{ordinal:064x}"), timestamp,)
+                .await
+                .is_err()
+        );
+    }
+
+    for (ordinal, timestamp) in [
+        "2026-01-01T00:00:00.Z",
+        "2026-01-01T00:00:00.12xZ",
+        "2026-01-01T00:00:00+00:00",
+        "2026-01-01T00:00:00z",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert!(insert_work_order_submission(
+            &store,
+            &work_order_id,
+            format!("{ordinal:064x}"),
+            "{\"kind\":\"human\"}",
+            "[]",
+            timestamp,
+        )
+        .await
+        .is_err());
+    }
+
+    assert!(insert_work_order_attempt(
+        &store,
+        submission_id,
+        None,
+        None,
+        None,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:00Z",
+        Some("2026-01-01T00:00:00.1+00:00"),
+    )
+    .await
+    .is_err());
+}
+
+#[tokio::test]
+async fn harness_work_order_evidence_columns_enforce_json_and_byte_limits() {
+    let (store, _dir) = temp_store().await;
+    let work_order_id = "d".repeat(64);
+    insert_work_order_with_timestamp(&store, work_order_id.clone(), "2026-08-30T00:00:00Z")
+        .await
+        .expect("insert work order");
+
+    let origin_maximum = json_string_at_limit(4_096);
+    let lint_maximum = json_string_at_limit(65_536);
+    let origin_submission = insert_work_order_submission(
+        &store,
+        &work_order_id,
+        "1".repeat(64),
+        &origin_maximum,
+        "[]",
+        "2026-08-30T00:00:00Z",
+    )
+    .await
+    .expect("accept origin JSON at its byte limit");
+    insert_work_order_submission(
+        &store,
+        &work_order_id,
+        "2".repeat(64),
+        "{}",
+        &lint_maximum,
+        "2026-08-30T00:00:00Z",
+    )
+    .await
+    .expect("accept lint JSON at its byte limit");
+    assert!(insert_work_order_submission(
+        &store,
+        &work_order_id,
+        "3".repeat(64),
+        &json_string_at_limit(4_097),
+        "[]",
+        "2026-08-30T00:00:00Z",
+    )
+    .await
+    .is_err());
+    assert!(insert_work_order_submission(
+        &store,
+        &work_order_id,
+        "4".repeat(64),
+        "{}",
+        &json_string_at_limit(65_537),
+        "2026-08-30T00:00:00Z",
+    )
+    .await
+    .is_err());
+    for (ordinal, origin_json, lint_json) in [("5", "{", "[]"), ("6", "{}", "[")] {
+        assert!(insert_work_order_submission(
+            &store,
+            &work_order_id,
+            ordinal.repeat(64),
+            origin_json,
+            lint_json,
+            "2026-08-30T00:00:00Z",
+        )
+        .await
+        .is_err());
+    }
+
+    let result_maximum = json_string_at_limit(65_536);
+    insert_work_order_attempt(
+        &store,
+        origin_submission,
+        Some(&result_maximum),
+        Some(&"c".repeat(128)),
+        Some(&"m".repeat(4_096)),
+        "2026-08-30T00:00:00Z",
+        "2026-08-30T00:00:00Z",
+        Some("2026-08-30T00:00:00Z"),
+    )
+    .await
+    .expect("accept attempt evidence at every byte limit");
+    for (result_json, failure_code, failure_message) in [
+        (Some(json_string_at_limit(65_537)), None, None),
+        (Some("{".to_owned()), None, None),
+        (None, Some("c".repeat(129)), None),
+        (None, None, Some("m".repeat(4_097))),
+    ] {
+        assert!(insert_work_order_attempt(
+            &store,
+            origin_submission,
+            result_json.as_deref(),
+            failure_code.as_deref(),
+            failure_message.as_deref(),
+            "2026-08-30T00:00:00Z",
+            "2026-08-30T00:00:00Z",
+            Some("2026-08-30T00:00:00Z"),
+        )
+        .await
+        .is_err());
+    }
 }
 
 #[test]

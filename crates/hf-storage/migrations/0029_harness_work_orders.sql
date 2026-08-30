@@ -26,11 +26,7 @@ CREATE TABLE harness_work_orders (
         AND json_valid(packet_json)
         AND length(CAST(packet_json AS BLOB)) <= 262144
     ),
-    created_at TEXT NOT NULL CHECK (
-        typeof(created_at) = 'text'
-        AND length(CAST(created_at AS BLOB)) BETWEEN 20 AND 32
-        AND created_at GLOB '????-??-??T??:??:??*Z'
-    )
+    created_at TEXT NOT NULL CHECK (typeof(created_at) = 'text')
 );
 
 CREATE TABLE harness_work_order_submissions (
@@ -84,11 +80,7 @@ CREATE TABLE harness_work_order_submissions (
         AND json_valid(lint_json)
         AND length(CAST(lint_json AS BLOB)) <= 65536
     ),
-    submitted_at TEXT NOT NULL CHECK (
-        typeof(submitted_at) = 'text'
-        AND length(CAST(submitted_at AS BLOB)) BETWEEN 20 AND 32
-        AND submitted_at GLOB '????-??-??T??:??:??*Z'
-    )
+    submitted_at TEXT NOT NULL CHECK (typeof(submitted_at) = 'text')
 );
 
 CREATE TABLE harness_work_order_attempts (
@@ -162,23 +154,9 @@ CREATE TABLE harness_work_order_attempts (
     failure_message TEXT CHECK (
         failure_message IS NULL OR length(CAST(failure_message AS BLOB)) BETWEEN 1 AND 4096
     ),
-    started_at TEXT NOT NULL CHECK (
-        typeof(started_at) = 'text'
-        AND length(CAST(started_at AS BLOB)) BETWEEN 20 AND 32
-        AND started_at GLOB '????-??-??T??:??:??*Z'
-    ),
-    updated_at TEXT NOT NULL CHECK (
-        typeof(updated_at) = 'text'
-        AND length(CAST(updated_at AS BLOB)) BETWEEN 20 AND 32
-        AND updated_at GLOB '????-??-??T??:??:??*Z'
-    ),
-    ended_at TEXT CHECK (
-        ended_at IS NULL OR (
-            typeof(ended_at) = 'text'
-            AND length(CAST(ended_at AS BLOB)) BETWEEN 20 AND 32
-            AND ended_at GLOB '????-??-??T??:??:??*Z'
-        )
-    ),
+    started_at TEXT NOT NULL CHECK (typeof(started_at) = 'text'),
+    updated_at TEXT NOT NULL CHECK (typeof(updated_at) = 'text'),
+    ended_at TEXT CHECK (ended_at IS NULL OR typeof(ended_at) = 'text'),
     CHECK (
         (status = 'running' AND current_stage IN ('compile', 'review', 'smoke')
             AND ended_at IS NULL)
@@ -189,6 +167,248 @@ CREATE TABLE harness_work_order_attempts (
             ) AND current_stage = 'complete' AND ended_at IS NOT NULL)
     )
 );
+
+CREATE TRIGGER harness_work_orders_validate_created_at
+BEFORE INSERT ON harness_work_orders
+WHEN NOT (
+    length(CAST(NEW.created_at AS BLOB)) = length(NEW.created_at)
+    AND length(NEW.created_at) >= 20
+    AND substr(NEW.created_at, 5, 1) = '-'
+    AND substr(NEW.created_at, 8, 1) = '-'
+    AND substr(NEW.created_at, 11, 1) = 'T'
+    AND substr(NEW.created_at, 14, 1) = ':'
+    AND substr(NEW.created_at, 17, 1) = ':'
+    AND substr(NEW.created_at, -1, 1) = 'Z'
+    AND substr(NEW.created_at, 1, 4) NOT GLOB '*[^0-9]*'
+    AND substr(NEW.created_at, 6, 2) NOT GLOB '*[^0-9]*'
+    AND substr(NEW.created_at, 9, 2) NOT GLOB '*[^0-9]*'
+    AND substr(NEW.created_at, 12, 2) NOT GLOB '*[^0-9]*'
+    AND substr(NEW.created_at, 15, 2) NOT GLOB '*[^0-9]*'
+    AND substr(NEW.created_at, 18, 2) NOT GLOB '*[^0-9]*'
+    AND (length(NEW.created_at) = 20 OR (
+        length(NEW.created_at) >= 22
+        AND substr(NEW.created_at, 20, 1) = '.'
+        AND substr(NEW.created_at, 21, length(NEW.created_at) - 21) NOT GLOB '*[^0-9]*'
+    ))
+    AND CAST(substr(NEW.created_at, 6, 2) AS INTEGER) BETWEEN 1 AND 12
+    AND CAST(substr(NEW.created_at, 9, 2) AS INTEGER) BETWEEN 1 AND CASE
+        CAST(substr(NEW.created_at, 6, 2) AS INTEGER)
+        WHEN 2 THEN CASE
+            WHEN CAST(substr(NEW.created_at, 1, 4) AS INTEGER) % 4 = 0
+                AND (CAST(substr(NEW.created_at, 1, 4) AS INTEGER) % 100 <> 0
+                    OR CAST(substr(NEW.created_at, 1, 4) AS INTEGER) % 400 = 0)
+            THEN 29 ELSE 28
+        END
+        WHEN 4 THEN 30 WHEN 6 THEN 30 WHEN 9 THEN 30 WHEN 11 THEN 30
+        ELSE 31
+    END
+    AND CAST(substr(NEW.created_at, 12, 2) AS INTEGER) BETWEEN 0 AND 23
+    AND CAST(substr(NEW.created_at, 15, 2) AS INTEGER) BETWEEN 0 AND 59
+    AND CAST(substr(NEW.created_at, 18, 2) AS INTEGER) BETWEEN 0 AND 60
+)
+BEGIN
+    SELECT RAISE(ABORT, 'work order created_at must be a valid UTC RFC 3339 timestamp');
+END;
+
+CREATE TRIGGER harness_work_order_submissions_validate_submitted_at
+BEFORE INSERT ON harness_work_order_submissions
+WHEN NOT (
+    length(CAST(NEW.submitted_at AS BLOB)) = length(NEW.submitted_at)
+    AND length(NEW.submitted_at) >= 20
+    AND substr(NEW.submitted_at, 5, 1) = '-'
+    AND substr(NEW.submitted_at, 8, 1) = '-'
+    AND substr(NEW.submitted_at, 11, 1) = 'T'
+    AND substr(NEW.submitted_at, 14, 1) = ':'
+    AND substr(NEW.submitted_at, 17, 1) = ':'
+    AND substr(NEW.submitted_at, -1, 1) = 'Z'
+    AND substr(NEW.submitted_at, 1, 4) NOT GLOB '*[^0-9]*'
+    AND substr(NEW.submitted_at, 6, 2) NOT GLOB '*[^0-9]*'
+    AND substr(NEW.submitted_at, 9, 2) NOT GLOB '*[^0-9]*'
+    AND substr(NEW.submitted_at, 12, 2) NOT GLOB '*[^0-9]*'
+    AND substr(NEW.submitted_at, 15, 2) NOT GLOB '*[^0-9]*'
+    AND substr(NEW.submitted_at, 18, 2) NOT GLOB '*[^0-9]*'
+    AND (length(NEW.submitted_at) = 20 OR (
+        length(NEW.submitted_at) >= 22
+        AND substr(NEW.submitted_at, 20, 1) = '.'
+        AND substr(NEW.submitted_at, 21, length(NEW.submitted_at) - 21) NOT GLOB '*[^0-9]*'
+    ))
+    AND CAST(substr(NEW.submitted_at, 6, 2) AS INTEGER) BETWEEN 1 AND 12
+    AND CAST(substr(NEW.submitted_at, 9, 2) AS INTEGER) BETWEEN 1 AND CASE
+        CAST(substr(NEW.submitted_at, 6, 2) AS INTEGER)
+        WHEN 2 THEN CASE
+            WHEN CAST(substr(NEW.submitted_at, 1, 4) AS INTEGER) % 4 = 0
+                AND (CAST(substr(NEW.submitted_at, 1, 4) AS INTEGER) % 100 <> 0
+                    OR CAST(substr(NEW.submitted_at, 1, 4) AS INTEGER) % 400 = 0)
+            THEN 29 ELSE 28
+        END
+        WHEN 4 THEN 30 WHEN 6 THEN 30 WHEN 9 THEN 30 WHEN 11 THEN 30
+        ELSE 31
+    END
+    AND CAST(substr(NEW.submitted_at, 12, 2) AS INTEGER) BETWEEN 0 AND 23
+    AND CAST(substr(NEW.submitted_at, 15, 2) AS INTEGER) BETWEEN 0 AND 59
+    AND CAST(substr(NEW.submitted_at, 18, 2) AS INTEGER) BETWEEN 0 AND 60
+)
+BEGIN
+    SELECT RAISE(ABORT, 'work order submitted_at must be a valid UTC RFC 3339 timestamp');
+END;
+
+CREATE TRIGGER harness_work_order_attempts_validate_timestamps_insert
+BEFORE INSERT ON harness_work_order_attempts
+WHEN NOT (
+    length(CAST(NEW.started_at AS BLOB)) = length(NEW.started_at)
+    AND length(NEW.started_at) >= 20
+    AND substr(NEW.started_at, 5, 1) = '-' AND substr(NEW.started_at, 8, 1) = '-'
+    AND substr(NEW.started_at, 11, 1) = 'T' AND substr(NEW.started_at, 14, 1) = ':'
+    AND substr(NEW.started_at, 17, 1) = ':' AND substr(NEW.started_at, -1, 1) = 'Z'
+    AND substr(NEW.started_at, 1, 4) NOT GLOB '*[^0-9]*'
+    AND substr(NEW.started_at, 6, 2) NOT GLOB '*[^0-9]*'
+    AND substr(NEW.started_at, 9, 2) NOT GLOB '*[^0-9]*'
+    AND substr(NEW.started_at, 12, 2) NOT GLOB '*[^0-9]*'
+    AND substr(NEW.started_at, 15, 2) NOT GLOB '*[^0-9]*'
+    AND substr(NEW.started_at, 18, 2) NOT GLOB '*[^0-9]*'
+    AND (length(NEW.started_at) = 20 OR (length(NEW.started_at) >= 22
+        AND substr(NEW.started_at, 20, 1) = '.'
+        AND substr(NEW.started_at, 21, length(NEW.started_at) - 21) NOT GLOB '*[^0-9]*'))
+    AND CAST(substr(NEW.started_at, 6, 2) AS INTEGER) BETWEEN 1 AND 12
+    AND CAST(substr(NEW.started_at, 9, 2) AS INTEGER) BETWEEN 1 AND CASE CAST(substr(NEW.started_at, 6, 2) AS INTEGER)
+        WHEN 2 THEN CASE WHEN CAST(substr(NEW.started_at, 1, 4) AS INTEGER) % 4 = 0
+            AND (CAST(substr(NEW.started_at, 1, 4) AS INTEGER) % 100 <> 0
+                OR CAST(substr(NEW.started_at, 1, 4) AS INTEGER) % 400 = 0) THEN 29 ELSE 28 END
+        WHEN 4 THEN 30 WHEN 6 THEN 30 WHEN 9 THEN 30 WHEN 11 THEN 30 ELSE 31 END
+    AND CAST(substr(NEW.started_at, 12, 2) AS INTEGER) BETWEEN 0 AND 23
+    AND CAST(substr(NEW.started_at, 15, 2) AS INTEGER) BETWEEN 0 AND 59
+    AND CAST(substr(NEW.started_at, 18, 2) AS INTEGER) BETWEEN 0 AND 60
+    AND length(CAST(NEW.updated_at AS BLOB)) = length(NEW.updated_at)
+    AND length(NEW.updated_at) >= 20
+    AND substr(NEW.updated_at, 5, 1) = '-' AND substr(NEW.updated_at, 8, 1) = '-'
+    AND substr(NEW.updated_at, 11, 1) = 'T' AND substr(NEW.updated_at, 14, 1) = ':'
+    AND substr(NEW.updated_at, 17, 1) = ':' AND substr(NEW.updated_at, -1, 1) = 'Z'
+    AND substr(NEW.updated_at, 1, 4) NOT GLOB '*[^0-9]*'
+    AND substr(NEW.updated_at, 6, 2) NOT GLOB '*[^0-9]*'
+    AND substr(NEW.updated_at, 9, 2) NOT GLOB '*[^0-9]*'
+    AND substr(NEW.updated_at, 12, 2) NOT GLOB '*[^0-9]*'
+    AND substr(NEW.updated_at, 15, 2) NOT GLOB '*[^0-9]*'
+    AND substr(NEW.updated_at, 18, 2) NOT GLOB '*[^0-9]*'
+    AND (length(NEW.updated_at) = 20 OR (length(NEW.updated_at) >= 22
+        AND substr(NEW.updated_at, 20, 1) = '.'
+        AND substr(NEW.updated_at, 21, length(NEW.updated_at) - 21) NOT GLOB '*[^0-9]*'))
+    AND CAST(substr(NEW.updated_at, 6, 2) AS INTEGER) BETWEEN 1 AND 12
+    AND CAST(substr(NEW.updated_at, 9, 2) AS INTEGER) BETWEEN 1 AND CASE CAST(substr(NEW.updated_at, 6, 2) AS INTEGER)
+        WHEN 2 THEN CASE WHEN CAST(substr(NEW.updated_at, 1, 4) AS INTEGER) % 4 = 0
+            AND (CAST(substr(NEW.updated_at, 1, 4) AS INTEGER) % 100 <> 0
+                OR CAST(substr(NEW.updated_at, 1, 4) AS INTEGER) % 400 = 0) THEN 29 ELSE 28 END
+        WHEN 4 THEN 30 WHEN 6 THEN 30 WHEN 9 THEN 30 WHEN 11 THEN 30 ELSE 31 END
+    AND CAST(substr(NEW.updated_at, 12, 2) AS INTEGER) BETWEEN 0 AND 23
+    AND CAST(substr(NEW.updated_at, 15, 2) AS INTEGER) BETWEEN 0 AND 59
+    AND CAST(substr(NEW.updated_at, 18, 2) AS INTEGER) BETWEEN 0 AND 60
+    AND (NEW.ended_at IS NULL OR (
+        length(CAST(NEW.ended_at AS BLOB)) = length(NEW.ended_at)
+        AND length(NEW.ended_at) >= 20
+        AND substr(NEW.ended_at, 5, 1) = '-' AND substr(NEW.ended_at, 8, 1) = '-'
+        AND substr(NEW.ended_at, 11, 1) = 'T' AND substr(NEW.ended_at, 14, 1) = ':'
+        AND substr(NEW.ended_at, 17, 1) = ':' AND substr(NEW.ended_at, -1, 1) = 'Z'
+        AND substr(NEW.ended_at, 1, 4) NOT GLOB '*[^0-9]*'
+        AND substr(NEW.ended_at, 6, 2) NOT GLOB '*[^0-9]*'
+        AND substr(NEW.ended_at, 9, 2) NOT GLOB '*[^0-9]*'
+        AND substr(NEW.ended_at, 12, 2) NOT GLOB '*[^0-9]*'
+        AND substr(NEW.ended_at, 15, 2) NOT GLOB '*[^0-9]*'
+        AND substr(NEW.ended_at, 18, 2) NOT GLOB '*[^0-9]*'
+        AND (length(NEW.ended_at) = 20 OR (length(NEW.ended_at) >= 22
+            AND substr(NEW.ended_at, 20, 1) = '.'
+            AND substr(NEW.ended_at, 21, length(NEW.ended_at) - 21) NOT GLOB '*[^0-9]*'))
+        AND CAST(substr(NEW.ended_at, 6, 2) AS INTEGER) BETWEEN 1 AND 12
+        AND CAST(substr(NEW.ended_at, 9, 2) AS INTEGER) BETWEEN 1 AND CASE CAST(substr(NEW.ended_at, 6, 2) AS INTEGER)
+            WHEN 2 THEN CASE WHEN CAST(substr(NEW.ended_at, 1, 4) AS INTEGER) % 4 = 0
+                AND (CAST(substr(NEW.ended_at, 1, 4) AS INTEGER) % 100 <> 0
+                    OR CAST(substr(NEW.ended_at, 1, 4) AS INTEGER) % 400 = 0) THEN 29 ELSE 28 END
+            WHEN 4 THEN 30 WHEN 6 THEN 30 WHEN 9 THEN 30 WHEN 11 THEN 30 ELSE 31 END
+        AND CAST(substr(NEW.ended_at, 12, 2) AS INTEGER) BETWEEN 0 AND 23
+        AND CAST(substr(NEW.ended_at, 15, 2) AS INTEGER) BETWEEN 0 AND 59
+        AND CAST(substr(NEW.ended_at, 18, 2) AS INTEGER) BETWEEN 0 AND 60
+    ))
+)
+BEGIN
+    SELECT RAISE(ABORT, 'work order attempt timestamps must be valid UTC RFC 3339 values');
+END;
+
+CREATE TRIGGER harness_work_order_attempts_validate_timestamps_update
+BEFORE UPDATE ON harness_work_order_attempts
+WHEN NOT (
+    length(CAST(NEW.started_at AS BLOB)) = length(NEW.started_at)
+    AND length(NEW.started_at) >= 20
+    AND substr(NEW.started_at, 5, 1) = '-' AND substr(NEW.started_at, 8, 1) = '-'
+    AND substr(NEW.started_at, 11, 1) = 'T' AND substr(NEW.started_at, 14, 1) = ':'
+    AND substr(NEW.started_at, 17, 1) = ':' AND substr(NEW.started_at, -1, 1) = 'Z'
+    AND substr(NEW.started_at, 1, 4) NOT GLOB '*[^0-9]*'
+    AND substr(NEW.started_at, 6, 2) NOT GLOB '*[^0-9]*'
+    AND substr(NEW.started_at, 9, 2) NOT GLOB '*[^0-9]*'
+    AND substr(NEW.started_at, 12, 2) NOT GLOB '*[^0-9]*'
+    AND substr(NEW.started_at, 15, 2) NOT GLOB '*[^0-9]*'
+    AND substr(NEW.started_at, 18, 2) NOT GLOB '*[^0-9]*'
+    AND (length(NEW.started_at) = 20 OR (length(NEW.started_at) >= 22
+        AND substr(NEW.started_at, 20, 1) = '.'
+        AND substr(NEW.started_at, 21, length(NEW.started_at) - 21) NOT GLOB '*[^0-9]*'))
+    AND CAST(substr(NEW.started_at, 6, 2) AS INTEGER) BETWEEN 1 AND 12
+    AND CAST(substr(NEW.started_at, 9, 2) AS INTEGER) BETWEEN 1 AND CASE CAST(substr(NEW.started_at, 6, 2) AS INTEGER)
+        WHEN 2 THEN CASE WHEN CAST(substr(NEW.started_at, 1, 4) AS INTEGER) % 4 = 0
+            AND (CAST(substr(NEW.started_at, 1, 4) AS INTEGER) % 100 <> 0
+                OR CAST(substr(NEW.started_at, 1, 4) AS INTEGER) % 400 = 0) THEN 29 ELSE 28 END
+        WHEN 4 THEN 30 WHEN 6 THEN 30 WHEN 9 THEN 30 WHEN 11 THEN 30 ELSE 31 END
+    AND CAST(substr(NEW.started_at, 12, 2) AS INTEGER) BETWEEN 0 AND 23
+    AND CAST(substr(NEW.started_at, 15, 2) AS INTEGER) BETWEEN 0 AND 59
+    AND CAST(substr(NEW.started_at, 18, 2) AS INTEGER) BETWEEN 0 AND 60
+    AND length(CAST(NEW.updated_at AS BLOB)) = length(NEW.updated_at)
+    AND length(NEW.updated_at) >= 20
+    AND substr(NEW.updated_at, 5, 1) = '-' AND substr(NEW.updated_at, 8, 1) = '-'
+    AND substr(NEW.updated_at, 11, 1) = 'T' AND substr(NEW.updated_at, 14, 1) = ':'
+    AND substr(NEW.updated_at, 17, 1) = ':' AND substr(NEW.updated_at, -1, 1) = 'Z'
+    AND substr(NEW.updated_at, 1, 4) NOT GLOB '*[^0-9]*'
+    AND substr(NEW.updated_at, 6, 2) NOT GLOB '*[^0-9]*'
+    AND substr(NEW.updated_at, 9, 2) NOT GLOB '*[^0-9]*'
+    AND substr(NEW.updated_at, 12, 2) NOT GLOB '*[^0-9]*'
+    AND substr(NEW.updated_at, 15, 2) NOT GLOB '*[^0-9]*'
+    AND substr(NEW.updated_at, 18, 2) NOT GLOB '*[^0-9]*'
+    AND (length(NEW.updated_at) = 20 OR (length(NEW.updated_at) >= 22
+        AND substr(NEW.updated_at, 20, 1) = '.'
+        AND substr(NEW.updated_at, 21, length(NEW.updated_at) - 21) NOT GLOB '*[^0-9]*'))
+    AND CAST(substr(NEW.updated_at, 6, 2) AS INTEGER) BETWEEN 1 AND 12
+    AND CAST(substr(NEW.updated_at, 9, 2) AS INTEGER) BETWEEN 1 AND CASE CAST(substr(NEW.updated_at, 6, 2) AS INTEGER)
+        WHEN 2 THEN CASE WHEN CAST(substr(NEW.updated_at, 1, 4) AS INTEGER) % 4 = 0
+            AND (CAST(substr(NEW.updated_at, 1, 4) AS INTEGER) % 100 <> 0
+                OR CAST(substr(NEW.updated_at, 1, 4) AS INTEGER) % 400 = 0) THEN 29 ELSE 28 END
+        WHEN 4 THEN 30 WHEN 6 THEN 30 WHEN 9 THEN 30 WHEN 11 THEN 30 ELSE 31 END
+    AND CAST(substr(NEW.updated_at, 12, 2) AS INTEGER) BETWEEN 0 AND 23
+    AND CAST(substr(NEW.updated_at, 15, 2) AS INTEGER) BETWEEN 0 AND 59
+    AND CAST(substr(NEW.updated_at, 18, 2) AS INTEGER) BETWEEN 0 AND 60
+    AND (NEW.ended_at IS NULL OR (
+        length(CAST(NEW.ended_at AS BLOB)) = length(NEW.ended_at)
+        AND length(NEW.ended_at) >= 20
+        AND substr(NEW.ended_at, 5, 1) = '-' AND substr(NEW.ended_at, 8, 1) = '-'
+        AND substr(NEW.ended_at, 11, 1) = 'T' AND substr(NEW.ended_at, 14, 1) = ':'
+        AND substr(NEW.ended_at, 17, 1) = ':' AND substr(NEW.ended_at, -1, 1) = 'Z'
+        AND substr(NEW.ended_at, 1, 4) NOT GLOB '*[^0-9]*'
+        AND substr(NEW.ended_at, 6, 2) NOT GLOB '*[^0-9]*'
+        AND substr(NEW.ended_at, 9, 2) NOT GLOB '*[^0-9]*'
+        AND substr(NEW.ended_at, 12, 2) NOT GLOB '*[^0-9]*'
+        AND substr(NEW.ended_at, 15, 2) NOT GLOB '*[^0-9]*'
+        AND substr(NEW.ended_at, 18, 2) NOT GLOB '*[^0-9]*'
+        AND (length(NEW.ended_at) = 20 OR (length(NEW.ended_at) >= 22
+            AND substr(NEW.ended_at, 20, 1) = '.'
+            AND substr(NEW.ended_at, 21, length(NEW.ended_at) - 21) NOT GLOB '*[^0-9]*'))
+        AND CAST(substr(NEW.ended_at, 6, 2) AS INTEGER) BETWEEN 1 AND 12
+        AND CAST(substr(NEW.ended_at, 9, 2) AS INTEGER) BETWEEN 1 AND CASE CAST(substr(NEW.ended_at, 6, 2) AS INTEGER)
+            WHEN 2 THEN CASE WHEN CAST(substr(NEW.ended_at, 1, 4) AS INTEGER) % 4 = 0
+                AND (CAST(substr(NEW.ended_at, 1, 4) AS INTEGER) % 100 <> 0
+                    OR CAST(substr(NEW.ended_at, 1, 4) AS INTEGER) % 400 = 0) THEN 29 ELSE 28 END
+            WHEN 4 THEN 30 WHEN 6 THEN 30 WHEN 9 THEN 30 WHEN 11 THEN 30 ELSE 31 END
+        AND CAST(substr(NEW.ended_at, 12, 2) AS INTEGER) BETWEEN 0 AND 23
+        AND CAST(substr(NEW.ended_at, 15, 2) AS INTEGER) BETWEEN 0 AND 59
+        AND CAST(substr(NEW.ended_at, 18, 2) AS INTEGER) BETWEEN 0 AND 60
+    ))
+)
+BEGIN
+    SELECT RAISE(ABORT, 'work order attempt timestamps must be valid UTC RFC 3339 values');
+END;
 
 CREATE UNIQUE INDEX harness_work_order_submissions_identity
 ON harness_work_order_submissions (
