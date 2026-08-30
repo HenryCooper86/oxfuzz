@@ -16,12 +16,14 @@ use hf_core::target::{
 };
 use hf_service::harness_work_order::{
     build_work_order, quote_posix_arg, render_work_order, verify_work_order, work_order_commands,
-    HarnessWorkOrderErrorCode, HarnessWorkOrderPayload, WorkOrderArg, WorkOrderCompileContext,
+    HarnessWorkOrderErrorCode, HarnessWorkOrderErrorKind, HarnessWorkOrderPayload,
+    ImportHarnessWorkOrderSubmissionRequest, WorkOrderArg, WorkOrderCompileContext,
     WorkOrderPlaceholder, WorkOrderRule, WorkOrderSeedReference, WorkOrderSourceEvidence,
-    WorkOrderStep, WorkOrderTargetEvidence, HARNESS_WORK_ORDER_SCHEMA_VERSION,
-    MAX_WORK_ORDER_PACKET_BYTES,
+    WorkOrderStep, WorkOrderSubmissionOrigin, WorkOrderTargetEvidence,
+    HARNESS_WORK_ORDER_SCHEMA_VERSION, MAX_WORK_ORDER_PACKET_BYTES,
 };
 use hf_service::{HarnessWorkOrderExportRequest, ServiceContainer};
+use sha2::{Digest, Sha256};
 
 #[derive(Default)]
 struct CountingRuntime {
@@ -146,6 +148,46 @@ fn payload() -> HarnessWorkOrderPayload {
             WorkOrderStep::RunCampaign { duration_secs: 300 },
             WorkOrderStep::Coverage,
         ],
+    }
+}
+
+async fn persist_work_order(store: &hf_storage::Store, packet: hf_service::HarnessWorkOrder) {
+    store
+        .insert_harness_work_order(&hf_storage::HarnessWorkOrderRecord {
+            id: packet.id.clone(),
+            target_id: uuid::Uuid::new_v4(),
+            project_root: "/retained/project".to_owned(),
+            schema_version: packet.schema_version,
+            packet_json: serde_json::to_string(&packet).expect("serialize work order packet"),
+            created_at: Utc::now(),
+        })
+        .await
+        .expect("persist work order");
+}
+
+fn submission_request(
+    work_order_id: String,
+    source: impl Into<String>,
+    origin: WorkOrderSubmissionOrigin,
+    parent_submission_id: Option<uuid::Uuid>,
+) -> ImportHarnessWorkOrderSubmissionRequest {
+    ImportHarnessWorkOrderSubmissionRequest {
+        work_order_id,
+        source: source.into(),
+        origin,
+        parent_submission_id,
+    }
+}
+
+fn human_origin() -> WorkOrderSubmissionOrigin {
+    WorkOrderSubmissionOrigin::Human
+}
+
+fn external_origin() -> WorkOrderSubmissionOrigin {
+    WorkOrderSubmissionOrigin::ExternalTool {
+        tool: "  external author  ".to_owned(),
+        model: Some("  model-v1  ".to_owned()),
+        response_id: Some("  response-1  ".to_owned()),
     }
 }
 
@@ -1021,4 +1063,354 @@ async fn service_export_rejects_oversized_retained_source() {
             .code,
         HarnessWorkOrderErrorCode::SourceTooLarge
     );
+}
+
+#[tokio::test]
+async fn submission_import_preserves_source_and_persists_lint_without_dispatch() {
+    let workspace = tempfile::tempdir().expect("create workspace");
+    let store = Arc::new(
+        hf_storage::Store::connect(workspace.path().join("work-order.db"))
+            .await
+            .expect("create store"),
+    );
+    let packet = build_work_order(payload()).expect("build work order");
+    persist_work_order(&store, packet.clone()).await;
+    let runtime = Arc::new(CountingRuntime::default());
+    let service = ServiceContainer::new(runtime.clone(), None).with_store(store.clone());
+    let source = "\nvoid LLVMFuzzerTestOneInput(void) { abort(); }\n";
+
+    let human = service
+        .import_harness_work_order_submission(submission_request(
+            packet.id.clone(),
+            source,
+            human_origin(),
+            None,
+        ))
+        .await
+        .expect("import human submission");
+    let external = service
+        .import_harness_work_order_submission(submission_request(
+            packet.id.clone(),
+            source,
+            external_origin(),
+            None,
+        ))
+        .await
+        .expect("import external submission");
+    let retry = service
+        .import_harness_work_order_submission(submission_request(
+            packet.id.clone(),
+            source,
+            WorkOrderSubmissionOrigin::ExternalTool {
+                tool: "external author".to_owned(),
+                model: Some("model-v1".to_owned()),
+                response_id: Some("response-1".to_owned()),
+            },
+            None,
+        ))
+        .await
+        .expect("retry exact external submission");
+    let repair = service
+        .import_harness_work_order_submission(submission_request(
+            packet.id.clone(),
+            source,
+            external_origin(),
+            Some(external.id),
+        ))
+        .await
+        .expect("import repair submission");
+
+    assert_eq!(human.source, source);
+    assert!(hf_harness::has_blocking_finding(&human.lint));
+    assert_eq!(retry, external);
+    assert_ne!(human.id, external.id);
+    assert_ne!(external.id, repair.id);
+    assert_eq!(repair.parent_submission_id, Some(external.id));
+    assert_eq!(
+        external.origin,
+        WorkOrderSubmissionOrigin::ExternalTool {
+            tool: "external author".to_owned(),
+            model: Some("model-v1".to_owned()),
+            response_id: Some("response-1".to_owned()),
+        }
+    );
+    assert_eq!(
+        service
+            .harness_work_order_submission(human.id)
+            .await
+            .expect("retrieve submission"),
+        human
+    );
+    assert_eq!(
+        service
+            .list_harness_work_order_submissions(&packet.id)
+            .await
+            .expect("list submissions")
+            .len(),
+        3
+    );
+    assert_eq!(runtime.calls.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn submission_import_rejects_invalid_input_parent_and_limit() {
+    let workspace = tempfile::tempdir().expect("create workspace");
+    let store = Arc::new(
+        hf_storage::Store::connect(workspace.path().join("work-order.db"))
+            .await
+            .expect("create store"),
+    );
+    let first_packet = build_work_order(payload()).expect("build first work order");
+    let mut second_payload = payload();
+    second_payload.target.symbol = "parse_other_packet".to_owned();
+    let second_packet = build_work_order(second_payload).expect("build second work order");
+    persist_work_order(&store, first_packet.clone()).await;
+    persist_work_order(&store, second_packet.clone()).await;
+    let runtime = Arc::new(CountingRuntime::default());
+    let service = ServiceContainer::new(runtime.clone(), None).with_store(store);
+
+    let oversized_source = "x".repeat(65_537);
+    for (source, origin) in [
+        ("", human_origin()),
+        (oversized_source.as_str(), human_origin()),
+    ] {
+        let error = service
+            .import_harness_work_order_submission(submission_request(
+                first_packet.id.clone(),
+                source,
+                origin,
+                None,
+            ))
+            .await
+            .expect_err("invalid source must fail");
+        assert!(matches!(
+            error.code,
+            HarnessWorkOrderErrorCode::SourceEmpty | HarnessWorkOrderErrorCode::SourceTooLarge
+        ));
+        assert_eq!(error.kind, HarnessWorkOrderErrorKind::Validation);
+    }
+    for origin in [
+        WorkOrderSubmissionOrigin::ExternalTool {
+            tool: "\n".to_owned(),
+            model: None,
+            response_id: None,
+        },
+        WorkOrderSubmissionOrigin::ExternalTool {
+            tool: "tool".to_owned(),
+            model: Some(format!("{}\u{7f}", "a".repeat(127))),
+            response_id: Some("response".to_owned()),
+        },
+        WorkOrderSubmissionOrigin::ExternalTool {
+            tool: "tool".to_owned(),
+            model: None,
+            response_id: Some("r".repeat(257)),
+        },
+    ] {
+        let error = service
+            .import_harness_work_order_submission(submission_request(
+                first_packet.id.clone(),
+                "void f(void) {}",
+                origin,
+                None,
+            ))
+            .await
+            .expect_err("invalid provenance must fail");
+        assert_eq!(error.code, HarnessWorkOrderErrorCode::InvalidProvenance);
+        assert_eq!(error.kind, HarnessWorkOrderErrorKind::Validation);
+    }
+
+    let root = service
+        .import_harness_work_order_submission(submission_request(
+            first_packet.id.clone(),
+            "void root(void) {}",
+            human_origin(),
+            None,
+        ))
+        .await
+        .expect("import root submission");
+    let missing_parent = service
+        .import_harness_work_order_submission(submission_request(
+            first_packet.id.clone(),
+            "void missing_parent(void) {}",
+            human_origin(),
+            Some(uuid::Uuid::new_v4()),
+        ))
+        .await
+        .expect_err("missing parent must fail");
+    assert_eq!(
+        missing_parent.code,
+        HarnessWorkOrderErrorCode::ParentNotFound
+    );
+    let cross_work_order = service
+        .import_harness_work_order_submission(submission_request(
+            second_packet.id.clone(),
+            "void cross_work_order(void) {}",
+            human_origin(),
+            Some(root.id),
+        ))
+        .await
+        .expect_err("cross-work-order parent must fail");
+    assert_eq!(
+        cross_work_order.code,
+        HarnessWorkOrderErrorCode::ParentWorkOrderMismatch
+    );
+
+    for index in 1..20 {
+        service
+            .import_harness_work_order_submission(submission_request(
+                first_packet.id.clone(),
+                format!("void submission_{index}(void) {{}}"),
+                human_origin(),
+                None,
+            ))
+            .await
+            .expect("import within submission limit");
+    }
+    let limit = service
+        .import_harness_work_order_submission(submission_request(
+            first_packet.id.clone(),
+            "void twenty_first(void) {}",
+            human_origin(),
+            None,
+        ))
+        .await
+        .expect_err("twenty-first distinct submission must fail");
+    assert_eq!(
+        limit.code,
+        HarnessWorkOrderErrorCode::SubmissionLimitReached
+    );
+    assert_eq!(limit.kind, HarnessWorkOrderErrorKind::Validation);
+    assert_eq!(runtime.calls.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn submission_reads_reject_tampered_packets_and_malformed_durable_data() {
+    let workspace = tempfile::tempdir().expect("create workspace");
+    let store = Arc::new(
+        hf_storage::Store::connect(workspace.path().join("work-order.db"))
+            .await
+            .expect("create store"),
+    );
+    let valid_packet = build_work_order(payload()).expect("build valid work order");
+    persist_work_order(&store, valid_packet.clone()).await;
+    let malformed_packet_id = "e".repeat(64);
+    store
+        .insert_harness_work_order(&hf_storage::HarnessWorkOrderRecord {
+            id: malformed_packet_id.clone(),
+            target_id: uuid::Uuid::new_v4(),
+            project_root: "/retained/malformed".to_owned(),
+            schema_version: HARNESS_WORK_ORDER_SCHEMA_VERSION,
+            packet_json: "{}".to_owned(),
+            created_at: Utc::now(),
+        })
+        .await
+        .expect("persist malformed packet row");
+    let runtime = Arc::new(CountingRuntime::default());
+    let service = ServiceContainer::new(runtime.clone(), None).with_store(store.clone());
+
+    let packet_error = service
+        .import_harness_work_order_submission(submission_request(
+            malformed_packet_id,
+            "void f(void) {}",
+            human_origin(),
+            None,
+        ))
+        .await
+        .expect_err("tampered packet must block import");
+    assert_eq!(
+        packet_error.code,
+        HarnessWorkOrderErrorCode::InvalidWorkOrderDigest
+    );
+    assert_eq!(packet_error.kind, HarnessWorkOrderErrorKind::Validation);
+
+    let malformed_origin_id = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO harness_work_order_submissions
+         (id, work_order_id, source, source_sha256, origin_json, parent_submission_id, lint_json, submitted_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7)",
+    )
+    .bind(malformed_origin_id.to_string())
+    .bind(&valid_packet.id)
+    .bind("void malformed_origin(void) {}")
+    .bind(hex::encode(Sha256::digest(b"void malformed_origin(void) {}")))
+    .bind("{\"unknown\":true}")
+    .bind("[]")
+    .bind("2026-08-30T00:00:00Z")
+    .execute(store.pool())
+    .await
+    .expect("insert malformed origin row");
+    let origin_error = service
+        .harness_work_order_submission(malformed_origin_id)
+        .await
+        .expect_err("malformed origin JSON must fail retrieval");
+    assert_eq!(
+        origin_error.code,
+        HarnessWorkOrderErrorCode::InvalidWorkOrderDigest
+    );
+    assert_eq!(origin_error.kind, HarnessWorkOrderErrorKind::Validation);
+
+    let malformed_lint_packet = build_work_order(HarnessWorkOrderPayload {
+        target: WorkOrderTargetEvidence {
+            symbol: "parse_lint_packet".to_owned(),
+            ..payload().target
+        },
+        ..payload()
+    })
+    .expect("build lint work order");
+    persist_work_order(&store, malformed_lint_packet.clone()).await;
+    sqlx::query(
+        "INSERT INTO harness_work_order_submissions
+         (id, work_order_id, source, source_sha256, origin_json, parent_submission_id, lint_json, submitted_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7)",
+    )
+    .bind(uuid::Uuid::new_v4().to_string())
+    .bind(&malformed_lint_packet.id)
+    .bind("void malformed_lint(void) {}")
+    .bind(hex::encode(Sha256::digest(b"void malformed_lint(void) {}")))
+    .bind("\"human\"")
+    .bind("{\"not\":\"a lint list\"}")
+    .bind("2026-08-30T00:00:01Z")
+    .execute(store.pool())
+    .await
+    .expect("insert malformed lint row");
+    let lint_error = service
+        .list_harness_work_order_submissions(&malformed_lint_packet.id)
+        .await
+        .expect_err("malformed lint JSON must fail listing");
+    assert_eq!(
+        lint_error.code,
+        HarnessWorkOrderErrorCode::InvalidWorkOrderDigest
+    );
+    assert_eq!(lint_error.kind, HarnessWorkOrderErrorKind::Validation);
+
+    sqlx::query("DROP TRIGGER harness_work_order_submissions_validate_submitted_at")
+        .execute(store.pool())
+        .await
+        .expect("remove temporary timestamp guard");
+    let malformed_timestamp_id = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO harness_work_order_submissions
+         (id, work_order_id, source, source_sha256, origin_json, parent_submission_id, lint_json, submitted_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7)",
+    )
+    .bind(malformed_timestamp_id.to_string())
+    .bind(&valid_packet.id)
+    .bind("void malformed_timestamp(void) {}")
+    .bind(hex::encode(Sha256::digest(b"void malformed_timestamp(void) {}")))
+    .bind("\"human\"")
+    .bind("[]")
+    .bind("not-a-timestamp")
+    .execute(store.pool())
+    .await
+    .expect("insert malformed timestamp row");
+    let timestamp_error = service
+        .harness_work_order_submission(malformed_timestamp_id)
+        .await
+        .expect_err("malformed timestamp must fail retrieval");
+    assert_eq!(
+        timestamp_error.code,
+        HarnessWorkOrderErrorCode::InvalidWorkOrderDigest
+    );
+    assert_eq!(timestamp_error.kind, HarnessWorkOrderErrorKind::Validation);
+    assert_eq!(runtime.calls.load(Ordering::Relaxed), 0);
 }
