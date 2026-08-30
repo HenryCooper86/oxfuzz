@@ -15,11 +15,11 @@ use hf_core::target::{
     InputSurface, SourceLocation, TargetCandidate, TargetInventory, TargetKind, TargetLanguage,
 };
 use hf_service::harness_work_order::{
-    build_work_order, quote_posix_arg, render_work_order, verify_work_order, work_order_commands,
-    HarnessWorkOrderErrorCode, HarnessWorkOrderErrorKind, HarnessWorkOrderPayload,
-    ImportHarnessWorkOrderSubmissionRequest, WorkOrderArg, WorkOrderCompileContext,
-    WorkOrderPlaceholder, WorkOrderRule, WorkOrderSeedReference, WorkOrderSourceEvidence,
-    WorkOrderStep, WorkOrderSubmissionOrigin, WorkOrderTargetEvidence,
+    build_work_order, quote_posix_arg, render_work_order, sanitize_work_order_diagnostic,
+    verify_work_order, work_order_commands, HarnessWorkOrderErrorCode, HarnessWorkOrderErrorKind,
+    HarnessWorkOrderPayload, ImportHarnessWorkOrderSubmissionRequest, WorkOrderArg,
+    WorkOrderCompileContext, WorkOrderPlaceholder, WorkOrderRule, WorkOrderSeedReference,
+    WorkOrderSourceEvidence, WorkOrderStep, WorkOrderSubmissionOrigin, WorkOrderTargetEvidence,
     HARNESS_WORK_ORDER_SCHEMA_VERSION, MAX_WORK_ORDER_PACKET_BYTES,
     MAX_WORK_ORDER_SOURCE_EXCERPT_BYTES,
 };
@@ -529,6 +529,22 @@ fn posix_quoting_preserves_literal_arguments() {
     assert_eq!(quote_posix_arg("two words"), "'two words'");
     assert_eq!(quote_posix_arg("a'b"), "'a'\"'\"'b'");
     assert_eq!(quote_posix_arg("$(touch nope)"), "'$(touch nope)'");
+}
+
+#[test]
+fn diagnostic_sanitizer_redacts_embedded_markers_and_preserves_ordinary_prefixes() {
+    let sanitized = sanitize_work_order_diagnostic(
+        "ordinary diagnostic detail;sk-punctuated-secret \
+         detail;token=secret-value detail;Bearer opaque-credential \
+         unix;/Users/operator/private win];C:\\Users\\operator\\private",
+        4_096,
+    );
+
+    assert_eq!(
+        sanitized,
+        "ordinary diagnostic detail;<redacted> detail;token=<redacted> \
+         detail;Bearer <redacted> unix;<redacted-path> win];<redacted-path>"
+    );
 }
 
 #[tokio::test]
