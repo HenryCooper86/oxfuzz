@@ -162,6 +162,7 @@ struct ApiFixture {
     _directory: tempfile::TempDir,
     project: PathBuf,
     alternate_project: PathBuf,
+    container: hf_service::ServiceContainer,
     app: axum::Router,
 }
 
@@ -227,11 +228,12 @@ impl ApiFixture {
             vec![project.clone(), alternate_project.clone()],
         )
         .expect("open local test security");
-        let app = build_with_state_and_security(AppState::new(container), security);
+        let app = build_with_state_and_security(AppState::new(container.clone()), security);
         Self {
             _directory: directory,
             project,
             alternate_project,
+            container,
             app,
         }
     }
@@ -697,8 +699,10 @@ async fn successful_promotion_returns_an_explicit_path_free_promoted_view() {
 #[tokio::test]
 async fn successful_attempt_responses_never_return_punctuation_adjacent_credentials() {
     let fixture = ControlledApiFixture::new(ControlledRuntimeMode::CompileError(
-        "compile failed !sk-punctuated-secret! !token=secret-value \
-         !Bearer opaque-credential detail;/Users/operator/private/source.c"
+        "compile failed detail;sk-embedded-secret \
+         detail;token=embedded-assignment-secret \
+         detail;Bearer embedded-bearer-secret \
+         detail;/Users/operator/private/source.c"
             .to_owned(),
     ))
     .await;
@@ -732,9 +736,9 @@ async fn successful_attempt_responses_never_return_punctuation_adjacent_credenti
     for body in [&qualification_bytes, &list_bytes, &get_bytes] {
         let body = String::from_utf8_lossy(body);
         for secret in [
-            "punctuated-secret",
-            "secret-value",
-            "opaque-credential",
+            "embedded-secret",
+            "embedded-assignment-secret",
+            "embedded-bearer-secret",
             "/Users/operator",
         ] {
             assert!(
@@ -853,6 +857,116 @@ async fn malformed_path_identifiers_return_common_json_validation_errors() {
         assert_eq!(body["code"], "invalid_identifier", "{uri}: {body}");
         assert_root_absent(&fixture.canonical_root(), &bytes);
     }
+}
+
+#[tokio::test]
+async fn undecodable_identifier_paths_return_common_json_before_service_side_effects() {
+    let fixture = ApiFixture::new().await;
+    let root = fixture.canonical_root();
+    let (work_order_id, _) = export_work_order(&fixture).await;
+    let (status, submission, _) = json_request(
+        &fixture.app,
+        Method::POST,
+        &format!("/harness/work-orders/{work_order_id}/submissions"),
+        serde_json::json!({
+            "source": "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size > 0 && data[0]; }",
+            "origin": "human",
+            "parent_submission_id": null
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "baseline submission: {submission}");
+    let submission_id: uuid::Uuid = submission["id"]
+        .as_str()
+        .expect("baseline submission id")
+        .parse()
+        .expect("baseline submission UUID");
+    let orders_before = fixture
+        .container
+        .list_harness_work_orders(None)
+        .await
+        .expect("list baseline work orders");
+    let submissions_before = fixture
+        .container
+        .list_harness_work_order_submissions(&work_order_id)
+        .await
+        .expect("list baseline submissions");
+    let attempts_before = fixture
+        .container
+        .list_harness_work_order_attempts(submission_id)
+        .await
+        .expect("list baseline attempts");
+
+    let requests = [
+        (Method::GET, "/harness/work-orders/%FF", None),
+        (Method::GET, "/harness/work-orders/%FF/submissions", None),
+        (
+            Method::POST,
+            "/harness/work-orders/%FF/submissions",
+            Some(r#"{"source":"valid source","origin":"human"}"#),
+        ),
+        (
+            Method::GET,
+            "/harness/work-order-submissions/%FF/qualifications",
+            None,
+        ),
+        (
+            Method::POST,
+            "/harness/work-order-submissions/%FF/qualifications",
+            None,
+        ),
+        (Method::GET, "/harness/work-order-attempts/%FF", None),
+        (
+            Method::POST,
+            "/harness/work-order-attempts/%FF/promotion",
+            None,
+        ),
+    ];
+
+    for (method, uri, body) in requests {
+        let (status, bytes) = send(
+            &fixture.app,
+            method,
+            uri,
+            body.map_or_else(Body::empty, Body::from),
+            body.is_some(),
+        )
+        .await;
+        let response: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("path rejection uses common JSON");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {response}");
+        assert_eq!(response["code"], "invalid_request", "{uri}: {response}");
+        assert!(response["error"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty()));
+        assert_eq!(response.as_object().map(serde_json::Map::len), Some(2));
+        assert_root_absent(&root, &bytes);
+    }
+
+    assert_eq!(
+        fixture
+            .container
+            .list_harness_work_orders(None)
+            .await
+            .expect("list work orders after path rejections"),
+        orders_before
+    );
+    assert_eq!(
+        fixture
+            .container
+            .list_harness_work_order_submissions(&work_order_id)
+            .await
+            .expect("list submissions after path rejections"),
+        submissions_before
+    );
+    assert_eq!(
+        fixture
+            .container
+            .list_harness_work_order_attempts(submission_id)
+            .await
+            .expect("list attempts after path rejections"),
+        attempts_before
+    );
 }
 
 #[tokio::test]

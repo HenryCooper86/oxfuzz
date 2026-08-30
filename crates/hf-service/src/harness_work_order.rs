@@ -546,33 +546,45 @@ pub fn sanitize_work_order_diagnostic(message: &str, maximum_bytes: usize) -> St
     let mut redact_next = false;
     let sanitized = message
         .split_whitespace()
-        .map(|token| {
-            if redact_next {
-                redact_next = false;
-                return "<redacted>".to_owned();
-            }
-            let normalized = normalized_diagnostic_token(token);
-            if normalized.eq_ignore_ascii_case("bearer") {
-                redact_next = true;
-                return "Bearer".to_owned();
-            }
-            if secret_key(normalized) {
-                redact_next = true;
-                return token.to_owned();
-            }
-            if let Some(redacted) = redact_secret_assignment(token, &mut redact_next) {
-                return redacted;
-            }
-            if secret_value(normalized) {
-                return "<redacted>".to_owned();
-            }
-            redact_absolute_path(token).unwrap_or_else(|| token.to_owned())
-        })
+        .map(|token| sanitize_diagnostic_token(token, &mut redact_next))
         .collect::<Vec<_>>()
         .join(" ");
     bounded_utf8(&sanitized, maximum_bytes)
         .trim_end()
         .to_owned()
+}
+
+fn sanitize_diagnostic_token(token: &str, redact_next: &mut bool) -> String {
+    if *redact_next {
+        *redact_next = false;
+        return "<redacted>".to_owned();
+    }
+    for (index, suffix) in diagnostic_marker_suffixes(token) {
+        let normalized = normalized_diagnostic_token(suffix);
+        if normalized.eq_ignore_ascii_case("bearer") {
+            *redact_next = true;
+            return format!("{}Bearer", &token[..index]);
+        }
+        if secret_key(normalized) {
+            *redact_next = true;
+            return token.to_owned();
+        }
+        if let Some(redacted) = redact_secret_assignment(suffix, redact_next) {
+            return format!("{}{redacted}", &token[..index]);
+        }
+        if secret_value(normalized) {
+            return format!("{}<redacted>", &token[..index]);
+        }
+    }
+    redact_absolute_path(token).unwrap_or_else(|| token.to_owned())
+}
+
+fn diagnostic_marker_suffixes(token: &str) -> impl Iterator<Item = (usize, &str)> {
+    std::iter::once((0, token)).chain(token.char_indices().filter_map(move |(index, character)| {
+        let suffix_index = index + character.len_utf8();
+        (!character.is_alphanumeric() && suffix_index < token.len())
+            .then_some((suffix_index, &token[suffix_index..]))
+    }))
 }
 
 fn normalized_diagnostic_token(token: &str) -> &str {

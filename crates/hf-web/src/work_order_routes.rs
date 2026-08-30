@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 use axum::extract::rejection::{JsonRejection, QueryRejection};
-use axum::extract::{DefaultBodyLimit, Json, Path, Query, Request, State};
-use axum::http::StatusCode;
+use axum::extract::{DefaultBodyLimit, FromRequestParts, Json, Path, Query, Request, State};
+use axum::http::{request::Parts, StatusCode};
 use axum::routing::{get, post};
 use axum::Router;
 use hf_service::{
@@ -144,6 +144,22 @@ struct WorkOrderErrorResponse {
 type WorkOrderApiError = (StatusCode, Json<WorkOrderErrorResponse>);
 type WorkOrderApiResult<T> = Result<Json<T>, WorkOrderApiError>;
 
+struct StableIdentifierPath(String);
+
+impl<S> FromRequestParts<S> for StableIdentifierPath
+where
+    S: Send + Sync,
+{
+    type Rejection = WorkOrderApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        Path::<String>::from_request_parts(parts, state)
+            .await
+            .map(|Path(value)| Self(value))
+            .map_err(|_| invalid_request("request path identifier is malformed".to_owned()))
+    }
+}
+
 async fn export(
     State(state): State<AppState>,
     request: Result<Json<ExportRequest>, JsonRejection>,
@@ -208,7 +224,7 @@ async fn list(
 
 async fn get_by_id(
     State(state): State<AppState>,
-    Path(work_order_id): Path<String>,
+    StableIdentifierPath(work_order_id): StableIdentifierPath,
 ) -> WorkOrderApiResult<WorkOrderResponse> {
     let work_order_id = parse_work_order_id(work_order_id)?;
     let work_order = state
@@ -221,7 +237,7 @@ async fn get_by_id(
 
 async fn import_submission(
     State(state): State<AppState>,
-    Path(work_order_id): Path<String>,
+    StableIdentifierPath(work_order_id): StableIdentifierPath,
     request: Result<Json<ImportSubmissionRequest>, JsonRejection>,
 ) -> WorkOrderApiResult<hf_service::HarnessWorkOrderSubmission> {
     let work_order_id = parse_work_order_id(work_order_id)?;
@@ -246,7 +262,7 @@ async fn import_submission(
 
 async fn list_submissions(
     State(state): State<AppState>,
-    Path(work_order_id): Path<String>,
+    StableIdentifierPath(work_order_id): StableIdentifierPath,
 ) -> WorkOrderApiResult<Vec<hf_service::HarnessWorkOrderSubmission>> {
     let work_order_id = parse_work_order_id(work_order_id)?;
     let submissions = state
@@ -259,7 +275,7 @@ async fn list_submissions(
 
 async fn qualify_submission(
     State(state): State<AppState>,
-    Path(submission_id): Path<String>,
+    StableIdentifierPath(submission_id): StableIdentifierPath,
     request: Request,
 ) -> WorkOrderApiResult<hf_service::HarnessWorkOrderAttempt> {
     let submission_id = parse_identifier(&submission_id)?;
@@ -274,7 +290,7 @@ async fn qualify_submission(
 
 async fn list_attempts(
     State(state): State<AppState>,
-    Path(submission_id): Path<String>,
+    StableIdentifierPath(submission_id): StableIdentifierPath,
 ) -> WorkOrderApiResult<Vec<hf_service::HarnessWorkOrderAttempt>> {
     let submission_id = parse_identifier(&submission_id)?;
     let attempts = state
@@ -287,7 +303,7 @@ async fn list_attempts(
 
 async fn get_attempt(
     State(state): State<AppState>,
-    Path(attempt_id): Path<String>,
+    StableIdentifierPath(attempt_id): StableIdentifierPath,
 ) -> WorkOrderApiResult<hf_service::HarnessWorkOrderAttempt> {
     let attempt_id = parse_identifier(&attempt_id)?;
     let attempt = state
@@ -318,7 +334,7 @@ async fn rank_attempts(
 
 async fn promote_attempt(
     State(state): State<AppState>,
-    Path(attempt_id): Path<String>,
+    StableIdentifierPath(attempt_id): StableIdentifierPath,
     request: Request,
 ) -> WorkOrderApiResult<PromotedHarnessResponse> {
     let attempt_id = parse_identifier(&attempt_id)?;
@@ -486,8 +502,9 @@ mod tests {
     fn public_error_messages_are_bounded_and_sanitized() {
         let private_root = "/Users/operator/private-project";
         let message = format!(
-            "storage at {private_root}/work-orders.db failed !sk-punctuated-secret! \
-             !token=secret-value !Bearer opaque-credential {}",
+            "storage at {private_root}/work-orders.db failed detail;sk-embedded-secret \
+             detail;token=embedded-assignment-secret \
+             detail;Bearer embedded-bearer-secret {}",
             "x".repeat(MAX_PUBLIC_ERROR_MESSAGE_BYTES * 2)
         );
         let (_, Json(body)) = work_order_api_error(HarnessWorkOrderError {
@@ -498,9 +515,11 @@ mod tests {
 
         assert!(body.error.len() <= MAX_PUBLIC_ERROR_MESSAGE_BYTES);
         assert!(!body.error.contains(private_root));
-        assert!(!body.error.contains("punctuated-secret"));
-        assert!(!body.error.contains("secret-value"));
-        assert!(!body.error.contains("opaque-credential"));
+        assert!(!body.error.contains("embedded-secret"));
+        assert!(!body.error.contains("embedded-assignment-secret"));
+        assert!(!body.error.contains("embedded-bearer-secret"));
+        assert!(body.error.contains("storage at"));
+        assert!(body.error.contains("detail;"));
         assert!(!body.error.chars().any(char::is_control));
     }
 }
