@@ -1,128 +1,541 @@
-//! Service-owned, provider-free harness authoring packet.
+//! Deterministic Harness Work Order v2 packets.
 //!
-//! Every harness-authoring path in oxfuzz requires a configured LLM provider.
-//! That excludes two real cases: an operator who wants to write the harness
-//! themselves, and an environment where no provider credential may be present.
-//!
-//! A work order is everything needed to author one harness for one candidate,
-//! with no provider involved at any point.
-//!
-//! See `docs/design/harness-work-order-design.md`.
-//!
-//! The rendering is deterministic: the same retained state produces the same
-//! bytes, so two exports can be diffed. Nothing is read from the environment,
-//! because no part of this needs it.
+//! Packets carry retained authoring evidence only. Constructing, verifying, and
+//! rendering a packet never invokes a provider, build, runtime, or fuzzer.
 
-use hf_core::build::BuildContext;
+use std::{error::Error, fmt, path::Path};
+
+use hf_core::{engine::EngineKind, error::ClassifiedError, target::TargetLanguage};
 use hf_harness::{harness_rules, HarnessRuleSummary, LintSeverity};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Current serialized Harness Work Order schema.
-pub const HARNESS_WORK_ORDER_SCHEMA_VERSION: u32 = 1;
+pub const HARNESS_WORK_ORDER_SCHEMA_VERSION: u32 = 2;
 
-/// Everything gathered for one candidate.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorkOrderInputs {
-    /// The candidate function.
-    pub target_symbol: String,
-    /// Its recorded signature, when discovery captured one.
-    pub signature: Option<String>,
-    /// `file:line` of its definition.
-    pub location: String,
-    /// Why discovery ranked it.
-    pub rationale: String,
-    /// Source language, as the harness will be written in.
-    pub language: String,
-    /// A bounded excerpt of the candidate's source.
-    pub source_excerpt: String,
-    /// The compile context for its translation unit.
-    pub build_context: BuildContext,
-    /// Retained corpus entries and repository fixtures worth seeding from.
-    pub seed_suggestions: Vec<String>,
-    /// The project path, as it appears in the validation commands.
-    pub project_display: String,
+/// Maximum serialized packet size retained by storage.
+pub const MAX_WORK_ORDER_PACKET_BYTES: usize = 262_144;
+/// Maximum source excerpt size carried by a packet.
+pub const MAX_WORK_ORDER_SOURCE_EXCERPT_BYTES: usize = 65_536;
+/// Maximum source excerpt line count carried by a packet.
+pub const MAX_WORK_ORDER_SOURCE_EXCERPT_LINES: usize = 60;
+/// Maximum retained seed references carried by a packet.
+pub const MAX_WORK_ORDER_SEEDS: usize = 20;
+
+/// One deterministic, content-addressed authoring packet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessWorkOrder {
+    /// Serialization version for this packet.
+    pub schema_version: u32,
+    /// Lowercase SHA-256 of the canonical payload JSON.
+    pub id: String,
+    /// Evidence consumed by an authoring tool or a human.
+    pub payload: HarnessWorkOrderPayload,
 }
 
-/// One rule an author must satisfy, as the packet states it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// The evidence covered by a Harness Work Order identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessWorkOrderPayload {
+    /// Stable discovery evidence for the selected target.
+    pub target: WorkOrderTargetEvidence,
+    /// Selected fuzzing engine.
+    pub engine: EngineKind,
+    /// Bounded source evidence for the target.
+    pub source: WorkOrderSourceEvidence,
+    /// Normalized compilation evidence.
+    pub compile_context: WorkOrderCompileContext,
+    /// Lowercase SHA-256 of canonical compilation evidence JSON.
+    pub compile_context_sha256: String,
+    /// Harness lint rules the author must follow.
+    pub harness_rules: Vec<WorkOrderRule>,
+    /// Content-addressed seed references.
+    pub seeds: Vec<WorkOrderSeedReference>,
+    /// Semantic validation operations in execution order.
+    pub validation_steps: Vec<WorkOrderStep>,
+}
+
+/// Stable discovery evidence for one target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkOrderTargetEvidence {
+    /// Discovered function or entrypoint name.
+    pub symbol: String,
+    /// Discovered signature when available.
+    pub signature: Option<String>,
+    /// Language used by the target and harness.
+    pub language: TargetLanguage,
+    /// Source path relative to the project root.
+    pub relative_source: String,
+    /// One-based source line containing the target.
+    pub line: u32,
+    /// Discovery reason retained for the target selection.
+    pub rationale: String,
+}
+
+/// Bounded source evidence for one target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkOrderSourceEvidence {
+    /// Candidate declaration and body excerpt.
+    pub excerpt: String,
+    /// Whether the excerpt was cut by a configured bound.
+    pub excerpt_truncated: bool,
+    /// Lowercase SHA-256 of the complete candidate source file.
+    pub sha256: String,
+}
+
+/// Normalized compilation evidence for the target translation unit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkOrderCompileContext {
+    /// Project-relative include directories.
+    pub include_dirs: Vec<String>,
+    /// Preprocessor definitions without their compiler spelling.
+    pub defines: Vec<String>,
+    /// Language-standard compiler flag when recorded.
+    pub std_flag: Option<String>,
+    /// Additional retained compiler flags.
+    pub extra_flags: Vec<String>,
+    /// Number of compile-database units contributing this context.
+    pub compile_units: usize,
+    /// Compile flags excluded from the portable context.
+    pub dropped_flags: Vec<String>,
+}
+
+/// One harness lint rule rendered with the packet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkOrderRule {
-    /// Stable rule identifier, matching the lint finding a violation produces.
+    /// Stable harness-lint identifier.
     pub id: String,
-    /// Whether a violation blocks compilation.
+    /// Whether violating this rule blocks qualification.
     pub blocking: bool,
-    /// What is wrong and why it matters.
+    /// Explanation displayed to the author.
     pub message: String,
 }
 
-/// One authoring packet.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct HarnessWorkOrder {
-    /// Serialization version of this packet.
-    pub schema_version: u32,
-    /// The candidate function.
-    pub target_symbol: String,
-    /// Its recorded signature, when discovery captured one.
-    pub signature: Option<String>,
-    /// `file:line` of its definition.
-    pub location: String,
-    /// Why discovery ranked it.
-    pub rationale: String,
-    /// Source language.
-    pub language: String,
-    /// A bounded excerpt of the candidate's source.
-    pub source_excerpt: String,
-    /// Include directories the harness must be compiled with.
-    pub include_dirs: Vec<String>,
-    /// Defines the harness must be compiled with.
-    pub defines: Vec<String>,
-    /// The language standard, when the compile database recorded one.
-    pub std_flag: Option<String>,
-    /// Other code-generation flags the compile database recorded.
-    pub extra_flags: Vec<String>,
-    /// Translation units the compile database recorded. Zero means the flags
-    /// above are not the project's own.
-    pub compile_units: usize,
-    /// The rules the lint enforces, so an author sees them before writing.
-    pub harness_rules: Vec<WorkOrderRule>,
-    /// Inputs worth seeding the corpus from.
-    pub seed_suggestions: Vec<String>,
-    /// Exactly how to check the result.
-    pub validation_commands: Vec<String>,
+/// One content-addressed seed candidate.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct WorkOrderSeedReference {
+    /// Lowercase SHA-256 of the seed content.
+    pub sha256: String,
+    /// Seed content size in bytes.
+    pub size: u64,
 }
 
-/// Assemble the packet for one candidate.
-///
-/// Calls no provider and reads no environment variable.
-#[must_use]
-pub fn build_work_order(inputs: &WorkOrderInputs) -> HarnessWorkOrder {
-    HarnessWorkOrder {
-        schema_version: HARNESS_WORK_ORDER_SCHEMA_VERSION,
-        target_symbol: inputs.target_symbol.clone(),
-        signature: inputs.signature.clone(),
-        location: inputs.location.clone(),
-        rationale: inputs.rationale.clone(),
-        language: inputs.language.clone(),
-        source_excerpt: inputs.source_excerpt.clone(),
-        include_dirs: inputs
-            .build_context
-            .include_dirs
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect(),
-        defines: inputs.build_context.defines.clone(),
-        std_flag: inputs.build_context.std_flag.clone(),
-        extra_flags: inputs.build_context.extra_flags.clone(),
-        compile_units: inputs.build_context.entry_count,
-        harness_rules: rules_for(&inputs.language),
-        seed_suggestions: inputs.seed_suggestions.clone(),
-        validation_commands: validation_commands(&inputs.project_display, &inputs.target_symbol),
+/// A semantic validation operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkOrderStep {
+    /// Import an externally authored candidate.
+    Import,
+    /// Qualify one immutable submission.
+    Qualify,
+    /// Rank retained qualification attempts.
+    Rank,
+    /// Promote one active, smoke-passed attempt.
+    Promote,
+    /// Run a post-promotion campaign for the given duration.
+    RunCampaign { duration_secs: u64 },
+    /// Collect post-promotion coverage evidence.
+    Coverage,
+}
+
+/// A value deliberately absent from an argv array until an operator supplies it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkOrderPlaceholder {
+    /// Path to the authored source file.
+    SourceFile,
+    /// Identifier of one imported submission.
+    SubmissionId,
+    /// Identifiers of the attempts to rank.
+    AttemptIds,
+    /// Identifier of one qualification attempt.
+    AttemptId,
+}
+
+/// One argv item in a validation command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkOrderArg {
+    /// A concrete, packet-derived argument.
+    Literal(String),
+    /// An operator-supplied value with declared meaning.
+    Placeholder(WorkOrderPlaceholder),
+}
+
+/// A rendered command description for one semantic validation operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkOrderCommand {
+    /// Operation represented by this argv array.
+    pub step: WorkOrderStep,
+    /// Arguments for a JSON client or a POSIX renderer.
+    pub argv: Vec<WorkOrderArg>,
+    /// Whether the service requires a human approval event before execution.
+    pub approval_required: bool,
+}
+
+/// Category used by clients to decide whether an operation can be retried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessWorkOrderErrorKind {
+    /// Packet or request evidence is invalid.
+    Validation,
+    /// A durable record is absent.
+    NotFound,
+    /// A durable record conflicts with an immutable value.
+    Conflict,
+    /// A required service dependency is unavailable.
+    Unavailable,
+    /// A provider operation failed.
+    Provider,
+    /// Sandboxed build or execution failed.
+    Sandbox,
+    /// Durable storage failed.
+    Storage,
+    /// An unexpected service failure occurred.
+    Internal,
+}
+
+/// Stable detail code returned by Harness Work Order service operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessWorkOrderErrorCode {
+    /// The operation requires durable storage.
+    StorageRequired,
+    /// Packet or compile-context digest verification failed.
+    InvalidWorkOrderDigest,
+    /// The packet schema is unsupported.
+    UnsupportedWorkOrderSchema,
+    /// Submitted source is empty.
+    SourceEmpty,
+    /// Source or packet evidence exceeds its configured size bound.
+    SourceTooLarge,
+    /// Submitted provenance is malformed.
+    InvalidProvenance,
+    /// A declared submission parent does not exist.
+    ParentNotFound,
+    /// A declared submission parent belongs to another work order.
+    ParentWorkOrderMismatch,
+    /// A work order already has its maximum number of submissions.
+    SubmissionLimitReached,
+    /// Qualification cannot run while lint has blocking findings.
+    SubmissionHasBlockingLint,
+    /// Retained source or compile evidence no longer matches the project.
+    StaleWorkOrder,
+    /// A recovery operation interrupted a running qualification attempt.
+    AttemptInterrupted,
+    /// Promotion requires a smoke-passed qualification attempt.
+    AttemptNotSmokePassed,
+    /// Promotion requires the exact active workspace revision.
+    AttemptNotActive,
+    /// A requested work order was not found.
+    WorkOrderNotFound,
+    /// A requested submission was not found.
+    SubmissionNotFound,
+    /// A requested qualification attempt was not found.
+    AttemptNotFound,
+    /// A durable attempt transition is invalid.
+    InvalidTransition,
+    /// Ranking accepts no more than the configured number of attempts.
+    RankingLimitExceeded,
+    /// A project-relative path was absolute or escaped the project root.
+    InvalidProjectPath,
+    /// The packet has more retained seed references than the schema allows.
+    SeedLimitExceeded,
+    /// The packet exceeds the durable packet size limit.
+    WorkOrderTooLarge,
+}
+
+impl HarnessWorkOrderErrorCode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::StorageRequired => "storage_required",
+            Self::InvalidWorkOrderDigest => "invalid_work_order_digest",
+            Self::UnsupportedWorkOrderSchema => "unsupported_work_order_schema",
+            Self::SourceEmpty => "source_empty",
+            Self::SourceTooLarge => "source_too_large",
+            Self::InvalidProvenance => "invalid_provenance",
+            Self::ParentNotFound => "parent_not_found",
+            Self::ParentWorkOrderMismatch => "parent_work_order_mismatch",
+            Self::SubmissionLimitReached => "submission_limit_reached",
+            Self::SubmissionHasBlockingLint => "submission_has_blocking_lint",
+            Self::StaleWorkOrder => "stale_work_order",
+            Self::AttemptInterrupted => "attempt_interrupted",
+            Self::AttemptNotSmokePassed => "attempt_not_smoke_passed",
+            Self::AttemptNotActive => "attempt_not_active",
+            Self::WorkOrderNotFound => "work_order_not_found",
+            Self::SubmissionNotFound => "submission_not_found",
+            Self::AttemptNotFound => "attempt_not_found",
+            Self::InvalidTransition => "invalid_transition",
+            Self::RankingLimitExceeded => "ranking_limit_exceeded",
+            Self::InvalidProjectPath => "invalid_project_path",
+            Self::SeedLimitExceeded => "seed_limit_exceeded",
+            Self::WorkOrderTooLarge => "work_order_too_large",
+        }
     }
 }
 
-/// The lint's own rules, filtered to the ones that apply to this language.
-fn rules_for(language: &str) -> Vec<WorkOrderRule> {
-    let is_cpp = matches!(language.to_lowercase().as_str(), "cpp" | "c++" | "cxx");
-    harness_rules()
+/// Error returned by Harness Work Order service operations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessWorkOrderError {
+    /// Stable machine-readable detail code.
+    pub code: HarnessWorkOrderErrorCode,
+    /// Retry and presentation category.
+    pub kind: HarnessWorkOrderErrorKind,
+    /// Bounded human-readable explanation.
+    pub message: String,
+}
+
+impl HarnessWorkOrderError {
+    fn validation(code: HarnessWorkOrderErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            kind: HarnessWorkOrderErrorKind::Validation,
+            message: message.into(),
+        }
+    }
+
+    fn internal(message: impl Into<String>) -> Self {
+        Self {
+            code: HarnessWorkOrderErrorCode::InvalidWorkOrderDigest,
+            kind: HarnessWorkOrderErrorKind::Internal,
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for HarnessWorkOrderError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}: {}", self.code.as_str(), self.message)
+    }
+}
+
+impl Error for HarnessWorkOrderError {}
+
+impl From<HarnessWorkOrderError> for ClassifiedError {
+    fn from(error: HarnessWorkOrderError) -> Self {
+        let message = error.to_string();
+        match error.kind {
+            HarnessWorkOrderErrorKind::Provider => Self::Provider(message),
+            HarnessWorkOrderErrorKind::Sandbox => Self::Sandbox(message),
+            HarnessWorkOrderErrorKind::Storage => Self::Storage(message),
+            HarnessWorkOrderErrorKind::Internal | HarnessWorkOrderErrorKind::Unavailable => {
+                Self::Internal(message)
+            }
+            HarnessWorkOrderErrorKind::Validation
+            | HarnessWorkOrderErrorKind::NotFound
+            | HarnessWorkOrderErrorKind::Conflict => Self::Validation(message),
+        }
+    }
+}
+
+/// Build a canonical, content-addressed v2 packet from retained evidence.
+pub fn build_work_order(
+    payload: HarnessWorkOrderPayload,
+) -> Result<HarnessWorkOrder, HarnessWorkOrderError> {
+    let payload = canonical_payload(payload)?;
+    let payload_json = canonical_json(&payload)?;
+    let work_order = HarnessWorkOrder {
+        schema_version: HARNESS_WORK_ORDER_SCHEMA_VERSION,
+        id: sha256_hex(&payload_json),
+        payload,
+    };
+    ensure_packet_size(&work_order)?;
+    Ok(work_order)
+}
+
+/// Verify a retained packet's schema, canonicalization, and digest evidence.
+pub fn verify_work_order(work_order: &HarnessWorkOrder) -> Result<(), HarnessWorkOrderError> {
+    if work_order.schema_version != HARNESS_WORK_ORDER_SCHEMA_VERSION {
+        return Err(HarnessWorkOrderError::validation(
+            HarnessWorkOrderErrorCode::UnsupportedWorkOrderSchema,
+            format!(
+                "schema {} is not supported; expected {HARNESS_WORK_ORDER_SCHEMA_VERSION}",
+                work_order.schema_version
+            ),
+        ));
+    }
+
+    let canonical = canonical_payload(work_order.payload.clone())?;
+    if canonical != work_order.payload {
+        return Err(HarnessWorkOrderError::validation(
+            HarnessWorkOrderErrorCode::InvalidWorkOrderDigest,
+            "packet payload is not canonical",
+        ));
+    }
+    let payload_json = canonical_json(&canonical)?;
+    ensure_packet_size(work_order)?;
+    if work_order.id != sha256_hex(&payload_json) {
+        return Err(HarnessWorkOrderError::validation(
+            HarnessWorkOrderErrorCode::InvalidWorkOrderDigest,
+            "packet identifier does not match canonical payload",
+        ));
+    }
+    Ok(())
+}
+
+/// Return semantic commands for the packet's declared validation operations.
+#[must_use]
+pub fn work_order_commands(work_order: &HarnessWorkOrder) -> Vec<WorkOrderCommand> {
+    work_order
+        .payload
+        .validation_steps
+        .iter()
+        .cloned()
+        .map(|step| command_for_step(work_order, step))
+        .collect()
+}
+
+/// Quote one concrete argument for a POSIX shell command display.
+#[must_use]
+pub fn quote_posix_arg(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"@%_+=:,./-".contains(&byte))
+    {
+        return value.to_owned();
+    }
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+/// Render a packet for a human author without executing any operation.
+#[must_use]
+pub fn render_work_order(work_order: &HarnessWorkOrder) -> String {
+    let payload = &work_order.payload;
+    let mut output = String::new();
+    let line = |output: &mut String, text: &str| {
+        output.push_str(text);
+        output.push('\n');
+    };
+
+    line(&mut output, "# Harness Work Order v2");
+    line(&mut output, "");
+    line(&mut output, &format!("- Identifier: `{}`", work_order.id));
+    line(
+        &mut output,
+        &format!("- Engine: `{}`", payload.engine.as_str()),
+    );
+    line(&mut output, "");
+    line(&mut output, "## Target evidence");
+    line(&mut output, "");
+    line(
+        &mut output,
+        &format!("- Symbol: `{}`", payload.target.symbol),
+    );
+    match &payload.target.signature {
+        Some(signature) => line(&mut output, &format!("- Signature: `{signature}`")),
+        None => line(&mut output, "- Signature: not recorded"),
+    }
+    line(
+        &mut output,
+        &format!("- Language: `{}`", payload.target.language.as_str()),
+    );
+    line(
+        &mut output,
+        &format!(
+            "- Source: `{}:{}`",
+            payload.target.relative_source, payload.target.line
+        ),
+    );
+    line(
+        &mut output,
+        &format!("- Rationale: {}", payload.target.rationale),
+    );
+    line(&mut output, "");
+    line(&mut output, "## Source evidence");
+    line(&mut output, "");
+    line(
+        &mut output,
+        &format!("- SHA-256: `{}`", payload.source.sha256),
+    );
+    line(
+        &mut output,
+        &format!("- Truncated: {}", payload.source.excerpt_truncated),
+    );
+    line(&mut output, "```text");
+    line(&mut output, payload.source.excerpt.trim_end());
+    line(&mut output, "```");
+    line(&mut output, "");
+    line(&mut output, "## Compile context");
+    line(&mut output, "");
+    line(
+        &mut output,
+        &format!("- SHA-256: `{}`", payload.compile_context_sha256),
+    );
+    line(
+        &mut output,
+        &format!(
+            "- Translation units: {}",
+            payload.compile_context.compile_units
+        ),
+    );
+    render_values(
+        &mut output,
+        "Include directories",
+        &payload.compile_context.include_dirs,
+    );
+    render_values(&mut output, "Defines", &payload.compile_context.defines);
+    match &payload.compile_context.std_flag {
+        Some(std_flag) => line(&mut output, &format!("- Language standard: `{std_flag}`")),
+        None => line(&mut output, "- Language standard: not recorded"),
+    }
+    render_values(
+        &mut output,
+        "Extra flags",
+        &payload.compile_context.extra_flags,
+    );
+    render_values(
+        &mut output,
+        "Dropped flags",
+        &payload.compile_context.dropped_flags,
+    );
+    line(&mut output, "");
+    line(&mut output, "## Harness rules");
+    line(&mut output, "");
+    for rule in &payload.harness_rules {
+        let severity = if rule.blocking {
+            "blocking"
+        } else {
+            "advisory"
+        };
+        line(
+            &mut output,
+            &format!("- `{}` ({severity}): {}", rule.id, rule.message),
+        );
+    }
+    line(&mut output, "");
+    line(&mut output, "## Seed references");
+    line(&mut output, "");
+    if payload.seeds.is_empty() {
+        line(&mut output, "- None retained");
+    } else {
+        for seed in &payload.seeds {
+            line(
+                &mut output,
+                &format!("- `{}` ({} bytes)", seed.sha256, seed.size),
+            );
+        }
+    }
+    line(&mut output, "");
+    line(&mut output, "## Validation steps");
+    line(&mut output, "");
+    for command in work_order_commands(work_order) {
+        line(&mut output, &format!("### {}", step_label(&command.step)));
+        if command.approval_required {
+            line(&mut output, "Approval required before execution.");
+        }
+        line(&mut output, "```sh");
+        line(&mut output, &render_command(&command));
+        line(&mut output, "```");
+        line(&mut output, "");
+    }
+    output
+}
+
+/// Return the lint rules applicable to one target language.
+#[must_use]
+pub fn work_order_rules(language: TargetLanguage) -> Vec<WorkOrderRule> {
+    let is_cpp = language == TargetLanguage::Cpp;
+    let mut rules = harness_rules()
         .into_iter()
         .filter(|rule: &HarnessRuleSummary| is_cpp || !rule.cpp_only)
         .map(|rule| WorkOrderRule {
@@ -130,163 +543,260 @@ fn rules_for(language: &str) -> Vec<WorkOrderRule> {
             blocking: rule.severity == LintSeverity::Error,
             message: rule.message,
         })
-        .collect()
+        .collect::<Vec<_>>();
+    normalize_rules(&mut rules);
+    rules
 }
 
-/// The commands that check the authored harness, in the order to run them.
-fn validation_commands(project: &str, target: &str) -> Vec<String> {
-    vec![
-        format!("oxfuzz harness {project} --target {target} --engine libfuzzer"),
-        format!("oxfuzz run {project} --target {target} --engine libfuzzer --duration 5m"),
-        format!("oxfuzz coverage {project} --target {target}"),
-    ]
-}
-
-/// The candidate's rationale, or a statement that discovery recorded none.
-///
-/// An empty field would render as a dangling label, which reads as a bug in the
-/// packet rather than as absent evidence.
-fn rationale_of(order: &HarnessWorkOrder) -> &str {
-    let trimmed = order.rationale.trim();
-    if trimmed.is_empty() {
-        "not recorded by discovery"
-    } else {
-        trimmed
+fn canonical_payload(
+    mut payload: HarnessWorkOrderPayload,
+) -> Result<HarnessWorkOrderPayload, HarnessWorkOrderError> {
+    validate_source_evidence(&payload.source)?;
+    validate_project_relative_path(&payload.target.relative_source)?;
+    for include_dir in &payload.compile_context.include_dirs {
+        validate_project_relative_path(include_dir)?;
     }
+    normalize_strings(&mut payload.compile_context.include_dirs);
+    normalize_strings(&mut payload.compile_context.defines);
+    normalize_strings(&mut payload.compile_context.extra_flags);
+    normalize_strings(&mut payload.compile_context.dropped_flags);
+    normalize_rules(&mut payload.harness_rules);
+    normalize_seeds(&mut payload.seeds)?;
+    normalize_steps(&mut payload.validation_steps);
+    payload.compile_context_sha256 = sha256_hex(&canonical_json(&payload.compile_context)?);
+    Ok(payload)
 }
 
-/// Render the packet as a document a person reads.
-///
-/// Deterministic: no timestamp, no identifier, and no iteration over an
-/// unordered collection, so the same retained state yields the same bytes.
-#[must_use]
-pub fn render_work_order(order: &HarnessWorkOrder) -> String {
-    let mut out = String::new();
-    let line = |out: &mut String, text: &str| {
-        out.push_str(text);
-        out.push('\n');
-    };
-
-    line(
-        &mut out,
-        &format!("# Harness work order: {}", order.target_symbol),
-    );
-    line(&mut out, "");
-    line(&mut out, "## Candidate");
-    line(&mut out, "");
-    line(&mut out, &format!("- Function: `{}`", order.target_symbol));
-    match &order.signature {
-        Some(signature) => line(&mut out, &format!("- Signature: `{signature}`")),
-        None => line(
-            &mut out,
-            "- Signature: not recorded by discovery; read it from the source below.",
-        ),
+fn validate_source_evidence(source: &WorkOrderSourceEvidence) -> Result<(), HarnessWorkOrderError> {
+    if source.excerpt.is_empty() {
+        return Err(HarnessWorkOrderError::validation(
+            HarnessWorkOrderErrorCode::SourceEmpty,
+            "source excerpt is empty",
+        ));
     }
-    line(&mut out, &format!("- Defined at: `{}`", order.location));
-    line(&mut out, &format!("- Language: `{}`", order.language));
-    line(
-        &mut out,
-        &format!("- Why it was ranked: {}", rationale_of(order)),
-    );
-    line(&mut out, "");
-
-    line(&mut out, "## Source");
-    line(&mut out, "");
-    line(&mut out, "```");
-    line(&mut out, order.source_excerpt.trim_end());
-    line(&mut out, "```");
-    line(&mut out, "");
-
-    line(&mut out, "## Compile context");
-    line(&mut out, "");
-    if order.compile_units == 0 {
-        line(
-            &mut out,
-            "No compile database was available for this project, so the flags below are \
-             oxfuzz's defaults rather than the project's own. Expect to adjust them.",
-        );
-        line(&mut out, "");
-    } else {
-        line(
-            &mut out,
-            &format!(
-                "From the project's compile database ({} translation unit(s)).",
-                order.compile_units
+    if source.excerpt.len() > MAX_WORK_ORDER_SOURCE_EXCERPT_BYTES
+        || source.excerpt.lines().count() > MAX_WORK_ORDER_SOURCE_EXCERPT_LINES
+    {
+        return Err(HarnessWorkOrderError::validation(
+            HarnessWorkOrderErrorCode::SourceTooLarge,
+            format!(
+                "source excerpt exceeds {MAX_WORK_ORDER_SOURCE_EXCERPT_BYTES} bytes or \
+                 {MAX_WORK_ORDER_SOURCE_EXCERPT_LINES} lines"
             ),
-        );
-        line(&mut out, "");
+        ));
     }
-    if order.include_dirs.is_empty() {
-        line(&mut out, "- Include directories: none recorded");
-    } else {
-        line(&mut out, "- Include directories:");
-        for dir in &order.include_dirs {
-            line(&mut out, &format!("  - `{dir}`"));
-        }
-    }
-    if order.defines.is_empty() {
-        line(&mut out, "- Defines: none recorded");
-    } else {
-        line(&mut out, "- Defines:");
-        for define in &order.defines {
-            line(&mut out, &format!("  - `{define}`"));
-        }
-    }
-    match &order.std_flag {
-        Some(flag) => line(&mut out, &format!("- Language standard: `{flag}`")),
-        None => line(&mut out, "- Language standard: none recorded"),
-    }
-    if !order.extra_flags.is_empty() {
-        line(&mut out, "- Other flags:");
-        for flag in &order.extra_flags {
-            line(&mut out, &format!("  - `{flag}`"));
-        }
-    }
-    line(&mut out, "");
+    validate_sha256(&source.sha256, "source SHA-256")
+}
 
-    line(&mut out, "## Rules the build will enforce");
-    line(&mut out, "");
-    line(
-        &mut out,
-        "These are checked by the harness lint before compilation. A blocking rule \
-         fails the build.",
-    );
-    line(&mut out, "");
-    for rule in &order.harness_rules {
-        let severity = if rule.blocking {
-            "blocking"
-        } else {
-            "advisory"
-        };
-        line(
-            &mut out,
-            &format!("- `{}` ({severity}): {}", rule.id, rule.message),
-        );
+fn validate_project_relative_path(value: &str) -> Result<(), HarnessWorkOrderError> {
+    let windows_drive = value.len() >= 3
+        && value.as_bytes()[0].is_ascii_alphabetic()
+        && value.as_bytes()[1] == b':'
+        && matches!(value.as_bytes()[2], b'/' | b'\\');
+    if value.is_empty()
+        || Path::new(value).is_absolute()
+        || value.starts_with('\\')
+        || windows_drive
+        || value.split(['/', '\\']).any(|component| component == "..")
+    {
+        return Err(HarnessWorkOrderError::validation(
+            HarnessWorkOrderErrorCode::InvalidProjectPath,
+            "packet paths must be project-relative and must not escape the project",
+        ));
     }
-    line(&mut out, "");
+    Ok(())
+}
 
-    line(&mut out, "## Seeds");
-    line(&mut out, "");
-    if order.seed_suggestions.is_empty() {
-        line(
-            &mut out,
-            "No seed candidates were found in the retained corpus or the repository. \
-             Write a valid input by hand before the first run; an empty corpus is the \
-             single most common reason a campaign reaches nothing.",
-        );
-    } else {
-        for seed in &order.seed_suggestions {
-            line(&mut out, &format!("- `{seed}`"));
-        }
+fn validate_sha256(value: &str, subject: &str) -> Result<(), HarnessWorkOrderError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(HarnessWorkOrderError::validation(
+            HarnessWorkOrderErrorCode::InvalidWorkOrderDigest,
+            format!("{subject} must be a lowercase SHA-256 digest"),
+        ));
     }
-    line(&mut out, "");
+    Ok(())
+}
 
-    line(&mut out, "## Validation");
-    line(&mut out, "");
-    line(&mut out, "Run these in order once the harness is written.");
-    line(&mut out, "");
-    for command in &order.validation_commands {
-        line(&mut out, &format!("```\n{command}\n```"));
+fn normalize_strings(values: &mut Vec<String>) {
+    values.sort_unstable();
+    values.dedup();
+}
+
+fn normalize_rules(rules: &mut Vec<WorkOrderRule>) {
+    rules.sort_by(|left, right| {
+        (&left.id, left.blocking, &left.message).cmp(&(&right.id, right.blocking, &right.message))
+    });
+    rules.dedup();
+}
+
+fn normalize_seeds(seeds: &mut Vec<WorkOrderSeedReference>) -> Result<(), HarnessWorkOrderError> {
+    for seed in &*seeds {
+        validate_sha256(&seed.sha256, "seed SHA-256")?;
     }
-    out
+    seeds.sort_unstable();
+    seeds.dedup();
+    if seeds.len() > MAX_WORK_ORDER_SEEDS {
+        return Err(HarnessWorkOrderError::validation(
+            HarnessWorkOrderErrorCode::SeedLimitExceeded,
+            format!("packet has more than {MAX_WORK_ORDER_SEEDS} seed references"),
+        ));
+    }
+    Ok(())
+}
+
+fn normalize_steps(steps: &mut Vec<WorkOrderStep>) {
+    steps.sort_by_key(step_sort_key);
+    steps.dedup();
+}
+
+fn step_sort_key(step: &WorkOrderStep) -> (u8, u64) {
+    match step {
+        WorkOrderStep::Import => (0, 0),
+        WorkOrderStep::Qualify => (1, 0),
+        WorkOrderStep::Rank => (2, 0),
+        WorkOrderStep::Promote => (3, 0),
+        WorkOrderStep::RunCampaign { duration_secs } => (4, *duration_secs),
+        WorkOrderStep::Coverage => (5, 0),
+    }
+}
+
+fn canonical_json<T: Serialize>(value: &T) -> Result<Vec<u8>, HarnessWorkOrderError> {
+    serde_json::to_vec(value).map_err(|error| {
+        HarnessWorkOrderError::internal(format!("serialize canonical packet evidence: {error}"))
+    })
+}
+
+fn ensure_packet_size(work_order: &HarnessWorkOrder) -> Result<(), HarnessWorkOrderError> {
+    let packet_json = canonical_json(work_order)?;
+    if packet_json.len() > MAX_WORK_ORDER_PACKET_BYTES {
+        return Err(HarnessWorkOrderError::validation(
+            HarnessWorkOrderErrorCode::WorkOrderTooLarge,
+            format!("packet exceeds {MAX_WORK_ORDER_PACKET_BYTES} bytes"),
+        ));
+    }
+    Ok(())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
+fn command_for_step(work_order: &HarnessWorkOrder, step: WorkOrderStep) -> WorkOrderCommand {
+    let literal = |value: &str| WorkOrderArg::Literal(value.to_owned());
+    let value = |value: String| WorkOrderArg::Literal(value);
+    let placeholder = WorkOrderArg::Placeholder;
+    let (argv, approval_required) = match &step {
+        WorkOrderStep::Import => (
+            vec![
+                literal("oxfuzz"),
+                literal("work-order"),
+                literal("import"),
+                literal("--work-order"),
+                value(work_order.id.clone()),
+                literal("--source"),
+                placeholder(WorkOrderPlaceholder::SourceFile),
+            ],
+            false,
+        ),
+        WorkOrderStep::Qualify => (
+            vec![
+                literal("oxfuzz"),
+                literal("work-order"),
+                literal("qualify"),
+                literal("--submission"),
+                placeholder(WorkOrderPlaceholder::SubmissionId),
+            ],
+            true,
+        ),
+        WorkOrderStep::Rank => (
+            vec![
+                literal("oxfuzz"),
+                literal("work-order"),
+                literal("rank"),
+                literal("--attempt"),
+                placeholder(WorkOrderPlaceholder::AttemptIds),
+            ],
+            false,
+        ),
+        WorkOrderStep::Promote => (
+            vec![
+                literal("oxfuzz"),
+                literal("work-order"),
+                literal("promote"),
+                literal("--attempt"),
+                placeholder(WorkOrderPlaceholder::AttemptId),
+            ],
+            true,
+        ),
+        WorkOrderStep::RunCampaign { duration_secs } => (
+            vec![
+                literal("oxfuzz"),
+                literal("run"),
+                literal("--target"),
+                value(work_order.payload.target.symbol.clone()),
+                literal("--engine"),
+                literal(work_order.payload.engine.as_str()),
+                literal("--duration-secs"),
+                value(duration_secs.to_string()),
+            ],
+            true,
+        ),
+        WorkOrderStep::Coverage => (
+            vec![
+                literal("oxfuzz"),
+                literal("coverage"),
+                literal("--target"),
+                value(work_order.payload.target.symbol.clone()),
+            ],
+            false,
+        ),
+    };
+    WorkOrderCommand {
+        step,
+        argv,
+        approval_required,
+    }
+}
+
+fn render_values(output: &mut String, label: &str, values: &[String]) {
+    if values.is_empty() {
+        output.push_str(&format!("- {label}: none recorded\n"));
+        return;
+    }
+    output.push_str(&format!("- {label}:\n"));
+    for value in values {
+        output.push_str(&format!("  - `{value}`\n"));
+    }
+}
+
+fn render_command(command: &WorkOrderCommand) -> String {
+    command
+        .argv
+        .iter()
+        .map(|argument| match argument {
+            WorkOrderArg::Literal(value) => quote_posix_arg(value),
+            WorkOrderArg::Placeholder(placeholder) => match placeholder {
+                WorkOrderPlaceholder::SourceFile => "<source-file>".to_owned(),
+                WorkOrderPlaceholder::SubmissionId => "<submission-id>".to_owned(),
+                WorkOrderPlaceholder::AttemptIds => "<attempt-id>...".to_owned(),
+                WorkOrderPlaceholder::AttemptId => "<attempt-id>".to_owned(),
+            },
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn step_label(step: &WorkOrderStep) -> &'static str {
+    match step {
+        WorkOrderStep::Import => "Import",
+        WorkOrderStep::Qualify => "Qualify",
+        WorkOrderStep::Rank => "Rank",
+        WorkOrderStep::Promote => "Promote",
+        WorkOrderStep::RunCampaign { .. } => "Run campaign",
+        WorkOrderStep::Coverage => "Coverage",
+    }
 }

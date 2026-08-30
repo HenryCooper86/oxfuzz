@@ -9,24 +9,25 @@
 use std::path::Path;
 
 use hf_core::build::BuildContext;
+use hf_core::engine::EngineKind;
 use hf_core::target::{TargetCandidate, TargetLanguage};
+use sha2::Digest;
 
 use crate::container::ServiceContainer;
-use crate::harness_work_order::{build_work_order, HarnessWorkOrder, WorkOrderInputs};
+use crate::harness_work_order::{
+    build_work_order, HarnessWorkOrder, HarnessWorkOrderPayload, WorkOrderCompileContext,
+    WorkOrderSeedReference, WorkOrderSourceEvidence, WorkOrderStep, WorkOrderTargetEvidence,
+    MAX_WORK_ORDER_SOURCE_EXCERPT_BYTES, MAX_WORK_ORDER_SOURCE_EXCERPT_LINES,
+};
 use crate::ClassifiedError;
 
 /// Source lines carried around the candidate's definition.
 ///
 /// The declaration plus body is what an author needs; the whole file is
 /// unbounded and comes from an untrusted project.
-const EXCERPT_LINES: usize = 60;
-
 /// Largest source file read for an excerpt. A project under test is untrusted
 /// input, so the read is bounded rather than trusting the file to be sane.
 const MAX_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
-
-/// Seed suggestions carried, so a large corpus cannot flood the packet.
-const MAX_SEED_SUGGESTIONS: usize = 20;
 
 impl ServiceContainer {
     /// Assemble the provider-free authoring packet for one candidate.
@@ -39,7 +40,9 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
         lang: TargetLanguage,
+        engine: EngineKind,
     ) -> Result<HarnessWorkOrder, ClassifiedError> {
+        super::require_fuzzing_harness_engine(engine, lang)?;
         let inventory = self.discover(project, lang).await?;
         let candidate = inventory
             .candidates
@@ -54,44 +57,54 @@ impl ServiceContainer {
             .unwrap_or_default()
             .unwrap_or_else(empty_build_context);
 
-        Ok(build_work_order(&WorkOrderInputs {
-            target_symbol: candidate.symbol.clone(),
-            signature: candidate.signature.clone(),
-            location: format!(
-                "{}:{}",
-                candidate.location.file.display(),
-                candidate.location.line
-            ),
-            rationale: candidate.rationale.clone(),
-            language: format!("{lang:?}").to_lowercase(),
-            source_excerpt: source_excerpt(project, candidate),
-            build_context,
-            seed_suggestions: self.seed_suggestions(candidate.id).await,
-            project_display: project.display().to_string(),
-        }))
+        let payload = HarnessWorkOrderPayload {
+            target: WorkOrderTargetEvidence {
+                symbol: candidate.symbol.clone(),
+                signature: candidate.signature.clone(),
+                language: lang,
+                relative_source: project_relative_path(project, &candidate.location.file)?,
+                line: candidate.location.line,
+                rationale: candidate.rationale.clone(),
+            },
+            engine,
+            source: source_evidence(project, candidate)?,
+            compile_context: work_order_compile_context(project, build_context)?,
+            compile_context_sha256: String::new(),
+            harness_rules: crate::harness_work_order::work_order_rules(lang),
+            seeds: self.seed_references(candidate.id).await?,
+            validation_steps: vec![
+                WorkOrderStep::Import,
+                WorkOrderStep::Qualify,
+                WorkOrderStep::Rank,
+                WorkOrderStep::Promote,
+                WorkOrderStep::RunCampaign { duration_secs: 300 },
+                WorkOrderStep::Coverage,
+            ],
+        };
+        build_work_order(payload).map_err(Into::into)
     }
 
-    /// Retained corpus entries worth seeding a new harness from.
-    ///
-    /// Best effort: with no store, or a store read failure, the packet says
-    /// there are no seed candidates, which is the honest reading. A failure to
-    /// list seeds must not fail an export that needs no store to be useful.
-    async fn seed_suggestions(&self, target_id: uuid::Uuid) -> Vec<String> {
-        let Some(store) = self.store() else {
-            return Vec::new();
-        };
-        let Ok(entries) = store.list_corpus_entries(target_id).await else {
-            return Vec::new();
-        };
-        let mut paths: Vec<String> = entries
+    /// Retained corpus content references for a new packet.
+    async fn seed_references(
+        &self,
+        target_id: uuid::Uuid,
+    ) -> Result<Vec<WorkOrderSeedReference>, ClassifiedError> {
+        let store = self.store().ok_or_else(|| {
+            ClassifiedError::Storage(
+                "storage_required: work order export requires storage".to_owned(),
+            )
+        })?;
+        let entries = store
+            .list_corpus_entries(target_id)
+            .await
+            .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
+        Ok(entries
             .iter()
-            .map(|entry| entry.path.display().to_string())
-            .collect();
-        // Sorted and capped so the same retained state renders the same bytes.
-        paths.sort_unstable();
-        paths.dedup();
-        paths.truncate(MAX_SEED_SUGGESTIONS);
-        paths
+            .map(|entry| WorkOrderSeedReference {
+                sha256: entry.sha256.clone(),
+                size: entry.size,
+            })
+            .collect())
     }
 }
 
@@ -106,38 +119,109 @@ fn empty_build_context() -> BuildContext {
     }
 }
 
-/// A bounded excerpt around the candidate's definition.
-///
-/// Returns a stated placeholder rather than an error when the file cannot be
-/// read: a packet missing its source excerpt is still worth having, and the
-/// author can open the file themselves.
-fn source_excerpt(project: &Path, candidate: &TargetCandidate) -> String {
+/// Read bounded source evidence for the candidate.
+fn source_evidence(
+    project: &Path,
+    candidate: &TargetCandidate,
+) -> Result<WorkOrderSourceEvidence, ClassifiedError> {
     let path = if candidate.location.file.is_absolute() {
         candidate.location.file.clone()
     } else {
         project.join(&candidate.location.file)
     };
-    let Ok(metadata) = std::fs::symlink_metadata(&path) else {
-        return format!("source not readable: {}", candidate.location.file.display());
-    };
+    let metadata = std::fs::symlink_metadata(&path)
+        .map_err(|error| ClassifiedError::Validation(format!("read candidate source: {error}")))?;
     if !metadata.file_type().is_file() || metadata.len() > MAX_SOURCE_BYTES {
-        return format!(
-            "source not readable as a bounded regular file: {}",
-            candidate.location.file.display()
-        );
+        return Err(ClassifiedError::Validation(
+            "candidate source must be a bounded regular non-symlink file".to_owned(),
+        ));
     }
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return format!("source not readable: {}", candidate.location.file.display());
-    };
+    let bytes = std::fs::read(&path)
+        .map_err(|error| ClassifiedError::Validation(format!("read candidate source: {error}")))?;
+    let source_sha256 = hex::encode(sha2::Sha256::digest(&bytes));
+    let text = String::from_utf8(bytes).map_err(|error| {
+        ClassifiedError::Validation(format!("candidate source is not UTF-8: {error}"))
+    })?;
     let lines: Vec<&str> = text.lines().collect();
     let start = (candidate.location.line as usize).saturating_sub(1);
-    let end = start.saturating_add(EXCERPT_LINES).min(lines.len());
     if start >= lines.len() {
-        return format!(
+        return Err(ClassifiedError::Validation(format!(
             "source line {} is past the end of {}",
             candidate.location.line,
             candidate.location.file.display()
-        );
+        )));
     }
-    lines[start..end].join("\n")
+    let mut excerpt = String::new();
+    let mut truncated = false;
+    for line in lines
+        .iter()
+        .skip(start)
+        .take(MAX_WORK_ORDER_SOURCE_EXCERPT_LINES + 1)
+    {
+        let separator = usize::from(!excerpt.is_empty());
+        if excerpt.len() + separator + line.len() > MAX_WORK_ORDER_SOURCE_EXCERPT_BYTES {
+            truncated = true;
+            break;
+        }
+        if !excerpt.is_empty() {
+            excerpt.push('\n');
+        }
+        excerpt.push_str(line);
+    }
+    if lines.len() > start + MAX_WORK_ORDER_SOURCE_EXCERPT_LINES {
+        truncated = true;
+    }
+    Ok(WorkOrderSourceEvidence {
+        excerpt,
+        excerpt_truncated: truncated,
+        sha256: source_sha256,
+    })
+}
+
+fn work_order_compile_context(
+    project: &Path,
+    build_context: BuildContext,
+) -> Result<WorkOrderCompileContext, ClassifiedError> {
+    let include_dirs = build_context
+        .include_dirs
+        .iter()
+        .map(|include_dir| project_relative_path(project, include_dir))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(WorkOrderCompileContext {
+        include_dirs,
+        defines: build_context
+            .defines
+            .into_iter()
+            .map(|define| define.strip_prefix("-D").unwrap_or(&define).to_owned())
+            .collect(),
+        std_flag: build_context.std_flag,
+        extra_flags: build_context.extra_flags,
+        compile_units: build_context.entry_count,
+        dropped_flags: build_context.dropped,
+    })
+}
+
+fn project_relative_path(project: &Path, path: &Path) -> Result<String, ClassifiedError> {
+    let relative = if path.is_absolute() {
+        path.strip_prefix(project).map_err(|_| {
+            ClassifiedError::Validation(
+                "work order evidence path is outside the project".to_owned(),
+            )
+        })?
+    } else {
+        path
+    };
+    if relative.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::ParentDir | std::path::Component::RootDir
+        )
+    }) {
+        return Err(ClassifiedError::Validation(
+            "work order evidence path escapes the project".to_owned(),
+        ));
+    }
+    relative.to_str().map(str::to_owned).ok_or_else(|| {
+        ClassifiedError::Validation("work order evidence path is not UTF-8".to_owned())
+    })
 }

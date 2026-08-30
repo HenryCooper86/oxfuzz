@@ -1,165 +1,267 @@
-//! Harness Work Order domain contract.
-//!
-//! The packet is the provider-free authoring path: deterministic, secret-free,
-//! and carrying the compile reality the harness will actually be built against.
+//! Pure-model tests for the deterministic Harness Work Order v2 packet.
 
 #![cfg(feature = "harness-work-order")]
 
-use std::path::PathBuf;
+use hf_core::engine::EngineKind;
+use hf_core::target::TargetLanguage;
+use hf_service::harness_work_order::{
+    build_work_order, quote_posix_arg, render_work_order, verify_work_order, work_order_commands,
+    HarnessWorkOrderErrorCode, HarnessWorkOrderPayload, WorkOrderArg, WorkOrderCompileContext,
+    WorkOrderPlaceholder, WorkOrderRule, WorkOrderSeedReference, WorkOrderSourceEvidence,
+    WorkOrderStep, WorkOrderTargetEvidence, HARNESS_WORK_ORDER_SCHEMA_VERSION,
+};
 
-use hf_core::build::BuildContext;
-use hf_service::harness_work_order::{build_work_order, render_work_order, WorkOrderInputs};
-
-fn inputs() -> WorkOrderInputs {
-    WorkOrderInputs {
-        target_symbol: "parse_packet".to_owned(),
-        signature: Some("int parse_packet(const uint8_t*, size_t)".to_owned()),
-        location: "src/parser.c:42".to_owned(),
-        rationale: "untrusted packet parser reached from the network path".to_owned(),
-        language: "c".to_owned(),
-        source_excerpt: "int parse_packet(const uint8_t *data, size_t len) {\n    return 0;\n}"
-            .to_owned(),
-        build_context: BuildContext {
-            include_dirs: vec![PathBuf::from("/proj/include")],
-            defines: vec!["-DHAVE_CONFIG_H=1".to_owned()],
+fn payload() -> HarnessWorkOrderPayload {
+    HarnessWorkOrderPayload {
+        target: WorkOrderTargetEvidence {
+            symbol: "parse_packet".to_owned(),
+            signature: Some("int parse_packet(const uint8_t*, size_t)".to_owned()),
+            language: TargetLanguage::C,
+            relative_source: "src/parser.c".to_owned(),
+            line: 42,
+            rationale: "reachable from an untrusted network packet".to_owned(),
+        },
+        engine: EngineKind::LibFuzzer,
+        source: WorkOrderSourceEvidence {
+            excerpt: "int parse_packet(const uint8_t *data, size_t len) { return 0; }".to_owned(),
+            excerpt_truncated: false,
+            sha256: "a".repeat(64),
+        },
+        compile_context: WorkOrderCompileContext {
+            include_dirs: vec!["include".to_owned()],
+            defines: vec!["HAVE_CONFIG_H=1".to_owned()],
             std_flag: Some("-std=c11".to_owned()),
             extra_flags: vec!["-fno-omit-frame-pointer".to_owned()],
-            entry_count: 12,
-            dropped: Vec::new(),
+            compile_units: 12,
+            dropped_flags: vec!["-Winvalid-pch".to_owned()],
         },
-        seed_suggestions: vec!["tests/fixtures/packet.bin".to_owned()],
-        project_display: "/proj".to_owned(),
+        compile_context_sha256: String::new(),
+        harness_rules: vec![WorkOrderRule {
+            id: "no-shell".to_owned(),
+            blocking: true,
+            message: "Harnesses must not invoke a shell.".to_owned(),
+        }],
+        seeds: vec![WorkOrderSeedReference {
+            sha256: "b".repeat(64),
+            size: 16,
+        }],
+        validation_steps: vec![
+            WorkOrderStep::Import,
+            WorkOrderStep::Qualify,
+            WorkOrderStep::Rank,
+            WorkOrderStep::Promote,
+            WorkOrderStep::RunCampaign { duration_secs: 300 },
+            WorkOrderStep::Coverage,
+        ],
     }
 }
 
 #[test]
-fn the_packet_carries_the_compile_reality_the_harness_will_be_built_against() {
-    let rendered = render_work_order(&build_work_order(&inputs()));
+fn unchanged_evidence_produces_byte_identical_packets() {
+    let first = build_work_order(payload()).expect("build first packet");
+    let second = build_work_order(payload()).expect("build second packet");
 
-    assert!(rendered.contains("/proj/include"), "include directories");
-    assert!(rendered.contains("-DHAVE_CONFIG_H=1"), "defines");
-    assert!(rendered.contains("-std=c11"), "language standard");
-}
-
-#[test]
-fn the_packet_names_the_candidate_and_shows_its_source() {
-    let rendered = render_work_order(&build_work_order(&inputs()));
-
-    assert!(rendered.contains("parse_packet"));
-    assert!(rendered.contains("src/parser.c:42"));
-    assert!(rendered.contains("int parse_packet(const uint8_t *data, size_t len)"));
-}
-
-#[test]
-fn the_packet_states_the_rules_the_lint_will_enforce() {
-    let order = build_work_order(&inputs());
-    let rendered = render_work_order(&order);
-
-    assert!(
-        !order.harness_rules.is_empty(),
-        "an author must see the constraints before writing, not as compile failures after"
+    assert_eq!(first, second);
+    assert_eq!(
+        serde_json::to_vec(&first).expect("serialize first packet"),
+        serde_json::to_vec(&second).expect("serialize second packet")
     );
-    // The rules come from the lint itself, so the packet cannot drift from it.
-    for rule in &order.harness_rules {
-        assert!(
-            rendered.contains(&rule.id),
-            "rule {} must be rendered",
-            rule.id
-        );
-    }
-    let ids: Vec<&str> = order.harness_rules.iter().map(|r| r.id.as_str()).collect();
-    assert!(ids.contains(&"no-process-exit"));
-    assert!(ids.contains(&"no-shell"));
+    assert_eq!(first.schema_version, HARNESS_WORK_ORDER_SCHEMA_VERSION);
 }
 
 #[test]
-fn the_packet_tells_the_author_how_to_validate_the_result() {
-    let order = build_work_order(&inputs());
+fn each_evidence_class_changes_the_packet_identifier() {
+    let original = build_work_order(payload()).expect("build packet");
+    let mut variants = Vec::new();
 
-    assert!(
-        !order.validation_commands.is_empty(),
-        "a packet that cannot be checked is a suggestion, not a work order"
-    );
-    let rendered = render_work_order(&order);
-    assert!(rendered.contains("oxfuzz"));
-}
+    let mut changed_target = payload();
+    changed_target.target.language = TargetLanguage::Cpp;
+    variants.push(changed_target);
 
-#[test]
-fn the_same_retained_state_renders_byte_identical_packets() {
-    let first = render_work_order(&build_work_order(&inputs()));
-    let second = render_work_order(&build_work_order(&inputs()));
+    let mut changed_engine = payload();
+    changed_engine.engine = EngineKind::Honggfuzz;
+    variants.push(changed_engine);
 
-    assert_eq!(first, second, "two exports must be diffable");
-}
+    let mut changed_source = payload();
+    changed_source.source.excerpt.push_str(" // changed");
+    variants.push(changed_source);
 
-#[test]
-fn nothing_from_the_environment_reaches_the_packet() {
-    // A regression guard: if someone later interpolates configuration into the
-    // packet, a credential must not be what arrives.
-    let rendered = render_work_order(&build_work_order(&inputs()));
+    let mut changed_context = payload();
+    changed_context
+        .compile_context
+        .defines
+        .push("TRACE=1".to_owned());
+    variants.push(changed_context);
 
-    for marker in [
-        "HF_PROVIDER_API_KEY",
-        "API_KEY",
-        "SECRET",
-        "TOKEN",
-        "PASSWORD",
-        "Bearer ",
-    ] {
-        assert!(!rendered.contains(marker), "packet must not carry {marker}");
+    let mut changed_rules = payload();
+    changed_rules.harness_rules[0].message.push_str(" Always.");
+    variants.push(changed_rules);
+
+    let mut changed_seed = payload();
+    changed_seed.seeds[0].size = 17;
+    variants.push(changed_seed);
+
+    let mut changed_steps = payload();
+    changed_steps.validation_steps = vec![WorkOrderStep::Import, WorkOrderStep::Qualify];
+    variants.push(changed_steps);
+
+    for changed in variants {
+        let packet = build_work_order(changed).expect("build changed packet");
+        assert_ne!(packet.id, original.id);
     }
 }
 
 #[test]
-fn a_candidate_with_no_recorded_signature_still_produces_a_packet() {
-    let mut inputs = inputs();
-    inputs.signature = None;
+fn construction_normalizes_set_like_evidence_before_hashing() {
+    let mut unordered = payload();
+    unordered.compile_context.include_dirs =
+        vec!["zinc".to_owned(), "include".to_owned(), "zinc".to_owned()];
+    unordered.compile_context.defines = vec!["Z=1".to_owned(), "A=1".to_owned(), "Z=1".to_owned()];
+    unordered.compile_context.extra_flags = vec!["-z".to_owned(), "-a".to_owned(), "-z".to_owned()];
+    unordered.compile_context.dropped_flags = vec![
+        "-drop-z".to_owned(),
+        "-drop-a".to_owned(),
+        "-drop-z".to_owned(),
+    ];
+    unordered.harness_rules = vec![
+        WorkOrderRule {
+            id: "z-rule".to_owned(),
+            blocking: false,
+            message: "Z".to_owned(),
+        },
+        WorkOrderRule {
+            id: "a-rule".to_owned(),
+            blocking: true,
+            message: "A".to_owned(),
+        },
+        WorkOrderRule {
+            id: "z-rule".to_owned(),
+            blocking: false,
+            message: "Z".to_owned(),
+        },
+    ];
+    unordered.seeds = vec![
+        WorkOrderSeedReference {
+            sha256: "d".repeat(64),
+            size: 2,
+        },
+        WorkOrderSeedReference {
+            sha256: "c".repeat(64),
+            size: 1,
+        },
+        WorkOrderSeedReference {
+            sha256: "d".repeat(64),
+            size: 2,
+        },
+    ];
 
-    let rendered = render_work_order(&build_work_order(&inputs));
+    let mut ordered = unordered.clone();
+    ordered.compile_context.include_dirs = vec!["include".to_owned(), "zinc".to_owned()];
+    ordered.compile_context.defines = vec!["A=1".to_owned(), "Z=1".to_owned()];
+    ordered.compile_context.extra_flags = vec!["-a".to_owned(), "-z".to_owned()];
+    ordered.compile_context.dropped_flags = vec!["-drop-a".to_owned(), "-drop-z".to_owned()];
+    ordered.harness_rules = vec![
+        WorkOrderRule {
+            id: "a-rule".to_owned(),
+            blocking: true,
+            message: "A".to_owned(),
+        },
+        WorkOrderRule {
+            id: "z-rule".to_owned(),
+            blocking: false,
+            message: "Z".to_owned(),
+        },
+    ];
+    ordered.seeds = vec![
+        WorkOrderSeedReference {
+            sha256: "c".repeat(64),
+            size: 1,
+        },
+        WorkOrderSeedReference {
+            sha256: "d".repeat(64),
+            size: 2,
+        },
+    ];
 
-    assert!(rendered.contains("parse_packet"));
+    let normalized = build_work_order(unordered).expect("normalize unordered evidence");
+    let canonical = build_work_order(ordered).expect("build ordered evidence");
+
+    assert_eq!(normalized, canonical);
+    assert_eq!(normalized.payload.compile_context_sha256.len(), 64);
 }
 
 #[test]
-fn an_empty_compile_context_is_stated_rather_than_left_blank() {
-    let mut inputs = inputs();
-    inputs.build_context = BuildContext {
-        include_dirs: Vec::new(),
-        defines: Vec::new(),
-        std_flag: None,
-        extra_flags: Vec::new(),
-        entry_count: 0,
-        dropped: Vec::new(),
-    };
+fn verification_rejects_v1_packets_and_tampered_digests() {
+    let packet = build_work_order(payload()).expect("build packet");
 
-    let rendered = render_work_order(&build_work_order(&inputs));
+    let mut v1 = packet.clone();
+    v1.schema_version = 1;
+    assert_eq!(
+        verify_work_order(&v1)
+            .expect_err("v1 must be rejected")
+            .code,
+        HarnessWorkOrderErrorCode::UnsupportedWorkOrderSchema
+    );
 
-    assert!(
-        rendered.to_lowercase().contains("no compile database"),
-        "an author must know the flags are guesses, not the project's own"
+    let mut packet_digest = packet.clone();
+    packet_digest.id = "0".repeat(64);
+    assert_eq!(
+        verify_work_order(&packet_digest)
+            .expect_err("packet digest tampering must be rejected")
+            .code,
+        HarnessWorkOrderErrorCode::InvalidWorkOrderDigest
+    );
+
+    let mut context_digest = packet;
+    context_digest.payload.compile_context_sha256 = "0".repeat(64);
+    assert_eq!(
+        verify_work_order(&context_digest)
+            .expect_err("compile-context digest tampering must be rejected")
+            .code,
+        HarnessWorkOrderErrorCode::InvalidWorkOrderDigest
     );
 }
 
 #[test]
-fn a_packet_with_no_seed_suggestion_says_so() {
-    let mut inputs = inputs();
-    inputs.seed_suggestions = Vec::new();
+fn construction_rejects_absolute_host_paths_from_packet_json() {
+    let mut candidate = payload();
+    candidate.target.relative_source = "/Users/operator/project/src/parser.c".to_owned();
 
-    let rendered = render_work_order(&build_work_order(&inputs));
-
-    assert!(rendered.to_lowercase().contains("no seed"));
+    let error = build_work_order(candidate).expect_err("absolute paths must be rejected");
+    assert_eq!(error.code, HarnessWorkOrderErrorCode::InvalidProjectPath);
 }
 
 #[test]
-fn a_candidate_with_no_recorded_rationale_does_not_render_a_dangling_label() {
-    let mut inputs = inputs();
-    inputs.rationale = String::new();
+fn commands_use_typed_placeholders_and_approval_requirements() {
+    let commands = work_order_commands(&build_work_order(payload()).expect("build packet"));
 
-    let rendered = render_work_order(&build_work_order(&inputs));
+    assert_eq!(commands[0].step, WorkOrderStep::Import);
+    assert!(commands[0]
+        .argv
+        .contains(&WorkOrderArg::Placeholder(WorkOrderPlaceholder::SourceFile)));
+    assert_eq!(commands[1].step, WorkOrderStep::Qualify);
+    assert!(commands[1].approval_required);
+    assert!(commands[1].argv.contains(&WorkOrderArg::Placeholder(
+        WorkOrderPlaceholder::SubmissionId
+    )));
+    assert_eq!(commands[2].step, WorkOrderStep::Rank);
+    assert!(commands[2]
+        .argv
+        .contains(&WorkOrderArg::Placeholder(WorkOrderPlaceholder::AttemptIds)));
+    assert_eq!(commands[3].step, WorkOrderStep::Promote);
+    assert!(commands[3].approval_required);
+    assert!(commands[3]
+        .argv
+        .contains(&WorkOrderArg::Placeholder(WorkOrderPlaceholder::AttemptId)));
 
-    assert!(
-        !rendered.contains("Why it was ranked: \n"),
-        "an empty rationale must be stated, not left as an empty field"
-    );
-    assert!(rendered.contains("Why it was ranked: not recorded"));
+    let rendered = render_work_order(&build_work_order(payload()).expect("build packet"));
+    assert!(rendered.contains("Approval required"));
+}
+
+#[test]
+fn posix_quoting_preserves_literal_arguments() {
+    assert_eq!(quote_posix_arg("plain"), "plain");
+    assert_eq!(quote_posix_arg("two words"), "'two words'");
+    assert_eq!(quote_posix_arg("a'b"), "'a'\"'\"'b'");
+    assert_eq!(quote_posix_arg("$(touch nope)"), "'$(touch nope)'");
 }
