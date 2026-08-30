@@ -13,7 +13,10 @@ use hf_core::{
     runtime::{classify_fixed_sandbox_include_path, FixedSandboxIncludePath},
     target::{TargetCandidate, TargetLanguage},
 };
-use hf_storage::{HarnessWorkOrderRecord, HarnessWorkOrderSubmissionRecord, StorageError};
+use hf_storage::{
+    HarnessWorkOrderRecord, HarnessWorkOrderSubmissionInsertError,
+    HarnessWorkOrderSubmissionRecord, StorageError,
+};
 use sha2::Digest;
 
 use crate::{
@@ -225,7 +228,7 @@ impl ServiceContainer {
         let persisted = store
             .insert_harness_work_order_submission(&record)
             .await
-            .map_err(submission_storage_error)?;
+            .map_err(submission_insertion_error)?;
         retained_submission(&persisted)
     }
 
@@ -396,29 +399,33 @@ fn invalid_durable_origin() -> HarnessWorkOrderError {
     )
 }
 
-fn submission_storage_error(error: StorageError) -> HarnessWorkOrderError {
+fn submission_insertion_error(
+    error: HarnessWorkOrderSubmissionInsertError,
+) -> HarnessWorkOrderError {
     match error {
-        StorageError::NotFound(message) if message.starts_with("submission parent ") => {
-            HarnessWorkOrderError::not_found(HarnessWorkOrderErrorCode::ParentNotFound, message)
+        HarnessWorkOrderSubmissionInsertError::MissingWorkOrder => {
+            HarnessWorkOrderError::not_found(
+                HarnessWorkOrderErrorCode::WorkOrderNotFound,
+                "work order was not found",
+            )
         }
-        StorageError::NotFound(message) if message.starts_with("work order ") => {
-            HarnessWorkOrderError::not_found(HarnessWorkOrderErrorCode::WorkOrderNotFound, message)
-        }
-        StorageError::InvalidData(message)
-            if message == "submission parent belongs to a different work order" =>
-        {
+        HarnessWorkOrderSubmissionInsertError::MissingParent => HarnessWorkOrderError::not_found(
+            HarnessWorkOrderErrorCode::ParentNotFound,
+            "submission parent was not found",
+        ),
+        HarnessWorkOrderSubmissionInsertError::ParentWorkOrderMismatch => {
             HarnessWorkOrderError::validation(
                 HarnessWorkOrderErrorCode::ParentWorkOrderMismatch,
-                message,
+                "submission parent belongs to a different work order",
             )
         }
-        StorageError::InvalidData(message) if message == "work order submission limit reached" => {
+        HarnessWorkOrderSubmissionInsertError::SubmissionLimitReached => {
             HarnessWorkOrderError::validation(
                 HarnessWorkOrderErrorCode::SubmissionLimitReached,
-                message,
+                "work order submission limit reached",
             )
         }
-        error => storage_error(error),
+        HarnessWorkOrderSubmissionInsertError::Storage(error) => storage_error(error),
     }
 }
 

@@ -15,13 +15,13 @@ use hf_storage::{
     AutomotiveStateCorpusRecord, GuardrailDecisionRecord, HarnessAiReviewRecord,
     HarnessApprovalKind, HarnessWorkOrderAttemptCompletion, HarnessWorkOrderAttemptRecord,
     HarnessWorkOrderAttemptStage, HarnessWorkOrderAttemptStatus, HarnessWorkOrderRecord,
-    HarnessWorkOrderSubmissionRecord, NewScheduleOccurrence, ProjectAutoRevert,
-    RemediationOperationCompletion, RemediationOperationRecord, RemediationOperationStage,
-    RemediationOperationStatus, RunKind, RunRecord, RunStatus, ScheduleOccurrenceAcknowledgement,
-    ScheduleOccurrenceInspection, ScheduleOccurrenceReservation, ScheduleOccurrenceTransition,
-    ScheduleOccurrenceTransitionResult, SemgrepFindingRecord, SemgrepFindingSeverity,
-    SemgrepPublication, SemgrepRunRecord, SemgrepRunStatus, SemgrepTargetScoreRecord, StorageError,
-    Store,
+    HarnessWorkOrderSubmissionInsertError, HarnessWorkOrderSubmissionRecord, NewScheduleOccurrence,
+    ProjectAutoRevert, RemediationOperationCompletion, RemediationOperationRecord,
+    RemediationOperationStage, RemediationOperationStatus, RunKind, RunRecord, RunStatus,
+    ScheduleOccurrenceAcknowledgement, ScheduleOccurrenceInspection, ScheduleOccurrenceReservation,
+    ScheduleOccurrenceTransition, ScheduleOccurrenceTransitionResult, SemgrepFindingRecord,
+    SemgrepFindingSeverity, SemgrepPublication, SemgrepRunRecord, SemgrepRunStatus,
+    SemgrepTargetScoreRecord, StorageError, Store,
 };
 use uuid::Uuid;
 
@@ -611,6 +611,20 @@ async fn harness_work_order_store_preserves_immutable_rows_and_submission_constr
         None,
         now,
     );
+    let missing_work_order = submission_record(
+        Uuid::new_v4(),
+        &"e".repeat(64),
+        "missing work order source",
+        "e".repeat(64),
+        None,
+        now,
+    );
+    assert!(matches!(
+        store
+            .insert_harness_work_order_submission(&missing_work_order)
+            .await,
+        Err(HarnessWorkOrderSubmissionInsertError::MissingWorkOrder)
+    ));
     assert_eq!(
         store
             .insert_harness_work_order_submission(&root_submission)
@@ -646,7 +660,21 @@ async fn harness_work_order_store_preserves_immutable_rows_and_submission_constr
         store
             .insert_harness_work_order_submission(&cross_work_order_parent)
             .await,
-        Err(StorageError::InvalidData(_))
+        Err(HarnessWorkOrderSubmissionInsertError::ParentWorkOrderMismatch)
+    ));
+    let missing_parent = submission_record(
+        Uuid::new_v4(),
+        &first.id,
+        "missing parent source",
+        "3".repeat(64),
+        Some(Uuid::new_v4()),
+        now,
+    );
+    assert!(matches!(
+        store
+            .insert_harness_work_order_submission(&missing_parent)
+            .await,
+        Err(HarnessWorkOrderSubmissionInsertError::MissingParent)
     ));
 
     for ordinal in 2..=20 {
@@ -675,7 +703,7 @@ async fn harness_work_order_store_preserves_immutable_rows_and_submission_constr
         store
             .insert_harness_work_order_submission(&twenty_first)
             .await,
-        Err(StorageError::InvalidData(_))
+        Err(HarnessWorkOrderSubmissionInsertError::SubmissionLimitReached)
     ));
     let submissions = store
         .list_harness_work_order_submissions(&first.id)
@@ -734,7 +762,9 @@ async fn harness_work_order_store_rejects_uuid_conflict_before_secondary_submiss
         store
             .insert_harness_work_order_submission(&conflicting_retry)
             .await,
-        Err(StorageError::InvalidData(_))
+        Err(HarnessWorkOrderSubmissionInsertError::Storage(
+            StorageError::InvalidData(_)
+        ))
     ));
     assert_eq!(
         store.harness_work_order_submission(first.id).await.unwrap(),
