@@ -2257,6 +2257,7 @@ dependencies = [
  "hf-web",
  "ratatui",
  "reqwest 0.13.4",
+ "rustix 1.1.4",
  "serde_json",
  "tempfile",
  "tokio",

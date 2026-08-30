@@ -81,6 +81,7 @@ axum = { workspace = true }
 reqwest = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
+rustix = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
