@@ -102,7 +102,7 @@ impl ServiceContainer {
     /// activation is HITL-gated exactly like a manual revert -- a denied approval
     /// simply leaves the harness unchanged. Returns the outcome only when the
     /// revert applied.
-    async fn maybe_auto_revert(
+    pub(super) async fn maybe_auto_revert(
         &self,
         project: &Path,
         target: &str,
