@@ -149,10 +149,16 @@ CREATE TABLE harness_work_order_attempts (
         )
     ),
     failure_code TEXT CHECK (
-        failure_code IS NULL OR length(CAST(failure_code AS BLOB)) BETWEEN 1 AND 128
+        failure_code IS NULL OR (
+            typeof(failure_code) = 'text'
+            AND length(CAST(failure_code AS BLOB)) BETWEEN 1 AND 128
+        )
     ),
     failure_message TEXT CHECK (
-        failure_message IS NULL OR length(CAST(failure_message AS BLOB)) BETWEEN 1 AND 4096
+        failure_message IS NULL OR (
+            typeof(failure_message) = 'text'
+            AND length(CAST(failure_message AS BLOB)) BETWEEN 1 AND 4096
+        )
     ),
     started_at TEXT NOT NULL CHECK (typeof(started_at) = 'text'),
     updated_at TEXT NOT NULL CHECK (typeof(updated_at) = 'text'),
