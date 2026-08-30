@@ -5,6 +5,7 @@
 
 use std::{error::Error, fmt, fmt::Write as _, path::Path};
 
+use chrono::{DateTime, Utc};
 use hf_core::{
     engine::EngineKind,
     error::ClassifiedError,
@@ -15,6 +16,8 @@ use hf_harness::{harness_rules, HarnessRuleSummary, LintSeverity};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+
+use crate::VerdictLevel;
 
 /// Current serialized Harness Work Order schema.
 pub const HARNESS_WORK_ORDER_SCHEMA_VERSION: u32 = 2;
@@ -87,7 +90,56 @@ pub struct HarnessWorkOrderSubmission {
     /// Deterministic lint findings recorded at import.
     pub lint: Vec<hf_harness::LintFinding>,
     /// First durable submission timestamp.
-    pub submitted_at: chrono::DateTime<chrono::Utc>,
+    pub submitted_at: DateTime<Utc>,
+}
+
+/// Bounded terminal evidence retained for one qualification attempt.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessWorkOrderAttemptResult {
+    /// Whether sandbox compilation completed successfully.
+    pub compiled: bool,
+    /// Deterministic smoke assessment when smoke produced an outcome.
+    pub smoke_verdict: Option<VerdictLevel>,
+    /// Immutable repair ancestry depth used by later ranking.
+    pub repair_depth: u32,
+    /// SHA-256 of the exact reviewed source when review reached that evidence.
+    pub source_sha256: Option<String>,
+    /// SHA-256 of the exact reviewed executable when review reached that evidence.
+    pub binary_sha256: Option<String>,
+    /// Observed smoke throughput when smoke completed.
+    pub execs_per_sec: Option<f64>,
+    /// Observed smoke crash count when smoke completed.
+    pub crashes: Option<u32>,
+}
+
+/// Public view of one durable harness qualification attempt.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HarnessWorkOrderAttempt {
+    /// Durable attempt identifier.
+    pub id: Uuid,
+    /// Immutable submission being qualified.
+    pub submission_id: Uuid,
+    /// Current or terminal durable outcome.
+    pub status: hf_storage::HarnessWorkOrderAttemptStatus,
+    /// Current service-owned qualification stage.
+    pub current_stage: hf_storage::HarnessWorkOrderAttemptStage,
+    /// Persisted compiled harness revision, when compilation succeeded.
+    pub harness_id: Option<Uuid>,
+    /// Persisted smoke-run identity, when smoke completed.
+    pub smoke_run_id: Option<Uuid>,
+    /// Bounded terminal evidence.
+    pub result: Option<HarnessWorkOrderAttemptResult>,
+    /// Stable terminal failure category.
+    pub failure_code: Option<String>,
+    /// Sanitized bounded terminal failure detail.
+    pub failure_message: Option<String>,
+    /// First durable attempt timestamp.
+    pub started_at: DateTime<Utc>,
+    /// Latest durable transition timestamp.
+    pub updated_at: DateTime<Utc>,
+    /// Terminal timestamp, absent only while running.
+    pub ended_at: Option<DateTime<Utc>>,
 }
 
 /// The evidence covered by a Harness Work Order identifier.

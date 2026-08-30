@@ -10,12 +10,14 @@ use chrono::Utc;
 use hf_core::{
     build::BuildContext,
     engine::EngineKind,
+    error::ClassifiedError,
     runtime::{classify_fixed_sandbox_include_path, FixedSandboxIncludePath},
     target::{TargetCandidate, TargetLanguage},
 };
 use hf_storage::{
-    HarnessWorkOrderRecord, HarnessWorkOrderSubmissionInsertError,
-    HarnessWorkOrderSubmissionRecord, StorageError,
+    HarnessWorkOrderAttemptCompletion, HarnessWorkOrderAttemptRecord, HarnessWorkOrderAttemptStage,
+    HarnessWorkOrderAttemptStatus, HarnessWorkOrderRecord, HarnessWorkOrderSubmissionInsertError,
+    HarnessWorkOrderSubmissionRecord, StorageError, Store,
 };
 use sha2::Digest;
 
@@ -25,8 +27,9 @@ use crate::{
         require_fuzzing_harness_engine, ServiceContainer,
     },
     harness_work_order::{
-        build_work_order, verify_work_order, HarnessWorkOrder, HarnessWorkOrderError,
-        HarnessWorkOrderErrorCode, HarnessWorkOrderPayload, HarnessWorkOrderSubmission,
+        build_work_order, verify_work_order, HarnessWorkOrder, HarnessWorkOrderAttempt,
+        HarnessWorkOrderAttemptResult, HarnessWorkOrderError, HarnessWorkOrderErrorCode,
+        HarnessWorkOrderPayload, HarnessWorkOrderSubmission,
         ImportHarnessWorkOrderSubmissionRequest, WorkOrderCompileContext, WorkOrderSeedReference,
         WorkOrderSourceEvidence, WorkOrderStep, WorkOrderSubmissionOrigin, WorkOrderTargetEvidence,
         MAX_WORK_ORDER_SEEDS, MAX_WORK_ORDER_SOURCE_EXCERPT_BYTES,
@@ -37,6 +40,8 @@ use crate::{
 const MAX_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_PROVENANCE_LABEL_BYTES: usize = 128;
 const MAX_PROVENANCE_RESPONSE_ID_BYTES: usize = 256;
+const MAX_ATTEMPT_FAILURE_CODE_BYTES: usize = 128;
+const MAX_ATTEMPT_FAILURE_MESSAGE_BYTES: usize = 4_096;
 
 /// Provider-free request for one durable authoring packet.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,15 +53,24 @@ pub struct HarnessWorkOrderExportRequest {
 }
 
 impl ServiceContainer {
+    fn work_order_store(&self) -> Result<&Store, HarnessWorkOrderError> {
+        if !self.work_order_recovery_ready {
+            return Err(HarnessWorkOrderError::storage(
+                "harness work order recovery is incomplete",
+            ));
+        }
+        self.store()
+            .map(AsRef::as_ref)
+            .ok_or_else(|| HarnessWorkOrderError::storage("durable work order storage is required"))
+    }
+
     /// Export retained target evidence as an immutable durable work order.
     pub async fn export_harness_work_order(
         &self,
         request: HarnessWorkOrderExportRequest,
     ) -> Result<HarnessWorkOrder, HarnessWorkOrderError> {
+        let store = self.work_order_store()?;
         let project = canonical_project_root(&request.project).map_err(service_validation)?;
-        let store = self.store().ok_or_else(|| {
-            HarnessWorkOrderError::storage("work order export requires durable storage")
-        })?;
         require_fuzzing_harness_engine(request.engine, request.language)
             .map_err(service_validation)?;
         let project_text = project.to_str().ok_or_else(|| {
@@ -152,9 +166,7 @@ impl ServiceContainer {
         &self,
         id: &str,
     ) -> Result<HarnessWorkOrder, HarnessWorkOrderError> {
-        let store = self.store().ok_or_else(|| {
-            HarnessWorkOrderError::storage("work order retrieval requires durable storage")
-        })?;
+        let store = self.work_order_store()?;
         let record = store
             .harness_work_order(id)
             .await
@@ -173,9 +185,7 @@ impl ServiceContainer {
         &self,
         project: Option<&Path>,
     ) -> Result<Vec<HarnessWorkOrder>, HarnessWorkOrderError> {
-        let store = self.store().ok_or_else(|| {
-            HarnessWorkOrderError::storage("work order listing requires durable storage")
-        })?;
+        let store = self.work_order_store()?;
         let canonical = project
             .map(canonical_project_root)
             .transpose()
@@ -205,9 +215,7 @@ impl ServiceContainer {
         &self,
         request: ImportHarnessWorkOrderSubmissionRequest,
     ) -> Result<HarnessWorkOrderSubmission, HarnessWorkOrderError> {
-        let store = self.store().ok_or_else(|| {
-            HarnessWorkOrderError::storage("work order submission import requires durable storage")
-        })?;
+        let store = self.work_order_store()?;
         let work_order = load_verified_work_order(store, &request.work_order_id).await?;
         validate_submission_source(&request.source)?;
         let origin = normalized_submission_origin(request.origin)?;
@@ -237,11 +245,7 @@ impl ServiceContainer {
         &self,
         id: uuid::Uuid,
     ) -> Result<HarnessWorkOrderSubmission, HarnessWorkOrderError> {
-        let store = self.store().ok_or_else(|| {
-            HarnessWorkOrderError::storage(
-                "work order submission retrieval requires durable storage",
-            )
-        })?;
+        let store = self.work_order_store()?;
         let record = store
             .harness_work_order_submission(id)
             .await
@@ -261,9 +265,7 @@ impl ServiceContainer {
         &self,
         work_order_id: &str,
     ) -> Result<Vec<HarnessWorkOrderSubmission>, HarnessWorkOrderError> {
-        let store = self.store().ok_or_else(|| {
-            HarnessWorkOrderError::storage("work order submission listing requires durable storage")
-        })?;
+        let store = self.work_order_store()?;
         load_verified_work_order(store, work_order_id).await?;
         store
             .list_harness_work_order_submissions(work_order_id)
@@ -273,6 +275,518 @@ impl ServiceContainer {
             .map(retained_submission)
             .collect()
     }
+
+    /// Qualify one immutable submission through compile, review, and smoke.
+    pub async fn qualify_harness_work_order_submission(
+        &self,
+        submission_id: uuid::Uuid,
+    ) -> Result<HarnessWorkOrderAttempt, HarnessWorkOrderError> {
+        let preflight = self.qualification_preflight(submission_id).await?;
+        let store = self.work_order_store()?;
+        let started_at = Utc::now();
+        let attempt = HarnessWorkOrderAttemptRecord {
+            id: uuid::Uuid::new_v4(),
+            submission_id,
+            status: HarnessWorkOrderAttemptStatus::Running,
+            current_stage: HarnessWorkOrderAttemptStage::Compile,
+            harness_id: None,
+            smoke_run_id: None,
+            result_json: None,
+            failure_code: None,
+            failure_message: None,
+            started_at,
+            updated_at: started_at,
+            ended_at: None,
+        };
+        let attempt = store
+            .insert_harness_work_order_attempt(&attempt)
+            .await
+            .map_err(storage_error)?;
+        let mut result = HarnessWorkOrderAttemptResult {
+            compiled: false,
+            smoke_verdict: None,
+            repair_depth: preflight.repair_depth,
+            source_sha256: None,
+            binary_sha256: None,
+            execs_per_sec: None,
+            crashes: None,
+        };
+        let payload = &preflight.work_order.payload;
+
+        let compiled = match self
+            .harness_compile(
+                preflight.submission.source,
+                &preflight.project,
+                payload.engine,
+                &payload.target.symbol,
+                payload.target.language,
+            )
+            .await
+        {
+            Ok(compiled) => compiled,
+            Err(error) => {
+                return complete_failed_attempt(
+                    store,
+                    &attempt,
+                    HarnessWorkOrderAttemptStage::Compile,
+                    HarnessWorkOrderAttemptStatus::CompileFailed,
+                    None,
+                    &result,
+                    &error,
+                )
+                .await;
+            }
+        };
+        result.compiled = true;
+        store
+            .transition_harness_work_order_attempt(
+                attempt.id,
+                HarnessWorkOrderAttemptStage::Compile,
+                HarnessWorkOrderAttemptStage::Review,
+                Some(compiled.harness_id),
+                Utc::now(),
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let review = match self
+            .harness_review_exact(
+                &preflight.project,
+                &payload.target.symbol,
+                payload.engine,
+                payload.target.language,
+                compiled.harness_id,
+            )
+            .await
+        {
+            Ok(review) => review,
+            Err(error) => {
+                return complete_failed_attempt(
+                    store,
+                    &attempt,
+                    HarnessWorkOrderAttemptStage::Review,
+                    HarnessWorkOrderAttemptStatus::ReviewFailed,
+                    Some(compiled.harness_id),
+                    &result,
+                    &error,
+                )
+                .await;
+            }
+        };
+        result.source_sha256 = Some(review.source_sha256.clone());
+        result.binary_sha256 = Some(review.binary_sha256.clone());
+        store
+            .transition_harness_work_order_attempt(
+                attempt.id,
+                HarnessWorkOrderAttemptStage::Review,
+                HarnessWorkOrderAttemptStage::Smoke,
+                Some(compiled.harness_id),
+                Utc::now(),
+            )
+            .await
+            .map_err(storage_error)?;
+
+        let smoke = match self
+            .harness_smoke_exact(
+                &preflight.project,
+                &payload.target.symbol,
+                payload.engine,
+                payload.target.language,
+                compiled.harness_id,
+            )
+            .await
+        {
+            Ok(smoke) => smoke,
+            Err(error) => {
+                return complete_failed_attempt(
+                    store,
+                    &attempt,
+                    HarnessWorkOrderAttemptStage::Smoke,
+                    HarnessWorkOrderAttemptStatus::SmokeFailed,
+                    Some(compiled.harness_id),
+                    &result,
+                    &error,
+                )
+                .await;
+            }
+        };
+        let Some(smoke_run_id) = smoke.summary.run_id else {
+            let error = ClassifiedError::Internal(
+                "successful smoke qualification omitted its durable run id".to_owned(),
+            );
+            return complete_failed_attempt(
+                store,
+                &attempt,
+                HarnessWorkOrderAttemptStage::Smoke,
+                HarnessWorkOrderAttemptStatus::SmokeFailed,
+                Some(compiled.harness_id),
+                &result,
+                &error,
+            )
+            .await;
+        };
+        result.smoke_verdict = Some(smoke.verdict.level);
+        result.execs_per_sec = Some(smoke.summary.execs_per_sec);
+        result.crashes = Some(smoke.summary.crashes);
+        let result_json = serde_json::to_string(&result).map_err(serialization_error)?;
+        let completed = store
+            .complete_harness_work_order_attempt(
+                attempt.id,
+                HarnessWorkOrderAttemptCompletion {
+                    expected_stage: HarnessWorkOrderAttemptStage::Smoke,
+                    status: HarnessWorkOrderAttemptStatus::SmokePassed,
+                    harness_id: Some(compiled.harness_id),
+                    smoke_run_id: Some(smoke_run_id),
+                    result_json: Some(&result_json),
+                    failure_code: None,
+                    failure_message: None,
+                    completed_at: Utc::now(),
+                },
+            )
+            .await
+            .map_err(storage_error)?;
+        retained_attempt(&completed)
+    }
+
+    /// Read one durable qualification attempt.
+    pub async fn harness_work_order_attempt(
+        &self,
+        attempt_id: uuid::Uuid,
+    ) -> Result<HarnessWorkOrderAttempt, HarnessWorkOrderError> {
+        let store = self.work_order_store()?;
+        let record = store
+            .harness_work_order_attempt(attempt_id)
+            .await
+            .map_err(storage_error)?
+            .ok_or_else(|| {
+                HarnessWorkOrderError::not_found(
+                    HarnessWorkOrderErrorCode::AttemptNotFound,
+                    "work order qualification attempt was not found",
+                )
+            })?;
+        retained_attempt(&record)
+    }
+
+    /// List durable qualification attempts for one immutable submission.
+    pub async fn list_harness_work_order_attempts(
+        &self,
+        submission_id: uuid::Uuid,
+    ) -> Result<Vec<HarnessWorkOrderAttempt>, HarnessWorkOrderError> {
+        let store = self.work_order_store()?;
+        if store
+            .harness_work_order_submission(submission_id)
+            .await
+            .map_err(durable_submission_storage_error)?
+            .is_none()
+        {
+            return Err(HarnessWorkOrderError::not_found(
+                HarnessWorkOrderErrorCode::SubmissionNotFound,
+                "work order submission was not found",
+            ));
+        }
+        store
+            .list_harness_work_order_attempts(submission_id)
+            .await
+            .map_err(storage_error)?
+            .iter()
+            .map(retained_attempt)
+            .collect()
+    }
+
+    async fn qualification_preflight(
+        &self,
+        submission_id: uuid::Uuid,
+    ) -> Result<QualificationPreflight, HarnessWorkOrderError> {
+        let store = self.work_order_store()?;
+        let submission_record = store
+            .harness_work_order_submission(submission_id)
+            .await
+            .map_err(durable_submission_storage_error)?
+            .ok_or_else(|| {
+                HarnessWorkOrderError::not_found(
+                    HarnessWorkOrderErrorCode::SubmissionNotFound,
+                    "work order submission was not found",
+                )
+            })?;
+        let submission = retained_submission(&submission_record)?;
+        let work_order_record = store
+            .harness_work_order(&submission.work_order_id)
+            .await
+            .map_err(storage_error)?
+            .ok_or_else(|| {
+                HarnessWorkOrderError::not_found(
+                    HarnessWorkOrderErrorCode::WorkOrderNotFound,
+                    "work order was not found",
+                )
+            })?;
+        let work_order = retained_packet(&work_order_record, None)?;
+        let project = canonical_project_root(Path::new(&work_order_record.project_root))
+            .map_err(|_| stale_work_order())?;
+        if project.to_string_lossy() != work_order_record.project_root {
+            return Err(stale_work_order());
+        }
+        let candidate = store
+            .list_targets(&work_order_record.project_root)
+            .await
+            .map_err(storage_error)?
+            .into_iter()
+            .find(|candidate| candidate.id == work_order_record.target_id)
+            .ok_or_else(stale_work_order)?;
+        if candidate.symbol != work_order.payload.target.symbol
+            || candidate.language != work_order.payload.target.language
+            || candidate.signature != work_order.payload.target.signature
+            || candidate.location.line != work_order.payload.target.line
+            || candidate.rationale != work_order.payload.target.rationale
+        {
+            return Err(stale_work_order());
+        }
+        let relative_source =
+            project_relative_regular_file(&project, &candidate.location.file, MAX_SOURCE_BYTES)
+                .map_err(|_| stale_work_order())?;
+        if relative_source.to_string_lossy() != work_order.payload.target.relative_source {
+            return Err(stale_work_order());
+        }
+        if source_evidence(&project, &candidate)
+            .map_err(|_| stale_work_order())?
+            .sha256
+            != work_order.payload.source.sha256
+        {
+            return Err(stale_work_order());
+        }
+        let build_context = self
+            .resolve_build_context(&project)
+            .map_err(|_| stale_work_order())?
+            .unwrap_or_else(empty_build_context);
+        let mut current_payload = work_order.payload.clone();
+        current_payload.compile_context =
+            normalized_build_context(&project, build_context).map_err(|_| stale_work_order())?;
+        let current = build_work_order(current_payload).map_err(|_| stale_work_order())?;
+        if current.payload.compile_context_sha256 != work_order.payload.compile_context_sha256 {
+            return Err(stale_work_order());
+        }
+        let lint =
+            hf_harness::lint_harness_source(&submission.source, work_order.payload.target.language);
+        if lint != submission.lint {
+            return Err(HarnessWorkOrderError::validation(
+                HarnessWorkOrderErrorCode::InvalidWorkOrderDigest,
+                "durable submission lint does not match its source",
+            ));
+        }
+        if hf_harness::has_blocking_finding(&lint) {
+            return Err(HarnessWorkOrderError::validation(
+                HarnessWorkOrderErrorCode::SubmissionHasBlockingLint,
+                "submission has blocking harness lint findings",
+            ));
+        }
+        let repair_depth = submission_repair_depth(store, &submission).await?;
+        Ok(QualificationPreflight {
+            project,
+            work_order,
+            submission,
+            repair_depth,
+        })
+    }
+}
+
+struct QualificationPreflight {
+    project: PathBuf,
+    work_order: HarnessWorkOrder,
+    submission: HarnessWorkOrderSubmission,
+    repair_depth: u32,
+}
+
+async fn submission_repair_depth(
+    store: &Store,
+    submission: &HarnessWorkOrderSubmission,
+) -> Result<u32, HarnessWorkOrderError> {
+    let mut depth = 0_u32;
+    let mut parent_id = submission.parent_submission_id;
+    while let Some(id) = parent_id {
+        let parent = store
+            .harness_work_order_submission(id)
+            .await
+            .map_err(durable_submission_storage_error)?
+            .ok_or_else(|| {
+                HarnessWorkOrderError::validation(
+                    HarnessWorkOrderErrorCode::InvalidWorkOrderDigest,
+                    "durable submission ancestry is incomplete",
+                )
+            })?;
+        if parent.work_order_id != submission.work_order_id {
+            return Err(HarnessWorkOrderError::validation(
+                HarnessWorkOrderErrorCode::InvalidWorkOrderDigest,
+                "durable submission ancestry crosses work orders",
+            ));
+        }
+        depth = depth.checked_add(1).ok_or_else(|| {
+            HarnessWorkOrderError::validation(
+                HarnessWorkOrderErrorCode::InvalidWorkOrderDigest,
+                "durable submission ancestry is too deep",
+            )
+        })?;
+        if depth >= hf_storage::MAX_WORK_ORDER_SUBMISSIONS {
+            return Err(HarnessWorkOrderError::validation(
+                HarnessWorkOrderErrorCode::InvalidWorkOrderDigest,
+                "durable submission ancestry is too deep",
+            ));
+        }
+        parent_id = parent.parent_submission_id;
+    }
+    Ok(depth)
+}
+
+async fn complete_failed_attempt(
+    store: &Store,
+    attempt: &HarnessWorkOrderAttemptRecord,
+    expected_stage: HarnessWorkOrderAttemptStage,
+    status: HarnessWorkOrderAttemptStatus,
+    harness_id: Option<uuid::Uuid>,
+    result: &HarnessWorkOrderAttemptResult,
+    error: &ClassifiedError,
+) -> Result<HarnessWorkOrderAttempt, HarnessWorkOrderError> {
+    if matches!(error, ClassifiedError::Storage(_)) {
+        return Err(HarnessWorkOrderError::storage(
+            "harness qualification persistence failed",
+        ));
+    }
+    let result_json = serde_json::to_string(result).map_err(serialization_error)?;
+    let (failure_code, failure_message) = bounded_attempt_failure(error);
+    let completed = store
+        .complete_harness_work_order_attempt(
+            attempt.id,
+            HarnessWorkOrderAttemptCompletion {
+                expected_stage,
+                status,
+                harness_id,
+                smoke_run_id: None,
+                result_json: Some(&result_json),
+                failure_code: Some(&failure_code),
+                failure_message: Some(&failure_message),
+                completed_at: Utc::now(),
+            },
+        )
+        .await
+        .map_err(storage_error)?;
+    retained_attempt(&completed)
+}
+
+fn retained_attempt(
+    record: &HarnessWorkOrderAttemptRecord,
+) -> Result<HarnessWorkOrderAttempt, HarnessWorkOrderError> {
+    let result = record
+        .result_json
+        .as_deref()
+        .map(serde_json::from_str::<HarnessWorkOrderAttemptResult>)
+        .transpose()
+        .map_err(|_| {
+            HarnessWorkOrderError::validation(
+                HarnessWorkOrderErrorCode::InvalidWorkOrderDigest,
+                "durable qualification result is malformed",
+            )
+        })?;
+    if result.as_ref().is_some_and(|result| {
+        result
+            .source_sha256
+            .as_deref()
+            .is_some_and(|digest| !valid_sha256(digest))
+            || result
+                .binary_sha256
+                .as_deref()
+                .is_some_and(|digest| !valid_sha256(digest))
+            || result.execs_per_sec.is_some_and(|value| !value.is_finite())
+    }) {
+        return Err(HarnessWorkOrderError::validation(
+            HarnessWorkOrderErrorCode::InvalidWorkOrderDigest,
+            "durable qualification result contains invalid evidence",
+        ));
+    }
+    Ok(HarnessWorkOrderAttempt {
+        id: record.id,
+        submission_id: record.submission_id,
+        status: record.status,
+        current_stage: record.current_stage,
+        harness_id: record.harness_id,
+        smoke_run_id: record.smoke_run_id,
+        result,
+        failure_code: record.failure_code.clone(),
+        failure_message: record.failure_message.clone(),
+        started_at: record.started_at,
+        updated_at: record.updated_at,
+        ended_at: record.ended_at,
+    })
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn stale_work_order() -> HarnessWorkOrderError {
+    HarnessWorkOrderError::validation(
+        HarnessWorkOrderErrorCode::StaleWorkOrder,
+        "retained work order evidence no longer matches the project",
+    )
+}
+
+fn bounded_attempt_failure(error: &ClassifiedError) -> (String, String) {
+    let code = match error {
+        ClassifiedError::Provider(_) => "provider",
+        ClassifiedError::Sandbox(_) => "sandbox",
+        ClassifiedError::Engine(_) => "engine",
+        ClassifiedError::Harness(_) => "harness",
+        ClassifiedError::Storage(_) => "storage",
+        ClassifiedError::Validation(_) => "validation",
+        ClassifiedError::Timeout => "timeout",
+        ClassifiedError::Internal(_) => "internal",
+    };
+    let message = error
+        .to_string()
+        .split_whitespace()
+        .map(redacted_failure_token)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let message = bounded_utf8(&message, MAX_ATTEMPT_FAILURE_MESSAGE_BYTES);
+    let message = if message.is_empty() {
+        format!("{code} failure")
+    } else {
+        message
+    };
+    (bounded_utf8(code, MAX_ATTEMPT_FAILURE_CODE_BYTES), message)
+}
+
+fn redacted_failure_token(token: &str) -> &str {
+    let lowercase = token.to_ascii_lowercase();
+    let path_candidate = token.trim_start_matches(['(', '[', '{', '\'', '"']);
+    if lowercase.contains("password")
+        || lowercase.contains("secret")
+        || lowercase.contains("token")
+        || lowercase.contains("api_key")
+        || lowercase.contains("apikey")
+    {
+        "<redacted>"
+    } else if path_candidate.starts_with('/')
+        || path_candidate
+            .as_bytes()
+            .get(1)
+            .is_some_and(|byte| *byte == b':')
+    {
+        "<redacted-path>"
+    } else {
+        token
+    }
+}
+
+fn bounded_utf8(value: &str, maximum_bytes: usize) -> String {
+    if value.len() <= maximum_bytes {
+        return value.to_owned();
+    }
+    let mut end = maximum_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
 }
 
 async fn load_verified_work_order(
