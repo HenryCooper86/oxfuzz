@@ -364,6 +364,78 @@ Indexes:
 `idx_remediation_finding(finding_id, created_at DESC)` and
 `idx_remediation_status(status, updated_at)`.
 
+### `harness_work_orders`
+
+One immutable canonical Harness Work Order v2 packet. `target_id` remains a
+logical target UUID and `project_root` is retained only for lookup and explicit
+project cleanup; neither is packet content.
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | lowercase SHA-256 packet identifier |
+| `target_id` | `TEXT NOT NULL` | logical target UUID |
+| `project_root` | `TEXT NOT NULL` | canonical project root for lookup |
+| `schema_version` | `INTEGER NOT NULL CHECK (schema_version = 2)` | packet schema version |
+| `packet_json` | `TEXT NOT NULL` | valid JSON, at most 262,144 bytes |
+| `created_at` | `TEXT NOT NULL` | RFC 3339 first-persisted time |
+
+Index: `idx_harness_work_orders_target_project(target_id, project_root,
+created_at DESC)`. The update trigger rejects all row mutation.
+
+### `harness_work_order_submissions`
+
+Immutable externally or human-authored harness source retained under one work
+order. `parent_submission_id` records repair ancestry and refers to an earlier
+submission; the Store validates that parent and child share one work order.
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | UUID |
+| `work_order_id` | `TEXT NOT NULL` | retained work-order identifier |
+| `source` | `TEXT NOT NULL` | non-empty UTF-8, at most 65,536 bytes |
+| `source_sha256` | `TEXT NOT NULL` | lowercase source SHA-256 |
+| `origin_json` | `TEXT NOT NULL` | canonical origin JSON, at most 4,096 bytes |
+| `parent_submission_id` | `TEXT` | nullable UUID repair parent |
+| `lint_json` | `TEXT NOT NULL` | valid lint JSON, at most 65,536 bytes |
+| `submitted_at` | `TEXT NOT NULL` | RFC 3339 submission time |
+
+Indexes: `harness_work_order_submissions_identity(work_order_id,
+source_sha256, origin_json, COALESCE(parent_submission_id, ''))` and
+`idx_harness_work_order_submissions_work_order(work_order_id, submitted_at
+DESC, id DESC)`. The identity index rejects raw duplicate insertion; exact
+retry handling belongs to the Store API. The update trigger rejects all row
+mutation.
+
+### `harness_work_order_attempts`
+
+Durable qualification state for one immutable submission. `smoke_run_id` is a
+logical UUID without a foreign key to `runs`, so clearing run history retains
+terminal attempt evidence in `result_json` and the linked harness id.
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | UUID |
+| `submission_id` | `TEXT NOT NULL` | immutable source submission UUID |
+| `status` | `TEXT NOT NULL CHECK (...)` | running/compile_failed/review_failed/smoke_failed/smoke_passed/interrupted |
+| `current_stage` | `TEXT NOT NULL CHECK (...)` | compile/review/smoke/complete |
+| `harness_id` | `TEXT` | nullable logical compiled harness UUID |
+| `smoke_run_id` | `TEXT` | nullable logical smoke-run UUID; no run foreign key |
+| `result_json` | `TEXT` | nullable valid result summary, at most 65,536 bytes |
+| `failure_code` | `TEXT` | nullable bounded failure code |
+| `failure_message` | `TEXT` | nullable bounded failure message |
+| `started_at` | `TEXT NOT NULL` | RFC 3339 start time |
+| `updated_at` | `TEXT NOT NULL` | RFC 3339 latest state time |
+| `ended_at` | `TEXT` | nullable RFC 3339 terminal time |
+
+The row check permits `running` only at `compile`, `review`, or `smoke`, and
+requires every terminal status at `complete` with `ended_at`. Attempt identity
+is immutable and terminal rows reject all updates. Indexes:
+`idx_harness_work_order_attempts_submission(submission_id, started_at DESC,
+id DESC)` and `idx_harness_work_order_attempts_status(status, updated_at DESC)`.
+
+Explicit cleanup deletes attempts before submissions and submissions before
+work orders. Clearing run history does not delete any work-order table.
+
 ### `corpus_entries`
 
 | column | SQLite declaration |
@@ -773,6 +845,7 @@ Index: `idx_guardrail_decisions_ts(decided_at DESC)`.
 | `0026_patch_to_proof.sql` | creates durable remediation attempts with immutable review scope, compare-and-set lifecycle states, and terminal sandbox evidence |
 | `0027_run_closeout.sql` | records per-run closeout step outcomes so an interrupted chain resumes rather than repeating terminal work |
 | `0028_harness_ai_reviews.sql` | creates source-digest-bound independent pre-execution harness review evidence |
+| `0029_harness_work_orders.sql` | creates immutable work-order packets, submissions, and qualification attempts with bounded durable evidence |
 
 ## 7. Read failure contract
 
