@@ -696,6 +696,60 @@ async fn harness_work_order_store_preserves_immutable_rows_and_submission_constr
 }
 
 #[tokio::test]
+async fn harness_work_order_store_rejects_uuid_conflict_before_secondary_submission_retry() {
+    let (store, _dir) = temp_store().await;
+    let now = Utc::now().trunc_subsecs(0);
+    let work_order = work_order_record('c', Uuid::new_v4(), "/projects/uuid-conflict", now);
+    store.insert_harness_work_order(&work_order).await.unwrap();
+    let first = submission_record(
+        Uuid::new_v4(),
+        &work_order.id,
+        "first source",
+        "1".repeat(64),
+        None,
+        now,
+    );
+    let second = submission_record(
+        Uuid::new_v4(),
+        &work_order.id,
+        "second source",
+        "2".repeat(64),
+        None,
+        now + Duration::seconds(1),
+    );
+    store
+        .insert_harness_work_order_submission(&first)
+        .await
+        .unwrap();
+    store
+        .insert_harness_work_order_submission(&second)
+        .await
+        .unwrap();
+    let conflicting_retry = HarnessWorkOrderSubmissionRecord {
+        id: first.id,
+        ..second.clone()
+    };
+
+    assert!(matches!(
+        store
+            .insert_harness_work_order_submission(&conflicting_retry)
+            .await,
+        Err(StorageError::InvalidData(_))
+    ));
+    assert_eq!(
+        store.harness_work_order_submission(first.id).await.unwrap(),
+        Some(first)
+    );
+    assert_eq!(
+        store
+            .harness_work_order_submission(second.id)
+            .await
+            .unwrap(),
+        Some(second)
+    );
+}
+
+#[tokio::test]
 async fn harness_work_order_attempts_use_compare_and_set_and_recover_running_rows() {
     let (store, _dir) = temp_store().await;
     let now = Utc::now().trunc_subsecs(0);
