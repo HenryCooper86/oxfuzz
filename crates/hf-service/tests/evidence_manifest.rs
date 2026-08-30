@@ -142,7 +142,7 @@ async fn service_assembles_a_manifest_from_durable_run_and_approval_evidence() {
     use chrono::Utc;
     use hf_core::crash::{Crash, CrashKind};
     use hf_core::engine::FuzzRunConfig;
-    use hf_core::harness::{BuildCommand, Harness, HarnessStatus};
+    use hf_core::harness::{BuildCommand, Harness, HarnessStatus, SmokeRunSummary};
     use hf_core::target::{
         InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
     };
@@ -199,7 +199,9 @@ async fn service_assembles_a_manifest_from_durable_run_and_approval_evidence() {
     store.upsert_target(&target, Utc::now()).await.unwrap();
 
     let harness_id = Uuid::from_u128(11);
-    let harness = Harness {
+    let harness_sha256 = digest('b');
+    let binary_sha256 = digest('c');
+    let mut harness = Harness {
         id: harness_id,
         target_id,
         engine: EngineKind::LibFuzzer,
@@ -213,11 +215,19 @@ async fn service_assembles_a_manifest_from_durable_run_and_approval_evidence() {
             extra_flags: Vec::new(),
         },
         sanitizer: Sanitizer::Address,
-        status: HarnessStatus::Promoted,
-        smoke_run: None,
+        status: HarnessStatus::SmokePassed,
+        smoke_run: Some(SmokeRunSummary {
+            duration_secs: 60,
+            execs_per_sec: 1.0,
+            crashes: 0,
+            passed: true,
+            source_sha256: Some(harness_sha256.clone()),
+            binary_sha256: Some(binary_sha256.clone()),
+            run_id: Some(Uuid::new_v4()),
+        }),
     };
-    let harness_sha256 = digest('b');
-    let binary_sha256 = digest('c');
+    store.upsert_harness(&harness).await.unwrap();
+    harness.status = HarnessStatus::Promoted;
     store
         .promote_harness_with_approval(
             &harness,
