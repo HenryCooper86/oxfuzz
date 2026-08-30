@@ -676,6 +676,9 @@ mod workspace_lease_tests {
 
     #[tokio::test]
     async fn delete_run_locked_completes_with_a_queued_cleanup_writer() {
+        let _environment = ServiceContainer::workspace_environment_test_gate()
+            .lock()
+            .await;
         let (container, store, run, evidence_root) = fixture().await;
         let lease = container.acquire_workspace_operation().await.unwrap();
         let (writer, waiting) = queue_cleanup_writer().await;
@@ -698,6 +701,9 @@ mod workspace_lease_tests {
 
     #[tokio::test]
     async fn clear_all_runs_locked_completes_with_a_queued_cleanup_writer() {
+        let _environment = ServiceContainer::workspace_environment_test_gate()
+            .lock()
+            .await;
         let (container, store, run, evidence_root) = fixture().await;
         let lease = container.acquire_workspace_operation().await.unwrap();
         let (writer, waiting) = queue_cleanup_writer().await;
