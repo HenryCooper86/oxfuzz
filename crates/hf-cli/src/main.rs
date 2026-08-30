@@ -5,6 +5,8 @@
 //! service methods through it. No domain logic lives here.
 
 mod tui;
+#[cfg(feature = "harness-work-order")]
+mod work_order;
 
 use clap::{Parser, Subcommand};
 use hf_service::scheduler::{CampaignScheduler, CampaignSchedulerError};
@@ -282,24 +284,11 @@ enum Commands {
         #[arg(long)]
         run: String,
     },
-    /// Write a self-contained harness authoring packet for one candidate.
-    /// Needs no LLM provider; performs no build and starts no process.
+    /// Manage durable harness work orders.
     #[cfg(feature = "harness-work-order")]
     WorkOrder {
-        /// Project root path.
-        project: PathBuf,
-        /// Target symbol.
-        #[arg(long)]
-        target: String,
-        /// Source language.
-        #[arg(long, default_value = "c")]
-        lang: String,
-        /// Fuzzing engine. Defaults to libFuzzer.
-        #[arg(long, default_value = "libfuzzer")]
-        engine: String,
-        /// Write the packet here instead of standard output.
-        #[arg(long)]
-        out: Option<PathBuf>,
+        #[command(subcommand)]
+        command: work_order::WorkOrderCommand,
     },
     /// CI gate: harness + short fuzz + triage; write SARIF and exit non-zero
     /// if any crash is found. Intended for PR pipelines.
@@ -2106,40 +2095,6 @@ async fn cmd_closeout(run: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Write the provider-free harness authoring packet for one candidate.
-///
-/// Rendering only: the packet is assembled by `hf-service` (AGENTS.md 2.9).
-#[cfg(feature = "harness-work-order")]
-async fn cmd_work_order(
-    project: PathBuf,
-    target: &str,
-    lang: &str,
-    engine: &str,
-    out: Option<&std::path::Path>,
-) -> anyhow::Result<()> {
-    let language = parse_lang(lang)?;
-    let engine = parse_engine(engine)?;
-    let container = ServiceContainer::bootstrap().await;
-    let order = container
-        .export_harness_work_order(hf_service::HarnessWorkOrderExportRequest {
-            project,
-            target: target.to_owned(),
-            language,
-            engine,
-        })
-        .await?;
-    let rendered = hf_service::render_work_order(&order);
-
-    match out {
-        Some(path) => {
-            std::fs::write(path, &rendered)?;
-            println!("work order written to {}", path.display());
-        }
-        None => print!("{rendered}"),
-    }
-    Ok(())
-}
-
 /// Print the campaign trust audit for one run.
 ///
 /// Rendering only: every verdict, sentence, and withheld claim arrives decided
@@ -3024,13 +2979,7 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(feature = "run-closeout")]
         Commands::Closeout { run } => cmd_closeout(&run).await?,
         #[cfg(feature = "harness-work-order")]
-        Commands::WorkOrder {
-            project,
-            target,
-            lang,
-            engine,
-            out,
-        } => cmd_work_order(project, &target, &lang, &engine, out.as_deref()).await?,
+        Commands::WorkOrder { command } => work_order::run(command).await?,
         Commands::Ci {
             project,
             target,
@@ -3865,39 +3814,6 @@ mod harness_help_tests {
         assert!(help.contains("local desktop application"), "{help}");
         assert!(help.contains("kernel-campaign workflow"), "{help}");
         assert!(help.contains("operator approval"), "{help}");
-    }
-}
-
-#[cfg(all(test, feature = "harness-work-order"))]
-mod work_order_tests {
-    use clap::Parser as _;
-
-    use super::{Cli, Commands};
-
-    #[test]
-    fn work_order_defaults_to_libfuzzer_and_accepts_an_engine() {
-        let default =
-            Cli::try_parse_from(["oxfuzz", "work-order", "/tmp/project", "--target", "parse"])
-                .expect("parse default work-order command");
-        let Commands::WorkOrder { engine, .. } = default.command else {
-            panic!("expected work-order command");
-        };
-        assert_eq!(engine, "libfuzzer");
-
-        let explicit = Cli::try_parse_from([
-            "oxfuzz",
-            "work-order",
-            "/tmp/project",
-            "--target",
-            "parse",
-            "--engine",
-            "honggfuzz",
-        ])
-        .expect("parse explicit work-order engine");
-        let Commands::WorkOrder { engine, .. } = explicit.command else {
-            panic!("expected work-order command");
-        };
-        assert_eq!(engine, "honggfuzz");
     }
 }
 
