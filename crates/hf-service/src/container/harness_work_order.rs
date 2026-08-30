@@ -13,7 +13,7 @@ use hf_core::{
     runtime::{classify_fixed_sandbox_include_path, FixedSandboxIncludePath},
     target::{TargetCandidate, TargetLanguage},
 };
-use hf_storage::HarnessWorkOrderRecord;
+use hf_storage::{HarnessWorkOrderRecord, HarnessWorkOrderSubmissionRecord, StorageError};
 use sha2::Digest;
 
 use crate::{
@@ -23,14 +23,17 @@ use crate::{
     },
     harness_work_order::{
         build_work_order, verify_work_order, HarnessWorkOrder, HarnessWorkOrderError,
-        HarnessWorkOrderErrorCode, HarnessWorkOrderPayload, WorkOrderCompileContext,
-        WorkOrderSeedReference, WorkOrderSourceEvidence, WorkOrderStep, WorkOrderTargetEvidence,
+        HarnessWorkOrderErrorCode, HarnessWorkOrderPayload, HarnessWorkOrderSubmission,
+        ImportHarnessWorkOrderSubmissionRequest, WorkOrderCompileContext, WorkOrderSeedReference,
+        WorkOrderSourceEvidence, WorkOrderStep, WorkOrderSubmissionOrigin, WorkOrderTargetEvidence,
         MAX_WORK_ORDER_SEEDS, MAX_WORK_ORDER_SOURCE_EXCERPT_BYTES,
         MAX_WORK_ORDER_SOURCE_EXCERPT_LINES,
     },
 };
 
 const MAX_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_PROVENANCE_LABEL_BYTES: usize = 128;
+const MAX_PROVENANCE_RESPONSE_ID_BYTES: usize = 256;
 
 /// Provider-free request for one durable authoring packet.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,6 +195,236 @@ impl ServiceContainer {
             .into_iter()
             .map(|record| retained_packet(&record, None))
             .collect()
+    }
+
+    /// Import one externally authored immutable harness submission.
+    pub async fn import_harness_work_order_submission(
+        &self,
+        request: ImportHarnessWorkOrderSubmissionRequest,
+    ) -> Result<HarnessWorkOrderSubmission, HarnessWorkOrderError> {
+        let store = self.store().ok_or_else(|| {
+            HarnessWorkOrderError::storage("work order submission import requires durable storage")
+        })?;
+        let work_order = load_verified_work_order(store, &request.work_order_id).await?;
+        validate_submission_source(&request.source)?;
+        let origin = normalized_submission_origin(request.origin)?;
+        let origin_json = canonical_origin_json(&origin)?;
+        let lint =
+            hf_harness::lint_harness_source(&request.source, work_order.payload.target.language);
+        let lint_json = serde_json::to_string(&lint).map_err(serialization_error)?;
+        let record = HarnessWorkOrderSubmissionRecord {
+            id: uuid::Uuid::new_v4(),
+            work_order_id: request.work_order_id,
+            source_sha256: hex::encode(sha2::Sha256::digest(request.source.as_bytes())),
+            source: request.source,
+            origin_json,
+            parent_submission_id: request.parent_submission_id,
+            lint_json,
+            submitted_at: Utc::now(),
+        };
+        let persisted = store
+            .insert_harness_work_order_submission(&record)
+            .await
+            .map_err(submission_storage_error)?;
+        retained_submission(&persisted)
+    }
+
+    /// Read one immutable submission after verifying its durable work order.
+    pub async fn harness_work_order_submission(
+        &self,
+        id: uuid::Uuid,
+    ) -> Result<HarnessWorkOrderSubmission, HarnessWorkOrderError> {
+        let store = self.store().ok_or_else(|| {
+            HarnessWorkOrderError::storage(
+                "work order submission retrieval requires durable storage",
+            )
+        })?;
+        let record = store
+            .harness_work_order_submission(id)
+            .await
+            .map_err(durable_submission_storage_error)?
+            .ok_or_else(|| {
+                HarnessWorkOrderError::not_found(
+                    HarnessWorkOrderErrorCode::SubmissionNotFound,
+                    "work order submission was not found",
+                )
+            })?;
+        load_verified_work_order(store, &record.work_order_id).await?;
+        retained_submission(&record)
+    }
+
+    /// List immutable submissions for one verified durable work order.
+    pub async fn list_harness_work_order_submissions(
+        &self,
+        work_order_id: &str,
+    ) -> Result<Vec<HarnessWorkOrderSubmission>, HarnessWorkOrderError> {
+        let store = self.store().ok_or_else(|| {
+            HarnessWorkOrderError::storage("work order submission listing requires durable storage")
+        })?;
+        load_verified_work_order(store, work_order_id).await?;
+        store
+            .list_harness_work_order_submissions(work_order_id)
+            .await
+            .map_err(durable_submission_storage_error)?
+            .iter()
+            .map(retained_submission)
+            .collect()
+    }
+}
+
+async fn load_verified_work_order(
+    store: &hf_storage::Store,
+    id: &str,
+) -> Result<HarnessWorkOrder, HarnessWorkOrderError> {
+    let record = store
+        .harness_work_order(id)
+        .await
+        .map_err(storage_error)?
+        .ok_or_else(|| {
+            HarnessWorkOrderError::not_found(
+                HarnessWorkOrderErrorCode::WorkOrderNotFound,
+                "work order was not found",
+            )
+        })?;
+    retained_packet(&record, None)
+}
+
+fn validate_submission_source(source: &str) -> Result<(), HarnessWorkOrderError> {
+    if source.is_empty() {
+        return Err(HarnessWorkOrderError::validation(
+            HarnessWorkOrderErrorCode::SourceEmpty,
+            "submission source must not be empty",
+        ));
+    }
+    if source.len() > MAX_WORK_ORDER_SOURCE_EXCERPT_BYTES {
+        return Err(HarnessWorkOrderError::validation(
+            HarnessWorkOrderErrorCode::SourceTooLarge,
+            "submission source exceeds the maximum size",
+        ));
+    }
+    Ok(())
+}
+
+fn normalized_submission_origin(
+    origin: WorkOrderSubmissionOrigin,
+) -> Result<WorkOrderSubmissionOrigin, HarnessWorkOrderError> {
+    match origin {
+        WorkOrderSubmissionOrigin::Human => Ok(WorkOrderSubmissionOrigin::Human),
+        WorkOrderSubmissionOrigin::ExternalTool {
+            tool,
+            model,
+            response_id,
+        } => Ok(WorkOrderSubmissionOrigin::ExternalTool {
+            tool: normalized_provenance_label(&tool, MAX_PROVENANCE_LABEL_BYTES)?,
+            model: model
+                .as_deref()
+                .map(|value| normalized_provenance_label(value, MAX_PROVENANCE_LABEL_BYTES))
+                .transpose()?,
+            response_id: response_id
+                .as_deref()
+                .map(|value| normalized_provenance_label(value, MAX_PROVENANCE_RESPONSE_ID_BYTES))
+                .transpose()?,
+        }),
+    }
+}
+
+fn normalized_provenance_label(
+    value: &str,
+    maximum_bytes: usize,
+) -> Result<String, HarnessWorkOrderError> {
+    if value.chars().any(char::is_control) {
+        return Err(invalid_provenance());
+    }
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > maximum_bytes {
+        return Err(invalid_provenance());
+    }
+    Ok(trimmed.to_owned())
+}
+
+fn canonical_origin_json(
+    origin: &WorkOrderSubmissionOrigin,
+) -> Result<String, HarnessWorkOrderError> {
+    serde_json::to_string(origin).map_err(serialization_error)
+}
+
+fn retained_submission(
+    record: &HarnessWorkOrderSubmissionRecord,
+) -> Result<HarnessWorkOrderSubmission, HarnessWorkOrderError> {
+    validate_submission_source(&record.source)?;
+    let source_sha256 = hex::encode(sha2::Sha256::digest(record.source.as_bytes()));
+    if record.source_sha256 != source_sha256 {
+        return Err(HarnessWorkOrderError::validation(
+            HarnessWorkOrderErrorCode::InvalidWorkOrderDigest,
+            "durable submission source digest does not match its source",
+        ));
+    }
+    let origin = serde_json::from_str(&record.origin_json).map_err(|_| {
+        HarnessWorkOrderError::validation(
+            HarnessWorkOrderErrorCode::InvalidWorkOrderDigest,
+            "durable submission origin is malformed",
+        )
+    })?;
+    let lint = serde_json::from_str(&record.lint_json).map_err(|_| {
+        HarnessWorkOrderError::validation(
+            HarnessWorkOrderErrorCode::InvalidWorkOrderDigest,
+            "durable submission lint is malformed",
+        )
+    })?;
+    Ok(HarnessWorkOrderSubmission {
+        id: record.id,
+        work_order_id: record.work_order_id.clone(),
+        source: record.source.clone(),
+        source_sha256: record.source_sha256.clone(),
+        origin,
+        parent_submission_id: record.parent_submission_id,
+        lint,
+        submitted_at: record.submitted_at,
+    })
+}
+
+fn invalid_provenance() -> HarnessWorkOrderError {
+    HarnessWorkOrderError::validation(
+        HarnessWorkOrderErrorCode::InvalidProvenance,
+        "submission provenance is invalid",
+    )
+}
+
+fn submission_storage_error(error: StorageError) -> HarnessWorkOrderError {
+    match error {
+        StorageError::NotFound(message) if message.starts_with("submission parent ") => {
+            HarnessWorkOrderError::not_found(HarnessWorkOrderErrorCode::ParentNotFound, message)
+        }
+        StorageError::NotFound(message) if message.starts_with("work order ") => {
+            HarnessWorkOrderError::not_found(HarnessWorkOrderErrorCode::WorkOrderNotFound, message)
+        }
+        StorageError::InvalidData(message)
+            if message == "submission parent belongs to a different work order" =>
+        {
+            HarnessWorkOrderError::validation(
+                HarnessWorkOrderErrorCode::ParentWorkOrderMismatch,
+                message,
+            )
+        }
+        StorageError::InvalidData(message) if message == "work order submission limit reached" => {
+            HarnessWorkOrderError::validation(
+                HarnessWorkOrderErrorCode::SubmissionLimitReached,
+                message,
+            )
+        }
+        error => storage_error(error),
+    }
+}
+
+fn durable_submission_storage_error(error: StorageError) -> HarnessWorkOrderError {
+    match error {
+        StorageError::Timestamp(message) | StorageError::InvalidData(message) => {
+            HarnessWorkOrderError::validation(
+                HarnessWorkOrderErrorCode::InvalidWorkOrderDigest,
+                format!("durable submission data is malformed: {message}"),
+            )
+        }
+        error => storage_error(error),
     }
 }
 

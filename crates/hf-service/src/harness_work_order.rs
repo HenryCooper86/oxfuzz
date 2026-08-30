@@ -14,6 +14,7 @@ use hf_core::{
 use hf_harness::{harness_rules, HarnessRuleSummary, LintSeverity};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 /// Current serialized Harness Work Order schema.
 pub const HARNESS_WORK_ORDER_SCHEMA_VERSION: u32 = 2;
@@ -36,6 +37,57 @@ pub struct HarnessWorkOrder {
     pub id: String,
     /// Evidence consumed by an authoring tool or a human.
     pub payload: HarnessWorkOrderPayload,
+}
+
+/// Provenance supplied by the authoring party for one imported submission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkOrderSubmissionOrigin {
+    /// A submission written directly by a person.
+    Human,
+    /// A submission returned by an external authoring tool.
+    ExternalTool {
+        /// Label for the external tool.
+        tool: String,
+        /// Optional model label reported by the external tool.
+        model: Option<String>,
+        /// Optional response identifier reported by the external tool.
+        response_id: Option<String>,
+    },
+}
+
+/// Request to retain one immutable externally authored harness submission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportHarnessWorkOrderSubmissionRequest {
+    /// Content-addressed parent work-order identifier.
+    pub work_order_id: String,
+    /// UTF-8 harness source, preserved exactly as supplied.
+    pub source: String,
+    /// Unverified authoring provenance.
+    pub origin: WorkOrderSubmissionOrigin,
+    /// Optional earlier submission repaired by this submission.
+    pub parent_submission_id: Option<Uuid>,
+}
+
+/// One immutable imported harness submission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessWorkOrderSubmission {
+    /// Durable submission identifier.
+    pub id: Uuid,
+    /// Content-addressed parent work-order identifier.
+    pub work_order_id: String,
+    /// UTF-8 harness source as originally supplied.
+    pub source: String,
+    /// Lowercase SHA-256 of `source` bytes.
+    pub source_sha256: String,
+    /// Unverified authoring provenance.
+    pub origin: WorkOrderSubmissionOrigin,
+    /// Optional earlier submission repaired by this submission.
+    pub parent_submission_id: Option<Uuid>,
+    /// Deterministic lint findings recorded at import.
+    pub lint: Vec<hf_harness::LintFinding>,
+    /// First durable submission timestamp.
+    pub submitted_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// The evidence covered by a Harness Work Order identifier.

@@ -185,9 +185,10 @@ pub use harness_tournament::{
 pub use harness_work_order::{
     build_work_order, quote_posix_arg, render_work_order, verify_work_order, work_order_commands,
     work_order_rules, HarnessWorkOrder, HarnessWorkOrderError, HarnessWorkOrderErrorCode,
-    HarnessWorkOrderErrorKind, HarnessWorkOrderPayload, WorkOrderArg, WorkOrderCommand,
+    HarnessWorkOrderErrorKind, HarnessWorkOrderPayload, HarnessWorkOrderSubmission,
+    ImportHarnessWorkOrderSubmissionRequest, WorkOrderArg, WorkOrderCommand,
     WorkOrderCompileContext, WorkOrderPlaceholder, WorkOrderRule, WorkOrderSeedReference,
-    WorkOrderSourceEvidence, WorkOrderStep, WorkOrderTargetEvidence,
+    WorkOrderSourceEvidence, WorkOrderStep, WorkOrderSubmissionOrigin, WorkOrderTargetEvidence,
     HARNESS_WORK_ORDER_SCHEMA_VERSION,
 };
 pub use hf_storage::{AutoRevertEvent, GuardrailDecisionRecord, ProjectAutoRevert};
