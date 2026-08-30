@@ -1384,6 +1384,102 @@ async fn submission_operations_require_durable_storage() {
 }
 
 #[tokio::test]
+async fn submission_reads_reject_typed_durable_source_digest_corruption() {
+    let workspace = tempfile::tempdir().expect("create workspace");
+    let store = Arc::new(
+        hf_storage::Store::connect(workspace.path().join("work-order.db"))
+            .await
+            .expect("create store"),
+    );
+    let packet = build_work_order(payload()).expect("build work order");
+    persist_work_order(&store, packet.clone()).await;
+    let source = "void typed_source_digest(void) {}";
+    let record = hf_storage::HarnessWorkOrderSubmissionRecord {
+        id: uuid::Uuid::new_v4(),
+        work_order_id: packet.id.clone(),
+        source: source.to_owned(),
+        source_sha256: hex::encode(Sha256::digest(b"a different source")),
+        origin_json: "\"human\"".to_owned(),
+        parent_submission_id: None,
+        lint_json: "[]".to_owned(),
+        submitted_at: Utc::now(),
+    };
+    store
+        .insert_harness_work_order_submission(&record)
+        .await
+        .expect("persist source-digest-corrupted submission");
+    let service =
+        ServiceContainer::new(Arc::new(CountingRuntime::default()), None).with_store(store);
+
+    for result in [
+        service
+            .harness_work_order_submission(record.id)
+            .await
+            .map(|_| ()),
+        service
+            .list_harness_work_order_submissions(&packet.id)
+            .await
+            .map(|_| ()),
+    ] {
+        let error = result.expect_err("mismatched durable source digest must fail");
+        assert_eq!(
+            error.code,
+            HarnessWorkOrderErrorCode::InvalidWorkOrderDigest
+        );
+        assert_eq!(error.kind, HarnessWorkOrderErrorKind::Validation);
+    }
+}
+
+#[tokio::test]
+async fn submission_import_and_work_order_reads_reject_valid_v2_digest_tampering() {
+    let workspace = tempfile::tempdir().expect("create workspace");
+    let store = Arc::new(
+        hf_storage::Store::connect(workspace.path().join("work-order.db"))
+            .await
+            .expect("create store"),
+    );
+    let mut tampered = build_work_order(payload()).expect("build work order");
+    tampered.payload.target.symbol = "changed_after_identifier".to_owned();
+    store
+        .insert_harness_work_order(&hf_storage::HarnessWorkOrderRecord {
+            id: tampered.id.clone(),
+            target_id: uuid::Uuid::new_v4(),
+            project_root: "/retained/v2-digest-tampered".to_owned(),
+            schema_version: HARNESS_WORK_ORDER_SCHEMA_VERSION,
+            packet_json: serde_json::to_string(&tampered).expect("serialize v2 packet"),
+            created_at: Utc::now(),
+        })
+        .await
+        .expect("persist schema-v2 digest-tampered packet");
+    let service =
+        ServiceContainer::new(Arc::new(CountingRuntime::default()), None).with_store(store);
+
+    for result in [
+        service
+            .import_harness_work_order_submission(submission_request(
+                tampered.id.clone(),
+                "",
+                human_origin(),
+                None,
+            ))
+            .await
+            .map(|_| ()),
+        service
+            .harness_work_order_by_id(&tampered.id)
+            .await
+            .map(|_| ()),
+        service.list_harness_work_orders(None).await.map(|_| ()),
+    ] {
+        let error = result.expect_err("valid schema-v2 digest tampering must fail");
+        assert_eq!(
+            error.code,
+            HarnessWorkOrderErrorCode::InvalidWorkOrderDigest
+        );
+        assert_eq!(error.kind, HarnessWorkOrderErrorKind::Validation);
+    }
+}
+
+#[tokio::test]
 async fn submission_reads_reject_tampered_packets_and_malformed_durable_data() {
     let workspace = tempfile::tempdir().expect("create workspace");
     let store = Arc::new(
