@@ -277,6 +277,7 @@ impl ServiceContainer {
     }
 
     /// Qualify one immutable submission through compile, review, and smoke.
+    #[tracing::instrument(skip(self), fields(%submission_id))]
     pub async fn qualify_harness_work_order_submission(
         &self,
         submission_id: uuid::Uuid,
@@ -312,13 +313,17 @@ impl ServiceContainer {
             crashes: None,
         };
         let payload = &preflight.work_order.payload;
+        let target_selector = format!(
+            "{}::{}",
+            payload.target.relative_source, payload.target.symbol
+        );
 
         let compiled = match self
             .harness_compile(
                 preflight.submission.source,
                 &preflight.project,
                 payload.engine,
-                &payload.target.symbol,
+                &target_selector,
                 payload.target.language,
             )
             .await
@@ -330,6 +335,7 @@ impl ServiceContainer {
                     &attempt,
                     HarnessWorkOrderAttemptStage::Compile,
                     HarnessWorkOrderAttemptStatus::CompileFailed,
+                    None,
                     None,
                     &result,
                     &error,
@@ -350,9 +356,9 @@ impl ServiceContainer {
             .map_err(storage_error)?;
 
         let review = match self
-            .harness_review_exact(
+            .harness_review_exact_detailed(
                 &preflight.project,
-                &payload.target.symbol,
+                &target_selector,
                 payload.engine,
                 payload.target.language,
                 compiled.harness_id,
@@ -360,15 +366,20 @@ impl ServiceContainer {
             .await
         {
             Ok(review) => review,
-            Err(error) => {
+            Err(failure) => {
+                if let Some(evidence) = failure.evidence {
+                    result.source_sha256 = Some(evidence.source_sha256);
+                    result.binary_sha256 = Some(evidence.binary_sha256);
+                }
                 return complete_failed_attempt(
                     store,
                     &attempt,
                     HarnessWorkOrderAttemptStage::Review,
                     HarnessWorkOrderAttemptStatus::ReviewFailed,
                     Some(compiled.harness_id),
+                    None,
                     &result,
-                    &error,
+                    &failure.error,
                 )
                 .await;
             }
@@ -387,9 +398,9 @@ impl ServiceContainer {
             .map_err(storage_error)?;
 
         let smoke = match self
-            .harness_smoke_exact(
+            .harness_smoke_exact_detailed(
                 &preflight.project,
-                &payload.target.symbol,
+                &target_selector,
                 payload.engine,
                 payload.target.language,
                 compiled.harness_id,
@@ -397,15 +408,16 @@ impl ServiceContainer {
             .await
         {
             Ok(smoke) => smoke,
-            Err(error) => {
+            Err(failure) => {
                 return complete_failed_attempt(
                     store,
                     &attempt,
                     HarnessWorkOrderAttemptStage::Smoke,
                     HarnessWorkOrderAttemptStatus::SmokeFailed,
                     Some(compiled.harness_id),
+                    failure.smoke_run_id,
                     &result,
-                    &error,
+                    &failure.error,
                 )
                 .await;
             }
@@ -420,6 +432,7 @@ impl ServiceContainer {
                 HarnessWorkOrderAttemptStage::Smoke,
                 HarnessWorkOrderAttemptStatus::SmokeFailed,
                 Some(compiled.harness_id),
+                None,
                 &result,
                 &error,
             )
@@ -449,6 +462,7 @@ impl ServiceContainer {
     }
 
     /// Read one durable qualification attempt.
+    #[tracing::instrument(skip(self), fields(%attempt_id))]
     pub async fn harness_work_order_attempt(
         &self,
         attempt_id: uuid::Uuid,
@@ -468,6 +482,7 @@ impl ServiceContainer {
     }
 
     /// List durable qualification attempts for one immutable submission.
+    #[tracing::instrument(skip(self), fields(%submission_id))]
     pub async fn list_harness_work_order_attempts(
         &self,
         submission_id: uuid::Uuid,
@@ -641,6 +656,7 @@ async fn complete_failed_attempt(
     expected_stage: HarnessWorkOrderAttemptStage,
     status: HarnessWorkOrderAttemptStatus,
     harness_id: Option<uuid::Uuid>,
+    smoke_run_id: Option<uuid::Uuid>,
     result: &HarnessWorkOrderAttemptResult,
     error: &ClassifiedError,
 ) -> Result<HarnessWorkOrderAttempt, HarnessWorkOrderError> {
@@ -658,7 +674,7 @@ async fn complete_failed_attempt(
                 expected_stage,
                 status,
                 harness_id,
-                smoke_run_id: None,
+                smoke_run_id,
                 result_json: Some(&result_json),
                 failure_code: Some(&failure_code),
                 failure_message: Some(&failure_message),
@@ -684,21 +700,13 @@ fn retained_attempt(
                 "durable qualification result is malformed",
             )
         })?;
-    if result.as_ref().is_some_and(|result| {
-        result
-            .source_sha256
-            .as_deref()
-            .is_some_and(|digest| !valid_sha256(digest))
-            || result
-                .binary_sha256
-                .as_deref()
-                .is_some_and(|digest| !valid_sha256(digest))
-            || result.execs_per_sec.is_some_and(|value| !value.is_finite())
-    }) {
-        return Err(HarnessWorkOrderError::validation(
-            HarnessWorkOrderErrorCode::InvalidWorkOrderDigest,
-            "durable qualification result contains invalid evidence",
-        ));
+    if let (Some(raw), Some(parsed)) = (record.result_json.as_deref(), result.as_ref()) {
+        if serde_json::to_string(parsed).map_err(serialization_error)? != raw {
+            return Err(invalid_attempt_evidence());
+        }
+    }
+    if !valid_attempt_semantics(record, result.as_ref()) {
+        return Err(invalid_attempt_evidence());
     }
     Ok(HarnessWorkOrderAttempt {
         id: record.id,
@@ -714,6 +722,155 @@ fn retained_attempt(
         updated_at: record.updated_at,
         ended_at: record.ended_at,
     })
+}
+
+fn invalid_attempt_evidence() -> HarnessWorkOrderError {
+    HarnessWorkOrderError::validation(
+        HarnessWorkOrderErrorCode::InvalidWorkOrderDigest,
+        "durable qualification attempt contains contradictory evidence",
+    )
+}
+
+fn valid_attempt_semantics(
+    record: &HarnessWorkOrderAttemptRecord,
+    result: Option<&HarnessWorkOrderAttemptResult>,
+) -> bool {
+    if record.id.is_nil()
+        || record.submission_id.is_nil()
+        || record.harness_id.is_some_and(|id| id.is_nil())
+        || record.smoke_run_id.is_some_and(|id| id.is_nil())
+        || record.updated_at < record.started_at
+        || !valid_result_values(result)
+    {
+        return false;
+    }
+
+    match record.status {
+        HarnessWorkOrderAttemptStatus::Running => {
+            record.current_stage != HarnessWorkOrderAttemptStage::Complete
+                && record.ended_at.is_none()
+                && record.smoke_run_id.is_none()
+                && record.result_json.is_none()
+                && no_failure(record)
+                && match record.current_stage {
+                    HarnessWorkOrderAttemptStage::Compile => record.harness_id.is_none(),
+                    HarnessWorkOrderAttemptStage::Review | HarnessWorkOrderAttemptStage::Smoke => {
+                        record.harness_id.is_some()
+                    }
+                    HarnessWorkOrderAttemptStage::Complete => false,
+                }
+        }
+        status => {
+            if record.current_stage != HarnessWorkOrderAttemptStage::Complete
+                || record.ended_at != Some(record.updated_at)
+            {
+                return false;
+            }
+            match status {
+                HarnessWorkOrderAttemptStatus::CompileFailed => {
+                    record.harness_id.is_none()
+                        && record.smoke_run_id.is_none()
+                        && valid_failure(record)
+                        && result.is_some_and(valid_compile_failure_result)
+                }
+                HarnessWorkOrderAttemptStatus::ReviewFailed => {
+                    record.harness_id.is_some()
+                        && record.smoke_run_id.is_none()
+                        && valid_failure(record)
+                        && result.is_some_and(valid_review_failure_result)
+                }
+                HarnessWorkOrderAttemptStatus::SmokeFailed => {
+                    record.harness_id.is_some()
+                        && valid_failure(record)
+                        && result.is_some_and(valid_smoke_failure_result)
+                }
+                HarnessWorkOrderAttemptStatus::SmokePassed => {
+                    record.harness_id.is_some()
+                        && record.smoke_run_id.is_some()
+                        && no_failure(record)
+                        && result.is_some_and(valid_smoke_passed_result)
+                }
+                HarnessWorkOrderAttemptStatus::Interrupted => {
+                    record.smoke_run_id.is_none()
+                        && record.result_json.is_none()
+                        && record.failure_code.as_deref() == Some("attempt_interrupted")
+                        && record
+                            .failure_message
+                            .as_deref()
+                            .is_some_and(valid_failure_message)
+                }
+                HarnessWorkOrderAttemptStatus::Running => false,
+            }
+        }
+    }
+}
+
+fn valid_result_values(result: Option<&HarnessWorkOrderAttemptResult>) -> bool {
+    result.is_none_or(|result| {
+        result.repair_depth < hf_storage::MAX_WORK_ORDER_SUBMISSIONS
+            && result.source_sha256.as_deref().is_none_or(valid_sha256)
+            && result.binary_sha256.as_deref().is_none_or(valid_sha256)
+            && result
+                .execs_per_sec
+                .is_none_or(|value| value.is_finite() && value >= 0.0)
+    })
+}
+
+fn valid_compile_failure_result(result: &HarnessWorkOrderAttemptResult) -> bool {
+    !result.compiled && no_digest_evidence(result) && no_smoke_evidence(result)
+}
+
+fn valid_review_failure_result(result: &HarnessWorkOrderAttemptResult) -> bool {
+    result.compiled
+        && no_smoke_evidence(result)
+        && (result.binary_sha256.is_none() || result.source_sha256.is_some())
+}
+
+fn valid_smoke_failure_result(result: &HarnessWorkOrderAttemptResult) -> bool {
+    result.compiled
+        && result.source_sha256.is_some()
+        && result.binary_sha256.is_some()
+        && no_smoke_evidence(result)
+}
+
+fn valid_smoke_passed_result(result: &HarnessWorkOrderAttemptResult) -> bool {
+    result.compiled
+        && result.source_sha256.is_some()
+        && result.binary_sha256.is_some()
+        && result.smoke_verdict.is_some()
+        && result.execs_per_sec.is_some()
+        && result.crashes.is_some()
+}
+
+fn no_digest_evidence(result: &HarnessWorkOrderAttemptResult) -> bool {
+    result.source_sha256.is_none() && result.binary_sha256.is_none()
+}
+
+fn no_smoke_evidence(result: &HarnessWorkOrderAttemptResult) -> bool {
+    result.smoke_verdict.is_none() && result.execs_per_sec.is_none() && result.crashes.is_none()
+}
+
+fn no_failure(record: &HarnessWorkOrderAttemptRecord) -> bool {
+    record.failure_code.is_none() && record.failure_message.is_none()
+}
+
+fn valid_failure(record: &HarnessWorkOrderAttemptRecord) -> bool {
+    record.failure_code.as_deref().is_some_and(|code| {
+        matches!(
+            code,
+            "provider" | "sandbox" | "engine" | "harness" | "validation" | "timeout" | "internal"
+        )
+    }) && record
+        .failure_message
+        .as_deref()
+        .is_some_and(valid_failure_message)
+}
+
+fn valid_failure_message(message: &str) -> bool {
+    !message.is_empty()
+        && message.len() <= MAX_ATTEMPT_FAILURE_MESSAGE_BYTES
+        && !message.chars().any(char::is_control)
+        && sanitize_failure_message(message) == message
 }
 
 fn valid_sha256(value: &str) -> bool {
@@ -741,13 +898,10 @@ fn bounded_attempt_failure(error: &ClassifiedError) -> (String, String) {
         ClassifiedError::Timeout => "timeout",
         ClassifiedError::Internal(_) => "internal",
     };
-    let message = error
-        .to_string()
-        .split_whitespace()
-        .map(redacted_failure_token)
-        .collect::<Vec<_>>()
-        .join(" ");
-    let message = bounded_utf8(&message, MAX_ATTEMPT_FAILURE_MESSAGE_BYTES);
+    let message = sanitize_failure_message(&error.to_string());
+    let message = bounded_utf8(&message, MAX_ATTEMPT_FAILURE_MESSAGE_BYTES)
+        .trim_end()
+        .to_owned();
     let message = if message.is_empty() {
         format!("{code} failure")
     } else {
@@ -756,26 +910,99 @@ fn bounded_attempt_failure(error: &ClassifiedError) -> (String, String) {
     (bounded_utf8(code, MAX_ATTEMPT_FAILURE_CODE_BYTES), message)
 }
 
-fn redacted_failure_token(token: &str) -> &str {
-    let lowercase = token.to_ascii_lowercase();
-    let path_candidate = token.trim_start_matches(['(', '[', '{', '\'', '"']);
-    if lowercase.contains("password")
-        || lowercase.contains("secret")
-        || lowercase.contains("token")
-        || lowercase.contains("api_key")
-        || lowercase.contains("apikey")
-    {
-        "<redacted>"
-    } else if path_candidate.starts_with('/')
-        || path_candidate
-            .as_bytes()
-            .get(1)
-            .is_some_and(|byte| *byte == b':')
-    {
-        "<redacted-path>"
-    } else {
-        token
+fn sanitize_failure_message(message: &str) -> String {
+    let mut redact_next = false;
+    message
+        .split_whitespace()
+        .map(|token| {
+            if redact_next {
+                redact_next = false;
+                return "<redacted>".to_owned();
+            }
+            let normalized = normalized_failure_token(token);
+            if normalized.eq_ignore_ascii_case("bearer") {
+                redact_next = true;
+                return "Bearer".to_owned();
+            }
+            if secret_key(normalized) {
+                redact_next = true;
+                return token.to_owned();
+            }
+            if let Some(redacted) = redact_secret_assignment(token, &mut redact_next) {
+                return redacted;
+            }
+            if secret_value(normalized) {
+                return "<redacted>".to_owned();
+            }
+            redact_absolute_path(token).unwrap_or_else(|| token.to_owned())
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn normalized_failure_token(token: &str) -> &str {
+    token.trim_matches(|character: char| {
+        matches!(
+            character,
+            '(' | ')' | '[' | ']' | '{' | '}' | '\'' | '"' | ',' | ';' | ':'
+        )
+    })
+}
+
+fn secret_key(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "password" | "secret" | "token" | "api_key" | "api-key" | "apikey"
+    )
+}
+
+fn secret_value(value: &str) -> bool {
+    let lowercase = value.to_ascii_lowercase();
+    lowercase.starts_with("sk-")
+        || lowercase.starts_with("ghp_")
+        || lowercase.starts_with("github_pat_")
+        || lowercase.starts_with("xoxb-")
+        || lowercase.starts_with("xoxp-")
+        || lowercase.starts_with("xoxa-")
+        || lowercase.starts_with("hf_")
+        || (lowercase.starts_with("akia") && lowercase.len() > 8)
+}
+
+fn redact_secret_assignment(token: &str, redact_next: &mut bool) -> Option<String> {
+    for (index, character) in token.char_indices() {
+        if !matches!(character, '=' | ':') {
+            continue;
+        }
+        let key = normalized_failure_token(&token[..index]);
+        if !secret_key(key) && !key.eq_ignore_ascii_case("authorization") {
+            continue;
+        }
+        let value = &token[index + character.len_utf8()..];
+        if value.eq_ignore_ascii_case("bearer") || (value.is_empty() && secret_key(key)) {
+            *redact_next = true;
+        }
+        return Some(format!("{}<redacted>", &token[..=index]));
     }
+    None
+}
+
+fn redact_absolute_path(token: &str) -> Option<String> {
+    let bytes = token.as_bytes();
+    for index in 0..bytes.len() {
+        let prefixed = index == 0
+            || matches!(
+                bytes[index - 1],
+                b'=' | b':' | b'(' | b'[' | b'{' | b'\'' | b'"' | b','
+            );
+        let unix = bytes[index] == b'/';
+        let windows = bytes.get(index..index + 3).is_some_and(|part| {
+            part[0].is_ascii_alphabetic() && part[1] == b':' && matches!(part[2], b'/' | b'\\')
+        });
+        if prefixed && (unix || windows) {
+            return Some(format!("{}<redacted-path>", &token[..index]));
+        }
+    }
+    None
 }
 
 fn bounded_utf8(value: &str, maximum_bytes: usize) -> String {
@@ -881,12 +1108,19 @@ fn retained_submission(
     if canonical_origin_json(&origin)? != record.origin_json {
         return Err(invalid_durable_origin());
     }
-    let lint = serde_json::from_str(&record.lint_json).map_err(|_| {
-        HarnessWorkOrderError::validation(
+    let lint =
+        serde_json::from_str::<Vec<hf_harness::LintFinding>>(&record.lint_json).map_err(|_| {
+            HarnessWorkOrderError::validation(
+                HarnessWorkOrderErrorCode::InvalidWorkOrderDigest,
+                "durable submission lint is malformed",
+            )
+        })?;
+    if serde_json::to_string(&lint).map_err(serialization_error)? != record.lint_json {
+        return Err(HarnessWorkOrderError::validation(
             HarnessWorkOrderErrorCode::InvalidWorkOrderDigest,
-            "durable submission lint is malformed",
-        )
-    })?;
+            "durable submission lint is not canonical",
+        ));
+    }
     Ok(HarnessWorkOrderSubmission {
         id: record.id,
         work_order_id: record.work_order_id.clone(),
@@ -1004,6 +1238,12 @@ fn retained_packet(
             "durable work order packet is malformed",
         )
     })?;
+    if serde_json::to_string(&packet).map_err(serialization_error)? != record.packet_json {
+        return Err(HarnessWorkOrderError::validation(
+            HarnessWorkOrderErrorCode::InvalidWorkOrderDigest,
+            "durable work order packet is not canonical",
+        ));
+    }
     if packet.id != record.id || packet.schema_version != record.schema_version {
         return Err(HarnessWorkOrderError::validation(
             HarnessWorkOrderErrorCode::InvalidWorkOrderDigest,

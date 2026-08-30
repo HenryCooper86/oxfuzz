@@ -75,6 +75,28 @@ pub(crate) struct HarnessReviewOutcome {
     pub binary_sha256: String,
 }
 
+pub(crate) struct HarnessReviewFailure {
+    pub error: ClassifiedError,
+    #[cfg(feature = "harness-work-order")]
+    pub evidence: Option<HarnessReviewOutcome>,
+}
+
+impl From<ClassifiedError> for HarnessReviewFailure {
+    fn from(error: ClassifiedError) -> Self {
+        Self {
+            error,
+            #[cfg(feature = "harness-work-order")]
+            evidence: None,
+        }
+    }
+}
+
+#[cfg(feature = "harness-work-order")]
+pub(crate) struct HarnessSmokeFailure {
+    pub error: ClassifiedError,
+    pub smoke_run_id: Option<Uuid>,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ExactPromotion<'a> {
     harness_id: Uuid,
@@ -203,21 +225,22 @@ fn project_compile_flags(_container: &ServiceContainer, _project: &Path) -> Vec<
 }
 
 impl ServiceContainer {
-    async fn harness_review_locked(
+    async fn harness_review_locked_detailed(
         &self,
         project: &Path,
         target: &str,
         engine: EngineKind,
         language: TargetLanguage,
         expected_harness_id: Option<Uuid>,
-    ) -> Result<(Harness, HarnessReviewOutcome), ClassifiedError> {
+    ) -> Result<(Harness, HarnessReviewOutcome), HarnessReviewFailure> {
         let harness = self.active_harness_locked(project, target, engine).await?;
         require_expected_harness_id(&harness, expected_harness_id)?;
         if harness.language != language {
             return Err(ClassifiedError::Validation(format!(
                 "active harness language is {:?}, not {language:?}",
                 harness.language
-            )));
+            ))
+            .into());
         }
         if !matches!(
             harness.status,
@@ -226,7 +249,8 @@ impl ServiceContainer {
             return Err(ClassifiedError::Validation(format!(
                 "only a compiled harness can be reviewed; active status is {:?}",
                 harness.status
-            )));
+            ))
+            .into());
         }
         let store = self.store.as_ref().ok_or_else(|| {
             ClassifiedError::Validation(
@@ -238,19 +262,26 @@ impl ServiceContainer {
         if !is_regular_file(&binary) {
             return Err(ClassifiedError::Validation(format!(
                 "Compiled harness '{binary_name}' not found -- compile the harness first."
-            )));
+            ))
+            .into());
         }
         let binary_sha256 = sha256_file(&binary)?;
-        self.require_harness_ai_review(store, &harness, target, &binary_sha256)
-            .await?;
-        Ok((
-            harness.clone(),
-            HarnessReviewOutcome {
-                harness_id: harness.id,
-                source_sha256: sha256_hex(harness.source.as_bytes()),
-                binary_sha256,
-            },
-        ))
+        let review = HarnessReviewOutcome {
+            harness_id: harness.id,
+            source_sha256: sha256_hex(harness.source.as_bytes()),
+            binary_sha256,
+        };
+        if let Err(error) = self
+            .require_harness_ai_review(store, &harness, target, &review.binary_sha256)
+            .await
+        {
+            return Err(HarnessReviewFailure {
+                error,
+                #[cfg(feature = "harness-work-order")]
+                evidence: Some(review),
+            });
+        }
+        Ok((harness.clone(), review))
     }
 
     pub(crate) async fn harness_review_exact(
@@ -261,13 +292,26 @@ impl ServiceContainer {
         language: TargetLanguage,
         expected_harness_id: Uuid,
     ) -> Result<HarnessReviewOutcome, ClassifiedError> {
+        self.harness_review_exact_detailed(project, target, engine, language, expected_harness_id)
+            .await
+            .map_err(|failure| failure.error)
+    }
+
+    pub(crate) async fn harness_review_exact_detailed(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+        language: TargetLanguage,
+        expected_harness_id: Uuid,
+    ) -> Result<HarnessReviewOutcome, HarnessReviewFailure> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
         let project_root = canonical_project_root(project)?;
         let _target_revision = self
             .acquire_target_revision(project_root.as_path(), target)
             .await?;
         let (_, review) = self
-            .harness_review_locked(
+            .harness_review_locked_detailed(
                 project_root.as_path(),
                 target,
                 engine,
@@ -993,6 +1037,7 @@ impl ServiceContainer {
         let _target_revision = self
             .acquire_target_revision(project_root.as_path(), target)
             .await?;
+        let mut smoke_run_id = None;
         self.harness_smoke_locked(
             project_root.as_path(),
             target,
@@ -1000,8 +1045,52 @@ impl ServiceContainer {
             lang,
             expected_harness_id,
             review,
+            &mut smoke_run_id,
         )
         .await
+    }
+
+    #[cfg(feature = "harness-work-order")]
+    pub(crate) async fn harness_smoke_exact_detailed(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+        lang: TargetLanguage,
+        expected_harness_id: Uuid,
+    ) -> Result<crate::verification::SmokeOutcome, HarnessSmokeFailure> {
+        let review = self
+            .harness_review_exact_detailed(project, target, engine, lang, expected_harness_id)
+            .await
+            .map_err(|failure| HarnessSmokeFailure {
+                error: failure.error,
+                smoke_run_id: None,
+            })?;
+        let failure = |error| HarnessSmokeFailure {
+            error,
+            smoke_run_id: None,
+        };
+        let _workspace_operation = self.acquire_workspace_operation().await.map_err(failure)?;
+        let project_root = canonical_project_root(project).map_err(failure)?;
+        let _target_revision = self
+            .acquire_target_revision(project_root.as_path(), target)
+            .await
+            .map_err(failure)?;
+        let mut smoke_run_id = None;
+        self.harness_smoke_locked(
+            project_root.as_path(),
+            target,
+            engine,
+            lang,
+            expected_harness_id,
+            review,
+            &mut smoke_run_id,
+        )
+        .await
+        .map_err(|error| HarnessSmokeFailure {
+            error,
+            smoke_run_id,
+        })
     }
 
     async fn harness_smoke_locked(
@@ -1012,6 +1101,7 @@ impl ServiceContainer {
         lang: TargetLanguage,
         expected_harness_id: Uuid,
         review: HarnessReviewOutcome,
+        smoke_run_id: &mut Option<Uuid>,
     ) -> Result<crate::verification::SmokeOutcome, ClassifiedError> {
         let resolved = resolve_internal_run(engine, SMOKE_FUZZ_SECS)?;
         if !engine.supports_language(lang) {
@@ -1117,6 +1207,7 @@ impl ServiceContainer {
             }
             return Err(ClassifiedError::Storage(error.to_string()));
         }
+        *smoke_run_id = Some(smoke_record.id);
         // Journal the smoke run like a campaign run. Without this, a process
         // kill/crash during the ~60s smoke window leaves a permanent `Running`
         // row: clear_all_runs and delete_run both reject a run with no crash

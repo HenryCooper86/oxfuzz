@@ -33,6 +33,7 @@ pub const MAX_WORK_ORDER_SEEDS: usize = 20;
 
 /// One deterministic, content-addressed authoring packet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HarnessWorkOrder {
     /// Serialization version for this packet.
     pub schema_version: u32,
@@ -126,7 +127,7 @@ pub struct HarnessWorkOrderAttempt {
     pub current_stage: hf_storage::HarnessWorkOrderAttemptStage,
     /// Persisted compiled harness revision, when compilation succeeded.
     pub harness_id: Option<Uuid>,
-    /// Persisted smoke-run identity, when smoke completed.
+    /// Persisted smoke-run identity once smoke allocated its durable run row.
     pub smoke_run_id: Option<Uuid>,
     /// Bounded terminal evidence.
     pub result: Option<HarnessWorkOrderAttemptResult>,
@@ -144,6 +145,7 @@ pub struct HarnessWorkOrderAttempt {
 
 /// The evidence covered by a Harness Work Order identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HarnessWorkOrderPayload {
     /// Stable discovery evidence for the selected target.
     pub target: WorkOrderTargetEvidence,
@@ -165,6 +167,7 @@ pub struct HarnessWorkOrderPayload {
 
 /// Stable discovery evidence for one target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkOrderTargetEvidence {
     /// Discovered function or entrypoint name.
     pub symbol: String,
@@ -182,6 +185,7 @@ pub struct WorkOrderTargetEvidence {
 
 /// Bounded source evidence for one target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkOrderSourceEvidence {
     /// Candidate declaration and body excerpt.
     pub excerpt: String,
@@ -193,6 +197,7 @@ pub struct WorkOrderSourceEvidence {
 
 /// Normalized compilation evidence for the target translation unit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkOrderCompileContext {
     /// Project-relative include directories.
     pub include_dirs: Vec<String>,
@@ -210,6 +215,7 @@ pub struct WorkOrderCompileContext {
 
 /// One harness lint rule rendered with the packet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkOrderRule {
     /// Stable harness-lint identifier.
     pub id: String,
@@ -221,6 +227,7 @@ pub struct WorkOrderRule {
 
 /// One content-addressed seed candidate.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkOrderSeedReference {
     /// Lowercase SHA-256 of the seed content.
     pub sha256: String,
