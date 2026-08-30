@@ -68,6 +68,20 @@ struct HarnessAiReviewEvidence {
     response: ChatResponse,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HarnessReviewOutcome {
+    pub harness_id: Uuid,
+    pub source_sha256: String,
+    pub binary_sha256: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExactPromotion<'a> {
+    harness_id: Uuid,
+    source_sha256: &'a str,
+    binary_sha256: &'a str,
+}
+
 fn validate_harness_review_opinion(
     opinion: &HarnessPreExecutionOpinion,
 ) -> Result<(), ClassifiedError> {
@@ -95,6 +109,36 @@ fn enforce_positive_harness_review(
         "LLM review refused harness execution: {}",
         opinion.reasons.join("; ")
     )))
+}
+
+fn require_expected_harness_id(
+    harness: &Harness,
+    expected_harness_id: Option<Uuid>,
+) -> Result<(), ClassifiedError> {
+    if expected_harness_id.is_some_and(|expected| expected != harness.id) {
+        return Err(ClassifiedError::Validation(
+            "active harness revision does not match the requested harness id".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn require_expected_promotion(
+    harness: &Harness,
+    expected: Option<ExactPromotion<'_>>,
+) -> Result<(), ClassifiedError> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    require_expected_harness_id(harness, Some(expected.harness_id))?;
+    let (_, source_sha256, binary_sha256) = qualification_evidence(harness)?;
+    if source_sha256 != expected.source_sha256 || binary_sha256 != expected.binary_sha256 {
+        return Err(ClassifiedError::Validation(
+            "active smoke qualification does not match the requested source and binary digests"
+                .to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// The project's compile context for prompt rendering, or `None` when it ships
@@ -159,6 +203,78 @@ fn project_compile_flags(_container: &ServiceContainer, _project: &Path) -> Vec<
 }
 
 impl ServiceContainer {
+    async fn harness_review_locked(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+        language: TargetLanguage,
+        expected_harness_id: Option<Uuid>,
+    ) -> Result<(Harness, HarnessReviewOutcome), ClassifiedError> {
+        let harness = self.active_harness_locked(project, target, engine).await?;
+        require_expected_harness_id(&harness, expected_harness_id)?;
+        if harness.language != language {
+            return Err(ClassifiedError::Validation(format!(
+                "active harness language is {:?}, not {language:?}",
+                harness.language
+            )));
+        }
+        if !matches!(
+            harness.status,
+            HarnessStatus::Compiled | HarnessStatus::SmokePassed | HarnessStatus::Promoted
+        ) {
+            return Err(ClassifiedError::Validation(format!(
+                "only a compiled harness can be reviewed; active status is {:?}",
+                harness.status
+            )));
+        }
+        let store = self.store.as_ref().ok_or_else(|| {
+            ClassifiedError::Validation(
+                "harness qualification requires the persistent service store".to_owned(),
+            )
+        })?;
+        let binary_name = harness_binary_name(target);
+        let binary = workspace_dir(project, target).join(&binary_name);
+        if !is_regular_file(&binary) {
+            return Err(ClassifiedError::Validation(format!(
+                "Compiled harness '{binary_name}' not found -- compile the harness first."
+            )));
+        }
+        let binary_sha256 = sha256_file(&binary)?;
+        self.require_harness_ai_review(store, &harness, target, &binary_sha256)
+            .await?;
+        Ok((
+            harness.clone(),
+            HarnessReviewOutcome {
+                harness_id: harness.id,
+                source_sha256: sha256_hex(harness.source.as_bytes()),
+                binary_sha256,
+            },
+        ))
+    }
+
+    pub(crate) async fn harness_review_exact(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+        language: TargetLanguage,
+        expected_harness_id: Uuid,
+    ) -> Result<HarnessReviewOutcome, ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
+        let project_root = canonical_project_root(project)?;
+        let (_, review) = self
+            .harness_review_locked(
+                project_root.as_path(),
+                target,
+                engine,
+                language,
+                Some(expected_harness_id),
+            )
+            .await?;
+        Ok(review)
+    }
+
     async fn require_harness_ai_review(
         &self,
         store: &Store,
@@ -660,6 +776,7 @@ impl ServiceContainer {
         write_current_harness_source(&workspace, &compiled.source)?;
         write_current_harness_id(&workspace, compiled.id)?;
         Ok(CompileOutcome {
+            harness_id: compiled.id,
             status: compiled.status,
             binary_name: compiled
                 .build_cmd
@@ -812,6 +929,44 @@ impl ServiceContainer {
         engine: EngineKind,
         lang: TargetLanguage,
     ) -> Result<crate::verification::SmokeOutcome, ClassifiedError> {
+        let harness = self.active_harness(project, target, engine).await?;
+        self.harness_smoke_exact(project, target, engine, lang, harness.id)
+            .await
+    }
+
+    pub(crate) async fn harness_smoke_exact(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+        lang: TargetLanguage,
+        expected_harness_id: Uuid,
+    ) -> Result<crate::verification::SmokeOutcome, ClassifiedError> {
+        let review = self
+            .harness_review_exact(project, target, engine, lang, expected_harness_id)
+            .await?;
+        let _workspace_operation = self.acquire_workspace_operation().await?;
+        let project_root = canonical_project_root(project)?;
+        self.harness_smoke_locked(
+            project_root.as_path(),
+            target,
+            engine,
+            lang,
+            expected_harness_id,
+            review,
+        )
+        .await
+    }
+
+    async fn harness_smoke_locked(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+        lang: TargetLanguage,
+        expected_harness_id: Uuid,
+        review: HarnessReviewOutcome,
+    ) -> Result<crate::verification::SmokeOutcome, ClassifiedError> {
         let resolved = resolve_internal_run(engine, SMOKE_FUZZ_SECS)?;
         if !engine.supports_language(lang) {
             return Err(ClassifiedError::Validation(format!(
@@ -819,11 +974,9 @@ impl ServiceContainer {
                 engine.as_str()
             )));
         }
-        let _workspace_operation = self.acquire_workspace_operation().await?;
-        let project_root = canonical_project_root(project)?;
-        let project = project_root.as_path();
         let workspace = workspace_dir(project, target);
-        let harness = self.active_harness(project, target, engine).await?;
+        let harness = self.active_harness_locked(project, target, engine).await?;
+        require_expected_harness_id(&harness, Some(expected_harness_id))?;
         if harness.language != lang {
             return Err(ClassifiedError::Validation(format!(
                 "active harness language is {:?}, not {lang:?}",
@@ -851,9 +1004,13 @@ impl ServiceContainer {
                 "Compiled harness '{binary_name}' not found -- compile the harness first."
             )));
         }
-        let reviewed_binary_sha256 = sha256_file(&binary)?;
-        self.require_harness_ai_review(store, &harness, target, &reviewed_binary_sha256)
-            .await?;
+        let reviewed_binary_sha256 = review.binary_sha256;
+        if review.harness_id != harness.id || sha256_file(&binary)? != reviewed_binary_sha256 {
+            return Err(ClassifiedError::Validation(
+                "compiled binary digest changed after LLM review; compile and review the harness again"
+                    .to_owned(),
+            ));
+        }
         self.authorize_recorded(Action::RunHarness, "harness_smoke", Some(project))
             .await?;
 
@@ -943,6 +1100,8 @@ impl ServiceContainer {
                 .await;
             return Err(error);
         }
+        let active = self.active_harness_locked(project, target, engine).await?;
+        require_expected_harness_id(&active, Some(expected_harness_id))?;
         let mut staged_harness = harness;
         staged_harness.build_cmd.output = artifacts.binary_host.clone();
         let mut smoked = match hf_harness::smoke_fuzz_in_paths_with_config_and_sandbox_image(
@@ -1045,8 +1204,52 @@ impl ServiceContainer {
         target: &str,
         engine: EngineKind,
     ) -> Result<Harness, ClassifiedError> {
+        let harness = self.active_harness(project, target, engine).await?;
+        let (_, source_sha256, binary_sha256) = qualification_evidence(&harness)?;
+        self.harness_promote_exact(
+            project,
+            target,
+            engine,
+            harness.id,
+            source_sha256,
+            binary_sha256,
+        )
+        .await
+    }
+
+    pub(crate) async fn harness_promote_exact(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+        expected_harness_id: Uuid,
+        expected_source_sha256: &str,
+        expected_binary_sha256: &str,
+    ) -> Result<Harness, ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
-        let mut harness = self.active_harness(project, target, engine).await?;
+        let project_root = canonical_project_root(project)?;
+        self.harness_promote_locked(
+            project_root.as_path(),
+            target,
+            engine,
+            Some(ExactPromotion {
+                harness_id: expected_harness_id,
+                source_sha256: expected_source_sha256,
+                binary_sha256: expected_binary_sha256,
+            }),
+        )
+        .await
+    }
+
+    async fn harness_promote_locked(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+        expected: Option<ExactPromotion<'_>>,
+    ) -> Result<Harness, ClassifiedError> {
+        let harness = self.active_harness_locked(project, target, engine).await?;
+        require_expected_promotion(&harness, expected)?;
         let smoke = harness.smoke_run.as_ref().ok_or_else(|| {
             ClassifiedError::Validation(format!(
                 "harness '{target}' has no persisted smoke evidence; run smoke qualification first"
@@ -1059,10 +1262,35 @@ impl ServiceContainer {
         }
         self.verify_harness_qualification(project, target, &harness)
             .await?;
+        // Reload immediately before the persistence mutation so a direct caller
+        // cannot promote a revision replaced while qualification was checked.
+        let mut harness = self.active_harness_locked(project, target, engine).await?;
+        require_expected_promotion(&harness, expected)?;
+        let smoke = harness.smoke_run.as_ref().ok_or_else(|| {
+            ClassifiedError::Validation(format!(
+                "harness '{target}' has no persisted smoke evidence; run smoke qualification first"
+            ))
+        })?;
+        if harness.status != HarnessStatus::SmokePassed || !smoke.passed {
+            return Err(ClassifiedError::Validation(format!(
+                "harness '{target}' cannot be promoted until a crash-free smoke run passes"
+            )));
+        }
         let (_, source_sha256, binary_sha256) = qualification_evidence(&harness)?;
         let source_sha256 = source_sha256.to_owned();
         let binary_sha256 = binary_sha256.to_owned();
         harness.status = HarnessStatus::Promoted;
+        self.persist_clean_harness_promotion(&harness, &source_sha256, &binary_sha256)
+            .await?;
+        Ok(harness)
+    }
+
+    async fn persist_clean_harness_promotion(
+        &self,
+        harness: &Harness,
+        source_sha256: &str,
+        binary_sha256: &str,
+    ) -> Result<(), ClassifiedError> {
         let store = self.store.as_ref().ok_or_else(|| {
             ClassifiedError::Validation(
                 "harness promotion requires the persistent service store".to_owned(),
@@ -1070,15 +1298,15 @@ impl ServiceContainer {
         })?;
         store
             .promote_harness_with_approval(
-                &harness,
+                harness,
                 hf_storage::HarnessApprovalKind::CleanSmoke,
-                &source_sha256,
-                &binary_sha256,
+                source_sha256,
+                binary_sha256,
                 Utc::now(),
             )
             .await
             .map_err(|e| ClassifiedError::Storage(e.to_string()))?;
-        Ok(harness)
+        Ok(())
     }
 
     /// Promote a harness with documented smoke findings. This is intentionally
@@ -1479,4 +1707,366 @@ const MAX_CANDIDATE_ERROR_BYTES: usize = 2048;
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest as _;
     hex::encode(sha2::Sha256::digest(bytes))
+}
+
+#[cfg(test)]
+mod exact_qualification_tests {
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    use hf_core::engine::EngineKind;
+    use hf_core::error::ClassifiedError;
+    use hf_core::harness::{Harness, HarnessStatus};
+    use hf_core::provider::{
+        ChatRequest, ChatResponse, ChatStreamResponse, ProviderError, ProviderPool, ProviderStatus,
+        RouteRequest,
+    };
+    use hf_core::runtime::{
+        CommandResult, CommandTermination, ImmutableImageReference, ResourceLimits, RuntimeAdapter,
+    };
+    use hf_core::target::{Sanitizer, TargetLanguage};
+    use uuid::Uuid;
+
+    use super::{harness_binary_name, workspace_dir, ServiceContainer};
+
+    const TARGET: &str = "parse_entry";
+    const SOURCE: &str = "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }";
+    const APPROVING_REVIEW: &str = r#"{"exercises_target":true,"safe_to_execute":true,"reasons":["target receives fuzz input"]}"#;
+
+    #[derive(Default)]
+    struct CountingRuntime {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeAdapter for CountingRuntime {
+        async fn resolve_image_reference(
+            &self,
+            _image: &str,
+        ) -> Result<Option<ImmutableImageReference>, ClassifiedError> {
+            Ok(Some(hf_test_utils::immutable_test_image()?))
+        }
+
+        async fn run_command(
+            &self,
+            _cmd: &[String],
+            cwd: &Path,
+            _limits: &ResourceLimits,
+        ) -> Result<CommandResult, ClassifiedError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            std::fs::create_dir_all(cwd).unwrap();
+            Ok(CommandResult {
+                exit_code: 0,
+                stdout: "DONE cov: 12 ft: 24 corp: 2/8b exec/s: 128".to_owned(),
+                stderr: String::new(),
+                workspace: cwd.to_path_buf(),
+                termination: CommandTermination::Completed,
+            })
+        }
+
+        async fn run_command_streaming(
+            &self,
+            cmd: &[String],
+            cwd: &Path,
+            limits: &ResourceLimits,
+            _cancel: &tokio_util::sync::CancellationToken,
+            _on_line: &hf_core::runtime::LineSink<'_>,
+        ) -> Result<CommandResult, ClassifiedError> {
+            self.run_command(cmd, cwd, limits).await
+        }
+
+        async fn write_file(&self, path: &Path, content: &str) -> Result<(), ClassifiedError> {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, content).unwrap();
+            Ok(())
+        }
+
+        async fn read_file(&self, path: &Path) -> Result<String, ClassifiedError> {
+            Ok(std::fs::read_to_string(path).unwrap_or_default())
+        }
+    }
+
+    struct CountingReviewPool {
+        calls: AtomicUsize,
+        replace_active_with: Mutex<Option<(PathBuf, Uuid)>>,
+    }
+
+    impl CountingReviewPool {
+        fn approving() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                replace_active_with: Mutex::new(None),
+            }
+        }
+
+        fn replace_active_during_review(&self, active_marker: PathBuf, replacement: Uuid) {
+            *self.replace_active_with.lock().unwrap() = Some((active_marker, replacement));
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderPool for CountingReviewPool {
+        async fn chat_completion(
+            &self,
+            _request: &ChatRequest,
+            _route: &RouteRequest,
+        ) -> Result<ChatResponse, ProviderError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some((marker, replacement)) = &*self.replace_active_with.lock().unwrap() {
+                std::fs::write(marker, replacement.to_string()).unwrap();
+            }
+            Ok(hf_test_utils::fixtures::make_chat_response(
+                APPROVING_REVIEW,
+            ))
+        }
+
+        async fn chat_completion_stream(
+            &self,
+            _request: &ChatRequest,
+            _route: &RouteRequest,
+        ) -> Result<ChatStreamResponse, ProviderError> {
+            Err(ProviderError::Other {
+                message: "unused".to_owned(),
+            })
+        }
+
+        fn report_error(&self, _provider_id: &hf_core::types::ProviderId, _error: &ProviderError) {}
+
+        async fn provider_statuses(&self) -> Vec<ProviderStatus> {
+            Vec::new()
+        }
+
+        async fn freeze(&self, _provider_id: &hf_core::types::ProviderId, _reason: String) {}
+
+        async fn thaw(
+            &self,
+            _provider_id: &hf_core::types::ProviderId,
+        ) -> Result<(), ProviderError> {
+            Ok(())
+        }
+    }
+
+    fn install_workspace() {
+        static ROOT: OnceLock<PathBuf> = OnceLock::new();
+        let root = ROOT.get_or_init(|| {
+            let root = std::env::temp_dir().join(format!("oxfuzz-exact-{}", Uuid::new_v4()));
+            std::fs::create_dir_all(&root).unwrap();
+            let canonical = std::fs::canonicalize(&root).unwrap();
+            std::fs::write(
+                canonical.join(".oxfuzz-workspace.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "application": "oxfuzz",
+                    "version": 1,
+                    "canonical_root": canonical,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            canonical
+        });
+        std::env::set_var("HF_WORKSPACE_DIR", root);
+    }
+
+    fn qualification_test_gate() -> &'static tokio::sync::Mutex<()> {
+        static GATE: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        GATE.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
+    async fn fixture(
+        review: Arc<CountingReviewPool>,
+    ) -> (
+        tempfile::TempDir,
+        Arc<hf_storage::Store>,
+        ServiceContainer,
+        Arc<CountingRuntime>,
+        Uuid,
+    ) {
+        install_workspace();
+        let project = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            hf_storage::Store::connect(project.path().join("exact.db"))
+                .await
+                .unwrap(),
+        );
+        let runtime = Arc::new(CountingRuntime::default());
+        let container = ServiceContainer::new(
+            Arc::clone(&runtime) as Arc<dyn RuntimeAdapter>,
+            Some(review),
+        )
+        .with_store(Arc::clone(&store));
+        let id = Uuid::new_v4();
+        let workspace = workspace_dir(project.path(), TARGET);
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("harness.source"), SOURCE).unwrap();
+        std::fs::write(workspace.join("harness.active"), id.to_string()).unwrap();
+        std::fs::write(
+            workspace.join(harness_binary_name(TARGET)),
+            b"mock compiled harness",
+        )
+        .unwrap();
+        store
+            .upsert_harness(&Harness {
+                id,
+                target_id: Uuid::new_v4(),
+                engine: EngineKind::LibFuzzer,
+                source: SOURCE.to_owned(),
+                language: TargetLanguage::C,
+                build_cmd: hf_harness::build_command(
+                    EngineKind::LibFuzzer,
+                    TargetLanguage::C,
+                    &harness_binary_name(TARGET),
+                ),
+                sanitizer: Sanitizer::Address,
+                status: HarnessStatus::Compiled,
+                smoke_run: None,
+            })
+            .await
+            .unwrap();
+        (project, store, container, runtime, id)
+    }
+
+    #[tokio::test]
+    async fn exact_review_rejects_another_active_id_and_reuses_durable_evidence() {
+        let _gate = qualification_test_gate().lock().await;
+        let review = Arc::new(CountingReviewPool::approving());
+        let (project, _store, container, _runtime, id) = fixture(Arc::clone(&review)).await;
+
+        let outcome = container
+            .harness_review_exact(
+                project.path(),
+                TARGET,
+                EngineKind::LibFuzzer,
+                TargetLanguage::C,
+                id,
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome.harness_id, id);
+        assert_eq!(outcome.source_sha256, super::sha256_hex(SOURCE.as_bytes()));
+        container
+            .harness_review_exact(
+                project.path(),
+                TARGET,
+                EngineKind::LibFuzzer,
+                TargetLanguage::C,
+                id,
+            )
+            .await
+            .unwrap();
+        assert_eq!(review.calls.load(Ordering::SeqCst), 1);
+
+        let error = container
+            .harness_review_exact(
+                project.path(),
+                TARGET,
+                EngineKind::LibFuzzer,
+                TargetLanguage::C,
+                Uuid::new_v4(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("requested harness id"),
+            "{error}"
+        );
+        assert_eq!(review.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn exact_smoke_refuses_a_replaced_active_revision_before_runtime_dispatch() {
+        let _gate = qualification_test_gate().lock().await;
+        let review = Arc::new(CountingReviewPool::approving());
+        let (project, _store, container, runtime, id) = fixture(Arc::clone(&review)).await;
+        let mismatch = container
+            .harness_smoke_exact(
+                project.path(),
+                TARGET,
+                EngineKind::LibFuzzer,
+                TargetLanguage::C,
+                Uuid::new_v4(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            mismatch.to_string().contains("requested harness id"),
+            "{mismatch}"
+        );
+        assert_eq!(runtime.calls.load(Ordering::SeqCst), 0);
+        review.replace_active_during_review(
+            workspace_dir(project.path(), TARGET).join("harness.active"),
+            Uuid::new_v4(),
+        );
+
+        let error = container
+            .harness_smoke_exact(
+                project.path(),
+                TARGET,
+                EngineKind::LibFuzzer,
+                TargetLanguage::C,
+                id,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("active harness record"),
+            "{error}"
+        );
+        assert_eq!(runtime.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn exact_promotion_rejects_mismatched_evidence_without_status_mutation() {
+        let _gate = qualification_test_gate().lock().await;
+        let review = Arc::new(CountingReviewPool::approving());
+        let (project, store, container, _runtime, id) = fixture(review).await;
+        container
+            .harness_smoke(
+                project.path(),
+                TARGET,
+                EngineKind::LibFuzzer,
+                TargetLanguage::C,
+            )
+            .await
+            .unwrap();
+        let harness = store.get_harness(id).await.unwrap().unwrap();
+        let (_, source_sha256, binary_sha256) = super::qualification_evidence(&harness).unwrap();
+
+        for (expected_id, source, binary) in [
+            (Uuid::new_v4(), source_sha256, binary_sha256),
+            (id, "0", binary_sha256),
+            (id, source_sha256, "0"),
+        ] {
+            assert!(container
+                .harness_promote_exact(
+                    project.path(),
+                    TARGET,
+                    EngineKind::LibFuzzer,
+                    expected_id,
+                    source,
+                    binary
+                )
+                .await
+                .is_err());
+            assert_eq!(
+                store.get_harness(id).await.unwrap().unwrap().status,
+                HarnessStatus::SmokePassed
+            );
+        }
+
+        let promoted = container
+            .harness_promote_exact(
+                project.path(),
+                TARGET,
+                EngineKind::LibFuzzer,
+                id,
+                source_sha256,
+                binary_sha256,
+            )
+            .await
+            .unwrap();
+        assert_eq!(promoted.status, HarnessStatus::Promoted);
+    }
 }

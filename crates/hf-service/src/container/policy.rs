@@ -264,6 +264,7 @@ impl ServiceContainer {
         self.verify_harness_qualification(&project, &symbol, &harness)
             .await?;
         Ok(CompileOutcome {
+            harness_id: harness.id,
             status: HarnessStatus::Promoted,
             binary_name: harness_binary_name(&symbol),
             workspace,
