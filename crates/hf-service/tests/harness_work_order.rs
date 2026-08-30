@@ -191,6 +191,33 @@ fn external_origin() -> WorkOrderSubmissionOrigin {
     }
 }
 
+async fn insert_raw_submission(
+    store: &hf_storage::Store,
+    work_order_id: &str,
+    source: &str,
+    origin_json: &str,
+    lint_json: &str,
+    submitted_at: &str,
+) -> uuid::Uuid {
+    let id = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO harness_work_order_submissions
+         (id, work_order_id, source, source_sha256, origin_json, parent_submission_id, lint_json, submitted_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7)",
+    )
+    .bind(id.to_string())
+    .bind(work_order_id)
+    .bind(source)
+    .bind(hex::encode(Sha256::digest(source.as_bytes())))
+    .bind(origin_json)
+    .bind(lint_json)
+    .bind(submitted_at)
+    .execute(store.pool())
+    .await
+    .expect("insert raw submission");
+    id
+}
+
 #[test]
 fn unchanged_evidence_produces_byte_identical_packets() {
     let first = build_work_order(payload()).expect("build first packet");
@@ -1413,4 +1440,60 @@ async fn submission_reads_reject_tampered_packets_and_malformed_durable_data() {
     );
     assert_eq!(timestamp_error.kind, HarnessWorkOrderErrorKind::Validation);
     assert_eq!(runtime.calls.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn submission_reads_reject_invalid_or_noncanonical_durable_provenance() {
+    let workspace = tempfile::tempdir().expect("create workspace");
+    let store = Arc::new(
+        hf_storage::Store::connect(workspace.path().join("work-order.db"))
+            .await
+            .expect("create store"),
+    );
+    let service =
+        ServiceContainer::new(Arc::new(CountingRuntime::default()), None).with_store(store.clone());
+    let origins = vec![
+        r#"{"external_tool":{"tool":"","model":null,"response_id":null}}"#.to_owned(),
+        r#"{"external_tool":{"tool":"tool\u0001","model":null,"response_id":null}}"#.to_owned(),
+        format!(
+            r#"{{"external_tool":{{"tool":"{}","model":null,"response_id":null}}}}"#,
+            "t".repeat(129)
+        ),
+        r#"{"external_tool":{"tool":"tool","model":null,"response_id":null,"extra":true}}"#
+            .to_owned(),
+        r#"{"external_tool": { "tool": "tool", "model": null, "response_id": null }}"#.to_owned(),
+        r#"{"external_tool":{"response_id":null,"tool":"tool","model":null}}"#.to_owned(),
+    ];
+
+    for (index, origin_json) in origins.into_iter().enumerate() {
+        let mut malformed_payload = payload();
+        malformed_payload.target.symbol = format!("parse_provenance_{index}");
+        let packet = build_work_order(malformed_payload).expect("build work order");
+        persist_work_order(&store, packet.clone()).await;
+        let source = format!("void malformed_provenance_{index}(void) {{}}");
+        let id = insert_raw_submission(
+            &store,
+            &packet.id,
+            &source,
+            &origin_json,
+            "[]",
+            "2026-08-30T00:00:00Z",
+        )
+        .await;
+
+        for result in [
+            service.harness_work_order_submission(id).await.map(|_| ()),
+            service
+                .list_harness_work_order_submissions(&packet.id)
+                .await
+                .map(|_| ()),
+        ] {
+            let error = result.expect_err("invalid durable provenance must fail");
+            assert_eq!(
+                error.code,
+                HarnessWorkOrderErrorCode::InvalidWorkOrderDigest
+            );
+            assert_eq!(error.kind, HarnessWorkOrderErrorKind::Validation);
+        }
+    }
 }
