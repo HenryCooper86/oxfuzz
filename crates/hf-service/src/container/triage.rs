@@ -310,6 +310,7 @@ impl ServiceContainer {
     /// complete cleanly (a transient failure is not cached, so it retries).
     async fn coverage_export_json_cached(&self, project: &Path, target: &str) -> Option<String> {
         let _workspace_operation = self.acquire_workspace_operation().await.ok()?;
+        let _target_revision = self.acquire_target_revision(project, target).await.ok()?;
         let workspace = workspace_dir(project, target);
         if !workspace.join("harness.c").exists() {
             return None;
@@ -870,6 +871,7 @@ impl ServiceContainer {
         // gate it like triage.
         self.authorize_recorded(Action::Triage, "verify_regressions", Some(project))
             .await?;
+        let _target_revision = self.acquire_target_revision(project, target).await?;
         let workspace = workspace_dir(project, target);
         let binary_name = harness_binary_name(target);
         if !workspace.join(&binary_name).exists() {

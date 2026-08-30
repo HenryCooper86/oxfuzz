@@ -134,6 +134,7 @@ impl ServiceContainer {
 
         prepare_configured_workspace_root()?;
         let workspace = workspace_dir(project, target);
+        let _target_revision = self.acquire_target_revision(project, target).await?;
         self.require_promoted_harness(project, target, &workspace)
             .await?;
 

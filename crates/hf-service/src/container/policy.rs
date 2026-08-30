@@ -155,6 +155,16 @@ impl ServiceContainer {
         &self,
         run_id: &str,
     ) -> Result<CompileOutcome, ClassifiedError> {
+        self.revert_harness_from_run_if_current(run_id, None).await
+    }
+
+    /// Restore a retained revision only if the active qualification remains the
+    /// campaign revision that requested the automatic revert.
+    pub(crate) async fn revert_harness_from_run_if_current(
+        &self,
+        run_id: &str,
+        expected_current: Option<(&str, &str)>,
+    ) -> Result<CompileOutcome, ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
         let store = self
             .store
@@ -204,6 +214,18 @@ impl ServiceContainer {
 
         let workspace = workspace_dir(&project, &symbol);
         let _target_revision = self.acquire_target_revision(&project, &symbol).await?;
+        if let Some((expected_source, expected_binary)) = expected_current {
+            let active = self
+                .active_harness_locked(&project, &symbol, run.engine)
+                .await?;
+            let (_, current_source, current_binary) = qualification_evidence(&active)?;
+            if current_source != expected_source || current_binary != expected_binary {
+                return Err(ClassifiedError::Validation(
+                    "active harness changed after the campaign completed; automatic revert will not replace a newer revision"
+                        .to_owned(),
+                ));
+            }
+        }
         let source_path = run_source_path(&workspace, &run)?;
         let binary_path = run_binary_path(&workspace, &run, &symbol)?;
         let source = std::fs::read_to_string(&source_path).map_err(|error| {

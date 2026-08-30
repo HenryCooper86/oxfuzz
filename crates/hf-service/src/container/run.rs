@@ -108,6 +108,7 @@ impl ServiceContainer {
         this_run_id: Uuid,
         this_edges: u64,
         this_rev: Option<&str>,
+        this_binary: Option<&str>,
     ) -> Option<AutoRevertOutcome> {
         let policy = match self.effective_auto_revert_policy(project).await {
             Ok(policy) => policy,
@@ -227,7 +228,11 @@ impl ServiceContainer {
         // Regression confirmed: restore the comparable baseline's harness. The
         // recompile is HITL-gated inside `harness_compile`; if approval is denied
         // the active canonical revision and binary remain unchanged.
-        match self.revert_harness_from_run(&prev_id).await {
+        let this_binary = this_binary.filter(|digest| !digest.is_empty())?;
+        match self
+            .revert_harness_from_run_if_current(&prev_id, Some((this_rev, this_binary)))
+            .await
+        {
             Ok(_) => {
                 let detail = format!(
                     "coverage dropped {drop_pct:.1}% ({this_edges} < {prev_edges} edges) after harness {this_rev} -> restored comparable baseline {prev_rev} from run {prev_id}"
@@ -460,10 +465,9 @@ impl ServiceContainer {
         let project_root = canonical_project_root(project)?;
         let project = project_root.as_path();
 
-        let engine = resolved.engine;
-        let duration_secs = resolved.duration_secs;
+        let (engine, duration_secs) = (resolved.engine, resolved.duration_secs);
 
-        let _target_revision = self.acquire_target_revision(project, target).await?;
+        let target_revision = self.acquire_target_revision(project, target).await?;
         let qualified = self.active_harness_locked(project, target, engine).await?;
         if qualified.status != HarnessStatus::Promoted {
             return Err(ClassifiedError::Validation(format!(
@@ -786,19 +790,17 @@ impl ServiceContainer {
             return Err(error);
         }
         persisted_run.disarm();
-        // Auto-revert policy: if this run's harness revision regressed coverage
-        // past the threshold versus the latest comparable run for this target,
-        // restore that last-good revision (HITL-gated recompile). Skipped for
-        // truncated runs, whose partial coverage is not a fair comparison.
         let auto_revert = if truncated {
             None
         } else {
+            drop(target_revision);
             self.maybe_auto_revert(
                 project,
                 target,
                 run_id,
                 edges,
                 run_record.harness_rev.as_deref(),
+                run_record.binary_rev.as_deref(),
             )
             .await
         };

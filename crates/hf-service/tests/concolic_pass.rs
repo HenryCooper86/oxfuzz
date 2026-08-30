@@ -120,7 +120,7 @@ impl Fixture {
 
     async fn persist_harness(&self, status: HarnessStatus, source: &str) {
         let target_id = self.target_id().await;
-        let harness = Harness {
+        let mut harness = Harness {
             id: Uuid::new_v4(),
             target_id,
             engine: EngineKind::LibFuzzer,
@@ -137,6 +137,18 @@ impl Fixture {
             smoke_run: None,
         };
         if status == HarnessStatus::Promoted {
+            harness.status = HarnessStatus::SmokePassed;
+            harness.smoke_run = Some(hf_core::harness::SmokeRunSummary {
+                duration_secs: 60,
+                execs_per_sec: 1.0,
+                crashes: 0,
+                passed: true,
+                source_sha256: Some("a".repeat(64)),
+                binary_sha256: Some("b".repeat(64)),
+                run_id: Some(Uuid::new_v4()),
+            });
+            self.store.upsert_harness(&harness).await.unwrap();
+            harness.status = HarnessStatus::Promoted;
             self.store
                 .promote_harness_with_approval(
                     &harness,
