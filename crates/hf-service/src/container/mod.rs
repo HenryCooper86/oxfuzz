@@ -87,8 +87,8 @@ use uuid::Uuid;
 pub(crate) use workspace::build_doctor_staging_dir;
 use workspace::{
     clear_managed_workspace_root, prepare_configured_workspace_root,
-    prepare_managed_workspace_root_with_adoption, workspace_lock_error, workspace_lock_file,
-    workspace_operation_gate,
+    prepare_managed_workspace_root_with_adoption, target_revision_gate, target_revision_lock_file,
+    workspace_lock_error, workspace_lock_file, workspace_operation_gate,
 };
 
 const SMOKE_FUZZ_SECS: u64 = 60;
@@ -112,6 +112,14 @@ pub(crate) struct WorkspaceOperationLease {
 
 pub(crate) struct WorkspaceCleanupLease {
     _process_guard: tokio::sync::OwnedRwLockWriteGuard<()>,
+    _system_guard: File,
+}
+
+/// Exclusive ownership of one target's active harness revision. The lock order
+/// is workspace-operation first, then target-revision, so root cleanup cannot
+/// deadlock against compile, review, smoke, promotion, or revert.
+pub(crate) struct TargetRevisionLease {
+    _process_guard: tokio::sync::OwnedMutexGuard<()>,
     _system_guard: File,
 }
 
@@ -796,6 +804,33 @@ impl ServiceContainer {
         })
     }
 
+    /// Take the per-target revision lease after acquiring the outer workspace
+    /// operation lease. This serializes all mutations and exact checks for one
+    /// active harness across service containers and processes.
+    pub(crate) async fn acquire_target_revision(
+        &self,
+        project: &Path,
+        target: &str,
+    ) -> Result<TargetRevisionLease, ClassifiedError> {
+        let workspace = workspace_dir(project, target);
+        std::fs::create_dir_all(&workspace).map_err(|error| {
+            ClassifiedError::Internal(format!(
+                "create harness revision workspace {}: {error}",
+                workspace.display()
+            ))
+        })?;
+        let (workspace, gate) = target_revision_gate(&workspace)?;
+        let process_guard = gate.lock_owned().await;
+        let system_guard = target_revision_lock_file(&workspace)?;
+        system_guard
+            .try_lock()
+            .map_err(|error| workspace_lock_error(error, true))?;
+        Ok(TargetRevisionLease {
+            _process_guard: process_guard,
+            _system_guard: system_guard,
+        })
+    }
+
     /// Enter a synchronous workspace read without racing whole-root cleanup.
     fn try_acquire_workspace_operation_now() -> Result<WorkspaceOperationLease, ClassifiedError> {
         let root = workspace_root();
@@ -938,6 +973,7 @@ impl ServiceContainer {
         engine: EngineKind,
     ) -> Result<Harness, ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
+        let _target_revision = self.acquire_target_revision(project, target).await?;
         self.active_harness_locked(project, target, engine).await
     }
 
@@ -1010,6 +1046,21 @@ impl ServiceContainer {
         harness: &Harness,
     ) -> Result<(), ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
+        let _target_revision = self.acquire_target_revision(project, target).await?;
+        self.verify_harness_qualification_locked(project, target, harness)
+            .await
+    }
+
+    /// Verify qualification while the caller holds workspace-operation followed
+    /// by target-revision leases. Keeping this lock order avoids recursive
+    /// read guards in promotion and protects the checked artifacts through the
+    /// persistence decision.
+    async fn verify_harness_qualification_locked(
+        &self,
+        project: &Path,
+        target: &str,
+        harness: &Harness,
+    ) -> Result<(), ClassifiedError> {
         let (qualification_run_id, expected_source, expected_binary) =
             qualification_evidence(harness)?;
         let workspace = workspace_dir(project, target);

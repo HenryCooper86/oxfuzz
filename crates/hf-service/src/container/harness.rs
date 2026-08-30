@@ -263,6 +263,9 @@ impl ServiceContainer {
     ) -> Result<HarnessReviewOutcome, ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
         let project_root = canonical_project_root(project)?;
+        let _target_revision = self
+            .acquire_target_revision(project_root.as_path(), target)
+            .await?;
         let (_, review) = self
             .harness_review_locked(
                 project_root.as_path(),
@@ -497,6 +500,9 @@ impl ServiceContainer {
     ) -> Result<HarnessGenOutcome, ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
         let target = &candidate.symbol;
+        let _target_revision = self
+            .acquire_target_revision(&candidate.project_root, target)
+            .await?;
         let mut source = initial_source;
         let mut repairs_used = 0usize;
         let mut last_diagnostics = String::new();
@@ -724,6 +730,7 @@ impl ServiceContainer {
         lang: TargetLanguage,
     ) -> Result<CompileOutcome, ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
+        let _target_revision = self.acquire_target_revision(project, target).await?;
         require_fuzzing_harness_engine(engine, lang)?;
         self.authorize_recorded(Action::CompileHarness, "harness_compile", Some(project))
             .await?;
@@ -947,6 +954,9 @@ impl ServiceContainer {
             .await?;
         let _workspace_operation = self.acquire_workspace_operation().await?;
         let project_root = canonical_project_root(project)?;
+        let _target_revision = self
+            .acquire_target_revision(project_root.as_path(), target)
+            .await?;
         self.harness_smoke_locked(
             project_root.as_path(),
             target,
@@ -999,13 +1009,19 @@ impl ServiceContainer {
         })?;
         let binary_name = harness_binary_name(target);
         let binary = workspace.join(&binary_name);
+        let source_path = workspace.join("harness.source");
         if !is_regular_file(&binary) {
             return Err(ClassifiedError::Validation(format!(
                 "Compiled harness '{binary_name}' not found -- compile the harness first."
             )));
         }
-        let reviewed_binary_sha256 = review.binary_sha256;
-        if review.harness_id != harness.id || sha256_file(&binary)? != reviewed_binary_sha256 {
+        let reviewed_binary_sha256 = review.binary_sha256.clone();
+        if review.harness_id != harness.id
+            || review.source_sha256 != sha256_hex(harness.source.as_bytes())
+            || !is_regular_file(&source_path)
+            || sha256_file(&source_path)? != review.source_sha256
+            || sha256_file(&binary)? != reviewed_binary_sha256
+        {
             return Err(ClassifiedError::Validation(
                 "compiled binary digest changed after LLM review; compile and review the harness again"
                     .to_owned(),
@@ -1102,6 +1118,14 @@ impl ServiceContainer {
         }
         let active = self.active_harness_locked(project, target, engine).await?;
         require_expected_harness_id(&active, Some(expected_harness_id))?;
+        if sha256_file(&source_path)? != review.source_sha256
+            || sha256_file(&binary)? != review.binary_sha256
+        {
+            return Err(ClassifiedError::Validation(
+                "active harness artifacts changed after LLM review; compile and review the harness again"
+                    .to_owned(),
+            ));
+        }
         let mut staged_harness = harness;
         staged_harness.build_cmd.output = artifacts.binary_host.clone();
         let mut smoked = match hf_harness::smoke_fuzz_in_paths_with_config_and_sandbox_image(
@@ -1123,6 +1147,10 @@ impl ServiceContainer {
                 return Err(error);
             }
         };
+        // The runtime needs the staged artifact path, but that path is run
+        // specific rather than part of the compiled harness revision. Persist
+        // the original build identity when smoke advances its status.
+        smoked.build_cmd = active.build_cmd;
         // Fail smoke only on a definite overflow; a transient scan race must not
         // fail a valid smoke run (mirrors the campaign monitor).
         if output_budget_status(
@@ -1228,6 +1256,9 @@ impl ServiceContainer {
     ) -> Result<Harness, ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
         let project_root = canonical_project_root(project)?;
+        let _target_revision = self
+            .acquire_target_revision(project_root.as_path(), target)
+            .await?;
         self.harness_promote_locked(
             project_root.as_path(),
             target,
@@ -1260,7 +1291,7 @@ impl ServiceContainer {
                 "harness '{target}' cannot be promoted until a crash-free smoke run passes"
             )));
         }
-        self.verify_harness_qualification(project, target, &harness)
+        self.verify_harness_qualification_locked(project, target, &harness)
             .await?;
         // Reload immediately before the persistence mutation so a direct caller
         // cannot promote a revision replaced while qualification was checked.
@@ -1319,7 +1350,8 @@ impl ServiceContainer {
         engine: EngineKind,
     ) -> Result<Harness, ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
-        let mut harness = self.active_harness(project, target, engine).await?;
+        let _target_revision = self.acquire_target_revision(project, target).await?;
+        let mut harness = self.active_harness_locked(project, target, engine).await?;
         let smoke = harness.smoke_run.as_ref().ok_or_else(|| {
             ClassifiedError::Validation("run smoke qualification before approving findings".into())
         })?;
@@ -1328,7 +1360,7 @@ impl ServiceContainer {
                 "known-findings approval requires at least one smoke crash".into(),
             ));
         }
-        self.verify_harness_qualification(project, target, &harness)
+        self.verify_harness_qualification_locked(project, target, &harness)
             .await?;
         let (_, source_sha256, binary_sha256) = qualification_evidence(&harness)?;
         let source_sha256 = source_sha256.to_owned();
@@ -1815,6 +1847,7 @@ mod exact_qualification_tests {
             _route: &RouteRequest,
         ) -> Result<ChatResponse, ProviderError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            tokio::task::yield_now().await;
             if let Some((marker, replacement)) = &*self.replace_active_with.lock().unwrap() {
                 std::fs::write(marker, replacement.to_string()).unwrap();
             }
@@ -1994,6 +2027,7 @@ mod exact_qualification_tests {
             mismatch.to_string().contains("requested harness id"),
             "{mismatch}"
         );
+        assert_eq!(review.calls.load(Ordering::SeqCst), 0);
         assert_eq!(runtime.calls.load(Ordering::SeqCst), 0);
         review.replace_active_during_review(
             workspace_dir(project.path(), TARGET).join("harness.active"),
@@ -2015,6 +2049,133 @@ mod exact_qualification_tests {
             "{error}"
         );
         assert_eq!(runtime.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn exact_smoke_refuses_a_changed_persisted_revision_before_dispatch() {
+        let _gate = qualification_test_gate().lock().await;
+        let review = Arc::new(CountingReviewPool::approving());
+        let (project, store, container, runtime, id) = fixture(Arc::clone(&review)).await;
+        let mut changed = store.get_harness(id).await.unwrap().unwrap();
+        changed.source = "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size == 0; }".to_owned();
+        sqlx::query("UPDATE harnesses SET source = ?2, data_json = ?3 WHERE id = ?1")
+            .bind(id.to_string())
+            .bind(&changed.source)
+            .bind(serde_json::to_string(&changed).unwrap())
+            .execute(store.pool())
+            .await
+            .unwrap();
+
+        let error = container
+            .harness_smoke_exact(
+                project.path(),
+                TARGET,
+                EngineKind::LibFuzzer,
+                TargetLanguage::C,
+                id,
+            )
+            .await
+            .expect_err("a changed record under the active id must fail closed");
+
+        assert!(error.to_string().contains("does not match"), "{error}");
+        assert_eq!(review.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(runtime.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            store.get_harness(id).await.unwrap().unwrap().status,
+            HarnessStatus::Compiled
+        );
+    }
+
+    #[tokio::test]
+    async fn simultaneous_exact_reviews_retain_one_provider_result() {
+        let _gate = qualification_test_gate().lock().await;
+        let review = Arc::new(CountingReviewPool::approving());
+        let (project, store, container, _runtime, id) = fixture(Arc::clone(&review)).await;
+        let project_path = project.path().to_path_buf();
+        let first = container.harness_review_exact(
+            &project_path,
+            TARGET,
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+            id,
+        );
+        let second = container.harness_review_exact(
+            &project_path,
+            TARGET,
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+            id,
+        );
+
+        let (first, second) = tokio::join!(first, second);
+        assert_eq!(first.unwrap().harness_id, id);
+        assert_eq!(second.unwrap().harness_id, id);
+        assert_eq!(review.calls.load(Ordering::SeqCst), 1);
+        assert!(store.harness_ai_review(id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn exact_promotion_completes_with_a_waiting_workspace_cleanup() {
+        let _gate = qualification_test_gate().lock().await;
+        let review = Arc::new(CountingReviewPool::approving());
+        let (project, store, container, _runtime, id) = fixture(review).await;
+        container
+            .harness_smoke(
+                project.path(),
+                TARGET,
+                EngineKind::LibFuzzer,
+                TargetLanguage::C,
+            )
+            .await
+            .unwrap();
+        let harness = store.get_harness(id).await.unwrap().unwrap();
+        let (_, source_sha256, binary_sha256) = super::qualification_evidence(&harness).unwrap();
+
+        let workspace_operation = container.acquire_workspace_operation().await.unwrap();
+        let project_root = super::canonical_project_root(project.path()).unwrap();
+        let target_revision = container
+            .acquire_target_revision(project_root.as_path(), TARGET)
+            .await
+            .unwrap();
+        let (_, workspace_gate) = super::super::workspace::workspace_operation_gate(
+            &super::super::workspace::workspace_root(),
+        )
+        .unwrap();
+        let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel();
+        let (acquired_tx, acquired_rx) = tokio::sync::oneshot::channel();
+        let cleanup = tokio::spawn(async move {
+            let _ = waiting_tx.send(());
+            let _cleanup = workspace_gate.write_owned().await;
+            let _ = acquired_tx.send(());
+        });
+        waiting_rx.await.unwrap();
+        tokio::task::yield_now().await;
+
+        let promoted = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            container.harness_promote_locked(
+                project_root.as_path(),
+                TARGET,
+                EngineKind::LibFuzzer,
+                Some(super::ExactPromotion {
+                    harness_id: id,
+                    source_sha256,
+                    binary_sha256,
+                }),
+            ),
+        )
+        .await
+        .expect("promotion must not try to take a nested workspace read")
+        .unwrap();
+        assert_eq!(promoted.status, HarnessStatus::Promoted);
+
+        drop(target_revision);
+        drop(workspace_operation);
+        tokio::time::timeout(std::time::Duration::from_secs(1), acquired_rx)
+            .await
+            .expect("cleanup must acquire after promotion releases its read")
+            .unwrap();
+        cleanup.await.unwrap();
     }
 
     #[tokio::test]
