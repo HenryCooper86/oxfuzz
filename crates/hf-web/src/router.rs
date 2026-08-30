@@ -1311,7 +1311,12 @@ async fn harness_work_order(
     let engine = parse_engine(&req.engine).map_err(map_err(StatusCode::BAD_REQUEST))?;
     let order = state
         .container
-        .harness_work_order(&req.project, &req.target, lang, engine)
+        .export_harness_work_order(hf_service::HarnessWorkOrderExportRequest {
+            project: req.project,
+            target: req.target,
+            language: lang,
+            engine,
+        })
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(order)))

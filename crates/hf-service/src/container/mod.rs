@@ -24,6 +24,8 @@ mod guards;
 mod harness;
 #[cfg(feature = "harness-work-order")]
 mod harness_work_order;
+#[cfg(feature = "harness-work-order")]
+pub use harness_work_order::HarnessWorkOrderExportRequest;
 mod harness_workspace;
 mod history;
 mod lifecycle;

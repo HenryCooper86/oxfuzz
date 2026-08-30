@@ -150,6 +150,8 @@ pub use concolic::{
 pub use container::AiPolicy;
 #[cfg(feature = "native-analysis")]
 pub use container::AnalyzedInventory;
+#[cfg(feature = "harness-work-order")]
+pub use container::HarnessWorkOrderExportRequest;
 pub use container::{
     build_sandbox_image, copy_project_sources, generate_target_seeds, initialize_workspace_root,
     project_workspace_dir, provider_pool_from_config, provider_pool_from_env, repo_root,

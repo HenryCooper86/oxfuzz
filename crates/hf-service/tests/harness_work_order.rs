@@ -2,11 +2,18 @@
 
 #![cfg(feature = "harness-work-order")]
 
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use chrono::Utc;
+use hf_core::corpus::{CorpusEntry, CorpusSource};
 use hf_core::engine::EngineKind;
 use hf_core::error::ClassifiedError;
-use hf_core::target::TargetLanguage;
+use hf_core::runtime::{CommandResult, ResourceLimits, RuntimeAdapter};
+use hf_core::target::{
+    InputSurface, SourceLocation, TargetCandidate, TargetInventory, TargetKind, TargetLanguage,
+};
 use hf_service::harness_work_order::{
     build_work_order, quote_posix_arg, render_work_order, verify_work_order, work_order_commands,
     HarnessWorkOrderErrorCode, HarnessWorkOrderPayload, WorkOrderArg, WorkOrderCompileContext,
@@ -14,7 +21,88 @@ use hf_service::harness_work_order::{
     WorkOrderStep, WorkOrderTargetEvidence, HARNESS_WORK_ORDER_SCHEMA_VERSION,
     MAX_WORK_ORDER_PACKET_BYTES,
 };
-use hf_service::ServiceContainer;
+use hf_service::{HarnessWorkOrderExportRequest, ServiceContainer};
+
+#[derive(Default)]
+struct CountingRuntime {
+    calls: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl RuntimeAdapter for CountingRuntime {
+    async fn run_command(
+        &self,
+        _cmd: &[String],
+        _cwd: &Path,
+        _limits: &ResourceLimits,
+    ) -> Result<CommandResult, ClassifiedError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        Err(ClassifiedError::Sandbox(
+            "work order export must not start a runtime command".to_owned(),
+        ))
+    }
+
+    async fn write_file(&self, _path: &Path, _content: &str) -> Result<(), ClassifiedError> {
+        Err(ClassifiedError::Sandbox(
+            "work order export must not write through the runtime".to_owned(),
+        ))
+    }
+
+    async fn read_file(&self, _path: &Path) -> Result<String, ClassifiedError> {
+        Err(ClassifiedError::Sandbox(
+            "work order export must not read through the runtime".to_owned(),
+        ))
+    }
+}
+
+fn retained_target(project: &Path, source: PathBuf, language: TargetLanguage) -> TargetCandidate {
+    TargetCandidate {
+        id: uuid::Uuid::new_v4(),
+        project_root: std::fs::canonicalize(project).expect("canonicalize project"),
+        language,
+        symbol: "parse_packet".to_owned(),
+        kind: TargetKind::Parser,
+        location: SourceLocation {
+            file: source,
+            line: 2,
+            col: 1,
+            end_line: None,
+            end_col: None,
+        },
+        signature: Some("int parse_packet(const unsigned char *, size_t)".to_owned()),
+        input_surface: InputSurface::Bytes,
+        complexity: 4,
+        fit_score: 0.8,
+        sanitizers: Vec::new(),
+        rationale: "parses attacker controlled packet bytes".to_owned(),
+        reachable_functions: Vec::new(),
+        accumulated_complexity: 4,
+    }
+}
+
+async fn persist_target(store: &hf_storage::Store, candidate: TargetCandidate) -> TargetCandidate {
+    store
+        .save_inventory(
+            &TargetInventory {
+                project_root: candidate.project_root.clone(),
+                candidates: vec![candidate.clone()],
+                call_graph: std::collections::HashMap::default(),
+            },
+            Utc::now(),
+        )
+        .await
+        .expect("persist retained target");
+    candidate
+}
+
+fn export_request(project: &Path) -> HarnessWorkOrderExportRequest {
+    HarnessWorkOrderExportRequest {
+        project: project.to_path_buf(),
+        target: "parse_packet".to_owned(),
+        language: TargetLanguage::C,
+        engine: EngineKind::LibFuzzer,
+    }
+}
 
 fn payload() -> HarnessWorkOrderPayload {
     HarnessWorkOrderPayload {
@@ -342,37 +430,9 @@ fn posix_quoting_preserves_literal_arguments() {
 }
 
 #[tokio::test]
-async fn work_order_export_propagates_a_malformed_compile_database() {
-    let project = tempfile::tempdir().expect("create project");
-    std::fs::write(
-        project.path().join("parser.c"),
-        "#include <stddef.h>\nint parse_packet(const unsigned char *data, size_t len) { return len > 0 && data[0]; }\n",
-    )
-    .expect("write source");
-    std::fs::write(project.path().join("compile_commands.json"), "{not json")
-        .expect("write malformed compile database");
-    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
-
-    let error = container
-        .harness_work_order(
-            project.path(),
-            "parse_packet",
-            TargetLanguage::C,
-            EngineKind::LibFuzzer,
-        )
-        .await
-        .expect_err("malformed compile database must stop export");
-
-    assert!(matches!(error, ClassifiedError::Validation(_)));
-    assert!(error.to_string().contains("compile"), "{error}");
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn work_order_export_through_a_symlinked_root_uses_relative_compile_evidence() {
+async fn service_export_persists_identical_packet_before_return_without_runtime_or_provider() {
     let workspace = tempfile::tempdir().expect("create workspace");
     let project = workspace.path().join("project");
-    let alias = workspace.path().join("project-alias");
     std::fs::create_dir_all(project.join("include")).expect("create include directory");
     std::fs::write(
         project.join("parser.c"),
@@ -382,40 +442,318 @@ async fn work_order_export_through_a_symlinked_root_uses_relative_compile_eviden
     let compile_database = serde_json::json!([{
         "directory": project,
         "file": project.join("parser.c"),
-        "arguments": [
-            "cc",
-            format!("-I{}", project.join("include").display()),
-            "-c",
-            "parser.c",
-        ],
+        "arguments": ["cc", "-Iinclude", "-I/work/system", "-c", "parser.c"],
     }]);
     std::fs::write(
         project.join("compile_commands.json"),
         serde_json::to_vec(&compile_database).expect("serialize compile database"),
     )
     .expect("write compile database");
-    std::os::unix::fs::symlink(&project, &alias).expect("create project alias");
 
     let store = Arc::new(
         hf_storage::Store::connect(workspace.path().join("work-order.db"))
             .await
             .expect("create store"),
     );
-    let container =
-        ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None).with_store(store);
+    let target = persist_target(
+        &store,
+        retained_target(&project, PathBuf::from("parser.c"), TargetLanguage::C),
+    )
+    .await;
+    for index in 0_u8..21 {
+        store
+            .upsert_corpus_entry(
+                target.id,
+                &CorpusEntry {
+                    path: PathBuf::from("must-not-leak"),
+                    sha256: format!("{index:02x}").repeat(32),
+                    size: u64::from(index),
+                    source: CorpusSource::Seed,
+                    coverage_hash: None,
+                },
+            )
+            .await
+            .expect("persist retained corpus entry");
+    }
+    let runtime = Arc::new(CountingRuntime::default());
+    let container = ServiceContainer::new(runtime.clone(), None).with_store(store.clone());
 
-    let order = container
-        .harness_work_order(
-            &alias,
-            "parse_packet",
-            TargetLanguage::C,
-            EngineKind::LibFuzzer,
-        )
+    let first = container
+        .export_harness_work_order(export_request(&project))
         .await
-        .expect("export work order through project alias");
-    let packet_json = serde_json::to_string(&order).expect("serialize packet");
+        .expect("export retained evidence");
+    let persisted = store
+        .harness_work_order(&first.id)
+        .await
+        .expect("load persisted work order")
+        .expect("export must be durable before returning");
+    let second = container
+        .export_harness_work_order(export_request(&project))
+        .await
+        .expect("retry retained export");
 
-    assert_eq!(order.payload.compile_context.include_dirs, vec!["include"]);
-    assert!(!packet_json.contains(&alias.display().to_string()));
+    assert_eq!(first, second);
+    assert_eq!(
+        persisted.packet_json,
+        serde_json::to_string(&first).expect("serialize returned packet")
+    );
+    assert_eq!(
+        first.payload.compile_context.include_dirs,
+        vec!["/work/system", "include"]
+    );
+    assert_eq!(
+        first
+            .payload
+            .seeds
+            .iter()
+            .map(|seed| seed.sha256.clone())
+            .collect::<Vec<_>>(),
+        (0_u8..20)
+            .map(|index| format!("{index:02x}").repeat(32))
+            .collect::<Vec<_>>()
+    );
+    let packet_json = serde_json::to_string(&first).expect("serialize packet");
+    assert!(!packet_json.contains("must-not-leak"));
     assert!(!packet_json.contains(&project.display().to_string()));
+    assert_eq!(runtime.calls.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn service_work_order_reads_and_lists_only_verified_durable_packets() {
+    let workspace = tempfile::tempdir().expect("create workspace");
+    let project = workspace.path().join("project");
+    std::fs::create_dir_all(&project).expect("create project");
+    std::fs::write(
+        project.join("parser.c"),
+        "// heading\nint parse_packet(void) { return 0; }\n",
+    )
+    .expect("write source");
+    let store = Arc::new(
+        hf_storage::Store::connect(workspace.path().join("work-order.db"))
+            .await
+            .expect("create store"),
+    );
+    persist_target(
+        &store,
+        retained_target(&project, PathBuf::from("parser.c"), TargetLanguage::C),
+    )
+    .await;
+    let runtime = Arc::new(CountingRuntime::default());
+    let container = ServiceContainer::new(runtime.clone(), None).with_store(store);
+    let exported = container
+        .export_harness_work_order(export_request(&project))
+        .await
+        .expect("export work order");
+
+    assert_eq!(
+        container
+            .harness_work_order_by_id(&exported.id)
+            .await
+            .expect("load durable work order"),
+        exported
+    );
+    assert_eq!(
+        container
+            .list_harness_work_orders(Some(&project))
+            .await
+            .expect("list project work orders"),
+        vec![exported]
+    );
+    assert_eq!(runtime.calls.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn service_export_requires_storage_and_a_matching_retained_target() {
+    let project = tempfile::tempdir().expect("create project");
+    std::fs::write(
+        project.path().join("parser.c"),
+        "int parse_packet(void) { return 0; }",
+    )
+    .expect("write source");
+    let container = ServiceContainer::new(Arc::new(CountingRuntime::default()), None);
+
+    assert_eq!(
+        container
+            .export_harness_work_order(export_request(project.path()))
+            .await
+            .expect_err("storage is mandatory")
+            .code,
+        HarnessWorkOrderErrorCode::StorageRequired
+    );
+    let store = Arc::new(
+        hf_storage::Store::connect(project.path().join("work-order.db"))
+            .await
+            .expect("create store"),
+    );
+    let container =
+        ServiceContainer::new(Arc::new(CountingRuntime::default()), None).with_store(store);
+    assert_eq!(
+        container
+            .export_harness_work_order(export_request(project.path()))
+            .await
+            .expect_err("discovery must not run for an unknown target")
+            .code,
+        HarnessWorkOrderErrorCode::WorkOrderNotFound
+    );
+}
+
+#[tokio::test]
+async fn service_work_order_reads_return_stable_not_found_codes() {
+    let workspace = tempfile::tempdir().expect("create workspace");
+    let store = Arc::new(
+        hf_storage::Store::connect(workspace.path().join("work-order.db"))
+            .await
+            .expect("create store"),
+    );
+    let container =
+        ServiceContainer::new(Arc::new(CountingRuntime::default()), None).with_store(store);
+
+    assert_eq!(
+        container
+            .harness_work_order_by_id("missing")
+            .await
+            .expect_err("missing work order must be visible")
+            .code,
+        HarnessWorkOrderErrorCode::WorkOrderNotFound
+    );
+}
+
+#[tokio::test]
+async fn service_export_rejects_malformed_compile_database_before_persistence() {
+    let project = tempfile::tempdir().expect("create project");
+    std::fs::write(
+        project.path().join("parser.c"),
+        "// heading\nint parse_packet(void) { return 0; }\n",
+    )
+    .expect("write source");
+    std::fs::write(project.path().join("compile_commands.json"), "{not json")
+        .expect("write malformed compile database");
+    let store = Arc::new(
+        hf_storage::Store::connect(project.path().join("work-order.db"))
+            .await
+            .expect("create store"),
+    );
+    persist_target(
+        &store,
+        retained_target(project.path(), PathBuf::from("parser.c"), TargetLanguage::C),
+    )
+    .await;
+    let container =
+        ServiceContainer::new(Arc::new(CountingRuntime::default()), None).with_store(store.clone());
+
+    let error = container
+        .export_harness_work_order(export_request(project.path()))
+        .await
+        .expect_err("malformed compile database must stop export");
+
+    assert_eq!(
+        error.code,
+        HarnessWorkOrderErrorCode::InvalidWorkOrderDigest
+    );
+    assert!(!error
+        .message
+        .contains(&project.path().display().to_string()));
+    assert!(store
+        .list_harness_work_orders(None)
+        .await
+        .expect("list rows")
+        .is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn service_export_rejects_symlinked_or_escaping_retained_sources() {
+    let workspace = tempfile::tempdir().expect("create workspace");
+    let project = workspace.path().join("project");
+    let outside = workspace.path().join("outside.c");
+    std::fs::create_dir_all(&project).expect("create project");
+    std::fs::write(
+        &outside,
+        "// heading\nint parse_packet(void) { return 0; }\n",
+    )
+    .expect("write outside source");
+    std::os::unix::fs::symlink(&outside, project.join("parser.c")).expect("link source");
+    let store = Arc::new(
+        hf_storage::Store::connect(workspace.path().join("work-order.db"))
+            .await
+            .expect("create store"),
+    );
+    persist_target(
+        &store,
+        retained_target(&project, PathBuf::from("parser.c"), TargetLanguage::C),
+    )
+    .await;
+    let container =
+        ServiceContainer::new(Arc::new(CountingRuntime::default()), None).with_store(store);
+    assert_eq!(
+        container
+            .export_harness_work_order(export_request(&project))
+            .await
+            .expect_err("symlink source must fail closed")
+            .code,
+        HarnessWorkOrderErrorCode::InvalidProjectPath
+    );
+}
+
+#[tokio::test]
+async fn service_export_rejects_retained_source_paths_that_escape_the_project() {
+    let workspace = tempfile::tempdir().expect("create workspace");
+    let project = workspace.path().join("project");
+    std::fs::create_dir_all(&project).expect("create project");
+    std::fs::write(
+        workspace.path().join("outside.c"),
+        "// heading\nint parse_packet(void) { return 0; }\n",
+    )
+    .expect("write outside source");
+    let store = Arc::new(
+        hf_storage::Store::connect(workspace.path().join("work-order.db"))
+            .await
+            .expect("create store"),
+    );
+    persist_target(
+        &store,
+        retained_target(&project, PathBuf::from("../outside.c"), TargetLanguage::C),
+    )
+    .await;
+    let container =
+        ServiceContainer::new(Arc::new(CountingRuntime::default()), None).with_store(store);
+
+    assert_eq!(
+        container
+            .export_harness_work_order(export_request(&project))
+            .await
+            .expect_err("escaping retained source must fail")
+            .code,
+        HarnessWorkOrderErrorCode::InvalidProjectPath
+    );
+}
+
+#[tokio::test]
+async fn service_export_rejects_oversized_retained_source() {
+    let project = tempfile::tempdir().expect("create project");
+    std::fs::write(
+        project.path().join("parser.c"),
+        vec![b'x'; 4 * 1024 * 1024 + 1],
+    )
+    .expect("write oversized source");
+    let store = Arc::new(
+        hf_storage::Store::connect(project.path().join("work-order.db"))
+            .await
+            .expect("create store"),
+    );
+    persist_target(
+        &store,
+        retained_target(project.path(), PathBuf::from("parser.c"), TargetLanguage::C),
+    )
+    .await;
+    let container =
+        ServiceContainer::new(Arc::new(CountingRuntime::default()), None).with_store(store);
+    assert_eq!(
+        container
+            .export_harness_work_order(export_request(project.path()))
+            .await
+            .expect_err("oversized retained source must fail")
+            .code,
+        HarnessWorkOrderErrorCode::SourceTooLarge
+    );
 }

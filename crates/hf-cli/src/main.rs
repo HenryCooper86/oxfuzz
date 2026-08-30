@@ -2121,7 +2121,12 @@ async fn cmd_work_order(
     let engine = parse_engine(engine)?;
     let container = ServiceContainer::bootstrap().await;
     let order = container
-        .harness_work_order(&project, target, language, engine)
+        .export_harness_work_order(hf_service::HarnessWorkOrderExportRequest {
+            project,
+            target: target.to_owned(),
+            language,
+            engine,
+        })
         .await?;
     let rendered = hf_service::render_work_order(&order);
 
