@@ -676,7 +676,7 @@ async fn work_order_ranking_recognizes_durable_post_compile_identity() {
         .expect("retain interrupted compiled harness identity");
     fixture
         .store
-        .recover_interrupted_harness_work_order_attempts(fixed_time(22))
+        .recover_harness_work_order_attempt(interrupted_after_compile, fixed_time(22))
         .await
         .expect("recover post-compile attempt as interrupted");
 
@@ -922,7 +922,7 @@ async fn work_order_promotion_rejects_noneligible_and_incomplete_attempts() {
         .expect("insert interrupted promotion fixture");
     fixture
         .store
-        .recover_interrupted_harness_work_order_attempts(fixed_time(41))
+        .recover_harness_work_order_attempt(interrupted, fixed_time(41))
         .await
         .expect("recover interrupted promotion fixture");
 
@@ -1998,14 +1998,11 @@ async fn interrupted_attempt_recovery_preserves_identity_and_start_time() {
         .await
         .expect("insert interrupted attempt fixture");
 
-    assert_eq!(
-        fixture
-            .store
-            .recover_interrupted_harness_work_order_attempts(Utc::now())
-            .await
-            .expect("run startup recovery"),
-        1
-    );
+    assert!(fixture
+        .store
+        .recover_harness_work_order_attempt(attempt_id, Utc::now())
+        .await
+        .expect("run startup recovery"));
     let recovered = fixture
         .service
         .harness_work_order_attempt(attempt_id)

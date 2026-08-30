@@ -53,7 +53,7 @@ pub use workspace::{
 
 use std::fmt::Write;
 use std::fs::File;
-#[cfg(feature = "semgrep-enrichment")]
+#[cfg(any(feature = "harness-work-order", feature = "semgrep-enrichment"))]
 use std::fs::TryLockError;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -123,6 +123,11 @@ pub(crate) struct TargetRevisionLease {
     _system_guard: File,
 }
 
+#[cfg(feature = "harness-work-order")]
+pub(crate) struct HarnessWorkOrderAttemptLease {
+    _system_guard: File,
+}
+
 #[cfg(feature = "semgrep-enrichment")]
 pub(crate) struct SemgrepProjectLease {
     _system_guard: File,
@@ -167,6 +172,48 @@ fn run_has_crash_evidence(status: RunStatus) -> bool {
         status,
         RunStatus::Done | RunStatus::Failed | RunStatus::Cancelled
     )
+}
+
+#[cfg(feature = "harness-work-order")]
+pub(crate) fn try_acquire_harness_work_order_attempt_lease(
+    attempt_id: Uuid,
+) -> Result<Option<HarnessWorkOrderAttemptLease>, ClassifiedError> {
+    let lock_dir = crate::init::user_app_dir().join("locks");
+    std::fs::create_dir_all(&lock_dir).map_err(|error| {
+        ClassifiedError::Internal(format!(
+            "create harness work order attempt lease directory: {error}"
+        ))
+    })?;
+    let lock_path = lock_dir.join(format!("harness-work-order-attempt-{attempt_id}.lock"));
+    let system_guard = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)
+        .map_err(|error| {
+            ClassifiedError::Internal(format!("open harness work order attempt lease: {error}"))
+        })?;
+    match system_guard.try_lock() {
+        Ok(()) => Ok(Some(HarnessWorkOrderAttemptLease {
+            _system_guard: system_guard,
+        })),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(TryLockError::Error(error)) => Err(ClassifiedError::Internal(format!(
+            "acquire harness work order attempt lease: {error}"
+        ))),
+    }
+}
+
+#[cfg(feature = "harness-work-order")]
+pub(crate) fn acquire_harness_work_order_attempt_lease(
+    attempt_id: Uuid,
+) -> Result<HarnessWorkOrderAttemptLease, ClassifiedError> {
+    try_acquire_harness_work_order_attempt_lease(attempt_id)?.ok_or_else(|| {
+        ClassifiedError::Internal(
+            "harness work order attempt identifier is already owned".to_owned(),
+        )
+    })
 }
 
 #[cfg(feature = "semgrep-enrichment")]

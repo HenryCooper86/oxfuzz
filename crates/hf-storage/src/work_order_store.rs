@@ -412,6 +412,18 @@ impl Store {
         rows.iter().map(attempt_from_row).collect()
     }
 
+    /// List every unfinished qualification attempt for owner-liveness recovery.
+    pub async fn list_running_harness_work_order_attempts(
+        &self,
+    ) -> Result<Vec<HarnessWorkOrderAttemptRecord>, StorageError> {
+        let rows = sqlx::query(&format!(
+            "{ATTEMPT_COLUMNS} WHERE status = 'running' ORDER BY started_at, id"
+        ))
+        .fetch_all(self.pool())
+        .await?;
+        rows.iter().map(attempt_from_row).collect()
+    }
+
     /// Advance a running attempt by one service-owned qualification stage.
     pub async fn transition_harness_work_order_attempt(
         &self,
@@ -493,11 +505,12 @@ impl Store {
         })
     }
 
-    /// Mark unfinished qualification attempts interrupted after a restart.
-    pub async fn recover_interrupted_harness_work_order_attempts(
+    /// Mark one unfinished qualification attempt interrupted after its owner is gone.
+    pub async fn recover_harness_work_order_attempt(
         &self,
+        id: Uuid,
         recovered_at: DateTime<Utc>,
-    ) -> Result<u64, StorageError> {
+    ) -> Result<bool, StorageError> {
         let updated = sqlx::query(
             "UPDATE harness_work_order_attempts
              SET status = 'interrupted',
@@ -506,12 +519,13 @@ impl Store {
                  failure_message = 'The application restarted before harness qualification completed.',
                  updated_at = ?1,
                  ended_at = ?1
-             WHERE status = 'running'",
+             WHERE id = ?2 AND status = 'running'",
         )
         .bind(utc_timestamp(recovered_at))
+        .bind(id.to_string())
         .execute(self.pool())
         .await?;
-        Ok(updated.rows_affected())
+        Ok(updated.rows_affected() == 1)
     }
 }
 

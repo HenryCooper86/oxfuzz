@@ -287,8 +287,15 @@ impl ServiceContainer {
         let preflight = self.qualification_preflight(submission_id).await?;
         let store = self.work_order_store()?;
         let started_at = Utc::now();
+        let attempt_id = uuid::Uuid::new_v4();
+        let _attempt_lease =
+            super::acquire_harness_work_order_attempt_lease(attempt_id).map_err(|_| {
+                HarnessWorkOrderError::storage(
+                    "harness work order qualification ownership is unavailable",
+                )
+            })?;
         let attempt = HarnessWorkOrderAttemptRecord {
-            id: uuid::Uuid::new_v4(),
+            id: attempt_id,
             submission_id,
             status: HarnessWorkOrderAttemptStatus::Running,
             current_stage: HarnessWorkOrderAttemptStage::Compile,
