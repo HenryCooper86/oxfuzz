@@ -6,7 +6,7 @@ mod common;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
 use hf_core::engine::EngineKind;
@@ -36,6 +36,7 @@ enum RuntimeMode {
 
 struct ControlledRuntime {
     calls: AtomicUsize,
+    workspaces: Mutex<Vec<PathBuf>>,
     mode: RuntimeMode,
 }
 
@@ -43,22 +44,32 @@ impl ControlledRuntime {
     fn new(mode: RuntimeMode) -> Self {
         Self {
             calls: AtomicUsize::new(0),
+            workspaces: Mutex::new(Vec::new()),
             mode,
         }
     }
 
-    fn command_result(&self, cwd: &Path) -> Result<CommandResult, ClassifiedError> {
+    fn command_result(&self, cmd: &[String], cwd: &Path) -> Result<CommandResult, ClassifiedError> {
         let call = self.calls.fetch_add(1, Ordering::Relaxed);
+        self.workspaces
+            .lock()
+            .expect("lock controlled runtime workspaces")
+            .push(cwd.to_path_buf());
         if call == 0 {
             if let RuntimeMode::CompileError(message) = &self.mode {
                 return Err(ClassifiedError::Sandbox(message.clone()));
             }
             std::fs::create_dir_all(cwd).expect("create controlled runtime workspace");
-            std::fs::write(
-                cwd.join("fuzz_parse_packet"),
-                b"controlled compiled harness",
-            )
-            .expect("write controlled compiled harness");
+            let binary_name = cmd
+                .get(2)
+                .and_then(|script| script.rsplit_once("/work/'"))
+                .and_then(|(_, tail)| tail.split_once('\''))
+                .map_or_else(
+                    || panic!("compile command carries a staged output: {cmd:?}"),
+                    |(name, _)| name,
+                );
+            std::fs::write(cwd.join(binary_name), b"controlled compiled harness")
+                .expect("write controlled compiled harness");
         } else if let RuntimeMode::SmokeError(message) = &self.mode {
             return Err(ClassifiedError::Sandbox(message.clone()));
         }
@@ -83,22 +94,22 @@ impl RuntimeAdapter for ControlledRuntime {
 
     async fn run_command(
         &self,
-        _cmd: &[String],
+        cmd: &[String],
         cwd: &Path,
         _limits: &ResourceLimits,
     ) -> Result<CommandResult, ClassifiedError> {
-        self.command_result(cwd)
+        self.command_result(cmd, cwd)
     }
 
     async fn run_command_streaming(
         &self,
-        _cmd: &[String],
+        cmd: &[String],
         cwd: &Path,
         _limits: &ResourceLimits,
         _cancel: &tokio_util::sync::CancellationToken,
         _on_line: &hf_core::runtime::LineSink<'_>,
     ) -> Result<CommandResult, ClassifiedError> {
-        self.command_result(cwd)
+        self.command_result(cmd, cwd)
     }
 
     async fn write_file(&self, path: &Path, content: &str) -> Result<(), ClassifiedError> {
@@ -182,12 +193,23 @@ struct QualificationFixture {
     service: ServiceContainer,
     runtime: Arc<ControlledRuntime>,
     review: Arc<ControlledReviewPool>,
+    target_id: Uuid,
     packet: hf_service::HarnessWorkOrder,
     submission: hf_service::HarnessWorkOrderSubmission,
 }
 
 impl QualificationFixture {
     async fn new(runtime_mode: RuntimeMode, review_mode: ReviewMode, source: &str) -> Self {
+        Self::new_for_target(runtime_mode, review_mode, source, "parse_packet", false).await
+    }
+
+    async fn new_for_target(
+        runtime_mode: RuntimeMode,
+        review_mode: ReviewMode,
+        source: &str,
+        target: &str,
+        duplicate_symbol: bool,
+    ) -> Self {
         common::install_managed_workspace("oxfuzz_work_order_qualification_it");
         let root = tempfile::tempdir().expect("create qualification root");
         let project = root.path().join("project");
@@ -197,18 +219,36 @@ impl QualificationFixture {
             "#include <stddef.h>\nint parse_packet(const unsigned char *data, size_t size) { return size > 0 && data[0]; }\n",
         )
         .expect("write candidate source");
+        if duplicate_symbol {
+            std::fs::write(
+                project.join("alternate.c"),
+                "#include <stddef.h>\nint parse_packet(const unsigned char *data, size_t size) { return size > 1 && data[1]; }\n",
+            )
+            .expect("write duplicate-symbol source");
+        }
         write_compile_database(&project, "WORK_ORDER=1");
         let store = Arc::new(
             hf_storage::Store::connect(root.path().join("qualification.db"))
                 .await
                 .expect("create qualification store"),
         );
-        let candidate = retained_target(&project);
+        let mut candidates = vec![retained_target(&project)];
+        if duplicate_symbol {
+            candidates.push(retained_target_at(&project, "alternate.c"));
+        }
+        let target_file = target
+            .rsplit_once("::")
+            .map_or("parser.c", |(file, _)| file);
+        let target_id = candidates
+            .iter()
+            .find(|candidate| candidate.location.file == Path::new(target_file))
+            .expect("selected fixture target exists")
+            .id;
         store
             .save_inventory(
                 &TargetInventory {
-                    project_root: candidate.project_root.clone(),
-                    candidates: vec![candidate],
+                    project_root: candidates[0].project_root.clone(),
+                    candidates,
                     call_graph: std::collections::HashMap::new(),
                 },
                 Utc::now(),
@@ -220,7 +260,7 @@ impl QualificationFixture {
         let service = ServiceContainer::new(runtime.clone(), Some(review.clone()))
             .with_store(Arc::clone(&store));
         let packet = service
-            .export_harness_work_order(export_request(&project))
+            .export_harness_work_order(export_request_for_target(&project, target))
             .await
             .expect("export qualification packet");
         let submission = service
@@ -239,6 +279,7 @@ impl QualificationFixture {
             service,
             runtime,
             review,
+            target_id,
             packet,
             submission,
         }
@@ -257,6 +298,10 @@ impl QualificationFixture {
 }
 
 fn retained_target(project: &Path) -> TargetCandidate {
+    retained_target_at(project, "parser.c")
+}
+
+fn retained_target_at(project: &Path, file: &str) -> TargetCandidate {
     TargetCandidate {
         id: Uuid::new_v4(),
         project_root: std::fs::canonicalize(project).expect("canonicalize project"),
@@ -264,7 +309,7 @@ fn retained_target(project: &Path) -> TargetCandidate {
         symbol: "parse_packet".to_owned(),
         kind: TargetKind::Parser,
         location: SourceLocation {
-            file: PathBuf::from("parser.c"),
+            file: PathBuf::from(file),
             line: 2,
             col: 1,
             end_line: None,
@@ -294,10 +339,10 @@ fn write_compile_database(project: &Path, define: &str) {
     .expect("write compile database");
 }
 
-fn export_request(project: &Path) -> HarnessWorkOrderExportRequest {
+fn export_request_for_target(project: &Path, target: &str) -> HarnessWorkOrderExportRequest {
     HarnessWorkOrderExportRequest {
         project: project.to_path_buf(),
-        target: "parse_packet".to_owned(),
+        target: target.to_owned(),
         language: TargetLanguage::C,
         engine: EngineKind::LibFuzzer,
     }
@@ -378,6 +423,36 @@ async fn qualification_rejects_packet_digest_tampering_before_attempt_or_dispatc
 }
 
 #[tokio::test]
+async fn qualification_rejects_unknown_durable_packet_fields_before_dispatch() {
+    let fixture =
+        QualificationFixture::new(RuntimeMode::Pass, ReviewMode::Approve, VALID_HARNESS).await;
+    let mut packet = serde_json::to_value(&fixture.packet).expect("serialize packet value");
+    packet["payload"]["target"]["unrecognized_evidence"] = serde_json::json!(true);
+    sqlx::query("DROP TRIGGER harness_work_orders_immutable")
+        .execute(fixture.store.pool())
+        .await
+        .expect("disable immutability only for corruption fixture");
+    sqlx::query("UPDATE harness_work_orders SET packet_json = ?1 WHERE id = ?2")
+        .bind(serde_json::to_string(&packet).expect("serialize corrupt packet"))
+        .bind(&fixture.packet.id)
+        .execute(fixture.store.pool())
+        .await
+        .expect("inject unknown packet field");
+
+    let error = fixture
+        .service
+        .qualify_harness_work_order_submission(fixture.submission.id)
+        .await
+        .expect_err("unknown durable packet fields must be rejected");
+
+    assert_eq!(
+        error.code,
+        HarnessWorkOrderErrorCode::InvalidWorkOrderDigest
+    );
+    fixture.assert_no_attempt_or_dispatch().await;
+}
+
+#[tokio::test]
 async fn qualification_rejects_submission_digest_tampering_before_attempt_or_dispatch() {
     let fixture =
         QualificationFixture::new(RuntimeMode::Pass, ReviewMode::Approve, VALID_HARNESS).await;
@@ -397,6 +472,40 @@ async fn qualification_rejects_submission_digest_tampering_before_attempt_or_dis
         .qualify_harness_work_order_submission(fixture.submission.id)
         .await
         .expect_err("tampered submission must fail preflight");
+
+    assert_eq!(
+        error.code,
+        HarnessWorkOrderErrorCode::InvalidWorkOrderDigest
+    );
+    fixture.assert_no_attempt_or_dispatch().await;
+}
+
+#[tokio::test]
+async fn qualification_rejects_unknown_durable_lint_fields_before_dispatch() {
+    let warning_harness =
+        "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { signal(1, 0); return size > 0 && data[0]; }";
+    let fixture =
+        QualificationFixture::new(RuntimeMode::Pass, ReviewMode::Approve, warning_harness).await;
+    assert!(!fixture.submission.lint.is_empty());
+    sqlx::query("DROP TRIGGER harness_work_order_submissions_immutable")
+        .execute(fixture.store.pool())
+        .await
+        .expect("disable immutability only for corruption fixture");
+    sqlx::query(
+        "UPDATE harness_work_order_submissions
+         SET lint_json = json_set(lint_json, '$[0].unrecognized_evidence', 1)
+         WHERE id = ?1",
+    )
+    .bind(fixture.submission.id.to_string())
+    .execute(fixture.store.pool())
+    .await
+    .expect("inject unknown lint field");
+
+    let error = fixture
+        .service
+        .qualify_harness_work_order_submission(fixture.submission.id)
+        .await
+        .expect_err("unknown durable lint fields must be rejected");
 
     assert_eq!(
         error.code,
@@ -539,9 +648,79 @@ async fn qualification_success_persists_exact_evidence_without_promotion() {
 }
 
 #[tokio::test]
+async fn qualification_preserves_file_qualified_target_across_every_stage() {
+    let fixture = QualificationFixture::new_for_target(
+        RuntimeMode::Pass,
+        ReviewMode::Approve,
+        VALID_HARNESS,
+        "alternate.c::parse_packet",
+        true,
+    )
+    .await;
+    install_stage_audit(&fixture.store).await;
+
+    let attempt = fixture
+        .service
+        .qualify_harness_work_order_submission(fixture.submission.id)
+        .await
+        .expect("qualify the retained duplicate-symbol target");
+
+    assert_eq!(attempt.status, HarnessWorkOrderAttemptStatus::SmokePassed);
+    assert_eq!(
+        stage_audit(&fixture.store).await,
+        vec!["compile->review", "review->smoke", "smoke->complete"]
+    );
+    let harness = fixture
+        .store
+        .get_harness(attempt.harness_id.expect("qualified harness id"))
+        .await
+        .expect("load qualified harness")
+        .expect("qualified harness exists");
+    assert_eq!(harness.target_id, fixture.target_id);
+    let workspaces = fixture
+        .runtime
+        .workspaces
+        .lock()
+        .expect("lock controlled runtime workspaces");
+    assert_eq!(workspaces.len(), 2);
+    assert_eq!(workspaces[0], workspaces[1]);
+}
+
+#[tokio::test]
+async fn qualification_records_nonzero_repair_depth() {
+    let fixture =
+        QualificationFixture::new(RuntimeMode::Pass, ReviewMode::Approve, VALID_HARNESS).await;
+    let repaired = fixture
+        .service
+        .import_harness_work_order_submission(ImportHarnessWorkOrderSubmissionRequest {
+            work_order_id: fixture.packet.id.clone(),
+            source: VALID_HARNESS.to_owned(),
+            origin: WorkOrderSubmissionOrigin::Human,
+            parent_submission_id: Some(fixture.submission.id),
+        })
+        .await
+        .expect("import repaired submission");
+
+    let attempt = fixture
+        .service
+        .qualify_harness_work_order_submission(repaired.id)
+        .await
+        .expect("qualify repaired submission");
+
+    assert_eq!(
+        attempt
+            .result
+            .as_ref()
+            .expect("qualification result")
+            .repair_depth,
+        1
+    );
+}
+
+#[tokio::test]
 async fn qualification_step_failures_return_terminal_bounded_attempts() {
     let sensitive_detail = format!(
-        "TOKEN=sk-do-not-retain /Users/operator/private/target.c {}\n",
+        "compile failed sk-standalone-secret; Authorization: Bearer bearer-secret; path=/Users/operator/private/target.c api_key=key-secret token= adjacent-credential {}\n",
         "x".repeat(6_000)
     );
     let cases = [
@@ -599,7 +778,10 @@ async fn qualification_step_failures_return_terminal_bounded_attempts() {
         assert!(!message.is_empty());
         assert!(message.len() <= 4_096);
         assert!(!message.chars().any(char::is_control));
-        assert!(!message.contains("sk-do-not-retain"));
+        assert!(!message.contains("sk-standalone-secret"));
+        assert!(!message.contains("bearer-secret"));
+        assert!(!message.contains("key-secret"));
+        assert!(!message.contains("adjacent-credential"));
         assert!(!message.contains("/Users/operator"));
         assert_eq!(
             stage_audit(&fixture.store).await.last().map(String::as_str),
@@ -615,7 +797,288 @@ async fn qualification_step_failures_return_terminal_bounded_attempts() {
                 .expect("reload terminal attempt"),
             attempt
         );
+        let durable_message: String = sqlx::query_scalar(
+            "SELECT failure_message FROM harness_work_order_attempts WHERE id = ?1",
+        )
+        .bind(attempt.id.to_string())
+        .fetch_one(fixture.store.pool())
+        .await
+        .expect("load durable failure message");
+        assert!(!durable_message.contains("sk-standalone-secret"));
+        assert!(!durable_message.contains("bearer-secret"));
+        assert!(!durable_message.contains("key-secret"));
+        assert!(!durable_message.contains("adjacent-credential"));
+        assert!(!durable_message.contains("/Users/operator"));
     }
+}
+
+#[tokio::test]
+async fn qualification_failures_retain_all_available_stage_evidence() {
+    let review_fixture = QualificationFixture::new(
+        RuntimeMode::Pass,
+        ReviewMode::Error("controlled review failure".to_owned()),
+        VALID_HARNESS,
+    )
+    .await;
+    let review_attempt = review_fixture
+        .service
+        .qualify_harness_work_order_submission(review_fixture.submission.id)
+        .await
+        .expect("review failure is retained");
+    assert_eq!(
+        review_attempt.status,
+        HarnessWorkOrderAttemptStatus::ReviewFailed
+    );
+    assert!(review_attempt.harness_id.is_some());
+    assert!(review_attempt.smoke_run_id.is_none());
+    let review_result = review_attempt.result.expect("review failure result");
+    assert!(review_result.compiled);
+    assert_eq!(
+        review_result.source_sha256.as_deref().map(str::len),
+        Some(64)
+    );
+    assert_eq!(
+        review_result.binary_sha256.as_deref().map(str::len),
+        Some(64)
+    );
+    assert!(review_result.smoke_verdict.is_none());
+    assert!(review_result.execs_per_sec.is_none());
+    assert!(review_result.crashes.is_none());
+
+    let smoke_fixture = QualificationFixture::new(
+        RuntimeMode::SmokeError("controlled smoke runtime failure".to_owned()),
+        ReviewMode::Approve,
+        VALID_HARNESS,
+    )
+    .await;
+    let smoke_attempt = smoke_fixture
+        .service
+        .qualify_harness_work_order_submission(smoke_fixture.submission.id)
+        .await
+        .expect("smoke failure is retained");
+    assert_eq!(
+        smoke_attempt.status,
+        HarnessWorkOrderAttemptStatus::SmokeFailed
+    );
+    assert!(smoke_attempt.harness_id.is_some());
+    let smoke_run_id = smoke_attempt
+        .smoke_run_id
+        .expect("allocated smoke run id is retained");
+    let smoke_result = smoke_attempt.result.expect("smoke failure result");
+    assert!(smoke_result.compiled);
+    assert_eq!(
+        smoke_result.source_sha256.as_deref().map(str::len),
+        Some(64)
+    );
+    assert_eq!(
+        smoke_result.binary_sha256.as_deref().map(str::len),
+        Some(64)
+    );
+    assert!(smoke_result.smoke_verdict.is_none());
+    assert!(smoke_result.execs_per_sec.is_none());
+    assert!(smoke_result.crashes.is_none());
+    assert_eq!(
+        smoke_fixture
+            .store
+            .get_run(smoke_run_id)
+            .await
+            .expect("load smoke run")
+            .expect("allocated smoke run exists")
+            .status,
+        hf_storage::RunStatus::Failed
+    );
+}
+
+async fn assert_attempt_corruption_rejected(fixture: &QualificationFixture, attempt_id: Uuid) {
+    let get_error = fixture
+        .service
+        .harness_work_order_attempt(attempt_id)
+        .await
+        .expect_err("get must reject contradictory attempt evidence");
+    assert_eq!(
+        get_error.code,
+        HarnessWorkOrderErrorCode::InvalidWorkOrderDigest
+    );
+    let list_error = fixture
+        .service
+        .list_harness_work_order_attempts(fixture.submission.id)
+        .await
+        .expect_err("list must reject contradictory attempt evidence");
+    assert_eq!(
+        list_error.code,
+        HarnessWorkOrderErrorCode::InvalidWorkOrderDigest
+    );
+}
+
+#[tokio::test]
+async fn attempt_reads_reject_unknown_and_contradictory_durable_evidence() {
+    let fixture =
+        QualificationFixture::new(RuntimeMode::Pass, ReviewMode::Approve, VALID_HARNESS).await;
+    let attempt = fixture
+        .service
+        .qualify_harness_work_order_submission(fixture.submission.id)
+        .await
+        .expect("create valid attempt");
+    let original_result: String =
+        sqlx::query_scalar("SELECT result_json FROM harness_work_order_attempts WHERE id = ?1")
+            .bind(attempt.id.to_string())
+            .fetch_one(fixture.store.pool())
+            .await
+            .expect("load original result");
+    sqlx::query("DROP TRIGGER harness_work_order_attempts_terminal_immutable")
+        .execute(fixture.store.pool())
+        .await
+        .expect("disable terminal immutability only for corruption fixture");
+
+    sqlx::query(
+        "UPDATE harness_work_order_attempts
+         SET result_json = json_set(result_json, '$.unexpected_evidence', 1)
+         WHERE id = ?1",
+    )
+    .bind(attempt.id.to_string())
+    .execute(fixture.store.pool())
+    .await
+    .expect("inject unknown result field");
+    assert_attempt_corruption_rejected(&fixture, attempt.id).await;
+
+    sqlx::query(
+        "UPDATE harness_work_order_attempts
+         SET result_json = json_set(?1, '$.execs_per_sec', -1)
+         WHERE id = ?2",
+    )
+    .bind(&original_result)
+    .bind(attempt.id.to_string())
+    .execute(fixture.store.pool())
+    .await
+    .expect("inject negative throughput");
+    assert_attempt_corruption_rejected(&fixture, attempt.id).await;
+
+    sqlx::query(
+        "UPDATE harness_work_order_attempts
+         SET status = 'smoke_failed', result_json = ?1,
+             failure_code = 'sandbox', failure_message = 'controlled failure'
+         WHERE id = ?2",
+    )
+    .bind(&original_result)
+    .bind(attempt.id.to_string())
+    .execute(fixture.store.pool())
+    .await
+    .expect("inject failure status with successful smoke evidence");
+    assert_attempt_corruption_rejected(&fixture, attempt.id).await;
+
+    sqlx::query(
+        "UPDATE harness_work_order_attempts
+         SET status = 'smoke_passed', result_json = ?1,
+             failure_code = NULL, failure_message = NULL, harness_id = NULL
+         WHERE id = ?2",
+    )
+    .bind(&original_result)
+    .bind(attempt.id.to_string())
+    .execute(fixture.store.pool())
+    .await
+    .expect("remove required harness id");
+    assert_attempt_corruption_rejected(&fixture, attempt.id).await;
+
+    sqlx::query(
+        "UPDATE harness_work_order_attempts
+         SET harness_id = ?1, ended_at = started_at
+         WHERE id = ?2",
+    )
+    .bind(attempt.harness_id.expect("valid harness id").to_string())
+    .bind(attempt.id.to_string())
+    .execute(fixture.store.pool())
+    .await
+    .expect("inject contradictory terminal timestamp");
+    assert_attempt_corruption_rejected(&fixture, attempt.id).await;
+
+    sqlx::query(
+        "UPDATE harness_work_order_attempts
+         SET ended_at = updated_at, smoke_run_id = NULL
+         WHERE id = ?1",
+    )
+    .bind(attempt.id.to_string())
+    .execute(fixture.store.pool())
+    .await
+    .expect("remove required smoke run id");
+    assert_attempt_corruption_rejected(&fixture, attempt.id).await;
+
+    sqlx::query(
+        "UPDATE harness_work_order_attempts
+         SET smoke_run_id = ?1,
+             result_json = json_set(?2, '$.crashes', NULL)
+         WHERE id = ?3",
+    )
+    .bind(
+        attempt
+            .smoke_run_id
+            .expect("valid smoke run id")
+            .to_string(),
+    )
+    .bind(&original_result)
+    .bind(attempt.id.to_string())
+    .execute(fixture.store.pool())
+    .await
+    .expect("remove required crash evidence");
+    assert_attempt_corruption_rejected(&fixture, attempt.id).await;
+
+    sqlx::query(
+        "UPDATE harness_work_order_attempts
+         SET result_json = json_set(?1, '$.repair_depth', ?2)
+         WHERE id = ?3",
+    )
+    .bind(&original_result)
+    .bind(hf_storage::MAX_WORK_ORDER_SUBMISSIONS)
+    .bind(attempt.id.to_string())
+    .execute(fixture.store.pool())
+    .await
+    .expect("inject out-of-range repair depth");
+    assert_attempt_corruption_rejected(&fixture, attempt.id).await;
+
+    sqlx::query("UPDATE harness_work_order_attempts SET result_json = NULL WHERE id = ?1")
+        .bind(attempt.id.to_string())
+        .execute(fixture.store.pool())
+        .await
+        .expect("remove required terminal result");
+    assert_attempt_corruption_rejected(&fixture, attempt.id).await;
+}
+
+#[tokio::test]
+async fn qualification_transition_storage_failure_is_not_a_stage_failure() {
+    let fixture =
+        QualificationFixture::new(RuntimeMode::Pass, ReviewMode::Approve, VALID_HARNESS).await;
+    sqlx::query(
+        "CREATE TRIGGER reject_qualification_transition
+         BEFORE UPDATE OF current_stage ON harness_work_order_attempts
+         WHEN OLD.current_stage = 'compile' AND NEW.current_stage = 'review'
+         BEGIN
+             SELECT RAISE(ABORT, 'controlled transition failure');
+         END",
+    )
+    .execute(fixture.store.pool())
+    .await
+    .expect("install controlled transition failure");
+
+    let error = fixture
+        .service
+        .qualify_harness_work_order_submission(fixture.submission.id)
+        .await
+        .expect_err("transition storage failure must remain a service error");
+
+    assert_eq!(error.code, HarnessWorkOrderErrorCode::StorageRequired);
+    let attempts = fixture
+        .store
+        .list_harness_work_order_attempts(fixture.submission.id)
+        .await
+        .expect("load interrupted transition attempt");
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].status, HarnessWorkOrderAttemptStatus::Running);
+    assert_eq!(
+        attempts[0].current_stage,
+        HarnessWorkOrderAttemptStage::Compile
+    );
+    assert!(attempts[0].failure_code.is_none());
+    assert_eq!(fixture.runtime.calls.load(Ordering::Relaxed), 1);
+    assert_eq!(fixture.review.calls.load(Ordering::Relaxed), 0);
 }
 
 #[tokio::test]

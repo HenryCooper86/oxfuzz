@@ -37,6 +37,7 @@ pub enum LintSeverity {
 
 /// One rule violation in harness source.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LintFinding {
     /// Whether this blocks the build.
     pub severity: LintSeverity,

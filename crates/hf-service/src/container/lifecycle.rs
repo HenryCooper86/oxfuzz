@@ -507,9 +507,11 @@ impl ServiceContainer {
 
 #[cfg(all(test, feature = "harness-work-order"))]
 mod work_order_recovery_tests {
+    use std::path::PathBuf;
     use std::sync::Arc;
 
     use chrono::Utc;
+    use hf_core::{engine::EngineKind, target::TargetLanguage};
     use hf_storage::{
         HarnessWorkOrderAttemptRecord, HarnessWorkOrderAttemptStage, HarnessWorkOrderAttemptStatus,
         HarnessWorkOrderRecord, HarnessWorkOrderSubmissionRecord, Store,
@@ -518,7 +520,11 @@ mod work_order_recovery_tests {
     use uuid::Uuid;
 
     use super::{recover_harness_work_order_attempts, ServiceContainer};
-    use crate::harness_work_order::HarnessWorkOrderErrorCode;
+    use crate::harness_work_order::{
+        HarnessWorkOrderErrorCode, ImportHarnessWorkOrderSubmissionRequest,
+        WorkOrderSubmissionOrigin,
+    };
+    use crate::HarnessWorkOrderExportRequest;
 
     async fn running_attempt_fixture(
         store: &Store,
@@ -605,7 +611,7 @@ mod work_order_recovery_tests {
                 .await
                 .expect("create recovery store"),
         );
-        running_attempt_fixture(&store).await;
+        let (attempt, _) = running_attempt_fixture(&store).await;
         sqlx::query(
             "CREATE TRIGGER reject_work_order_recovery
              BEFORE UPDATE OF status ON harness_work_order_attempts
@@ -623,14 +629,41 @@ mod work_order_recovery_tests {
             ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None).with_store(store);
         service.work_order_recovery_ready = ready;
 
-        assert_eq!(
-            service
-                .list_harness_work_orders(None)
-                .await
-                .expect_err("degraded recovery must gate work-order reads")
-                .code,
-            HarnessWorkOrderErrorCode::StorageRequired
+        macro_rules! assert_recovery_gate {
+            ($operation:expr) => {
+                assert_eq!(
+                    $operation
+                        .await
+                        .expect_err("degraded recovery must gate the work-order operation")
+                        .code,
+                    HarnessWorkOrderErrorCode::StorageRequired
+                );
+            };
+        }
+
+        assert_recovery_gate!(
+            service.export_harness_work_order(HarnessWorkOrderExportRequest {
+                project: PathBuf::from("/test/project"),
+                target: "target".to_owned(),
+                language: TargetLanguage::C,
+                engine: EngineKind::LibFuzzer,
+            })
         );
+        assert_recovery_gate!(service.harness_work_order_by_id(&"a".repeat(64)));
+        assert_recovery_gate!(service.list_harness_work_orders(None));
+        assert_recovery_gate!(service.import_harness_work_order_submission(
+            ImportHarnessWorkOrderSubmissionRequest {
+                work_order_id: "a".repeat(64),
+                source: "source".to_owned(),
+                origin: WorkOrderSubmissionOrigin::Human,
+                parent_submission_id: None,
+            }
+        ));
+        assert_recovery_gate!(service.harness_work_order_submission(attempt.submission_id));
+        assert_recovery_gate!(service.list_harness_work_order_submissions(&"a".repeat(64)));
+        assert_recovery_gate!(service.qualify_harness_work_order_submission(attempt.submission_id));
+        assert_recovery_gate!(service.harness_work_order_attempt(attempt.id));
+        assert_recovery_gate!(service.list_harness_work_order_attempts(attempt.submission_id));
         assert!(service.provider_statuses().await.is_empty());
     }
 }
