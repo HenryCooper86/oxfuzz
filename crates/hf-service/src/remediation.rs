@@ -96,8 +96,28 @@ impl ServiceContainer {
         follow_up_fuzz_seconds: u64,
     ) -> Result<RemediationDraftParts, ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
+        self.prepare_remediation_draft_locked(
+            run_id,
+            finding_id,
+            patch,
+            pricing,
+            follow_up_fuzz_seconds,
+        )
+        .await
+    }
+
+    async fn prepare_remediation_draft_locked(
+        &self,
+        run_id: Uuid,
+        finding_id: Uuid,
+        patch: &str,
+        pricing: CampaignEvidencePricing,
+        follow_up_fuzz_seconds: u64,
+    ) -> Result<RemediationDraftParts, ClassifiedError> {
         let managed_workspace_root = crate::container::initialize_workspace_root()?;
-        let manifest = self.campaign_evidence_manifest(run_id, pricing).await?;
+        let manifest = self
+            .campaign_evidence_manifest_locked(run_id, pricing)
+            .await?;
         let finding = manifest
             .body
             .findings
@@ -353,4 +373,82 @@ fn render_summary(handoff: &RemediationHandoff) -> String {
         handoff.binding.reproducer_sha256,
         handoff.binding.evidence_manifest_sha256,
     )
+}
+
+#[cfg(test)]
+mod workspace_lease_tests {
+    use std::path::PathBuf;
+    use std::sync::{Arc, OnceLock};
+    use std::time::Duration;
+
+    use uuid::Uuid;
+
+    use crate::container::ServiceContainer;
+    use crate::evidence::CampaignEvidencePricing;
+
+    fn install_workspace() {
+        static ROOT: OnceLock<PathBuf> = OnceLock::new();
+        let root = ROOT.get_or_init(|| {
+            let root = std::env::temp_dir().join(format!("oxfuzz-remediation-{}", Uuid::new_v4()));
+            std::fs::create_dir_all(&root).unwrap();
+            let canonical = std::fs::canonicalize(&root).unwrap();
+            std::fs::write(
+                canonical.join(".oxfuzz-workspace.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "application": "oxfuzz",
+                    "version": 1,
+                    "canonical_root": canonical,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            canonical
+        });
+        std::env::set_var("HF_WORKSPACE_DIR", root);
+    }
+
+    #[tokio::test]
+    async fn remediation_draft_locked_completes_with_a_queued_cleanup_writer() {
+        install_workspace();
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            hf_storage::Store::connect(directory.path().join("remediation.db"))
+                .await
+                .unwrap(),
+        );
+        let container = ServiceContainer::stubbed().with_store(store);
+        let lease = container.acquire_workspace_operation().await.unwrap();
+        let gate = ServiceContainer::workspace_test_operation_gate();
+        let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel();
+        let writer = tokio::spawn(async move {
+            let _ = waiting_tx.send(());
+            let _cleanup = gate.write_owned().await;
+        });
+        waiting_rx.await.unwrap();
+        tokio::task::yield_now().await;
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            container.prepare_remediation_draft_locked(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                "--- a/parser.c\n+++ b/parser.c\n",
+                CampaignEvidencePricing {
+                    compute_usd_per_hour: 1.0,
+                    model_cost_usd: 0.0,
+                },
+                60,
+            ),
+        )
+        .await
+        .expect("already-locked remediation assembly must not reacquire the workspace lease");
+        let error = match result {
+            Ok(_) => panic!("the missing run must remain a validation failure"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("was not found"));
+
+        drop(lease);
+        writer.await.unwrap();
+    }
 }

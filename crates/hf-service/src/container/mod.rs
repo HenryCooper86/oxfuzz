@@ -806,6 +806,13 @@ impl ServiceContainer {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn workspace_test_operation_gate() -> Arc<tokio::sync::RwLock<()>> {
+        workspace_operation_gate(&workspace_root())
+            .expect("test workspace operation gate")
+            .1
+    }
+
     /// Take the per-target revision lease after acquiring the outer workspace
     /// operation lease. This serializes all mutations and exact checks for one
     /// active harness across service containers and processes.
