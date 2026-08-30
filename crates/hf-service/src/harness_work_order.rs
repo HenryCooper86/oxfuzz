@@ -266,8 +266,12 @@ pub enum WorkOrderStep {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkOrderPlaceholder {
+    /// Project root supplied by the operator running the packet locally.
+    Project,
     /// Path to the authored source file.
     SourceFile,
+    /// Provenance label accepted by `work-order import`.
+    SubmissionOrigin,
     /// Identifier of one imported submission.
     SubmissionId,
     /// Identifiers of the attempts to rank.
@@ -1045,6 +1049,8 @@ fn command_for_step(work_order: &HarnessWorkOrder, step: WorkOrderStep) -> WorkO
                 value(work_order.id.clone()),
                 literal("--source"),
                 placeholder(WorkOrderPlaceholder::SourceFile),
+                literal("--origin"),
+                placeholder(WorkOrderPlaceholder::SubmissionOrigin),
             ],
             false,
         ),
@@ -1082,12 +1088,15 @@ fn command_for_step(work_order: &HarnessWorkOrder, step: WorkOrderStep) -> WorkO
             vec![
                 literal("oxfuzz"),
                 literal("run"),
+                placeholder(WorkOrderPlaceholder::Project),
                 literal("--target"),
-                value(work_order.payload.target.symbol.clone()),
+                value(work_order_target_selector(work_order)),
                 literal("--engine"),
                 literal(work_order.payload.engine.as_str()),
-                literal("--duration-secs"),
-                value(duration_secs.to_string()),
+                literal("--lang"),
+                literal(work_order.payload.target.language.as_str()),
+                literal("--duration"),
+                value(format!("{duration_secs}s")),
             ],
             true,
         ),
@@ -1095,8 +1104,9 @@ fn command_for_step(work_order: &HarnessWorkOrder, step: WorkOrderStep) -> WorkO
             vec![
                 literal("oxfuzz"),
                 literal("coverage"),
+                placeholder(WorkOrderPlaceholder::Project),
                 literal("--target"),
-                value(work_order.payload.target.symbol.clone()),
+                value(work_order_target_selector(work_order)),
             ],
             false,
         ),
@@ -1106,6 +1116,13 @@ fn command_for_step(work_order: &HarnessWorkOrder, step: WorkOrderStep) -> WorkO
         argv,
         approval_required,
     }
+}
+
+fn work_order_target_selector(work_order: &HarnessWorkOrder) -> String {
+    format!(
+        "{}::{}",
+        work_order.payload.target.relative_source, work_order.payload.target.symbol
+    )
 }
 
 fn render_values(output: &mut String, label: &str, values: &[String]) {
@@ -1126,7 +1143,9 @@ fn render_command(command: &WorkOrderCommand) -> String {
         .map(|argument| match argument {
             WorkOrderArg::Literal(value) => quote_posix_arg(value),
             WorkOrderArg::Placeholder(placeholder) => match placeholder {
+                WorkOrderPlaceholder::Project => "<project>".to_owned(),
                 WorkOrderPlaceholder::SourceFile => "<source-file>".to_owned(),
+                WorkOrderPlaceholder::SubmissionOrigin => "<submission-origin>".to_owned(),
                 WorkOrderPlaceholder::SubmissionId => "<submission-id>".to_owned(),
                 WorkOrderPlaceholder::AttemptIds => "<attempt-id>...".to_owned(),
                 WorkOrderPlaceholder::AttemptId => "<attempt-id>".to_owned(),

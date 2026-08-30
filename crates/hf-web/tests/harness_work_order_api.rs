@@ -397,6 +397,15 @@ async fn export_project_work_order(
         .as_str()
         .expect("exported work-order id")
         .to_owned();
+    let qualified_target = format!(
+        "{}::{}",
+        body["payload"]["target"]["relative_source"]
+            .as_str()
+            .expect("work-order relative source"),
+        body["payload"]["target"]["symbol"]
+            .as_str()
+            .expect("work-order target symbol")
+    );
     assert_eq!(body["schema_version"], 2);
     assert_eq!(
         body["validation_commands"],
@@ -410,7 +419,9 @@ async fn export_project_work_order(
                     {"literal": "--work-order"},
                     {"literal": id},
                     {"literal": "--source"},
-                    {"placeholder": "source_file"}
+                    {"placeholder": "source_file"},
+                    {"literal": "--origin"},
+                    {"placeholder": "submission_origin"}
                 ],
                 "approval_required": false
             },
@@ -452,12 +463,15 @@ async fn export_project_work_order(
                 "argv": [
                     {"literal": "oxfuzz"},
                     {"literal": "run"},
+                    {"placeholder": "project"},
                     {"literal": "--target"},
-                    {"literal": target},
+                    {"literal": qualified_target},
                     {"literal": "--engine"},
                     {"literal": "libfuzzer"},
-                    {"literal": "--duration-secs"},
-                    {"literal": "300"}
+                    {"literal": "--lang"},
+                    {"literal": "c"},
+                    {"literal": "--duration"},
+                    {"literal": "300s"}
                 ],
                 "approval_required": true
             },
@@ -466,8 +480,9 @@ async fn export_project_work_order(
                 "argv": [
                     {"literal": "oxfuzz"},
                     {"literal": "coverage"},
+                    {"placeholder": "project"},
                     {"literal": "--target"},
-                    {"literal": target}
+                    {"literal": qualified_target}
                 ],
                 "approval_required": false
             }

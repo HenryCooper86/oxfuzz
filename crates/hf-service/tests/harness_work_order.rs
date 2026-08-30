@@ -500,6 +500,9 @@ fn commands_use_typed_placeholders_and_approval_requirements() {
     assert!(commands[0]
         .argv
         .contains(&WorkOrderArg::Placeholder(WorkOrderPlaceholder::SourceFile)));
+    assert!(commands[0].argv.contains(&WorkOrderArg::Placeholder(
+        WorkOrderPlaceholder::SubmissionOrigin
+    )));
     assert_eq!(commands[1].step, WorkOrderStep::Qualify);
     assert!(commands[1].approval_required);
     assert!(commands[1].argv.contains(&WorkOrderArg::Placeholder(
@@ -519,6 +522,21 @@ fn commands_use_typed_placeholders_and_approval_requirements() {
         WorkOrderStep::RunCampaign { duration_secs: 300 }
     );
     assert!(commands[4].approval_required);
+    assert!(commands[4]
+        .argv
+        .contains(&WorkOrderArg::Placeholder(WorkOrderPlaceholder::Project)));
+    assert!(commands[4].argv.contains(&WorkOrderArg::Literal(
+        "src/parser.c::parse_packet".to_owned()
+    )));
+    assert!(commands[4]
+        .argv
+        .contains(&WorkOrderArg::Literal("300s".to_owned())));
+    assert!(commands[5]
+        .argv
+        .contains(&WorkOrderArg::Placeholder(WorkOrderPlaceholder::Project)));
+    assert!(commands[5].argv.contains(&WorkOrderArg::Literal(
+        "src/parser.c::parse_packet".to_owned()
+    )));
 
     let rendered = render_work_order(&build_work_order(payload()).expect("build packet"));
     assert!(rendered.contains("Approval required"));
