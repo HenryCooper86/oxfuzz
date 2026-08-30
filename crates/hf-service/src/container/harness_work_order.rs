@@ -359,12 +359,11 @@ fn retained_submission(
             "durable submission source digest does not match its source",
         ));
     }
-    let origin = serde_json::from_str(&record.origin_json).map_err(|_| {
-        HarnessWorkOrderError::validation(
-            HarnessWorkOrderErrorCode::InvalidWorkOrderDigest,
-            "durable submission origin is malformed",
-        )
-    })?;
+    let origin = serde_json::from_str(&record.origin_json).map_err(|_| invalid_durable_origin())?;
+    let origin = normalized_submission_origin(origin).map_err(|_| invalid_durable_origin())?;
+    if canonical_origin_json(&origin)? != record.origin_json {
+        return Err(invalid_durable_origin());
+    }
     let lint = serde_json::from_str(&record.lint_json).map_err(|_| {
         HarnessWorkOrderError::validation(
             HarnessWorkOrderErrorCode::InvalidWorkOrderDigest,
@@ -387,6 +386,13 @@ fn invalid_provenance() -> HarnessWorkOrderError {
     HarnessWorkOrderError::validation(
         HarnessWorkOrderErrorCode::InvalidProvenance,
         "submission provenance is invalid",
+    )
+}
+
+fn invalid_durable_origin() -> HarnessWorkOrderError {
+    HarnessWorkOrderError::validation(
+        HarnessWorkOrderErrorCode::InvalidWorkOrderDigest,
+        "durable submission origin is malformed",
     )
 }
 
