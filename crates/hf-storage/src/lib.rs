@@ -43,6 +43,6 @@ pub use transcript::JsonlTranscriptStore;
 pub use transcript_display::JsonlDisplayTranscriptStore;
 pub use work_order_store::{
     HarnessWorkOrderAttemptCompletion, HarnessWorkOrderAttemptRecord, HarnessWorkOrderAttemptStage,
-    HarnessWorkOrderAttemptStatus, HarnessWorkOrderRecord, HarnessWorkOrderSubmissionRecord,
-    MAX_WORK_ORDER_RANK_ATTEMPTS, MAX_WORK_ORDER_SUBMISSIONS,
+    HarnessWorkOrderAttemptStatus, HarnessWorkOrderRecord, HarnessWorkOrderSubmissionInsertError,
+    HarnessWorkOrderSubmissionRecord, MAX_WORK_ORDER_RANK_ATTEMPTS, MAX_WORK_ORDER_SUBMISSIONS,
 };

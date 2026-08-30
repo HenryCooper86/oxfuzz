@@ -5,6 +5,7 @@ use std::{fmt, str::FromStr};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
+use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{StorageError, Store};
@@ -13,6 +14,32 @@ use crate::{StorageError, Store};
 pub const MAX_WORK_ORDER_SUBMISSIONS: u32 = 20;
 /// Maximum attempts that may be ranked in one request.
 pub const MAX_WORK_ORDER_RANK_ATTEMPTS: usize = 5;
+
+/// Typed policy outcomes from immutable submission insertion.
+#[derive(Debug, Error)]
+pub enum HarnessWorkOrderSubmissionInsertError {
+    /// The declared work order does not exist.
+    #[error("work order was not found")]
+    MissingWorkOrder,
+    /// The declared repair parent does not exist.
+    #[error("submission parent was not found")]
+    MissingParent,
+    /// The declared repair parent belongs to another work order.
+    #[error("submission parent belongs to a different work order")]
+    ParentWorkOrderMismatch,
+    /// The work order already has the maximum number of submissions.
+    #[error("work order submission limit reached")]
+    SubmissionLimitReached,
+    /// A database, serialization, or other storage failure occurred.
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+}
+
+impl From<sqlx::Error> for HarnessWorkOrderSubmissionInsertError {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Storage(StorageError::Db(error))
+    }
+}
 
 /// The service-owned qualification phase recorded for an attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -240,11 +267,12 @@ impl Store {
     pub async fn insert_harness_work_order_submission(
         &self,
         record: &HarnessWorkOrderSubmissionRecord,
-    ) -> Result<HarnessWorkOrderSubmissionRecord, StorageError> {
+    ) -> Result<HarnessWorkOrderSubmissionRecord, HarnessWorkOrderSubmissionInsertError> {
         let mut transaction = self.pool().begin().await?;
         if let Some(existing) = load_submission(&mut *transaction, record.id).await? {
             transaction.commit().await?;
-            return exact_or_conflict(existing, record, "submission identifier conflicts");
+            return exact_or_conflict(existing, record, "submission identifier conflicts")
+                .map_err(Into::into);
         }
         if let Some(existing) = load_submission_identity(&mut transaction, record).await? {
             transaction.commit().await?;
@@ -256,10 +284,7 @@ impl Store {
                 .fetch_optional(&mut *transaction)
                 .await?;
         if work_order_exists.is_none() {
-            return Err(StorageError::NotFound(format!(
-                "work order {}",
-                record.work_order_id
-            )));
+            return Err(HarnessWorkOrderSubmissionInsertError::MissingWorkOrder);
         }
         if let Some(parent_id) = record.parent_submission_id {
             let parent_work_order: Option<String> = sqlx::query_scalar(
@@ -271,15 +296,9 @@ impl Store {
             match parent_work_order {
                 Some(parent_work_order) if parent_work_order == record.work_order_id => {}
                 Some(_) => {
-                    return Err(StorageError::InvalidData(
-                        "submission parent belongs to a different work order".to_owned(),
-                    ));
+                    return Err(HarnessWorkOrderSubmissionInsertError::ParentWorkOrderMismatch);
                 }
-                None => {
-                    return Err(StorageError::NotFound(format!(
-                        "submission parent {parent_id}"
-                    )));
-                }
+                None => return Err(HarnessWorkOrderSubmissionInsertError::MissingParent),
             }
         }
         let submission_count: i64 = sqlx::query_scalar(
@@ -289,9 +308,7 @@ impl Store {
         .fetch_one(&mut *transaction)
         .await?;
         if submission_count >= i64::from(MAX_WORK_ORDER_SUBMISSIONS) {
-            return Err(StorageError::InvalidData(
-                "work order submission limit reached".to_owned(),
-            ));
+            return Err(HarnessWorkOrderSubmissionInsertError::SubmissionLimitReached);
         }
         sqlx::query(
             "INSERT INTO harness_work_order_submissions
