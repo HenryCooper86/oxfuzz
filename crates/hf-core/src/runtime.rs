@@ -183,21 +183,30 @@ pub fn posix_relative(path: &std::path::Path) -> String {
         .join("/")
 }
 
-/// Whether `value` is the fixed sandbox workspace or one canonical descendant.
-///
-/// This accepts only POSIX spellings that cannot escape `/work`: components
-/// must be non-empty normal names, so dot segments, duplicate separators,
-/// trailing separators, and backslashes are rejected before a path API can
-/// normalize them.
+/// Classification of a value relative to the fixed `/work` sandbox namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FixedSandboxIncludePath {
+    /// The value does not name the `/work` namespace.
+    Outside,
+    /// `/work` or a canonical descendant composed of safe POSIX components.
+    Canonical,
+    /// A noncanonical spelling within the `/work` namespace.
+    Invalid,
+}
+
+/// Classify fixed-sandbox include paths without normalizing unsafe spellings.
 #[must_use]
-pub fn is_fixed_sandbox_include_path(value: &str) -> bool {
+pub fn classify_fixed_sandbox_include_path(value: &str) -> FixedSandboxIncludePath {
     if value == "/work" {
-        return true;
+        return FixedSandboxIncludePath::Canonical;
+    }
+    if value.starts_with("/work\\") {
+        return FixedSandboxIncludePath::Invalid;
     }
     let Some(descendant) = value.strip_prefix("/work/") else {
-        return false;
+        return FixedSandboxIncludePath::Outside;
     };
-    !descendant.is_empty()
+    if !descendant.is_empty()
         && !value.contains('\\')
         && descendant.split('/').all(|component| {
             !component.is_empty()
@@ -205,6 +214,11 @@ pub fn is_fixed_sandbox_include_path(value: &str) -> bool {
                 && component != ".."
                 && !component.chars().any(char::is_control)
         })
+    {
+        FixedSandboxIncludePath::Canonical
+    } else {
+        FixedSandboxIncludePath::Invalid
+    }
 }
 
 impl SandboxMount {
@@ -399,32 +413,38 @@ pub trait RuntimeAdapter: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_fixed_sandbox_include_path, posix_relative, CommandResult, CommandTermination,
-        ImmutableImageReference,
+        classify_fixed_sandbox_include_path, posix_relative, CommandResult, CommandTermination,
+        FixedSandboxIncludePath, ImmutableImageReference,
     };
 
     #[test]
-    fn fixed_sandbox_include_paths_require_canonical_work_descendants() {
+    fn fixed_sandbox_include_paths_classify_canonical_and_invalid_spellings() {
         for accepted in ["/work", "/work/include", "/work/a/b"] {
-            assert!(
-                is_fixed_sandbox_include_path(accepted),
+            assert_eq!(
+                classify_fixed_sandbox_include_path(accepted),
+                FixedSandboxIncludePath::Canonical,
                 "must accept {accepted}"
             );
         }
-        for rejected in [
+        for invalid in [
             "/work/../etc",
             "/work/./include",
             "/work//include",
             "/work/include/",
             "/work\\include",
-            "/workx/include",
+            "/work/include\n",
             "/work/",
         ] {
-            assert!(
-                !is_fixed_sandbox_include_path(rejected),
-                "must reject {rejected}"
+            assert_eq!(
+                classify_fixed_sandbox_include_path(invalid),
+                FixedSandboxIncludePath::Invalid,
+                "must reject {invalid}"
             );
         }
+        assert_eq!(
+            classify_fixed_sandbox_include_path("/workx/include"),
+            FixedSandboxIncludePath::Outside
+        );
     }
 
     #[test]

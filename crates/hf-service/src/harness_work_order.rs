@@ -6,7 +6,9 @@
 use std::{error::Error, fmt, fmt::Write as _, path::Path};
 
 use hf_core::{
-    engine::EngineKind, error::ClassifiedError, runtime::is_fixed_sandbox_include_path,
+    engine::EngineKind,
+    error::ClassifiedError,
+    runtime::{classify_fixed_sandbox_include_path, FixedSandboxIncludePath},
     target::TargetLanguage,
 };
 use hf_harness::{harness_rules, HarnessRuleSummary, LintSeverity};
@@ -627,10 +629,14 @@ fn validate_project_relative_path(value: &str) -> Result<(), HarnessWorkOrderErr
 }
 
 fn validate_compile_include_path(value: &str) -> Result<(), HarnessWorkOrderError> {
-    if is_fixed_sandbox_include_path(value) {
-        return Ok(());
+    match classify_fixed_sandbox_include_path(value) {
+        FixedSandboxIncludePath::Canonical => Ok(()),
+        FixedSandboxIncludePath::Invalid => Err(HarnessWorkOrderError::validation(
+            HarnessWorkOrderErrorCode::InvalidProjectPath,
+            "packet path is a noncanonical fixed sandbox include path",
+        )),
+        FixedSandboxIncludePath::Outside => validate_project_relative_path(value),
     }
-    validate_project_relative_path(value)
 }
 
 fn validate_sha256(value: &str, subject: &str) -> Result<(), HarnessWorkOrderError> {

@@ -660,7 +660,7 @@ async fn service_work_order_reads_reject_malformed_and_digest_invalid_durable_pa
     invalid_packet.id = invalid_id.clone();
     store
         .insert_harness_work_order(&hf_storage::HarnessWorkOrderRecord {
-            id: invalid_id,
+            id: invalid_id.clone(),
             target_id: uuid::Uuid::new_v4(),
             project_root: "/retained/other".to_owned(),
             schema_version: packet.schema_version,
@@ -677,6 +677,14 @@ async fn service_work_order_reads_reject_malformed_and_digest_invalid_durable_pa
             .harness_work_order_by_id(&malformed_id)
             .await
             .expect_err("malformed durable packet must fail")
+            .code,
+        HarnessWorkOrderErrorCode::InvalidWorkOrderDigest
+    );
+    assert_eq!(
+        container
+            .harness_work_order_by_id(&invalid_id)
+            .await
+            .expect_err("digest-invalid durable packet must fail directly")
             .code,
         HarnessWorkOrderErrorCode::InvalidWorkOrderDigest
     );

@@ -10,7 +10,7 @@ use chrono::Utc;
 use hf_core::{
     build::BuildContext,
     engine::EngineKind,
-    runtime::is_fixed_sandbox_include_path,
+    runtime::{classify_fixed_sandbox_include_path, FixedSandboxIncludePath},
     target::{TargetCandidate, TargetLanguage},
 };
 use hf_storage::HarnessWorkOrderRecord;
@@ -337,20 +337,24 @@ fn bounded_excerpt(lines: &[&str]) -> (String, bool) {
         if index == MAX_WORK_ORDER_SOURCE_EXCERPT_LINES {
             return (excerpt, true);
         }
-        let separator = usize::from(!excerpt.is_empty());
+        let separator = usize::from(index > 0);
         let available = MAX_WORK_ORDER_SOURCE_EXCERPT_BYTES.saturating_sub(excerpt.len());
         if separator + line.len() > available {
-            if separator == 1 && available <= separator {
+            if line.is_empty() {
+                return (excerpt, true);
+            }
+            let line_bytes = available.saturating_sub(separator);
+            let prefix_len = utf8_prefix_len(line, line_bytes);
+            if prefix_len == 0 {
                 return (excerpt, true);
             }
             if separator == 1 {
                 excerpt.push('\n');
             }
-            let remaining = MAX_WORK_ORDER_SOURCE_EXCERPT_BYTES - excerpt.len();
-            excerpt.push_str(&line[..utf8_prefix_len(line, remaining)]);
+            excerpt.push_str(&line[..prefix_len]);
             return (excerpt, true);
         }
-        if !excerpt.is_empty() {
+        if separator == 1 {
             excerpt.push('\n');
         }
         excerpt.push_str(line);
@@ -392,11 +396,15 @@ fn normalized_build_context(
 }
 
 fn normalized_include_path(project: &Path, path: &Path) -> Result<String, HarnessWorkOrderError> {
-    if let Some(value) = path
-        .to_str()
-        .filter(|value| is_fixed_sandbox_include_path(value))
-    {
-        return Ok(value.to_owned());
+    match path.to_str().map(classify_fixed_sandbox_include_path) {
+        Some(FixedSandboxIncludePath::Canonical) => {
+            return path
+                .to_str()
+                .map(str::to_owned)
+                .ok_or_else(invalid_project_path);
+        }
+        Some(FixedSandboxIncludePath::Invalid) => return Err(invalid_project_path()),
+        Some(FixedSandboxIncludePath::Outside) | None => {}
     }
     let relative = if path.is_absolute() {
         path.strip_prefix(project)
@@ -566,5 +574,27 @@ mod tests {
             MAX_WORK_ORDER_SOURCE_EXCERPT_LINES
         );
         assert!(truncated);
+    }
+
+    #[test]
+    fn bounded_excerpt_preserves_leading_empty_lines_without_separator_only_truncation() {
+        assert_eq!(
+            bounded_excerpt(&["", "first"]),
+            ("\nfirst".to_owned(), false)
+        );
+
+        let prefix = "x".repeat(MAX_WORK_ORDER_SOURCE_EXCERPT_BYTES - 2);
+        let (excerpt, truncated) = bounded_excerpt(&[&prefix, "é"]);
+        assert_eq!(excerpt, prefix);
+        assert!(truncated);
+    }
+
+    #[test]
+    fn normalized_include_rejects_invalid_fixed_paths_under_work_root() {
+        assert!(super::normalized_include_path(
+            std::path::Path::new("/work"),
+            std::path::Path::new("/work/./include")
+        )
+        .is_err());
     }
 }
