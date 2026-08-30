@@ -183,6 +183,30 @@ pub fn posix_relative(path: &std::path::Path) -> String {
         .join("/")
 }
 
+/// Whether `value` is the fixed sandbox workspace or one canonical descendant.
+///
+/// This accepts only POSIX spellings that cannot escape `/work`: components
+/// must be non-empty normal names, so dot segments, duplicate separators,
+/// trailing separators, and backslashes are rejected before a path API can
+/// normalize them.
+#[must_use]
+pub fn is_fixed_sandbox_include_path(value: &str) -> bool {
+    if value == "/work" {
+        return true;
+    }
+    let Some(descendant) = value.strip_prefix("/work/") else {
+        return false;
+    };
+    !descendant.is_empty()
+        && !value.contains('\\')
+        && descendant.split('/').all(|component| {
+            !component.is_empty()
+                && component != "."
+                && component != ".."
+                && !component.chars().any(char::is_control)
+        })
+}
+
 impl SandboxMount {
     /// Construct a writable bind mount.
     #[must_use]
@@ -374,7 +398,34 @@ pub trait RuntimeAdapter: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::{posix_relative, CommandResult, CommandTermination, ImmutableImageReference};
+    use super::{
+        is_fixed_sandbox_include_path, posix_relative, CommandResult, CommandTermination,
+        ImmutableImageReference,
+    };
+
+    #[test]
+    fn fixed_sandbox_include_paths_require_canonical_work_descendants() {
+        for accepted in ["/work", "/work/include", "/work/a/b"] {
+            assert!(
+                is_fixed_sandbox_include_path(accepted),
+                "must accept {accepted}"
+            );
+        }
+        for rejected in [
+            "/work/../etc",
+            "/work/./include",
+            "/work//include",
+            "/work/include/",
+            "/work\\include",
+            "/workx/include",
+            "/work/",
+        ] {
+            assert!(
+                !is_fixed_sandbox_include_path(rejected),
+                "must reject {rejected}"
+            );
+        }
+    }
 
     #[test]
     fn posix_relative_joins_components_with_forward_slashes() {

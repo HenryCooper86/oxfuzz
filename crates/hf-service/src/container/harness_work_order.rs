@@ -10,6 +10,7 @@ use chrono::Utc;
 use hf_core::{
     build::BuildContext,
     engine::EngineKind,
+    runtime::is_fixed_sandbox_include_path,
     target::{TargetCandidate, TargetLanguage},
 };
 use hf_storage::HarnessWorkOrderRecord;
@@ -337,8 +338,12 @@ fn bounded_excerpt(lines: &[&str]) -> (String, bool) {
             return (excerpt, true);
         }
         let separator = usize::from(!excerpt.is_empty());
-        if excerpt.len() + separator + line.len() > MAX_WORK_ORDER_SOURCE_EXCERPT_BYTES {
-            if !excerpt.is_empty() {
+        let available = MAX_WORK_ORDER_SOURCE_EXCERPT_BYTES.saturating_sub(excerpt.len());
+        if separator + line.len() > available {
+            if separator == 1 && available <= separator {
+                return (excerpt, true);
+            }
+            if separator == 1 {
                 excerpt.push('\n');
             }
             let remaining = MAX_WORK_ORDER_SOURCE_EXCERPT_BYTES - excerpt.len();
@@ -387,11 +392,11 @@ fn normalized_build_context(
 }
 
 fn normalized_include_path(project: &Path, path: &Path) -> Result<String, HarnessWorkOrderError> {
-    if path == Path::new("/work") || path.starts_with("/work/") {
-        return path
-            .to_str()
-            .map(str::to_owned)
-            .ok_or_else(invalid_project_path);
+    if let Some(value) = path
+        .to_str()
+        .filter(|value| is_fixed_sandbox_include_path(value))
+    {
+        return Ok(value.to_owned());
     }
     let relative = if path.is_absolute() {
         path.strip_prefix(project)
@@ -404,6 +409,9 @@ fn normalized_include_path(project: &Path, path: &Path) -> Result<String, Harnes
         .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
     {
         return Err(invalid_project_path());
+    }
+    if relative.as_os_str().is_empty() {
+        return Ok(".".to_owned());
     }
     relative
         .to_str()
@@ -524,4 +532,39 @@ fn open_regular_file_beneath(
         HarnessWorkOrderErrorCode::InvalidProjectPath,
         "descriptor-confined project reads are unavailable on this platform",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bounded_excerpt;
+    use crate::harness_work_order::{
+        MAX_WORK_ORDER_SOURCE_EXCERPT_BYTES, MAX_WORK_ORDER_SOURCE_EXCERPT_LINES,
+    };
+
+    #[test]
+    fn bounded_excerpt_honors_byte_and_line_limits_on_utf8_edges() {
+        let exact = "x".repeat(MAX_WORK_ORDER_SOURCE_EXCERPT_BYTES);
+        assert_eq!(bounded_excerpt(&[&exact]), (exact, false));
+
+        let first = "x".repeat(MAX_WORK_ORDER_SOURCE_EXCERPT_BYTES);
+        let (next_line, truncated) = bounded_excerpt(&[&first, "next"]);
+        assert_eq!(next_line.len(), MAX_WORK_ORDER_SOURCE_EXCERPT_BYTES);
+        assert!(!next_line.ends_with('\n'));
+        assert!(truncated);
+
+        let prefix = "x".repeat(MAX_WORK_ORDER_SOURCE_EXCERPT_BYTES - 4);
+        let (multibyte, truncated) = bounded_excerpt(&[&prefix, "éé"]);
+        assert_eq!(multibyte.len(), MAX_WORK_ORDER_SOURCE_EXCERPT_BYTES - 1);
+        assert!(multibyte.ends_with("\né"));
+        assert!(truncated);
+
+        let lines = std::iter::repeat_n("line", MAX_WORK_ORDER_SOURCE_EXCERPT_LINES + 1)
+            .collect::<Vec<_>>();
+        let (line_limited, truncated) = bounded_excerpt(&lines);
+        assert_eq!(
+            line_limited.lines().count(),
+            MAX_WORK_ORDER_SOURCE_EXCERPT_LINES
+        );
+        assert!(truncated);
+    }
 }
