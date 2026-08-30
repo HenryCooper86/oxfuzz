@@ -212,38 +212,65 @@ impl QualificationFixture {
         target: &str,
         duplicate_symbol: bool,
     ) -> Self {
+        let mut candidates = vec![("parser.c", "parse_packet")];
+        if duplicate_symbol {
+            candidates.push(("alternate.c", "parse_packet"));
+        }
+        let selected_file = if duplicate_symbol {
+            "alternate.c"
+        } else {
+            "parser.c"
+        };
+        Self::new_with_candidates(
+            runtime_mode,
+            review_mode,
+            source,
+            target,
+            selected_file,
+            TargetLanguage::C,
+            candidates,
+        )
+        .await
+    }
+
+    async fn new_with_candidates(
+        runtime_mode: RuntimeMode,
+        review_mode: ReviewMode,
+        source: &str,
+        target: &str,
+        selected_file: &str,
+        language: TargetLanguage,
+        candidate_specs: Vec<(&str, &str)>,
+    ) -> Self {
         common::install_managed_workspace("oxfuzz_work_order_qualification_it");
         let root = tempfile::tempdir().expect("create qualification root");
         let project = root.path().join("project");
         std::fs::create_dir_all(&project).expect("create qualification project");
-        std::fs::write(
-            project.join("parser.c"),
-            "#include <stddef.h>\nint parse_packet(const unsigned char *data, size_t size) { return size > 0 && data[0]; }\n",
-        )
-        .expect("write candidate source");
-        if duplicate_symbol {
-            std::fs::write(
-                project.join("alternate.c"),
-                "#include <stddef.h>\nint parse_packet(const unsigned char *data, size_t size) { return size > 1 && data[1]; }\n",
-            )
-            .expect("write duplicate-symbol source");
+        for (index, (file, symbol)) in candidate_specs.iter().enumerate() {
+            let source = if symbol.contains("::") {
+                format!(
+                    "#include <cstddef>\nnamespace ns {{ int parse_packet(const unsigned char *data, std::size_t size) {{ return size > {index} && data[{index}]; }} }}\n"
+                )
+            } else {
+                format!(
+                    "#include <stddef.h>\nint parse_packet(const unsigned char *data, size_t size) {{ return size > {index} && data[{index}]; }}\n"
+                )
+            };
+            std::fs::write(project.join(file), source).expect("write candidate source");
         }
-        write_compile_database(&project, "WORK_ORDER=1");
+        write_compile_database_for(&project, "WORK_ORDER=1", candidate_specs[0].0, language);
         let store = Arc::new(
             hf_storage::Store::connect(root.path().join("qualification.db"))
                 .await
                 .expect("create qualification store"),
         );
-        let mut candidates = vec![retained_target(&project)];
-        if duplicate_symbol {
-            candidates.push(retained_target_at(&project, "alternate.c"));
-        }
-        let target_file = target
-            .rsplit_once("::")
-            .map_or("parser.c", |(file, _)| file);
+        let candidates = candidate_specs
+            .iter()
+            .map(|(file, symbol)| retained_target_named_at(&project, file, symbol, language))
+            .collect::<Vec<_>>();
         let target_id = candidates
             .iter()
-            .find(|candidate| candidate.location.file == Path::new(target_file))
+            .find(|candidate| candidate.location.file == Path::new(selected_file))
             .expect("selected fixture target exists")
             .id;
         store
@@ -262,7 +289,7 @@ impl QualificationFixture {
         let service = ServiceContainer::new(runtime.clone(), Some(review.clone()))
             .with_store(Arc::clone(&store));
         let packet = service
-            .export_harness_work_order(export_request_for_target(&project, target))
+            .export_harness_work_order(export_request_for_target(&project, target, language))
             .await
             .expect("export qualification packet");
         let submission = service
@@ -299,16 +326,17 @@ impl QualificationFixture {
     }
 }
 
-fn retained_target(project: &Path) -> TargetCandidate {
-    retained_target_at(project, "parser.c")
-}
-
-fn retained_target_at(project: &Path, file: &str) -> TargetCandidate {
+fn retained_target_named_at(
+    project: &Path,
+    file: &str,
+    symbol: &str,
+    language: TargetLanguage,
+) -> TargetCandidate {
     TargetCandidate {
         id: Uuid::new_v4(),
         project_root: std::fs::canonicalize(project).expect("canonicalize project"),
-        language: TargetLanguage::C,
-        symbol: "parse_packet".to_owned(),
+        language,
+        symbol: symbol.to_owned(),
         kind: TargetKind::Parser,
         location: SourceLocation {
             file: PathBuf::from(file),
@@ -329,10 +357,18 @@ fn retained_target_at(project: &Path, file: &str) -> TargetCandidate {
 }
 
 fn write_compile_database(project: &Path, define: &str) {
+    write_compile_database_for(project, define, "parser.c", TargetLanguage::C);
+}
+
+fn write_compile_database_for(project: &Path, define: &str, file: &str, language: TargetLanguage) {
+    let (compiler, standard) = match language {
+        TargetLanguage::Cpp => ("c++", "-std=c++17"),
+        _ => ("cc", "-std=c11"),
+    };
     let database = serde_json::json!([{
         "directory": project,
-        "file": project.join("parser.c"),
-        "arguments": ["cc", format!("-D{define}"), "-std=c11", "-c", "parser.c"],
+        "file": project.join(file),
+        "arguments": [compiler, format!("-D{define}"), standard, "-c", file],
     }]);
     std::fs::write(
         project.join("compile_commands.json"),
@@ -341,11 +377,15 @@ fn write_compile_database(project: &Path, define: &str) {
     .expect("write compile database");
 }
 
-fn export_request_for_target(project: &Path, target: &str) -> HarnessWorkOrderExportRequest {
+fn export_request_for_target(
+    project: &Path,
+    target: &str,
+    language: TargetLanguage,
+) -> HarnessWorkOrderExportRequest {
     HarnessWorkOrderExportRequest {
         project: project.to_path_buf(),
         target: target.to_owned(),
-        language: TargetLanguage::C,
+        language,
         engine: EngineKind::LibFuzzer,
     }
 }
@@ -1477,6 +1517,38 @@ async fn qualification_preserves_file_qualified_target_across_every_stage() {
         .expect("lock controlled runtime workspaces");
     assert_eq!(workspaces.len(), 2);
     assert_eq!(workspaces[0], workspaces[1]);
+}
+
+#[tokio::test]
+async fn qualification_preserves_file_qualified_namespaced_symbol() {
+    let fixture = QualificationFixture::new_with_candidates(
+        RuntimeMode::Pass,
+        ReviewMode::Approve,
+        VALID_HARNESS,
+        "alternate.cpp::ns::parse_packet",
+        "alternate.cpp",
+        TargetLanguage::Cpp,
+        vec![
+            ("parser.cpp", "ns::parse_packet"),
+            ("alternate.cpp", "ns::parse_packet"),
+        ],
+    )
+    .await;
+
+    let attempt = fixture
+        .service
+        .qualify_harness_work_order_submission(fixture.submission.id)
+        .await
+        .expect("qualify the retained namespaced target");
+
+    assert_eq!(attempt.status, HarnessWorkOrderAttemptStatus::SmokePassed);
+    let harness = fixture
+        .store
+        .get_harness(attempt.harness_id.expect("qualified harness id"))
+        .await
+        .expect("load qualified harness")
+        .expect("qualified harness exists");
+    assert_eq!(harness.target_id, fixture.target_id);
 }
 
 #[tokio::test]
