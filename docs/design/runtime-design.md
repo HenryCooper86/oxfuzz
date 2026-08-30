@@ -115,6 +115,9 @@ uses `SandboxNetworkMode::Host` with only `SandboxCapability::NetRaw`. These are
 typed runtime options rather than a boolean network switch or arbitrary
 capability/device flags; all retain capability dropping and
 `no-new-privileges`, and automotive flows do not select `Bridge` by default.
+The runtime rejects this host-network/raw-socket profile unless the image is a
+direct lowercase `sha256:<image-id>` resolved by the service for that operation;
+a tag or named digest is insufficient at this final execution check.
 
 A virtual profile exposes only a service-allowlisted vcan interface. A physical
 profile is disabled by default and requires the service to validate the exact
@@ -182,6 +185,12 @@ aggregate run-directory budget; either limit stops the run before oversized
 output is accepted as retained evidence.
 
 ## 5. Failure Semantics
+
+Production runtime construction and system-readiness reporting resolve the
+same `HF_USE_DOCKER` decision. When Docker execution is explicitly disabled,
+the service installs the refusing stub runtime and diagnostics report Docker,
+the sandbox image, and its engines as unavailable even if an unrelated local
+daemon happens to be reachable.
 
 Spawn errors, invalid workspace paths, and failed forced teardown are sandbox
 errors. Once a command has started, its result carries one explicit terminal

@@ -7,7 +7,7 @@
 #![cfg(feature = "build-doctor")]
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
 use hf_core::error::ClassifiedError;
@@ -20,6 +20,7 @@ use hf_service::{RunBuildPlanRequest, ServiceContainer};
 /// A runtime double that records commands and optionally writes the database.
 struct BuildRuntime {
     calls: Mutex<Vec<Vec<String>>>,
+    working_directories: Mutex<Vec<PathBuf>>,
     exit_code: i32,
     write_artifact: Option<PathBuf>,
 }
@@ -28,6 +29,7 @@ impl BuildRuntime {
     fn new(exit_code: i32, write_artifact: Option<PathBuf>) -> Arc<Self> {
         Arc::new(Self {
             calls: Mutex::new(Vec::new()),
+            working_directories: Mutex::new(Vec::new()),
             exit_code,
             write_artifact,
         })
@@ -35,6 +37,10 @@ impl BuildRuntime {
 
     fn calls(&self) -> Vec<Vec<String>> {
         self.calls.lock().unwrap().clone()
+    }
+
+    fn working_directories(&self) -> Vec<PathBuf> {
+        self.working_directories.lock().unwrap().clone()
     }
 }
 
@@ -54,6 +60,10 @@ impl RuntimeAdapter for BuildRuntime {
         _limits: &ResourceLimits,
     ) -> Result<CommandResult, ClassifiedError> {
         self.calls.lock().unwrap().push(cmd.to_vec());
+        self.working_directories
+            .lock()
+            .unwrap()
+            .push(cwd.to_path_buf());
         if self.exit_code == 0 {
             if let Some(relative) = &self.write_artifact {
                 let path = cwd.join(relative);
@@ -97,11 +107,27 @@ impl RuntimeAdapter for BuildRuntime {
 }
 
 fn cmake_project() -> tempfile::TempDir {
+    build_workspace_root();
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("CMakeLists.txt"), b"project(p)\n").unwrap();
     std::fs::write(dir.path().join("a.c"), b"int main(void){return 0;}\n").unwrap();
     std::fs::create_dir_all(dir.path().join("include")).unwrap();
     dir
+}
+
+fn build_workspace_root() -> &'static Path {
+    static ROOT: OnceLock<PathBuf> = OnceLock::new();
+    ROOT.get_or_init(|| {
+        let root = std::env::temp_dir().join(format!(
+            "oxfuzz_build_doctor_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        // SAFETY: every test in this integration-test process initializes the
+        // same OnceLock value and no test writes a different workspace root.
+        unsafe { std::env::set_var("HF_WORKSPACE_DIR", &root) };
+        hf_service::initialize_workspace_root().unwrap()
+    })
 }
 
 fn request(project: &Path) -> RunBuildPlanRequest {
@@ -114,6 +140,7 @@ fn request(project: &Path) -> RunBuildPlanRequest {
 #[tokio::test]
 async fn a_successful_run_executes_the_plan_in_the_sandbox_and_resolves_the_database() {
     let project = cmake_project();
+    let project_root = std::fs::canonicalize(project.path()).unwrap();
     let runtime = BuildRuntime::new(
         0,
         Some(PathBuf::from(".oxfuzz-build/compile_commands.json")),
@@ -138,6 +165,16 @@ async fn a_successful_run_executes_the_plan_in_the_sandbox_and_resolves_the_data
     assert!(calls[0]
         .iter()
         .any(|arg| arg == "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"));
+    let working_directories = runtime.working_directories();
+    assert!(
+        working_directories[0].starts_with(build_workspace_root()),
+        "untrusted build ran outside the managed workspace: {}",
+        working_directories[0].display()
+    );
+    assert_ne!(
+        working_directories[0], project_root,
+        "the runtime must execute a staged project, not mount the operator's source tree"
+    );
 }
 
 #[tokio::test]

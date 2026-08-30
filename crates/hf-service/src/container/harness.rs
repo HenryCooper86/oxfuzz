@@ -8,9 +8,11 @@ use hf_core::build::BuildContext;
 use hf_core::engine::{EngineKind, FuzzRunConfig};
 use hf_core::error::ClassifiedError;
 use hf_core::harness::{Harness, HarnessDraft, HarnessStatus};
+use hf_core::provider::{ChatRequest, ChatResponse, FinishReason, LlmProvider as _};
 use hf_core::target::{Sanitizer, TargetCandidate, TargetLanguage};
+use hf_core::types::Message;
 use hf_guardrails::Action;
-use hf_storage::{RunKind, RunRecord, RunStatus};
+use hf_storage::{HarnessAiReviewRecord, RunKind, RunRecord, RunStatus, Store};
 use uuid::Uuid;
 
 use super::coverage_cache::frontier_refine_lines;
@@ -28,7 +30,7 @@ use super::project_identity::{
 };
 use super::staging::{
     qualification_evidence, resolve_run_sandbox_image, retain_run_context, run_context_digests,
-    stage_run_artifacts, verify_run_artifacts,
+    sha256_file, stage_run_artifacts, verify_run_artifacts,
 };
 use super::workspace::{
     prepare_configured_workspace_root, workspace_dir, workspace_relative_record,
@@ -38,6 +40,62 @@ use super::{
     CompileOutcome, HarnessGenOutcome, LlmProviderBridge, SeedEntry, ServiceContainer,
     SMOKE_FUZZ_SECS,
 };
+
+/// Maximum complete source revision accepted by the mandatory model review.
+const MAX_HARNESS_REVIEW_SOURCE_BYTES: usize = 64 * 1024;
+/// Maximum normalized provider response retained as review evidence.
+const MAX_HARNESS_REVIEW_RESPONSE_BYTES: usize = 64 * 1024;
+const MAX_HARNESS_REVIEW_REASONS: usize = 32;
+const MAX_HARNESS_REVIEW_REASON_BYTES: usize = 1024;
+const HARNESS_AI_REVIEW_SCHEMA_VERSION: u32 = 1;
+const HARNESS_AI_REVIEW_PROMPT_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HarnessPreExecutionOpinion {
+    exercises_target: bool,
+    safe_to_execute: bool,
+    reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HarnessAiReviewEvidence {
+    schema_version: u32,
+    prompt_version: u32,
+    target: String,
+    opinion: HarnessPreExecutionOpinion,
+    response: ChatResponse,
+}
+
+fn validate_harness_review_opinion(
+    opinion: &HarnessPreExecutionOpinion,
+) -> Result<(), ClassifiedError> {
+    if opinion.reasons.is_empty()
+        || opinion.reasons.len() > MAX_HARNESS_REVIEW_REASONS
+        || opinion.reasons.iter().any(|reason| {
+            reason.trim().is_empty() || reason.len() > MAX_HARNESS_REVIEW_REASON_BYTES
+        })
+    {
+        return Err(ClassifiedError::Provider(
+            "LLM harness review returned invalid or unbounded reasons".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn enforce_positive_harness_review(
+    opinion: &HarnessPreExecutionOpinion,
+) -> Result<(), ClassifiedError> {
+    validate_harness_review_opinion(opinion)?;
+    if opinion.exercises_target && opinion.safe_to_execute {
+        return Ok(());
+    }
+    Err(ClassifiedError::Harness(format!(
+        "LLM review refused harness execution: {}",
+        opinion.reasons.join("; ")
+    )))
+}
 
 /// The project's compile context for prompt rendering, or `None` when it ships
 /// no database or the database cannot be read.
@@ -96,14 +154,126 @@ fn project_compile_flags(
 /// Compile-database support is not built in, so a harness compiles with the
 /// engine arguments alone.
 #[cfg(not(feature = "build-context"))]
-fn project_compile_flags(
-    _container: &ServiceContainer,
-    _project: &Path,
-) -> Result<Vec<String>, ClassifiedError> {
-    Ok(Vec::new())
+fn project_compile_flags(_container: &ServiceContainer, _project: &Path) -> Vec<String> {
+    Vec::new()
 }
 
 impl ServiceContainer {
+    async fn require_harness_ai_review(
+        &self,
+        store: &Store,
+        harness: &Harness,
+        target: &str,
+        binary_sha256: &str,
+    ) -> Result<(), ClassifiedError> {
+        let source_sha256 = sha256_hex(harness.source.as_bytes());
+        if let Some(record) = store.harness_ai_review(harness.id).await? {
+            if record.source_sha256 != source_sha256 {
+                return Err(ClassifiedError::Storage(format!(
+                    "stored LLM review for harness {} belongs to a different source digest",
+                    harness.id
+                )));
+            }
+            if record.binary_sha256 != binary_sha256 {
+                return Err(ClassifiedError::Validation(format!(
+                    "compiled binary digest no longer matches the LLM review for harness {}",
+                    harness.id
+                )));
+            }
+            let evidence: HarnessAiReviewEvidence = serde_json::from_str(&record.review_json)
+                .map_err(|error| {
+                    ClassifiedError::Storage(format!(
+                        "stored LLM review for harness {} is malformed: {error}",
+                        harness.id
+                    ))
+                })?;
+            if evidence.schema_version != HARNESS_AI_REVIEW_SCHEMA_VERSION
+                || evidence.prompt_version != HARNESS_AI_REVIEW_PROMPT_VERSION
+                || evidence.target != target
+                || evidence.response.finish_reason != FinishReason::Stop
+            {
+                return Err(ClassifiedError::Storage(format!(
+                    "stored LLM review for harness {} has invalid provenance",
+                    harness.id
+                )));
+            }
+            let response_opinion: HarnessPreExecutionOpinion =
+                serde_json::from_str(evidence.response.text().trim()).map_err(|error| {
+                    ClassifiedError::Storage(format!(
+                        "stored LLM review response for harness {} is malformed: {error}",
+                        harness.id
+                    ))
+                })?;
+            if response_opinion != evidence.opinion {
+                return Err(ClassifiedError::Storage(format!(
+                    "stored LLM review for harness {} has inconsistent evidence",
+                    harness.id
+                )));
+            }
+            return enforce_positive_harness_review(&evidence.opinion);
+        }
+
+        if harness.source.len() > MAX_HARNESS_REVIEW_SOURCE_BYTES {
+            return Err(ClassifiedError::Validation(format!(
+                "harness source is {} bytes; the exact-source LLM review limit is {} bytes",
+                harness.source.len(),
+                MAX_HARNESS_REVIEW_SOURCE_BYTES
+            )));
+        }
+        let pool = self.provider_pool().ok_or_else(|| {
+            ClassifiedError::Provider(
+                "harness execution requires an independent LLM review, but no LLM provider is configured"
+                    .to_owned(),
+            )
+        })?;
+        let prompt = hf_prompt::render_harness_pre_execution_review_prompt(target, &harness.source);
+        let provider = LlmProviderBridge::new(pool).with_diagnostics(
+            Arc::clone(&self.diagnostics),
+            "harness_pre_execution_review",
+        );
+        let request = ChatRequest::from_messages(vec![Message::user(prompt)]);
+        let response = provider.chat_completion(&request).await.map_err(|error| {
+            ClassifiedError::Provider(format!("LLM harness review failed: {error}"))
+        })?;
+        if response.finish_reason != FinishReason::Stop {
+            return Err(ClassifiedError::Provider(format!(
+                "LLM harness review did not complete normally: {:?}",
+                response.finish_reason
+            )));
+        }
+        let serialized_response = serde_json::to_vec(&response)
+            .map_err(|error| ClassifiedError::Provider(error.to_string()))?;
+        if serialized_response.len() > MAX_HARNESS_REVIEW_RESPONSE_BYTES {
+            return Err(ClassifiedError::Provider(format!(
+                "LLM harness review response exceeded {MAX_HARNESS_REVIEW_RESPONSE_BYTES} bytes"
+            )));
+        }
+        let opinion: HarnessPreExecutionOpinion = serde_json::from_str(response.text().trim())
+            .map_err(|error| {
+                ClassifiedError::Provider(format!(
+                    "LLM harness review returned malformed JSON: {error}"
+                ))
+            })?;
+        validate_harness_review_opinion(&opinion)?;
+        let evidence = HarnessAiReviewEvidence {
+            schema_version: HARNESS_AI_REVIEW_SCHEMA_VERSION,
+            prompt_version: HARNESS_AI_REVIEW_PROMPT_VERSION,
+            target: target.to_owned(),
+            opinion: opinion.clone(),
+            response,
+        };
+        let review = HarnessAiReviewRecord {
+            harness_id: harness.id,
+            source_sha256,
+            binary_sha256: binary_sha256.to_owned(),
+            review_json: serde_json::to_string(&evidence)
+                .map_err(|error| ClassifiedError::Storage(error.to_string()))?,
+            reviewed_at: Utc::now(),
+        };
+        store.record_harness_ai_review(&review).await?;
+        enforce_positive_harness_review(&opinion)
+    }
+
     /// Resolve a target symbol to its discovered candidate id.
     ///
     /// Unknown symbols are rejected rather than being attached to the nil UUID.
@@ -238,7 +408,14 @@ impl ServiceContainer {
             let mut build_cmd =
                 hf_harness::build_command(engine, lang, &harness_binary_name(target));
             build_cmd.output = PathBuf::from(harness_binary_name(target));
-            build_cmd.extra_flags = project_compile_flags(self, &candidate.project_root)?;
+            #[cfg(feature = "build-context")]
+            {
+                build_cmd.extra_flags = project_compile_flags(self, &candidate.project_root)?;
+            }
+            #[cfg(not(feature = "build-context"))]
+            {
+                build_cmd.extra_flags = project_compile_flags(self, &candidate.project_root);
+            }
             let harness = Harness {
                 id: Uuid::new_v4(),
                 target_id: candidate.id,
@@ -450,7 +627,14 @@ impl ServiceContainer {
         copy_project_sources(project, &workspace);
 
         let mut build_cmd = hf_harness::build_command(engine, lang, &harness_binary_name(target));
-        build_cmd.extra_flags = project_compile_flags(self, project)?;
+        #[cfg(feature = "build-context")]
+        {
+            build_cmd.extra_flags = project_compile_flags(self, project)?;
+        }
+        #[cfg(not(feature = "build-context"))]
+        {
+            build_cmd.extra_flags = project_compile_flags(self, project);
+        }
         let harness = Harness {
             id: Uuid::new_v4(),
             target_id: self.resolve_target_id(project, target, lang).await?,
@@ -638,8 +822,6 @@ impl ServiceContainer {
         let _workspace_operation = self.acquire_workspace_operation().await?;
         let project_root = canonical_project_root(project)?;
         let project = project_root.as_path();
-        self.authorize_recorded(Action::RunHarness, "harness_smoke", Some(project))
-            .await?;
         let workspace = workspace_dir(project, target);
         let harness = self.active_harness(project, target, engine).await?;
         if harness.language != lang {
@@ -669,6 +851,11 @@ impl ServiceContainer {
                 "Compiled harness '{binary_name}' not found -- compile the harness first."
             )));
         }
+        let reviewed_binary_sha256 = sha256_file(&binary)?;
+        self.require_harness_ai_review(store, &harness, target, &reviewed_binary_sha256)
+            .await?;
+        self.authorize_recorded(Action::RunHarness, "harness_smoke", Some(project))
+            .await?;
 
         // Allocate the run identity before execution so its immutable inputs and
         // every finding are owned by one durable evidence directory.
@@ -700,6 +887,17 @@ impl ServiceContainer {
         let context = run_context_digests(&workspace, sandbox_image.sha256())?;
         retain_run_context(&mut smoke_record, context);
         let artifacts = stage_run_artifacts(&workspace, smoke_record.id, &harness.source, &binary)?;
+        if artifacts.binary_sha256 != reviewed_binary_sha256 {
+            if let Some(run_root) = artifacts.output_host.parent() {
+                // Best-effort cleanup only; no run record references this
+                // pre-execution staging directory.
+                let _ = std::fs::remove_dir_all(run_root);
+            }
+            return Err(ClassifiedError::Validation(
+                "compiled binary digest changed after LLM review; compile and review the harness again"
+                    .to_owned(),
+            ));
+        }
         smoke_record.status = RunStatus::Running;
         smoke_record.harness_rev = Some(artifacts.source_sha256.clone());
         smoke_record.binary_rev = Some(artifacts.binary_sha256.clone());
@@ -1196,15 +1394,20 @@ impl ServiceContainer {
                     // Smoke is what separates a hollow harness from a working
                     // one. A smoke that cannot run leaves the evidence absent
                     // rather than inventing a verdict.
-                    let smoke = self
+                    let smoke = match self
                         .harness_smoke(project, &req.target, req.engine, req.lang)
                         .await
-                        .ok()
-                        .map(|outcome| SmokeEvidence {
+                    {
+                        Ok(outcome) => Some(SmokeEvidence {
                             verdict: outcome.verdict.level,
                             execs_per_sec: outcome.summary.execs_per_sec,
                             crashes: outcome.summary.crashes,
-                        });
+                        }),
+                        Err(error) => {
+                            tracing::warn!(%error, index, "harness tournament smoke failed");
+                            None
+                        }
+                    };
                     winning_sources.push((index, source));
                     evidence.push(HarnessCandidateEvidence {
                         index,
@@ -1273,7 +1476,6 @@ impl ServiceContainer {
 #[cfg(feature = "harness-tournament")]
 const MAX_CANDIDATE_ERROR_BYTES: usize = 2048;
 
-#[cfg(feature = "harness-tournament")]
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest as _;
     hex::encode(sha2::Sha256::digest(bytes))

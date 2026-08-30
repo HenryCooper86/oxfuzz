@@ -161,9 +161,12 @@ struct HarnessDraftPool;
 impl hf_core::provider::ProviderPool for HarnessDraftPool {
     async fn chat_completion(
         &self,
-        _request: &hf_core::provider::ChatRequest,
+        request: &hf_core::provider::ChatRequest,
         _route: &hf_core::provider::RouteRequest,
     ) -> Result<hf_core::provider::ChatResponse, hf_core::provider::ProviderError> {
+        if hf_test_utils::is_harness_review_request(request) {
+            return Ok(hf_test_utils::approving_harness_review_response());
+        }
         Ok(hf_test_utils::fixtures::make_chat_response(HARNESS_REPLY))
     }
     async fn chat_completion_stream(

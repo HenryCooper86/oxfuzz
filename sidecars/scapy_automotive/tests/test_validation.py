@@ -44,12 +44,14 @@ def physical_config() -> dict[str, object]:
         "service_allowlist": [0x10, 0x22],
         "allow_dangerous_services": False,
         "limits": limits(max_events=100, max_rate_per_second=50),
+        "sidecar_image_sha256": "cd" * 32,
     }
     config["approval"] = {
         "approval_id": "approval-123",
         "approved_by": "bench-operator",
         "approved_at": "2026-07-15T09:00:00Z",
         "scope_sha256": "ab" * 32,
+        "sidecar_image_sha256": "cd" * 32,
     }
     return config
 
@@ -113,6 +115,11 @@ class ValidationTests(unittest.TestCase):
         malformed["approval"]["scope_sha256"] = "not-a-digest"  # type: ignore[index]
         with self.assertRaises(SidecarError):
             validate_operation_config(malformed)
+
+        missing_image_identity = physical_config()
+        del missing_image_identity["sidecar_image_sha256"]
+        with self.assertRaises(SidecarError):
+            validate_operation_config(missing_image_identity)
 
         self.assertEqual(validate_operation_config(physical_config())["mode"], "physical_bench")
 

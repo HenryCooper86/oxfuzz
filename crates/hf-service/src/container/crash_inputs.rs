@@ -4,6 +4,7 @@
 //! layout. This module normalizes both into the input paths and CASR reports
 //! triage consumes, and derives the stable crash identity used for dedup.
 
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use hf_core::engine::EngineKind;
@@ -151,27 +152,136 @@ pub(super) fn bucket_by_cluster(crashes: Vec<hf_core::crash::Crash>) -> Vec<hf_c
 }
 
 pub(super) fn collect_casreps(dir: &Path) -> Vec<(PathBuf, hf_core::crash::CasrReport)> {
-    let mut out = Vec::new();
-    collect_casreps_into(dir, &mut out);
-    out
+    let mut collection = CasrepCollection::default();
+    if is_regular_directory(dir) {
+        collect_casreps_into(dir, 0, &mut collection);
+    }
+    if collection.truncated {
+        tracing::warn!(
+            path = %dir.display(),
+            reports = collection.reports.len(),
+            bytes = collection.bytes,
+            "CASR report collection reached a safety limit"
+        );
+    }
+    collection.reports
 }
 
-fn collect_casreps_into(dir: &Path, out: &mut Vec<(PathBuf, hf_core::crash::CasrReport)>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
+#[cfg(test)]
+mod casrep_collection_boundary_tests {
+    use super::collect_casreps;
+
+    const REPORT: &str = r#"{"CrashLine":"parse.c:1:1","Stacktrace":["parse"]}"#;
+
+    #[cfg(unix)]
+    #[test]
+    fn casrep_collection_never_follows_report_or_directory_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let reports = root.path().join("reports");
+        let outside = root.path().join("outside");
+        std::fs::create_dir_all(&reports).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(reports.join("real.casrep"), REPORT).unwrap();
+        std::fs::write(outside.join("secret.casrep"), REPORT).unwrap();
+        symlink(outside.join("secret.casrep"), reports.join("linked.casrep")).unwrap();
+        symlink(&outside, reports.join("linked-dir")).unwrap();
+
+        let collected = collect_casreps(&reports);
+
+        assert_eq!(collected.len(), 1);
+        assert_eq!(collected[0].0, reports.join("real.casrep"));
+    }
+
+    #[test]
+    fn casrep_collection_rejects_an_oversized_normalized_report() {
+        let root = tempfile::tempdir().unwrap();
+        let mut oversized = REPORT.to_owned();
+        oversized.push_str(&" ".repeat(hf_crash::MAX_SANITIZER_REPORT_BYTES));
+        std::fs::write(root.path().join("oversized.casrep"), oversized).unwrap();
+
+        assert!(collect_casreps(root.path()).is_empty());
+    }
+}
+
+const MAX_CASREP_DEPTH: usize = 8;
+
+#[derive(Default)]
+struct CasrepCollection {
+    reports: Vec<(PathBuf, hf_core::crash::CasrReport)>,
+    bytes: usize,
+    truncated: bool,
+}
+
+fn collect_casreps_into(dir: &Path, depth: usize, collection: &mut CasrepCollection) {
+    if depth > MAX_CASREP_DEPTH || collection.reports.len() >= hf_crash::MAX_CRASH_ARTIFACTS {
+        collection.truncated = true;
+        return;
+    }
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        tracing::warn!(path = %dir.display(), "could not enumerate CASR report directory");
         return;
     };
-    for entry in entries.flatten() {
+    let mut entries = Vec::new();
+    for entry in read_dir {
+        match entry {
+            Ok(entry) => entries.push(entry),
+            Err(error) => {
+                tracing::warn!(path = %dir.display(), %error, "could not inspect CASR directory entry");
+            }
+        }
+    }
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
         let path = entry.path();
-        if path.is_dir() {
-            collect_casreps_into(&path, out);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("casrep") {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                if let Ok(mut report) = hf_crash::parse_casrep(&content) {
-                    // CASR groups equivalent crashes into `cl<N>` dirs; carry the
-                    // cluster id so triage can bucket by it.
-                    report.cluster = hf_crash::cluster_from_path(&path);
-                    out.push((path, report));
-                }
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.file_type().is_dir() {
+            collect_casreps_into(&path, depth + 1, collection);
+            continue;
+        }
+        if !metadata.file_type().is_file()
+            || path.extension().and_then(|extension| extension.to_str()) != Some("casrep")
+        {
+            continue;
+        }
+        if collection.reports.len() >= hf_crash::MAX_CRASH_ARTIFACTS
+            || metadata.len() > hf_crash::MAX_SANITIZER_REPORT_BYTES as u64
+            || collection.bytes.saturating_add(metadata.len() as usize)
+                > hf_crash::MAX_AGGREGATE_REPORT_BYTES
+        {
+            collection.truncated = true;
+            continue;
+        }
+        let Ok(file) = std::fs::File::open(&path) else {
+            continue;
+        };
+        let Ok(opened) = file.metadata() else {
+            continue;
+        };
+        if !opened.is_file() || opened.len() != metadata.len() {
+            continue;
+        }
+        let mut content = String::new();
+        if file
+            .take((hf_crash::MAX_SANITIZER_REPORT_BYTES + 1) as u64)
+            .read_to_string(&mut content)
+            .is_err()
+            || content.len() > hf_crash::MAX_SANITIZER_REPORT_BYTES
+        {
+            collection.truncated = true;
+            continue;
+        }
+        if let Ok(mut report) = hf_crash::parse_casrep(&content) {
+            // CASR groups equivalent crashes into `cl<N>` dirs; carry the
+            // cluster id so triage can bucket by it.
+            report.cluster = hf_crash::cluster_from_path(&path);
+            collection.bytes += content.len();
+            collection.reports.push((path, report));
+            if collection.reports.len() >= hf_crash::MAX_CRASH_ARTIFACTS {
+                collection.truncated = true;
             }
         }
     }

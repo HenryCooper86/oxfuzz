@@ -2,7 +2,7 @@
 
 mod common;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use hf_core::engine::EngineKind;
@@ -11,6 +11,74 @@ use hf_core::harness::HarnessStatus;
 use hf_core::runtime::{CommandResult, ResourceLimits, RuntimeAdapter};
 use hf_core::target::TargetLanguage;
 use hf_service::ServiceContainer;
+use sha2::Digest as _;
+
+const APPROVING_REVIEW: &str = r#"{"exercises_target":true,"safe_to_execute":true,"reasons":["target receives fuzz input without unsafe side effects"]}"#;
+
+struct FixedReviewPool {
+    response: &'static str,
+    tamper_binary: Option<PathBuf>,
+}
+
+impl FixedReviewPool {
+    fn new(response: &'static str) -> Self {
+        Self {
+            response,
+            tamper_binary: None,
+        }
+    }
+
+    fn tampering(response: &'static str, binary: PathBuf) -> Self {
+        Self {
+            response,
+            tamper_binary: Some(binary),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl hf_core::provider::ProviderPool for FixedReviewPool {
+    async fn chat_completion(
+        &self,
+        _request: &hf_core::provider::ChatRequest,
+        _route: &hf_core::provider::RouteRequest,
+    ) -> Result<hf_core::provider::ChatResponse, hf_core::provider::ProviderError> {
+        if let Some(binary) = &self.tamper_binary {
+            std::fs::write(binary, b"substituted while review was in flight").unwrap();
+        }
+        Ok(hf_test_utils::fixtures::make_chat_response(self.response))
+    }
+
+    async fn chat_completion_stream(
+        &self,
+        _request: &hf_core::provider::ChatRequest,
+        _route: &hf_core::provider::RouteRequest,
+    ) -> Result<hf_core::provider::ChatStreamResponse, hf_core::provider::ProviderError> {
+        Err(hf_core::provider::ProviderError::Other {
+            message: "unused".to_owned(),
+        })
+    }
+
+    fn report_error(
+        &self,
+        _provider_id: &hf_core::types::ProviderId,
+        _error: &hf_core::provider::ProviderError,
+    ) {
+    }
+
+    async fn provider_statuses(&self) -> Vec<hf_core::provider::ProviderStatus> {
+        Vec::new()
+    }
+
+    async fn freeze(&self, _provider_id: &hf_core::types::ProviderId, _reason: String) {}
+
+    async fn thaw(
+        &self,
+        _provider_id: &hf_core::types::ProviderId,
+    ) -> Result<(), hf_core::provider::ProviderError> {
+        Ok(())
+    }
+}
 
 fn isolate_workspace() {
     common::install_managed_workspace("oxfuzz_qualification_it");
@@ -91,9 +159,143 @@ async fn qualified_fixture() -> (tempfile::TempDir, Arc<hf_storage::Store>, Serv
             .await
             .unwrap(),
     );
-    let container =
-        ServiceContainer::new(Arc::new(QualifyingRuntime), None).with_store(Arc::clone(&store));
+    let container = ServiceContainer::new(
+        Arc::new(QualifyingRuntime),
+        Some(Arc::new(FixedReviewPool::new(APPROVING_REVIEW))),
+    )
+    .with_store(Arc::clone(&store));
     (project, store, container)
+}
+
+#[tokio::test]
+async fn smoke_without_a_required_llm_review_is_refused() {
+    let (project, store, _approved_container) = qualified_fixture().await;
+    let container = ServiceContainer::new(Arc::new(QualifyingRuntime), None).with_store(store);
+    let source = "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }";
+    container
+        .harness_compile(
+            source.to_owned(),
+            project.path(),
+            EngineKind::LibFuzzer,
+            "parse_entry",
+            TargetLanguage::C,
+        )
+        .await
+        .unwrap();
+
+    let error = container
+        .harness_smoke(
+            project.path(),
+            "parse_entry",
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+        )
+        .await
+        .expect_err("generated harness execution requires LLM review");
+    assert!(error.to_string().contains("LLM review"), "{error}");
+}
+
+#[tokio::test]
+async fn negative_llm_review_is_persisted_and_prevents_smoke_execution() {
+    let (project, store, container) = qualified_fixture().await;
+    let container = container.with_provider_pool(Arc::new(FixedReviewPool::new(
+        r#"{"exercises_target":true,"safe_to_execute":false,"reasons":["starts an unrelated process"]}"#,
+    )));
+    container
+        .harness_compile(
+            "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }".to_owned(),
+            project.path(),
+            EngineKind::LibFuzzer,
+            "parse_entry",
+            TargetLanguage::C,
+        )
+        .await
+        .unwrap();
+
+    let error = container
+        .harness_smoke(
+            project.path(),
+            "parse_entry",
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+        )
+        .await
+        .expect_err("negative review must stop execution");
+    assert!(error.to_string().contains("LLM review refused"), "{error}");
+    assert!(store.list_runs(None).await.unwrap().is_empty());
+    let harness = store.list_all_harnesses().await.unwrap().pop().unwrap();
+    let review = store
+        .harness_ai_review(harness.id)
+        .await
+        .unwrap()
+        .expect("negative decision remains auditable");
+    assert_eq!(
+        review.source_sha256,
+        hex::encode(sha2::Sha256::digest(harness.source.as_bytes()))
+    );
+    assert!(review.review_json.contains("starts an unrelated process"));
+}
+
+#[tokio::test]
+async fn malformed_llm_review_fails_closed_before_smoke_execution() {
+    let (project, store, container) = qualified_fixture().await;
+    let container = container.with_provider_pool(Arc::new(FixedReviewPool::new("approved")));
+    container
+        .harness_compile(
+            "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }".to_owned(),
+            project.path(),
+            EngineKind::LibFuzzer,
+            "parse_entry",
+            TargetLanguage::C,
+        )
+        .await
+        .unwrap();
+
+    let error = container
+        .harness_smoke(
+            project.path(),
+            "parse_entry",
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+        )
+        .await
+        .expect_err("malformed review must stop execution");
+    assert!(error.to_string().contains("malformed JSON"), "{error}");
+    assert!(store.list_runs(None).await.unwrap().is_empty());
+    let harness = store.list_all_harnesses().await.unwrap().pop().unwrap();
+    assert!(store.harness_ai_review(harness.id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn binary_substitution_during_llm_review_is_refused_before_execution() {
+    let (project, store, container) = qualified_fixture().await;
+    let binary = hf_service::workspace_dir(project.path(), "parse_entry").join("fuzz_parse_entry");
+    let container = container.with_provider_pool(Arc::new(FixedReviewPool::tampering(
+        APPROVING_REVIEW,
+        binary,
+    )));
+    container
+        .harness_compile(
+            "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }".to_owned(),
+            project.path(),
+            EngineKind::LibFuzzer,
+            "parse_entry",
+            TargetLanguage::C,
+        )
+        .await
+        .unwrap();
+
+    let error = container
+        .harness_smoke(
+            project.path(),
+            "parse_entry",
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+        )
+        .await
+        .expect_err("the reviewed source must remain bound to its compiled binary");
+    assert!(error.to_string().contains("binary digest"), "{error}");
+    assert!(store.list_runs(None).await.unwrap().is_empty());
 }
 
 #[tokio::test]

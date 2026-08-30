@@ -377,6 +377,21 @@ async fn strict_policy_denies_chat_send() {
 }
 
 #[tokio::test]
+async fn strict_policy_denies_external_finding_publication_before_integration_io() {
+    let (container, _gate) = strict_container(None);
+    let project = fixture_project();
+
+    let issue_error = container.file_issue("missing-crash").await.unwrap_err();
+    assert_guardrail_denied(&issue_error, "publish findings to issue-tracker");
+
+    let defectdojo_error = container
+        .push_to_defectdojo(project.path(), None)
+        .await
+        .unwrap_err();
+    assert_guardrail_denied(&defectdojo_error, "publish findings to defectdojo");
+}
+
+#[tokio::test]
 async fn default_policy_records_an_allowed_decision() {
     let (container, _gate) = default_container(None);
     let (container, _dir) = with_temp_store(container).await;

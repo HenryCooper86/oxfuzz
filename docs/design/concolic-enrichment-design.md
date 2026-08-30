@@ -75,6 +75,14 @@ Step 4 is deliberately the existing path rather than a parallel store. A solved
 input is a corpus input; giving it a second home would mean every consumer of
 the corpus had to learn about concolic enrichment (AGENTS.md 2.18).
 
+The ordinary in-workspace corpus bookkeeping is authorized as `CorpusOp`.
+Before the instrumented build or any target execution, the service separately
+authorizes a high-risk `RunConcolic` action containing the target and resolved
+total duration. Concolic enrichment is not recorded as `RunFuzzer`: the design
+deliberately does not classify SymCC as a fuzzing engine, and the approval/audit
+taxonomy must preserve that distinction while applying the same high-risk
+execution policy.
+
 ## 5. Bounding
 
 Path explosion is concolic execution's normal failure mode, not its exceptional

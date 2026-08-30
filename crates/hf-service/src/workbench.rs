@@ -474,7 +474,7 @@ pub async fn issue_export(
 /// # Errors
 /// Returns [`ClassifiedError`] when the issue tracker is not configured, has no
 /// token, the crash is unknown, or the API rejects the request.
-pub async fn file_issue(
+pub(crate) async fn file_issue(
     store: Option<&Store>,
     crash_id: &str,
 ) -> Result<crate::issue_tracker::CreatedIssue, ClassifiedError> {

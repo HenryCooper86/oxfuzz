@@ -159,8 +159,8 @@ impl ServiceContainer {
             .map_err(|e| ClassifiedError::Validation(format!("stage driver: {e}")))?;
 
         self.authorize_recorded(
-            Action::RunFuzzer {
-                engine: "SymCC concolic enrichment".to_owned(),
+            Action::RunConcolic {
+                target: target.to_owned(),
                 duration_secs: settings.total_timeout_secs,
             },
             "corpus_concolic",

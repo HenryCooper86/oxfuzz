@@ -7,7 +7,7 @@
 //! (AGENTS.md 2.12).
 
 #[cfg(feature = "build-context")]
-mod build_context;
+pub(crate) mod build_context;
 #[cfg(feature = "campaign-health")]
 mod campaign_health;
 #[cfg(feature = "campaign-trust")]
@@ -81,6 +81,8 @@ pub(crate) use staging::run_context_source_digest;
 use staging::{qualification_evidence, sha256_file, RunArtifacts};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+#[cfg(feature = "build-doctor")]
+pub(crate) use workspace::build_doctor_staging_dir;
 use workspace::{
     clear_managed_workspace_root, prepare_configured_workspace_root,
     prepare_managed_workspace_root_with_adoption, workspace_lock_error, workspace_lock_file,
@@ -754,6 +756,7 @@ impl ServiceContainer {
     #[must_use]
     #[cfg(any(
         feature = "automotive-scapy",
+        feature = "build-doctor",
         feature = "semgrep-enrichment",
         feature = "patch-to-proof"
     ))]
@@ -830,7 +833,7 @@ impl ServiceContainer {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "semgrep-enrichment"))]
     pub(crate) fn semgrep_test_workspace_cleanup_lease(
         root: &Path,
     ) -> Result<WorkspaceCleanupLease, ClassifiedError> {
@@ -1125,8 +1128,7 @@ impl ServiceContainer {
 /// daemon is reachable (and `HF_USE_DOCKER` is not disabled), else the stub.
 #[must_use]
 pub fn runtime_from_env() -> Arc<dyn RuntimeAdapter> {
-    let use_docker = std::env::var("HF_USE_DOCKER").map_or(true, |v| v != "0" && v != "false");
-    if use_docker && hf_runtime::docker_daemon_ready() {
+    if docker_runtime_enabled() && hf_runtime::docker_daemon_ready() {
         let cfg = RuntimeConfig::default();
         Arc::new(hf_runtime::docker::DockerRuntime::new(
             cfg,
@@ -1135,6 +1137,17 @@ pub fn runtime_from_env() -> Arc<dyn RuntimeAdapter> {
     } else {
         Arc::new(hf_runtime::StubRuntime)
     }
+}
+
+/// Whether production construction is configured to use the Docker runtime.
+/// Readiness diagnostics use this same decision so they cannot report a
+/// sandbox that the service has explicitly disabled.
+pub(crate) fn docker_runtime_enabled() -> bool {
+    docker_runtime_enabled_from(std::env::var("HF_USE_DOCKER").ok().as_deref())
+}
+
+pub(crate) fn docker_runtime_enabled_from(value: Option<&str>) -> bool {
+    !matches!(value, Some("0" | "false"))
 }
 
 /// Build an LLM provider pool from `HF_PROVIDER_*` env vars, or `None` when no

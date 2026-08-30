@@ -45,6 +45,15 @@ fn valid_pinned_image_reference(image: &str) -> bool {
     })
 }
 
+fn valid_local_image_id(image: &str) -> bool {
+    image.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
 /// Best-effort cleanup when an in-flight runtime future is dropped or aborted.
 /// The Docker CLI child has `kill_on_drop`, but killing that client alone does
 /// not stop the named container it launched.
@@ -531,6 +540,16 @@ impl DockerRuntime {
         {
             return Err(ClassifiedError::Sandbox(
                 "sandbox image override must be a pinned, safe image reference".to_owned(),
+            ));
+        }
+        if opts.network_mode == hf_core::runtime::SandboxNetworkMode::Host
+            && opts
+                .capabilities
+                .contains(&hf_core::runtime::SandboxCapability::NetRaw)
+            && !opts.image.as_deref().is_some_and(valid_local_image_id)
+        {
+            return Err(ClassifiedError::Sandbox(
+                "host-network raw-socket execution requires a direct immutable image id".to_owned(),
             ));
         }
         if opts

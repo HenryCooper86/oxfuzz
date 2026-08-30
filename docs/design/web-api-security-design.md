@@ -27,6 +27,13 @@ the `Authorization` and `Content-Type` headers; it never uses a wildcard origin.
 carrying an unlisted cross-origin `Origin` header are rejected before handler
 execution, so CORS is not treated as response-only CSRF protection.
 
+Every request body is limited to 1 MiB at the router before JSON extraction or
+handler execution. Current APIs carry paths, settings, source snippets, and
+bounded DTOs rather than bulk artifacts; captures and other large inputs are
+staged in the managed workspace. A future bulk-upload route must declare its
+own narrower authenticated streaming policy instead of raising this global
+limit.
+
 ## 3. Host Filesystem Boundary
 
 Network requests may refer only to projects below the canonical roots in

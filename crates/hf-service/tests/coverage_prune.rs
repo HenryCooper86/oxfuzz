@@ -137,7 +137,11 @@ async fn coverage_prune_collapses_same_coverage_inputs() {
         showmap_limits: std::sync::Mutex::new(None),
         fail_showmap: false,
     });
-    let container = ServiceContainer::new(runtime.clone(), None).with_store(store);
+    let container = ServiceContainer::new(
+        runtime.clone(),
+        Some(hf_test_utils::approving_harness_review_pool()),
+    )
+    .with_store(store);
     container
         .harness_compile(
             "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }".to_owned(),
@@ -210,7 +214,11 @@ async fn coverage_prune_propagates_sandbox_failure_without_pruning() {
         showmap_limits: std::sync::Mutex::new(None),
         fail_showmap: true,
     });
-    let container = ServiceContainer::new(runtime, None).with_store(store);
+    let container = ServiceContainer::new(
+        runtime,
+        Some(hf_test_utils::approving_harness_review_pool()),
+    )
+    .with_store(store);
     container
         .harness_compile(
             "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }".to_owned(),

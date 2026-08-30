@@ -14,9 +14,11 @@
 #   HF_DEFECTDOJO_PORT     host port the app owns (default: 8080)
 #   HF_DEFECTDOJO_PROJECT  docker compose project name (default: defectdojo)
 #   HF_DEFECTDOJO_READY_TIMEOUT  seconds to wait for first boot (default: 300)
+#   HF_DEFECTDOJO_REF      exact reviewed upstream commit to install
 #
 # Usage: ./scripts/setup-defectdojo.sh
 set -uo pipefail
+umask 077
 
 # Finder-launched callers may not inherit the OrbStack/Docker PATH.
 export PATH="$HOME/.orbstack/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
@@ -28,10 +30,34 @@ DD_PROJECT="${HF_DEFECTDOJO_PROJECT:-defectdojo}"
 READY_TIMEOUT="${HF_DEFECTDOJO_READY_TIMEOUT:-300}"
 DD_URL="http://localhost:${DD_PORT}"
 UPSTREAM="https://github.com/DefectDojo/django-DefectDojo.git"
+# DefectDojo 2.58.4. This is the peeled release commit, not the annotated tag.
+DEFAULT_DEFECTDOJO_REF="5b1d60e8d59b3fd8df638e7dcdfa279a5cb815af"
+DEFECTDOJO_REF="${HF_DEFECTDOJO_REF:-$DEFAULT_DEFECTDOJO_REF}"
+DJANGO_IMAGE_VERSION="2.58.4@sha256:aa1ad27ac55660ccc8d635f5ba03b701a2882285abafd66f248424b6aff9d630"
+NGINX_IMAGE_VERSION="2.58.4@sha256:7d2d0ec29051039f081072366df973fe8d5d12fde4e4a524bdd0a1a0aab1c4fe"
 CONFIG_FILE="$REPO_ROOT/config/defectdojo.toml"
 
 log() { printf '=== %s ===\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+validate_commit_ref() { [[ "$1" =~ ^[0-9a-f]{40}$ ]]; }
+
+read_env_value() {
+  local name="$1"
+  local file="$2"
+  local count
+  count="$(grep -c "^${name}=" "$file" 2>/dev/null || true)"
+  [ "$count" = 1 ] || die "${file} must contain exactly one ${name} entry"
+  grep "^${name}=" "$file" | sed "s/^${name}=//"
+}
+
+validate_commit_ref "$DEFECTDOJO_REF" \
+  || die "HF_DEFECTDOJO_REF must be an exact lowercase 40-character commit"
+[[ "$DD_PORT" =~ ^[0-9]+$ ]] && [ "$DD_PORT" -ge 1 ] && [ "$DD_PORT" -le 65535 ] \
+  || die "HF_DEFECTDOJO_PORT must be an integer between 1 and 65535"
+[[ "$READY_TIMEOUT" =~ ^[0-9]+$ ]] && [ "$READY_TIMEOUT" -le 3600 ] \
+  || die "HF_DEFECTDOJO_READY_TIMEOUT must be an integer no greater than 3600"
+[[ "$DD_PROJECT" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]] \
+  || die "HF_DEFECTDOJO_PROJECT must be a lowercase compose project name"
 
 command -v docker >/dev/null 2>&1 || die "docker CLI not found (install OrbStack or Docker Desktop)"
 docker info >/dev/null 2>&1 || die "Docker daemon is not reachable -- start OrbStack/Docker and retry"
@@ -58,19 +84,36 @@ if project_running; then
   log "DefectDojo is already running; ensuring config and API token"
 fi
 
-# --- Clone or update upstream compose project ------------------------------
-# Always needed for the compose file and the credentials .env, even when the
-# stack is already running (the checkout is where its .env lives).
+# --- Prepare the reviewed upstream compose project -------------------------
+# The checkout is required even when the stack is already running because its
+# compose file and generated credential data remain the lifecycle source.
 if [ -d "$DD_DIR/.git" ]; then
-  if [ "$need_start" = 1 ]; then
-    log "Updating upstream DefectDojo in ${DD_DIR}"
-    git -C "$DD_DIR" pull --ff-only --quiet || echo "warning: could not fast-forward the DefectDojo checkout; using the existing one"
-  fi
+  [ "$(git -C "$DD_DIR" remote get-url origin 2>/dev/null)" = "$UPSTREAM" ] \
+    || die "existing DefectDojo checkout has an unexpected origin"
 else
-  log "Cloning upstream DefectDojo into ${DD_DIR}"
+  if [ -d "$DD_DIR" ] && [ -n "$(find "$DD_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+    die "${DD_DIR} exists and is not an empty DefectDojo checkout"
+  fi
+  log "Initializing reviewed DefectDojo checkout in ${DD_DIR}"
   mkdir -p "$(dirname "$DD_DIR")"
-  git clone --depth 1 "$UPSTREAM" "$DD_DIR" || die "git clone failed"
+  git init --quiet "$DD_DIR" || die "git init failed"
+  git -C "$DD_DIR" remote add origin "$UPSTREAM" || die "git remote setup failed"
 fi
+
+current_ref="$(git -C "$DD_DIR" rev-parse HEAD 2>/dev/null || true)"
+if [ "$current_ref" != "$DEFECTDOJO_REF" ]; then
+  git -C "$DD_DIR" diff --quiet && git -C "$DD_DIR" diff --cached --quiet \
+    || die "existing DefectDojo checkout has local changes; refusing to replace it"
+  log "Fetching reviewed DefectDojo commit ${DEFECTDOJO_REF}"
+  git -C "$DD_DIR" fetch --depth 1 origin "$DEFECTDOJO_REF" \
+    || die "fetching reviewed DefectDojo commit failed"
+  ( cd "$DD_DIR" && git checkout --detach "$DEFECTDOJO_REF" ) \
+    || die "checking out reviewed DefectDojo commit failed"
+fi
+resolved_ref="$(git -C "$DD_DIR" rev-parse HEAD 2>/dev/null)" \
+  || die "resolving DefectDojo checkout failed"
+[ "$resolved_ref" = "$DEFECTDOJO_REF" ] \
+  || die "DefectDojo checkout does not match the reviewed commit"
 [ -f "$DD_DIR/docker-compose.yml" ] || die "no docker-compose.yml in ${DD_DIR}"
 
 # --- Deterministic admin credentials (persisted once) ----------------------
@@ -79,16 +122,30 @@ fi
 # (compose auto-loads it); an override injects it into the initializer, whose
 # base compose does not declare DD_ADMIN_PASSWORD.
 DD_ENV="$DD_DIR/.env"
-if ! grep -q '^DD_ADMIN_PASSWORD=' "$DD_ENV" 2>/dev/null; then
-  GEN_PW="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24)"
-  {
-    echo "DD_ADMIN_USER=admin"
-    echo "DD_ADMIN_PASSWORD=${GEN_PW}"
-    echo "DD_PORT=${DD_PORT}"
-  } >>"$DD_ENV"
+touch "$DD_ENV" || die "cannot create ${DD_ENV}"
+chmod 600 "$DD_ENV" || die "cannot protect ${DD_ENV}"
+if grep -Ev '^[[:space:]]*(#|$)|^(DD_ADMIN_USER|DD_ADMIN_PASSWORD|DD_PORT)=' "$DD_ENV" | grep -q .; then
+  die "${DD_ENV} contains unsupported entries; expected only DD_ADMIN_USER, DD_ADMIN_PASSWORD, and DD_PORT"
 fi
-# shellcheck disable=SC1090
-set -a; . "$DD_ENV"; set +a
+if ! grep -q '^DD_ADMIN_USER=' "$DD_ENV"; then
+  echo "DD_ADMIN_USER=admin" >>"$DD_ENV"
+fi
+if ! grep -q '^DD_ADMIN_PASSWORD=' "$DD_ENV"; then
+  GEN_PW="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24)"
+  echo "DD_ADMIN_PASSWORD=${GEN_PW}" >>"$DD_ENV"
+fi
+if ! grep -q '^DD_PORT=' "$DD_ENV"; then
+  echo "DD_PORT=${DD_PORT}" >>"$DD_ENV"
+fi
+DD_ADMIN_USER="$(read_env_value DD_ADMIN_USER "$DD_ENV")"
+DD_ADMIN_PASSWORD="$(read_env_value DD_ADMIN_PASSWORD "$DD_ENV")"
+DD_ENV_PORT="$(read_env_value DD_PORT "$DD_ENV")"
+[[ "$DD_ADMIN_USER" =~ ^[A-Za-z0-9_.@-]{1,128}$ ]] \
+  || die "DD_ADMIN_USER contains unsupported characters"
+[[ "$DD_ADMIN_PASSWORD" =~ ^[A-Za-z0-9]{24,128}$ ]] \
+  || die "DD_ADMIN_PASSWORD must contain 24 to 128 ASCII letters or digits"
+[ "$DD_ENV_PORT" = "$DD_PORT" ] \
+  || die "configured DD_PORT ${DD_PORT} differs from persisted ${DD_ENV_PORT}"
 
 if [ "$need_start" = 1 ]; then
   cat >"$DD_DIR/docker-compose.override.yml" <<'YAML'
@@ -99,16 +156,28 @@ services:
     environment:
       DD_ADMIN_PASSWORD: "${DD_ADMIN_PASSWORD}"
 YAML
+  chmod 600 "$DD_DIR/docker-compose.override.yml" \
+    || die "cannot protect the compose override"
 
-  # --- Pull released images, then start (no source build) ------------------
-  # Services declare both build: and image:; pulling first makes `up` use the
-  # released images instead of building DefectDojo from source.
+  # --- Pull reviewed images, then start (no source build) ------------------
+  # The application image variables include registry digests. The pinned
+  # upstream compose revision already digest-pins its database and cache.
   log "Pulling DefectDojo images (this is large on first run)"
-  ( cd "$DD_DIR" && COMPOSE_PROJECT_NAME="$DD_PROJECT" DD_PORT="$DD_PORT" docker compose pull ) \
+  ( cd "$DD_DIR" && \
+    COMPOSE_PROJECT_NAME="$DD_PROJECT" \
+    COMPOSE_FILE="$DD_DIR/docker-compose.yml:$DD_DIR/docker-compose.override.yml" \
+    DJANGO_VERSION="$DJANGO_IMAGE_VERSION" \
+    NGINX_VERSION="$NGINX_IMAGE_VERSION" \
+    docker compose --env-file "$DD_ENV" pull ) \
     || die "docker compose pull failed"
 
   log "Starting DefectDojo (project '${DD_PROJECT}', port ${DD_PORT})"
-  ( cd "$DD_DIR" && COMPOSE_PROJECT_NAME="$DD_PROJECT" DD_PORT="$DD_PORT" docker compose up -d ) \
+  ( cd "$DD_DIR" && \
+    COMPOSE_PROJECT_NAME="$DD_PROJECT" \
+    COMPOSE_FILE="$DD_DIR/docker-compose.yml:$DD_DIR/docker-compose.override.yml" \
+    DJANGO_VERSION="$DJANGO_IMAGE_VERSION" \
+    NGINX_VERSION="$NGINX_IMAGE_VERSION" \
+    docker compose --env-file "$DD_ENV" up -d --no-build ) \
     || die "docker compose up failed"
 fi
 
@@ -128,14 +197,18 @@ done
 # --- Provision an API token (best-effort) ----------------------------------
 TOKEN=""
 if [ "$ready" = "1" ]; then
-  TOKEN="$(curl -s -X POST "${DD_URL}/api/v2/api-token-auth/" \
-    -H 'Content-Type: application/json' \
-    -d "{\"username\":\"${DD_ADMIN_USER:-admin}\",\"password\":\"${DD_ADMIN_PASSWORD}\"}" 2>/dev/null \
-    | sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+  TOKEN="$(
+    printf '{"username":"%s","password":"%s"}' "$DD_ADMIN_USER" "$DD_ADMIN_PASSWORD" \
+      | curl -s -X POST "${DD_URL}/api/v2/api-token-auth/" \
+        -H 'Content-Type: application/json' --data-binary @- 2>/dev/null \
+      | sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+  )"
 fi
 
 # --- Write oxfuzz config (gitignored; may hold the token) --------------
 mkdir -p "$REPO_ROOT/config"
+CONFIG_TEMP="$(mktemp "$REPO_ROOT/config/.defectdojo.toml.XXXXXX")" \
+  || die "cannot create temporary DefectDojo config"
 {
   echo "# Written by scripts/setup-defectdojo.sh. Gitignored -- may hold a token."
   echo "url = \"${DD_URL}\""
@@ -153,14 +226,17 @@ mkdir -p "$REPO_ROOT/config"
   echo "[lifecycle]"
   echo "autostart = true"
   echo "compose_project = \"${DD_PROJECT}\""
-} >"$CONFIG_FILE"
+} >"$CONFIG_TEMP"
+chmod 600 "$CONFIG_TEMP" || die "cannot protect temporary DefectDojo config"
+mv "$CONFIG_TEMP" "$CONFIG_FILE" || die "cannot install DefectDojo config"
+chmod 600 "$CONFIG_FILE" || die "cannot protect ${CONFIG_FILE}"
 
 # --- Summary ---------------------------------------------------------------
 echo ""
 log "DefectDojo setup complete"
 echo "  URL:        ${DD_URL}"
-echo "  Admin user: ${DD_ADMIN_USER:-admin}"
-echo "  Admin pass: ${DD_ADMIN_PASSWORD}   (also in ${DD_ENV})"
+echo "  Admin user: ${DD_ADMIN_USER}"
+echo "  Credentials: stored owner-only in ${DD_ENV}"
 echo "  Compose:    project '${DD_PROJECT}' in ${DD_DIR}"
 echo "  Config:     ${CONFIG_FILE}"
 if [ -n "$TOKEN" ]; then

@@ -12,7 +12,8 @@
 //!
 //! See `docs/design/build-doctor-design.md`.
 
-use std::path::Path;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -227,23 +228,13 @@ fn is_root_file(project: &Path, name: &str) -> bool {
         .is_ok_and(|meta| meta.is_file())
 }
 
-/// Whether the project already ships a compile database in one of the places
-/// the existing resolver looks.
+/// Whether the first compile database selected by the service resolves into
+/// usable, allowlisted build context.
 fn has_usable_build_context(project: &Path) -> bool {
-    [
-        "compile_commands.json",
-        "build/compile_commands.json",
-        "out/compile_commands.json",
-    ]
-    .iter()
-    .any(|relative| is_root_relative_file(project, relative))
-}
-
-fn is_root_relative_file(project: &Path, relative: &str) -> bool {
-    project
-        .join(relative)
-        .symlink_metadata()
-        .is_ok_and(|meta| meta.is_file())
+    matches!(
+        crate::container::build_context::resolve_project_build_context(project),
+        Ok(Some(_))
+    )
 }
 
 /// Request to run a diagnosed build plan in the sandbox.
@@ -287,6 +278,277 @@ pub struct BuildPlanRunOutcome {
 
 /// Bound on retained step output, so a verbose build cannot flood a record.
 const MAX_STEP_OUTPUT_BYTES: usize = 8 * 1024;
+const MAX_SNAPSHOT_FILES: usize = 20_000;
+const MAX_SNAPSHOT_FILE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_SNAPSHOT_BYTES: u64 = 512 * 1024 * 1024;
+const SNAPSHOT_SKIP_NAMES: [&str; 5] =
+    [".git", OXFUZZ_BUILD_DIR, "build", "node_modules", "target"];
+
+struct BuildStagingGuard {
+    path: PathBuf,
+}
+
+impl Drop for BuildStagingGuard {
+    fn drop(&mut self) {
+        match std::fs::remove_dir_all(&self.path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => tracing::warn!(
+                path = %self.path.display(),
+                "failed to remove Build Doctor staging directory: {error}"
+            ),
+        }
+    }
+}
+
+fn stage_project_snapshot(
+    project: &Path,
+    staging: &Path,
+) -> Result<(), hf_core::error::ClassifiedError> {
+    use hf_core::error::ClassifiedError;
+
+    let project = std::fs::canonicalize(project).map_err(|error| {
+        ClassifiedError::Validation(format!("resolve Build Doctor project: {error}"))
+    })?;
+    let staging = std::fs::canonicalize(staging).map_err(|error| {
+        ClassifiedError::Internal(format!("resolve Build Doctor staging: {error}"))
+    })?;
+    if staging.starts_with(&project) {
+        return Err(ClassifiedError::Validation(
+            "the managed workspace must not be inside the project being diagnosed".to_owned(),
+        ));
+    }
+
+    let mut files = 0usize;
+    let mut bytes = 0u64;
+    let mut pending = vec![(project, staging)];
+    while let Some((source_dir, destination_dir)) = pending.pop() {
+        let entries = std::fs::read_dir(&source_dir).map_err(|error| {
+            ClassifiedError::Validation(format!(
+                "read Build Doctor snapshot directory {}: {error}",
+                source_dir.display()
+            ))
+        })?;
+        let mut entries = entries
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| ClassifiedError::Validation(format!("read project entry: {error}")))?;
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        for entry in entries {
+            let name = entry.file_name();
+            if SNAPSHOT_SKIP_NAMES
+                .iter()
+                .any(|skipped| name == std::ffi::OsStr::new(skipped))
+            {
+                continue;
+            }
+            let source = entry.path();
+            let destination = destination_dir.join(&name);
+            let kind = entry.file_type().map_err(|error| {
+                ClassifiedError::Validation(format!(
+                    "inspect Build Doctor snapshot entry {}: {error}",
+                    source.display()
+                ))
+            })?;
+            if kind.is_symlink() {
+                return Err(ClassifiedError::Validation(format!(
+                    "Build Doctor snapshot refuses symbolic link {}",
+                    source.display()
+                )));
+            }
+            if kind.is_dir() {
+                std::fs::create_dir(&destination).map_err(|error| {
+                    ClassifiedError::Internal(format!(
+                        "create Build Doctor staging directory {}: {error}",
+                        destination.display()
+                    ))
+                })?;
+                pending.push((source, destination));
+                continue;
+            }
+            if !kind.is_file() {
+                return Err(ClassifiedError::Validation(format!(
+                    "Build Doctor snapshot refuses special file {}",
+                    source.display()
+                )));
+            }
+            let metadata = entry.metadata().map_err(|error| {
+                ClassifiedError::Validation(format!(
+                    "inspect Build Doctor snapshot file {}: {error}",
+                    source.display()
+                ))
+            })?;
+            if metadata.len() > MAX_SNAPSHOT_FILE_BYTES {
+                return Err(ClassifiedError::Validation(format!(
+                    "Build Doctor snapshot file {} exceeds {MAX_SNAPSHOT_FILE_BYTES} bytes",
+                    source.display()
+                )));
+            }
+            if files >= MAX_SNAPSHOT_FILES {
+                return Err(ClassifiedError::Validation(format!(
+                    "Build Doctor snapshot exceeds {MAX_SNAPSHOT_FILES} files"
+                )));
+            }
+            bytes = bytes.checked_add(metadata.len()).ok_or_else(|| {
+                ClassifiedError::Validation(
+                    "Build Doctor snapshot byte count overflowed".to_owned(),
+                )
+            })?;
+            if bytes > MAX_SNAPSHOT_BYTES {
+                return Err(ClassifiedError::Validation(format!(
+                    "Build Doctor snapshot exceeds {MAX_SNAPSHOT_BYTES} bytes"
+                )));
+            }
+            let copied = std::fs::copy(&source, &destination).map_err(|error| {
+                ClassifiedError::Internal(format!(
+                    "stage Build Doctor file {}: {error}",
+                    source.display()
+                ))
+            })?;
+            if copied != metadata.len() {
+                return Err(ClassifiedError::Validation(format!(
+                    "Build Doctor source changed while staging {}",
+                    source.display()
+                )));
+            }
+            files += 1;
+        }
+    }
+    Ok(())
+}
+
+fn rewrite_execution_paths(value: &mut serde_json::Value, staging: &Path, project: &Path) {
+    match value {
+        serde_json::Value::String(text) => {
+            let staging = staging.to_string_lossy();
+            let project = project.to_string_lossy();
+            let staging_prefix = format!("{staging}{}", std::path::MAIN_SEPARATOR);
+            let project_prefix = format!("{project}{}", std::path::MAIN_SEPARATOR);
+            *text = text.replace(&staging_prefix, &project_prefix);
+            if text == staging.as_ref() {
+                *text = project.to_string();
+            }
+            *text = text.replace("/work/", &format!("{project}/"));
+            if text == "/work" {
+                *text = project.to_string();
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                rewrite_execution_paths(value, staging, project);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values_mut() {
+                rewrite_execution_paths(value, staging, project);
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
+}
+
+fn normalize_compile_database(
+    artifact: &Path,
+    staging: &Path,
+    project: &Path,
+) -> Result<(String, hf_core::build::BuildContext), hf_core::error::ClassifiedError> {
+    use hf_core::error::ClassifiedError;
+
+    let metadata = std::fs::symlink_metadata(artifact).map_err(|error| {
+        ClassifiedError::Validation(format!("inspect compile database: {error}"))
+    })?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_SNAPSHOT_FILE_BYTES {
+        return Err(ClassifiedError::Validation(
+            "Build Doctor compile database is not a bounded regular file".to_owned(),
+        ));
+    }
+    let raw = std::fs::read_to_string(artifact).map_err(|error| {
+        ClassifiedError::Validation(format!("read Build Doctor compile database: {error}"))
+    })?;
+    let mut value: serde_json::Value = serde_json::from_str(&raw).map_err(|error| {
+        ClassifiedError::Validation(format!("parse Build Doctor compile database: {error}"))
+    })?;
+    rewrite_execution_paths(&mut value, staging, project);
+    let normalized = serde_json::to_string_pretty(&value).map_err(|error| {
+        ClassifiedError::Internal(format!("serialize normalized compile database: {error}"))
+    })?;
+    let entries = hf_discovery::build_context::parse_compile_database(&normalized)
+        .map_err(|error| ClassifiedError::Validation(error.to_string()))?;
+    let context = hf_discovery::build_context::extract_build_context(&entries, project);
+    if context.is_empty() {
+        return Err(ClassifiedError::Validation(
+            "normalized compile database contains no usable build context".to_owned(),
+        ));
+    }
+    Ok((normalized, context))
+}
+
+fn publish_compile_database(
+    project: &Path,
+    normalized: &str,
+) -> Result<(), hf_core::error::ClassifiedError> {
+    use hf_core::error::ClassifiedError;
+
+    let directory = project.join(OXFUZZ_BUILD_DIR);
+    match std::fs::symlink_metadata(&directory) {
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) => {
+            return Err(ClassifiedError::Validation(format!(
+                "Build Doctor output directory is not a regular directory: {}",
+                directory.display()
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(&directory).map_err(|error| {
+                ClassifiedError::Internal(format!(
+                    "create Build Doctor output directory {}: {error}",
+                    directory.display()
+                ))
+            })?;
+        }
+        Err(error) => {
+            return Err(ClassifiedError::Validation(format!(
+                "inspect Build Doctor output directory {}: {error}",
+                directory.display()
+            )));
+        }
+    }
+    let destination = directory.join("compile_commands.json");
+    if std::fs::symlink_metadata(&destination).is_ok_and(|metadata| !metadata.file_type().is_file())
+    {
+        return Err(ClassifiedError::Validation(format!(
+            "Build Doctor output is not a regular file: {}",
+            destination.display()
+        )));
+    }
+    let mut temporary = tempfile::NamedTempFile::new_in(&directory).map_err(|error| {
+        ClassifiedError::Internal(format!("create temporary compile database: {error}"))
+    })?;
+    temporary
+        .write_all(normalized.as_bytes())
+        .map_err(|error| {
+            ClassifiedError::Internal(format!("write normalized compile database: {error}"))
+        })?;
+    temporary.as_file().sync_all().map_err(|error| {
+        ClassifiedError::Internal(format!("sync normalized compile database: {error}"))
+    })?;
+    temporary.persist(&destination).map_err(|error| {
+        ClassifiedError::Internal(format!(
+            "install normalized compile database: {}",
+            error.error
+        ))
+    })?;
+    Ok(())
+}
+
+fn artifact_missing_outcome(build_system: BuildSystem, steps_run: usize) -> BuildPlanRunOutcome {
+    BuildPlanRunOutcome {
+        status: BuildPlanRunStatus::ArtifactMissing,
+        build_system,
+        steps_run,
+        failed_step: None,
+        build_context: None,
+    }
+}
 
 impl crate::container::ServiceContainer {
     /// Diagnose a project's build systems. Reads the project root and executes
@@ -352,6 +614,13 @@ impl crate::container::ServiceContainer {
         .await
         .map_err(|error| ClassifiedError::Validation(error.to_string()))?;
 
+        let _workspace_operation = self.acquire_workspace_operation().await?;
+        let staging = crate::container::build_doctor_staging_dir(&root, uuid::Uuid::new_v4())?;
+        let _staging_guard = BuildStagingGuard {
+            path: staging.clone(),
+        };
+        stage_project_snapshot(&root, &staging)?;
+
         let runtime = self.runtime_adapter().clone();
         let limits = hf_core::runtime::ResourceLimits {
             max_mem_mb: 4096,
@@ -364,7 +633,7 @@ impl crate::container::ServiceContainer {
 
         let mut steps_run = 0usize;
         for (index, step) in plan.steps.iter().enumerate() {
-            let cwd = root.join(&step.working_dir);
+            let cwd = staging.join(&step.working_dir);
             let result = runtime
                 .as_ref()
                 .run_command_opts(&step.argv, &cwd, &limits, &opts)
@@ -389,29 +658,28 @@ impl crate::container::ServiceContainer {
         }
 
         // The artifact is the evidence, not the exit status.
-        let artifact = root.join(&plan.expected_artifact);
+        let artifact = staging.join(&plan.expected_artifact);
         if !artifact.symlink_metadata().is_ok_and(|meta| meta.is_file()) {
-            return Ok(BuildPlanRunOutcome {
-                status: BuildPlanRunStatus::ArtifactMissing,
-                build_system: req.build_system,
-                steps_run,
-                failed_step: None,
-                build_context: None,
-            });
+            return Ok(artifact_missing_outcome(req.build_system, steps_run));
         }
-        let build_context = self.resolve_build_context(&root).unwrap_or(None);
+        let (normalized, build_context) =
+            match normalize_compile_database(&artifact, &staging, &root) {
+                Ok(result) => result,
+                Err(error) => {
+                    tracing::warn!(
+                        project = %root.display(),
+                        "Build Doctor produced an unusable compile database: {error}"
+                    );
+                    return Ok(artifact_missing_outcome(req.build_system, steps_run));
+                }
+            };
+        publish_compile_database(&root, &normalized)?;
         Ok(BuildPlanRunOutcome {
-            status: if build_context.is_some() {
-                BuildPlanRunStatus::Succeeded
-            } else {
-                // The file appeared but yielded nothing a compiler can use, so
-                // the run did not achieve what it was for.
-                BuildPlanRunStatus::ArtifactMissing
-            },
+            status: BuildPlanRunStatus::Succeeded,
             build_system: req.build_system,
             steps_run,
             failed_step: None,
-            build_context,
+            build_context: Some(build_context),
         })
     }
 }

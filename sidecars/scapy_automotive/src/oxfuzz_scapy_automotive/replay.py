@@ -95,6 +95,7 @@ def physical_replay_scope_sha256(plan_value: Any, config_value: Any) -> str:
             "arbitration_ids": sorted(config["arbitration_id_allowlist"]),
             "uds_services": sorted(config["service_allowlist"]),
             "allow_dangerous_services": config["allow_dangerous_services"],
+            "sidecar_image_sha256": config["sidecar_image_sha256"],
         }
     )
 

@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 
 /// How many call-trace frames identify a kernel bug.
 ///
-/// Matches the userspace signature depth in [`crate::classify`]: deep enough to
+/// Matches the userspace signature depth in [`crate::classify()`]: deep enough to
 /// separate distinct bugs, shallow enough that an unrelated caller further down
 /// the stack does not fork one bug into many.
 const SIGNATURE_FRAMES: usize = 3;

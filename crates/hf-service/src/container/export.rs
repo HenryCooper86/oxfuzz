@@ -8,6 +8,7 @@ use hf_core::engine::EngineKind;
 use hf_core::error::ClassifiedError;
 use hf_core::provider::ProviderPool;
 use hf_core::target::TargetLanguage;
+use hf_guardrails::Action;
 use uuid::Uuid;
 
 use super::crash_inputs::is_regular_file;
@@ -589,6 +590,14 @@ impl ServiceContainer {
         &self,
         crash_id: &str,
     ) -> Result<crate::issue_tracker::CreatedIssue, ClassifiedError> {
+        self.authorize_recorded(
+            Action::PublishFindings {
+                destination: "issue-tracker".to_owned(),
+            },
+            "file_issue",
+            None,
+        )
+        .await?;
         crate::workbench::file_issue(self.store.as_deref(), crash_id).await
     }
 
@@ -636,6 +645,14 @@ impl ServiceContainer {
         project: &Path,
         target: Option<&str>,
     ) -> Result<crate::defectdojo::PushOutcome, ClassifiedError> {
+        self.authorize_recorded(
+            Action::PublishFindings {
+                destination: "defectdojo".to_owned(),
+            },
+            "push_to_defectdojo",
+            Some(project),
+        )
+        .await?;
         let cfg = crate::defectdojo::load_config()?;
         let token = crate::defectdojo::resolve_token(&cfg)?;
         let crashes = self.crashes_for_latest_run(project, target).await?;

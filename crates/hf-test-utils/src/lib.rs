@@ -3,8 +3,13 @@
 
 pub mod assert_helpers;
 pub mod fixtures;
+mod harness_review;
 pub mod mock_provider;
 pub mod mock_storage;
+
+pub use harness_review::{
+    approving_harness_review_pool, approving_harness_review_response, is_harness_review_request,
+};
 
 /// Stable content-addressed image identity for runtime test doubles that
 /// exercise proof-carrying smoke or campaign paths.

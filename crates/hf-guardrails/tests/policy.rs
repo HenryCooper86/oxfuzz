@@ -11,6 +11,19 @@ fn run_fuzzer() -> Action {
     }
 }
 
+fn run_concolic() -> Action {
+    Action::RunConcolic {
+        target: "parse_packet".to_owned(),
+        duration_secs: 60,
+    }
+}
+
+fn publish_findings() -> Action {
+    Action::PublishFindings {
+        destination: "defectdojo".to_owned(),
+    }
+}
+
 fn verify_remediation() -> Action {
     Action::VerifyRemediation {
         engine: "libfuzzer".to_owned(),
@@ -105,6 +118,7 @@ fn risk_tiers_are_ordered() {
             interface: "can0".to_owned(),
             protocol: "uds".to_owned(),
             duration_secs: 5,
+            sidecar_image_sha256: "ab".repeat(32),
         }
         .risk(),
         RiskTier::High
@@ -137,9 +151,10 @@ fn automotive_labels_distinguish_offline_virtual_and_physical_access() {
         interface: "can0".to_owned(),
         protocol: "uds".to_owned(),
         duration_secs: 5,
+        sidecar_image_sha256: "ab".repeat(32),
     }
     .label()
-    .contains("physical CAN interface can0"));
+    .contains("image sha256:abababababababababababababababababababababababababababababababab"));
 }
 
 #[test]
@@ -149,6 +164,13 @@ fn action_kinds_are_stable_snake_case_audit_labels() {
     assert_eq!(Action::CompileHarness.kind(), "compile_harness");
     assert_eq!(Action::RunHarness.kind(), "run_harness");
     assert_eq!(run_fuzzer().kind(), "run_fuzzer");
+    assert_eq!(run_concolic().kind(), "run_concolic");
+    assert_eq!(
+        run_concolic().label(),
+        "run concolic enrichment for parse_packet for 60s"
+    );
+    assert_eq!(publish_findings().kind(), "publish_findings");
+    assert_eq!(publish_findings().label(), "publish findings to defectdojo");
     assert_eq!(verify_remediation().kind(), "verify_remediation");
     assert_eq!(
         verify_remediation().label(),
@@ -174,6 +196,7 @@ fn action_kinds_are_stable_snake_case_audit_labels() {
             interface: "can0".to_owned(),
             protocol: "uds".to_owned(),
             duration_secs: 5,
+            sidecar_image_sha256: "ab".repeat(32),
         }
         .kind(),
         "automotive_physical_bench"
@@ -219,6 +242,20 @@ fn default_policy_allows_low_requires_high_denies_critical() {
     assert_eq!(p.evaluate(&Action::CompileHarness), Decision::Allow);
     assert!(matches!(
         p.evaluate(&run_fuzzer()),
+        Decision::RequireApproval {
+            tier: RiskTier::High,
+            ..
+        }
+    ));
+    assert!(matches!(
+        p.evaluate(&run_concolic()),
+        Decision::RequireApproval {
+            tier: RiskTier::High,
+            ..
+        }
+    ));
+    assert!(matches!(
+        p.evaluate(&publish_findings()),
         Decision::RequireApproval {
             tier: RiskTier::High,
             ..

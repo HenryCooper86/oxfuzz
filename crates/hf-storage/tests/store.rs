@@ -12,8 +12,8 @@ use hf_core::target::{
 };
 use hf_storage::{
     AutoRevertEvent, AutomotiveOperationRecord, AutomotiveOperationStatus,
-    AutomotiveStateCorpusRecord, GuardrailDecisionRecord, HarnessApprovalKind,
-    NewScheduleOccurrence, ProjectAutoRevert, RemediationOperationCompletion,
+    AutomotiveStateCorpusRecord, GuardrailDecisionRecord, HarnessAiReviewRecord,
+    HarnessApprovalKind, NewScheduleOccurrence, ProjectAutoRevert, RemediationOperationCompletion,
     RemediationOperationRecord, RemediationOperationStage, RemediationOperationStatus, RunKind,
     RunRecord, RunStatus, ScheduleOccurrenceAcknowledgement, ScheduleOccurrenceInspection,
     ScheduleOccurrenceReservation, ScheduleOccurrenceTransition,
@@ -28,6 +28,39 @@ async fn temp_store() -> (Store, tempfile::TempDir) {
     let path = dir.path().join("test.db");
     let store = Store::connect(&path).await.expect("connect");
     (store, dir)
+}
+
+#[tokio::test]
+async fn store_connections_enable_sqlite_write_ahead_logging() {
+    let (store, _dir) = temp_store().await;
+
+    let journal_mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+        .fetch_one(store.pool())
+        .await
+        .expect("read journal mode");
+
+    assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+}
+
+#[tokio::test]
+async fn harness_ai_review_is_persisted_for_the_exact_source_revision() {
+    let (store, _dir) = temp_store().await;
+    let harness = sample_harness(Uuid::new_v4());
+    store.upsert_harness(&harness).await.unwrap();
+    let review = HarnessAiReviewRecord {
+        harness_id: harness.id,
+        source_sha256: "a".repeat(64),
+        binary_sha256: "b".repeat(64),
+        review_json: r#"{"exercises_target":true}"#.to_owned(),
+        reviewed_at: Utc::now(),
+    };
+
+    store.record_harness_ai_review(&review).await.unwrap();
+
+    assert_eq!(
+        store.harness_ai_review(harness.id).await.unwrap(),
+        Some(review)
+    );
 }
 
 async fn remediation_fixture(store: &Store, project: &str) -> RemediationOperationRecord {

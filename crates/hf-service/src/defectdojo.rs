@@ -496,7 +496,7 @@ impl DefectDojoClient {
     ///
     /// # Errors
     /// Returns a classified error if the request fails or the server rejects it.
-    pub async fn import(
+    pub(crate) async fn import(
         &self,
         target: &ImportTarget,
         findings: &serde_json::Value,

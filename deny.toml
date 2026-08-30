@@ -3,7 +3,7 @@
 
 [advisories]
 unmaintained = "workspace"
-yanked = "warn"
+yanked = "deny"
 
 [licenses]
 allow = [
@@ -13,18 +13,38 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
-    "ISC",
     "Unicode-3.0",
-    "Unicode-DFS-2016",
     "Zlib",
     "BSL-1.0",
     "CC0-1.0",
-    "OpenSSL",
     "MPL-2.0",
 ]
 [bans]
-multiple-versions = "warn"
+multiple-versions = "deny"
 wildcards = "allow"
+
+# Tauri and its desktop plugins support several operating-system generations,
+# so their published dependency trees intentionally retain incompatible major
+# versions of platform crates. Exact root versions keep this review scoped: the
+# strict gate reports an unmatched exception whenever an upgrade makes an entry
+# stale, requiring the new tree to be reviewed.
+skip-tree = [
+    { crate = "tauri@2.11.5", reason = "Reviewed Tauri desktop platform tree" },
+    { crate = "tauri-build@2.6.3", reason = "Reviewed Tauri build-time platform tree" },
+    { crate = "tauri-plugin-dialog@2.7.2", reason = "Reviewed Tauri dialog platform tree" },
+    { crate = "tauri-plugin-opener@2.5.4", reason = "Reviewed Tauri opener platform tree" },
+]
+
+# These older major versions are still required by independently maintained
+# direct dependencies. Keep each exception exact so dependency upgrades make
+# stale entries fail the strict policy gate instead of accumulating silently.
+skip = [
+    { crate = "hashbrown@0.15.5", reason = "SQLx 0.8 and Ratatui 0.28 require this series" },
+    { crate = "phf@0.11.3", reason = "jieba-rs 0.7 requires this series" },
+    { crate = "phf_shared@0.11.3", reason = "jieba-rs 0.7 requires this series" },
+    { crate = "strum@0.26.3", reason = "Ratatui 0.28 requires this series" },
+    { crate = "strum_macros@0.26.4", reason = "Ratatui 0.28 requires this series" },
+]
 
 [sources]
 unknown-registry = "deny"

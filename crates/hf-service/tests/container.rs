@@ -354,8 +354,13 @@ async fn cancel_run_stops_an_in_flight_fuzz_run() {
             .expect("connect store"),
     );
     let runtime = Arc::new(BlockingRuntime::default());
-    let container =
-        Arc::new(ServiceContainer::new(runtime.clone(), None).with_store(Arc::clone(&store)));
+    let container = Arc::new(
+        ServiceContainer::new(
+            runtime.clone(),
+            Some(hf_test_utils::approving_harness_review_pool()),
+        )
+        .with_store(Arc::clone(&store)),
+    );
     container
         .harness_compile(
             "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }".to_owned(),
@@ -577,7 +582,11 @@ async fn a_wall_clock_killed_run_persists_the_coverage_it_measured() {
             .expect("connect store"),
     );
     let container = Arc::new(
-        ServiceContainer::new(Arc::new(TimedOutRuntime), None).with_store(Arc::clone(&store)),
+        ServiceContainer::new(
+            Arc::new(TimedOutRuntime),
+            Some(hf_test_utils::approving_harness_review_pool()),
+        )
+        .with_store(Arc::clone(&store)),
     );
     container
         .harness_compile(
@@ -664,8 +673,11 @@ async fn background_start_returns_a_durable_cancellable_run_id() {
             .await
             .expect("connect store"),
     );
-    let container = ServiceContainer::new(Arc::new(BlockingRuntime::default()), None)
-        .with_store(Arc::clone(&store));
+    let container = ServiceContainer::new(
+        Arc::new(BlockingRuntime::default()),
+        Some(hf_test_utils::approving_harness_review_pool()),
+    )
+    .with_store(Arc::clone(&store));
     container
         .harness_compile(
             "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }".to_owned(),
@@ -799,8 +811,11 @@ async fn completed_run_merges_discoveries_without_writable_live_corpus() {
             .await
             .unwrap(),
     );
-    let container =
-        ServiceContainer::new(Arc::new(DiscoveryRuntime), None).with_store(Arc::clone(&store));
+    let container = ServiceContainer::new(
+        Arc::new(DiscoveryRuntime),
+        Some(hf_test_utils::approving_harness_review_pool()),
+    )
+    .with_store(Arc::clone(&store));
     container
         .harness_compile(
             "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }".to_owned(),
@@ -1207,7 +1222,11 @@ async fn corpus_minimize_uses_the_promoted_revision_and_an_isolated_snapshot() {
             .unwrap(),
     );
     let runtime = Arc::new(CorpusMinimizeRuntime::default());
-    let container = ServiceContainer::new(runtime.clone(), None).with_store(Arc::clone(&store));
+    let container = ServiceContainer::new(
+        runtime.clone(),
+        Some(hf_test_utils::approving_harness_review_pool()),
+    )
+    .with_store(Arc::clone(&store));
     container
         .harness_compile(
             "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }".to_owned(),
