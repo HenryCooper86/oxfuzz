@@ -29,13 +29,13 @@ use crate::{
         require_fuzzing_harness_engine, ServiceContainer,
     },
     harness_work_order::{
-        build_work_order, verify_work_order, HarnessWorkOrder, HarnessWorkOrderAttempt,
-        HarnessWorkOrderAttemptResult, HarnessWorkOrderError, HarnessWorkOrderErrorCode,
-        HarnessWorkOrderPayload, HarnessWorkOrderRanking, HarnessWorkOrderSubmission,
-        ImportHarnessWorkOrderSubmissionRequest, WorkOrderCompileContext, WorkOrderSeedReference,
-        WorkOrderSourceEvidence, WorkOrderStep, WorkOrderSubmissionOrigin, WorkOrderTargetEvidence,
-        MAX_WORK_ORDER_SEEDS, MAX_WORK_ORDER_SOURCE_EXCERPT_BYTES,
-        MAX_WORK_ORDER_SOURCE_EXCERPT_LINES,
+        build_work_order, sanitize_work_order_diagnostic, verify_work_order, HarnessWorkOrder,
+        HarnessWorkOrderAttempt, HarnessWorkOrderAttemptResult, HarnessWorkOrderError,
+        HarnessWorkOrderErrorCode, HarnessWorkOrderPayload, HarnessWorkOrderRanking,
+        HarnessWorkOrderSubmission, ImportHarnessWorkOrderSubmissionRequest,
+        WorkOrderCompileContext, WorkOrderSeedReference, WorkOrderSourceEvidence, WorkOrderStep,
+        WorkOrderSubmissionOrigin, WorkOrderTargetEvidence, MAX_WORK_ORDER_SEEDS,
+        MAX_WORK_ORDER_SOURCE_EXCERPT_BYTES, MAX_WORK_ORDER_SOURCE_EXCERPT_LINES,
     },
 };
 
@@ -1158,7 +1158,7 @@ fn valid_failure_message(message: &str) -> bool {
     !message.is_empty()
         && message.len() <= MAX_ATTEMPT_FAILURE_MESSAGE_BYTES
         && !message.chars().any(char::is_control)
-        && sanitize_failure_message(message) == message
+        && sanitize_work_order_diagnostic(message, MAX_ATTEMPT_FAILURE_MESSAGE_BYTES) == message
 }
 
 fn valid_sha256(value: &str) -> bool {
@@ -1186,108 +1186,14 @@ fn bounded_attempt_failure(error: &ClassifiedError) -> (String, String) {
         ClassifiedError::Timeout => "timeout",
         ClassifiedError::Internal(_) => "internal",
     };
-    let message = sanitize_failure_message(&error.to_string());
-    let message = bounded_utf8(&message, MAX_ATTEMPT_FAILURE_MESSAGE_BYTES)
-        .trim_end()
-        .to_owned();
+    let message =
+        sanitize_work_order_diagnostic(&error.to_string(), MAX_ATTEMPT_FAILURE_MESSAGE_BYTES);
     let message = if message.is_empty() {
         format!("{code} failure")
     } else {
         message
     };
     (bounded_utf8(code, MAX_ATTEMPT_FAILURE_CODE_BYTES), message)
-}
-
-fn sanitize_failure_message(message: &str) -> String {
-    let mut redact_next = false;
-    message
-        .split_whitespace()
-        .map(|token| {
-            if redact_next {
-                redact_next = false;
-                return "<redacted>".to_owned();
-            }
-            let normalized = normalized_failure_token(token);
-            if normalized.eq_ignore_ascii_case("bearer") {
-                redact_next = true;
-                return "Bearer".to_owned();
-            }
-            if secret_key(normalized) {
-                redact_next = true;
-                return token.to_owned();
-            }
-            if let Some(redacted) = redact_secret_assignment(token, &mut redact_next) {
-                return redacted;
-            }
-            if secret_value(normalized) {
-                return "<redacted>".to_owned();
-            }
-            redact_absolute_path(token).unwrap_or_else(|| token.to_owned())
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn normalized_failure_token(token: &str) -> &str {
-    token.trim_matches(|character: char| {
-        matches!(
-            character,
-            '(' | ')' | '[' | ']' | '{' | '}' | '\'' | '"' | ',' | ';' | ':'
-        )
-    })
-}
-
-fn secret_key(value: &str) -> bool {
-    matches!(
-        value.to_ascii_lowercase().as_str(),
-        "password" | "secret" | "token" | "api_key" | "api-key" | "apikey"
-    )
-}
-
-fn secret_value(value: &str) -> bool {
-    let lowercase = value.to_ascii_lowercase();
-    lowercase.starts_with("sk-")
-        || lowercase.starts_with("ghp_")
-        || lowercase.starts_with("github_pat_")
-        || lowercase.starts_with("xoxb-")
-        || lowercase.starts_with("xoxp-")
-        || lowercase.starts_with("xoxa-")
-        || lowercase.starts_with("hf_")
-        || (lowercase.starts_with("akia") && lowercase.len() > 8)
-}
-
-fn redact_secret_assignment(token: &str, redact_next: &mut bool) -> Option<String> {
-    for (index, character) in token.char_indices() {
-        if !matches!(character, '=' | ':') {
-            continue;
-        }
-        let key = normalized_failure_token(&token[..index]);
-        if !secret_key(key) && !key.eq_ignore_ascii_case("authorization") {
-            continue;
-        }
-        let value = &token[index + character.len_utf8()..];
-        if value.eq_ignore_ascii_case("bearer") || (value.is_empty() && secret_key(key)) {
-            *redact_next = true;
-        }
-        return Some(format!("{}<redacted>", &token[..=index]));
-    }
-    None
-}
-
-fn redact_absolute_path(token: &str) -> Option<String> {
-    let bytes = token.as_bytes();
-    for index in 0..bytes.len() {
-        let starts_after_non_word =
-            index == 0 || (!bytes[index - 1].is_ascii_alphanumeric() && bytes[index - 1] != b'_');
-        let unix = bytes[index] == b'/';
-        let windows = bytes.get(index..index + 3).is_some_and(|part| {
-            part[0].is_ascii_alphabetic() && part[1] == b':' && matches!(part[2], b'/' | b'\\')
-        });
-        if starts_after_non_word && (unix || windows) {
-            return Some(format!("{}<redacted-path>", &token[..index]));
-        }
-    }
-    None
 }
 
 fn bounded_utf8(value: &str, maximum_bytes: usize) -> String {

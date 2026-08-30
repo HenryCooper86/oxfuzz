@@ -325,6 +325,10 @@ pub enum HarnessWorkOrderErrorKind {
 pub enum HarnessWorkOrderErrorCode {
     /// The operation requires durable storage.
     StorageRequired,
+    /// A presentation input is not valid for its declared request field.
+    InvalidRequest,
+    /// A UUID presentation input is malformed.
+    InvalidIdentifier,
     /// Packet or compile-context digest verification failed.
     InvalidWorkOrderDigest,
     /// The packet schema is unsupported.
@@ -373,6 +377,8 @@ impl HarnessWorkOrderErrorCode {
     const fn as_str(self) -> &'static str {
         match self {
             Self::StorageRequired => "storage_required",
+            Self::InvalidRequest => "invalid_request",
+            Self::InvalidIdentifier => "invalid_identifier",
             Self::InvalidWorkOrderDigest => "invalid_work_order_digest",
             Self::UnsupportedWorkOrderSchema => "unsupported_work_order_schema",
             Self::SourceEmpty => "source_empty",
@@ -531,6 +537,112 @@ pub fn work_order_commands(work_order: &HarnessWorkOrder) -> Vec<WorkOrderComman
         .cloned()
         .map(|step| command_for_step(work_order, step))
         .collect()
+}
+
+/// Remove credentials and absolute host paths from one bounded public
+/// diagnostic.
+#[must_use]
+pub fn sanitize_work_order_diagnostic(message: &str, maximum_bytes: usize) -> String {
+    let mut redact_next = false;
+    let sanitized = message
+        .split_whitespace()
+        .map(|token| {
+            if redact_next {
+                redact_next = false;
+                return "<redacted>".to_owned();
+            }
+            let normalized = normalized_diagnostic_token(token);
+            if normalized.eq_ignore_ascii_case("bearer") {
+                redact_next = true;
+                return "Bearer".to_owned();
+            }
+            if secret_key(normalized) {
+                redact_next = true;
+                return token.to_owned();
+            }
+            if let Some(redacted) = redact_secret_assignment(token, &mut redact_next) {
+                return redacted;
+            }
+            if secret_value(normalized) {
+                return "<redacted>".to_owned();
+            }
+            redact_absolute_path(token).unwrap_or_else(|| token.to_owned())
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    bounded_utf8(&sanitized, maximum_bytes)
+        .trim_end()
+        .to_owned()
+}
+
+fn normalized_diagnostic_token(token: &str) -> &str {
+    token.trim_matches(|character: char| character.is_ascii_punctuation())
+}
+
+fn secret_key(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "password" | "secret" | "token" | "api_key" | "api-key" | "apikey"
+    )
+}
+
+fn secret_value(value: &str) -> bool {
+    let lowercase = value.to_ascii_lowercase();
+    lowercase.starts_with("sk-")
+        || lowercase.starts_with("ghp_")
+        || lowercase.starts_with("github_pat_")
+        || lowercase.starts_with("xoxb-")
+        || lowercase.starts_with("xoxp-")
+        || lowercase.starts_with("xoxa-")
+        || lowercase.starts_with("hf_")
+        || (lowercase.starts_with("akia") && lowercase.len() > 8)
+}
+
+fn redact_secret_assignment(token: &str, redact_next: &mut bool) -> Option<String> {
+    for (index, character) in token.char_indices() {
+        if !matches!(character, '=' | ':') {
+            continue;
+        }
+        let key = normalized_diagnostic_token(&token[..index]);
+        if !secret_key(key) && !key.eq_ignore_ascii_case("authorization") {
+            continue;
+        }
+        let value = &token[index + character.len_utf8()..];
+        if normalized_diagnostic_token(value).eq_ignore_ascii_case("bearer")
+            || (value.is_empty() && secret_key(key))
+        {
+            *redact_next = true;
+        }
+        return Some(format!("{}<redacted>", &token[..=index]));
+    }
+    None
+}
+
+fn redact_absolute_path(token: &str) -> Option<String> {
+    let bytes = token.as_bytes();
+    for index in 0..bytes.len() {
+        let starts_after_non_word =
+            index == 0 || (!bytes[index - 1].is_ascii_alphanumeric() && bytes[index - 1] != b'_');
+        let unix = bytes[index] == b'/';
+        let windows = bytes.get(index..index + 3).is_some_and(|part| {
+            part[0].is_ascii_alphabetic() && part[1] == b':' && matches!(part[2], b'/' | b'\\')
+        });
+        if starts_after_non_word && (unix || windows) {
+            return Some(format!("{}<redacted-path>", &token[..index]));
+        }
+    }
+    None
+}
+
+fn bounded_utf8(value: &str, maximum_bytes: usize) -> String {
+    if value.len() <= maximum_bytes {
+        return value.to_owned();
+    }
+    let mut end = maximum_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
 }
 
 /// Quote one concrete argument for a POSIX shell command display.

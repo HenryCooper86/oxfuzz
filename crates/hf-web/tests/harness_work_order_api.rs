@@ -2,18 +2,166 @@
 
 #![cfg(feature = "harness-work-order")]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
+use hf_core::provider::{ProviderError, ProviderPool};
+use hf_service::{
+    ClassifiedError, CommandResult, CommandTermination, ResourceLimits, RuntimeAdapter,
+};
 use hf_web::{build_with_state_and_security, AppState, WebSecurityConfig};
 use tower::ServiceExt as _;
 
 const IMPORT_BODY_LIMIT: usize = 131_072;
+const VALID_HARNESS: &str = "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size > 0 && data[0]; }";
+const APPROVING_REVIEW: &str = r#"{"exercises_target":true,"safe_to_execute":true,"reasons":["target receives fuzz input without unsafe side effects"]}"#;
+
+#[derive(Clone)]
+enum ControlledRuntimeMode {
+    Pass,
+    CompileError(String),
+}
+
+struct ControlledRuntime {
+    calls: AtomicUsize,
+    mode: ControlledRuntimeMode,
+}
+
+impl ControlledRuntime {
+    fn new(mode: ControlledRuntimeMode) -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            mode,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl RuntimeAdapter for ControlledRuntime {
+    async fn resolve_image_reference(
+        &self,
+        _image: &str,
+    ) -> Result<Option<hf_service::ImmutableImageReference>, ClassifiedError> {
+        Ok(Some(hf_test_utils::immutable_test_image()?))
+    }
+
+    async fn run_command(
+        &self,
+        cmd: &[String],
+        cwd: &Path,
+        _limits: &ResourceLimits,
+    ) -> Result<CommandResult, ClassifiedError> {
+        let call = self.calls.fetch_add(1, Ordering::Relaxed);
+        if call == 0 {
+            if let ControlledRuntimeMode::CompileError(message) = &self.mode {
+                return Err(ClassifiedError::Sandbox(message.clone()));
+            }
+            std::fs::create_dir_all(cwd)
+                .map_err(|error| ClassifiedError::Sandbox(error.to_string()))?;
+            let binary_name = cmd
+                .get(2)
+                .and_then(|script| script.rsplit_once("/work/'"))
+                .and_then(|(_, tail)| tail.split_once('\''))
+                .map_or_else(
+                    || panic!("compile command carries a staged output: {cmd:?}"),
+                    |(name, _)| name,
+                );
+            std::fs::write(cwd.join(binary_name), b"controlled compiled harness")
+                .map_err(|error| ClassifiedError::Sandbox(error.to_string()))?;
+        }
+        Ok(CommandResult {
+            exit_code: 0,
+            stdout: "DONE cov: 12 ft: 24 corp: 2/8b exec/s: 128".to_owned(),
+            stderr: String::new(),
+            workspace: cwd.to_path_buf(),
+            termination: CommandTermination::Completed,
+        })
+    }
+
+    async fn write_file(&self, path: &Path, content: &str) -> Result<(), ClassifiedError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| ClassifiedError::Sandbox(error.to_string()))?;
+        }
+        std::fs::write(path, content).map_err(|error| ClassifiedError::Sandbox(error.to_string()))
+    }
+
+    async fn read_file(&self, path: &Path) -> Result<String, ClassifiedError> {
+        std::fs::read_to_string(path).map_err(|error| ClassifiedError::Sandbox(error.to_string()))
+    }
+}
+
+struct ControlledReviewPool;
+
+#[async_trait::async_trait]
+impl ProviderPool for ControlledReviewPool {
+    async fn chat_completion(
+        &self,
+        _request: &hf_core::provider::ChatRequest,
+        _route: &hf_core::provider::RouteRequest,
+    ) -> Result<hf_core::provider::ChatResponse, ProviderError> {
+        Ok(hf_test_utils::fixtures::make_chat_response(
+            APPROVING_REVIEW,
+        ))
+    }
+
+    async fn chat_completion_stream(
+        &self,
+        _request: &hf_core::provider::ChatRequest,
+        _route: &hf_core::provider::RouteRequest,
+    ) -> Result<hf_core::provider::ChatStreamResponse, ProviderError> {
+        Err(ProviderError::Other {
+            message: "streaming is unused".to_owned(),
+        })
+    }
+
+    fn report_error(&self, _provider_id: &hf_core::types::ProviderId, _error: &ProviderError) {}
+
+    async fn provider_statuses(&self) -> Vec<hf_core::provider::ProviderStatus> {
+        Vec::new()
+    }
+
+    async fn freeze(&self, _provider_id: &hf_core::types::ProviderId, _reason: String) {}
+
+    async fn thaw(&self, _provider_id: &hf_core::types::ProviderId) -> Result<(), ProviderError> {
+        Ok(())
+    }
+}
+
+fn managed_workspace_root() -> PathBuf {
+    static ROOT: OnceLock<PathBuf> = OnceLock::new();
+    let root = ROOT.get_or_init(|| {
+        let root = std::env::temp_dir().join(format!(
+            "oxfuzz-work-order-web-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("create controlled managed workspace");
+        let canonical =
+            std::fs::canonicalize(&root).expect("canonical controlled managed workspace");
+        std::fs::write(
+            canonical.join(".oxfuzz-workspace.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "application": "oxfuzz",
+                "version": 1,
+                "canonical_root": canonical,
+            }))
+            .expect("serialize controlled workspace manifest"),
+        )
+        .expect("write controlled workspace manifest");
+        canonical
+    });
+    std::env::set_var("HF_WORKSPACE_DIR", root);
+    root.clone()
+}
 
 struct ApiFixture {
     _directory: tempfile::TempDir,
     project: PathBuf,
+    alternate_project: PathBuf,
     app: axum::Router,
 }
 
@@ -29,6 +177,15 @@ impl ApiFixture {
               }\n",
         )
         .expect("write project source");
+        let alternate_project = directory.path().join("alternate-project-root");
+        std::fs::create_dir(&alternate_project).expect("create alternate project root");
+        std::fs::write(
+            alternate_project.join("decoder.c"),
+            b"int decode_packet(const unsigned char *data, unsigned long size) {\n\
+                return size == 0 ? 0 : data[0];\n\
+              }\n",
+        )
+        .expect("write alternate project source");
 
         let container = hf_service::ServiceContainer::stubbed()
             .with_store_path(directory.path().join("work-orders.db"))
@@ -48,13 +205,33 @@ impl ApiFixture {
                 .any(|candidate| candidate.symbol == "parse_packet"),
             "fixture source must retain the requested target"
         );
+        let alternate_inventory = container
+            .discover(
+                &alternate_project,
+                "c".parse().expect("canonical test target language"),
+            )
+            .await
+            .expect("discover and retain alternate test target");
+        assert!(
+            alternate_inventory
+                .candidates
+                .iter()
+                .any(|candidate| candidate.symbol == "decode_packet"),
+            "alternate fixture source must retain the requested target"
+        );
 
-        let security = WebSecurityConfig::new(None, true, Vec::new(), vec![project.clone()])
-            .expect("open local test security");
+        let security = WebSecurityConfig::new(
+            None,
+            true,
+            Vec::new(),
+            vec![project.clone(), alternate_project.clone()],
+        )
+        .expect("open local test security");
         let app = build_with_state_and_security(AppState::new(container), security);
         Self {
             _directory: directory,
             project,
+            alternate_project,
             app,
         }
     }
@@ -62,6 +239,77 @@ impl ApiFixture {
     fn canonical_root(&self) -> String {
         std::fs::canonicalize(&self.project)
             .expect("canonical fixture root")
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+struct ControlledApiFixture {
+    _directory: tempfile::TempDir,
+    project: PathBuf,
+    managed_workspace: PathBuf,
+    store: Arc<hf_storage::Store>,
+    target_id: uuid::Uuid,
+    app: axum::Router,
+}
+
+impl ControlledApiFixture {
+    async fn new(mode: ControlledRuntimeMode) -> Self {
+        let managed_workspace = managed_workspace_root();
+        let directory = tempfile::tempdir().expect("temporary controlled API fixture");
+        let project = directory.path().join("controlled-private-project");
+        std::fs::create_dir(&project).expect("create controlled project");
+        std::fs::write(
+            project.join("parser.c"),
+            b"#include <stddef.h>\n\
+              int parse_packet(const unsigned char *data, size_t size) {\n\
+                return size == 0 ? 0 : data[0];\n\
+              }\n",
+        )
+        .expect("write controlled project source");
+        let store = Arc::new(
+            hf_storage::Store::connect(directory.path().join("controlled-work-orders.db"))
+                .await
+                .expect("open controlled work-order store"),
+        );
+        let container = hf_service::ServiceContainer::new(
+            Arc::new(ControlledRuntime::new(mode)),
+            Some(Arc::new(ControlledReviewPool)),
+        )
+        .with_store(Arc::clone(&store));
+        let inventory = container
+            .discover(&project, "c".parse().expect("controlled target language"))
+            .await
+            .expect("discover controlled target");
+        let target_id = inventory
+            .candidates
+            .iter()
+            .find(|candidate| candidate.symbol == "parse_packet")
+            .expect("controlled target retained")
+            .id;
+        let security = WebSecurityConfig::new(None, true, Vec::new(), vec![project.clone()])
+            .expect("controlled web security");
+        let app = build_with_state_and_security(AppState::new(container), security);
+        Self {
+            _directory: directory,
+            project,
+            managed_workspace,
+            store,
+            target_id,
+            app,
+        }
+    }
+
+    fn canonical_root(&self) -> String {
+        std::fs::canonicalize(&self.project)
+            .expect("canonical controlled project")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn canonical_workspace(&self) -> String {
+        std::fs::canonicalize(&self.managed_workspace)
+            .expect("canonical controlled managed workspace")
             .to_string_lossy()
             .into_owned()
     }
@@ -120,13 +368,21 @@ fn assert_root_absent(root: &str, body: &[u8]) {
 }
 
 async fn export_work_order(fixture: &ApiFixture) -> (String, Vec<u8>) {
+    export_project_work_order(fixture, &fixture.project, "parse_packet").await
+}
+
+async fn export_project_work_order(
+    fixture: &ApiFixture,
+    project: &std::path::Path,
+    target: &str,
+) -> (String, Vec<u8>) {
     let (status, body, bytes) = json_request(
         &fixture.app,
         Method::POST,
         "/harness/work-orders",
         serde_json::json!({
-            "project": fixture.project,
-            "target": "parse_packet",
+            "project": project,
+            "target": target,
             "lang": "c",
             "engine": "libfuzzer"
         }),
@@ -138,9 +394,121 @@ async fn export_work_order(fixture: &ApiFixture) -> (String, Vec<u8>) {
         .expect("exported work-order id")
         .to_owned();
     assert_eq!(body["schema_version"], 2);
-    assert_eq!(body["payload"]["target"]["relative_source"], "parser.c");
-    assert!(body["validation_commands"][0]["argv"].is_array());
+    assert_eq!(
+        body["validation_commands"],
+        serde_json::json!([
+            {
+                "step": "import",
+                "argv": [
+                    {"literal": "oxfuzz"},
+                    {"literal": "work-order"},
+                    {"literal": "import"},
+                    {"literal": "--work-order"},
+                    {"literal": id},
+                    {"literal": "--source"},
+                    {"placeholder": "source_file"}
+                ],
+                "approval_required": false
+            },
+            {
+                "step": "qualify",
+                "argv": [
+                    {"literal": "oxfuzz"},
+                    {"literal": "work-order"},
+                    {"literal": "qualify"},
+                    {"literal": "--submission"},
+                    {"placeholder": "submission_id"}
+                ],
+                "approval_required": true
+            },
+            {
+                "step": "rank",
+                "argv": [
+                    {"literal": "oxfuzz"},
+                    {"literal": "work-order"},
+                    {"literal": "rank"},
+                    {"literal": "--attempt"},
+                    {"placeholder": "attempt_ids"}
+                ],
+                "approval_required": false
+            },
+            {
+                "step": "promote",
+                "argv": [
+                    {"literal": "oxfuzz"},
+                    {"literal": "work-order"},
+                    {"literal": "promote"},
+                    {"literal": "--attempt"},
+                    {"placeholder": "attempt_id"}
+                ],
+                "approval_required": true
+            },
+            {
+                "step": {"run_campaign": {"duration_secs": 300}},
+                "argv": [
+                    {"literal": "oxfuzz"},
+                    {"literal": "run"},
+                    {"literal": "--target"},
+                    {"literal": target},
+                    {"literal": "--engine"},
+                    {"literal": "libfuzzer"},
+                    {"literal": "--duration-secs"},
+                    {"literal": "300"}
+                ],
+                "approval_required": true
+            },
+            {
+                "step": "coverage",
+                "argv": [
+                    {"literal": "oxfuzz"},
+                    {"literal": "coverage"},
+                    {"literal": "--target"},
+                    {"literal": target}
+                ],
+                "approval_required": false
+            }
+        ])
+    );
     (id, bytes)
+}
+
+async fn controlled_submission(
+    fixture: &ControlledApiFixture,
+) -> (String, String, serde_json::Value) {
+    let (status, work_order, _) = json_request(
+        &fixture.app,
+        Method::POST,
+        "/harness/work-orders",
+        serde_json::json!({
+            "project": fixture.project,
+            "target": "parse_packet",
+            "lang": "c",
+            "engine": "libfuzzer"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "controlled export: {work_order}");
+    let work_order_id = work_order["id"]
+        .as_str()
+        .expect("controlled work-order id")
+        .to_owned();
+    let (status, submission, _) = json_request(
+        &fixture.app,
+        Method::POST,
+        &format!("/harness/work-orders/{work_order_id}/submissions"),
+        serde_json::json!({
+            "source": VALID_HARNESS,
+            "origin": "human",
+            "parent_submission_id": null
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "controlled import: {submission}");
+    let submission_id = submission["id"]
+        .as_str()
+        .expect("controlled submission id")
+        .to_owned();
+    (work_order_id, submission_id, submission)
 }
 
 #[tokio::test]
@@ -251,6 +619,291 @@ async fn every_work_order_resource_round_trips_service_owned_views() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "promotion: {promotion}");
     assert_eq!(promotion["code"], "attempt_not_smoke_passed");
     assert_root_absent(&root, &bytes);
+}
+
+#[tokio::test]
+async fn successful_promotion_returns_an_explicit_path_free_promoted_view() {
+    let fixture = ControlledApiFixture::new(ControlledRuntimeMode::Pass).await;
+    let (_, submission_id, _) = controlled_submission(&fixture).await;
+    let (status, attempt, bytes) = empty_request(
+        &fixture.app,
+        Method::POST,
+        &format!("/harness/work-order-submissions/{submission_id}/qualifications"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "controlled qualification: {attempt}"
+    );
+    assert_eq!(attempt["status"], "smoke_passed");
+    let attempt_id = attempt["id"]
+        .as_str()
+        .expect("controlled attempt id")
+        .to_owned();
+    let harness_id = attempt["harness_id"]
+        .as_str()
+        .expect("controlled harness id")
+        .to_owned();
+    let source_sha256 = attempt["result"]["source_sha256"]
+        .as_str()
+        .expect("controlled source digest")
+        .to_owned();
+    let binary_sha256 = attempt["result"]["binary_sha256"]
+        .as_str()
+        .expect("controlled binary digest")
+        .to_owned();
+    assert_root_absent(&fixture.canonical_root(), &bytes);
+    assert_root_absent(&fixture.canonical_workspace(), &bytes);
+
+    let (status, promoted, bytes) = empty_request(
+        &fixture.app,
+        Method::POST,
+        &format!("/harness/work-order-attempts/{attempt_id}/promotion"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "controlled promotion: {promoted}");
+    assert_eq!(
+        promoted,
+        serde_json::json!({
+            "id": harness_id,
+            "target_id": fixture.target_id,
+            "engine": "libfuzzer",
+            "source": VALID_HARNESS,
+            "language": "C",
+            "status": "Promoted"
+        })
+    );
+    assert_root_absent(&fixture.canonical_root(), &bytes);
+    assert_root_absent(&fixture.canonical_workspace(), &bytes);
+    let approval = fixture
+        .store
+        .harness_approval(
+            harness_id.parse().expect("controlled harness UUID"),
+            &source_sha256,
+            &binary_sha256,
+        )
+        .await
+        .expect("load REST promotion approval")
+        .expect("REST promotion retained approval");
+    assert_eq!(approval.harness_id.to_string(), harness_id);
+    assert_eq!(
+        approval.approval_kind,
+        hf_storage::HarnessApprovalKind::CleanSmoke
+    );
+}
+
+#[tokio::test]
+async fn successful_attempt_responses_never_return_punctuation_adjacent_credentials() {
+    let fixture = ControlledApiFixture::new(ControlledRuntimeMode::CompileError(
+        "compile failed !sk-punctuated-secret! !token=secret-value \
+         !Bearer opaque-credential detail;/Users/operator/private/source.c"
+            .to_owned(),
+    ))
+    .await;
+    let (_, submission_id, _) = controlled_submission(&fixture).await;
+    let qualification_uri =
+        format!("/harness/work-order-submissions/{submission_id}/qualifications");
+    let (status, attempt, qualification_bytes) =
+        empty_request(&fixture.app, Method::POST, &qualification_uri).await;
+    assert_eq!(status, StatusCode::OK, "controlled failure: {attempt}");
+    assert_eq!(attempt["status"], "compile_failed");
+    let attempt_id = attempt["id"]
+        .as_str()
+        .expect("controlled failed attempt id")
+        .to_owned();
+
+    let (status, attempts, list_bytes) =
+        empty_request(&fixture.app, Method::GET, &qualification_uri).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "controlled attempt list: {attempts}"
+    );
+    let (status, fetched, get_bytes) = empty_request(
+        &fixture.app,
+        Method::GET,
+        &format!("/harness/work-order-attempts/{attempt_id}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "controlled attempt get: {fetched}");
+
+    for body in [&qualification_bytes, &list_bytes, &get_bytes] {
+        let body = String::from_utf8_lossy(body);
+        for secret in [
+            "punctuated-secret",
+            "secret-value",
+            "opaque-credential",
+            "/Users/operator",
+        ] {
+            assert!(
+                !body.contains(secret),
+                "attempt response disclosed {secret}"
+            );
+        }
+        assert!(!body.contains(&fixture.canonical_root()));
+        assert!(!body.contains(&fixture.canonical_workspace()));
+    }
+}
+
+#[tokio::test]
+async fn list_filter_returns_only_the_approved_project_work_orders() {
+    let fixture = ApiFixture::new().await;
+    let (primary_id, _) = export_work_order(&fixture).await;
+    let (alternate_id, _) =
+        export_project_work_order(&fixture, &fixture.alternate_project, "decode_packet").await;
+
+    let (status, filtered, bytes) = empty_request(
+        &fixture.app,
+        Method::GET,
+        &format!("/harness/work-orders?project={}", fixture.project.display()),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "filtered list: {filtered}");
+    assert_eq!(filtered.as_array().map(Vec::len), Some(1));
+    assert_eq!(filtered[0]["id"], primary_id);
+    assert_ne!(filtered[0]["id"], alternate_id);
+    assert_root_absent(&fixture.canonical_root(), &bytes);
+}
+
+#[tokio::test]
+async fn list_filter_rejects_unapproved_and_unknown_query_input_as_json() {
+    let fixture = ApiFixture::new().await;
+    let outside = tempfile::tempdir().expect("outside project filter");
+    let outside_root = std::fs::canonicalize(outside.path())
+        .expect("canonical outside filter root")
+        .to_string_lossy()
+        .into_owned();
+
+    let (status, body, bytes) = empty_request(
+        &fixture.app,
+        Method::GET,
+        &format!("/harness/work-orders?project={outside_root}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "outside filter: {body}");
+    assert_eq!(body["code"], "invalid_project_path");
+    assert_root_absent(&outside_root, &bytes);
+    assert_root_absent(&fixture.canonical_root(), &bytes);
+
+    let (status, body, bytes) = empty_request(
+        &fixture.app,
+        Method::GET,
+        "/harness/work-orders?project_root=/tmp/unauthorized",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "unknown query: {body}");
+    assert_eq!(body["code"], "invalid_request");
+    assert!(body["error"]
+        .as_str()
+        .is_some_and(|error| !error.is_empty()));
+    assert_root_absent(&fixture.canonical_root(), &bytes);
+}
+
+#[tokio::test]
+async fn malformed_path_identifiers_return_common_json_validation_errors() {
+    let fixture = ApiFixture::new().await;
+    let malformed_digest = "A".repeat(64);
+    let malformed_uuid = "not-a-uuid";
+
+    for uri in [
+        format!("/harness/work-orders/{malformed_digest}"),
+        format!("/harness/work-orders/{malformed_digest}/submissions"),
+    ] {
+        let (status, body, bytes) = empty_request(&fixture.app, Method::GET, &uri).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body}");
+        assert_eq!(body["code"], "invalid_work_order_digest", "{uri}: {body}");
+        assert_root_absent(&fixture.canonical_root(), &bytes);
+    }
+
+    let (status, body, bytes) = json_request(
+        &fixture.app,
+        Method::POST,
+        &format!("/harness/work-orders/{malformed_digest}/submissions"),
+        serde_json::json!({"source": "valid source", "origin": "human"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "import path: {body}");
+    assert_eq!(body["code"], "invalid_work_order_digest");
+    assert_root_absent(&fixture.canonical_root(), &bytes);
+
+    let requests = [
+        (
+            Method::POST,
+            format!("/harness/work-order-submissions/{malformed_uuid}/qualifications"),
+        ),
+        (
+            Method::GET,
+            format!("/harness/work-order-submissions/{malformed_uuid}/qualifications"),
+        ),
+        (
+            Method::GET,
+            format!("/harness/work-order-attempts/{malformed_uuid}"),
+        ),
+        (
+            Method::POST,
+            format!("/harness/work-order-attempts/{malformed_uuid}/promotion"),
+        ),
+    ];
+    for (method, uri) in requests {
+        let (status, body, bytes) = empty_request(&fixture.app, method, &uri).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body}");
+        assert_eq!(body["code"], "invalid_identifier", "{uri}: {body}");
+        assert_root_absent(&fixture.canonical_root(), &bytes);
+    }
+}
+
+#[tokio::test]
+async fn malformed_json_identifiers_use_route_owned_common_errors() {
+    let fixture = ApiFixture::new().await;
+    let (work_order_id, _) = export_work_order(&fixture).await;
+
+    let (status, body, bytes) = json_request(
+        &fixture.app,
+        Method::POST,
+        &format!("/harness/work-orders/{work_order_id}/submissions"),
+        serde_json::json!({
+            "source": "valid source",
+            "origin": "human",
+            "parent_submission_id": "not-a-uuid"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "parent id: {body}");
+    assert_eq!(body["code"], "invalid_identifier");
+    assert_root_absent(&fixture.canonical_root(), &bytes);
+
+    let (status, body, bytes) = json_request(
+        &fixture.app,
+        Method::POST,
+        "/harness/work-order-attempts/rank",
+        serde_json::json!({"attempt_ids": ["not-a-uuid"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "rank id: {body}");
+    assert_eq!(body["code"], "invalid_identifier");
+    assert_root_absent(&fixture.canonical_root(), &bytes);
+
+    for (uri, raw_json) in [
+        (
+            format!("/harness/work-orders/{work_order_id}/submissions"),
+            r#"{"source":"valid source","origin":"human","parent_submission_id":17}"#,
+        ),
+        (
+            "/harness/work-order-attempts/rank".to_owned(),
+            r#"{"attempt_ids":[17]}"#,
+        ),
+    ] {
+        let (status, bytes) =
+            send(&fixture.app, Method::POST, &uri, Body::from(raw_json), true).await;
+        let body: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("stable JSON extraction error");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body}");
+        assert_eq!(body["code"], "invalid_request", "{uri}: {body}");
+        assert_root_absent(&fixture.canonical_root(), &bytes);
+    }
 }
 
 #[tokio::test]
@@ -378,6 +1031,7 @@ async fn public_json_requests_reject_unknown_or_authority_bearing_fields() {
                 "engine": "libfuzzer",
                 "target_id": "00000000-0000-0000-0000-000000000001"
             }),
+            "invalid_request",
         ),
         (
             format!("/harness/work-orders/{work_order_id}/submissions"),
@@ -387,6 +1041,7 @@ async fn public_json_requests_reject_unknown_or_authority_bearing_fields() {
                 "project_root": fixture.project,
                 "command": ["sh", "-c", "true"]
             }),
+            "invalid_request",
         ),
         (
             format!("/harness/work-orders/{work_order_id}/submissions"),
@@ -394,6 +1049,7 @@ async fn public_json_requests_reject_unknown_or_authority_bearing_fields() {
                 "source": "int LLVMFuzzerTestOneInput(void) { return 0; }",
                 "origin": {"external_tool": {"tool": "author", "env": {"KEY": "value"}}}
             }),
+            "invalid_request",
         ),
         (
             "/harness/work-order-attempts/rank".to_owned(),
@@ -401,12 +1057,14 @@ async fn public_json_requests_reject_unknown_or_authority_bearing_fields() {
                 "attempt_ids": ["00000000-0000-0000-0000-000000000001"],
                 "approval": true
             }),
+            "invalid_request",
         ),
     ];
 
-    for (uri, body) in cases {
-        let (status, _, bytes) = json_request(&fixture.app, Method::POST, &uri, body).await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{uri}");
+    for (uri, request, code) in cases {
+        let (status, body, bytes) = json_request(&fixture.app, Method::POST, &uri, request).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body}");
+        assert_eq!(body["code"], code, "{uri}: {body}");
         assert_root_absent(&fixture.canonical_root(), &bytes);
     }
 
@@ -422,6 +1080,7 @@ async fn public_json_requests_reject_unknown_or_authority_bearing_fields() {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body}");
+        assert_eq!(body["code"], "invalid_request", "{uri}: {body}");
         assert_root_absent(&fixture.canonical_root(), &bytes);
     }
 }
