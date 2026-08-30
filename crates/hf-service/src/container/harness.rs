@@ -19,8 +19,8 @@ use super::coverage_cache::frontier_refine_lines;
 use super::crash_inputs::is_regular_file;
 use super::guards::{ensure_run_journal_durable, PersistedRunGuard};
 use super::harness_workspace::{
-    copy_project_sources, generate_target_seeds, harness_binary_name, read_current_harness_source,
-    write_current_harness_id, write_current_harness_source,
+    copy_project_sources, generate_target_seeds, harness_binary_name, read_current_harness_id,
+    read_current_harness_source, write_current_harness_id, write_current_harness_source,
 };
 use super::output_budget::{
     output_budget_status, OutputBudget, MAX_RUN_OUTPUT_BYTES, MAX_RUN_OUTPUT_ENTRIES,
@@ -2396,6 +2396,108 @@ mod exact_qualification_tests {
         (project, store, container, runtime, promoted)
     }
 
+    async fn install_different_promoted_revision(
+        project: &tempfile::TempDir,
+        store: &Arc<hf_storage::Store>,
+        container: &ServiceContainer,
+        previous: &Harness,
+    ) -> Harness {
+        let candidate = store
+            .list_all_targets()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.id == previous.target_id)
+            .unwrap();
+        let workspace = workspace_dir(project.path(), TARGET);
+        let replacement_source = "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size > 1 && data[1]; }";
+        container
+            .compile_source_with_repair(
+                &candidate,
+                EngineKind::LibFuzzer,
+                TargetLanguage::C,
+                &workspace,
+                replacement_source.to_owned(),
+                0,
+            )
+            .await
+            .unwrap();
+        std::fs::write(
+            workspace.join(harness_binary_name(TARGET)),
+            b"mock compiled replacement harness",
+        )
+        .unwrap();
+        container
+            .harness_smoke(
+                project.path(),
+                TARGET,
+                EngineKind::LibFuzzer,
+                TargetLanguage::C,
+            )
+            .await
+            .unwrap();
+        let replacement = container
+            .harness_promote(project.path(), TARGET, EngineKind::LibFuzzer)
+            .await
+            .unwrap();
+
+        let (_, previous_source, previous_binary) =
+            super::qualification_evidence(previous).unwrap();
+        let (_, replacement_source, replacement_binary) =
+            super::qualification_evidence(&replacement).unwrap();
+        assert_ne!(replacement.id, previous.id);
+        assert_ne!(replacement_source, previous_source);
+        assert_ne!(replacement_binary, previous_binary);
+        replacement
+    }
+
+    async fn persist_campaign_run(
+        project: &tempfile::TempDir,
+        store: &hf_storage::Store,
+        harness: &Harness,
+        edges: u64,
+        started_at: chrono::DateTime<chrono::Utc>,
+    ) -> hf_storage::RunRecord {
+        let (qualification_run_id, source_sha256, binary_sha256) =
+            super::qualification_evidence(harness).unwrap();
+        let qualification_run = store.get_run(qualification_run_id).await.unwrap().unwrap();
+        let mut config = qualification_run.config.unwrap();
+        config.harness_id = harness.id;
+        let mut run = hf_storage::RunRecord::new(
+            project.path().to_string_lossy(),
+            harness.engine,
+            Some(config),
+            started_at,
+        );
+        run.status = hf_storage::RunStatus::Done;
+        run.ended_at = Some(started_at + chrono::Duration::seconds(1));
+        run.edges = Some(edges);
+        run.harness_rev = Some(source_sha256.to_owned());
+        run.binary_rev = Some(binary_sha256.to_owned());
+        run.context_rev = Some("c".repeat(64));
+        run.evidence_dir = Some(format!("runs/{}/out", run.id));
+
+        let workspace = workspace_dir(project.path(), TARGET);
+        let input = workspace
+            .join("runs")
+            .join(run.id.to_string())
+            .join("input");
+        std::fs::create_dir_all(&input).unwrap();
+        std::fs::create_dir_all(workspace.join("runs").join(run.id.to_string()).join("out"))
+            .unwrap();
+        std::fs::write(input.join("harness.source"), &harness.source).unwrap();
+        std::fs::copy(
+            workspace
+                .join("runs")
+                .join(qualification_run_id.to_string())
+                .join("input/harness"),
+            input.join("harness"),
+        )
+        .unwrap();
+        store.insert_run(&run).await.unwrap();
+        run
+    }
+
     #[tokio::test]
     async fn conditional_revert_rejects_a_newer_harness_id_without_mutation() {
         let _gate = qualification_test_gate().lock().await;
@@ -2543,13 +2645,33 @@ mod exact_qualification_tests {
     }
 
     #[tokio::test]
-    async fn conditional_revert_completes_after_a_queued_workspace_cleanup() {
+    async fn normal_auto_revert_completes_after_a_queued_workspace_cleanup() {
         let _gate = qualification_test_gate().lock().await;
-        let (_project, _store, container, _runtime, active) = promoted_fixture().await;
-        let (qualification_run, source_sha256, binary_sha256) = {
-            let (run, source, binary) = super::qualification_evidence(&active).unwrap();
-            (run, source.to_owned(), binary.to_owned())
-        };
+        let (project, store, container, _runtime, historical) = promoted_fixture().await;
+        let active =
+            install_different_promoted_revision(&project, &store, &container, &historical).await;
+        let now = chrono::Utc::now();
+        let baseline = persist_campaign_run(
+            &project,
+            &store,
+            &historical,
+            100,
+            now - chrono::Duration::seconds(2),
+        )
+        .await;
+        let current = persist_campaign_run(
+            &project,
+            &store,
+            &active,
+            50,
+            now - chrono::Duration::seconds(1),
+        )
+        .await;
+        container
+            .set_project_auto_revert_override(project.path(), true, 20.0, false)
+            .await
+            .unwrap();
+        let (_, source_sha256, binary_sha256) = super::qualification_evidence(&active).unwrap();
         let held = container.acquire_workspace_operation().await.unwrap();
         let (_, workspace_gate) = super::super::workspace::workspace_operation_gate(
             &super::super::workspace::workspace_root(),
@@ -2567,19 +2689,18 @@ mod exact_qualification_tests {
         queued_rx.await.unwrap();
 
         let worker = container.clone();
-        let run_id = qualification_run.to_string();
-        let active_id = active.id;
-        let expected_source = source_sha256.clone();
-        let expected_binary = binary_sha256.clone();
+        let project_path = project.path().to_path_buf();
+        let expected_source = source_sha256.to_owned();
+        let expected_binary = binary_sha256.to_owned();
         let mut revert = tokio::spawn(async move {
             worker
-                .revert_harness_from_run_if_current(
-                    &run_id,
-                    Some(super::super::policy::CurrentHarnessEvidence {
-                        id: active_id,
-                        source_sha256: &expected_source,
-                        binary_sha256: &expected_binary,
-                    }),
+                .maybe_auto_revert(
+                    &project_path,
+                    TARGET,
+                    current.id,
+                    50,
+                    Some(&expected_source),
+                    Some(&expected_binary),
                 )
                 .await
         });
@@ -2587,14 +2708,19 @@ mod exact_qualification_tests {
             tokio::time::timeout(std::time::Duration::from_millis(25), &mut revert)
                 .await
                 .is_err(),
-            "conditional reversion must wait behind the queued cleanup writer"
+            "normal auto-revert must wait behind the queued cleanup writer"
         );
         let _ = release_tx.send(());
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_secs(1), &mut revert)
-                .await
-                .is_ok(),
-            "conditional reversion must complete after cleanup releases the writer lease"
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), &mut revert)
+            .await
+            .expect("normal auto-revert must complete after cleanup releases the writer lease")
+            .unwrap()
+            .expect("the non-notify policy must return its applied reversion");
+        assert!(outcome.reverted);
+        assert_eq!(outcome.reverted_to_run, baseline.id.to_string());
+        assert_eq!(
+            super::read_current_harness_id(&workspace_dir(project.path(), TARGET)),
+            Some(historical.id)
         );
         cleanup.await.unwrap();
     }
@@ -2602,7 +2728,9 @@ mod exact_qualification_tests {
     #[tokio::test]
     async fn cached_coverage_holds_the_revision_lease_through_adapter_dispatch() {
         let _gate = qualification_test_gate().lock().await;
-        let (project, _store, container, runtime, active) = promoted_fixture().await;
+        let (project, store, container, runtime, historical) = promoted_fixture().await;
+        let active =
+            install_different_promoted_revision(&project, &store, &container, &historical).await;
         let workspace = workspace_dir(project.path(), TARGET);
         std::fs::write(workspace.join("harness.c"), SOURCE).unwrap();
         let (started, release) = runtime.pause_next_command(true);
@@ -2614,11 +2742,12 @@ mod exact_qualification_tests {
                 .await
         });
         started.await.unwrap();
-        let (run, source, binary) = super::qualification_evidence(&active).unwrap();
+        let (run, _, _) = super::qualification_evidence(&historical).unwrap();
+        let (_, active_source, active_binary) = super::qualification_evidence(&active).unwrap();
         let worker = container.clone();
         let run_id = run.to_string();
-        let source = source.to_owned();
-        let binary = binary.to_owned();
+        let source = active_source.to_owned();
+        let binary = active_binary.to_owned();
         let mut revert = tokio::spawn(async move {
             worker
                 .revert_harness_from_run_if_current(
@@ -2641,19 +2770,25 @@ mod exact_qualification_tests {
             .await
             .unwrap()
             .unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(1), &mut revert)
+        let reverted = tokio::time::timeout(std::time::Duration::from_secs(1), &mut revert)
             .await
             .unwrap()
             .unwrap()
             .unwrap();
+        assert_eq!(reverted.harness_id, historical.id);
+        assert_ne!(reverted.harness_id, active.id);
     }
 
     #[tokio::test]
     async fn regression_replay_holds_the_revision_lease_through_adapter_dispatch() {
         let _gate = qualification_test_gate().lock().await;
-        let (project, _store, container, runtime, active) = promoted_fixture().await;
+        let (project, store, container, runtime, historical) = promoted_fixture().await;
+        let active =
+            install_different_promoted_revision(&project, &store, &container, &historical).await;
         let workspace = workspace_dir(project.path(), TARGET);
-        let (qualification_run, source, binary) = super::qualification_evidence(&active).unwrap();
+        let (qualification_run, _, _) = super::qualification_evidence(&active).unwrap();
+        let (historical_run, _, _) = super::qualification_evidence(&historical).unwrap();
+        let (_, source, binary) = super::qualification_evidence(&active).unwrap();
         let output = workspace
             .join("runs")
             .join(qualification_run.to_string())
@@ -2670,7 +2805,7 @@ mod exact_qualification_tests {
         });
         started.await.unwrap();
         let worker = container.clone();
-        let run_id = qualification_run.to_string();
+        let run_id = historical_run.to_string();
         let source = source.to_owned();
         let binary = binary.to_owned();
         let mut revert = tokio::spawn(async move {
@@ -2696,11 +2831,13 @@ mod exact_qualification_tests {
             .unwrap()
             .unwrap()
             .unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(1), &mut revert)
+        let reverted = tokio::time::timeout(std::time::Duration::from_secs(1), &mut revert)
             .await
             .unwrap()
             .unwrap()
             .unwrap();
+        assert_eq!(reverted.harness_id, historical.id);
+        assert_ne!(reverted.harness_id, active.id);
     }
 
     #[tokio::test]
