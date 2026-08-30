@@ -2071,8 +2071,7 @@ mod exact_qualification_tests {
     }
 
     fn qualification_test_gate() -> &'static tokio::sync::Mutex<()> {
-        static GATE: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-        GATE.get_or_init(|| tokio::sync::Mutex::new(()))
+        ServiceContainer::workspace_environment_test_gate()
     }
 
     async fn fixture(

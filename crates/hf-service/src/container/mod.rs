@@ -813,6 +813,12 @@ impl ServiceContainer {
             .1
     }
 
+    #[cfg(test)]
+    pub(crate) fn workspace_environment_test_gate() -> &'static tokio::sync::Mutex<()> {
+        static GATE: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        GATE.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
     /// Take the per-target revision lease after acquiring the outer workspace
     /// operation lease. This serializes all mutations and exact checks for one
     /// active harness across service containers and processes.

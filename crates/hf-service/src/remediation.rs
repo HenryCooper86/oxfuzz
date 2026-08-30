@@ -409,6 +409,9 @@ mod workspace_lease_tests {
 
     #[tokio::test]
     async fn remediation_draft_locked_completes_with_a_queued_cleanup_writer() {
+        let _environment = ServiceContainer::workspace_environment_test_gate()
+            .lock()
+            .await;
         install_workspace();
         let directory = tempfile::tempdir().unwrap();
         let store = Arc::new(
