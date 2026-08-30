@@ -2,14 +2,19 @@
 
 #![cfg(feature = "harness-work-order")]
 
+use std::sync::Arc;
+
 use hf_core::engine::EngineKind;
+use hf_core::error::ClassifiedError;
 use hf_core::target::TargetLanguage;
 use hf_service::harness_work_order::{
     build_work_order, quote_posix_arg, render_work_order, verify_work_order, work_order_commands,
     HarnessWorkOrderErrorCode, HarnessWorkOrderPayload, WorkOrderArg, WorkOrderCompileContext,
     WorkOrderPlaceholder, WorkOrderRule, WorkOrderSeedReference, WorkOrderSourceEvidence,
     WorkOrderStep, WorkOrderTargetEvidence, HARNESS_WORK_ORDER_SCHEMA_VERSION,
+    MAX_WORK_ORDER_PACKET_BYTES,
 };
+use hf_service::ServiceContainer;
 
 fn payload() -> HarnessWorkOrderPayload {
     HarnessWorkOrderPayload {
@@ -85,6 +90,10 @@ fn each_evidence_class_changes_the_packet_identifier() {
     let mut changed_source = payload();
     changed_source.source.excerpt.push_str(" // changed");
     variants.push(changed_source);
+
+    let mut changed_source_digest = payload();
+    changed_source_digest.source.sha256 = "e".repeat(64);
+    variants.push(changed_source_digest);
 
     let mut changed_context = payload();
     changed_context
@@ -232,6 +241,67 @@ fn construction_rejects_absolute_host_paths_from_packet_json() {
 }
 
 #[test]
+fn construction_rejects_invalid_digests_and_more_than_twenty_seeds() {
+    let mut invalid_source = payload();
+    invalid_source.source.sha256 = "A".repeat(64);
+    assert_eq!(
+        build_work_order(invalid_source)
+            .expect_err("source digest must be lowercase SHA-256")
+            .code,
+        HarnessWorkOrderErrorCode::InvalidWorkOrderDigest
+    );
+
+    let mut invalid_seed = payload();
+    invalid_seed.seeds[0].sha256 = "invalid".to_owned();
+    assert_eq!(
+        build_work_order(invalid_seed)
+            .expect_err("seed digest must be lowercase SHA-256")
+            .code,
+        HarnessWorkOrderErrorCode::InvalidWorkOrderDigest
+    );
+
+    let mut too_many_seeds = payload();
+    too_many_seeds.seeds = (0_u8..21)
+        .map(|index| WorkOrderSeedReference {
+            sha256: format!("{index:02x}").repeat(32),
+            size: u64::from(index),
+        })
+        .collect();
+    assert_eq!(
+        build_work_order(too_many_seeds)
+            .expect_err("twenty-first seed must be rejected")
+            .code,
+        HarnessWorkOrderErrorCode::SeedLimitExceeded
+    );
+}
+
+#[test]
+fn construction_rejects_packets_larger_than_the_storage_limit() {
+    let mut oversized = payload();
+    oversized.target.rationale = "x".repeat(MAX_WORK_ORDER_PACKET_BYTES);
+
+    assert_eq!(
+        build_work_order(oversized)
+            .expect_err("oversized packet must be rejected")
+            .code,
+        HarnessWorkOrderErrorCode::WorkOrderTooLarge
+    );
+}
+
+#[test]
+fn verification_rejects_a_noncanonical_retained_payload() {
+    let mut packet = build_work_order(payload()).expect("build packet");
+    packet.payload.compile_context.include_dirs = vec!["zinc".to_owned(), "include".to_owned()];
+
+    assert_eq!(
+        verify_work_order(&packet)
+            .expect_err("stored payload must remain canonical")
+            .code,
+        HarnessWorkOrderErrorCode::InvalidWorkOrderDigest
+    );
+}
+
+#[test]
 fn commands_use_typed_placeholders_and_approval_requirements() {
     let commands = work_order_commands(&build_work_order(payload()).expect("build packet"));
 
@@ -253,6 +323,11 @@ fn commands_use_typed_placeholders_and_approval_requirements() {
     assert!(commands[3]
         .argv
         .contains(&WorkOrderArg::Placeholder(WorkOrderPlaceholder::AttemptId)));
+    assert_eq!(
+        commands[4].step,
+        WorkOrderStep::RunCampaign { duration_secs: 300 }
+    );
+    assert!(commands[4].approval_required);
 
     let rendered = render_work_order(&build_work_order(payload()).expect("build packet"));
     assert!(rendered.contains("Approval required"));
@@ -264,4 +339,30 @@ fn posix_quoting_preserves_literal_arguments() {
     assert_eq!(quote_posix_arg("two words"), "'two words'");
     assert_eq!(quote_posix_arg("a'b"), "'a'\"'\"'b'");
     assert_eq!(quote_posix_arg("$(touch nope)"), "'$(touch nope)'");
+}
+
+#[tokio::test]
+async fn work_order_export_propagates_a_malformed_compile_database() {
+    let project = tempfile::tempdir().expect("create project");
+    std::fs::write(
+        project.path().join("parser.c"),
+        "#include <stddef.h>\nint parse_packet(const unsigned char *data, size_t len) { return len > 0 && data[0]; }\n",
+    )
+    .expect("write source");
+    std::fs::write(project.path().join("compile_commands.json"), "{not json")
+        .expect("write malformed compile database");
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
+
+    let error = container
+        .harness_work_order(
+            project.path(),
+            "parse_packet",
+            TargetLanguage::C,
+            EngineKind::LibFuzzer,
+        )
+        .await
+        .expect_err("malformed compile database must stop export");
+
+    assert!(matches!(error, ClassifiedError::Validation(_)));
+    assert!(error.to_string().contains("compile"), "{error}");
 }

@@ -1299,6 +1299,7 @@ struct HarnessWorkOrderRequestBody {
     project: PathBuf,
     target: String,
     lang: String,
+    engine: String,
 }
 
 #[cfg(feature = "harness-work-order")]
@@ -1307,9 +1308,10 @@ async fn harness_work_order(
     Json(req): Json<HarnessWorkOrderRequestBody>,
 ) -> ApiResult<serde_json::Value> {
     let lang = parse_lang(&req.lang).map_err(map_err(StatusCode::BAD_REQUEST))?;
+    let engine = parse_engine(&req.engine).map_err(map_err(StatusCode::BAD_REQUEST))?;
     let order = state
         .container
-        .harness_work_order(&req.project, &req.target, lang)
+        .harness_work_order(&req.project, &req.target, lang, engine)
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(order)))
@@ -3764,6 +3766,8 @@ fn parse_engine(s: &str) -> Result<EngineKind, String> {
 mod request_tests {
     use axum::http::StatusCode;
 
+    #[cfg(feature = "harness-work-order")]
+    use super::HarnessWorkOrderRequestBody;
     use super::{
         classified_api_error, parse_role, public_provider_value, ReportRequest, SetProvidersRequest,
     };
@@ -3803,6 +3807,24 @@ mod request_tests {
         let request: SetProvidersRequest =
             serde_json::from_str(r#"{"providers":[]}"#).expect("wrapped provider request");
         assert!(request.into_providers().is_empty());
+    }
+
+    #[cfg(feature = "harness-work-order")]
+    #[test]
+    fn work_order_request_requires_a_parseable_engine() {
+        let request: HarnessWorkOrderRequestBody = serde_json::from_str(
+            r#"{"project":"/p","target":"parse","lang":"c","engine":"honggfuzz"}"#,
+        )
+        .expect("engine-bearing work-order request");
+        assert_eq!(request.engine, "honggfuzz");
+
+        assert!(
+            serde_json::from_str::<HarnessWorkOrderRequestBody>(
+                r#"{"project":"/p","target":"parse","lang":"c"}"#
+            )
+            .is_err(),
+            "the REST request must not silently choose an engine"
+        );
     }
 
     #[test]
