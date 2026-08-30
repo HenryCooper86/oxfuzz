@@ -18,9 +18,11 @@ use uuid::Uuid;
 use super::coverage_cache::frontier_refine_lines;
 use super::crash_inputs::is_regular_file;
 use super::guards::{ensure_run_journal_durable, PersistedRunGuard};
+#[cfg(test)]
+use super::harness_workspace::read_current_harness_id;
 use super::harness_workspace::{
-    copy_project_sources, generate_target_seeds, harness_binary_name, read_current_harness_id,
-    read_current_harness_source, write_current_harness_id, write_current_harness_source,
+    copy_project_sources, generate_target_seeds, harness_binary_name, read_current_harness_source,
+    write_current_harness_id, write_current_harness_source,
 };
 use super::output_budget::{
     output_budget_status, OutputBudget, MAX_RUN_OUTPUT_BYTES, MAX_RUN_OUTPUT_ENTRIES,
@@ -533,6 +535,7 @@ impl ServiceContainer {
         }
     }
 
+    #[cfg(any(test, feature = "harness-tournament"))]
     async fn compile_source_with_repair(
         &self,
         candidate: &TargetCandidate,
