@@ -1430,10 +1430,13 @@ async fn verify_regressions_replays_stored_crash_inputs() {
     // Stub runtime cannot reproduce, so the replay is retained as inconclusive
     // rather than being misreported as fixed.
     let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
-    let results = container
-        .verify_regressions(&project, target)
-        .await
-        .unwrap();
+    let results = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        container.verify_regressions(&project, target),
+    )
+    .await
+    .expect("regression replay must not recursively acquire its workspace lease")
+    .unwrap();
     assert_eq!(results.len(), 1, "the staged crash input is replayed");
     assert!(!results[0].verified);
     assert!(!results[0].still_crashes);
@@ -1542,10 +1545,13 @@ async fn verify_regressions_reports_regressed_and_fixed() {
     fs::write(out.join("crash-fixed"), b"now safe").unwrap();
 
     let container = ServiceContainer::new(Arc::new(RegressionReplayRuntime), None);
-    let results = container
-        .verify_regressions(&project, target)
-        .await
-        .unwrap();
+    let results = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        container.verify_regressions(&project, target),
+    )
+    .await
+    .expect("regression replay must finish through its locked helper")
+    .unwrap();
     assert_eq!(results.len(), 2, "both staged crash inputs are replayed");
 
     // The regressed input: the replay produced a crash trace.

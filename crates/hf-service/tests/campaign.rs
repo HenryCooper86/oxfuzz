@@ -1,6 +1,8 @@
 //! Integration test for the autonomous campaign controller
 //! (`ServiceContainer::run_campaign`).
 
+mod common;
+
 use std::sync::Arc;
 
 use hf_core::engine::EngineKind;
@@ -101,8 +103,7 @@ impl hf_core::provider::ProviderPool for CodeBlockPool {
 #[tokio::test]
 async fn run_campaign_runs_full_pipeline_and_picks_a_target() {
     let dir = tempfile::tempdir().unwrap();
-    let workspace_root = dir.path().join("workspace");
-    std::env::set_var("HF_WORKSPACE_DIR", &workspace_root);
+    let workspace_root = common::install_managed_workspace("oxfuzz_campaign_it");
     let project = dir.path().join("campproj");
     std::fs::create_dir_all(&project).unwrap();
     std::fs::write(
@@ -153,17 +154,20 @@ async fn run_campaign_runs_full_pipeline_and_picks_a_target() {
         .harness_promote(&project, "parse_entry", EngineKind::LibFuzzer)
         .await
         .expect("operator promotes harness");
-    let outcome = container
-        .run_campaign(
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        container.run_campaign(
             &project,
             None, // auto-pick the top-ranked target
             EngineKind::LibFuzzer,
             TargetLanguage::C,
             1, // duration secs (fake runtime returns instantly)
             2, // max iterations
-        )
-        .await
-        .expect("campaign should complete");
+        ),
+    )
+    .await
+    .expect("campaign must reach its independently guarded stages without a nested workspace lease")
+    .expect("campaign should complete");
 
     assert_eq!(outcome.target, "parse_entry", "should auto-pick the target");
     assert_eq!(

@@ -21,6 +21,7 @@ use super::harness_workspace::{
     build_workspace_dictionary, dict_llm_cache, harness_binary_name, read_dictionary_source_excerpt,
 };
 use super::output_budget::{monitor_run_output, run_artifacts_within_budget};
+use super::policy::CurrentHarnessEvidence;
 use super::project_identity::canonical_project_root;
 use super::staging::{
     resolve_run_sandbox_image, retain_run_context, run_context_digests, run_sandbox_options,
@@ -143,6 +144,7 @@ impl ServiceContainer {
             .context_rev
             .as_deref()
             .filter(|value| !value.is_empty())?;
+        let this_harness_id = this_run.config.as_ref()?.harness_id;
         // Resolve the target through the run's persisted harness rather than
         // re-discovering it as C. This keeps C++, Rust, and future language runs
         // eligible for the same rollback policy.
@@ -230,7 +232,14 @@ impl ServiceContainer {
         // the active canonical revision and binary remain unchanged.
         let this_binary = this_binary.filter(|digest| !digest.is_empty())?;
         match self
-            .revert_harness_from_run_if_current(&prev_id, Some((this_rev, this_binary)))
+            .revert_harness_from_run_if_current(
+                &prev_id,
+                Some(CurrentHarnessEvidence {
+                    id: this_harness_id,
+                    source_sha256: this_rev,
+                    binary_sha256: this_binary,
+                }),
+            )
             .await
         {
             Ok(_) => {
@@ -835,7 +844,6 @@ impl ServiceContainer {
         duration_secs: u64,
         max_iterations: usize,
     ) -> Result<CampaignOutcome, ClassifiedError> {
-        let _workspace_operation = self.acquire_workspace_operation().await?;
         let project_root = canonical_project_root(project)?;
         let project = project_root.as_path();
         let resolved = resolve_fuzzing_run(engine, duration_secs)?;

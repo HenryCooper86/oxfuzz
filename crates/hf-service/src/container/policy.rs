@@ -17,6 +17,13 @@ use super::staging::{qualification_evidence, run_binary_path, run_source_path, s
 use super::workspace::workspace_dir;
 use super::{CompileOutcome, EffectiveAutoRevert, ServiceContainer};
 
+/// The active revision a completed campaign is permitted to replace.
+pub(crate) struct CurrentHarnessEvidence<'a> {
+    pub(crate) id: Uuid,
+    pub(crate) source_sha256: &'a str,
+    pub(crate) binary_sha256: &'a str,
+}
+
 impl ServiceContainer {
     /// The guardrail decision audit trail (newest first), capped at `limit`
     /// rows. Empty without a store.
@@ -163,7 +170,7 @@ impl ServiceContainer {
     pub(crate) async fn revert_harness_from_run_if_current(
         &self,
         run_id: &str,
-        expected_current: Option<(&str, &str)>,
+        expected_current: Option<CurrentHarnessEvidence<'_>>,
     ) -> Result<CompileOutcome, ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
         let store = self
@@ -214,17 +221,22 @@ impl ServiceContainer {
 
         let workspace = workspace_dir(&project, &symbol);
         let _target_revision = self.acquire_target_revision(&project, &symbol).await?;
-        if let Some((expected_source, expected_binary)) = expected_current {
+        if let Some(expected) = expected_current {
             let active = self
                 .active_harness_locked(&project, &symbol, run.engine)
                 .await?;
             let (_, current_source, current_binary) = qualification_evidence(&active)?;
-            if current_source != expected_source || current_binary != expected_binary {
+            if active.id != expected.id
+                || current_source != expected.source_sha256
+                || current_binary != expected.binary_sha256
+            {
                 return Err(ClassifiedError::Validation(
                     "active harness changed after the campaign completed; automatic revert will not replace a newer revision"
                         .to_owned(),
                 ));
             }
+            self.verify_harness_qualification_locked(&project, &symbol, &active)
+                .await?;
         }
         let source_path = run_source_path(&workspace, &run)?;
         let binary_path = run_binary_path(&workspace, &run, &symbol)?;
