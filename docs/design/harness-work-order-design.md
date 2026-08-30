@@ -1,66 +1,54 @@
-# Harness Work Order Export
+# Harness Work Order v2
 
-Status: **planned**. Owner: `hf-service`, over `hf-discovery` candidates and the
-resolved build context.
+Status: **active**. Owner: `hf-service`. The approved implementation details,
+limits, durable records, stable errors, and REST resources are defined in the
+[Harness Work Order v2 specification](../superpowers/specs/2026-08-30-harness-work-order-v2-design.md).
 
-## 1. Goal
+## 1. Purpose
 
-Every harness-authoring path in oxfuzz requires a configured LLM provider. That
-excludes two real cases: an operator who wants to write the harness themselves,
-and an environment where no provider credential may be present.
+Harness Work Order v2 supports provider-free harness authoring without making
+import an execution operation. An operator can export retained target evidence,
+author a harness directly or through an external tool, import the result as an
+immutable draft, and explicitly qualify one selected submission through the
+existing sandboxed harness path.
 
-A work order is a self-contained directory holding everything needed to author
-one harness for one candidate, with no provider involved at any point.
+## 2. Active Flow
 
-## 2. Feature and Ownership
+1. **Export** creates a deterministic, content-addressed packet from retained
+   target evidence, a bounded source excerpt plus complete-source digest,
+   normalized compile context, lint rules, and bounded seed references. Export
+   persists the packet before returning and invokes no provider or runtime.
+2. **Import** persists exact UTF-8 source, untrusted authoring provenance,
+   repair ancestry, source digest, and deterministic lint findings. Import
+   invokes no provider, build, review, smoke run, or promotion.
+3. **Qualification** is a separate explicit operation. It rejects stale target
+   or compile evidence and blocking import lint before dispatch, then uses the
+   existing sandbox compile, independent exact-digest review, and bounded smoke
+   operations. Every stage and terminal result is durable; qualification never
+   promotes.
+4. **Ranking** reads retained attempt evidence only. It orders compilation
+   success, smoke verdict (`Pass`, `Suspect`, `Fail`, absent), repair ancestry,
+   throughput, submission time, and identifier without starting a process or
+   changing the active harness.
+5. **Promotion** accepts one explicit attempt identifier and can activate only
+   its exact active `SmokePassed` harness revision with matching reviewed and
+   smoked source and executable digests. The existing atomic promotion operation
+   persists the human approval for that exact evidence.
 
-Enabled by the `harness-work-order` feature in `hf-service`, which implies
-`build-context`. Export composes retained discovery and build-context state and
-calls no provider.
+The feature is exposed through service-owned operations, thin CLI commands, and
+REST resources. Presentation layers parse and render I/O but do not reproduce
+qualification, ranking, or promotion policy.
 
-## 3. Contents
+## 3. Safety and Recovery
 
-For one candidate:
+Work orders, submissions, and terminal attempts are immutable durable evidence.
+Startup recovery marks unfinished attempts interrupted; retry creates a new
+attempt. Clearing ordinary run history preserves the work-order records and
+their terminal summaries.
 
-- the candidate record: function, signature, source location, and the discovery
-  evidence that ranked it;
-- a bounded excerpt of the function's source and its declaration;
-- the resolved compile context for its translation unit -- include directories,
-  defines, language standard, and compile flags, as `hf-discovery`'s build
-  context already extracts them;
-- the harness rules from `docs/standards/HARNESS_STANDARD.md` that the lint
-  enforces, so an author sees the constraints before writing rather than as
-  compile failures afterward;
-- seed suggestions drawn from retained corpus entries and repository fixtures;
-  and
-- the exact oxfuzz commands that validate the result.
-
-## 4. Determinism And Safety
-
-The export is deterministic: the same retained state produces a
-byte-identical packet, so two exports can be diffed.
-
-Nothing secret is written. Provider credentials, tokens, and the environment are
-never read by this path, because no part of it needs them. Source excerpts come
-from the project under test and are bounded in size; the packet is data for a
-person to read, and the export performs no build and executes nothing.
-
-## 5. Rejected Alternatives
-
-- **Emitting a filled prompt template** -- fuzzctl writes model-ready prompt
-  packets. A prompt is one consumer's format; the work order holds the evidence
-  and lets a person or any tool decide how to use it.
-- **Including the whole source file** -- unbounded, and the candidate's
-  declaration plus body is what an author needs.
-- **Generating a draft harness in the packet** -- drafting is a provider path
-  with a review gate; a draft in a provider-free export would arrive without one.
-- **Writing the packet inside the project under test** -- the project is
-  untrusted input; exports land in the workspace.
-
-## 6. Verification Criteria
-
-- Export succeeds with no provider configured.
-- The same retained state exports byte-identical packets.
-- The packet carries compile context matching the candidate's translation unit.
-- No environment variable, credential, or token appears in the output.
-- Export performs no build and starts no process.
+No export, import, read, list, or ranking operation executes a harness. Compile,
+review, and smoke remain separate qualification steps under the existing human
+approval, guardrail, and `hf-runtime` sandbox requirements. A crash-bearing
+`Fail` attempt is ineligible for clean promotion. A crash-free `Suspect` attempt
+is technically eligible only through an explicit operator promotion request;
+the recommended action is to refine it and smoke the new revision first.
