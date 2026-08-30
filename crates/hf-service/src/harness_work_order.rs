@@ -143,6 +143,15 @@ pub struct HarnessWorkOrderAttempt {
     pub ended_at: Option<DateTime<Utc>>,
 }
 
+/// Deterministic ordering of retained qualification attempts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessWorkOrderRanking {
+    /// Attempt identifiers ordered from strongest to weakest evidence.
+    pub attempt_ids: Vec<Uuid>,
+    /// Highest-ranked attempt that compiled, or `None` when none compiled.
+    pub winner_attempt_id: Option<Uuid>,
+}
+
 /// The evidence covered by a Harness Work Order identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -421,6 +430,14 @@ impl HarnessWorkOrderError {
         Self {
             code,
             kind: HarnessWorkOrderErrorKind::NotFound,
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn conflict(code: HarnessWorkOrderErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            kind: HarnessWorkOrderErrorKind::Conflict,
             message: message.into(),
         }
     }

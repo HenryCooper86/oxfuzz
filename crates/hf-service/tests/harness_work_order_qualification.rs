@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use chrono::Utc;
+use chrono::{DateTime, TimeZone, Utc};
 use hf_core::engine::EngineKind;
 use hf_core::error::ClassifiedError;
 use hf_core::harness::HarnessStatus;
@@ -23,6 +23,7 @@ use hf_service::{
     ImportHarnessWorkOrderSubmissionRequest, ServiceContainer, VerdictLevel,
     WorkOrderSubmissionOrigin,
 };
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 const VALID_HARNESS: &str = "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size > 0 && data[0]; }";
@@ -377,6 +378,676 @@ async fn stage_audit(store: &hf_storage::Store) -> Vec<String> {
         .fetch_all(store.pool())
         .await
         .expect("load stage audit")
+}
+
+fn fixed_time(second: u32) -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 8, 30, 12, 0, second)
+        .single()
+        .expect("valid fixture timestamp")
+}
+
+async fn insert_ranking_submission(
+    fixture: &QualificationFixture,
+    id: Uuid,
+    parent_submission_id: Option<Uuid>,
+    submitted_at: DateTime<Utc>,
+) {
+    let source = format!("{VALID_HARNESS}\n/* {id} */");
+    fixture
+        .store
+        .insert_harness_work_order_submission(&hf_storage::HarnessWorkOrderSubmissionRecord {
+            id,
+            work_order_id: fixture.packet.id.clone(),
+            source_sha256: hex::encode(Sha256::digest(source.as_bytes())),
+            source,
+            origin_json: "\"human\"".to_owned(),
+            parent_submission_id,
+            lint_json: "[]".to_owned(),
+            submitted_at,
+        })
+        .await
+        .expect("insert immutable ranking submission");
+}
+
+fn attempt_result(
+    compiled: bool,
+    smoke_verdict: Option<VerdictLevel>,
+    repair_depth: u32,
+    execs_per_sec: Option<f64>,
+    crashes: Option<u32>,
+) -> HarnessWorkOrderAttemptResult {
+    let has_review_evidence = compiled && smoke_verdict.is_some();
+    HarnessWorkOrderAttemptResult {
+        compiled,
+        smoke_verdict,
+        repair_depth,
+        source_sha256: has_review_evidence.then(|| "a".repeat(64)),
+        binary_sha256: has_review_evidence.then(|| "b".repeat(64)),
+        execs_per_sec,
+        crashes,
+    }
+}
+
+async fn insert_terminal_attempt(
+    fixture: &QualificationFixture,
+    id: Uuid,
+    submission_id: Uuid,
+    status: HarnessWorkOrderAttemptStatus,
+    result: &HarnessWorkOrderAttemptResult,
+) {
+    let started_at = fixed_time(30);
+    fixture
+        .store
+        .insert_harness_work_order_attempt(&hf_storage::HarnessWorkOrderAttemptRecord {
+            id,
+            submission_id,
+            status: HarnessWorkOrderAttemptStatus::Running,
+            current_stage: HarnessWorkOrderAttemptStage::Compile,
+            harness_id: None,
+            smoke_run_id: None,
+            result_json: None,
+            failure_code: None,
+            failure_message: None,
+            started_at,
+            updated_at: started_at,
+            ended_at: None,
+        })
+        .await
+        .expect("insert running attempt fixture");
+    let harness_id = Uuid::new_v4();
+    let expected_stage = match status {
+        HarnessWorkOrderAttemptStatus::CompileFailed => HarnessWorkOrderAttemptStage::Compile,
+        HarnessWorkOrderAttemptStatus::ReviewFailed => {
+            fixture
+                .store
+                .transition_harness_work_order_attempt(
+                    id,
+                    HarnessWorkOrderAttemptStage::Compile,
+                    HarnessWorkOrderAttemptStage::Review,
+                    Some(harness_id),
+                    fixed_time(31),
+                )
+                .await
+                .expect("advance attempt to review");
+            HarnessWorkOrderAttemptStage::Review
+        }
+        HarnessWorkOrderAttemptStatus::SmokeFailed | HarnessWorkOrderAttemptStatus::SmokePassed => {
+            fixture
+                .store
+                .transition_harness_work_order_attempt(
+                    id,
+                    HarnessWorkOrderAttemptStage::Compile,
+                    HarnessWorkOrderAttemptStage::Review,
+                    Some(harness_id),
+                    fixed_time(31),
+                )
+                .await
+                .expect("advance attempt to review");
+            fixture
+                .store
+                .transition_harness_work_order_attempt(
+                    id,
+                    HarnessWorkOrderAttemptStage::Review,
+                    HarnessWorkOrderAttemptStage::Smoke,
+                    Some(harness_id),
+                    fixed_time(32),
+                )
+                .await
+                .expect("advance attempt to smoke");
+            HarnessWorkOrderAttemptStage::Smoke
+        }
+        HarnessWorkOrderAttemptStatus::Running | HarnessWorkOrderAttemptStatus::Interrupted => {
+            panic!("terminal fixture helper requires an ordinary terminal status")
+        }
+    };
+    let result_json = serde_json::to_string(result).expect("serialize attempt fixture result");
+    let smoke_run_id = (status == HarnessWorkOrderAttemptStatus::SmokePassed).then(Uuid::new_v4);
+    fixture
+        .store
+        .complete_harness_work_order_attempt(
+            id,
+            hf_storage::HarnessWorkOrderAttemptCompletion {
+                expected_stage,
+                status,
+                harness_id: (status != HarnessWorkOrderAttemptStatus::CompileFailed)
+                    .then_some(harness_id),
+                smoke_run_id,
+                result_json: Some(&result_json),
+                failure_code: (status != HarnessWorkOrderAttemptStatus::SmokePassed)
+                    .then_some("sandbox"),
+                failure_message: (status != HarnessWorkOrderAttemptStatus::SmokePassed)
+                    .then_some("controlled failure"),
+                completed_at: fixed_time(33),
+            },
+        )
+        .await
+        .expect("complete terminal attempt fixture");
+}
+
+async fn raw_attempt(
+    fixture: &QualificationFixture,
+    attempt_id: Uuid,
+) -> hf_storage::HarnessWorkOrderAttemptRecord {
+    fixture
+        .store
+        .harness_work_order_attempt(attempt_id)
+        .await
+        .expect("load raw attempt")
+        .expect("raw attempt exists")
+}
+
+#[tokio::test]
+async fn work_order_ranking_orders_compile_verdict_and_ancestry_without_dispatch() {
+    let fixture =
+        QualificationFixture::new(RuntimeMode::Pass, ReviewMode::Approve, VALID_HARNESS).await;
+    let root_submission = Uuid::from_u128(1);
+    let repaired_submission = Uuid::from_u128(2);
+    let pass_deep = Uuid::from_u128(11);
+    let pass_shallow = Uuid::from_u128(12);
+    let suspect = Uuid::from_u128(13);
+    let fail = Uuid::from_u128(14);
+    let compile_failed = Uuid::from_u128(15);
+    insert_ranking_submission(&fixture, root_submission, None, fixed_time(1)).await;
+    insert_ranking_submission(
+        &fixture,
+        repaired_submission,
+        Some(root_submission),
+        fixed_time(2),
+    )
+    .await;
+    insert_terminal_attempt(
+        &fixture,
+        pass_deep,
+        repaired_submission,
+        HarnessWorkOrderAttemptStatus::SmokePassed,
+        &attempt_result(true, Some(VerdictLevel::Pass), 1, Some(900.0), Some(0)),
+    )
+    .await;
+    insert_terminal_attempt(
+        &fixture,
+        pass_shallow,
+        root_submission,
+        HarnessWorkOrderAttemptStatus::SmokePassed,
+        &attempt_result(true, Some(VerdictLevel::Pass), 0, Some(100.0), Some(0)),
+    )
+    .await;
+    insert_terminal_attempt(
+        &fixture,
+        suspect,
+        root_submission,
+        HarnessWorkOrderAttemptStatus::SmokePassed,
+        &attempt_result(true, Some(VerdictLevel::Suspect), 0, Some(0.5), Some(0)),
+    )
+    .await;
+    insert_terminal_attempt(
+        &fixture,
+        fail,
+        root_submission,
+        HarnessWorkOrderAttemptStatus::SmokePassed,
+        &attempt_result(true, Some(VerdictLevel::Fail), 0, Some(128.0), Some(1)),
+    )
+    .await;
+    insert_terminal_attempt(
+        &fixture,
+        compile_failed,
+        root_submission,
+        HarnessWorkOrderAttemptStatus::CompileFailed,
+        &attempt_result(false, None, 0, None, None),
+    )
+    .await;
+    let workspace = hf_service::workspace_dir(&fixture.project, "parse_packet");
+    std::fs::create_dir_all(&workspace).expect("create ranking sentinel workspace");
+    std::fs::write(workspace.join("harness.source"), "ranking sentinel")
+        .expect("write ranking sentinel source");
+    std::fs::write(workspace.join("harness.active"), Uuid::new_v4().to_string())
+        .expect("write ranking sentinel id");
+    let source_before = std::fs::read(workspace.join("harness.source")).expect("read source");
+    let active_before = std::fs::read(workspace.join("harness.active")).expect("read active id");
+    std::fs::remove_file(fixture.project.join("parser.c"))
+        .expect("remove project source to prove retained-only ranking");
+
+    let ranking = fixture
+        .service
+        .rank_harness_work_order_attempts(&[compile_failed, fail, pass_deep, suspect, pass_shallow])
+        .await
+        .expect("rank retained attempts");
+
+    assert_eq!(
+        ranking.attempt_ids,
+        vec![pass_shallow, pass_deep, suspect, fail, compile_failed]
+    );
+    assert_eq!(ranking.winner_attempt_id, Some(pass_shallow));
+    assert_eq!(fixture.runtime.calls.load(Ordering::Relaxed), 0);
+    assert_eq!(fixture.review.calls.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        std::fs::read(workspace.join("harness.source")).expect("reread source"),
+        source_before
+    );
+    assert_eq!(
+        std::fs::read(workspace.join("harness.active")).expect("reread active id"),
+        active_before
+    );
+    assert!(fixture
+        .store
+        .list_harnesses(fixture.target_id)
+        .await
+        .expect("list unchanged harness state")
+        .is_empty());
+}
+
+#[tokio::test]
+async fn work_order_ranking_orders_throughput_submission_time_and_uuid() {
+    let fixture =
+        QualificationFixture::new(RuntimeMode::Pass, ReviewMode::Approve, VALID_HARNESS).await;
+    let older = Uuid::from_u128(21);
+    let newer = Uuid::from_u128(22);
+    let equal_time_low_id = Uuid::from_u128(23);
+    let equal_time_high_id = Uuid::from_u128(24);
+    insert_ranking_submission(&fixture, older, None, fixed_time(1)).await;
+    insert_ranking_submission(&fixture, newer, None, fixed_time(2)).await;
+    insert_ranking_submission(&fixture, equal_time_low_id, None, fixed_time(3)).await;
+    insert_ranking_submission(&fixture, equal_time_high_id, None, fixed_time(3)).await;
+    let high_throughput = Uuid::from_u128(31);
+    let earlier_submission = Uuid::from_u128(32);
+    let later_submission = Uuid::from_u128(33);
+    let low_uuid = Uuid::from_u128(34);
+    let high_uuid = Uuid::from_u128(35);
+    for (attempt_id, submission_id, throughput) in [
+        (high_throughput, newer, 500.0),
+        (earlier_submission, older, 100.0),
+        (later_submission, newer, 100.0),
+        (low_uuid, equal_time_low_id, 100.0),
+        (high_uuid, equal_time_high_id, 100.0),
+    ] {
+        insert_terminal_attempt(
+            &fixture,
+            attempt_id,
+            submission_id,
+            HarnessWorkOrderAttemptStatus::SmokePassed,
+            &attempt_result(true, Some(VerdictLevel::Pass), 0, Some(throughput), Some(0)),
+        )
+        .await;
+    }
+
+    let ranking = fixture
+        .service
+        .rank_harness_work_order_attempts(&[
+            high_uuid,
+            later_submission,
+            low_uuid,
+            earlier_submission,
+            high_throughput,
+        ])
+        .await
+        .expect("rank deterministic tie breakers");
+
+    assert_eq!(
+        ranking.attempt_ids,
+        vec![
+            high_throughput,
+            earlier_submission,
+            later_submission,
+            low_uuid,
+            high_uuid,
+        ]
+    );
+    assert_eq!(ranking.winner_attempt_id, Some(high_throughput));
+}
+
+#[tokio::test]
+async fn work_order_ranking_rejects_empty_duplicate_and_over_limit_requests() {
+    let fixture =
+        QualificationFixture::new(RuntimeMode::Pass, ReviewMode::Approve, VALID_HARNESS).await;
+    let id = Uuid::new_v4();
+
+    let empty = fixture
+        .service
+        .rank_harness_work_order_attempts(&[])
+        .await
+        .expect_err("empty ranking request must fail");
+    assert_eq!(empty.code, HarnessWorkOrderErrorCode::InvalidTransition);
+    let duplicate = fixture
+        .service
+        .rank_harness_work_order_attempts(&[id, id])
+        .await
+        .expect_err("duplicate ranking request must fail");
+    assert_eq!(duplicate.code, HarnessWorkOrderErrorCode::InvalidTransition);
+    let over_limit = fixture
+        .service
+        .rank_harness_work_order_attempts(&[
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        ])
+        .await
+        .expect_err("ranking limit must fail before loading attempts");
+    assert_eq!(
+        over_limit.code,
+        HarnessWorkOrderErrorCode::RankingLimitExceeded
+    );
+    assert_eq!(fixture.runtime.calls.load(Ordering::Relaxed), 0);
+    assert_eq!(fixture.review.calls.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn work_order_promotion_rejects_noneligible_and_incomplete_attempts() {
+    let fixture =
+        QualificationFixture::new(RuntimeMode::Pass, ReviewMode::Approve, VALID_HARNESS).await;
+    let compile_failed = Uuid::new_v4();
+    let review_failed = Uuid::new_v4();
+    let smoke_failed = Uuid::new_v4();
+    insert_terminal_attempt(
+        &fixture,
+        compile_failed,
+        fixture.submission.id,
+        HarnessWorkOrderAttemptStatus::CompileFailed,
+        &attempt_result(false, None, 0, None, None),
+    )
+    .await;
+    insert_terminal_attempt(
+        &fixture,
+        review_failed,
+        fixture.submission.id,
+        HarnessWorkOrderAttemptStatus::ReviewFailed,
+        &HarnessWorkOrderAttemptResult {
+            compiled: true,
+            smoke_verdict: None,
+            repair_depth: 0,
+            source_sha256: None,
+            binary_sha256: None,
+            execs_per_sec: None,
+            crashes: None,
+        },
+    )
+    .await;
+    insert_terminal_attempt(
+        &fixture,
+        smoke_failed,
+        fixture.submission.id,
+        HarnessWorkOrderAttemptStatus::SmokeFailed,
+        &HarnessWorkOrderAttemptResult {
+            compiled: true,
+            smoke_verdict: None,
+            repair_depth: 0,
+            source_sha256: Some("a".repeat(64)),
+            binary_sha256: Some("b".repeat(64)),
+            execs_per_sec: None,
+            crashes: None,
+        },
+    )
+    .await;
+    let interrupted = Uuid::new_v4();
+    let started_at = fixed_time(40);
+    fixture
+        .store
+        .insert_harness_work_order_attempt(&hf_storage::HarnessWorkOrderAttemptRecord {
+            id: interrupted,
+            submission_id: fixture.submission.id,
+            status: HarnessWorkOrderAttemptStatus::Running,
+            current_stage: HarnessWorkOrderAttemptStage::Compile,
+            harness_id: None,
+            smoke_run_id: None,
+            result_json: None,
+            failure_code: None,
+            failure_message: None,
+            started_at,
+            updated_at: started_at,
+            ended_at: None,
+        })
+        .await
+        .expect("insert interrupted promotion fixture");
+    fixture
+        .store
+        .recover_interrupted_harness_work_order_attempts(fixed_time(41))
+        .await
+        .expect("recover interrupted promotion fixture");
+
+    for attempt_id in [compile_failed, review_failed, smoke_failed, interrupted] {
+        let before = raw_attempt(&fixture, attempt_id).await;
+        let error = fixture
+            .service
+            .promote_harness_work_order_attempt(attempt_id)
+            .await
+            .expect_err("non-smoke-passed attempt must not promote");
+        assert_eq!(error.code, HarnessWorkOrderErrorCode::AttemptNotSmokePassed);
+        assert_eq!(raw_attempt(&fixture, attempt_id).await, before);
+    }
+
+    let qualified = fixture
+        .service
+        .qualify_harness_work_order_submission(fixture.submission.id)
+        .await
+        .expect("create complete promotion evidence");
+    sqlx::query("DROP TRIGGER harness_work_order_attempts_terminal_immutable")
+        .execute(fixture.store.pool())
+        .await
+        .expect("disable terminal immutability for incomplete fixture");
+    sqlx::query(
+        "UPDATE harness_work_order_attempts
+         SET result_json = json_set(result_json, '$.source_sha256', NULL)
+         WHERE id = ?1",
+    )
+    .bind(qualified.id.to_string())
+    .execute(fixture.store.pool())
+    .await
+    .expect("remove retained source digest");
+    let before = raw_attempt(&fixture, qualified.id).await;
+    let error = fixture
+        .service
+        .promote_harness_work_order_attempt(qualified.id)
+        .await
+        .expect_err("incomplete exact evidence must not promote");
+    assert_eq!(error.code, HarnessWorkOrderErrorCode::AttemptNotSmokePassed);
+    assert_eq!(raw_attempt(&fixture, qualified.id).await, before);
+
+    let original_result = qualified.result.expect("original exact result");
+    let mut changed_source = original_result.clone();
+    changed_source.source_sha256 = Some("c".repeat(64));
+    replace_attempt_result(&fixture, qualified.id, &changed_source).await;
+    let source_error = fixture
+        .service
+        .promote_harness_work_order_attempt(qualified.id)
+        .await
+        .expect_err("changed retained source digest must not promote");
+    assert_eq!(
+        source_error.code,
+        HarnessWorkOrderErrorCode::AttemptNotActive
+    );
+
+    let mut changed_binary = original_result;
+    changed_binary.binary_sha256 = Some("d".repeat(64));
+    replace_attempt_result(&fixture, qualified.id, &changed_binary).await;
+    let binary_error = fixture
+        .service
+        .promote_harness_work_order_attempt(qualified.id)
+        .await
+        .expect_err("changed retained binary digest must not promote");
+    assert_eq!(
+        binary_error.code,
+        HarnessWorkOrderErrorCode::AttemptNotActive
+    );
+}
+
+#[tokio::test]
+async fn work_order_promotion_rejects_crash_bearing_viable_smoke() {
+    let fixture =
+        QualificationFixture::new(RuntimeMode::Pass, ReviewMode::Approve, VALID_HARNESS).await;
+    let qualified = fixture
+        .service
+        .qualify_harness_work_order_submission(fixture.submission.id)
+        .await
+        .expect("create qualified promotion fixture");
+    sqlx::query("DROP TRIGGER harness_work_order_attempts_terminal_immutable")
+        .execute(fixture.store.pool())
+        .await
+        .expect("disable terminal immutability for crash fixture");
+    sqlx::query(
+        "UPDATE harness_work_order_attempts
+         SET result_json = json_set(result_json, '$.smoke_verdict', 'fail', '$.crashes', 1)
+         WHERE id = ?1",
+    )
+    .bind(qualified.id.to_string())
+    .execute(fixture.store.pool())
+    .await
+    .expect("retain crash-bearing viable smoke evidence");
+
+    let error = fixture
+        .service
+        .promote_harness_work_order_attempt(qualified.id)
+        .await
+        .expect_err("crash-bearing smoke is not a clean promotion");
+
+    assert_eq!(error.code, HarnessWorkOrderErrorCode::AttemptNotSmokePassed);
+    assert_eq!(
+        fixture
+            .store
+            .get_harness(qualified.harness_id.expect("qualified harness id"))
+            .await
+            .expect("load harness")
+            .expect("harness exists")
+            .status,
+        HarnessStatus::SmokePassed
+    );
+}
+
+#[tokio::test]
+async fn work_order_promotion_maps_inactive_id_and_changed_artifacts() {
+    let inactive_fixture =
+        QualificationFixture::new(RuntimeMode::Pass, ReviewMode::Approve, VALID_HARNESS).await;
+    let inactive = inactive_fixture
+        .service
+        .qualify_harness_work_order_submission(inactive_fixture.submission.id)
+        .await
+        .expect("qualify first inactive revision");
+    inactive_fixture
+        .service
+        .qualify_harness_work_order_submission(inactive_fixture.submission.id)
+        .await
+        .expect("replace active revision");
+    let inactive_before = raw_attempt(&inactive_fixture, inactive.id).await;
+    let inactive_error = inactive_fixture
+        .service
+        .promote_harness_work_order_attempt(inactive.id)
+        .await
+        .expect_err("inactive harness id must not promote");
+    assert_eq!(
+        inactive_error.code,
+        HarnessWorkOrderErrorCode::AttemptNotActive
+    );
+    assert_eq!(
+        raw_attempt(&inactive_fixture, inactive.id).await,
+        inactive_before
+    );
+
+    let source_fixture =
+        QualificationFixture::new(RuntimeMode::Pass, ReviewMode::Approve, VALID_HARNESS).await;
+    let source_attempt = source_fixture
+        .service
+        .qualify_harness_work_order_submission(source_fixture.submission.id)
+        .await
+        .expect("qualify source-change fixture");
+    let source_workspace =
+        hf_service::workspace_dir(&source_fixture.project, "parser.c::parse_packet");
+    let source_before = raw_attempt(&source_fixture, source_attempt.id).await;
+    std::fs::write(source_workspace.join("harness.source"), "changed source")
+        .expect("change active source digest");
+    let source_error = source_fixture
+        .service
+        .promote_harness_work_order_attempt(source_attempt.id)
+        .await
+        .expect_err("changed active source must not promote");
+    assert_eq!(
+        source_error.code,
+        HarnessWorkOrderErrorCode::AttemptNotActive
+    );
+    assert_eq!(
+        raw_attempt(&source_fixture, source_attempt.id).await,
+        source_before
+    );
+
+    let binary_fixture =
+        QualificationFixture::new(RuntimeMode::Pass, ReviewMode::Approve, VALID_HARNESS).await;
+    let binary_attempt = binary_fixture
+        .service
+        .qualify_harness_work_order_submission(binary_fixture.submission.id)
+        .await
+        .expect("qualify binary-change fixture");
+    let binary_workspace =
+        hf_service::workspace_dir(&binary_fixture.project, "parser.c::parse_packet");
+    let binary_before = raw_attempt(&binary_fixture, binary_attempt.id).await;
+    let binary_name = std::fs::read_dir(&binary_workspace)
+        .expect("read binary fixture workspace")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name())
+        .find(|name| name.to_string_lossy().starts_with("fuzz_"))
+        .expect("locate active binary name");
+    std::fs::write(binary_workspace.join(binary_name), b"changed binary")
+        .expect("change active binary digest");
+    let binary_error = binary_fixture
+        .service
+        .promote_harness_work_order_attempt(binary_attempt.id)
+        .await
+        .expect_err("changed active binary must not promote");
+    assert_eq!(
+        binary_error.code,
+        HarnessWorkOrderErrorCode::AttemptNotActive
+    );
+    assert_eq!(
+        raw_attempt(&binary_fixture, binary_attempt.id).await,
+        binary_before
+    );
+}
+
+#[tokio::test]
+async fn work_order_promotion_promotes_exact_revision_and_preserves_attempt() {
+    let fixture =
+        QualificationFixture::new(RuntimeMode::Pass, ReviewMode::Approve, VALID_HARNESS).await;
+    let attempt = fixture
+        .service
+        .qualify_harness_work_order_submission(fixture.submission.id)
+        .await
+        .expect("qualify exact promotion fixture");
+    let result = attempt.result.as_ref().expect("exact result evidence");
+    let harness_id = attempt.harness_id.expect("exact harness id");
+    let source_sha256 = result
+        .source_sha256
+        .as_deref()
+        .expect("exact source digest");
+    let binary_sha256 = result
+        .binary_sha256
+        .as_deref()
+        .expect("exact binary digest");
+    let raw_before = raw_attempt(&fixture, attempt.id).await;
+    let runtime_calls = fixture.runtime.calls.load(Ordering::Relaxed);
+    let review_calls = fixture.review.calls.load(Ordering::Relaxed);
+
+    let promoted = fixture
+        .service
+        .promote_harness_work_order_attempt(attempt.id)
+        .await
+        .expect("promote exact retained attempt");
+
+    assert_eq!(promoted.id, harness_id);
+    assert_eq!(promoted.status, HarnessStatus::Promoted);
+    assert_eq!(raw_attempt(&fixture, attempt.id).await, raw_before);
+    assert_eq!(fixture.runtime.calls.load(Ordering::Relaxed), runtime_calls);
+    assert_eq!(fixture.review.calls.load(Ordering::Relaxed), review_calls);
+    let approval = fixture
+        .store
+        .harness_approval(harness_id, source_sha256, binary_sha256)
+        .await
+        .expect("load exact clean-smoke approval")
+        .expect("clean-smoke approval exists");
+    assert_eq!(approval.harness_id, harness_id);
+    assert_eq!(approval.source_sha256, source_sha256);
+    assert_eq!(approval.binary_sha256, binary_sha256);
+    assert_eq!(
+        approval.approval_kind,
+        hf_storage::HarnessApprovalKind::CleanSmoke
+    );
 }
 
 #[tokio::test]
