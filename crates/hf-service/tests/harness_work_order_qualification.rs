@@ -1513,7 +1513,7 @@ async fn qualification_records_nonzero_repair_depth() {
 #[tokio::test]
 async fn qualification_step_failures_return_terminal_bounded_attempts() {
     let sensitive_detail = format!(
-        "compile/review failed sk-standalone-secret; Authorization: Bearer bearer-secret; path=/Users/operator/private/target.c detail;/Users/operator/semicolon/private detail)/Users/operator/closing/private win];C:\\Users\\operator\\private api_key=key-secret token= adjacent-credential {}\n",
+        "compile/review failed sk-standalone-secret; !sk-punctuated-secret! Authorization: Bearer bearer-secret; !Bearer opaque-credential !token=secret-value path=/Users/operator/private/target.c detail;/Users/operator/semicolon/private detail)/Users/operator/closing/private win];C:\\Users\\operator\\private api_key=key-secret token= adjacent-credential {}\n",
         "x".repeat(6_000)
     );
     let cases = [
@@ -1575,6 +1575,9 @@ async fn qualification_step_failures_return_terminal_bounded_attempts() {
         assert!(!message.contains("bearer-secret"));
         assert!(!message.contains("key-secret"));
         assert!(!message.contains("adjacent-credential"));
+        assert!(!message.contains("punctuated-secret"));
+        assert!(!message.contains("opaque-credential"));
+        assert!(!message.contains("secret-value"));
         assert!(!message.contains("/Users/operator"));
         assert!(!message.contains("C:\\Users\\operator"));
         if status == HarnessWorkOrderAttemptStatus::CompileFailed {
@@ -1605,6 +1608,9 @@ async fn qualification_step_failures_return_terminal_bounded_attempts() {
         assert!(!durable_message.contains("bearer-secret"));
         assert!(!durable_message.contains("key-secret"));
         assert!(!durable_message.contains("adjacent-credential"));
+        assert!(!durable_message.contains("punctuated-secret"));
+        assert!(!durable_message.contains("opaque-credential"));
+        assert!(!durable_message.contains("secret-value"));
         assert!(!durable_message.contains("/Users/operator"));
         assert!(!durable_message.contains("C:\\Users\\operator"));
         if status == HarnessWorkOrderAttemptStatus::CompileFailed {

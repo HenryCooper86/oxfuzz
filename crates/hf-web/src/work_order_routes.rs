@@ -2,13 +2,15 @@
 
 use std::path::PathBuf;
 
-use axum::extract::{DefaultBodyLimit, Json, Path, Request, State};
+use axum::extract::rejection::{JsonRejection, QueryRejection};
+use axum::extract::{DefaultBodyLimit, Json, Path, Query, Request, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::Router;
 use hf_service::{
-    EngineKind, HarnessWorkOrder, HarnessWorkOrderError, HarnessWorkOrderErrorCode,
-    HarnessWorkOrderErrorKind, HarnessWorkOrderExportRequest, HarnessWorkOrderPayload,
+    sanitize_work_order_diagnostic, EngineKind, HarnessStatus, HarnessWorkOrder,
+    HarnessWorkOrderError, HarnessWorkOrderErrorCode, HarnessWorkOrderErrorKind,
+    HarnessWorkOrderExportRequest, HarnessWorkOrderPayload,
     ImportHarnessWorkOrderSubmissionRequest, TargetLanguage, WorkOrderCommand,
     WorkOrderSubmissionOrigin,
 };
@@ -57,10 +59,16 @@ struct ExportRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ListQuery {
+    project: Option<PathBuf>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ImportSubmissionRequest {
     source: String,
     origin: SubmissionOriginRequest,
-    parent_submission_id: Option<Uuid>,
+    parent_submission_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,7 +102,7 @@ impl From<SubmissionOriginRequest> for WorkOrderSubmissionOrigin {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RankAttemptsRequest {
-    attempt_ids: Vec<Uuid>,
+    attempt_ids: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -124,6 +132,7 @@ struct PromotedHarnessResponse {
     engine: EngineKind,
     source: String,
     language: TargetLanguage,
+    status: HarnessStatus,
 }
 
 #[derive(Debug, Serialize)]
@@ -137,8 +146,9 @@ type WorkOrderApiResult<T> = Result<Json<T>, WorkOrderApiError>;
 
 async fn export(
     State(state): State<AppState>,
-    Json(request): Json<ExportRequest>,
+    request: Result<Json<ExportRequest>, JsonRejection>,
 ) -> WorkOrderApiResult<WorkOrderResponse> {
+    let request = extract_json(request)?;
     let project = state.approve_project(&request.project).map_err(|error| {
         transport_error(
             HarnessWorkOrderErrorCode::InvalidProjectPath,
@@ -148,11 +158,11 @@ async fn export(
     let language = request
         .lang
         .parse::<TargetLanguage>()
-        .map_err(transport_validation_error)?;
+        .map_err(invalid_request)?;
     let engine = request
         .engine
         .parse::<EngineKind>()
-        .map_err(transport_validation_error)?;
+        .map_err(invalid_request)?;
     let work_order = state
         .container
         .export_harness_work_order(HarnessWorkOrderExportRequest {
@@ -166,10 +176,26 @@ async fn export(
     Ok(Json(work_order.into()))
 }
 
-async fn list(State(state): State<AppState>) -> WorkOrderApiResult<Vec<WorkOrderResponse>> {
+async fn list(
+    State(state): State<AppState>,
+    query: Result<Query<ListQuery>, QueryRejection>,
+) -> WorkOrderApiResult<Vec<WorkOrderResponse>> {
+    let Query(query) = query.map_err(|error| invalid_request(error.body_text()))?;
+    let project = query
+        .project
+        .as_deref()
+        .map(|project| {
+            state.approve_project(project).map_err(|error| {
+                transport_error(
+                    HarnessWorkOrderErrorCode::InvalidProjectPath,
+                    error.to_string(),
+                )
+            })
+        })
+        .transpose()?;
     let work_orders = state
         .container
-        .list_harness_work_orders(None)
+        .list_harness_work_orders(project.as_deref())
         .await
         .map_err(work_order_api_error)?;
     Ok(Json(
@@ -184,6 +210,7 @@ async fn get_by_id(
     State(state): State<AppState>,
     Path(work_order_id): Path<String>,
 ) -> WorkOrderApiResult<WorkOrderResponse> {
+    let work_order_id = parse_work_order_id(work_order_id)?;
     let work_order = state
         .container
         .harness_work_order_by_id(&work_order_id)
@@ -195,15 +222,22 @@ async fn get_by_id(
 async fn import_submission(
     State(state): State<AppState>,
     Path(work_order_id): Path<String>,
-    Json(request): Json<ImportSubmissionRequest>,
+    request: Result<Json<ImportSubmissionRequest>, JsonRejection>,
 ) -> WorkOrderApiResult<hf_service::HarnessWorkOrderSubmission> {
+    let work_order_id = parse_work_order_id(work_order_id)?;
+    let request = extract_json(request)?;
+    let parent_submission_id = request
+        .parent_submission_id
+        .as_deref()
+        .map(parse_identifier)
+        .transpose()?;
     let submission = state
         .container
         .import_harness_work_order_submission(ImportHarnessWorkOrderSubmissionRequest {
             work_order_id,
             source: request.source,
             origin: request.origin.into(),
-            parent_submission_id: request.parent_submission_id,
+            parent_submission_id,
         })
         .await
         .map_err(work_order_api_error)?;
@@ -214,6 +248,7 @@ async fn list_submissions(
     State(state): State<AppState>,
     Path(work_order_id): Path<String>,
 ) -> WorkOrderApiResult<Vec<hf_service::HarnessWorkOrderSubmission>> {
+    let work_order_id = parse_work_order_id(work_order_id)?;
     let submissions = state
         .container
         .list_harness_work_order_submissions(&work_order_id)
@@ -224,9 +259,10 @@ async fn list_submissions(
 
 async fn qualify_submission(
     State(state): State<AppState>,
-    Path(submission_id): Path<Uuid>,
+    Path(submission_id): Path<String>,
     request: Request,
 ) -> WorkOrderApiResult<hf_service::HarnessWorkOrderAttempt> {
+    let submission_id = parse_identifier(&submission_id)?;
     require_empty_body(request).await?;
     let attempt = state
         .container
@@ -238,8 +274,9 @@ async fn qualify_submission(
 
 async fn list_attempts(
     State(state): State<AppState>,
-    Path(submission_id): Path<Uuid>,
+    Path(submission_id): Path<String>,
 ) -> WorkOrderApiResult<Vec<hf_service::HarnessWorkOrderAttempt>> {
+    let submission_id = parse_identifier(&submission_id)?;
     let attempts = state
         .container
         .list_harness_work_order_attempts(submission_id)
@@ -250,8 +287,9 @@ async fn list_attempts(
 
 async fn get_attempt(
     State(state): State<AppState>,
-    Path(attempt_id): Path<Uuid>,
+    Path(attempt_id): Path<String>,
 ) -> WorkOrderApiResult<hf_service::HarnessWorkOrderAttempt> {
+    let attempt_id = parse_identifier(&attempt_id)?;
     let attempt = state
         .container
         .harness_work_order_attempt(attempt_id)
@@ -262,11 +300,17 @@ async fn get_attempt(
 
 async fn rank_attempts(
     State(state): State<AppState>,
-    Json(request): Json<RankAttemptsRequest>,
+    request: Result<Json<RankAttemptsRequest>, JsonRejection>,
 ) -> WorkOrderApiResult<hf_service::HarnessWorkOrderRanking> {
+    let request = extract_json(request)?;
+    let attempt_ids = request
+        .attempt_ids
+        .into_iter()
+        .map(|attempt_id| parse_identifier(&attempt_id))
+        .collect::<Result<Vec<_>, _>>()?;
     let ranking = state
         .container
-        .rank_harness_work_order_attempts(&request.attempt_ids)
+        .rank_harness_work_order_attempts(&attempt_ids)
         .await
         .map_err(work_order_api_error)?;
     Ok(Json(ranking))
@@ -274,9 +318,10 @@ async fn rank_attempts(
 
 async fn promote_attempt(
     State(state): State<AppState>,
-    Path(attempt_id): Path<Uuid>,
+    Path(attempt_id): Path<String>,
     request: Request,
 ) -> WorkOrderApiResult<PromotedHarnessResponse> {
+    let attempt_id = parse_identifier(&attempt_id)?;
     require_empty_body(request).await?;
     let harness = state
         .container
@@ -289,24 +334,59 @@ async fn promote_attempt(
         engine: harness.engine,
         source: harness.source,
         language: harness.language,
+        status: harness.status,
     }))
+}
+
+fn extract_json<T>(request: Result<Json<T>, JsonRejection>) -> Result<T, WorkOrderApiError> {
+    match request {
+        Ok(Json(request)) => Ok(request),
+        Err(error) if error.status() == StatusCode::PAYLOAD_TOO_LARGE => Err(api_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            HarnessWorkOrderErrorCode::InvalidRequest,
+            &error.body_text(),
+        )),
+        Err(error) => Err(invalid_request(error.body_text())),
+    }
+}
+
+fn parse_work_order_id(value: String) -> Result<String, WorkOrderApiError> {
+    if value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        Ok(value)
+    } else {
+        Err(transport_error(
+            HarnessWorkOrderErrorCode::InvalidWorkOrderDigest,
+            "work-order identifier must be a lowercase 64-character SHA-256".to_owned(),
+        ))
+    }
+}
+
+fn parse_identifier(value: &str) -> Result<Uuid, WorkOrderApiError> {
+    value.parse::<Uuid>().map_err(|_| {
+        transport_error(
+            HarnessWorkOrderErrorCode::InvalidIdentifier,
+            "identifier must be a UUID".to_owned(),
+        )
+    })
 }
 
 async fn require_empty_body(request: Request) -> Result<(), WorkOrderApiError> {
     let bytes = axum::body::to_bytes(request.into_body(), 1)
         .await
-        .map_err(|_| transport_validation_error("request body must be empty".to_owned()))?;
+        .map_err(|_| invalid_request("request body must be empty".to_owned()))?;
     if bytes.is_empty() {
         Ok(())
     } else {
-        Err(transport_validation_error(
-            "request body must be empty".to_owned(),
-        ))
+        Err(invalid_request("request body must be empty".to_owned()))
     }
 }
 
-fn transport_validation_error(message: String) -> WorkOrderApiError {
-    transport_error(HarnessWorkOrderErrorCode::InvalidWorkOrderDigest, message)
+fn invalid_request(message: String) -> WorkOrderApiError {
+    transport_error(HarnessWorkOrderErrorCode::InvalidRequest, message)
 }
 
 fn transport_error(code: HarnessWorkOrderErrorCode, message: String) -> WorkOrderApiError {
@@ -335,10 +415,15 @@ fn work_order_api_error(error: HarnessWorkOrderError) -> WorkOrderApiError {
             StatusCode::INTERNAL_SERVER_ERROR
         }
     };
-    let message = sanitize_error_message(&message);
-    let message = bounded_utf8(&message, MAX_PUBLIC_ERROR_MESSAGE_BYTES)
-        .trim_end()
-        .to_owned();
+    api_error(status, code, &message)
+}
+
+fn api_error(
+    status: StatusCode,
+    code: HarnessWorkOrderErrorCode,
+    message: &str,
+) -> WorkOrderApiError {
+    let message = sanitize_work_order_diagnostic(message, MAX_PUBLIC_ERROR_MESSAGE_BYTES);
     let message = if message.is_empty() {
         "harness work order request failed".to_owned()
     } else {
@@ -351,109 +436,6 @@ fn work_order_api_error(error: HarnessWorkOrderError) -> WorkOrderApiError {
             error: message,
         }),
     )
-}
-
-fn sanitize_error_message(message: &str) -> String {
-    let mut redact_next = false;
-    message
-        .split_whitespace()
-        .map(|token| {
-            if redact_next {
-                redact_next = false;
-                return "<redacted>".to_owned();
-            }
-            let normalized = normalized_error_token(token);
-            if normalized.eq_ignore_ascii_case("bearer") {
-                redact_next = true;
-                return "Bearer".to_owned();
-            }
-            if secret_key(normalized) {
-                redact_next = true;
-                return token.to_owned();
-            }
-            if let Some(redacted) = redact_secret_assignment(token, &mut redact_next) {
-                return redacted;
-            }
-            if secret_value(normalized) {
-                return "<redacted>".to_owned();
-            }
-            redact_absolute_path(token).unwrap_or_else(|| token.to_owned())
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn normalized_error_token(token: &str) -> &str {
-    token.trim_matches(|character: char| {
-        matches!(
-            character,
-            '(' | ')' | '[' | ']' | '{' | '}' | '\'' | '"' | ',' | ';' | ':'
-        )
-    })
-}
-
-fn secret_key(value: &str) -> bool {
-    matches!(
-        value.to_ascii_lowercase().as_str(),
-        "password" | "secret" | "token" | "api_key" | "api-key" | "apikey"
-    )
-}
-
-fn secret_value(value: &str) -> bool {
-    let lowercase = value.to_ascii_lowercase();
-    lowercase.starts_with("sk-")
-        || lowercase.starts_with("ghp_")
-        || lowercase.starts_with("github_pat_")
-        || lowercase.starts_with("xoxb-")
-        || lowercase.starts_with("xoxp-")
-        || lowercase.starts_with("xoxa-")
-        || lowercase.starts_with("hf_")
-        || (lowercase.starts_with("akia") && lowercase.len() > 8)
-}
-
-fn redact_secret_assignment(token: &str, redact_next: &mut bool) -> Option<String> {
-    for (index, character) in token.char_indices() {
-        if !matches!(character, '=' | ':') {
-            continue;
-        }
-        let key = normalized_error_token(&token[..index]);
-        if !secret_key(key) && !key.eq_ignore_ascii_case("authorization") {
-            continue;
-        }
-        let value = &token[index + character.len_utf8()..];
-        if value.eq_ignore_ascii_case("bearer") || (value.is_empty() && secret_key(key)) {
-            *redact_next = true;
-        }
-        return Some(format!("{}<redacted>", &token[..=index]));
-    }
-    None
-}
-
-fn redact_absolute_path(token: &str) -> Option<String> {
-    let bytes = token.as_bytes();
-    for index in 0..bytes.len() {
-        let starts_after_non_word =
-            index == 0 || (!bytes[index - 1].is_ascii_alphanumeric() && bytes[index - 1] != b'_');
-        let unix = bytes[index] == b'/';
-        let windows = bytes.get(index..index + 3).is_some_and(|part| {
-            part[0].is_ascii_alphabetic() && part[1] == b':' && matches!(part[2], b'/' | b'\\')
-        });
-        if starts_after_non_word && (unix || windows) {
-            return Some(format!("{}<redacted-path>", &token[..index]));
-        }
-    }
-    None
-}
-
-fn bounded_utf8(value: &str, maximum_bytes: usize) -> String {
-    if value.len() <= maximum_bytes {
-        return value.to_owned();
-    }
-    let mut end = maximum_bytes;
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value[..end].to_owned()
 }
 
 #[cfg(test)]
@@ -504,7 +486,8 @@ mod tests {
     fn public_error_messages_are_bounded_and_sanitized() {
         let private_root = "/Users/operator/private-project";
         let message = format!(
-            "storage at {private_root}/work-orders.db failed token=secret-value {}",
+            "storage at {private_root}/work-orders.db failed !sk-punctuated-secret! \
+             !token=secret-value !Bearer opaque-credential {}",
             "x".repeat(MAX_PUBLIC_ERROR_MESSAGE_BYTES * 2)
         );
         let (_, Json(body)) = work_order_api_error(HarnessWorkOrderError {
@@ -515,7 +498,9 @@ mod tests {
 
         assert!(body.error.len() <= MAX_PUBLIC_ERROR_MESSAGE_BYTES);
         assert!(!body.error.contains(private_root));
+        assert!(!body.error.contains("punctuated-secret"));
         assert!(!body.error.contains("secret-value"));
+        assert!(!body.error.contains("opaque-credential"));
         assert!(!body.error.chars().any(char::is_control));
     }
 }

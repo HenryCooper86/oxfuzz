@@ -92,7 +92,7 @@ pub use hf_agent::{
 pub use hf_core::crash::Crash;
 pub use hf_core::engine::{EngineCapabilities, EngineKind, FuzzProgress};
 pub use hf_core::error::ClassifiedError;
-pub use hf_core::harness::DraftGenerator;
+pub use hf_core::harness::{DraftGenerator, HarnessStatus};
 pub use hf_core::provider::ProviderStatus;
 pub use hf_core::retired_engine::{RETIRED_ENGINE_ID, RETIRED_ENGINE_IDS};
 pub use hf_core::runtime::{
@@ -183,14 +183,14 @@ pub use harness_tournament::{
 };
 #[cfg(feature = "harness-work-order")]
 pub use harness_work_order::{
-    build_work_order, quote_posix_arg, render_work_order, verify_work_order, work_order_commands,
-    work_order_rules, HarnessWorkOrder, HarnessWorkOrderAttempt, HarnessWorkOrderAttemptResult,
-    HarnessWorkOrderError, HarnessWorkOrderErrorCode, HarnessWorkOrderErrorKind,
-    HarnessWorkOrderPayload, HarnessWorkOrderRanking, HarnessWorkOrderSubmission,
-    ImportHarnessWorkOrderSubmissionRequest, WorkOrderArg, WorkOrderCommand,
-    WorkOrderCompileContext, WorkOrderPlaceholder, WorkOrderRule, WorkOrderSeedReference,
-    WorkOrderSourceEvidence, WorkOrderStep, WorkOrderSubmissionOrigin, WorkOrderTargetEvidence,
-    HARNESS_WORK_ORDER_SCHEMA_VERSION,
+    build_work_order, quote_posix_arg, render_work_order, sanitize_work_order_diagnostic,
+    verify_work_order, work_order_commands, work_order_rules, HarnessWorkOrder,
+    HarnessWorkOrderAttempt, HarnessWorkOrderAttemptResult, HarnessWorkOrderError,
+    HarnessWorkOrderErrorCode, HarnessWorkOrderErrorKind, HarnessWorkOrderPayload,
+    HarnessWorkOrderRanking, HarnessWorkOrderSubmission, ImportHarnessWorkOrderSubmissionRequest,
+    WorkOrderArg, WorkOrderCommand, WorkOrderCompileContext, WorkOrderPlaceholder, WorkOrderRule,
+    WorkOrderSeedReference, WorkOrderSourceEvidence, WorkOrderStep, WorkOrderSubmissionOrigin,
+    WorkOrderTargetEvidence, HARNESS_WORK_ORDER_SCHEMA_VERSION,
 };
 pub use hf_storage::{AutoRevertEvent, GuardrailDecisionRecord, ProjectAutoRevert};
 #[cfg(feature = "harness-work-order")]
