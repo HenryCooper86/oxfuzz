@@ -21,6 +21,7 @@ use hf_service::harness_work_order::{
     WorkOrderPlaceholder, WorkOrderRule, WorkOrderSeedReference, WorkOrderSourceEvidence,
     WorkOrderStep, WorkOrderSubmissionOrigin, WorkOrderTargetEvidence,
     HARNESS_WORK_ORDER_SCHEMA_VERSION, MAX_WORK_ORDER_PACKET_BYTES,
+    MAX_WORK_ORDER_SOURCE_EXCERPT_BYTES,
 };
 use hf_service::{HarnessWorkOrderExportRequest, ServiceContainer};
 use sha2::{Digest, Sha256};
@@ -1308,6 +1309,78 @@ async fn submission_import_rejects_invalid_input_parent_and_limit() {
     );
     assert_eq!(limit.kind, HarnessWorkOrderErrorKind::Validation);
     assert_eq!(runtime.calls.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn submission_import_accepts_exact_source_and_provenance_limits() {
+    let workspace = tempfile::tempdir().expect("create workspace");
+    let store = Arc::new(
+        hf_storage::Store::connect(workspace.path().join("work-order.db"))
+            .await
+            .expect("create store"),
+    );
+    let packet = build_work_order(payload()).expect("build work order");
+    persist_work_order(&store, packet.clone()).await;
+    let service =
+        ServiceContainer::new(Arc::new(CountingRuntime::default()), None).with_store(store);
+    let source = "x".repeat(MAX_WORK_ORDER_SOURCE_EXCERPT_BYTES);
+
+    let submission = service
+        .import_harness_work_order_submission(submission_request(
+            packet.id,
+            source.clone(),
+            WorkOrderSubmissionOrigin::ExternalTool {
+                tool: "t".repeat(128),
+                model: Some("m".repeat(128)),
+                response_id: Some("r".repeat(256)),
+            },
+            None,
+        ))
+        .await
+        .expect("exact configured limits must be accepted");
+
+    assert_eq!(submission.source, source);
+    assert_eq!(
+        submission.origin,
+        WorkOrderSubmissionOrigin::ExternalTool {
+            tool: "t".repeat(128),
+            model: Some("m".repeat(128)),
+            response_id: Some("r".repeat(256)),
+        }
+    );
+}
+
+#[tokio::test]
+async fn submission_operations_require_durable_storage() {
+    let service = ServiceContainer::new(Arc::new(CountingRuntime::default()), None);
+    let work_order_id = "a".repeat(64);
+
+    let import_error = service
+        .import_harness_work_order_submission(submission_request(
+            work_order_id.clone(),
+            "void f(void) {}",
+            human_origin(),
+            None,
+        ))
+        .await
+        .expect_err("import requires durable storage");
+    assert_eq!(
+        import_error.code,
+        HarnessWorkOrderErrorCode::StorageRequired
+    );
+    assert_eq!(import_error.kind, HarnessWorkOrderErrorKind::Storage);
+    let get_error = service
+        .harness_work_order_submission(uuid::Uuid::new_v4())
+        .await
+        .expect_err("get requires durable storage");
+    assert_eq!(get_error.code, HarnessWorkOrderErrorCode::StorageRequired);
+    assert_eq!(get_error.kind, HarnessWorkOrderErrorKind::Storage);
+    let list_error = service
+        .list_harness_work_order_submissions(&work_order_id)
+        .await
+        .expect_err("list requires durable storage");
+    assert_eq!(list_error.code, HarnessWorkOrderErrorCode::StorageRequired);
+    assert_eq!(list_error.kind, HarnessWorkOrderErrorKind::Storage);
 }
 
 #[tokio::test]
