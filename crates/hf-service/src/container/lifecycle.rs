@@ -23,6 +23,35 @@ use super::{
     runtime_from_env, PersistenceAvailability, ServiceContainer,
 };
 
+#[cfg(feature = "harness-work-order")]
+async fn recover_harness_work_order_attempts(store: Option<&Arc<Store>>) -> bool {
+    let Some(store) = store else {
+        return true;
+    };
+    match store
+        .recover_interrupted_harness_work_order_attempts(Utc::now())
+        .await
+    {
+        Ok(affected) => {
+            if affected > 0 {
+                tracing::info!(
+                    affected,
+                    "marked interrupted harness work order qualifications after restart"
+                );
+            }
+            true
+        }
+        Err(error) => {
+            tracing::error!(
+                %error,
+                failure_code = "harness_work_order_recovery_degraded",
+                "harness work order recovery is degraded"
+            );
+            false
+        }
+    }
+}
+
 impl ServiceContainer {
     /// Create a new `ServiceContainer` without persistence.
     #[must_use]
@@ -35,6 +64,8 @@ impl ServiceContainer {
             provider_pool: Arc::new(std::sync::RwLock::new(provider_pool)),
             store: None,
             persistence_availability: PersistenceAvailability::NotConfigured,
+            #[cfg(feature = "harness-work-order")]
+            work_order_recovery_ready: true,
             session_manager: None,
             checkpoint_manager: None,
             guardrails: Guardrails::permissive(),
@@ -76,6 +107,10 @@ impl ServiceContainer {
         self.checkpoint_manager = Some(checkpoints);
         self.store = Some(store);
         self.persistence_availability = PersistenceAvailability::Available;
+        #[cfg(feature = "harness-work-order")]
+        {
+            self.work_order_recovery_ready = true;
+        }
         self
     }
 
@@ -230,6 +265,8 @@ impl ServiceContainer {
                 (None, PersistenceAvailability::Unavailable)
             }
         };
+        #[cfg(feature = "harness-work-order")]
+        let work_order_recovery_ready = recover_harness_work_order_attempts(store.as_ref()).await;
         #[cfg(feature = "semgrep-enrichment")]
         let semgrep = Arc::new(crate::semgrep::SemgrepCoordinator::persistent(
             crate::init::user_app_dir().join("semgrep-journal"),
@@ -338,6 +375,8 @@ impl ServiceContainer {
             provider_pool,
             store,
             persistence_availability,
+            #[cfg(feature = "harness-work-order")]
+            work_order_recovery_ready,
             session_manager,
             guardrails: Guardrails::from_env(),
             checkpoint_manager,
@@ -463,5 +502,135 @@ impl ServiceContainer {
     pub fn clear_workspace(&self) -> Result<(), ClassifiedError> {
         let (root, uses_trusted_default) = configured_workspace_root();
         self.clear_workspace_at_with_adoption(&root, uses_trusted_default)
+    }
+}
+
+#[cfg(all(test, feature = "harness-work-order"))]
+mod work_order_recovery_tests {
+    use std::sync::Arc;
+
+    use chrono::Utc;
+    use hf_storage::{
+        HarnessWorkOrderAttemptRecord, HarnessWorkOrderAttemptStage, HarnessWorkOrderAttemptStatus,
+        HarnessWorkOrderRecord, HarnessWorkOrderSubmissionRecord, Store,
+    };
+    use sha2::{Digest as _, Sha256};
+    use uuid::Uuid;
+
+    use super::{recover_harness_work_order_attempts, ServiceContainer};
+    use crate::harness_work_order::HarnessWorkOrderErrorCode;
+
+    async fn running_attempt_fixture(
+        store: &Store,
+    ) -> (HarnessWorkOrderAttemptRecord, chrono::DateTime<Utc>) {
+        let now = Utc::now();
+        let work_order = HarnessWorkOrderRecord {
+            id: "a".repeat(64),
+            target_id: Uuid::new_v4(),
+            project_root: "/test/project".to_owned(),
+            schema_version: 2,
+            packet_json: "{}".to_owned(),
+            created_at: now,
+        };
+        store
+            .insert_harness_work_order(&work_order)
+            .await
+            .expect("insert recovery work order");
+        let submission = HarnessWorkOrderSubmissionRecord {
+            id: Uuid::new_v4(),
+            work_order_id: work_order.id,
+            source: "source".to_owned(),
+            source_sha256: hex::encode(Sha256::digest(b"source")),
+            origin_json: "\"human\"".to_owned(),
+            parent_submission_id: None,
+            lint_json: "[]".to_owned(),
+            submitted_at: now,
+        };
+        store
+            .insert_harness_work_order_submission(&submission)
+            .await
+            .expect("insert recovery submission");
+        let attempt = HarnessWorkOrderAttemptRecord {
+            id: Uuid::new_v4(),
+            submission_id: submission.id,
+            status: HarnessWorkOrderAttemptStatus::Running,
+            current_stage: HarnessWorkOrderAttemptStage::Compile,
+            harness_id: None,
+            smoke_run_id: None,
+            result_json: None,
+            failure_code: None,
+            failure_message: None,
+            started_at: now,
+            updated_at: now,
+            ended_at: None,
+        };
+        store
+            .insert_harness_work_order_attempt(&attempt)
+            .await
+            .expect("insert running recovery attempt");
+        (attempt, now)
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_interrupts_running_attempts_without_changing_identity_or_start() {
+        let root = tempfile::tempdir().expect("create recovery root");
+        let store = Arc::new(
+            Store::connect(root.path().join("recovery.db"))
+                .await
+                .expect("create recovery store"),
+        );
+        let (attempt, started_at) = running_attempt_fixture(&store).await;
+
+        assert!(recover_harness_work_order_attempts(Some(&store)).await);
+
+        let recovered = store
+            .harness_work_order_attempt(attempt.id)
+            .await
+            .expect("load recovered attempt")
+            .expect("recovered attempt exists");
+        assert_eq!(recovered.id, attempt.id);
+        assert_eq!(recovered.started_at, started_at);
+        assert_eq!(recovered.status, HarnessWorkOrderAttemptStatus::Interrupted);
+        assert_eq!(
+            recovered.current_stage,
+            HarnessWorkOrderAttemptStage::Complete
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_startup_recovery_gates_only_work_order_methods() {
+        let root = tempfile::tempdir().expect("create recovery root");
+        let store = Arc::new(
+            Store::connect(root.path().join("recovery.db"))
+                .await
+                .expect("create recovery store"),
+        );
+        running_attempt_fixture(&store).await;
+        sqlx::query(
+            "CREATE TRIGGER reject_work_order_recovery
+             BEFORE UPDATE OF status ON harness_work_order_attempts
+             BEGIN
+                 SELECT RAISE(ABORT, 'controlled recovery failure');
+             END",
+        )
+        .execute(store.pool())
+        .await
+        .expect("install recovery failure trigger");
+
+        let ready = recover_harness_work_order_attempts(Some(&store)).await;
+        assert!(!ready);
+        let mut service =
+            ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None).with_store(store);
+        service.work_order_recovery_ready = ready;
+
+        assert_eq!(
+            service
+                .list_harness_work_orders(None)
+                .await
+                .expect_err("degraded recovery must gate work-order reads")
+                .code,
+            HarnessWorkOrderErrorCode::StorageRequired
+        );
+        assert!(service.provider_statuses().await.is_empty());
     }
 }

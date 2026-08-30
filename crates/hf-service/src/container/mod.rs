@@ -432,6 +432,8 @@ pub struct ServiceContainer {
     provider_pool: Arc<std::sync::RwLock<Option<Arc<dyn ProviderPool>>>>,
     store: Option<Arc<Store>>,
     persistence_availability: PersistenceAvailability,
+    #[cfg(feature = "harness-work-order")]
+    work_order_recovery_ready: bool,
     session_manager: Option<Arc<hf_session::SessionManager>>,
     checkpoint_manager: Option<Arc<hf_session::ChatCheckpointManager>>,
     guardrails: Guardrails,
