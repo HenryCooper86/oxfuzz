@@ -226,6 +226,77 @@ pub fn classify_fixed_sandbox_include_path(value: &str) -> FixedSandboxIncludePa
     }
 }
 
+/// Maximum bytes accepted for one portable compiler definition.
+pub const MAX_PORTABLE_DEFINE_BYTES: usize = 4_096;
+
+const MAX_URI_SCHEME_BYTES: usize = 32;
+
+/// Detect a Unix or Windows absolute path anywhere inside a portable value.
+///
+/// The byte scan is allocation-free and linear. URI authority separators such
+/// as `https://` are not paths, while `file:///...`, single-slash prefixes, UNC
+/// spellings, and drive-qualified Windows paths are detected. URI scheme
+/// recognition uses a fixed look-behind bound; longer ambiguous prefixes fail
+/// in the safe direction and are treated as path-bearing.
+#[must_use]
+pub fn contains_absolute_path_fragment(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    for index in 0..bytes.len() {
+        let starts_component =
+            index == 0 || (!bytes[index - 1].is_ascii_alphanumeric() && bytes[index - 1] != b'_');
+        if !starts_component {
+            continue;
+        }
+        if windows_drive_path_at(bytes, index) {
+            return true;
+        }
+        if bytes[index] == b'\\' && bytes.get(index + 1) == Some(&b'\\') {
+            return true;
+        }
+        if bytes[index] == b'/' && !non_file_uri_authority_slash(bytes, index) {
+            return true;
+        }
+    }
+    false
+}
+
+fn windows_drive_path_at(bytes: &[u8], index: usize) -> bool {
+    bytes.get(index..index + 3).is_some_and(|prefix| {
+        prefix[0].is_ascii_alphabetic() && prefix[1] == b':' && matches!(prefix[2], b'/' | b'\\')
+    })
+}
+
+fn non_file_uri_authority_slash(bytes: &[u8], index: usize) -> bool {
+    let colon = if index >= 1 && bytes[index - 1] == b':' && bytes.get(index + 1) == Some(&b'/') {
+        index - 1
+    } else if index >= 2 && bytes[index - 2] == b':' && bytes[index - 1] == b'/' {
+        index - 2
+    } else {
+        return false;
+    };
+    if bytes.get(colon + 1..colon + 3) != Some(b"//") {
+        return false;
+    }
+
+    let mut start = colon;
+    while start > 0
+        && colon - start < MAX_URI_SCHEME_BYTES
+        && (bytes[start - 1].is_ascii_alphanumeric()
+            || matches!(bytes[start - 1], b'+' | b'-' | b'.'))
+    {
+        start -= 1;
+    }
+    if start == colon
+        || !bytes[start].is_ascii_alphabetic()
+        || (start > 0
+            && (bytes[start - 1].is_ascii_alphanumeric()
+                || matches!(bytes[start - 1], b'+' | b'-' | b'.')))
+    {
+        return false;
+    }
+    !bytes[start..colon].eq_ignore_ascii_case(b"file")
+}
+
 impl SandboxMount {
     /// Construct a writable bind mount.
     #[must_use]
@@ -418,8 +489,8 @@ pub trait RuntimeAdapter: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_fixed_sandbox_include_path, posix_relative, CommandResult, CommandTermination,
-        FixedSandboxIncludePath, ImmutableImageReference,
+        classify_fixed_sandbox_include_path, contains_absolute_path_fragment, posix_relative,
+        CommandResult, CommandTermination, FixedSandboxIncludePath, ImmutableImageReference,
     };
 
     #[test]
@@ -468,6 +539,39 @@ mod tests {
         let path = std::path::PathBuf::from("corpus").join("c");
         assert_eq!(posix_relative(&path), "corpus/c");
         assert_eq!(posix_relative(std::path::Path::new("single")), "single");
+    }
+
+    #[test]
+    fn absolute_path_fragments_distinguish_host_paths_from_portable_values() {
+        for path_bearing in [
+            "/Users/alice/project",
+            "prefix:/Users/alice/project",
+            "file:///Users/alice/project",
+            "ROOT='/Users/alice/project'",
+            r"C:\Users\alice\project",
+            r"prefix:C:\Users\alice\project",
+            r"\\server\share\project",
+            "ROOT=//server/share/project",
+        ] {
+            assert!(
+                contains_absolute_path_fragment(path_bearing),
+                "must detect {path_bearing}"
+            );
+        }
+        for portable in [
+            "1",
+            "1.2.3",
+            "1/2",
+            "src/parser.c",
+            "left:right",
+            "https://example.test/api",
+            "ssh+git://example.test/repository",
+        ] {
+            assert!(
+                !contains_absolute_path_fragment(portable),
+                "must retain {portable}"
+            );
+        }
     }
 
     #[test]

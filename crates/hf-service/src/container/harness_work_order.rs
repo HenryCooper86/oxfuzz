@@ -13,7 +13,10 @@ use hf_core::{
     engine::EngineKind,
     error::ClassifiedError,
     harness::{Harness, HarnessStatus},
-    runtime::{classify_fixed_sandbox_include_path, FixedSandboxIncludePath},
+    runtime::{
+        classify_fixed_sandbox_include_path, contains_absolute_path_fragment,
+        FixedSandboxIncludePath, MAX_PORTABLE_DEFINE_BYTES,
+    },
     target::{TargetCandidate, TargetLanguage},
 };
 use hf_storage::{
@@ -1699,9 +1702,15 @@ fn normalized_include_path(project: &Path, path: &Path) -> Result<String, Harnes
 
 fn portable_define(define: &str) -> Result<String, HarnessWorkOrderError> {
     let value = define.strip_prefix("-D").unwrap_or(define);
+    if value.len() > MAX_PORTABLE_DEFINE_BYTES {
+        return Err(HarnessWorkOrderError::validation(
+            HarnessWorkOrderErrorCode::InvalidRequest,
+            "compile definition exceeds the portable size limit",
+        ));
+    }
     if value
         .split_once('=')
-        .is_some_and(|(_, value)| is_absolute_path(value))
+        .is_some_and(|(_, value)| contains_absolute_path_fragment(value))
     {
         return Err(HarnessWorkOrderError::validation(
             HarnessWorkOrderErrorCode::InvalidProjectPath,
@@ -1709,15 +1718,6 @@ fn portable_define(define: &str) -> Result<String, HarnessWorkOrderError> {
         ));
     }
     Ok(value.to_owned())
-}
-
-fn is_absolute_path(value: &str) -> bool {
-    let value = value.trim_matches(['\'', '"']);
-    let windows_drive = value.len() >= 3
-        && value.as_bytes()[0].is_ascii_alphabetic()
-        && value.as_bytes()[1] == b':'
-        && matches!(value.as_bytes()[2], b'/' | b'\\');
-    Path::new(value).is_absolute() || value.starts_with('\\') || windows_drive
 }
 
 fn dropped_flag_categories(dropped: &[String]) -> Vec<String> {
@@ -1814,7 +1814,7 @@ fn open_regular_file_beneath(
 
 #[cfg(test)]
 mod tests {
-    use super::bounded_excerpt;
+    use super::{bounded_excerpt, portable_define};
     use crate::harness_work_order::{
         MAX_WORK_ORDER_SOURCE_EXCERPT_BYTES, MAX_WORK_ORDER_SOURCE_EXCERPT_LINES,
     };
@@ -1866,5 +1866,28 @@ mod tests {
             std::path::Path::new("//work/include")
         )
         .is_err());
+    }
+
+    #[test]
+    fn portable_defines_reject_embedded_absolute_paths_and_keep_non_paths() {
+        for define in [
+            "ROOT=file:///Users/alice/project",
+            "ROOT=prefix:/Users/alice/project",
+            r"ROOT=C:\Users\alice\project",
+            r"ROOT=prefix:C:\Users\alice\project",
+        ] {
+            assert!(
+                portable_define(define).is_err(),
+                "must reject absolute path fragment in {define}"
+            );
+        }
+        for define in [
+            "VERSION=1.2.3",
+            "RATIO=1/2",
+            "URL=https://example.test/api",
+            "RELATIVE=src/parser.c",
+        ] {
+            assert_eq!(portable_define(define).expect("portable define"), define);
+        }
     }
 }
