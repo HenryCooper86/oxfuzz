@@ -11,7 +11,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use hf_core::crash::{Crash, CrashKind, CrashOrigin};
 use hf_core::engine::{EngineKind, FuzzRunConfig};
-use hf_core::harness::{BuildCommand, Harness, HarnessStatus};
+use hf_core::harness::{BuildCommand, Harness, HarnessStatus, SmokeRunSummary};
 use hf_core::target::{
     InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
 };
@@ -77,7 +77,7 @@ async fn fixture() -> Fixture {
     };
     store.upsert_target(&target, Utc::now()).await.unwrap();
 
-    let harness = Harness {
+    let mut harness = Harness {
         id: Uuid::new_v4(),
         target_id: target.id,
         engine: EngineKind::LibFuzzer,
@@ -91,9 +91,19 @@ async fn fixture() -> Fixture {
             extra_flags: Vec::new(),
         },
         sanitizer: Sanitizer::Address,
-        status: HarnessStatus::Promoted,
-        smoke_run: None,
+        status: HarnessStatus::SmokePassed,
+        smoke_run: Some(SmokeRunSummary {
+            duration_secs: 60,
+            execs_per_sec: 1.0,
+            crashes: 0,
+            passed: true,
+            source_sha256: Some("a".repeat(64)),
+            binary_sha256: Some("b".repeat(64)),
+            run_id: Some(Uuid::new_v4()),
+        }),
     };
+    store.upsert_harness(&harness).await.unwrap();
+    harness.status = HarnessStatus::Promoted;
     store
         .promote_harness_with_approval(
             &harness,
