@@ -3,7 +3,7 @@
 //! Packets carry retained authoring evidence only. Constructing, verifying, and
 //! rendering a packet never invokes a provider, build, runtime, or fuzzer.
 
-use std::{error::Error, fmt, path::Path};
+use std::{error::Error, fmt, fmt::Write as _, path::Path};
 
 use hf_core::{engine::EngineKind, error::ClassifiedError, target::TargetLanguage};
 use hf_harness::{harness_rules, HarnessRuleSummary, LintSeverity};
@@ -285,10 +285,26 @@ pub struct HarnessWorkOrderError {
 }
 
 impl HarnessWorkOrderError {
-    fn validation(code: HarnessWorkOrderErrorCode, message: impl Into<String>) -> Self {
+    pub(crate) fn validation(code: HarnessWorkOrderErrorCode, message: impl Into<String>) -> Self {
         Self {
             code,
             kind: HarnessWorkOrderErrorKind::Validation,
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn storage(message: impl Into<String>) -> Self {
+        Self {
+            code: HarnessWorkOrderErrorCode::StorageRequired,
+            kind: HarnessWorkOrderErrorKind::Storage,
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn not_found(code: HarnessWorkOrderErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            kind: HarnessWorkOrderErrorKind::NotFound,
             message: message.into(),
         }
     }
@@ -554,7 +570,7 @@ fn canonical_payload(
     validate_source_evidence(&payload.source)?;
     validate_project_relative_path(&payload.target.relative_source)?;
     for include_dir in &payload.compile_context.include_dirs {
-        validate_project_relative_path(include_dir)?;
+        validate_compile_include_path(include_dir)?;
     }
     normalize_strings(&mut payload.compile_context.include_dirs);
     normalize_strings(&mut payload.compile_context.defines);
@@ -605,6 +621,13 @@ fn validate_project_relative_path(value: &str) -> Result<(), HarnessWorkOrderErr
         ));
     }
     Ok(())
+}
+
+fn validate_compile_include_path(value: &str) -> Result<(), HarnessWorkOrderError> {
+    if value == "/work" || value.starts_with("/work/") {
+        return Ok(());
+    }
+    validate_project_relative_path(value)
 }
 
 fn validate_sha256(value: &str, subject: &str) -> Result<(), HarnessWorkOrderError> {
@@ -764,12 +787,12 @@ fn command_for_step(work_order: &HarnessWorkOrder, step: WorkOrderStep) -> WorkO
 
 fn render_values(output: &mut String, label: &str, values: &[String]) {
     if values.is_empty() {
-        output.push_str(&format!("- {label}: none recorded\n"));
+        writeln!(output, "- {label}: none recorded").expect("writing to String cannot fail");
         return;
     }
-    output.push_str(&format!("- {label}:\n"));
+    writeln!(output, "- {label}:").expect("writing to String cannot fail");
     for value in values {
-        output.push_str(&format!("  - `{value}`\n"));
+        writeln!(output, "  - `{value}`").expect("writing to String cannot fail");
     }
 }
 

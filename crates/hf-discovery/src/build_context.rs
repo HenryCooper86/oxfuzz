@@ -191,6 +191,9 @@ fn record_dropped(context: &mut BuildContext, seen: &mut HashSet<String>, token:
 /// the directory through a different real path (a symlinked temporary directory
 /// is the usual case).
 fn confined_include_dir(raw: &Path, directory: &Path, project_root: &Path) -> Option<PathBuf> {
+    if is_fixed_sandbox_include_dir(raw) {
+        return Some(raw.to_path_buf());
+    }
     let joined = if raw.is_absolute() {
         raw.to_path_buf()
     } else {
@@ -209,6 +212,12 @@ fn confined_include_dir(raw: &Path, directory: &Path, project_root: &Path) -> Op
     let real_root = std::fs::canonicalize(&root).ok()?;
     let relative = real_candidate.strip_prefix(&real_root).ok()?;
     Some(root.join(relative))
+}
+
+/// `/work` is the fixed project mount used by the hardened sandbox. It is the
+/// only absolute include root that cannot name a host path.
+fn is_fixed_sandbox_include_dir(path: &Path) -> bool {
+    path == Path::new("/work") || path.starts_with("/work/")
 }
 
 /// Resolve `.` and `..` without consulting the filesystem.
@@ -287,6 +296,10 @@ pub fn staged_compile_flags(
 ) -> Vec<String> {
     let mut flags = Vec::new();
     for directory in &ctx.include_dirs {
+        if is_fixed_sandbox_include_dir(directory) {
+            flags.push(format!("-I{}", directory.display()));
+            continue;
+        }
         let Ok(relative) = directory.strip_prefix(project_root) else {
             continue;
         };
