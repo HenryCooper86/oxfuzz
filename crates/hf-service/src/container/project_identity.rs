@@ -57,10 +57,10 @@ pub(super) fn project_lookup_identity(project: &Path) -> PathBuf {
 /// A plain symbol matching zero candidates yields `Ok(None)` (the caller
 /// reports "not found"); exactly one yields that candidate; more than one is a
 /// `Validation` error listing the file-qualified forms so the user can
-/// disambiguate. When no plain match exists and the string carries a `::`
-/// qualifier, the part before the last `::` is matched exactly against each
-/// candidate's root-relative file. The plain match is tried first so a symbol
-/// that itself contains `::` (C++-style) still resolves.
+/// disambiguate. When no plain match exists, the complete formatted
+/// `relative_file::symbol` value is matched without reparsing it. The plain
+/// match is tried first so a symbol that itself contains `::` (C++-style)
+/// still resolves.
 pub(super) fn select_target_candidate<'c>(
     candidates: &'c [TargetCandidate],
     target: &str,
@@ -82,14 +82,13 @@ pub(super) fn select_target_candidate<'c>(
         }
         return Ok(Some(first));
     }
-    if let Some((file, symbol)) = target.rsplit_once("::") {
-        if !file.is_empty() && !symbol.is_empty() {
-            return Ok(candidates
-                .iter()
-                .find(|c| c.symbol == symbol && c.relative_file() == file));
-        }
-    }
-    Ok(None)
+    Ok(candidates.iter().find(|candidate| {
+        let relative_file = candidate.relative_file();
+        target
+            .strip_prefix(relative_file.as_str())
+            .and_then(|suffix| suffix.strip_prefix("::"))
+            .is_some_and(|symbol| symbol == candidate.symbol)
+    }))
 }
 
 /// A per-project workspace directory name: the human-readable basename plus a
@@ -195,6 +194,16 @@ mod target_resolution_tests {
         ];
         let found = select_target_candidate(&candidates, "src/b.c::parse_opts").unwrap();
         assert_eq!(found.map(|c| c.id), Some(candidates[1].id));
+    }
+
+    #[test]
+    fn file_qualified_namespaced_symbol_resolves_exactly() {
+        let candidates = vec![
+            candidate("/proj/src/a.cpp", "ns::parse_opts"),
+            candidate("/proj/src/b.cpp", "ns::parse_opts"),
+        ];
+        let found = select_target_candidate(&candidates, "src/b.cpp::ns::parse_opts").unwrap();
+        assert_eq!(found.map(|candidate| candidate.id), Some(candidates[1].id));
     }
 
     #[test]
