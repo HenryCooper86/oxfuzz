@@ -186,10 +186,11 @@ pub use harness_work_order::{
     build_work_order, quote_posix_arg, render_work_order, verify_work_order, work_order_commands,
     work_order_rules, HarnessWorkOrder, HarnessWorkOrderAttempt, HarnessWorkOrderAttemptResult,
     HarnessWorkOrderError, HarnessWorkOrderErrorCode, HarnessWorkOrderErrorKind,
-    HarnessWorkOrderPayload, HarnessWorkOrderSubmission, ImportHarnessWorkOrderSubmissionRequest,
-    WorkOrderArg, WorkOrderCommand, WorkOrderCompileContext, WorkOrderPlaceholder, WorkOrderRule,
-    WorkOrderSeedReference, WorkOrderSourceEvidence, WorkOrderStep, WorkOrderSubmissionOrigin,
-    WorkOrderTargetEvidence, HARNESS_WORK_ORDER_SCHEMA_VERSION,
+    HarnessWorkOrderPayload, HarnessWorkOrderRanking, HarnessWorkOrderSubmission,
+    ImportHarnessWorkOrderSubmissionRequest, WorkOrderArg, WorkOrderCommand,
+    WorkOrderCompileContext, WorkOrderPlaceholder, WorkOrderRule, WorkOrderSeedReference,
+    WorkOrderSourceEvidence, WorkOrderStep, WorkOrderSubmissionOrigin, WorkOrderTargetEvidence,
+    HARNESS_WORK_ORDER_SCHEMA_VERSION,
 };
 pub use hf_storage::{AutoRevertEvent, GuardrailDecisionRecord, ProjectAutoRevert};
 #[cfg(feature = "harness-work-order")]

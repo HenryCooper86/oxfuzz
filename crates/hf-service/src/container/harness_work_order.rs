@@ -1,6 +1,7 @@
 //! Durable provider-free Harness Work Order export and retrieval.
 
 use std::{
+    collections::HashSet,
     fs::File,
     io::Read,
     path::{Component, Path, PathBuf},
@@ -11,6 +12,7 @@ use hf_core::{
     build::BuildContext,
     engine::EngineKind,
     error::ClassifiedError,
+    harness::{Harness, HarnessStatus},
     runtime::{classify_fixed_sandbox_include_path, FixedSandboxIncludePath},
     target::{TargetCandidate, TargetLanguage},
 };
@@ -29,7 +31,7 @@ use crate::{
     harness_work_order::{
         build_work_order, verify_work_order, HarnessWorkOrder, HarnessWorkOrderAttempt,
         HarnessWorkOrderAttemptResult, HarnessWorkOrderError, HarnessWorkOrderErrorCode,
-        HarnessWorkOrderPayload, HarnessWorkOrderSubmission,
+        HarnessWorkOrderPayload, HarnessWorkOrderRanking, HarnessWorkOrderSubmission,
         ImportHarnessWorkOrderSubmissionRequest, WorkOrderCompileContext, WorkOrderSeedReference,
         WorkOrderSourceEvidence, WorkOrderStep, WorkOrderSubmissionOrigin, WorkOrderTargetEvidence,
         MAX_WORK_ORDER_SEEDS, MAX_WORK_ORDER_SOURCE_EXCERPT_BYTES,
@@ -508,6 +510,121 @@ impl ServiceContainer {
             .collect()
     }
 
+    /// Rank retained qualification attempts without dispatching or reading active artifacts.
+    #[tracing::instrument(skip(self, attempt_ids), fields(attempt_count = attempt_ids.len()))]
+    pub async fn rank_harness_work_order_attempts(
+        &self,
+        attempt_ids: &[uuid::Uuid],
+    ) -> Result<HarnessWorkOrderRanking, HarnessWorkOrderError> {
+        validate_ranking_request(attempt_ids)?;
+        let store = self.work_order_store()?;
+        let mut attempts = Vec::with_capacity(attempt_ids.len());
+        for attempt_id in attempt_ids {
+            let record = store
+                .harness_work_order_attempt(*attempt_id)
+                .await
+                .map_err(storage_error)?
+                .ok_or_else(attempt_not_found)?;
+            let attempt = retained_attempt(&record)?;
+            let submission_record = store
+                .harness_work_order_submission(attempt.submission_id)
+                .await
+                .map_err(durable_submission_storage_error)?
+                .ok_or_else(|| {
+                    HarnessWorkOrderError::validation(
+                        HarnessWorkOrderErrorCode::InvalidWorkOrderDigest,
+                        "ranked attempt submission is missing",
+                    )
+                })?;
+            let submission = retained_submission(&submission_record)?;
+            load_verified_work_order(store, &submission.work_order_id).await?;
+            let repair_depth = submission_repair_depth(store, &submission).await?;
+            if attempt
+                .result
+                .as_ref()
+                .is_some_and(|result| result.repair_depth != repair_depth)
+            {
+                return Err(invalid_attempt_evidence());
+            }
+            attempts.push(RankedAttempt::new(
+                &attempt,
+                submission.submitted_at,
+                repair_depth,
+            ));
+        }
+        attempts.sort_by(RankedAttempt::compare);
+        let winner_attempt_id = attempts
+            .iter()
+            .find(|attempt| attempt.compiled)
+            .map(|attempt| attempt.id);
+        Ok(HarnessWorkOrderRanking {
+            attempt_ids: attempts.into_iter().map(|attempt| attempt.id).collect(),
+            winner_attempt_id,
+        })
+    }
+
+    /// Promote the exact clean smoke revision retained by one terminal attempt.
+    #[tracing::instrument(skip(self), fields(%attempt_id))]
+    pub async fn promote_harness_work_order_attempt(
+        &self,
+        attempt_id: uuid::Uuid,
+    ) -> Result<Harness, HarnessWorkOrderError> {
+        let store = self.work_order_store()?;
+        let record = store
+            .harness_work_order_attempt(attempt_id)
+            .await
+            .map_err(storage_error)?
+            .ok_or_else(attempt_not_found)?;
+        let attempt = retained_attempt(&record).map_err(|_| attempt_not_smoke_passed())?;
+        let evidence = PromotionEvidence::from_attempt(&attempt)?;
+        let submission_record = store
+            .harness_work_order_submission(attempt.submission_id)
+            .await
+            .map_err(durable_submission_storage_error)?
+            .ok_or_else(attempt_not_smoke_passed)?;
+        let submission =
+            retained_submission(&submission_record).map_err(|_| attempt_not_smoke_passed())?;
+        let repair_depth = submission_repair_depth(store, &submission)
+            .await
+            .map_err(|error| {
+                if error.kind == crate::harness_work_order::HarnessWorkOrderErrorKind::Storage {
+                    error
+                } else {
+                    attempt_not_smoke_passed()
+                }
+            })?;
+        if repair_depth != evidence.repair_depth {
+            return Err(attempt_not_smoke_passed());
+        }
+        let work_order_record = store
+            .harness_work_order(&submission.work_order_id)
+            .await
+            .map_err(storage_error)?
+            .ok_or_else(attempt_not_smoke_passed)?;
+        let work_order =
+            retained_packet(&work_order_record, None).map_err(|_| attempt_not_smoke_passed())?;
+        let harness = store
+            .get_harness(evidence.harness_id)
+            .await
+            .map_err(storage_error)?
+            .ok_or_else(attempt_not_smoke_passed)?;
+        validate_retained_promotion_harness(&harness, &evidence)?;
+        let target = format!(
+            "{}::{}",
+            work_order.payload.target.relative_source, work_order.payload.target.symbol
+        );
+        self.harness_promote_exact(
+            Path::new(&work_order_record.project_root),
+            &target,
+            work_order.payload.engine,
+            evidence.harness_id,
+            &evidence.source_sha256,
+            &evidence.binary_sha256,
+        )
+        .await
+        .map_err(|error| exact_promotion_error(&error))
+    }
+
     async fn qualification_preflight(
         &self,
         submission_id: uuid::Uuid,
@@ -617,7 +734,7 @@ async fn submission_repair_depth(
     let mut depth = 0_u32;
     let mut parent_id = submission.parent_submission_id;
     while let Some(id) = parent_id {
-        let parent = store
+        let parent_record = store
             .harness_work_order_submission(id)
             .await
             .map_err(durable_submission_storage_error)?
@@ -627,6 +744,7 @@ async fn submission_repair_depth(
                     "durable submission ancestry is incomplete",
                 )
             })?;
+        let parent = retained_submission(&parent_record)?;
         if parent.work_order_id != submission.work_order_id {
             return Err(HarnessWorkOrderError::validation(
                 HarnessWorkOrderErrorCode::InvalidWorkOrderDigest,
@@ -648,6 +766,162 @@ async fn submission_repair_depth(
         parent_id = parent.parent_submission_id;
     }
     Ok(depth)
+}
+
+struct RankedAttempt {
+    id: uuid::Uuid,
+    compiled: bool,
+    verdict: u8,
+    repair_depth: u32,
+    execs_per_sec: f64,
+    submitted_at: chrono::DateTime<Utc>,
+}
+
+impl RankedAttempt {
+    fn new(
+        attempt: &HarnessWorkOrderAttempt,
+        submitted_at: chrono::DateTime<Utc>,
+        repair_depth: u32,
+    ) -> Self {
+        let result = attempt.result.as_ref();
+        Self {
+            id: attempt.id,
+            compiled: result.is_some_and(|result| result.compiled),
+            verdict: match result.and_then(|result| result.smoke_verdict) {
+                Some(crate::VerdictLevel::Pass) => 0,
+                Some(crate::VerdictLevel::Suspect) => 1,
+                Some(crate::VerdictLevel::Fail) => 2,
+                None => 3,
+            },
+            repair_depth,
+            execs_per_sec: result
+                .and_then(|result| result.execs_per_sec)
+                .unwrap_or(0.0),
+            submitted_at,
+        }
+    }
+
+    fn compare(left: &Self, right: &Self) -> std::cmp::Ordering {
+        right
+            .compiled
+            .cmp(&left.compiled)
+            .then_with(|| left.verdict.cmp(&right.verdict))
+            .then_with(|| left.repair_depth.cmp(&right.repair_depth))
+            .then_with(|| right.execs_per_sec.total_cmp(&left.execs_per_sec))
+            .then_with(|| left.submitted_at.cmp(&right.submitted_at))
+            .then_with(|| left.id.cmp(&right.id))
+    }
+}
+
+struct PromotionEvidence {
+    harness_id: uuid::Uuid,
+    smoke_run_id: uuid::Uuid,
+    repair_depth: u32,
+    source_sha256: String,
+    binary_sha256: String,
+}
+
+impl PromotionEvidence {
+    fn from_attempt(attempt: &HarnessWorkOrderAttempt) -> Result<Self, HarnessWorkOrderError> {
+        let result = attempt
+            .result
+            .as_ref()
+            .ok_or_else(attempt_not_smoke_passed)?;
+        if attempt.status != HarnessWorkOrderAttemptStatus::SmokePassed
+            || attempt.current_stage != HarnessWorkOrderAttemptStage::Complete
+            || result.smoke_verdict == Some(crate::VerdictLevel::Fail)
+        {
+            return Err(attempt_not_smoke_passed());
+        }
+        Ok(Self {
+            harness_id: attempt.harness_id.ok_or_else(attempt_not_smoke_passed)?,
+            smoke_run_id: attempt.smoke_run_id.ok_or_else(attempt_not_smoke_passed)?,
+            repair_depth: result.repair_depth,
+            source_sha256: result
+                .source_sha256
+                .clone()
+                .ok_or_else(attempt_not_smoke_passed)?,
+            binary_sha256: result
+                .binary_sha256
+                .clone()
+                .ok_or_else(attempt_not_smoke_passed)?,
+        })
+    }
+}
+
+fn validate_ranking_request(attempt_ids: &[uuid::Uuid]) -> Result<(), HarnessWorkOrderError> {
+    if attempt_ids.len() > hf_storage::MAX_WORK_ORDER_RANK_ATTEMPTS {
+        return Err(HarnessWorkOrderError::validation(
+            HarnessWorkOrderErrorCode::RankingLimitExceeded,
+            format!(
+                "ranking accepts at most {} attempts",
+                hf_storage::MAX_WORK_ORDER_RANK_ATTEMPTS
+            ),
+        ));
+    }
+    if attempt_ids.is_empty()
+        || attempt_ids.iter().copied().collect::<HashSet<_>>().len() != attempt_ids.len()
+    {
+        return Err(HarnessWorkOrderError::validation(
+            HarnessWorkOrderErrorCode::InvalidTransition,
+            "ranking requires one or more unique attempt identifiers",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_retained_promotion_harness(
+    harness: &Harness,
+    evidence: &PromotionEvidence,
+) -> Result<(), HarnessWorkOrderError> {
+    let smoke = harness
+        .smoke_run
+        .as_ref()
+        .ok_or_else(attempt_not_smoke_passed)?;
+    if !matches!(
+        harness.status,
+        HarnessStatus::SmokePassed | HarnessStatus::Promoted
+    ) || !smoke.passed
+        || smoke.crashes != 0
+        || smoke.run_id != Some(evidence.smoke_run_id)
+    {
+        return Err(attempt_not_smoke_passed());
+    }
+    if smoke.source_sha256.as_deref() != Some(evidence.source_sha256.as_str())
+        || smoke.binary_sha256.as_deref() != Some(evidence.binary_sha256.as_str())
+        || hex::encode(sha2::Sha256::digest(harness.source.as_bytes())) != evidence.source_sha256
+    {
+        return Err(attempt_not_active());
+    }
+    Ok(())
+}
+
+fn attempt_not_found() -> HarnessWorkOrderError {
+    HarnessWorkOrderError::not_found(
+        HarnessWorkOrderErrorCode::AttemptNotFound,
+        "work order qualification attempt was not found",
+    )
+}
+
+fn attempt_not_smoke_passed() -> HarnessWorkOrderError {
+    HarnessWorkOrderError::validation(
+        HarnessWorkOrderErrorCode::AttemptNotSmokePassed,
+        "promotion requires complete clean-smoke evidence for the exact attempt",
+    )
+}
+
+fn exact_promotion_error(error: &ClassifiedError) -> HarnessWorkOrderError {
+    if matches!(error, ClassifiedError::Storage(_)) {
+        return HarnessWorkOrderError::storage("persist exact harness promotion");
+    }
+    attempt_not_active()
+}
+
+fn attempt_not_active() -> HarnessWorkOrderError {
+    HarnessWorkOrderError::conflict(
+        HarnessWorkOrderErrorCode::AttemptNotActive,
+        "attempt harness id or qualified artifacts are no longer active",
+    )
 }
 
 async fn complete_failed_attempt(
