@@ -363,7 +363,7 @@ pub async fn change_aware_fixture() -> Result<ChangeAwareTestFixture, Box<dyn Er
 {
     use hf_core::crash::{Crash, CrashKind, CrashOrigin};
     use hf_core::engine::{EngineKind, FuzzRunConfig};
-    use hf_core::harness::{BuildCommand, Harness, HarnessStatus};
+    use hf_core::harness::{BuildCommand, Harness, HarnessStatus, SmokeRunSummary};
     use hf_core::target::{
         InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
     };
@@ -400,7 +400,7 @@ pub async fn change_aware_fixture() -> Result<ChangeAwareTestFixture, Box<dyn Er
     };
     store.upsert_target(&target, chrono::Utc::now()).await?;
 
-    let harness = Harness {
+    let mut harness = Harness {
         id: uuid::Uuid::new_v4(),
         target_id: target.id,
         engine: EngineKind::LibFuzzer,
@@ -414,9 +414,19 @@ pub async fn change_aware_fixture() -> Result<ChangeAwareTestFixture, Box<dyn Er
             extra_flags: Vec::new(),
         },
         sanitizer: Sanitizer::Address,
-        status: HarnessStatus::Promoted,
-        smoke_run: None,
+        status: HarnessStatus::SmokePassed,
+        smoke_run: Some(SmokeRunSummary {
+            duration_secs: 60,
+            execs_per_sec: 1.0,
+            crashes: 0,
+            passed: true,
+            source_sha256: Some("a".repeat(64)),
+            binary_sha256: Some("b".repeat(64)),
+            run_id: Some(uuid::Uuid::new_v4()),
+        }),
     };
+    store.upsert_harness(&harness).await?;
+    harness.status = HarnessStatus::Promoted;
     store
         .promote_harness_with_approval(
             &harness,
