@@ -6,6 +6,7 @@
 //! runs, targets, harnesses, crashes, and corpus entries.
 
 mod store;
+mod work_order_store;
 
 pub mod checkpoint_store;
 mod remediation_store;
@@ -40,3 +41,8 @@ pub use store::{
 };
 pub use transcript::JsonlTranscriptStore;
 pub use transcript_display::JsonlDisplayTranscriptStore;
+pub use work_order_store::{
+    HarnessWorkOrderAttemptCompletion, HarnessWorkOrderAttemptRecord, HarnessWorkOrderAttemptStage,
+    HarnessWorkOrderAttemptStatus, HarnessWorkOrderRecord, HarnessWorkOrderSubmissionRecord,
+    MAX_WORK_ORDER_RANK_ATTEMPTS, MAX_WORK_ORDER_SUBMISSIONS,
+};

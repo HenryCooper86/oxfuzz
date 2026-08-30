@@ -13,7 +13,8 @@ use hf_core::target::{
 use hf_storage::{
     AutoRevertEvent, AutomotiveOperationRecord, AutomotiveOperationStatus,
     AutomotiveStateCorpusRecord, GuardrailDecisionRecord, HarnessAiReviewRecord,
-    HarnessApprovalKind, NewScheduleOccurrence, ProjectAutoRevert, RemediationOperationCompletion,
+    HarnessApprovalKind, HarnessWorkOrderAttemptStage, HarnessWorkOrderAttemptStatus,
+    NewScheduleOccurrence, ProjectAutoRevert, RemediationOperationCompletion,
     RemediationOperationRecord, RemediationOperationStage, RemediationOperationStatus, RunKind,
     RunRecord, RunStatus, ScheduleOccurrenceAcknowledgement, ScheduleOccurrenceInspection,
     ScheduleOccurrenceReservation, ScheduleOccurrenceTransition,
@@ -40,6 +41,205 @@ async fn store_connections_enable_sqlite_write_ahead_logging() {
         .expect("read journal mode");
 
     assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+}
+
+#[tokio::test]
+async fn harness_work_order_migration_enforces_durable_row_constraints() {
+    let (store, _dir) = temp_store().await;
+    let applied: i64 =
+        sqlx::query_scalar("SELECT version FROM _sqlx_migrations WHERE version = 29")
+            .fetch_one(store.pool())
+            .await
+            .expect("work-order migration receipt");
+    assert_eq!(applied, 29);
+
+    let work_order_id = "a".repeat(64);
+    let target_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO harness_work_orders
+            (id, target_id, project_root, schema_version, packet_json, created_at)
+         VALUES (?1, ?2, '/projects/work-order', 2, '{\"schema_version\":2}',
+                 '2026-08-30T00:00:00Z')",
+    )
+    .bind(&work_order_id)
+    .bind(target_id.to_string())
+    .execute(store.pool())
+    .await
+    .expect("insert work order");
+
+    for invalid_id in ["A".repeat(64), "a".repeat(63)] {
+        assert!(sqlx::query(
+            "INSERT INTO harness_work_orders
+                (id, target_id, project_root, schema_version, packet_json, created_at)
+             VALUES (?1, ?2, '/projects/work-order', 2, '{\"schema_version\":2}',
+                     '2026-08-30T00:00:00Z')",
+        )
+        .bind(invalid_id)
+        .bind(target_id.to_string())
+        .execute(store.pool())
+        .await
+        .is_err());
+    }
+    assert!(sqlx::query(
+        "INSERT INTO harness_work_orders
+            (id, target_id, project_root, schema_version, packet_json, created_at)
+         VALUES (?1, ?2, '/projects/work-order', 2, ?3, '2026-08-30T00:00:00Z')",
+    )
+    .bind("b".repeat(64))
+    .bind(target_id.to_string())
+    .bind(format!("\"{}\"", "x".repeat(262_145)))
+    .execute(store.pool())
+    .await
+    .is_err());
+
+    let submission_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO harness_work_order_submissions
+            (id, work_order_id, source, source_sha256, origin_json, parent_submission_id,
+             lint_json, submitted_at)
+         VALUES (?1, ?2, 'int LLVMFuzzerTestOneInput(void) { return 0; }', ?3,
+                 '{\"kind\":\"human\"}', NULL, '[]', '2026-08-30T00:00:00Z')",
+    )
+    .bind(submission_id.to_string())
+    .bind(&work_order_id)
+    .bind("c".repeat(64))
+    .execute(store.pool())
+    .await
+    .expect("insert submission");
+    assert!(sqlx::query(
+        "INSERT INTO harness_work_order_submissions
+            (id, work_order_id, source, source_sha256, origin_json, parent_submission_id,
+             lint_json, submitted_at)
+         VALUES (?1, ?2, ?3, ?4, '{\"kind\":\"human\"}', NULL, '[]',
+                 '2026-08-30T00:00:00Z')",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(&work_order_id)
+    .bind("x".repeat(65_537))
+    .bind("d".repeat(64))
+    .execute(store.pool())
+    .await
+    .is_err());
+    assert!(sqlx::query(
+        "INSERT INTO harness_work_order_submissions
+            (id, work_order_id, source, source_sha256, origin_json, parent_submission_id,
+             lint_json, submitted_at)
+         VALUES (?1, ?2, 'different source', ?3, '{\"kind\":\"human\"}', NULL,
+                 '[]', '2026-08-30T00:00:00Z')",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(&work_order_id)
+    .bind("D".repeat(64))
+    .execute(store.pool())
+    .await
+    .is_err());
+    assert!(sqlx::query(
+        "INSERT INTO harness_work_order_submissions
+            (id, work_order_id, source, source_sha256, origin_json, parent_submission_id,
+             lint_json, submitted_at)
+         VALUES (?1, ?2, 'int LLVMFuzzerTestOneInput(void) { return 0; }', ?3,
+                 '{\"kind\":\"human\"}', NULL, '[]', '2026-08-30T00:00:00Z')",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(&work_order_id)
+    .bind("c".repeat(64))
+    .execute(store.pool())
+    .await
+    .is_err());
+
+    assert!(
+        sqlx::query("UPDATE harness_work_orders SET project_root = '/changed'")
+            .execute(store.pool())
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query("UPDATE harness_work_order_submissions SET source = 'changed'")
+            .execute(store.pool())
+            .await
+            .is_err()
+    );
+
+    let stages = ["compile", "review", "smoke", "complete"];
+    let statuses = [
+        "running",
+        "compile_failed",
+        "review_failed",
+        "smoke_failed",
+        "smoke_passed",
+        "interrupted",
+    ];
+    assert_eq!(stages.len(), 4);
+    assert_eq!(statuses.len(), 6);
+
+    for stage in stages {
+        for status in statuses {
+            let valid = (status == "running" && stage != "complete")
+                || (status != "running" && stage == "complete");
+            let result = sqlx::query(
+                "INSERT INTO harness_work_order_attempts
+                    (id, submission_id, status, current_stage, harness_id, smoke_run_id,
+                     result_json, failure_code, failure_message, started_at, updated_at, ended_at)
+                 VALUES (?1, ?2, ?3, ?4, NULL, NULL, NULL, NULL, NULL,
+                         '2026-08-30T00:00:00Z', '2026-08-30T00:00:00Z', ?5)",
+            )
+            .bind(Uuid::new_v4().to_string())
+            .bind(submission_id.to_string())
+            .bind(status)
+            .bind(stage)
+            .bind(if valid && status != "running" {
+                Some("2026-08-30T00:00:01Z")
+            } else {
+                None
+            })
+            .execute(store.pool())
+            .await;
+            assert_eq!(result.is_ok(), valid, "{status}/{stage}");
+        }
+    }
+
+    let terminal_attempt_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO harness_work_order_attempts
+            (id, submission_id, status, current_stage, harness_id, smoke_run_id,
+             result_json, failure_code, failure_message, started_at, updated_at, ended_at)
+         VALUES (?1, ?2, 'smoke_passed', 'complete', NULL, NULL, '{\"verdict\":\"pass\"}',
+                 NULL, NULL, '2026-08-30T00:00:00Z', '2026-08-30T00:00:01Z',
+                 '2026-08-30T00:00:01Z')",
+    )
+    .bind(terminal_attempt_id.to_string())
+    .bind(submission_id.to_string())
+    .execute(store.pool())
+    .await
+    .expect("insert terminal attempt");
+    assert!(sqlx::query(
+        "UPDATE harness_work_order_attempts SET result_json = '{\"verdict\":\"changed\"}'
+         WHERE id = ?1",
+    )
+    .bind(terminal_attempt_id.to_string())
+    .execute(store.pool())
+    .await
+    .is_err());
+}
+
+#[test]
+fn harness_work_order_attempt_states_round_trip_and_reject_unknown_storage_values() {
+    assert_eq!(
+        "compile".parse::<HarnessWorkOrderAttemptStage>().unwrap(),
+        HarnessWorkOrderAttemptStage::Compile
+    );
+    assert_eq!(
+        HarnessWorkOrderAttemptStatus::SmokePassed.to_string(),
+        "smoke_passed"
+    );
+    assert!(matches!(
+        "unknown".parse::<HarnessWorkOrderAttemptStage>(),
+        Err(StorageError::InvalidData(_))
+    ));
+    assert!(matches!(
+        "unknown".parse::<HarnessWorkOrderAttemptStatus>(),
+        Err(StorageError::InvalidData(_))
+    ));
 }
 
 #[tokio::test]
