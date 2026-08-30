@@ -242,13 +242,13 @@ impl Store {
         record: &HarnessWorkOrderSubmissionRecord,
     ) -> Result<HarnessWorkOrderSubmissionRecord, StorageError> {
         let mut transaction = self.pool().begin().await?;
-        if let Some(existing) = load_submission_identity(&mut transaction, record).await? {
-            transaction.commit().await?;
-            return Ok(existing);
-        }
         if let Some(existing) = load_submission(&mut *transaction, record.id).await? {
             transaction.commit().await?;
             return exact_or_conflict(existing, record, "submission identifier conflicts");
+        }
+        if let Some(existing) = load_submission_identity(&mut transaction, record).await? {
+            transaction.commit().await?;
+            return Ok(existing);
         }
         let work_order_exists: Option<i64> =
             sqlx::query_scalar("SELECT 1 FROM harness_work_orders WHERE id = ?1")
