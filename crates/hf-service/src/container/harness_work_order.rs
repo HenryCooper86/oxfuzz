@@ -786,7 +786,7 @@ impl RankedAttempt {
         let result = attempt.result.as_ref();
         Self {
             id: attempt.id,
-            compiled: result.is_some_and(|result| result.compiled),
+            compiled: attempt.harness_id.is_some(),
             verdict: match result.and_then(|result| result.smoke_verdict) {
                 Some(crate::VerdictLevel::Pass) => 0,
                 Some(crate::VerdictLevel::Suspect) => 1,

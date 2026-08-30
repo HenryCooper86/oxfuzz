@@ -636,6 +636,127 @@ async fn work_order_ranking_orders_compile_verdict_and_ancestry_without_dispatch
 }
 
 #[tokio::test]
+async fn work_order_ranking_recognizes_durable_post_compile_identity() {
+    let fixture =
+        QualificationFixture::new(RuntimeMode::Pass, ReviewMode::Approve, VALID_HARNESS).await;
+    let compile_failed = Uuid::from_u128(1);
+    let interrupted_after_compile = Uuid::from_u128(41);
+    let running_after_compile = Uuid::from_u128(42);
+    let interrupted_harness_id = Uuid::new_v4();
+    let running_harness_id = Uuid::new_v4();
+    let started_at = fixed_time(20);
+    fixture
+        .store
+        .insert_harness_work_order_attempt(&hf_storage::HarnessWorkOrderAttemptRecord {
+            id: interrupted_after_compile,
+            submission_id: fixture.submission.id,
+            status: HarnessWorkOrderAttemptStatus::Running,
+            current_stage: HarnessWorkOrderAttemptStage::Compile,
+            harness_id: None,
+            smoke_run_id: None,
+            result_json: None,
+            failure_code: None,
+            failure_message: None,
+            started_at,
+            updated_at: started_at,
+            ended_at: None,
+        })
+        .await
+        .expect("insert attempt that will be interrupted after compile");
+    fixture
+        .store
+        .transition_harness_work_order_attempt(
+            interrupted_after_compile,
+            HarnessWorkOrderAttemptStage::Compile,
+            HarnessWorkOrderAttemptStage::Review,
+            Some(interrupted_harness_id),
+            fixed_time(21),
+        )
+        .await
+        .expect("retain interrupted compiled harness identity");
+    fixture
+        .store
+        .recover_interrupted_harness_work_order_attempts(fixed_time(22))
+        .await
+        .expect("recover post-compile attempt as interrupted");
+
+    fixture
+        .store
+        .insert_harness_work_order_attempt(&hf_storage::HarnessWorkOrderAttemptRecord {
+            id: running_after_compile,
+            submission_id: fixture.submission.id,
+            status: HarnessWorkOrderAttemptStatus::Running,
+            current_stage: HarnessWorkOrderAttemptStage::Compile,
+            harness_id: None,
+            smoke_run_id: None,
+            result_json: None,
+            failure_code: None,
+            failure_message: None,
+            started_at,
+            updated_at: started_at,
+            ended_at: None,
+        })
+        .await
+        .expect("insert running post-compile attempt");
+    fixture
+        .store
+        .transition_harness_work_order_attempt(
+            running_after_compile,
+            HarnessWorkOrderAttemptStage::Compile,
+            HarnessWorkOrderAttemptStage::Review,
+            Some(running_harness_id),
+            fixed_time(21),
+        )
+        .await
+        .expect("retain running compiled harness identity");
+    insert_terminal_attempt(
+        &fixture,
+        compile_failed,
+        fixture.submission.id,
+        HarnessWorkOrderAttemptStatus::CompileFailed,
+        &attempt_result(false, None, 0, None, None),
+    )
+    .await;
+    let interrupted_before = raw_attempt(&fixture, interrupted_after_compile).await;
+    let running_before = raw_attempt(&fixture, running_after_compile).await;
+    let compile_failed_before = raw_attempt(&fixture, compile_failed).await;
+
+    let ranking = fixture
+        .service
+        .rank_harness_work_order_attempts(&[
+            compile_failed,
+            running_after_compile,
+            interrupted_after_compile,
+        ])
+        .await
+        .expect("rank durable post-compile identities");
+
+    assert_eq!(
+        ranking.attempt_ids,
+        vec![
+            interrupted_after_compile,
+            running_after_compile,
+            compile_failed
+        ]
+    );
+    assert_eq!(ranking.winner_attempt_id, Some(interrupted_after_compile));
+    assert_eq!(fixture.runtime.calls.load(Ordering::Relaxed), 0);
+    assert_eq!(fixture.review.calls.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        raw_attempt(&fixture, interrupted_after_compile).await,
+        interrupted_before
+    );
+    assert_eq!(
+        raw_attempt(&fixture, running_after_compile).await,
+        running_before
+    );
+    assert_eq!(
+        raw_attempt(&fixture, compile_failed).await,
+        compile_failed_before
+    );
+}
+
+#[tokio::test]
 async fn work_order_ranking_orders_throughput_submission_time_and_uuid() {
     let fixture =
         QualificationFixture::new(RuntimeMode::Pass, ReviewMode::Approve, VALID_HARNESS).await;
