@@ -14,7 +14,9 @@ use hf_service::{
         HarnessApprovalKind, ProviderError, ProviderId, ProviderPool, ProviderStatus, RouteRequest,
         Store,
     },
-    ClassifiedError, CommandResult, CommandTermination, ResourceLimits, RuntimeAdapter,
+    ClassifiedError, CommandResult, CommandTermination, EngineKind, HarnessStatus,
+    HarnessWorkOrderExportRequest, ImportHarnessWorkOrderSubmissionRequest, ResourceLimits,
+    RuntimeAdapter, TargetLanguage, WorkOrderSubmissionOrigin,
 };
 use hf_web::{build_with_state_and_security, AppState, WebSecurityConfig};
 use tower::ServiceExt as _;
@@ -98,7 +100,10 @@ impl RuntimeAdapter for ControlledRuntime {
     }
 }
 
-struct ControlledReviewPool;
+#[derive(Default)]
+struct ControlledReviewPool {
+    calls: AtomicUsize,
+}
 
 #[async_trait::async_trait]
 impl ProviderPool for ControlledReviewPool {
@@ -107,6 +112,7 @@ impl ProviderPool for ControlledReviewPool {
         _request: &ChatRequest,
         _route: &RouteRequest,
     ) -> Result<ChatResponse, ProviderError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
         Ok(test_chat_response(APPROVING_REVIEW))
     }
 
@@ -253,6 +259,9 @@ struct ControlledApiFixture {
     project: PathBuf,
     managed_workspace: PathBuf,
     store: Arc<Store>,
+    container: hf_service::ServiceContainer,
+    runtime: Arc<ControlledRuntime>,
+    review: Arc<ControlledReviewPool>,
     target_id: uuid::Uuid,
     app: axum::Router,
 }
@@ -276,11 +285,10 @@ impl ControlledApiFixture {
                 .await
                 .expect("open controlled work-order store"),
         );
-        let container = hf_service::ServiceContainer::new(
-            Arc::new(ControlledRuntime::new(mode)),
-            Some(Arc::new(ControlledReviewPool)),
-        )
-        .with_store(Arc::clone(&store));
+        let runtime = Arc::new(ControlledRuntime::new(mode));
+        let review = Arc::new(ControlledReviewPool::default());
+        let container = hf_service::ServiceContainer::new(runtime.clone(), Some(review.clone()))
+            .with_store(Arc::clone(&store));
         let inventory = container
             .discover(&project, "c".parse().expect("controlled target language"))
             .await
@@ -293,12 +301,15 @@ impl ControlledApiFixture {
             .id;
         let security = WebSecurityConfig::new(None, true, Vec::new(), vec![project.clone()])
             .expect("controlled web security");
-        let app = build_with_state_and_security(AppState::new(container), security);
+        let app = build_with_state_and_security(AppState::new(container.clone()), security);
         Self {
             _directory: directory,
             project,
             managed_workspace,
             store,
+            container,
+            runtime,
+            review,
             target_id,
             app,
         }
@@ -369,6 +380,15 @@ fn assert_root_absent(root: &str, body: &[u8]) {
         !String::from_utf8_lossy(body).contains(root),
         "REST body disclosed the canonical project root"
     );
+}
+
+fn assert_outside_root_denied(status: StatusCode, body: &serde_json::Value) {
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "outside-root response: {body}"
+    );
+    assert_eq!(body["code"], "invalid_project_path");
 }
 
 async fn export_work_order(fixture: &ApiFixture) -> (String, Vec<u8>) {
@@ -784,6 +804,191 @@ async fn list_filter_returns_only_the_approved_project_work_orders() {
     assert_eq!(filtered[0]["id"], primary_id);
     assert_ne!(filtered[0]["id"], alternate_id);
     assert_root_absent(&fixture.canonical_root(), &bytes);
+}
+
+#[tokio::test]
+async fn service_created_outside_root_records_are_hidden_and_all_id_routes_deny_first() {
+    let fixture = ControlledApiFixture::new(ControlledRuntimeMode::Pass).await;
+    let outside = fixture._directory.path().join("outside-web-roots");
+    std::fs::create_dir(&outside).expect("create outside-root project");
+    std::fs::write(
+        outside.join("outside.c"),
+        b"int outside_parse(const unsigned char *data, unsigned long size) {\n\
+            return size == 0 ? 0 : data[0];\n\
+          }\n",
+    )
+    .expect("write outside-root source");
+    fixture
+        .container
+        .discover(&outside, TargetLanguage::C)
+        .await
+        .expect("retain outside-root target through the service");
+    let work_order = fixture
+        .container
+        .export_harness_work_order(HarnessWorkOrderExportRequest {
+            project: outside,
+            target: "outside_parse".to_owned(),
+            language: TargetLanguage::C,
+            engine: EngineKind::LibFuzzer,
+        })
+        .await
+        .expect("export outside-root work order through the service");
+    let submission = fixture
+        .container
+        .import_harness_work_order_submission(ImportHarnessWorkOrderSubmissionRequest {
+            work_order_id: work_order.id.clone(),
+            source: VALID_HARNESS.to_owned(),
+            origin: WorkOrderSubmissionOrigin::Human,
+            parent_submission_id: None,
+        })
+        .await
+        .expect("import outside-root submission through the service");
+    let attempt = fixture
+        .container
+        .qualify_harness_work_order_submission(submission.id)
+        .await
+        .expect("qualify outside-root submission through the service");
+    assert_eq!(
+        attempt.status,
+        hf_service::HarnessWorkOrderAttemptStatus::SmokePassed
+    );
+    let fresh_submission = fixture
+        .container
+        .import_harness_work_order_submission(ImportHarnessWorkOrderSubmissionRequest {
+            work_order_id: work_order.id.clone(),
+            source: format!("{VALID_HARNESS}\n/* fresh */"),
+            origin: WorkOrderSubmissionOrigin::Human,
+            parent_submission_id: None,
+        })
+        .await
+        .expect("import fresh outside-root submission through the service");
+    let runtime_calls = fixture.runtime.calls.load(Ordering::Relaxed);
+    let review_calls = fixture.review.calls.load(Ordering::Relaxed);
+
+    let (status, listed, _) =
+        empty_request(&fixture.app, Method::GET, "/harness/work-orders").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "unfiltered work-order list: {listed}"
+    );
+    assert!(listed
+        .as_array()
+        .expect("work-order list")
+        .iter()
+        .all(|listed| listed["id"] != work_order.id));
+
+    let (status, body, _) = empty_request(
+        &fixture.app,
+        Method::GET,
+        &format!("/harness/work-orders/{}", work_order.id),
+    )
+    .await;
+    assert_outside_root_denied(status, &body);
+
+    let submissions_before = fixture
+        .container
+        .list_harness_work_order_submissions(&work_order.id)
+        .await
+        .expect("list outside-root submissions before denied import")
+        .len();
+    let (status, body, _) = json_request(
+        &fixture.app,
+        Method::POST,
+        &format!("/harness/work-orders/{}/submissions", work_order.id),
+        serde_json::json!({
+            "source": VALID_HARNESS,
+            "origin": "human",
+            "parent_submission_id": null
+        }),
+    )
+    .await;
+    assert_outside_root_denied(status, &body);
+    assert_eq!(
+        fixture
+            .container
+            .list_harness_work_order_submissions(&work_order.id)
+            .await
+            .expect("list outside-root submissions after denied import")
+            .len(),
+        submissions_before
+    );
+
+    let (status, body, _) = empty_request(
+        &fixture.app,
+        Method::GET,
+        &format!("/harness/work-orders/{}/submissions", work_order.id),
+    )
+    .await;
+    assert_outside_root_denied(status, &body);
+
+    let (status, body, _) = empty_request(
+        &fixture.app,
+        Method::POST,
+        &format!(
+            "/harness/work-order-submissions/{}/qualifications",
+            fresh_submission.id
+        ),
+    )
+    .await;
+    assert_outside_root_denied(status, &body);
+    assert!(fixture
+        .container
+        .list_harness_work_order_attempts(fresh_submission.id)
+        .await
+        .expect("list attempts after denied qualification")
+        .is_empty());
+    assert_eq!(fixture.runtime.calls.load(Ordering::Relaxed), runtime_calls);
+    assert_eq!(fixture.review.calls.load(Ordering::Relaxed), review_calls);
+
+    let (status, body, _) = empty_request(
+        &fixture.app,
+        Method::GET,
+        &format!(
+            "/harness/work-order-submissions/{}/qualifications",
+            submission.id
+        ),
+    )
+    .await;
+    assert_outside_root_denied(status, &body);
+
+    let (status, body, _) = empty_request(
+        &fixture.app,
+        Method::GET,
+        &format!("/harness/work-order-attempts/{}", attempt.id),
+    )
+    .await;
+    assert_outside_root_denied(status, &body);
+
+    let (status, body, _) = json_request(
+        &fixture.app,
+        Method::POST,
+        "/harness/work-order-attempts/rank",
+        serde_json::json!({"attempt_ids": [attempt.id]}),
+    )
+    .await;
+    assert_outside_root_denied(status, &body);
+
+    let harness_id = attempt.harness_id.expect("smoke-passed harness id");
+    let (status, body, _) = empty_request(
+        &fixture.app,
+        Method::POST,
+        &format!("/harness/work-order-attempts/{}/promotion", attempt.id),
+    )
+    .await;
+    assert_outside_root_denied(status, &body);
+    assert_eq!(
+        fixture
+            .store
+            .get_harness(harness_id)
+            .await
+            .expect("load harness after denied promotion")
+            .expect("outside-root harness exists")
+            .status,
+        HarnessStatus::SmokePassed
+    );
+    assert_eq!(fixture.runtime.calls.load(Ordering::Relaxed), runtime_calls);
+    assert_eq!(fixture.review.calls.load(Ordering::Relaxed), review_calls);
 }
 
 #[tokio::test]
