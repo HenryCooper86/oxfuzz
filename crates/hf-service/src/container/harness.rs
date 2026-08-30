@@ -916,10 +916,10 @@ impl ServiceContainer {
         // coverage frontier is available (non-C targets, tooling missing) --
         // both accessors early-return without running the pipeline for a
         // non-C target, so the fallback costs nothing extra.
-        let frontier = self.coverage_uncovered(project, target).await;
+        let frontier = self.coverage_uncovered_locked(project, target).await;
         let uncovered: Vec<String> = if frontier.is_empty() {
             let covered: std::collections::HashSet<String> = self
-                .coverage_functions(project, target)
+                .coverage_functions_locked(project, target)
                 .await
                 .into_iter()
                 .collect();

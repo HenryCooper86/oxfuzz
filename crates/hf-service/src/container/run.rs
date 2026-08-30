@@ -461,7 +461,7 @@ impl ServiceContainer {
         replay: Option<ReplayProvenance>,
     ) -> Result<RunSummary, ClassifiedError> {
         const MAX_RAW_COVERAGE_SAMPLES: usize = 10_000;
-        let _workspace_operation = self.acquire_workspace_operation().await?;
+        let workspace_operation = self.acquire_workspace_operation().await?;
         let project_root = canonical_project_root(project)?;
         let project = project_root.as_path();
 
@@ -765,8 +765,6 @@ impl ServiceContainer {
             execs,
             crashes,
         } = metrics;
-        // A run becomes terminal only after its summary evidence is durable.
-        // This prevents a `Done` record whose stats or coverage curve were lost.
         let status = match result.termination {
             hf_core::runtime::CommandTermination::Cancelled => RunStatus::Cancelled,
             // The sandbox cap is a backstop over the fuzzer's own self-limit, and
@@ -793,7 +791,7 @@ impl ServiceContainer {
         let auto_revert = if truncated {
             None
         } else {
-            drop(target_revision);
+            drop((target_revision, workspace_operation));
             self.maybe_auto_revert(
                 project,
                 target,

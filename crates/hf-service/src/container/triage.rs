@@ -311,6 +311,17 @@ impl ServiceContainer {
     async fn coverage_export_json_cached(&self, project: &Path, target: &str) -> Option<String> {
         let _workspace_operation = self.acquire_workspace_operation().await.ok()?;
         let _target_revision = self.acquire_target_revision(project, target).await.ok()?;
+        self.coverage_export_json_cached_locked(project, target)
+            .await
+    }
+
+    /// Read or build cached coverage while the caller owns workspace-operation
+    /// followed by target-revision leases.
+    async fn coverage_export_json_cached_locked(
+        &self,
+        project: &Path,
+        target: &str,
+    ) -> Option<String> {
         let workspace = workspace_dir(project, target);
         if !workspace.join("harness.c").exists() {
             return None;
@@ -386,6 +397,17 @@ impl ServiceContainer {
         input_host_path: &Path,
     ) -> Option<String> {
         let _workspace_operation = self.acquire_workspace_operation().await.ok()?;
+        self.reproduce_crash_locked(workspace, binary_host, input_host_path)
+            .await
+    }
+
+    /// Reproduce one input while the caller owns the necessary workspace lease.
+    async fn reproduce_crash_locked(
+        &self,
+        workspace: &Path,
+        binary_host: &Path,
+        input_host_path: &Path,
+    ) -> Option<String> {
         if !binary_host.is_file() {
             return None;
         }
@@ -915,7 +937,9 @@ impl ServiceContainer {
                 continue;
             }
             let binary = workspace.join(harness_binary_name(target));
-            let trace = self.reproduce_crash(&workspace, &binary, &input).await;
+            let trace = self
+                .reproduce_crash_locked(&workspace, &binary, &input)
+                .await;
             let verified = trace.is_some();
             let still_crashes = trace.as_deref().is_some_and(hf_crash::looks_like_crash);
             let summary = if still_crashes {
@@ -975,6 +999,28 @@ impl ServiceContainer {
         self.coverage_export_json_cached(project, target)
             .await
             .map(|json| hf_coverage::parse_llvm_cov_uncovered(&json))
+            .unwrap_or_default()
+    }
+
+    pub(crate) async fn coverage_uncovered_locked(
+        &self,
+        project: &Path,
+        target: &str,
+    ) -> Vec<hf_coverage::UncoveredRegion> {
+        self.coverage_export_json_cached_locked(project, target)
+            .await
+            .map(|json| hf_coverage::parse_llvm_cov_uncovered(&json))
+            .unwrap_or_default()
+    }
+
+    pub(crate) async fn coverage_functions_locked(
+        &self,
+        project: &Path,
+        target: &str,
+    ) -> Vec<String> {
+        self.coverage_export_json_cached_locked(project, target)
+            .await
+            .map(|json| parse_covered_functions(&json))
             .unwrap_or_default()
     }
 
