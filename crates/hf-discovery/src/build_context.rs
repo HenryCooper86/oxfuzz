@@ -10,7 +10,10 @@
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
-use hf_core::build::{BuildContext, CompileEntry};
+use hf_core::{
+    build::{BuildContext, CompileEntry},
+    runtime::is_fixed_sandbox_include_path,
+};
 use serde::Deserialize;
 
 /// Cap on accepted translation units. A database past this is not something we
@@ -191,7 +194,7 @@ fn record_dropped(context: &mut BuildContext, seen: &mut HashSet<String>, token:
 /// the directory through a different real path (a symlinked temporary directory
 /// is the usual case).
 fn confined_include_dir(raw: &Path, directory: &Path, project_root: &Path) -> Option<PathBuf> {
-    if is_fixed_sandbox_include_dir(raw) {
+    if raw.to_str().is_some_and(is_fixed_sandbox_include_path) {
         return Some(raw.to_path_buf());
     }
     let joined = if raw.is_absolute() {
@@ -212,12 +215,6 @@ fn confined_include_dir(raw: &Path, directory: &Path, project_root: &Path) -> Op
     let real_root = std::fs::canonicalize(&root).ok()?;
     let relative = real_candidate.strip_prefix(&real_root).ok()?;
     Some(root.join(relative))
-}
-
-/// `/work` is the fixed project mount used by the hardened sandbox. It is the
-/// only absolute include root that cannot name a host path.
-fn is_fixed_sandbox_include_dir(path: &Path) -> bool {
-    path == Path::new("/work") || path.starts_with("/work/")
 }
 
 /// Resolve `.` and `..` without consulting the filesystem.
@@ -296,13 +293,22 @@ pub fn staged_compile_flags(
 ) -> Vec<String> {
     let mut flags = Vec::new();
     for directory in &ctx.include_dirs {
-        if is_fixed_sandbox_include_dir(directory) {
+        if directory
+            .to_str()
+            .is_some_and(is_fixed_sandbox_include_path)
+        {
             flags.push(format!("-I{}", directory.display()));
             continue;
         }
         let Ok(relative) = directory.strip_prefix(project_root) else {
             continue;
         };
+        if relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            continue;
+        }
         let posix = hf_core::runtime::posix_relative(relative);
         if posix.is_empty() {
             flags.push(format!("-I{container_root}"));
@@ -369,6 +375,35 @@ mod tests {
             ..BuildContext::default()
         };
         assert!(staged_compile_flags(&ctx, &PathBuf::from("/proj"), "/work").is_empty());
+    }
+
+    #[test]
+    fn fixed_sandbox_include_paths_reject_noncanonical_descendants() {
+        let db = r#"[{"directory":"/proj","file":"/proj/a.c",
+                      "arguments":["cc","-I/work/../etc","-I/work/./include",
+                                   "-I/work//include","-I/work/include/","-c","/proj/a.c"]}]"#;
+        let entries = parse_compile_database(db).expect("parse compile database");
+        let context = extract_build_context(&entries, &PathBuf::from("/proj"));
+        assert!(
+            context.include_dirs.is_empty(),
+            "{:?}",
+            context.include_dirs
+        );
+    }
+
+    #[test]
+    fn staging_never_replays_noncanonical_fixed_sandbox_paths() {
+        let context = BuildContext {
+            include_dirs: vec![
+                PathBuf::from("/work/../etc"),
+                PathBuf::from("/work/include"),
+            ],
+            ..BuildContext::default()
+        };
+        assert_eq!(
+            staged_compile_flags(&context, &PathBuf::from("/project"), "/work"),
+            vec!["-I/work/include"]
+        );
     }
 
     #[test]

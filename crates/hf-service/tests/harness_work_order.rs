@@ -329,6 +329,37 @@ fn construction_rejects_absolute_host_paths_from_packet_json() {
 }
 
 #[test]
+fn construction_and_verification_reject_noncanonical_fixed_sandbox_include_paths() {
+    for path in [
+        "/work/../etc",
+        "/work/./include",
+        "/work//include",
+        "/work/include/",
+        "/work\\include",
+    ] {
+        let mut invalid = payload();
+        invalid.compile_context.include_dirs = vec![path.to_owned()];
+        assert_eq!(
+            build_work_order(invalid)
+                .expect_err("noncanonical sandbox path must be rejected")
+                .code,
+            HarnessWorkOrderErrorCode::InvalidProjectPath,
+            "{path}"
+        );
+
+        let mut stored = build_work_order(payload()).expect("build valid packet");
+        stored.payload.compile_context.include_dirs = vec![path.to_owned()];
+        assert_eq!(
+            verify_work_order(&stored)
+                .expect_err("stored noncanonical sandbox path must be rejected")
+                .code,
+            HarnessWorkOrderErrorCode::InvalidProjectPath,
+            "{path}"
+        );
+    }
+}
+
+#[test]
 fn construction_rejects_invalid_digests_and_more_than_twenty_seeds() {
     let mut invalid_source = payload();
     invalid_source.source.sha256 = "A".repeat(64);
@@ -560,6 +591,231 @@ async fn service_work_order_reads_and_lists_only_verified_durable_packets() {
         vec![exported]
     );
     assert_eq!(runtime.calls.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn service_export_representes_project_root_include_as_dot() {
+    let workspace = tempfile::tempdir().expect("create workspace");
+    let project = workspace.path().join("project");
+    std::fs::create_dir_all(&project).expect("create project");
+    std::fs::write(
+        project.join("parser.c"),
+        "// heading\nint parse_packet(void) { return 0; }\n",
+    )
+    .expect("write source");
+    let compile_database = serde_json::json!([{
+        "directory": project,
+        "file": project.join("parser.c"),
+        "arguments": ["cc", "-I.", "-c", "parser.c"],
+    }]);
+    std::fs::write(
+        project.join("compile_commands.json"),
+        serde_json::to_vec(&compile_database).expect("serialize compile database"),
+    )
+    .expect("write compile database");
+    let store = Arc::new(
+        hf_storage::Store::connect(workspace.path().join("work-order.db"))
+            .await
+            .expect("create store"),
+    );
+    persist_target(
+        &store,
+        retained_target(&project, PathBuf::from("parser.c"), TargetLanguage::C),
+    )
+    .await;
+    let container =
+        ServiceContainer::new(Arc::new(CountingRuntime::default()), None).with_store(store);
+
+    let exported = container
+        .export_harness_work_order(export_request(&project))
+        .await
+        .expect("project-root include must export");
+
+    assert_eq!(exported.payload.compile_context.include_dirs, vec!["."]);
+}
+
+#[tokio::test]
+async fn service_work_order_reads_reject_malformed_and_digest_invalid_durable_packets() {
+    let workspace = tempfile::tempdir().expect("create workspace");
+    let store = Arc::new(
+        hf_storage::Store::connect(workspace.path().join("work-order.db"))
+            .await
+            .expect("create store"),
+    );
+    let malformed_id = "c".repeat(64);
+    store
+        .insert_harness_work_order(&hf_storage::HarnessWorkOrderRecord {
+            id: malformed_id.clone(),
+            target_id: uuid::Uuid::new_v4(),
+            project_root: "/retained/project".to_owned(),
+            schema_version: 2,
+            packet_json: "{}".to_owned(),
+            created_at: Utc::now(),
+        })
+        .await
+        .expect("insert malformed durable row");
+    let packet = build_work_order(payload()).expect("build packet");
+    let invalid_id = "d".repeat(64);
+    let mut invalid_packet = packet.clone();
+    invalid_packet.id = invalid_id.clone();
+    store
+        .insert_harness_work_order(&hf_storage::HarnessWorkOrderRecord {
+            id: invalid_id,
+            target_id: uuid::Uuid::new_v4(),
+            project_root: "/retained/other".to_owned(),
+            schema_version: packet.schema_version,
+            packet_json: serde_json::to_string(&invalid_packet).expect("serialize invalid packet"),
+            created_at: Utc::now(),
+        })
+        .await
+        .expect("insert digest-invalid durable row");
+    let container =
+        ServiceContainer::new(Arc::new(CountingRuntime::default()), None).with_store(store);
+
+    assert_eq!(
+        container
+            .harness_work_order_by_id(&malformed_id)
+            .await
+            .expect_err("malformed durable packet must fail")
+            .code,
+        HarnessWorkOrderErrorCode::InvalidWorkOrderDigest
+    );
+    assert_eq!(
+        container
+            .list_harness_work_orders(None)
+            .await
+            .expect_err("list must reject an invalid durable packet")
+            .code,
+        HarnessWorkOrderErrorCode::InvalidWorkOrderDigest
+    );
+}
+
+#[tokio::test]
+async fn concurrent_identical_exports_return_one_durable_packet() {
+    let workspace = tempfile::tempdir().expect("create workspace");
+    let project = workspace.path().join("project");
+    std::fs::create_dir_all(&project).expect("create project");
+    std::fs::write(
+        project.join("parser.c"),
+        "// heading\nint parse_packet(void) { return 0; }\n",
+    )
+    .expect("write source");
+    let store = Arc::new(
+        hf_storage::Store::connect(workspace.path().join("work-order.db"))
+            .await
+            .expect("create store"),
+    );
+    persist_target(
+        &store,
+        retained_target(&project, PathBuf::from("parser.c"), TargetLanguage::C),
+    )
+    .await;
+    let container =
+        ServiceContainer::new(Arc::new(CountingRuntime::default()), None).with_store(store.clone());
+    let request = export_request(&project);
+    let (first, second) = tokio::join!(
+        container.export_harness_work_order(request.clone()),
+        container.export_harness_work_order(request)
+    );
+    let first = first.expect("first concurrent export");
+    let second = second.expect("second concurrent export");
+
+    assert_eq!(first, second);
+    assert_eq!(
+        store
+            .list_harness_work_orders(None)
+            .await
+            .expect("list durable rows")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn same_packet_id_with_different_project_lookup_evidence_is_rejected() {
+    let workspace = tempfile::tempdir().expect("create workspace");
+    let first_project = workspace.path().join("first");
+    let second_project = workspace.path().join("second");
+    for project in [&first_project, &second_project] {
+        std::fs::create_dir_all(project).expect("create project");
+        std::fs::write(
+            project.join("parser.c"),
+            "// heading\nint parse_packet(void) { return 0; }\n",
+        )
+        .expect("write source");
+    }
+    let store = Arc::new(
+        hf_storage::Store::connect(workspace.path().join("work-order.db"))
+            .await
+            .expect("create store"),
+    );
+    for project in [&first_project, &second_project] {
+        persist_target(
+            &store,
+            retained_target(project, PathBuf::from("parser.c"), TargetLanguage::C),
+        )
+        .await;
+    }
+    let container =
+        ServiceContainer::new(Arc::new(CountingRuntime::default()), None).with_store(store);
+    let first = container
+        .export_harness_work_order(export_request(&first_project))
+        .await
+        .expect("export first project");
+
+    assert_eq!(
+        container
+            .export_harness_work_order(export_request(&second_project))
+            .await
+            .expect_err("project lookup mismatch must not reuse a packet")
+            .code,
+        HarnessWorkOrderErrorCode::InvalidWorkOrderDigest
+    );
+    assert_eq!(
+        container
+            .harness_work_order_by_id(&first.id)
+            .await
+            .expect("first durable packet remains readable"),
+        first
+    );
+}
+
+#[tokio::test]
+async fn service_export_rejects_an_unsupported_engine_language_pair() {
+    let workspace = tempfile::tempdir().expect("create workspace");
+    let project = workspace.path().join("project");
+    std::fs::create_dir_all(&project).expect("create project");
+    std::fs::write(
+        project.join("parser.py"),
+        "def parse_packet(data):\n    return data\n",
+    )
+    .expect("write source");
+    let store = Arc::new(
+        hf_storage::Store::connect(workspace.path().join("work-order.db"))
+            .await
+            .expect("create store"),
+    );
+    persist_target(
+        &store,
+        retained_target(&project, PathBuf::from("parser.py"), TargetLanguage::Python),
+    )
+    .await;
+    let container =
+        ServiceContainer::new(Arc::new(CountingRuntime::default()), None).with_store(store);
+
+    let error = container
+        .export_harness_work_order(HarnessWorkOrderExportRequest {
+            project,
+            target: "parse_packet".to_owned(),
+            language: TargetLanguage::Python,
+            engine: EngineKind::LibFuzzer,
+        })
+        .await
+        .expect_err("libFuzzer does not support Python targets");
+    assert_eq!(
+        error.code,
+        HarnessWorkOrderErrorCode::InvalidWorkOrderDigest
+    );
 }
 
 #[tokio::test]

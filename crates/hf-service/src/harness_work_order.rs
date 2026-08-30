@@ -5,7 +5,10 @@
 
 use std::{error::Error, fmt, fmt::Write as _, path::Path};
 
-use hf_core::{engine::EngineKind, error::ClassifiedError, target::TargetLanguage};
+use hf_core::{
+    engine::EngineKind, error::ClassifiedError, runtime::is_fixed_sandbox_include_path,
+    target::TargetLanguage,
+};
 use hf_harness::{harness_rules, HarnessRuleSummary, LintSeverity};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -624,7 +627,7 @@ fn validate_project_relative_path(value: &str) -> Result<(), HarnessWorkOrderErr
 }
 
 fn validate_compile_include_path(value: &str) -> Result<(), HarnessWorkOrderError> {
-    if value == "/work" || value.starts_with("/work/") {
+    if is_fixed_sandbox_include_path(value) {
         return Ok(());
     }
     validate_project_relative_path(value)
