@@ -834,12 +834,26 @@ fn valid_smoke_failure_result(result: &HarnessWorkOrderAttemptResult) -> bool {
 }
 
 fn valid_smoke_passed_result(result: &HarnessWorkOrderAttemptResult) -> bool {
+    let (Some(verdict), Some(execs_per_sec), Some(crashes)) =
+        (result.smoke_verdict, result.execs_per_sec, result.crashes)
+    else {
+        return false;
+    };
+    let metrics_match_verdict = match verdict {
+        crate::VerdictLevel::Pass => {
+            crashes == 0 && execs_per_sec >= crate::verification::MIN_MEANINGFUL_EXECS_PER_SEC
+        }
+        crate::VerdictLevel::Suspect => {
+            crashes == 0
+                && execs_per_sec > 0.0
+                && execs_per_sec < crate::verification::MIN_MEANINGFUL_EXECS_PER_SEC
+        }
+        crate::VerdictLevel::Fail => crashes > 0,
+    };
     result.compiled
         && result.source_sha256.is_some()
         && result.binary_sha256.is_some()
-        && result.smoke_verdict.is_some()
-        && result.execs_per_sec.is_some()
-        && result.crashes.is_some()
+        && metrics_match_verdict
 }
 
 fn no_digest_evidence(result: &HarnessWorkOrderAttemptResult) -> bool {
@@ -989,16 +1003,13 @@ fn redact_secret_assignment(token: &str, redact_next: &mut bool) -> Option<Strin
 fn redact_absolute_path(token: &str) -> Option<String> {
     let bytes = token.as_bytes();
     for index in 0..bytes.len() {
-        let prefixed = index == 0
-            || matches!(
-                bytes[index - 1],
-                b'=' | b':' | b'(' | b'[' | b'{' | b'\'' | b'"' | b','
-            );
+        let starts_after_non_word =
+            index == 0 || (!bytes[index - 1].is_ascii_alphanumeric() && bytes[index - 1] != b'_');
         let unix = bytes[index] == b'/';
         let windows = bytes.get(index..index + 3).is_some_and(|part| {
             part[0].is_ascii_alphabetic() && part[1] == b':' && matches!(part[2], b'/' | b'\\')
         });
-        if prefixed && (unix || windows) {
+        if starts_after_non_word && (unix || windows) {
             return Some(format!("{}<redacted-path>", &token[..index]));
         }
     }

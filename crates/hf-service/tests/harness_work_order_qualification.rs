@@ -18,9 +18,10 @@ use hf_core::target::{
     InputSurface, SourceLocation, TargetCandidate, TargetInventory, TargetKind, TargetLanguage,
 };
 use hf_service::{
-    HarnessWorkOrderAttemptStage, HarnessWorkOrderAttemptStatus, HarnessWorkOrderErrorCode,
-    HarnessWorkOrderExportRequest, ImportHarnessWorkOrderSubmissionRequest, ServiceContainer,
-    VerdictLevel, WorkOrderSubmissionOrigin,
+    HarnessWorkOrderAttemptResult, HarnessWorkOrderAttemptStage, HarnessWorkOrderAttemptStatus,
+    HarnessWorkOrderErrorCode, HarnessWorkOrderExportRequest,
+    ImportHarnessWorkOrderSubmissionRequest, ServiceContainer, VerdictLevel,
+    WorkOrderSubmissionOrigin,
 };
 use uuid::Uuid;
 
@@ -720,7 +721,7 @@ async fn qualification_records_nonzero_repair_depth() {
 #[tokio::test]
 async fn qualification_step_failures_return_terminal_bounded_attempts() {
     let sensitive_detail = format!(
-        "compile failed sk-standalone-secret; Authorization: Bearer bearer-secret; path=/Users/operator/private/target.c api_key=key-secret token= adjacent-credential {}\n",
+        "compile/review failed sk-standalone-secret; Authorization: Bearer bearer-secret; path=/Users/operator/private/target.c detail;/Users/operator/semicolon/private detail)/Users/operator/closing/private win];C:\\Users\\operator\\private api_key=key-secret token= adjacent-credential {}\n",
         "x".repeat(6_000)
     );
     let cases = [
@@ -783,6 +784,10 @@ async fn qualification_step_failures_return_terminal_bounded_attempts() {
         assert!(!message.contains("key-secret"));
         assert!(!message.contains("adjacent-credential"));
         assert!(!message.contains("/Users/operator"));
+        assert!(!message.contains("C:\\Users\\operator"));
+        if status == HarnessWorkOrderAttemptStatus::CompileFailed {
+            assert!(message.contains("compile/review"), "{message}");
+        }
         assert_eq!(
             stage_audit(&fixture.store).await.last().map(String::as_str),
             Some(final_transition)
@@ -809,6 +814,13 @@ async fn qualification_step_failures_return_terminal_bounded_attempts() {
         assert!(!durable_message.contains("key-secret"));
         assert!(!durable_message.contains("adjacent-credential"));
         assert!(!durable_message.contains("/Users/operator"));
+        assert!(!durable_message.contains("C:\\Users\\operator"));
+        if status == HarnessWorkOrderAttemptStatus::CompileFailed {
+            assert!(
+                durable_message.contains("compile/review"),
+                "{durable_message}"
+            );
+        }
     }
 }
 
@@ -908,6 +920,19 @@ async fn assert_attempt_corruption_rejected(fixture: &QualificationFixture, atte
         list_error.code,
         HarnessWorkOrderErrorCode::InvalidWorkOrderDigest
     );
+}
+
+async fn replace_attempt_result(
+    fixture: &QualificationFixture,
+    attempt_id: Uuid,
+    result: &HarnessWorkOrderAttemptResult,
+) {
+    sqlx::query("UPDATE harness_work_order_attempts SET result_json = ?1 WHERE id = ?2")
+        .bind(serde_json::to_string(result).expect("serialize attempt result fixture"))
+        .bind(attempt_id.to_string())
+        .execute(fixture.store.pool())
+        .await
+        .expect("replace attempt result fixture");
 }
 
 #[tokio::test]
@@ -1040,6 +1065,69 @@ async fn attempt_reads_reject_unknown_and_contradictory_durable_evidence() {
         .await
         .expect("remove required terminal result");
     assert_attempt_corruption_rejected(&fixture, attempt.id).await;
+}
+
+#[tokio::test]
+async fn attempt_reads_enforce_exact_smoke_verdict_metric_combinations() {
+    let fixture =
+        QualificationFixture::new(RuntimeMode::Pass, ReviewMode::Approve, VALID_HARNESS).await;
+    let attempt = fixture
+        .service
+        .qualify_harness_work_order_submission(fixture.submission.id)
+        .await
+        .expect("create valid smoke attempt");
+    let base = attempt.result.expect("valid smoke result");
+    sqlx::query("DROP TRIGGER harness_work_order_attempts_terminal_immutable")
+        .execute(fixture.store.pool())
+        .await
+        .expect("disable terminal immutability only for corruption fixture");
+
+    let valid = [
+        (VerdictLevel::Pass, 1.0, 0),
+        (VerdictLevel::Pass, 128.0, 0),
+        (VerdictLevel::Suspect, 0.5, 0),
+        (VerdictLevel::Fail, 0.0, 1),
+        (VerdictLevel::Fail, 128.0, 3),
+    ];
+    for (verdict, execs_per_sec, crashes) in valid {
+        let mut result = base.clone();
+        result.smoke_verdict = Some(verdict);
+        result.execs_per_sec = Some(execs_per_sec);
+        result.crashes = Some(crashes);
+        replace_attempt_result(&fixture, attempt.id, &result).await;
+
+        let loaded = fixture
+            .service
+            .harness_work_order_attempt(attempt.id)
+            .await
+            .expect("valid smoke evidence must remain readable");
+        assert_eq!(loaded.result.as_ref(), Some(&result));
+        let listed = fixture
+            .service
+            .list_harness_work_order_attempts(fixture.submission.id)
+            .await
+            .expect("valid smoke evidence must remain listable");
+        assert_eq!(listed[0].result.as_ref(), Some(&result));
+    }
+
+    let invalid = [
+        (VerdictLevel::Pass, 0.0, 0),
+        (VerdictLevel::Pass, 0.5, 0),
+        (VerdictLevel::Pass, 128.0, 1),
+        (VerdictLevel::Suspect, 0.0, 0),
+        (VerdictLevel::Suspect, 1.0, 0),
+        (VerdictLevel::Suspect, 128.0, 0),
+        (VerdictLevel::Suspect, 0.5, 1),
+        (VerdictLevel::Fail, 128.0, 0),
+    ];
+    for (verdict, execs_per_sec, crashes) in invalid {
+        let mut result = base.clone();
+        result.smoke_verdict = Some(verdict);
+        result.execs_per_sec = Some(execs_per_sec);
+        result.crashes = Some(crashes);
+        replace_attempt_result(&fixture, attempt.id, &result).await;
+        assert_attempt_corruption_rejected(&fixture, attempt.id).await;
+    }
 }
 
 #[tokio::test]
