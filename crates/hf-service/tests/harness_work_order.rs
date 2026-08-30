@@ -782,6 +782,67 @@ async fn service_work_order_reads_and_lists_only_verified_durable_packets() {
 }
 
 #[tokio::test]
+async fn service_export_never_persists_embedded_host_paths_from_defines() {
+    let workspace = tempfile::tempdir().expect("create workspace");
+    let project = workspace.path().join("project");
+    std::fs::create_dir_all(&project).expect("create project");
+    std::fs::write(
+        project.join("parser.c"),
+        "// heading\nint parse_packet(void) { return 0; }\n",
+    )
+    .expect("write source");
+    let compile_database = serde_json::json!([{
+        "directory": project,
+        "file": project.join("parser.c"),
+        "arguments": [
+            "cc",
+            "-DURI=file:///Users/alice/project",
+            "-DPREFIX=prefix:/Users/alice/project",
+            r"-DWINDOWS=C:\Users\alice\project",
+            "-DRATIO=1/2",
+            "-DURL=https://example.test/api",
+            "-c",
+            "parser.c"
+        ],
+    }]);
+    std::fs::write(
+        project.join("compile_commands.json"),
+        serde_json::to_vec(&compile_database).expect("serialize compile database"),
+    )
+    .expect("write compile database");
+    let store = Arc::new(
+        hf_storage::Store::connect(workspace.path().join("work-order.db"))
+            .await
+            .expect("create store"),
+    );
+    persist_target(
+        &store,
+        retained_target(&project, PathBuf::from("parser.c"), TargetLanguage::C),
+    )
+    .await;
+    let container = ServiceContainer::new(Arc::new(CountingRuntime::default()), None)
+        .with_store(Arc::clone(&store));
+
+    let exported = container
+        .export_harness_work_order(export_request(&project))
+        .await
+        .expect("export portable work order");
+
+    assert_eq!(
+        exported.payload.compile_context.defines,
+        vec!["RATIO=1/2", "URL=https://example.test/api"]
+    );
+    let packet_json: String =
+        sqlx::query_scalar("SELECT packet_json FROM harness_work_orders WHERE id = ?1")
+            .bind(&exported.id)
+            .fetch_one(store.pool())
+            .await
+            .expect("load persisted packet JSON");
+    assert!(!packet_json.contains("/Users/alice"));
+    assert!(!packet_json.contains(r"C:\Users\alice"));
+}
+
+#[tokio::test]
 async fn service_export_representes_project_root_include_as_dot() {
     let workspace = tempfile::tempdir().expect("create workspace");
     let project = workspace.path().join("project");

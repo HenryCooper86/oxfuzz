@@ -12,7 +12,10 @@ use std::path::{Component, Path, PathBuf};
 
 use hf_core::{
     build::{BuildContext, CompileEntry},
-    runtime::{classify_fixed_sandbox_include_path, FixedSandboxIncludePath},
+    runtime::{
+        classify_fixed_sandbox_include_path, contains_absolute_path_fragment,
+        FixedSandboxIncludePath, MAX_PORTABLE_DEFINE_BYTES,
+    },
 };
 use serde::Deserialize;
 
@@ -244,6 +247,13 @@ fn accepted_define(token: &str) -> bool {
         return false;
     };
     if body.is_empty() || body.chars().any(char::is_control) {
+        return false;
+    }
+    if body.len() > MAX_PORTABLE_DEFINE_BYTES
+        || body
+            .split_once('=')
+            .is_some_and(|(_, value)| contains_absolute_path_fragment(value))
+    {
         return false;
     }
     let name = body.split('=').next().unwrap_or_default();
@@ -523,6 +533,47 @@ mod tests {
         let entries = parse_compile_database(db).unwrap();
         let ctx = extract_build_context(&entries, &PathBuf::from("/proj"));
         assert!(ctx.defines.is_empty(), "{:?}", ctx.defines);
+    }
+
+    #[test]
+    fn rejects_embedded_absolute_paths_but_keeps_portable_define_values() {
+        let database = serde_json::json!([{
+            "directory": "/proj",
+            "file": "/proj/a.c",
+            "arguments": [
+                "cc",
+                "-DURI=file:///Users/alice/project",
+                "-DPREFIX=prefix:/Users/alice/project",
+                r"-DWINDOWS=C:\Users\alice\project",
+                r"-DPREFIXED_WINDOWS=value:C:\Users\alice\project",
+                "-DVERSION=1.2.3",
+                "-DRATIO=1/2",
+                "-DURL=https://example.test/api",
+                "-DRELATIVE=src/parser.c",
+                "-c",
+                "/proj/a.c"
+            ]
+        }])
+        .to_string();
+        let entries = parse_compile_database(&database).expect("parse compile database");
+
+        let context = extract_build_context(&entries, &PathBuf::from("/proj"));
+
+        assert_eq!(
+            context.defines,
+            vec![
+                "-DVERSION=1.2.3",
+                "-DRATIO=1/2",
+                "-DURL=https://example.test/api",
+                "-DRELATIVE=src/parser.c",
+            ]
+        );
+        assert!(context
+            .dropped
+            .contains(&"-DURI=file:///Users/alice/project".to_owned()));
+        assert!(context
+            .dropped
+            .contains(&"-DPREFIX=prefix:/Users/alice/project".to_owned()));
     }
 
     #[test]
