@@ -181,7 +181,11 @@ pub use harness_tournament::{
 };
 #[cfg(feature = "harness-work-order")]
 pub use harness_work_order::{
-    build_work_order, render_work_order, HarnessWorkOrder, WorkOrderInputs, WorkOrderRule,
+    build_work_order, quote_posix_arg, render_work_order, verify_work_order, work_order_commands,
+    work_order_rules, HarnessWorkOrder, HarnessWorkOrderError, HarnessWorkOrderErrorCode,
+    HarnessWorkOrderErrorKind, HarnessWorkOrderPayload, WorkOrderArg, WorkOrderCommand,
+    WorkOrderCompileContext, WorkOrderPlaceholder, WorkOrderRule, WorkOrderSeedReference,
+    WorkOrderSourceEvidence, WorkOrderStep, WorkOrderTargetEvidence,
     HARNESS_WORK_ORDER_SCHEMA_VERSION,
 };
 pub use hf_storage::{AutoRevertEvent, GuardrailDecisionRecord, ProjectAutoRevert};
