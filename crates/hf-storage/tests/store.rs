@@ -13,11 +13,12 @@ use hf_core::target::{
 use hf_storage::{
     AutoRevertEvent, AutomotiveOperationRecord, AutomotiveOperationStatus,
     AutomotiveStateCorpusRecord, GuardrailDecisionRecord, HarnessAiReviewRecord,
-    HarnessApprovalKind, HarnessWorkOrderAttemptStage, HarnessWorkOrderAttemptStatus,
-    NewScheduleOccurrence, ProjectAutoRevert, RemediationOperationCompletion,
-    RemediationOperationRecord, RemediationOperationStage, RemediationOperationStatus, RunKind,
-    RunRecord, RunStatus, ScheduleOccurrenceAcknowledgement, ScheduleOccurrenceInspection,
-    ScheduleOccurrenceReservation, ScheduleOccurrenceTransition,
+    HarnessApprovalKind, HarnessWorkOrderAttemptCompletion, HarnessWorkOrderAttemptRecord,
+    HarnessWorkOrderAttemptStage, HarnessWorkOrderAttemptStatus, HarnessWorkOrderRecord,
+    HarnessWorkOrderSubmissionRecord, NewScheduleOccurrence, ProjectAutoRevert,
+    RemediationOperationCompletion, RemediationOperationRecord, RemediationOperationStage,
+    RemediationOperationStatus, RunKind, RunRecord, RunStatus, ScheduleOccurrenceAcknowledgement,
+    ScheduleOccurrenceInspection, ScheduleOccurrenceReservation, ScheduleOccurrenceTransition,
     ScheduleOccurrenceTransitionResult, SemgrepFindingRecord, SemgrepFindingSeverity,
     SemgrepPublication, SemgrepRunRecord, SemgrepRunStatus, SemgrepTargetScoreRecord, StorageError,
     Store,
@@ -105,6 +106,63 @@ async fn insert_work_order_attempt(
     .execute(store.pool())
     .await
     .map(|_| ())
+}
+
+fn work_order_record(
+    id: char,
+    target_id: Uuid,
+    project_root: &str,
+    created_at: chrono::DateTime<Utc>,
+) -> HarnessWorkOrderRecord {
+    HarnessWorkOrderRecord {
+        id: id.to_string().repeat(64),
+        target_id,
+        project_root: project_root.to_owned(),
+        schema_version: 2,
+        packet_json: r#"{"schema_version":2}"#.to_owned(),
+        created_at,
+    }
+}
+
+fn submission_record(
+    id: Uuid,
+    work_order_id: &str,
+    source: &str,
+    source_sha256: String,
+    parent_submission_id: Option<Uuid>,
+    submitted_at: chrono::DateTime<Utc>,
+) -> HarnessWorkOrderSubmissionRecord {
+    HarnessWorkOrderSubmissionRecord {
+        id,
+        work_order_id: work_order_id.to_owned(),
+        source: source.to_owned(),
+        source_sha256,
+        origin_json: r#"{"kind":"human"}"#.to_owned(),
+        parent_submission_id,
+        lint_json: "[]".to_owned(),
+        submitted_at,
+    }
+}
+
+fn running_attempt(
+    id: Uuid,
+    submission_id: Uuid,
+    started_at: chrono::DateTime<Utc>,
+) -> HarnessWorkOrderAttemptRecord {
+    HarnessWorkOrderAttemptRecord {
+        id,
+        submission_id,
+        status: HarnessWorkOrderAttemptStatus::Running,
+        current_stage: HarnessWorkOrderAttemptStage::Compile,
+        harness_id: None,
+        smoke_run_id: None,
+        result_json: None,
+        failure_code: None,
+        failure_message: None,
+        started_at,
+        updated_at: started_at,
+        ended_at: None,
+    }
 }
 
 fn json_string_at_limit(limit: usize) -> String {
@@ -501,6 +559,448 @@ fn harness_work_order_attempt_states_round_trip_and_reject_unknown_storage_value
         "unknown".parse::<HarnessWorkOrderAttemptStatus>(),
         Err(StorageError::InvalidData(_))
     ));
+}
+
+#[tokio::test]
+async fn harness_work_order_store_preserves_immutable_rows_and_submission_constraints() {
+    let (store, _dir) = temp_store().await;
+    let now = Utc::now().trunc_subsecs(0);
+    let target_id = Uuid::new_v4();
+    let first = work_order_record('a', target_id, "/projects/one", now);
+    let second = work_order_record('b', target_id, "/projects/two", now + Duration::seconds(1));
+
+    assert_eq!(
+        store.insert_harness_work_order(&first).await.unwrap(),
+        first
+    );
+    assert_eq!(
+        store.insert_harness_work_order(&first).await.unwrap(),
+        first,
+        "an exact work-order retry returns the first persisted row"
+    );
+    let mut conflicting_retry = first.clone();
+    conflicting_retry.packet_json = r#"{"schema_version":2,"changed":true}"#.to_owned();
+    assert!(matches!(
+        store.insert_harness_work_order(&conflicting_retry).await,
+        Err(StorageError::InvalidData(_))
+    ));
+    store.insert_harness_work_order(&second).await.unwrap();
+    assert_eq!(
+        store
+            .list_harness_work_orders(None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|record| record.id)
+            .collect::<Vec<_>>(),
+        vec![second.id.clone(), first.id.clone()]
+    );
+    assert_eq!(
+        store
+            .list_harness_work_orders(Some("/projects/one"))
+            .await
+            .unwrap(),
+        vec![first.clone()]
+    );
+
+    let root_submission = submission_record(
+        Uuid::new_v4(),
+        &first.id,
+        "int LLVMFuzzerTestOneInput(const uint8_t*, size_t) { return 0; }",
+        "1".repeat(64),
+        None,
+        now,
+    );
+    assert_eq!(
+        store
+            .insert_harness_work_order_submission(&root_submission)
+            .await
+            .unwrap(),
+        root_submission
+    );
+    let retry_with_new_id = submission_record(
+        Uuid::new_v4(),
+        &first.id,
+        &root_submission.source,
+        "1".repeat(64),
+        None,
+        now + Duration::seconds(2),
+    );
+    assert_eq!(
+        store
+            .insert_harness_work_order_submission(&retry_with_new_id)
+            .await
+            .unwrap(),
+        root_submission,
+        "a submission retry is identified by immutable submission evidence"
+    );
+    let cross_work_order_parent = submission_record(
+        Uuid::new_v4(),
+        &second.id,
+        "different source",
+        "2".repeat(64),
+        Some(root_submission.id),
+        now,
+    );
+    assert!(matches!(
+        store
+            .insert_harness_work_order_submission(&cross_work_order_parent)
+            .await,
+        Err(StorageError::InvalidData(_))
+    ));
+
+    for ordinal in 2..=20 {
+        let submission = submission_record(
+            Uuid::new_v4(),
+            &first.id,
+            &format!("source {ordinal}"),
+            format!("{ordinal:064x}"),
+            None,
+            now + Duration::seconds(i64::from(ordinal)),
+        );
+        store
+            .insert_harness_work_order_submission(&submission)
+            .await
+            .unwrap();
+    }
+    let twenty_first = submission_record(
+        Uuid::new_v4(),
+        &first.id,
+        "source 21",
+        "f".repeat(64),
+        None,
+        now + Duration::seconds(21),
+    );
+    assert!(matches!(
+        store
+            .insert_harness_work_order_submission(&twenty_first)
+            .await,
+        Err(StorageError::InvalidData(_))
+    ));
+    let submissions = store
+        .list_harness_work_order_submissions(&first.id)
+        .await
+        .unwrap();
+    assert_eq!(submissions.len(), 20);
+    assert_eq!(
+        submissions.first().map(|record| record.source.as_str()),
+        Some("source 20")
+    );
+    assert_eq!(
+        store
+            .harness_work_order_submission(root_submission.id)
+            .await
+            .unwrap(),
+        Some(root_submission)
+    );
+}
+
+#[tokio::test]
+async fn harness_work_order_attempts_use_compare_and_set_and_recover_running_rows() {
+    let (store, _dir) = temp_store().await;
+    let now = Utc::now().trunc_subsecs(0);
+    let work_order = work_order_record('c', Uuid::new_v4(), "/projects/attempts", now);
+    store.insert_harness_work_order(&work_order).await.unwrap();
+    let submission = submission_record(
+        Uuid::new_v4(),
+        &work_order.id,
+        "source",
+        "3".repeat(64),
+        None,
+        now,
+    );
+    store
+        .insert_harness_work_order_submission(&submission)
+        .await
+        .unwrap();
+    let attempt = running_attempt(Uuid::new_v4(), submission.id, now);
+    assert_eq!(
+        store
+            .insert_harness_work_order_attempt(&attempt)
+            .await
+            .unwrap(),
+        attempt
+    );
+    let harness_id = Uuid::new_v4();
+    let reviewed = store
+        .transition_harness_work_order_attempt(
+            attempt.id,
+            HarnessWorkOrderAttemptStage::Compile,
+            HarnessWorkOrderAttemptStage::Review,
+            Some(harness_id),
+            now + Duration::seconds(1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reviewed.harness_id, Some(harness_id));
+    assert!(matches!(
+        store
+            .transition_harness_work_order_attempt(
+                attempt.id,
+                HarnessWorkOrderAttemptStage::Compile,
+                HarnessWorkOrderAttemptStage::Review,
+                None,
+                now + Duration::seconds(2),
+            )
+            .await,
+        Err(StorageError::InvalidData(_))
+    ));
+    let smoking = store
+        .transition_harness_work_order_attempt(
+            attempt.id,
+            HarnessWorkOrderAttemptStage::Review,
+            HarnessWorkOrderAttemptStage::Smoke,
+            None,
+            now + Duration::seconds(3),
+        )
+        .await
+        .unwrap();
+    assert_eq!(smoking.harness_id, Some(harness_id));
+    let completion = HarnessWorkOrderAttemptCompletion {
+        expected_stage: HarnessWorkOrderAttemptStage::Smoke,
+        status: HarnessWorkOrderAttemptStatus::SmokePassed,
+        harness_id: Some(harness_id),
+        smoke_run_id: Some(Uuid::new_v4()),
+        result_json: Some(r#"{"verdict":"pass"}"#),
+        failure_code: None,
+        failure_message: None,
+        completed_at: now + Duration::seconds(4),
+    };
+    let completed = store
+        .complete_harness_work_order_attempt(attempt.id, completion)
+        .await
+        .unwrap();
+    assert_eq!(completed.status, HarnessWorkOrderAttemptStatus::SmokePassed);
+    assert_eq!(
+        completed.current_stage,
+        HarnessWorkOrderAttemptStage::Complete
+    );
+    assert!(matches!(
+        store
+            .transition_harness_work_order_attempt(
+                attempt.id,
+                HarnessWorkOrderAttemptStage::Complete,
+                HarnessWorkOrderAttemptStage::Smoke,
+                None,
+                now + Duration::seconds(5),
+            )
+            .await,
+        Err(StorageError::InvalidData(_))
+    ));
+
+    let interrupted = running_attempt(Uuid::new_v4(), submission.id, now);
+    store
+        .insert_harness_work_order_attempt(&interrupted)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .recover_interrupted_harness_work_order_attempts(now + Duration::seconds(6))
+            .await
+            .unwrap(),
+        1
+    );
+    let recovered = store
+        .harness_work_order_attempt(interrupted.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.status, HarnessWorkOrderAttemptStatus::Interrupted);
+    assert_eq!(
+        recovered.current_stage,
+        HarnessWorkOrderAttemptStage::Complete
+    );
+    assert_eq!(
+        recovered.failure_code.as_deref(),
+        Some("attempt_interrupted")
+    );
+    assert!(recovered.ended_at.is_some());
+}
+
+#[tokio::test]
+async fn harness_work_order_cleanup_removes_owned_or_orphaned_rows_and_retains_run_history_evidence(
+) {
+    let (store, _dir) = temp_store().await;
+    let now = Utc::now().trunc_subsecs(0);
+    let target = sample_target("/projects/clear");
+    store.upsert_target(&target, now).await.unwrap();
+    let work_order = work_order_record('d', target.id, "/projects/clear", now);
+    store.insert_harness_work_order(&work_order).await.unwrap();
+    let submission = submission_record(
+        Uuid::new_v4(),
+        &work_order.id,
+        "source",
+        "4".repeat(64),
+        None,
+        now,
+    );
+    store
+        .insert_harness_work_order_submission(&submission)
+        .await
+        .unwrap();
+    let harness_id = Uuid::new_v4();
+    let smoke_run = RunRecord::new(
+        "/projects/clear".to_owned(),
+        EngineKind::LibFuzzer,
+        None,
+        now,
+    );
+    store.insert_run(&smoke_run).await.unwrap();
+    let attempt = running_attempt(Uuid::new_v4(), submission.id, now);
+    store
+        .insert_harness_work_order_attempt(&attempt)
+        .await
+        .unwrap();
+    store
+        .complete_harness_work_order_attempt(
+            attempt.id,
+            HarnessWorkOrderAttemptCompletion {
+                expected_stage: HarnessWorkOrderAttemptStage::Compile,
+                status: HarnessWorkOrderAttemptStatus::CompileFailed,
+                harness_id: Some(harness_id),
+                smoke_run_id: Some(smoke_run.id),
+                result_json: Some(r#"{"compile":"failed"}"#),
+                failure_code: Some("compile_failed"),
+                failure_message: Some("compile failed"),
+                completed_at: now + Duration::seconds(1),
+            },
+        )
+        .await
+        .unwrap();
+
+    store.clear_all_runs().await.unwrap();
+    assert!(store
+        .list_runs(Some("/projects/clear"))
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        store.harness_work_order(&work_order.id).await.unwrap(),
+        Some(work_order.clone())
+    );
+    assert_eq!(
+        store
+            .harness_work_order_submission(submission.id)
+            .await
+            .unwrap(),
+        Some(submission.clone())
+    );
+    let retained = store
+        .harness_work_order_attempt(attempt.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.harness_id, Some(harness_id));
+    assert_eq!(retained.smoke_run_id, Some(smoke_run.id));
+    assert_eq!(
+        retained.result_json.as_deref(),
+        Some(r#"{"compile":"failed"}"#)
+    );
+
+    store.clear_knowledge().await.unwrap();
+    assert!(store
+        .harness_work_order(&work_order.id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store
+        .harness_work_order_submission(submission.id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store
+        .harness_work_order_attempt(attempt.id)
+        .await
+        .unwrap()
+        .is_none());
+
+    let target = sample_target("/projects/delete-work-order");
+    store.upsert_target(&target, now).await.unwrap();
+    let project_work_order = work_order_record('e', target.id, "/projects/delete-work-order", now);
+    store
+        .insert_harness_work_order(&project_work_order)
+        .await
+        .unwrap();
+    let project_submission = submission_record(
+        Uuid::new_v4(),
+        &project_work_order.id,
+        "source",
+        "5".repeat(64),
+        None,
+        now,
+    );
+    store
+        .insert_harness_work_order_submission(&project_submission)
+        .await
+        .unwrap();
+    store
+        .insert_harness_work_order_attempt(&running_attempt(
+            Uuid::new_v4(),
+            project_submission.id,
+            now,
+        ))
+        .await
+        .unwrap();
+    store
+        .delete_project("/projects/delete-work-order")
+        .await
+        .unwrap();
+    assert!(store
+        .harness_work_order(&project_work_order.id)
+        .await
+        .unwrap()
+        .is_none());
+
+    let orphan_work_order = work_order_record('f', Uuid::new_v4(), "/projects/orphan", now);
+    sqlx::query(
+        "INSERT INTO harness_work_orders
+            (id, target_id, project_root, schema_version, packet_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    )
+    .bind(&orphan_work_order.id)
+    .bind(orphan_work_order.target_id.to_string())
+    .bind(&orphan_work_order.project_root)
+    .bind(orphan_work_order.schema_version)
+    .bind(&orphan_work_order.packet_json)
+    .bind(
+        orphan_work_order
+            .created_at
+            .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let orphan_submission = submission_record(
+        Uuid::new_v4(),
+        &orphan_work_order.id,
+        "orphan source",
+        "6".repeat(64),
+        None,
+        now,
+    );
+    store
+        .insert_harness_work_order_submission(&orphan_submission)
+        .await
+        .unwrap();
+    store
+        .insert_harness_work_order_attempt(&running_attempt(
+            Uuid::new_v4(),
+            orphan_submission.id,
+            now,
+        ))
+        .await
+        .unwrap();
+    store.delete_orphans().await.unwrap();
+    assert!(store
+        .harness_work_order(&orphan_work_order.id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store
+        .list_harness_work_order_submissions(&orphan_work_order.id)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
