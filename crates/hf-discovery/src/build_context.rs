@@ -418,7 +418,7 @@ mod tests {
             .include_dirs
             .is_empty());
         let direct = BuildContext {
-            include_dirs: vec![PathBuf::from("/work//include")],
+            include_dirs: vec![PathBuf::from("//work/include")],
             ..BuildContext::default()
         };
         assert!(staged_compile_flags(&direct, &PathBuf::from("/work"), "/work").is_empty());

@@ -336,6 +336,7 @@ fn construction_and_verification_reject_noncanonical_fixed_sandbox_include_paths
         "/work//include",
         "/work/include/",
         "/work\\include",
+        "//work/include",
     ] {
         let mut invalid = payload();
         invalid.compile_context.include_dirs = vec![path.to_owned()];
