@@ -212,6 +212,60 @@ impl ServiceContainer {
             .collect()
     }
 
+    /// Resolve one durable work order to its immutable owning project.
+    pub async fn harness_work_order_project(
+        &self,
+        work_order_id: &str,
+    ) -> Result<PathBuf, HarnessWorkOrderError> {
+        work_order_project(self.work_order_store()?, work_order_id).await
+    }
+
+    /// Resolve one durable submission to its immutable owning project.
+    pub async fn harness_work_order_submission_project(
+        &self,
+        submission_id: uuid::Uuid,
+    ) -> Result<PathBuf, HarnessWorkOrderError> {
+        let store = self.work_order_store()?;
+        let submission = store
+            .harness_work_order_submission(submission_id)
+            .await
+            .map_err(durable_submission_storage_error)?
+            .ok_or_else(|| {
+                HarnessWorkOrderError::not_found(
+                    HarnessWorkOrderErrorCode::SubmissionNotFound,
+                    "work order submission was not found",
+                )
+            })?;
+        retained_submission(&submission)?;
+        work_order_project(store, &submission.work_order_id).await
+    }
+
+    /// Resolve one durable qualification attempt to its immutable owning project.
+    pub async fn harness_work_order_attempt_project(
+        &self,
+        attempt_id: uuid::Uuid,
+    ) -> Result<PathBuf, HarnessWorkOrderError> {
+        let store = self.work_order_store()?;
+        let attempt = store
+            .harness_work_order_attempt(attempt_id)
+            .await
+            .map_err(storage_error)?
+            .ok_or_else(attempt_not_found)?;
+        retained_attempt(&attempt)?;
+        let submission = store
+            .harness_work_order_submission(attempt.submission_id)
+            .await
+            .map_err(durable_submission_storage_error)?
+            .ok_or_else(|| {
+                HarnessWorkOrderError::validation(
+                    HarnessWorkOrderErrorCode::InvalidWorkOrderDigest,
+                    "qualification attempt submission is missing",
+                )
+            })?;
+        retained_submission(&submission)?;
+        work_order_project(store, &submission.work_order_id).await
+    }
+
     /// Import one externally authored immutable harness submission.
     pub async fn import_harness_work_order_submission(
         &self,
@@ -1229,6 +1283,24 @@ async fn load_verified_work_order(
             )
         })?;
     retained_packet(&record, None)
+}
+
+async fn work_order_project(
+    store: &hf_storage::Store,
+    work_order_id: &str,
+) -> Result<PathBuf, HarnessWorkOrderError> {
+    let record = store
+        .harness_work_order(work_order_id)
+        .await
+        .map_err(storage_error)?
+        .ok_or_else(|| {
+            HarnessWorkOrderError::not_found(
+                HarnessWorkOrderErrorCode::WorkOrderNotFound,
+                "work order was not found",
+            )
+        })?;
+    retained_packet(&record, None)?;
+    Ok(PathBuf::from(record.project_root))
 }
 
 fn validate_submission_source(source: &str) -> Result<(), HarnessWorkOrderError> {

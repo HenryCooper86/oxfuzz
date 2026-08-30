@@ -214,6 +214,24 @@ async fn list(
         .list_harness_work_orders(project.as_deref())
         .await
         .map_err(work_order_api_error)?;
+    let work_orders = if project.is_some() {
+        work_orders
+    } else {
+        let mut approved = Vec::with_capacity(work_orders.len());
+        for work_order in work_orders {
+            let owner = state
+                .container
+                .harness_work_order_project(&work_order.id)
+                .await
+                .map_err(work_order_api_error)?;
+            // An unapproved or unavailable durable project is intentionally
+            // absent from an unscoped web listing.
+            if state.approve_project(&owner).is_ok() {
+                approved.push(work_order);
+            }
+        }
+        approved
+    };
     Ok(Json(
         work_orders
             .into_iter()
@@ -227,6 +245,7 @@ async fn get_by_id(
     StableIdentifierPath(work_order_id): StableIdentifierPath,
 ) -> WorkOrderApiResult<WorkOrderResponse> {
     let work_order_id = parse_work_order_id(work_order_id)?;
+    authorize_work_order(&state, &work_order_id).await?;
     let work_order = state
         .container
         .harness_work_order_by_id(&work_order_id)
@@ -247,6 +266,7 @@ async fn import_submission(
         .as_deref()
         .map(parse_identifier)
         .transpose()?;
+    authorize_work_order(&state, &work_order_id).await?;
     let submission = state
         .container
         .import_harness_work_order_submission(ImportHarnessWorkOrderSubmissionRequest {
@@ -265,6 +285,7 @@ async fn list_submissions(
     StableIdentifierPath(work_order_id): StableIdentifierPath,
 ) -> WorkOrderApiResult<Vec<hf_service::HarnessWorkOrderSubmission>> {
     let work_order_id = parse_work_order_id(work_order_id)?;
+    authorize_work_order(&state, &work_order_id).await?;
     let submissions = state
         .container
         .list_harness_work_order_submissions(&work_order_id)
@@ -280,6 +301,7 @@ async fn qualify_submission(
 ) -> WorkOrderApiResult<hf_service::HarnessWorkOrderAttempt> {
     let submission_id = parse_identifier(&submission_id)?;
     require_empty_body(request).await?;
+    authorize_submission(&state, submission_id).await?;
     let attempt = state
         .container
         .qualify_harness_work_order_submission(submission_id)
@@ -293,6 +315,7 @@ async fn list_attempts(
     StableIdentifierPath(submission_id): StableIdentifierPath,
 ) -> WorkOrderApiResult<Vec<hf_service::HarnessWorkOrderAttempt>> {
     let submission_id = parse_identifier(&submission_id)?;
+    authorize_submission(&state, submission_id).await?;
     let attempts = state
         .container
         .list_harness_work_order_attempts(submission_id)
@@ -306,6 +329,7 @@ async fn get_attempt(
     StableIdentifierPath(attempt_id): StableIdentifierPath,
 ) -> WorkOrderApiResult<hf_service::HarnessWorkOrderAttempt> {
     let attempt_id = parse_identifier(&attempt_id)?;
+    authorize_attempt(&state, attempt_id).await?;
     let attempt = state
         .container
         .harness_work_order_attempt(attempt_id)
@@ -324,6 +348,9 @@ async fn rank_attempts(
         .into_iter()
         .map(|attempt_id| parse_identifier(&attempt_id))
         .collect::<Result<Vec<_>, _>>()?;
+    for attempt_id in &attempt_ids {
+        authorize_attempt(&state, *attempt_id).await?;
+    }
     let ranking = state
         .container
         .rank_harness_work_order_attempts(&attempt_ids)
@@ -339,6 +366,7 @@ async fn promote_attempt(
 ) -> WorkOrderApiResult<PromotedHarnessResponse> {
     let attempt_id = parse_identifier(&attempt_id)?;
     require_empty_body(request).await?;
+    authorize_attempt(&state, attempt_id).await?;
     let harness = state
         .container
         .promote_harness_work_order_attempt(attempt_id)
@@ -352,6 +380,48 @@ async fn promote_attempt(
         language: harness.language,
         status: harness.status,
     }))
+}
+
+async fn authorize_work_order(
+    state: &AppState,
+    work_order_id: &str,
+) -> Result<(), WorkOrderApiError> {
+    let project = state
+        .container
+        .harness_work_order_project(work_order_id)
+        .await
+        .map_err(work_order_api_error)?;
+    authorize_project(state, &project)
+}
+
+async fn authorize_submission(
+    state: &AppState,
+    submission_id: Uuid,
+) -> Result<(), WorkOrderApiError> {
+    let project = state
+        .container
+        .harness_work_order_submission_project(submission_id)
+        .await
+        .map_err(work_order_api_error)?;
+    authorize_project(state, &project)
+}
+
+async fn authorize_attempt(state: &AppState, attempt_id: Uuid) -> Result<(), WorkOrderApiError> {
+    let project = state
+        .container
+        .harness_work_order_attempt_project(attempt_id)
+        .await
+        .map_err(work_order_api_error)?;
+    authorize_project(state, &project)
+}
+
+fn authorize_project(state: &AppState, project: &std::path::Path) -> Result<(), WorkOrderApiError> {
+    state.approve_project(project).map(|_| ()).map_err(|error| {
+        transport_error(
+            HarnessWorkOrderErrorCode::InvalidProjectPath,
+            error.to_string(),
+        )
+    })
 }
 
 fn extract_json<T>(request: Result<Json<T>, JsonRejection>) -> Result<T, WorkOrderApiError> {
