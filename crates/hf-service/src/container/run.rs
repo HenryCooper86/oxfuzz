@@ -463,14 +463,15 @@ impl ServiceContainer {
         let engine = resolved.engine;
         let duration_secs = resolved.duration_secs;
 
-        let qualified = self.active_harness(project, target, engine).await?;
+        let _target_revision = self.acquire_target_revision(project, target).await?;
+        let qualified = self.active_harness_locked(project, target, engine).await?;
         if qualified.status != HarnessStatus::Promoted {
             return Err(ClassifiedError::Validation(format!(
                 "active harness '{target}' is {:?}; run smoke qualification and explicitly promote it before starting a full campaign",
                 qualified.status
             )));
         }
-        self.verify_harness_qualification(project, target, &qualified)
+        self.verify_harness_qualification_locked(project, target, &qualified)
             .await?;
         self.authorize_recorded(
             Action::RunFuzzer {

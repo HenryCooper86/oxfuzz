@@ -3230,6 +3230,104 @@ async fn harness_promotion_and_digest_bound_approval_are_atomic_and_idempotent()
 }
 
 #[tokio::test]
+async fn documented_findings_promotion_accepts_crash_bearing_smoke_evidence() {
+    let (store, _dir) = temp_store().await;
+    let mut harness = smoke_passed_harness(Uuid::new_v4());
+    let smoke = harness.smoke_run.as_mut().unwrap();
+    smoke.passed = false;
+    smoke.crashes = 1;
+    store.upsert_harness(&harness).await.unwrap();
+    harness.status = HarnessStatus::Promoted;
+
+    let error = store
+        .promote_harness_with_approval(
+            &harness,
+            HarnessApprovalKind::KnownFindings,
+            &"c".repeat(64),
+            &"b".repeat(64),
+            Utc::now(),
+        )
+        .await
+        .expect_err("documented findings promotion must bind the retained source digest");
+    assert!(matches!(error, StorageError::InvalidData(_)));
+    assert_eq!(
+        store.get_harness(harness.id).await.unwrap().unwrap().status,
+        HarnessStatus::SmokePassed
+    );
+
+    let approval = store
+        .promote_harness_with_approval(
+            &harness,
+            HarnessApprovalKind::KnownFindings,
+            &"a".repeat(64),
+            &"b".repeat(64),
+            Utc::now(),
+        )
+        .await
+        .expect("documented findings promotion must retain crash evidence");
+
+    assert_eq!(approval.approval_kind, HarnessApprovalKind::KnownFindings);
+    assert_eq!(
+        store.get_harness(harness.id).await.unwrap().unwrap().status,
+        HarnessStatus::Promoted
+    );
+}
+
+#[tokio::test]
+async fn clean_smoke_promotion_rejects_a_crash_bearing_summary_without_writes() {
+    let (store, _dir) = temp_store().await;
+    let mut harness = smoke_passed_harness(Uuid::new_v4());
+    let smoke = harness.smoke_run.as_mut().unwrap();
+    smoke.passed = false;
+    smoke.crashes = 1;
+    store.upsert_harness(&harness).await.unwrap();
+    harness.status = HarnessStatus::Promoted;
+
+    let error = store
+        .promote_harness_with_approval(
+            &harness,
+            HarnessApprovalKind::CleanSmoke,
+            &"a".repeat(64),
+            &"b".repeat(64),
+            Utc::now(),
+        )
+        .await
+        .expect_err("clean promotion must reject retained smoke crashes");
+
+    assert!(matches!(error, StorageError::InvalidData(_)));
+    assert_eq!(
+        store.get_harness(harness.id).await.unwrap().unwrap().status,
+        HarnessStatus::SmokePassed
+    );
+    assert!(store
+        .harness_approval(harness.id, &"a".repeat(64), &"b".repeat(64))
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn harness_upsert_preserves_an_unchanged_revision_while_advancing_smoke_evidence() {
+    let (store, _dir) = temp_store().await;
+    let mut harness = sample_harness(Uuid::new_v4());
+    store.upsert_harness(&harness).await.unwrap();
+
+    harness.status = HarnessStatus::SmokePassed;
+    harness.smoke_run = smoke_passed_harness(harness.target_id).smoke_run;
+    store.upsert_harness(&harness).await.unwrap();
+
+    let persisted = store.get_harness(harness.id).await.unwrap().unwrap();
+    assert_eq!(persisted.status, HarnessStatus::SmokePassed);
+    assert_eq!(
+        persisted
+            .smoke_run
+            .as_ref()
+            .and_then(|smoke| smoke.source_sha256.as_deref()),
+        Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    );
+}
+
+#[tokio::test]
 async fn harness_promotion_rejects_changed_revisions_and_stale_current_status_without_writes() {
     let (store, _dir) = temp_store().await;
     let mut persisted = smoke_passed_harness(Uuid::new_v4());

@@ -2338,7 +2338,11 @@ impl Store {
         let requested_json = serde_json::to_string(harness)?;
         let exact_requested_revision = requested_json == serde_json::to_string(&expected_promoted)?;
         let smoke_matches = current.smoke_run.as_ref().is_some_and(|smoke| {
-            smoke.passed
+            let mode_matches = match approval_kind {
+                HarnessApprovalKind::CleanSmoke => smoke.passed && smoke.crashes == 0,
+                HarnessApprovalKind::KnownFindings => smoke.crashes > 0,
+            };
+            mode_matches
                 && smoke.source_sha256.as_deref() == Some(source_sha256)
                 && smoke.binary_sha256.as_deref() == Some(binary_sha256)
         });

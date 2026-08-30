@@ -503,6 +503,29 @@ impl ServiceContainer {
         let _target_revision = self
             .acquire_target_revision(&candidate.project_root, target)
             .await?;
+        self.compile_source_with_repair_locked(
+            candidate,
+            engine,
+            lang,
+            workspace,
+            initial_source,
+            max_repairs,
+        )
+        .await
+    }
+
+    /// Compile a replacement while the caller holds workspace-operation followed
+    /// by target-revision leases for the complete read/replace sequence.
+    async fn compile_source_with_repair_locked(
+        &self,
+        candidate: &TargetCandidate,
+        engine: EngineKind,
+        lang: TargetLanguage,
+        workspace: &Path,
+        initial_source: String,
+        max_repairs: usize,
+    ) -> Result<HarnessGenOutcome, ClassifiedError> {
+        let target = &candidate.symbol;
         let mut source = initial_source;
         let mut repairs_used = 0usize;
         let mut last_diagnostics = String::new();
@@ -826,6 +849,9 @@ impl ServiceContainer {
         let candidate = select_target_candidate(&inv.candidates, target)?
             .ok_or_else(|| ClassifiedError::Validation(format!("target '{target}' not found")))?
             .clone();
+        let _target_revision = self
+            .acquire_target_revision(&candidate.project_root, target)
+            .await?;
 
         prepare_configured_workspace_root()?;
         let workspace = workspace_dir(project, target);
@@ -834,8 +860,15 @@ impl ServiceContainer {
         copy_project_sources(project, &workspace);
 
         let source = self.draft_harness_source(project, &candidate, engine).await;
-        self.compile_source_with_repair(&candidate, engine, lang, &workspace, source, max_repairs)
-            .await
+        self.compile_source_with_repair_locked(
+            &candidate,
+            engine,
+            lang,
+            &workspace,
+            source,
+            max_repairs,
+        )
+        .await
     }
 
     /// Coverage-guided harness refinement: when coverage has stagnated, ask the
@@ -866,6 +899,9 @@ impl ServiceContainer {
         let candidate = select_target_candidate(&inv.candidates, target)?
             .ok_or_else(|| ClassifiedError::Validation(format!("target '{target}' not found")))?
             .clone();
+        let _target_revision = self
+            .acquire_target_revision(&candidate.project_root, target)
+            .await?;
 
         let workspace = workspace_dir(project, target);
         let current_source = read_current_harness_source(&workspace).ok_or_else(|| {
@@ -911,7 +947,7 @@ impl ServiceContainer {
         )
         .await?;
 
-        self.compile_source_with_repair(
+        self.compile_source_with_repair_locked(
             &candidate,
             engine,
             lang,
