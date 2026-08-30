@@ -593,7 +593,7 @@ mod tests {
     fn normalized_include_rejects_invalid_fixed_paths_under_work_root() {
         assert!(super::normalized_include_path(
             std::path::Path::new("/work"),
-            std::path::Path::new("/work/./include")
+            std::path::Path::new("//work/include")
         )
         .is_err());
     }

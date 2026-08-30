@@ -200,11 +200,16 @@ pub fn classify_fixed_sandbox_include_path(value: &str) -> FixedSandboxIncludePa
     if value == "/work" {
         return FixedSandboxIncludePath::Canonical;
     }
-    if value.starts_with("/work\\") {
-        return FixedSandboxIncludePath::Invalid;
+    let claims_work_namespace = value.starts_with(['/', '\\'])
+        && value
+            .trim_start_matches(['/', '\\'])
+            .strip_prefix("work")
+            .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with(['/', '\\']));
+    if !claims_work_namespace {
+        return FixedSandboxIncludePath::Outside;
     }
     let Some(descendant) = value.strip_prefix("/work/") else {
-        return FixedSandboxIncludePath::Outside;
+        return FixedSandboxIncludePath::Invalid;
     };
     if !descendant.is_empty()
         && !value.contains('\\')
@@ -434,6 +439,11 @@ mod tests {
             "/work\\include",
             "/work/include\n",
             "/work/",
+            "//work",
+            "//work/include",
+            "///work/include",
+            "\\work\\include",
+            "\\\\work\\include",
         ] {
             assert_eq!(
                 classify_fixed_sandbox_include_path(invalid),
@@ -443,6 +453,10 @@ mod tests {
         }
         assert_eq!(
             classify_fixed_sandbox_include_path("/workx/include"),
+            FixedSandboxIncludePath::Outside
+        );
+        assert_eq!(
+            classify_fixed_sandbox_include_path("//workspace"),
             FixedSandboxIncludePath::Outside
         );
     }
