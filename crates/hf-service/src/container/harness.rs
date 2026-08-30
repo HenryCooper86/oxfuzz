@@ -1807,6 +1807,32 @@ mod exact_qualification_tests {
     #[derive(Default)]
     struct CountingRuntime {
         calls: AtomicUsize,
+        pause: Mutex<Option<RuntimePause>>,
+    }
+
+    struct RuntimePause {
+        shell_command: bool,
+        started: tokio::sync::oneshot::Sender<()>,
+        release: tokio::sync::oneshot::Receiver<()>,
+    }
+
+    impl CountingRuntime {
+        fn pause_next_command(
+            &self,
+            shell_command: bool,
+        ) -> (
+            tokio::sync::oneshot::Receiver<()>,
+            tokio::sync::oneshot::Sender<()>,
+        ) {
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            *self.pause.lock().unwrap() = Some(RuntimePause {
+                shell_command,
+                started: started_tx,
+                release: release_rx,
+            });
+            (started_rx, release_tx)
+        }
     }
 
     #[async_trait::async_trait]
@@ -1820,11 +1846,20 @@ mod exact_qualification_tests {
 
         async fn run_command(
             &self,
-            _cmd: &[String],
+            cmd: &[String],
             cwd: &Path,
             _limits: &ResourceLimits,
         ) -> Result<CommandResult, ClassifiedError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            let pause = self.pause.lock().unwrap().take();
+            if let Some(pause) = pause {
+                if pause.shell_command == (cmd.first().is_some_and(|part| part == "sh")) {
+                    let _ = pause.started.send(());
+                    let _ = pause.release.await;
+                } else {
+                    *self.pause.lock().unwrap() = Some(pause);
+                }
+            }
             std::fs::create_dir_all(cwd).unwrap();
             Ok(CommandResult {
                 exit_code: 0,
@@ -2220,10 +2255,11 @@ mod exact_qualification_tests {
         tempfile::TempDir,
         Arc<hf_storage::Store>,
         ServiceContainer,
+        Arc<CountingRuntime>,
         Harness,
     ) {
         let review = Arc::new(CountingReviewPool::approving());
-        let (project, store, container, _runtime, _id) = fixture(review).await;
+        let (project, store, container, runtime, _id) = fixture(review).await;
         let compiled = store.list_all_harnesses().await.unwrap().pop().unwrap();
         store
             .upsert_target(
@@ -2266,13 +2302,13 @@ mod exact_qualification_tests {
             .harness_promote(project.path(), TARGET, EngineKind::LibFuzzer)
             .await
             .unwrap();
-        (project, store, container, promoted)
+        (project, store, container, runtime, promoted)
     }
 
     #[tokio::test]
     async fn conditional_revert_rejects_a_newer_harness_id_without_mutation() {
         let _gate = qualification_test_gate().lock().await;
-        let (project, store, container, active) = promoted_fixture().await;
+        let (project, store, container, _runtime, active) = promoted_fixture().await;
         let (qualification_run, source_sha256, binary_sha256) = {
             let (run, source, binary) = super::qualification_evidence(&active).unwrap();
             (run, source.to_owned(), binary.to_owned())
@@ -2349,7 +2385,7 @@ mod exact_qualification_tests {
     #[tokio::test]
     async fn conditional_revert_rejects_changed_current_binary_without_mutation() {
         let _gate = qualification_test_gate().lock().await;
-        let (project, store, container, active) = promoted_fixture().await;
+        let (project, store, container, _runtime, active) = promoted_fixture().await;
         let (qualification_run, source_sha256, binary_sha256) =
             super::qualification_evidence(&active).unwrap();
         let workspace = workspace_dir(project.path(), TARGET);
@@ -2418,7 +2454,7 @@ mod exact_qualification_tests {
     #[tokio::test]
     async fn conditional_revert_completes_after_a_queued_workspace_cleanup() {
         let _gate = qualification_test_gate().lock().await;
-        let (_project, _store, container, active) = promoted_fixture().await;
+        let (_project, _store, container, _runtime, active) = promoted_fixture().await;
         let (qualification_run, source_sha256, binary_sha256) = {
             let (run, source, binary) = super::qualification_evidence(&active).unwrap();
             (run, source.to_owned(), binary.to_owned())
@@ -2470,6 +2506,110 @@ mod exact_qualification_tests {
             "conditional reversion must complete after cleanup releases the writer lease"
         );
         cleanup.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cached_coverage_holds_the_revision_lease_through_adapter_dispatch() {
+        let _gate = qualification_test_gate().lock().await;
+        let (project, _store, container, runtime, active) = promoted_fixture().await;
+        let workspace = workspace_dir(project.path(), TARGET);
+        std::fs::write(workspace.join("harness.c"), SOURCE).unwrap();
+        let (started, release) = runtime.pause_next_command(true);
+        let project_path = project.path().to_path_buf();
+        let coverage_container = container.clone();
+        let mut coverage = tokio::spawn(async move {
+            coverage_container
+                .coverage_uncovered(&project_path, TARGET)
+                .await
+        });
+        started.await.unwrap();
+        let (run, source, binary) = super::qualification_evidence(&active).unwrap();
+        let worker = container.clone();
+        let run_id = run.to_string();
+        let source = source.to_owned();
+        let binary = binary.to_owned();
+        let mut revert = tokio::spawn(async move {
+            worker
+                .revert_harness_from_run_if_current(
+                    &run_id,
+                    Some(super::super::policy::CurrentHarnessEvidence {
+                        id: active.id,
+                        source_sha256: &source,
+                        binary_sha256: &binary,
+                    }),
+                )
+                .await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut revert)
+                .await
+                .is_err()
+        );
+        let _ = release.send(());
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut coverage)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut revert)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn regression_replay_holds_the_revision_lease_through_adapter_dispatch() {
+        let _gate = qualification_test_gate().lock().await;
+        let (project, _store, container, runtime, active) = promoted_fixture().await;
+        let workspace = workspace_dir(project.path(), TARGET);
+        let (qualification_run, source, binary) = super::qualification_evidence(&active).unwrap();
+        let output = workspace
+            .join("runs")
+            .join(qualification_run.to_string())
+            .join("out");
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::write(output.join("crash-input"), b"input").unwrap();
+        let (started, release) = runtime.pause_next_command(false);
+        let project_path = project.path().to_path_buf();
+        let replay_container = container.clone();
+        let mut replay = tokio::spawn(async move {
+            replay_container
+                .verify_regressions(&project_path, TARGET)
+                .await
+        });
+        started.await.unwrap();
+        let worker = container.clone();
+        let run_id = qualification_run.to_string();
+        let source = source.to_owned();
+        let binary = binary.to_owned();
+        let mut revert = tokio::spawn(async move {
+            worker
+                .revert_harness_from_run_if_current(
+                    &run_id,
+                    Some(super::super::policy::CurrentHarnessEvidence {
+                        id: active.id,
+                        source_sha256: &source,
+                        binary_sha256: &binary,
+                    }),
+                )
+                .await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut revert)
+                .await
+                .is_err()
+        );
+        let _ = release.send(());
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut replay)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut revert)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
