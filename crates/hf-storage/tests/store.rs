@@ -3124,9 +3124,69 @@ async fn target_and_harness_roundtrip() {
 }
 
 #[tokio::test]
+async fn harness_upsert_rejects_a_changed_source_for_an_existing_id() {
+    let (store, _dir) = temp_store().await;
+    let target_id = Uuid::new_v4();
+    let harness = sample_harness(target_id);
+    store.upsert_harness(&harness).await.unwrap();
+
+    let mut replacement = harness.clone();
+    replacement.source = "different immutable harness source".to_owned();
+    let error = store
+        .upsert_harness(&replacement)
+        .await
+        .expect_err("same harness id must not accept different source bytes");
+
+    assert!(matches!(error, StorageError::InvalidData(_)));
+    let persisted = store.get_harness(harness.id).await.unwrap().unwrap();
+    assert_eq!(persisted.source, harness.source);
+}
+
+#[tokio::test]
+async fn harness_upsert_rejects_a_changed_build_identity_for_an_existing_id() {
+    let (store, _dir) = temp_store().await;
+    let harness = sample_harness(Uuid::new_v4());
+    store.upsert_harness(&harness).await.unwrap();
+
+    let mut replacement = harness.clone();
+    replacement.build_cmd.output = PathBuf::from("different-fuzz-target");
+    let error = store
+        .upsert_harness(&replacement)
+        .await
+        .expect_err("same harness id must not accept a different build identity");
+
+    assert!(matches!(error, StorageError::InvalidData(_)));
+    assert_eq!(
+        store
+            .get_harness(harness.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .build_cmd
+            .output,
+        harness.build_cmd.output
+    );
+}
+
+fn smoke_passed_harness(target_id: Uuid) -> Harness {
+    let mut harness = sample_harness(target_id);
+    harness.status = HarnessStatus::SmokePassed;
+    harness.smoke_run = Some(hf_core::harness::SmokeRunSummary {
+        duration_secs: 60,
+        execs_per_sec: 1.0,
+        crashes: 0,
+        passed: true,
+        source_sha256: Some("a".repeat(64)),
+        binary_sha256: Some("b".repeat(64)),
+        run_id: Some(Uuid::new_v4()),
+    });
+    harness
+}
+
+#[tokio::test]
 async fn harness_promotion_and_digest_bound_approval_are_atomic_and_idempotent() {
     let (store, _dir) = temp_store().await;
-    let mut harness = sample_harness(Uuid::new_v4());
+    let mut harness = smoke_passed_harness(Uuid::new_v4());
     store.upsert_harness(&harness).await.unwrap();
     harness.status = HarnessStatus::Promoted;
     let approved_at = Utc::now();
@@ -3170,10 +3230,107 @@ async fn harness_promotion_and_digest_bound_approval_are_atomic_and_idempotent()
 }
 
 #[tokio::test]
+async fn harness_promotion_rejects_changed_revisions_and_stale_current_status_without_writes() {
+    let (store, _dir) = temp_store().await;
+    let mut persisted = smoke_passed_harness(Uuid::new_v4());
+    store.upsert_harness(&persisted).await.unwrap();
+    let mut promoted = persisted.clone();
+    promoted.status = HarnessStatus::Promoted;
+
+    let mut changed_source = promoted.clone();
+    changed_source.source = "different source".to_owned();
+    let error = store
+        .promote_harness_with_approval(
+            &changed_source,
+            HarnessApprovalKind::CleanSmoke,
+            &"a".repeat(64),
+            &"b".repeat(64),
+            Utc::now(),
+        )
+        .await
+        .expect_err("promotion must use the exact persisted revision");
+    assert!(matches!(error, StorageError::InvalidData(_)));
+    let unchanged = store.get_harness(persisted.id).await.unwrap().unwrap();
+    assert_eq!(unchanged.status, persisted.status);
+    assert_eq!(unchanged.source, persisted.source);
+    assert_eq!(unchanged.build_cmd.output, persisted.build_cmd.output);
+    assert!(store
+        .harness_approval(persisted.id, &"a".repeat(64), &"b".repeat(64))
+        .await
+        .unwrap()
+        .is_none());
+
+    persisted.status = HarnessStatus::Compiled;
+    store.upsert_harness(&persisted).await.unwrap();
+    let error = store
+        .promote_harness_with_approval(
+            &promoted,
+            HarnessApprovalKind::CleanSmoke,
+            &"a".repeat(64),
+            &"b".repeat(64),
+            Utc::now(),
+        )
+        .await
+        .expect_err("promotion must reject a stale current status");
+    assert!(matches!(error, StorageError::InvalidData(_)));
+    let unchanged = store.get_harness(persisted.id).await.unwrap().unwrap();
+    assert_eq!(unchanged.status, persisted.status);
+    assert_eq!(unchanged.source, persisted.source);
+    assert_eq!(unchanged.build_cmd.output, persisted.build_cmd.output);
+    assert!(store
+        .harness_approval(persisted.id, &"a".repeat(64), &"b".repeat(64))
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn harness_promotion_rolls_back_an_approval_when_its_conditional_update_loses() {
+    let (store, _dir) = temp_store().await;
+    let mut harness = smoke_passed_harness(Uuid::new_v4());
+    store.upsert_harness(&harness).await.unwrap();
+    sqlx::query(
+        "CREATE TRIGGER ignore_harness_promotion
+         BEFORE UPDATE ON harnesses
+         WHEN NEW.status = 'Promoted'
+         BEGIN
+           SELECT RAISE(IGNORE);
+         END",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    harness.status = HarnessStatus::Promoted;
+    let error = store
+        .promote_harness_with_approval(
+            &harness,
+            HarnessApprovalKind::CleanSmoke,
+            &"a".repeat(64),
+            &"b".repeat(64),
+            Utc::now(),
+        )
+        .await
+        .expect_err("a lost conditional update must abort the transition");
+
+    assert!(matches!(error, StorageError::InvalidData(_)));
+    assert_eq!(
+        store.get_harness(harness.id).await.unwrap().unwrap().status,
+        HarnessStatus::SmokePassed
+    );
+    assert!(store
+        .harness_approval(harness.id, &"a".repeat(64), &"b".repeat(64))
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
 async fn rejected_approval_rolls_back_the_promoted_harness_state() {
     let (store, _dir) = temp_store().await;
-    let mut harness = sample_harness(Uuid::new_v4());
-    harness.status = HarnessStatus::SmokePassed;
+    let mut harness = smoke_passed_harness(Uuid::new_v4());
+    harness.smoke_run.as_mut().unwrap().source_sha256 = Some("c".repeat(64));
+    harness.smoke_run.as_mut().unwrap().binary_sha256 = Some("d".repeat(64));
     store.upsert_harness(&harness).await.unwrap();
     sqlx::query(
         "CREATE TRIGGER reject_harness_approval

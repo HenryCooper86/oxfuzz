@@ -19,12 +19,17 @@ const WORKSPACE_MANIFEST_FILE: &str = ".oxfuzz-workspace.json";
 const WORKSPACE_MANIFEST_VERSION: u32 = 1;
 
 type WorkspaceOperationGate = tokio::sync::RwLock<()>;
+type TargetRevisionGate = tokio::sync::Mutex<()>;
 
 /// Workspace gates are keyed by resolved root rather than container instance:
 /// independent service containers in one process can target the same root.
 /// A weak registry avoids retaining a gate after its last lease is released.
 static WORKSPACE_OPERATION_GATES: OnceLock<
     Mutex<std::collections::HashMap<PathBuf, Weak<WorkspaceOperationGate>>>,
+> = OnceLock::new();
+
+static TARGET_REVISION_GATES: OnceLock<
+    Mutex<std::collections::HashMap<PathBuf, Weak<TargetRevisionGate>>>,
 > = OnceLock::new();
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
@@ -133,6 +138,57 @@ pub(super) fn workspace_lock_file(root: &Path) -> Result<File, ClassifiedError> 
         .map_err(|error| {
             ClassifiedError::Internal(format!(
                 "open workspace lease {}: {error}",
+                lock_path.display()
+            ))
+        })
+}
+
+/// Return the process-local gate and canonical key for one managed target
+/// workspace. Callers hold the workspace-operation lease before this gate.
+pub(super) fn target_revision_gate(
+    workspace: &Path,
+) -> Result<(PathBuf, Arc<TargetRevisionGate>), ClassifiedError> {
+    let key = comparable_path(workspace).ok_or_else(|| {
+        ClassifiedError::Internal(format!(
+            "resolve harness revision workspace {}",
+            workspace.display()
+        ))
+    })?;
+    let registry =
+        TARGET_REVISION_GATES.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let mut gates = registry.lock().map_err(|_| {
+        ClassifiedError::Internal("harness revision gate registry is poisoned".to_owned())
+    })?;
+    if let Some(gate) = gates.get(&key).and_then(Weak::upgrade) {
+        return Ok((key, gate));
+    }
+    let gate = Arc::new(TargetRevisionGate::new(()));
+    gates.insert(key.clone(), Arc::downgrade(&gate));
+    Ok((key, gate))
+}
+
+/// Open the cross-process exclusive lock for one canonical target workspace.
+pub(super) fn target_revision_lock_file(workspace: &Path) -> Result<File, ClassifiedError> {
+    use sha2::{Digest as _, Sha256};
+
+    let lock_dir = crate::init::user_app_dir().join("locks");
+    std::fs::create_dir_all(&lock_dir).map_err(|error| {
+        ClassifiedError::Internal(format!(
+            "create harness revision lease directory {}: {error}",
+            lock_dir.display()
+        ))
+    })?;
+    let digest = Sha256::digest(workspace.as_os_str().as_encoded_bytes());
+    let lock_path = lock_dir.join(format!("harness-revision-{digest:x}.lock"));
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|error| {
+            ClassifiedError::Internal(format!(
+                "open harness revision lease {}: {error}",
                 lock_path.display()
             ))
         })

@@ -2134,7 +2134,8 @@ impl Store {
 
     // -- harnesses ----------------------------------------------------------
 
-    /// Insert or replace a harness.
+    /// Insert a harness or advance mutable qualification state for the same
+    /// immutable harness revision.
     ///
     /// # Errors
     /// Returns an error on a SQL failure or serialization failure.
@@ -2143,20 +2144,54 @@ impl Store {
             Some(s) => Some(serde_json::to_string(s)?),
             None => None,
         };
-        sqlx::query(
-            "INSERT OR REPLACE INTO harnesses
-                (id, target_id, engine, source, status, smoke_run_json, data_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        )
-        .bind(h.id.to_string())
-        .bind(h.target_id.to_string())
-        .bind(enum_str(&h.engine))
-        .bind(&h.source)
-        .bind(enum_str(&h.status))
-        .bind(smoke_json)
-        .bind(serde_json::to_string(h)?)
-        .execute(&self.pool)
-        .await?;
+        let mut transaction = self.pool.begin().await?;
+        let existing = sqlx::query("SELECT data_json FROM harnesses WHERE id = ?1")
+            .bind(h.id.to_string())
+            .fetch_optional(&mut *transaction)
+            .await?;
+        if let Some(row) = existing {
+            let persisted: Harness = json_col(&row, "data_json")?;
+            if persisted.target_id != h.target_id
+                || persisted.engine != h.engine
+                || persisted.source != h.source
+                || persisted.language != h.language
+                || serde_json::to_string(&persisted.build_cmd)?
+                    != serde_json::to_string(&h.build_cmd)?
+                || persisted.sanitizer != h.sanitizer
+            {
+                return Err(StorageError::InvalidData(format!(
+                    "harness {} immutable revision fields conflict with the persisted record",
+                    h.id
+                )));
+            }
+            sqlx::query(
+                "UPDATE harnesses
+                 SET status = ?2, smoke_run_json = ?3, data_json = ?4
+                 WHERE id = ?1",
+            )
+            .bind(h.id.to_string())
+            .bind(enum_str(&h.status))
+            .bind(smoke_json)
+            .bind(serde_json::to_string(h)?)
+            .execute(&mut *transaction)
+            .await?;
+        } else {
+            sqlx::query(
+                "INSERT INTO harnesses
+                    (id, target_id, engine, source, status, smoke_run_json, data_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )
+            .bind(h.id.to_string())
+            .bind(h.target_id.to_string())
+            .bind(enum_str(&h.engine))
+            .bind(&h.source)
+            .bind(enum_str(&h.status))
+            .bind(smoke_json)
+            .bind(serde_json::to_string(h)?)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -2289,6 +2324,35 @@ impl Store {
 
         let mut transaction = self.pool.begin().await?;
         let approval_kind_text = enum_str(&approval_kind);
+        let current_row = sqlx::query("SELECT data_json FROM harnesses WHERE id = ?1")
+            .bind(harness.id.to_string())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or_else(|| {
+                StorageError::InvalidData(format!("cannot promote missing harness {}", harness.id))
+            })?;
+        let current: Harness = json_col(&current_row, "data_json")?;
+        let current_json = serde_json::to_string(&current)?;
+        let mut expected_promoted = current.clone();
+        expected_promoted.status = hf_core::harness::HarnessStatus::Promoted;
+        let requested_json = serde_json::to_string(harness)?;
+        let exact_requested_revision = requested_json == serde_json::to_string(&expected_promoted)?;
+        let smoke_matches = current.smoke_run.as_ref().is_some_and(|smoke| {
+            smoke.passed
+                && smoke.source_sha256.as_deref() == Some(source_sha256)
+                && smoke.binary_sha256.as_deref() == Some(binary_sha256)
+        });
+        let first_transition = current.status == hf_core::harness::HarnessStatus::SmokePassed
+            && smoke_matches
+            && exact_requested_revision;
+        let exact_retry = current.status == hf_core::harness::HarnessStatus::Promoted
+            && smoke_matches
+            && requested_json == current_json;
+        if !first_transition && !exact_retry {
+            return Err(StorageError::InvalidData(
+                "harness promotion does not match the current smoke-passed revision".to_owned(),
+            ));
+        }
         let existing = sqlx::query(
             "SELECT id, harness_id, source_sha256, binary_sha256, approval_kind, approved_at
              FROM harness_approvals
@@ -2304,6 +2368,10 @@ impl Store {
 
         let approval = if let Some(row) = existing {
             harness_approval_from_row(&row)?
+        } else if exact_retry {
+            return Err(StorageError::InvalidData(
+                "promoted harness is missing its matching approval record".to_owned(),
+            ));
         } else {
             let approval = HarnessApprovalRecord {
                 id: Uuid::new_v4(),
@@ -2329,25 +2397,31 @@ impl Store {
             approval
         };
 
-        let smoke_json = harness
-            .smoke_run
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
-        sqlx::query(
-            "INSERT OR REPLACE INTO harnesses
-                (id, target_id, engine, source, status, smoke_run_json, data_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        )
-        .bind(harness.id.to_string())
-        .bind(harness.target_id.to_string())
-        .bind(enum_str(&harness.engine))
-        .bind(&harness.source)
-        .bind(enum_str(&harness.status))
-        .bind(smoke_json)
-        .bind(serde_json::to_string(harness)?)
-        .execute(&mut *transaction)
-        .await?;
+        if first_transition {
+            let smoke_json = harness
+                .smoke_run
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?;
+            let updated = sqlx::query(
+                "UPDATE harnesses
+                 SET status = ?2, smoke_run_json = ?3, data_json = ?4
+                 WHERE id = ?1 AND status = ?5 AND data_json = ?6",
+            )
+            .bind(harness.id.to_string())
+            .bind(enum_str(&harness.status))
+            .bind(smoke_json)
+            .bind(&requested_json)
+            .bind(enum_str(&hf_core::harness::HarnessStatus::SmokePassed))
+            .bind(&current_json)
+            .execute(&mut *transaction)
+            .await?;
+            if updated.rows_affected() != 1 {
+                return Err(StorageError::InvalidData(
+                    "harness changed while promotion was being persisted".to_owned(),
+                ));
+            }
+        }
         transaction.commit().await?;
         Ok(approval)
     }

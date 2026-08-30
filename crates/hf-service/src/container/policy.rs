@@ -203,6 +203,7 @@ impl ServiceContainer {
         }
 
         let workspace = workspace_dir(&project, &symbol);
+        let _target_revision = self.acquire_target_revision(&project, &symbol).await?;
         let source_path = run_source_path(&workspace, &run)?;
         let binary_path = run_binary_path(&workspace, &run, &symbol)?;
         let source = std::fs::read_to_string(&source_path).map_err(|error| {
@@ -261,7 +262,7 @@ impl ServiceContainer {
             return Err(error);
         }
         let _ = std::fs::remove_file(&backup);
-        self.verify_harness_qualification(&project, &symbol, &harness)
+        self.verify_harness_qualification_locked(&project, &symbol, &harness)
             .await?;
         Ok(CompileOutcome {
             harness_id: harness.id,
