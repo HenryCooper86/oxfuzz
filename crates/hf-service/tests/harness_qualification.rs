@@ -303,7 +303,7 @@ async fn smoke_updates_the_compiled_revision_and_promotion_is_explicit() {
     let (project, store, container) = qualified_fixture().await;
     let source = "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }";
 
-    container
+    let compiled = container
         .harness_compile(
             source.to_owned(),
             project.path(),
@@ -324,6 +324,7 @@ async fn smoke_updates_the_compiled_revision_and_promotion_is_explicit() {
     assert_eq!(before.len(), 1);
     assert_eq!(before[0].status, HarnessStatus::Compiled);
     let harness_id = before[0].id;
+    assert_eq!(compiled.harness_id, harness_id);
 
     let premature = container
         .harness_promote(project.path(), "parse_entry", EngineKind::LibFuzzer)

@@ -938,6 +938,17 @@ impl ServiceContainer {
         engine: EngineKind,
     ) -> Result<Harness, ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
+        self.active_harness_locked(project, target, engine).await
+    }
+
+    /// Resolve the active harness while the caller retains the workspace
+    /// operation lease for its complete qualification operation.
+    async fn active_harness_locked(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+    ) -> Result<Harness, ClassifiedError> {
         let store = self.store.as_ref().ok_or_else(|| {
             ClassifiedError::Validation(
                 "harness qualification requires the persistent service store".to_owned(),
@@ -1228,6 +1239,8 @@ pub fn provider_pool_from_config() -> Option<Arc<dyn ProviderPool>> {
 /// The result of a harness compile.
 #[derive(Debug, Clone)]
 pub struct CompileOutcome {
+    /// Persisted identity of the compiled harness revision.
+    pub harness_id: Uuid,
     pub status: HarnessStatus,
     pub binary_name: String,
     pub workspace: PathBuf,
