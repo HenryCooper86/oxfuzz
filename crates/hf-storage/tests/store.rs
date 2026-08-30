@@ -943,11 +943,19 @@ async fn harness_work_order_attempts_use_compare_and_set_and_recover_running_row
         .unwrap();
     assert_eq!(
         store
-            .recover_interrupted_harness_work_order_attempts(now + Duration::seconds(6))
+            .list_running_harness_work_order_attempts()
             .await
             .unwrap(),
-        1
+        vec![interrupted.clone()]
     );
+    assert!(store
+        .recover_harness_work_order_attempt(interrupted.id, now + Duration::seconds(6),)
+        .await
+        .unwrap());
+    assert!(!store
+        .recover_harness_work_order_attempt(interrupted.id, now + Duration::seconds(7),)
+        .await
+        .unwrap());
     let recovered = store
         .harness_work_order_attempt(interrupted.id)
         .await

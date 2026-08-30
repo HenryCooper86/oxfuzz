@@ -433,6 +433,14 @@ is immutable and terminal rows reject all updates. Indexes:
 `idx_harness_work_order_attempts_submission(submission_id, started_at DESC,
 id DESC)` and `idx_harness_work_order_attempts_status(status, updated_at DESC)`.
 
+Qualification owns a process-independent OS advisory lease derived from the
+attempt UUID before inserting a `running` row and holds it until the terminal
+transition. Startup recovery lists running rows and non-blockingly tries each
+attempt's lease. It leaves a busy, demonstrably live attempt unchanged and may
+compare-and-set only an attempt whose lease it acquired to `interrupted`.
+Failure to enumerate, acquire, or transition fails work-order recovery closed;
+recovery never applies a blanket status update.
+
 Explicit cleanup deletes attempts before submissions and submissions before
 work orders. Clearing run history does not delete any work-order table.
 

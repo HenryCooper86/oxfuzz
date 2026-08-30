@@ -28,28 +28,57 @@ async fn recover_harness_work_order_attempts(store: Option<&Arc<Store>>) -> bool
     let Some(store) = store else {
         return true;
     };
-    match store
-        .recover_interrupted_harness_work_order_attempts(Utc::now())
-        .await
-    {
-        Ok(affected) => {
-            if affected > 0 {
-                tracing::info!(
-                    affected,
-                    "marked interrupted harness work order qualifications after restart"
-                );
-            }
-            true
-        }
+    let attempts = match store.list_running_harness_work_order_attempts().await {
+        Ok(attempts) => attempts,
         Err(error) => {
             tracing::error!(
                 %error,
                 failure_code = "harness_work_order_recovery_degraded",
-                "harness work order recovery is degraded"
+                "could not enumerate harness work order attempts for recovery"
             );
-            false
+            return false;
         }
+    };
+    let mut affected = 0_u64;
+    for attempt in attempts {
+        let lease = match super::try_acquire_harness_work_order_attempt_lease(attempt.id) {
+            Ok(Some(lease)) => lease,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::error!(
+                    attempt_id = %attempt.id,
+                    %error,
+                    failure_code = "harness_work_order_recovery_degraded",
+                    "could not prove harness work order attempt owner liveness"
+                );
+                return false;
+            }
+        };
+        let recovered = match store
+            .recover_harness_work_order_attempt(attempt.id, Utc::now())
+            .await
+        {
+            Ok(recovered) => recovered,
+            Err(error) => {
+                tracing::error!(
+                    attempt_id = %attempt.id,
+                    %error,
+                    failure_code = "harness_work_order_recovery_degraded",
+                    "could not recover unowned harness work order attempt"
+                );
+                return false;
+            }
+        };
+        drop(lease);
+        affected += u64::from(recovered);
     }
+    if affected > 0 {
+        tracing::info!(
+            affected,
+            "marked unowned harness work order qualifications interrupted"
+        );
+    }
+    true
 }
 
 impl ServiceContainer {
@@ -507,11 +536,16 @@ impl ServiceContainer {
 
 #[cfg(all(test, feature = "harness-work-order"))]
 mod work_order_recovery_tests {
-    use std::path::PathBuf;
-    use std::sync::Arc;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex, OnceLock};
 
     use chrono::Utc;
-    use hf_core::{engine::EngineKind, target::TargetLanguage};
+    use hf_core::{
+        engine::EngineKind,
+        error::ClassifiedError,
+        runtime::{CommandResult, ImmutableImageReference, ResourceLimits, RuntimeAdapter},
+        target::TargetLanguage,
+    };
     use hf_storage::{
         HarnessWorkOrderAttemptRecord, HarnessWorkOrderAttemptStage, HarnessWorkOrderAttemptStatus,
         HarnessWorkOrderRecord, HarnessWorkOrderSubmissionRecord, Store,
@@ -525,6 +559,109 @@ mod work_order_recovery_tests {
         WorkOrderSubmissionOrigin,
     };
     use crate::HarnessWorkOrderExportRequest;
+
+    const VALID_HARNESS: &str = "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size > 0 && data[0]; }";
+
+    struct PausedCompileRuntime {
+        started: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    }
+
+    impl PausedCompileRuntime {
+        fn new() -> (
+            Self,
+            tokio::sync::oneshot::Receiver<()>,
+            tokio::sync::oneshot::Sender<()>,
+        ) {
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            (
+                Self {
+                    started: Mutex::new(Some(started_tx)),
+                    release: Mutex::new(Some(release_rx)),
+                },
+                started_rx,
+                release_tx,
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeAdapter for PausedCompileRuntime {
+        async fn resolve_image_reference(
+            &self,
+            _image: &str,
+        ) -> Result<Option<ImmutableImageReference>, ClassifiedError> {
+            Ok(Some(hf_test_utils::immutable_test_image()?))
+        }
+
+        async fn run_command(
+            &self,
+            _cmd: &[String],
+            _cwd: &Path,
+            _limits: &ResourceLimits,
+        ) -> Result<CommandResult, ClassifiedError> {
+            self.started
+                .lock()
+                .expect("lock compile-start sender")
+                .take()
+                .expect("compile-start sender exists")
+                .send(())
+                .expect("compile-start observer remains active");
+            let release = self
+                .release
+                .lock()
+                .expect("lock compile-release receiver")
+                .take()
+                .expect("compile-release receiver exists");
+            release
+                .await
+                .expect("compile-release sender remains active");
+            Err(ClassifiedError::Sandbox(
+                "controlled compile failure after recovery check".to_owned(),
+            ))
+        }
+
+        async fn write_file(&self, path: &Path, content: &str) -> Result<(), ClassifiedError> {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| ClassifiedError::Sandbox(error.to_string()))?;
+            }
+            std::fs::write(path, content)
+                .map_err(|error| ClassifiedError::Sandbox(error.to_string()))
+        }
+
+        async fn read_file(&self, path: &Path) -> Result<String, ClassifiedError> {
+            std::fs::read_to_string(path)
+                .map_err(|error| ClassifiedError::Sandbox(error.to_string()))
+        }
+    }
+
+    fn install_recovery_workspace() {
+        static ROOT: OnceLock<PathBuf> = OnceLock::new();
+        let root = ROOT.get_or_init(|| {
+            let parent = std::env::temp_dir().join(format!(
+                "oxfuzz-work-order-recovery-{}-{}",
+                std::process::id(),
+                Uuid::new_v4()
+            ));
+            let root = parent.join("workspace");
+            std::fs::create_dir_all(&root).expect("create recovery workspace");
+            let canonical = std::fs::canonicalize(&root).expect("canonical recovery workspace");
+            std::fs::write(
+                canonical.join(".oxfuzz-workspace.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "application": "oxfuzz",
+                    "version": 1,
+                    "canonical_root": canonical,
+                }))
+                .expect("serialize recovery workspace manifest"),
+            )
+            .expect("write recovery workspace manifest");
+            canonical
+        });
+        std::env::set_var("HF_WORKSPACE_DIR", root);
+    }
 
     async fn running_attempt_fixture(
         store: &Store,
@@ -600,6 +737,174 @@ mod work_order_recovery_tests {
         assert_eq!(
             recovered.current_stage,
             HarnessWorkOrderAttemptStage::Complete
+        );
+    }
+
+    #[tokio::test]
+    async fn second_store_backed_container_does_not_interrupt_a_live_qualification() {
+        let root = tempfile::tempdir().expect("create recovery root");
+        let database = root.path().join("recovery.db");
+        let owner_store = Arc::new(
+            Store::connect(&database)
+                .await
+                .expect("create qualification owner store"),
+        );
+        let recovery_store = Arc::new(
+            Store::connect(&database)
+                .await
+                .expect("create independent recovery store"),
+        );
+        let owner = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None)
+            .with_store(Arc::clone(&owner_store));
+        let recovery = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None)
+            .with_store(Arc::clone(&recovery_store));
+        let (attempt, _) = running_attempt_fixture(
+            owner
+                .store
+                .as_ref()
+                .expect("qualification owner retains its store"),
+        )
+        .await;
+        let live_lease = super::super::acquire_harness_work_order_attempt_lease(attempt.id)
+            .expect("live qualification owns its attempt lease");
+
+        assert!(recover_harness_work_order_attempts(recovery.store.as_ref()).await);
+        let still_running = recovery_store
+            .harness_work_order_attempt(attempt.id)
+            .await
+            .expect("read live attempt through independent store")
+            .expect("live attempt exists");
+        assert_eq!(still_running.status, HarnessWorkOrderAttemptStatus::Running);
+
+        drop(live_lease);
+        assert!(recover_harness_work_order_attempts(recovery.store.as_ref()).await);
+        let recovered = recovery_store
+            .harness_work_order_attempt(attempt.id)
+            .await
+            .expect("read dead-owner attempt through independent store")
+            .expect("dead-owner attempt exists");
+        assert_eq!(recovered.status, HarnessWorkOrderAttemptStatus::Interrupted);
+    }
+
+    #[tokio::test]
+    async fn recovery_skips_an_actual_live_qualification_and_interrupts_a_stale_peer() {
+        let _environment = ServiceContainer::workspace_environment_test_gate()
+            .lock()
+            .await;
+        install_recovery_workspace();
+        let root = tempfile::tempdir().expect("create qualification recovery root");
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).expect("create qualification recovery project");
+        std::fs::write(
+            project.join("parser.c"),
+            "#include <stddef.h>\nint parse_packet(const unsigned char *data, size_t size) { return size > 0 && data[0]; }\n",
+        )
+        .expect("write qualification recovery source");
+        let database = root.path().join("recovery.db");
+        let owner_store = Arc::new(
+            Store::connect(&database)
+                .await
+                .expect("create qualification owner store"),
+        );
+        let recovery_store = Arc::new(
+            Store::connect(&database)
+                .await
+                .expect("create independent recovery store"),
+        );
+        let (runtime, started, release) = PausedCompileRuntime::new();
+        let owner =
+            ServiceContainer::new(Arc::new(runtime), None).with_store(Arc::clone(&owner_store));
+        let recovery = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None)
+            .with_store(Arc::clone(&recovery_store));
+        owner
+            .discover(&project, TargetLanguage::C)
+            .await
+            .expect("retain recovery target");
+        let work_order = owner
+            .export_harness_work_order(HarnessWorkOrderExportRequest {
+                project: project.clone(),
+                target: "parse_packet".to_owned(),
+                language: TargetLanguage::C,
+                engine: EngineKind::LibFuzzer,
+            })
+            .await
+            .expect("export recovery work order");
+        let submission = owner
+            .import_harness_work_order_submission(ImportHarnessWorkOrderSubmissionRequest {
+                work_order_id: work_order.id,
+                source: VALID_HARNESS.to_owned(),
+                origin: WorkOrderSubmissionOrigin::Human,
+                parent_submission_id: None,
+            })
+            .await
+            .expect("import recovery submission");
+        let qualification_owner = owner.clone();
+        let qualification = tokio::spawn(async move {
+            qualification_owner
+                .qualify_harness_work_order_submission(submission.id)
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), started)
+            .await
+            .expect("qualification reaches sandbox compile")
+            .expect("qualification compile-start sender remains active");
+        let live_attempt = owner_store
+            .list_running_harness_work_order_attempts()
+            .await
+            .expect("list live qualification")
+            .into_iter()
+            .next()
+            .expect("actual qualification owns a running attempt");
+        let now = Utc::now();
+        let stale_attempt = HarnessWorkOrderAttemptRecord {
+            id: Uuid::new_v4(),
+            submission_id: live_attempt.submission_id,
+            status: HarnessWorkOrderAttemptStatus::Running,
+            current_stage: HarnessWorkOrderAttemptStage::Compile,
+            harness_id: None,
+            smoke_run_id: None,
+            result_json: None,
+            failure_code: None,
+            failure_message: None,
+            started_at: now,
+            updated_at: now,
+            ended_at: None,
+        };
+        owner_store
+            .insert_harness_work_order_attempt(&stale_attempt)
+            .await
+            .expect("insert stale peer attempt");
+
+        assert!(recover_harness_work_order_attempts(recovery.store.as_ref()).await);
+        assert_eq!(
+            recovery_store
+                .harness_work_order_attempt(live_attempt.id)
+                .await
+                .expect("load actual live attempt")
+                .expect("actual live attempt exists")
+                .status,
+            HarnessWorkOrderAttemptStatus::Running
+        );
+        assert_eq!(
+            recovery_store
+                .harness_work_order_attempt(stale_attempt.id)
+                .await
+                .expect("load stale peer attempt")
+                .expect("stale peer attempt exists")
+                .status,
+            HarnessWorkOrderAttemptStatus::Interrupted
+        );
+
+        release
+            .send(())
+            .expect("actual qualification remains active until release");
+        let completed = qualification
+            .await
+            .expect("join actual qualification")
+            .expect("qualification records controlled compile failure");
+        assert_eq!(
+            completed.status,
+            HarnessWorkOrderAttemptStatus::CompileFailed
         );
     }
 
