@@ -444,7 +444,7 @@ impl IssueTrackerClient {
     /// # Errors
     /// Returns [`ClassifiedError::Validation`] on auth failure (401/403) and
     /// [`ClassifiedError::Provider`] on transport or server errors.
-    pub async fn create_issue(
+    pub(crate) async fn create_issue(
         &self,
         title: &str,
         body: &str,
@@ -475,7 +475,7 @@ impl IssueTrackerClient {
     ///
     /// Never errors: search is an optimization, so any transport/auth/parse
     /// failure yields `None` and the caller proceeds to create.
-    pub async fn find_existing_issue(&self, stack_signature: &str) -> Option<CreatedIssue> {
+    pub(crate) async fn find_existing_issue(&self, stack_signature: &str) -> Option<CreatedIssue> {
         if stack_signature.trim().is_empty() {
             return None;
         }

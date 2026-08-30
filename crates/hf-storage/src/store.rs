@@ -5,7 +5,7 @@ use std::{path::Path, time::Duration};
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 use thiserror::Error;
 use uuid::Uuid;
@@ -247,6 +247,21 @@ pub struct HarnessApprovalRecord {
     pub approved_at: DateTime<Utc>,
 }
 
+/// Durable independent LLM review of one exact harness source revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessAiReviewRecord {
+    /// Exact compiled harness reviewed before execution.
+    pub harness_id: Uuid,
+    /// Lowercase SHA-256 of the complete reviewed source.
+    pub source_sha256: String,
+    /// Lowercase SHA-256 of the compiled binary bound to this review.
+    pub binary_sha256: String,
+    /// Versioned review evidence, including provider response metadata.
+    pub review_json: String,
+    /// Time the accepted review was persisted.
+    pub reviewed_at: DateTime<Utc>,
+}
+
 /// A persisted fuzz-run record.
 #[derive(Debug, Clone)]
 pub struct RunRecord {
@@ -479,6 +494,7 @@ impl Store {
         let opts = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
             .busy_timeout(SQLITE_BUSY_TIMEOUT);
         Self::connect_with(opts).await
     }
@@ -2129,6 +2145,72 @@ impl Store {
         rows.iter().map(|r| json_col(r, "data_json")).collect()
     }
 
+    /// Persist the independent LLM review for one exact harness source.
+    ///
+    /// The first review is immutable through this API. An exact retry succeeds;
+    /// a conflicting review for the same harness id fails loudly.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid digest or JSON object, a conflicting
+    /// existing review, malformed stored evidence, or an SQL failure.
+    pub async fn record_harness_ai_review(
+        &self,
+        review: &HarnessAiReviewRecord,
+    ) -> Result<(), StorageError> {
+        let parsed: serde_json::Value = serde_json::from_str(&review.review_json)?;
+        if !is_sha256(&review.source_sha256)
+            || !is_sha256(&review.binary_sha256)
+            || !parsed.is_object()
+        {
+            return Err(StorageError::InvalidData(
+                "harness AI review requires lowercase source/binary SHA-256 digests and a JSON object"
+                    .to_owned(),
+            ));
+        }
+
+        sqlx::query(
+            "INSERT INTO harness_ai_reviews
+                (harness_id, source_sha256, binary_sha256, review_json, reviewed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(harness_id) DO NOTHING",
+        )
+        .bind(review.harness_id.to_string())
+        .bind(&review.source_sha256)
+        .bind(&review.binary_sha256)
+        .bind(&review.review_json)
+        .bind(review.reviewed_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+
+        let persisted = self.harness_ai_review(review.harness_id).await?;
+        if persisted.as_ref() != Some(review) {
+            return Err(StorageError::InvalidData(format!(
+                "conflicting harness AI review already exists for {}",
+                review.harness_id
+            )));
+        }
+        Ok(())
+    }
+
+    /// Load the independent LLM review for a harness source revision.
+    ///
+    /// # Errors
+    /// Returns an error on SQL failure or malformed stored evidence.
+    pub async fn harness_ai_review(
+        &self,
+        harness_id: Uuid,
+    ) -> Result<Option<HarnessAiReviewRecord>, StorageError> {
+        let row = sqlx::query(
+            "SELECT harness_id, source_sha256, binary_sha256, review_json, reviewed_at
+             FROM harness_ai_reviews WHERE harness_id = ?1",
+        )
+        .bind(harness_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|value| harness_ai_review_from_row(&value))
+            .transpose()
+    }
+
     /// Atomically persist a promoted harness and its digest-bound human approval.
     /// Exact retries return the first approval record.
     ///
@@ -3375,6 +3457,31 @@ fn harness_approval_from_row(
         binary_sha256: row.try_get("binary_sha256")?,
         approval_kind: enum_from(&row.try_get::<String, _>("approval_kind")?)?,
         approved_at: ts(&row.try_get::<String, _>("approved_at")?)?,
+    })
+}
+
+fn harness_ai_review_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<HarnessAiReviewRecord, StorageError> {
+    let harness_id = Uuid::parse_str(&row.try_get::<String, _>("harness_id")?)
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    let source_sha256: String = row.try_get("source_sha256")?;
+    let binary_sha256: String = row.try_get("binary_sha256")?;
+    let review_json: String = row.try_get("review_json")?;
+    if !is_sha256(&source_sha256)
+        || !is_sha256(&binary_sha256)
+        || !serde_json::from_str::<serde_json::Value>(&review_json)?.is_object()
+    {
+        return Err(StorageError::InvalidData(
+            "stored harness AI review has invalid digest or JSON evidence".to_owned(),
+        ));
+    }
+    Ok(HarnessAiReviewRecord {
+        harness_id,
+        source_sha256,
+        binary_sha256,
+        review_json,
+        reviewed_at: ts(&row.try_get::<String, _>("reviewed_at")?)?,
     })
 }
 

@@ -20,6 +20,13 @@ crash **stack signature** (`unique_id_from_tool`), so re-found crashes update in
 place and crashes that no longer reproduce are closed -- instead of the
 engagement filling with duplicates on every fuzzing iteration.
 
+Publishing findings is a high-risk `PublishFindings` guardrail action.
+`hf-service` authorizes it before loading credentials or issuing any import or
+reimport request. The lower-level REST client does not expose its mutating
+method outside the service crate. Scheduled closeout may request publication,
+but without an approval-capable gate it records the failure and leaves local
+evidence intact.
+
 ## Lifecycle of a local instance
 
 Shipping no server is not the same as pretending none is running. The desktop app
@@ -56,6 +63,18 @@ no-op once the project is running) and is invoked best-effort, skippable
 (`HF_SKIP_DEFECTDOJO=1`), from the environment-setup entry points
 (`rebuild-sandbox-image.command`, `scripts/build-app.sh`). Fuzzing never depends
 on it.
+
+The provisioner checks out a reviewed DefectDojo release by its exact Git
+commit and verifies `HEAD` before using the compose file. Upgrades require an
+explicit change to that identity (or an operator-supplied 40-character commit),
+and a dirty existing checkout is never replaced. The DefectDojo Django and
+nginx image versions include reviewed registry digests; the upstream database
+and cache images are likewise digest-addressed by the pinned compose revision.
+The generated `.env` is accepted only as a small data file containing the
+admin user, password, and port. It is never evaluated as shell code. Credential
+and token files are owner-only, and the password is sent to the local token API
+over standard input rather than exposed in process arguments or terminal
+output.
 
 ## Layering (AGENTS.md 2.9 -- all logic in hf-service)
 

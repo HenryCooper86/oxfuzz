@@ -79,6 +79,40 @@ impl RecordingRuntime {
             .unwrap_or_else(|| panic!("no recorded command for run {run_id}"))
             .clone()
     }
+
+    fn campaign_count(&self) -> usize {
+        self.commands.lock().unwrap().len()
+    }
+}
+
+fn write_fuzzing_policy(enabled_engines: &[&str], max_duration_secs: u64) {
+    let enabled_engines = enabled_engines
+        .iter()
+        .map(|engine| format!("\"{engine}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let default_engine = enabled_engines
+        .split(',')
+        .next()
+        .expect("at least one enabled engine")
+        .trim();
+    hf_service::config::write_config(
+        "oxfuzz",
+        &format!(
+            r"
+[fuzzing]
+enabled_engines = [{enabled_engines}]
+default_engine = {default_engine}
+default_duration_secs = 30
+
+[fuzzing.sandbox]
+max_mem_mb = 1024
+max_cpus = 1
+max_duration_secs = {max_duration_secs}
+"
+        ),
+    )
+    .expect("write fuzzing policy");
 }
 
 #[async_trait]
@@ -152,9 +186,12 @@ struct HarnessDraftPool;
 impl hf_core::provider::ProviderPool for HarnessDraftPool {
     async fn chat_completion(
         &self,
-        _request: &hf_core::provider::ChatRequest,
+        request: &hf_core::provider::ChatRequest,
         _route: &hf_core::provider::RouteRequest,
     ) -> Result<hf_core::provider::ChatResponse, hf_core::provider::ProviderError> {
+        if hf_test_utils::is_harness_review_request(request) {
+            return Ok(hf_test_utils::approving_harness_review_response());
+        }
         Ok(hf_test_utils::fixtures::make_chat_response(HARNESS_REPLY))
     }
     async fn chat_completion_stream(
@@ -188,6 +225,8 @@ impl hf_core::provider::ProviderPool for HarnessDraftPool {
 async fn run_records_a_seed_and_replay_reexecutes_with_it() {
     common::install_managed_workspace("oxfuzz_run_replay_it");
     let dir = tempfile::tempdir().unwrap();
+    std::env::set_var("HF_CONFIG_DIR", dir.path().join("config"));
+    write_fuzzing_policy(&["libfuzzer", "honggfuzz"], 120);
     let project = dir.path().join("replay_project");
     std::fs::create_dir_all(&project).unwrap();
     std::fs::write(project.join("parser.c"), FIXTURE).unwrap();
@@ -309,6 +348,26 @@ async fn run_records_a_seed_and_replay_reexecutes_with_it() {
         "an absent recorded seed must derive deterministically from the original run id"
     );
     assert_eq!(legacy_replayed_config.replay_of, Some(legacy.id));
+
+    // Replay is a new execution. It preserves reproducibility inputs only
+    // after the current operator policy admits the recorded engine and
+    // duration, and a rejection must not reach the sandbox runtime.
+    let campaign_count = runtime.campaign_count();
+    write_fuzzing_policy(&["honggfuzz"], 120);
+    let disabled = container.replay_run(summary.run_id, &|_| {}).await;
+    assert!(
+        matches!(&disabled, Err(ClassifiedError::Validation(message)) if message.contains("libfuzzer") && message.contains("disabled")),
+        "a replay must not bypass a newly disabled engine: {disabled:?}"
+    );
+    assert_eq!(runtime.campaign_count(), campaign_count);
+
+    write_fuzzing_policy(&["libfuzzer"], 30);
+    let over_ceiling = container.replay_run(summary.run_id, &|_| {}).await;
+    assert!(
+        matches!(&over_ceiling, Err(ClassifiedError::Validation(message)) if message.contains("60s") && message.contains("30s")),
+        "a replay must not bypass a newly lowered duration ceiling: {over_ceiling:?}"
+    );
+    assert_eq!(runtime.campaign_count(), campaign_count);
 
     // Replaying an unknown run is a validation error, not a panic.
     let unknown = container.replay_run(Uuid::new_v4(), &|_| {}).await;

@@ -31,6 +31,12 @@ is kept for attribution/display only, never for authentication.
   provider-correct new-issue URL in the browser. Filing is always a user-initiated
   button press (an outward action).
 
+The API filing operation is a high-risk `PublishFindings` guardrail action and
+is authorized in `hf-service` before configuration, credentials, dedup queries,
+or create requests reach the provider. Lower-level REST clients do not expose a
+public create method, so presentation or same-process callers cannot bypass the
+service decision point.
+
 ## Config -- `config/issue_tracker.toml` (+ `.example`)
 
 | key | meaning |

@@ -37,12 +37,15 @@ _TOP_LEVEL_KEYS = frozenset(
         "allow_dangerous_services",
         "limits",
         "approval",
+        "sidecar_image_sha256",
     }
 )
 _LIMIT_KEYS = frozenset(
     {"max_events", "max_payload_bytes", "max_duration_ms", "max_rate_per_second"}
 )
-_APPROVAL_KEYS = frozenset({"approval_id", "approved_by", "approved_at", "scope_sha256"})
+_APPROVAL_KEYS = frozenset(
+    {"approval_id", "approved_by", "approved_at", "scope_sha256", "sidecar_image_sha256"}
+)
 _MODE_CAPS = {
     "offline_pcap": {
         "max_events": 100_000,
@@ -164,11 +167,20 @@ def _validate_approval(config: Mapping[str, Any]) -> dict[str, str]:
         raise validation_error(
             "scope_sha256 must be a lowercase SHA-256 digest", field="approval.scope_sha256"
         )
+    sidecar_image_sha256 = _string(
+        approval["sidecar_image_sha256"], "approval.sidecar_image_sha256"
+    )
+    if not _SHA256.fullmatch(sidecar_image_sha256):
+        raise validation_error(
+            "sidecar_image_sha256 must be a lowercase SHA-256 digest",
+            field="approval.sidecar_image_sha256",
+        )
     return {
         "approval_id": _string(approval["approval_id"], "approval.approval_id"),
         "approved_by": _string(approval["approved_by"], "approval.approved_by"),
         "approved_at": approved_at,
         "scope_sha256": scope_sha256,
+        "sidecar_image_sha256": sidecar_image_sha256,
     }
 
 
@@ -184,6 +196,15 @@ def validate_operation_config(config_value: Any) -> dict[str, Any]:
         raise validation_error("unsupported automotive protocol", field="protocol")
     physical_enabled = _boolean(config.get("physical_enabled", False), "physical_enabled")
     limits = _validate_limits(config.get("limits"), mode)
+    sidecar_image_sha256_value = config.get("sidecar_image_sha256")
+    sidecar_image_sha256: str | None = None
+    if sidecar_image_sha256_value is not None:
+        sidecar_image_sha256 = _string(sidecar_image_sha256_value, "sidecar_image_sha256")
+        if not _SHA256.fullmatch(sidecar_image_sha256):
+            raise validation_error(
+                "sidecar_image_sha256 must be a lowercase SHA-256 digest",
+                field="sidecar_image_sha256",
+            )
 
     result: dict[str, Any] = {
         "mode": mode,
@@ -280,5 +301,18 @@ def validate_operation_config(config_value: Any) -> dict[str, Any]:
             "physical bench mode is disabled unless physical_enabled is true",
             field="physical_enabled",
         )
-    result["approval"] = _validate_approval(config)
+    if sidecar_image_sha256 is None:
+        raise validation_error(
+            "physical bench mode requires an immutable sidecar image identity",
+            field="sidecar_image_sha256",
+        )
+    approval = _validate_approval(config)
+    if approval["sidecar_image_sha256"] != sidecar_image_sha256:
+        raise SidecarError(
+            "approval_scope_mismatch",
+            "approval image identity does not match the runtime image identity",
+            field="approval.sidecar_image_sha256",
+        )
+    result["sidecar_image_sha256"] = sidecar_image_sha256
+    result["approval"] = approval
     return result

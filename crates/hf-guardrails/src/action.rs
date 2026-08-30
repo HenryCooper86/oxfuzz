@@ -30,6 +30,13 @@ pub enum Action {
         /// Requested wall-clock duration in seconds.
         duration_secs: u64,
     },
+    /// Build and execute a target under bounded concolic instrumentation.
+    RunConcolic {
+        /// Target symbol shown to the approver.
+        target: String,
+        /// Total operation wall-clock budget in seconds.
+        duration_secs: u64,
+    },
     /// Apply and verify an approved remediation inside the sandbox.
     VerifyRemediation {
         /// The fuzzing engine used for the bounded follow-up campaign.
@@ -45,6 +52,11 @@ pub enum Action {
     },
     /// Publish a change comparison to an external tracker outside the workspace.
     PublishChangeComparison {
+        /// Stable destination identifier, such as `issue-tracker`.
+        destination: String,
+    },
+    /// Publish triaged findings to an external system.
+    PublishFindings {
         /// Stable destination identifier, such as `issue-tracker`.
         destination: String,
     },
@@ -68,6 +80,8 @@ pub enum Action {
         protocol: String,
         /// Maximum session duration in seconds.
         duration_secs: u64,
+        /// Immutable sidecar image content digest shown to the approver.
+        sidecar_image_sha256: String,
     },
     /// Parse untrusted crash artifacts produced by a fuzzer.
     Triage,
@@ -107,9 +121,11 @@ impl Action {
             Action::CompileHarness => "compile_harness",
             Action::RunHarness => "run_harness",
             Action::RunFuzzer { .. } => "run_fuzzer",
+            Action::RunConcolic { .. } => "run_concolic",
             Action::VerifyRemediation { .. } => "verify_remediation",
             Action::RunProjectBuild { .. } => "run_project_build",
             Action::PublishChangeComparison { .. } => "publish_change_comparison",
+            Action::PublishFindings { .. } => "publish_findings",
             Action::AutomotiveOffline { .. } => "automotive_offline",
             Action::AutomotiveVirtualCan { .. } => "automotive_virtual_can",
             Action::AutomotivePhysicalBench { .. } => "automotive_physical_bench",
@@ -135,6 +151,10 @@ impl Action {
                 engine,
                 duration_secs,
             } => format!("run {engine} for {duration_secs}s"),
+            Action::RunConcolic {
+                target,
+                duration_secs,
+            } => format!("run concolic enrichment for {target} for {duration_secs}s"),
             Action::VerifyRemediation {
                 engine,
                 duration_secs,
@@ -144,6 +164,9 @@ impl Action {
             }
             Action::PublishChangeComparison { destination } => {
                 format!("publish change comparison to {destination}")
+            }
+            Action::PublishFindings { destination } => {
+                format!("publish findings to {destination}")
             }
             Action::AutomotiveOffline { operation } => {
                 format!("automotive offline {operation}")
@@ -156,8 +179,9 @@ impl Action {
                 interface,
                 protocol,
                 duration_secs,
+                sidecar_image_sha256,
             } => format!(
-                "automotive physical CAN interface {interface} using {protocol} for {duration_secs}s"
+                "automotive physical CAN interface {interface} using {protocol} for {duration_secs}s with image sha256:{sidecar_image_sha256}"
             ),
             Action::Triage => "triage crash artifacts".to_owned(),
             Action::CorpusOp => "corpus operation".to_owned(),
@@ -182,9 +206,11 @@ impl Action {
             | Action::AgentTool { .. } => RiskTier::Medium,
             Action::RunHarness
             | Action::RunFuzzer { .. }
+            | Action::RunConcolic { .. }
             | Action::VerifyRemediation { .. }
             | Action::RunProjectBuild { .. }
             | Action::PublishChangeComparison { .. }
+            | Action::PublishFindings { .. }
             | Action::AutomotiveVirtualCan { .. }
             | Action::AutomotivePhysicalBench { .. }
             | Action::WriteHostFile { .. } => RiskTier::High,

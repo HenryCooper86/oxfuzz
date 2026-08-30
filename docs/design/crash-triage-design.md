@@ -116,6 +116,10 @@ finding's fix-verification determination.
   sandbox replay may produce a stack signature or a "fixed" regression result.
 - Triage uses one bounded deadline across CASR, replay, and report drafting;
   forced CASR termination does not fan out into a longer fallback pass.
+- Raw crash artifacts are interpreted by CASR or replayed only inside the
+  sandbox. The host decodes only CASR's normalized JSON reports and accepts
+  regular, non-symlink files through a deterministic walk capped by depth,
+  report count, per-report bytes, and aggregate bytes.
 - Bug reports never auto-publish; HITL gate mandatory.
 
 ## 6. Tests

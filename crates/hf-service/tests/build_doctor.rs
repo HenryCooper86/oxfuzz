@@ -154,9 +154,12 @@ fn a_rust_project_needs_no_compile_database() {
 #[test]
 fn a_project_that_already_ships_a_database_is_ready_and_gets_no_plan() {
     let dir = project(&["CMakeLists.txt"]);
+    let root = dir.path().to_string_lossy();
     std::fs::write(
         dir.path().join("compile_commands.json"),
-        br#"[{"directory":"/p","file":"/p/a.c","arguments":["clang","-I/p/include","-c","/p/a.c"]}]"#,
+        format!(
+            r#"[{{"directory":"{root}","file":"{root}/a.c","arguments":["clang","-I{root}/include","-c","{root}/a.c"]}}]"#
+        ),
     )
     .unwrap();
     let found = detect_build_systems(dir.path());
@@ -165,4 +168,37 @@ fn a_project_that_already_ships_a_database_is_ready_and_gets_no_plan() {
         found[0].plan.is_none(),
         "a project that already has usable build context needs no plan"
     );
+}
+
+#[test]
+fn malformed_or_empty_compile_database_is_not_reported_as_ready() {
+    for contents in ["{not json", "[]"] {
+        let dir = project(&["CMakeLists.txt"]);
+        std::fs::write(dir.path().join("compile_commands.json"), contents).unwrap();
+
+        let found = detect_build_systems(dir.path());
+
+        assert_eq!(found[0].status, BuildSystemStatus::Supported);
+        assert!(found[0].plan.is_some());
+    }
+}
+
+#[test]
+fn validated_build_doctor_database_is_reported_as_ready() {
+    let dir = project(&["CMakeLists.txt"]);
+    let owned = dir.path().join(".oxfuzz-build");
+    std::fs::create_dir(&owned).unwrap();
+    let root = dir.path().to_string_lossy();
+    std::fs::write(
+        owned.join("compile_commands.json"),
+        format!(
+            r#"[{{"directory":"{root}","file":"{root}/a.c","arguments":["clang","-I{root}/include","-c","{root}/a.c"]}}]"#
+        ),
+    )
+    .unwrap();
+
+    let found = detect_build_systems(dir.path());
+
+    assert_eq!(found[0].status, BuildSystemStatus::Ready);
+    assert!(found[0].plan.is_none());
 }

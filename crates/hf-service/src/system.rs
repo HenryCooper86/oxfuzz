@@ -67,7 +67,7 @@ impl SystemStatus {
 /// Compute the current system status by probing Docker, the sandbox image, and
 /// the configured `DefectDojo`.
 pub async fn system_status() -> SystemStatus {
-    let docker = hf_runtime::docker_daemon_ready();
+    let docker = crate::container::docker_runtime_enabled() && hf_runtime::docker_daemon_ready();
     let sandbox_image = docker && hf_runtime::sandbox_image_present();
     let engines = if sandbox_image {
         hf_runtime::sandbox_engine_probe()
@@ -96,6 +96,7 @@ pub async fn system_status() -> SystemStatus {
 #[cfg(test)]
 mod tests {
     use super::{StatusFlag, SystemStatus};
+    use crate::container::docker_runtime_enabled_from;
 
     fn status(docker: bool, image: bool, libfuzzer: bool) -> SystemStatus {
         SystemStatus {
@@ -115,5 +116,14 @@ mod tests {
         assert!(!status(false, true, true).fuzzing_ready());
         assert!(!status(true, false, true).fuzzing_ready());
         assert!(!status(true, true, false).fuzzing_ready());
+    }
+
+    #[test]
+    fn runtime_and_readiness_share_the_docker_enablement_decision() {
+        assert!(docker_runtime_enabled_from(None));
+        assert!(docker_runtime_enabled_from(Some("1")));
+        assert!(docker_runtime_enabled_from(Some("true")));
+        assert!(!docker_runtime_enabled_from(Some("0")));
+        assert!(!docker_runtime_enabled_from(Some("false")));
     }
 }

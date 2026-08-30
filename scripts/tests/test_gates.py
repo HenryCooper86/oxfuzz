@@ -67,6 +67,19 @@ class GateDispatcherTests(unittest.TestCase):
             result = self.run_gates(["test"], stub_dir)
         self.assertNotEqual(result.returncode, 0)
 
+    def test_dependency_policy_gate_denies_warning_level_findings(self) -> None:
+        """Dependency advisories must not pass merely because they are warnings."""
+        with tempfile.TemporaryDirectory() as directory:
+            stub_dir = pathlib.Path(directory)
+            self.make_stub(
+                stub_dir,
+                "cargo-deny",
+                'if [ "$*" = "check -D warnings" ]; then exit 0; fi\n'
+                'echo "cargo-deny warnings were not denied" >&2\nexit 64',
+            )
+            result = self.run_gates(["deny"], stub_dir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_unknown_gate_name_is_rejected_with_the_valid_list(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             stub_dir = pathlib.Path(directory)
@@ -93,25 +106,27 @@ class GateDispatcherTests(unittest.TestCase):
             recorded = log.read_text(encoding="utf-8").splitlines()
         self.assertEqual(result.returncode, 0, result.stderr)
         # One assertion per gate in ALL_GATES, in order. check-no-default-features
-        # invokes `cargo check --workspace --no-default-features`, which the
-        # cargo stub also records as "cargo check" (it only sees $1), so it
-        # shows up as a second consecutive "cargo check" entry. script-tests and
+        # invokes Clippy for the feature-absent build, so it shows up as a second
+        # Clippy entry. The feature-matrix gate then invokes Clippy once per
+        # product feature. script-tests and
         # translation-pairing both invoke python3, so they show up as two
-        # consecutive "python3" entries. frontend-test runs npm three times
+        # consecutive "python3" entries. frontend-test runs npm four times
         # (ci, test, run build); only the first call is asserted here since it
         # alone identifies that the gate ran in the right position, and
         # frontend-lint's single call follows it.
         self.assertEqual(recorded[0], "cargo fmt")
         self.assertEqual(recorded[1], "cargo clippy")
         self.assertEqual(recorded[2], "cargo check")
-        self.assertEqual(recorded[3], "cargo check")
-        self.assertEqual(recorded[4], "cargo test")
-        self.assertEqual(recorded[5], "cargo doc")
-        self.assertEqual(recorded[6], "cargo-deny")
-        self.assertEqual(recorded[7], "python3")
-        self.assertEqual(recorded[8], "python3")
-        self.assertEqual(recorded[9], "npm --prefix crates/hf-gui ci")
-        self.assertEqual(recorded[12], "npm --prefix crates/hf-gui run lint")
+        self.assertEqual(recorded[3], "cargo clippy")
+        self.assertEqual(recorded[4], "cargo clippy")
+        self.assertEqual(recorded[22], "cargo clippy")
+        self.assertEqual(recorded[23], "cargo test")
+        self.assertEqual(recorded[24], "cargo doc")
+        self.assertEqual(recorded[25], "cargo-deny")
+        self.assertEqual(recorded[26], "python3")
+        self.assertEqual(recorded[27], "python3")
+        self.assertEqual(recorded[28], "npm --prefix crates/hf-gui ci")
+        self.assertEqual(recorded[32], "npm --prefix crates/hf-gui run lint")
 
     def test_named_subset_runs_only_those_gates(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -124,6 +139,81 @@ class GateDispatcherTests(unittest.TestCase):
             recorded = log.read_text(encoding="utf-8").splitlines()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(recorded, ["cargo fmt", "cargo check"])
+
+    def test_no_default_feature_gate_lints_every_target_with_warnings_denied(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            stub_dir = pathlib.Path(directory)
+            log = stub_dir / "invocations.log"
+            self.make_stub(
+                stub_dir, "cargo", f'echo "$*" >> "{log}"\nexit 0'
+            )
+            result = self.run_gates(["check-no-default-features"], stub_dir)
+            recorded = log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            recorded,
+            ["clippy --workspace --all-targets --no-default-features -- -D warnings"],
+        )
+
+    def test_feature_matrix_gate_lints_every_product_feature_independently(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            stub_dir = pathlib.Path(directory)
+            log = stub_dir / "invocations.log"
+            self.make_stub(
+                stub_dir, "cargo", f'echo "$*" >> "{log}"\nexit 0'
+            )
+            result = self.run_gates(["check-feature-matrix"], stub_dir)
+            recorded = log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        features = [
+            "automotive-lab",
+            "automotive-scapy",
+            "campaign-health",
+            "build-context",
+            "concolic-enrichment",
+            "build-doctor",
+            "campaign-trust",
+            "change-aware",
+            "coverage-blockers",
+            "harness-tournament",
+            "harness-work-order",
+            "native-analysis",
+            "oracle-studio",
+            "patch-to-proof",
+            "proof-carrying",
+            "run-closeout",
+            "semgrep-enrichment",
+            "triage-disposition",
+            "unreached-surface",
+        ]
+        self.assertEqual(
+            recorded,
+            [
+                "clippy --workspace --all-targets --no-default-features "
+                f"--features hf-cli/{feature} -- -D warnings"
+                for feature in features
+            ],
+        )
+
+    def test_frontend_gate_rejects_advisories_before_running_tests(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            stub_dir = pathlib.Path(directory)
+            log = stub_dir / "invocations.log"
+            self.make_stub(
+                stub_dir, "npm", f'echo "$*" >> "{log}"\nexit 0'
+            )
+            result = self.run_gates(["frontend-test"], stub_dir)
+            recorded = log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            recorded,
+            [
+                "--prefix crates/hf-gui ci",
+                "--prefix crates/hf-gui audit --audit-level=moderate",
+                "--prefix crates/hf-gui test",
+                "--prefix crates/hf-gui run build",
+            ],
+        )
 
 
 if __name__ == "__main__":

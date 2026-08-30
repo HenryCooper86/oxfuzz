@@ -70,8 +70,9 @@ for the full walkthrough.
 
 oxfuzz adopts a local DefectDojo rather than bundling one. `scripts/setup-defectdojo.sh`
 (double-click `setup-defectdojo.command`) installs it for you: it clones
-DefectDojo's upstream compose project, pulls the released images, starts the
-stack on `http://localhost:8080`, and writes `config/defectdojo.toml`. The
+the reviewed DefectDojo release commit, pulls digest-pinned released images,
+starts the stack on `http://localhost:8080`, and writes an owner-only
+`config/defectdojo.toml`. The
 environment-setup entry points (`rebuild-sandbox-image.command`,
 `scripts/build-app.sh`) run it best-effort and idempotently; set
 `HF_SKIP_DEFECTDOJO=1` to skip. Fuzzing never depends on it.

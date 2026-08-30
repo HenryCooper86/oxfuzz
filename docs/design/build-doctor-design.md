@@ -54,7 +54,10 @@ subdirectory belongs to a component, not to the project under test.
 Each detected build system carries one status:
 
 - **`ready`** -- the project already ships a compile database that resolves to
-  usable build context. No plan is needed and none is emitted.
+  usable, allowlisted build context through the same parser used by harness
+  compilation, including an approved `.oxfuzz-build` database. File existence,
+  malformed JSON, or an empty context is not reported as ready. No plan is
+  needed and none is emitted.
 - **`supported`** -- oxfuzz can produce a compile database for this build system
   with tools present in the pinned sandbox image. A plan is emitted.
 - **`unsupported_in_image`** -- the build system was detected, but the tool that
@@ -88,14 +91,21 @@ cmake -S . -B .oxfuzz-build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 producing `.oxfuzz-build/compile_commands.json`. It is a configure step only: it
 generates the database without compiling the project.
 
-The plan runs in the project directory, and `.oxfuzz-build/` is created there.
-This is a visible side effect on the operator's own source tree, and it is part
-of what the approval covers. The directory name is oxfuzz-owned and distinct
-from any `build/` the project maintains, so a plan run never overwrites the
-operator's build tree. Running in the project (rather than a workspace copy) is
-required, not incidental: `BuildContext` include directories must resolve inside
-the project root, so a database generated against a copy would be rejected by
-the existing allowlist.
+The reviewed plan describes paths relative to the project, but execution never
+mounts that operator-controlled path directly. After approval, the service
+copies a bounded regular-file snapshot into a unique Build Doctor directory
+below the managed workspace, excluding version control and known build-output
+trees and rejecting symbolic links or special files. The sandbox runs only in
+that snapshot and writes `.oxfuzz-build/` there.
+
+On success, the service reads the bounded JSON compile database from the
+snapshot, rewrites only the staged `/work` and snapshot-root path prefixes to
+the canonical project root, and atomically installs the normalized database at
+the operator-visible `.oxfuzz-build/compile_commands.json`. The existing build
+context parser then validates it against the real project allowlist. No other
+untrusted build output leaves the managed workspace. This preserves usable
+include paths without asking `hf-runtime` to mount a project outside its
+approved root.
 
 The plan is returned by diagnosis and rendered in full before anything runs.
 Producing a plan executes nothing.
@@ -110,6 +120,11 @@ is therefore:
 - executed step by step through `hf-runtime` with the pinned image, under the
   same resource limits and no network access as any other sandbox command; and
 - never executed on the host.
+
+The operation holds the shared workspace lease from snapshot creation through
+artifact validation and removes its unique staging directory on exit. Snapshot
+limits are 20,000 files, 64 MiB per file, and 512 MiB total; exceeding one fails
+before execution.
 
 A step that exits non-zero stops the run; later steps are not attempted, and the
 failing step's index, exit code, and captured output are retained.
@@ -155,4 +170,9 @@ intended artifact appeared.
 - A non-zero step stops the run and retains its index, exit code, and output.
 - All steps exiting zero with no resulting database reports `artifact_missing`.
 - No plan step runs on the host, and no step is composed through a shell.
+- A project outside the managed workspace is copied into a bounded staging
+  directory; the runtime never receives the original project as its working
+  directory or mount source.
+- Only a parsed and path-normalized compile database is copied back to the
+  project; other sandbox output remains in disposable staging.
 - Feature-disabled builds compile and hide the surface.

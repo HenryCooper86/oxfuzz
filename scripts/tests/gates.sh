@@ -12,7 +12,32 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-ALL_GATES=(fmt clippy check check-no-default-features test doc deny script-tests translation-pairing frontend-test frontend-lint)
+ALL_GATES=(fmt clippy check check-no-default-features check-feature-matrix test doc deny script-tests translation-pairing frontend-test frontend-lint)
+
+# Each product subsystem is independently selectable in hf-cli and forwards to
+# hf-web and hf-service. Checking them one at a time catches undeclared feature
+# coupling that default and all-feature builds both hide.
+PRODUCT_FEATURES=(
+  automotive-lab
+  automotive-scapy
+  campaign-health
+  build-context
+  concolic-enrichment
+  build-doctor
+  campaign-trust
+  change-aware
+  coverage-blockers
+  harness-tournament
+  harness-work-order
+  native-analysis
+  oracle-studio
+  patch-to-proof
+  proof-carrying
+  run-closeout
+  semgrep-enrichment
+  triage-disposition
+  unreached-surface
+)
 
 # Output noise that hides real results in a workspace this size.
 TEST_NOISE='^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$'
@@ -35,10 +60,18 @@ gate_check() {
 }
 
 gate_check_no_default_features() {
-  # Two defects on this branch were visible only here: an import left behind
-  # whose sole remaining user was feature-gated, and an import moved without the
-  # gate its use site needed. Both compiled cleanly with default features on.
-  cargo check --workspace --no-default-features
+  # Feature-absent code and tests must meet the same warning policy as the
+  # default build. A plain check missed dead helpers and feature-specific test
+  # compile failures because it neither denied warnings nor compiled all targets.
+  cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+}
+
+gate_check_feature_matrix() {
+  local feature
+  for feature in "${PRODUCT_FEATURES[@]}"; do
+    cargo clippy --workspace --all-targets --no-default-features \
+      --features "hf-cli/${feature}" -- -D warnings
+  done
 }
 
 gate_test() {
@@ -70,7 +103,10 @@ gate_deny() {
     echo "cargo-deny is required; install it with: cargo install cargo-deny --locked" >&2
     return 1
   fi
-  "${binary}" check
+  # Dependency-policy warnings are actionable findings. Promoting them here
+  # prevents advisory, duplicate-version, and stale-policy notices from being
+  # reported while the gate still exits successfully.
+  "${binary}" check -D warnings
 }
 
 gate_script_tests() {
@@ -90,6 +126,7 @@ gate_translation_pairing() {
 
 gate_frontend_test() {
   npm --prefix crates/hf-gui ci
+  npm --prefix crates/hf-gui audit --audit-level=moderate
   npm --prefix crates/hf-gui test
   npm --prefix crates/hf-gui run build
 }

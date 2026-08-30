@@ -24,7 +24,9 @@ const MAX_REMEDIATION_REGRESSION_CASES: usize = 256;
 pub(crate) struct RemediationDraftParts {
     pub handoff: RemediationHandoff,
     pub reproducer: Vec<u8>,
+    #[cfg(feature = "patch-to-proof")]
     pub project_root: String,
+    #[cfg(feature = "patch-to-proof")]
     pub target: String,
 }
 
@@ -171,7 +173,9 @@ impl ServiceContainer {
         Ok(RemediationDraftParts {
             handoff,
             reproducer,
+            #[cfg(feature = "patch-to-proof")]
             project_root: run.project_root.clone(),
+            #[cfg(feature = "patch-to-proof")]
             target: manifest.body.target.clone(),
         })
     }

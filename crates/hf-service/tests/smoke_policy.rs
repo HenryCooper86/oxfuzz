@@ -100,7 +100,11 @@ async fn smoke_budget_clamps_to_the_operator_ceiling_and_drives_runtime_and_pers
             .unwrap(),
     );
     let runtime = Arc::new(SmokePolicyRuntime::default());
-    let container = ServiceContainer::new(runtime.clone(), None).with_store(Arc::clone(&store));
+    let container = ServiceContainer::new(
+        runtime.clone(),
+        Some(hf_test_utils::approving_harness_review_pool()),
+    )
+    .with_store(Arc::clone(&store));
     container
         .harness_compile(
             "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }".to_owned(),

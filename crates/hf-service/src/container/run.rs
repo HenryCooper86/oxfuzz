@@ -1173,8 +1173,7 @@ impl ServiceContainer {
             .await
     }
 
-    /// Re-execute a recorded run with its exact engine, duration, resource
-    /// limits, and RNG seed.
+    /// Re-execute a recorded run with its engine, duration, and RNG seed.
     ///
     /// The original run's persisted config supplies every reproducibility
     /// input; when it predates recorded seeds, the seed is re-derived from the
@@ -1182,10 +1181,12 @@ impl ServiceContainer {
     /// The replay launches through the normal run path (same authorization,
     /// sandboxing, corpus merge, and WAL journaling), so the replayed run is
     /// persisted as its own new campaign row whose config links back to the
-    /// original via `replay_of` and pins the same `seed`. The corpus and
-    /// promoted harness are intentionally taken from the target's current
-    /// state: replay pins the RNG seed, not the (deliberately evolving)
-    /// shared corpus. The original run's row and journal state are untouched.
+    /// original via `replay_of` and pins the same `seed`. Because replay is a
+    /// new execution, the current operator policy must still admit the engine
+    /// and duration, and its current sandbox resource limits apply. The corpus
+    /// and promoted harness are intentionally taken from the target's current
+    /// state: replay pins the RNG seed, not the (deliberately evolving) shared
+    /// corpus. The original run's row and journal state are untouched.
     ///
     /// # Errors
     /// Returns `ClassifiedError` if the run or its harness/target is unknown,
@@ -1234,16 +1235,13 @@ impl ServiceContainer {
         let seed = config
             .seed
             .unwrap_or_else(|| hf_engine::seed::derive_run_seed(run_id));
-        // Replay the recorded campaign parameters verbatim rather than
-        // re-resolving them against the current operator policy: the point of
-        // a replay is to reproduce the original run, not a policy-clamped one.
-        // Authorization still happens on the normal run path.
-        let resolved = crate::config::ResolvedFuzzingRun {
-            engine: original.engine,
-            duration_secs: config.duration.map_or(3600, |d| d.as_secs()),
-            max_mem_mb: config.max_mem_mb,
-            max_cpus: config.max_cpus,
-        };
+        // Replay preserves the recorded engine and duration only when the
+        // current operator policy still admits them. Current sandbox resource
+        // limits apply because replay starts a new execution.
+        let resolved = resolve_fuzzing_run(
+            original.engine,
+            config.duration.map_or(3600, |duration| duration.as_secs()),
+        )?;
         let journal = Arc::clone(&self.run_journal);
         self.run_fuzzer_with_started(
             project.as_path(),

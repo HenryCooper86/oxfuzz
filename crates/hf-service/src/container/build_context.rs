@@ -32,6 +32,66 @@ const COMPILE_DATABASE_PATHS: [&str; 4] = [
 /// untrusted project.
 const MAX_COMPILE_DATABASE_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Resolve the first configured compile database into validated build context.
+///
+/// # Errors
+/// Returns a validation error when a present database is malformed, unsafe, or
+/// unreadable.
+pub(crate) fn resolve_project_build_context(
+    project: &Path,
+) -> Result<Option<BuildContext>, ClassifiedError> {
+    let Some(path) = COMPILE_DATABASE_PATHS
+        .iter()
+        .map(|relative| project.join(relative))
+        .find(|candidate| std::fs::symlink_metadata(candidate).is_ok())
+    else {
+        return Ok(None);
+    };
+
+    let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+        ClassifiedError::Validation(format!(
+            "inspect compile database {}: {error}",
+            path.display()
+        ))
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(ClassifiedError::Validation(format!(
+            "compile database is not a regular file: {}",
+            path.display()
+        )));
+    }
+    if metadata.len() > MAX_COMPILE_DATABASE_BYTES {
+        return Err(ClassifiedError::Validation(format!(
+            "compile database {} exceeds {MAX_COMPILE_DATABASE_BYTES} bytes",
+            path.display()
+        )));
+    }
+
+    let json = std::fs::read_to_string(&path).map_err(|error| {
+        ClassifiedError::Validation(format!("read compile database {}: {error}", path.display()))
+    })?;
+    let entries = hf_discovery::build_context::parse_compile_database(&json)
+        .map_err(|error| ClassifiedError::Validation(error.to_string()))?;
+    let context = hf_discovery::build_context::extract_build_context(&entries, project);
+
+    if !context.dropped.is_empty() {
+        tracing::info!(
+            database = %path.display(),
+            dropped = ?context.dropped,
+            "compile database flags outside the allowlist were not replayed"
+        );
+    }
+    if context.is_empty() {
+        tracing::debug!(
+            database = %path.display(),
+            entries = context.entry_count,
+            "compile database carried nothing usable for a harness build"
+        );
+        return Ok(None);
+    }
+    Ok(Some(context))
+}
+
 impl ServiceContainer {
     /// Resolve the project's compile database, if it ships one, into validated
     /// compile context.
@@ -52,58 +112,6 @@ impl ServiceContainer {
         &self,
         project: &Path,
     ) -> Result<Option<BuildContext>, ClassifiedError> {
-        let Some(path) = COMPILE_DATABASE_PATHS
-            .iter()
-            .map(|relative| project.join(relative))
-            .find(|candidate| std::fs::symlink_metadata(candidate).is_ok())
-        else {
-            return Ok(None);
-        };
-
-        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
-            ClassifiedError::Validation(format!(
-                "inspect compile database {}: {error}",
-                path.display()
-            ))
-        })?;
-        if !metadata.file_type().is_file() {
-            return Err(ClassifiedError::Validation(format!(
-                "compile database is not a regular file: {}",
-                path.display()
-            )));
-        }
-        if metadata.len() > MAX_COMPILE_DATABASE_BYTES {
-            return Err(ClassifiedError::Validation(format!(
-                "compile database {} exceeds {MAX_COMPILE_DATABASE_BYTES} bytes",
-                path.display()
-            )));
-        }
-
-        let json = std::fs::read_to_string(&path).map_err(|error| {
-            ClassifiedError::Validation(format!(
-                "read compile database {}: {error}",
-                path.display()
-            ))
-        })?;
-        let entries = hf_discovery::build_context::parse_compile_database(&json)
-            .map_err(|error| ClassifiedError::Validation(error.to_string()))?;
-        let context = hf_discovery::build_context::extract_build_context(&entries, project);
-
-        if !context.dropped.is_empty() {
-            tracing::info!(
-                database = %path.display(),
-                dropped = ?context.dropped,
-                "compile database flags outside the allowlist were not replayed"
-            );
-        }
-        if context.is_empty() {
-            tracing::debug!(
-                database = %path.display(),
-                entries = context.entry_count,
-                "compile database carried nothing usable for a harness build"
-            );
-            return Ok(None);
-        }
-        Ok(Some(context))
+        resolve_project_build_context(project)
     }
 }

@@ -11,6 +11,10 @@ in `crates/hf-storage/migrations/`. Connections wait up to 30 seconds for a
 transient SQLite writer to finish before returning `SQLITE_BUSY`; the bound
 prevents concurrent storage operations from failing under short-lived write
 contention while still surfacing a persistently locked database.
+Every file-backed store explicitly selects SQLite write-ahead logging before
+the pool is opened. WAL is therefore an enforced recoverability and concurrent
+reader setting rather than an assumption about a database previously opened by
+another process.
 
 The migrations are the schema source of truth. Applied migration files are
 immutable because `sqlx` records their checksums. Schema changes therefore use
@@ -103,7 +107,7 @@ most one physical transmission even within its freshness window.
 | column | SQLite declaration | notes |
 | --- | --- | --- |
 | `approval_id` | `TEXT PRIMARY KEY` | operator-issued approval id (single-use) |
-| `scope_sha256` | `TEXT NOT NULL` | plan/budget scope hash the approval covered |
+| `scope_sha256` | `TEXT NOT NULL` | plan, budget, allowlist, and immutable sidecar-image scope hash the approval covered |
 | `operation_id` | `TEXT NOT NULL` | automotive operation UUID that claimed it |
 | `project_root` | `TEXT NOT NULL` | project the operation ran under (retention) |
 | `consumed_at` | `TEXT NOT NULL` | RFC 3339 claim timestamp |
@@ -267,6 +271,26 @@ finishes and therefore serves as the durable retry marker.
 
 Index: `idx_harnesses_target(target_id)`. `target_id` is a logical reference;
 the migration does not declare a SQL foreign key.
+
+### `harness_ai_reviews`
+
+Durable evidence from the mandatory independent review performed before an
+exact generated harness source revision may execute. The normalized provider
+response contains the response id, model, routed provider id, stop reason,
+usage, and strict structured opinion. Negative valid decisions remain
+auditable; missing, malformed, incomplete, or oversized responses are not
+accepted as review evidence and execution fails closed.
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `harness_id` | `TEXT PRIMARY KEY` | exact compiled harness revision |
+| `source_sha256` | `TEXT NOT NULL` | lowercase digest of the complete reviewed source |
+| `binary_sha256` | `TEXT NOT NULL` | lowercase digest of the compiled executable bound before review |
+| `review_json` | `TEXT NOT NULL` | versioned review decision and normalized provider response; must be valid JSON |
+| `reviewed_at` | `TEXT NOT NULL` | RFC 3339 review time |
+
+The primary key prevents a later review from replacing evidence for the same
+harness id. Recompilation creates a new harness id and requires a new review.
 
 ### `harness_approvals`
 
@@ -748,6 +772,7 @@ Index: `idx_guardrail_decisions_ts(decided_at DESC)`.
 | `0025_schedule_retirement_operations.sql` | adds canonical lowercase RFC 4122 v4, shape-checked immutable operation proofs and exact normalized permanent-ID tombstones committed with linked schedule-history retirement; hardens retired archive and history insert/update immutability |
 | `0026_patch_to_proof.sql` | creates durable remediation attempts with immutable review scope, compare-and-set lifecycle states, and terminal sandbox evidence |
 | `0027_run_closeout.sql` | records per-run closeout step outcomes so an interrupted chain resumes rather than repeating terminal work |
+| `0028_harness_ai_reviews.sql` | creates source-digest-bound independent pre-execution harness review evidence |
 
 ## 7. Read failure contract
 

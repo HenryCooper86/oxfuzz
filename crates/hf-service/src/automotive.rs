@@ -12,7 +12,8 @@ use hf_automotive::{
 };
 use hf_core::error::ClassifiedError;
 use hf_core::runtime::{
-    ResourceLimits, SandboxCapability, SandboxMount, SandboxNetworkMode, SandboxOptions,
+    ImmutableImageReference, ResourceLimits, SandboxCapability, SandboxMount, SandboxNetworkMode,
+    SandboxOptions,
 };
 use hf_guardrails::Action;
 use hf_storage::{
@@ -54,6 +55,8 @@ pub struct AutomotiveApprovalEvidence {
     pub approved_at: DateTime<Utc>,
     /// SHA-256 over the exact command, limits, and physical allowlists.
     pub scope_sha256: String,
+    /// Immutable sidecar image content digest included in the approved scope.
+    pub sidecar_image_sha256: String,
 }
 
 /// High-level service operation. Filesystem paths remain outside the pure
@@ -296,6 +299,7 @@ struct PreparedInput {
 
 struct PreparedOperation {
     project_root: PathBuf,
+    command: AutomotiveCommand,
     domain_request: AutomotiveRequest,
     input: Option<PreparedInput>,
     mode: AutomotiveMode,
@@ -730,7 +734,7 @@ impl ServiceContainer {
         settings: AutomotiveSettings,
         workspace: &Path,
     ) -> Result<AutomotiveOperationOutcome, ClassifiedError> {
-        let prepared = preflight(request, &settings)?;
+        let mut prepared = preflight(request, &settings)?;
         let store = self.store().cloned().ok_or_else(|| {
             ClassifiedError::Storage(
                 "automotive operations require durable evidence storage".to_owned(),
@@ -747,8 +751,21 @@ impl ServiceContainer {
         {
             return Err(missing_sidecar_image_error(&settings.sidecar_image));
         }
+        let sidecar_image = self
+            .runtime_adapter()
+            .resolve_image_reference(&settings.sidecar_image)
+            .await?
+            .ok_or_else(|| missing_sidecar_image_error(&settings.sidecar_image))?;
+        validate_resolved_image_approval(&prepared, &settings, sidecar_image.sha256())?;
+        prepared.execution_config = build_execution_config(
+            &prepared.command,
+            prepared.approval.as_ref(),
+            &settings,
+            &operation_limits(&settings)?,
+            sidecar_image.sha256(),
+        )?;
         self.authorize_recorded(
-            action_for(&prepared, &settings),
+            action_for(&prepared, &settings, sidecar_image.sha256()),
             "automotive_operation",
             Some(&prepared.project_root),
         )
@@ -777,13 +794,20 @@ impl ServiceContainer {
                         .to_owned(),
                 )
             })?;
+            let claimed_at = Utc::now();
+            validate_resolved_image_approval_at(
+                &prepared,
+                &settings,
+                sidecar_image.sha256(),
+                claimed_at,
+            )?;
             let claimed = store
                 .consume_automotive_approval(
                     &approval.approval_id,
                     &approval.scope_sha256,
                     operation_id,
                     &prepared.project_root.display().to_string(),
-                    Utc::now(),
+                    claimed_at,
                 )
                 .await?;
             if !claimed {
@@ -849,7 +873,14 @@ impl ServiceContainer {
         store.insert_automotive_operation(&record).await?;
 
         let limits = runtime_limits(&settings, &prepared);
-        let options = sandbox_options(&settings, &prepared, &input_dir, &output_dir, encoded);
+        let options = sandbox_options(
+            &settings,
+            &prepared,
+            &sidecar_image,
+            &input_dir,
+            &output_dir,
+            encoded,
+        );
         let command = vec![
             "python3".to_owned(),
             "-m".to_owned(),
@@ -1919,21 +1950,16 @@ fn preflight(
     domain_request
         .validate()
         .map_err(|error| ClassifiedError::Validation(error.to_string()))?;
-    let execution_config = build_execution_config(
-        &request.command,
-        request.approval.as_ref(),
-        settings,
-        &limits,
-    )?;
     Ok(PreparedOperation {
         project_root,
+        command: request.command,
         domain_request,
         input,
         mode,
         protocol,
         operation_name,
         approval: request.approval,
-        execution_config,
+        execution_config: None,
     })
 }
 
@@ -2071,6 +2097,7 @@ fn runtime_limits(settings: &AutomotiveSettings, prepared: &PreparedOperation) -
 fn sandbox_options(
     settings: &AutomotiveSettings,
     prepared: &PreparedOperation,
+    sidecar_image: &ImmutableImageReference,
     input_dir: &Path,
     output_dir: &Path,
     stdin: Vec<u8>,
@@ -2090,7 +2117,7 @@ fn sandbox_options(
             SandboxMount::read_only(input_dir.to_path_buf(), SIDECAR_INPUT_ROOT),
             SandboxMount::writable(output_dir.to_path_buf(), SIDECAR_OUTPUT_ROOT),
         ],
-        image: Some(settings.sidecar_image.clone()),
+        image: Some(sidecar_image.reference().to_owned()),
         network_mode,
         workdir: Some("/work".to_owned()),
         relax_hardening: false,
@@ -2277,7 +2304,11 @@ async fn retain_failure<T>(
     }
 }
 
-fn action_for(prepared: &PreparedOperation, settings: &AutomotiveSettings) -> Action {
+fn action_for(
+    prepared: &PreparedOperation,
+    settings: &AutomotiveSettings,
+    sidecar_image_sha256: &str,
+) -> Action {
     match prepared.mode {
         AutomotiveMode::OfflinePcap => Action::AutomotiveOffline {
             operation: prepared.operation_name.to_owned(),
@@ -2298,6 +2329,7 @@ fn action_for(prepared: &PreparedOperation, settings: &AutomotiveSettings) -> Ac
                 interface,
                 protocol: prepared.protocol.map_or("unknown", protocol_id).to_owned(),
                 duration_secs: settings.limits.max_duration_secs,
+                sidecar_image_sha256: sidecar_image_sha256.to_owned(),
             }
         }
     }
@@ -2374,6 +2406,7 @@ fn validate_replay_policy(
             approval,
             &settings.physical_bench,
             limits,
+            None,
         ),
     }
 }
@@ -2469,6 +2502,36 @@ fn validate_physical_policy(
     approval: Option<&AutomotiveApprovalEvidence>,
     policy: &AutomotivePhysicalBenchSettings,
     limits: &OperationLimits,
+    sidecar_image_sha256: Option<&str>,
+) -> Result<(), ClassifiedError> {
+    validate_physical_policy_at(
+        interface,
+        approval_id,
+        plan,
+        approval,
+        policy,
+        limits,
+        PhysicalApprovalContext {
+            sidecar_image_sha256,
+            now: Utc::now(),
+        },
+    )
+}
+
+#[derive(Clone, Copy)]
+struct PhysicalApprovalContext<'a> {
+    sidecar_image_sha256: Option<&'a str>,
+    now: DateTime<Utc>,
+}
+
+fn validate_physical_policy_at(
+    interface: &str,
+    approval_id: &str,
+    plan: &ReplayPlan,
+    approval: Option<&AutomotiveApprovalEvidence>,
+    policy: &AutomotivePhysicalBenchSettings,
+    limits: &OperationLimits,
+    context: PhysicalApprovalContext<'_>,
 ) -> Result<(), ClassifiedError> {
     if !policy.enabled || !policy.interfaces.iter().any(|allowed| allowed == interface) {
         return Err(ClassifiedError::Validation(
@@ -2512,7 +2575,27 @@ fn validate_physical_policy(
             "physical automotive bench approval evidence is invalid".to_owned(),
         ));
     }
-    let now = Utc::now();
+    validate_approval_freshness_at(approval, context.now)?;
+    if let Some(sidecar_image_sha256) = context.sidecar_image_sha256 {
+        if approval.sidecar_image_sha256 != sidecar_image_sha256 {
+            return Err(ClassifiedError::Validation(
+                "physical automotive bench approval image identity does not match".to_owned(),
+            ));
+        }
+        let expected = approval_scope_hash(interface, plan, policy, limits, sidecar_image_sha256)?;
+        if approval.scope_sha256 != expected {
+            return Err(ClassifiedError::Validation(
+                "physical automotive bench approval scope does not match".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_approval_freshness_at(
+    approval: &AutomotiveApprovalEvidence,
+    now: DateTime<Utc>,
+) -> Result<(), ClassifiedError> {
     if approval.approved_at > now + Duration::minutes(1)
         || now.signed_duration_since(approval.approved_at) > APPROVAL_MAX_AGE
     {
@@ -2520,11 +2603,43 @@ fn validate_physical_policy(
             "physical automotive bench approval has expired".to_owned(),
         ));
     }
-    let expected = approval_scope_hash(interface, plan, policy, limits)?;
-    if approval.scope_sha256 != expected {
-        return Err(ClassifiedError::Validation(
-            "physical automotive bench approval scope does not match".to_owned(),
-        ));
+    Ok(())
+}
+
+fn validate_resolved_image_approval(
+    prepared: &PreparedOperation,
+    settings: &AutomotiveSettings,
+    sidecar_image_sha256: &str,
+) -> Result<(), ClassifiedError> {
+    validate_resolved_image_approval_at(prepared, settings, sidecar_image_sha256, Utc::now())
+}
+
+fn validate_resolved_image_approval_at(
+    prepared: &PreparedOperation,
+    settings: &AutomotiveSettings,
+    sidecar_image_sha256: &str,
+    now: DateTime<Utc>,
+) -> Result<(), ClassifiedError> {
+    if let AutomotiveCommand::ExecuteReplay {
+        mode: ModeConfig::PhysicalBench {
+            interface,
+            approval_id,
+        },
+        plan,
+    } = &prepared.command
+    {
+        validate_physical_policy_at(
+            interface,
+            approval_id,
+            plan,
+            prepared.approval.as_ref(),
+            &settings.physical_bench,
+            &operation_limits(settings)?,
+            PhysicalApprovalContext {
+                sidecar_image_sha256: Some(sidecar_image_sha256),
+                now,
+            },
+        )?;
     }
     Ok(())
 }
@@ -2598,6 +2713,7 @@ fn build_execution_config(
     approval: Option<&AutomotiveApprovalEvidence>,
     settings: &AutomotiveSettings,
     limits: &OperationLimits,
+    sidecar_image_sha256: &str,
 ) -> Result<Option<String>, ClassifiedError> {
     let (mode, protocol, plan): (&ModeConfig, AutomotiveProtocol, Option<&ReplayPlan>) =
         match command {
@@ -2674,6 +2790,7 @@ fn build_execution_config(
         "service_allowlist": service_allowlist,
         "allow_dangerous_services": settings.physical_bench.allow_dangerous_services,
         "limits": limits,
+        "sidecar_image_sha256": sidecar_image_sha256,
     });
     if let Some(interface) = interface {
         value["interface"] = serde_json::Value::String(interface);
@@ -2693,6 +2810,7 @@ fn approval_scope_hash(
     plan: &ReplayPlan,
     policy: &AutomotivePhysicalBenchSettings,
     limits: &OperationLimits,
+    sidecar_image_sha256: &str,
 ) -> Result<String, ClassifiedError> {
     let mut arbitration_ids = policy.arbitration_ids.clone();
     arbitration_ids.sort_unstable();
@@ -2707,6 +2825,7 @@ fn approval_scope_hash(
         "arbitration_ids": arbitration_ids,
         "uds_services": uds_services,
         "allow_dangerous_services": policy.allow_dangerous_services,
+        "sidecar_image_sha256": sidecar_image_sha256,
     }))
     .map_err(|error| {
         ClassifiedError::Internal(format!("serialize automotive approval scope: {error}"))
@@ -2781,8 +2900,8 @@ mod tests {
         ProviderStatus, RouteRequest,
     };
     use hf_core::runtime::{
-        CommandResult, CommandTermination, ResourceLimits, RuntimeAdapter, SandboxCapability,
-        SandboxNetworkMode, SandboxOptions,
+        CommandResult, CommandTermination, ImmutableImageReference, ResourceLimits, RuntimeAdapter,
+        SandboxCapability, SandboxNetworkMode, SandboxOptions,
     };
     use hf_core::types::{ProviderId, TokenUsage};
     use hf_storage::Store;
@@ -2790,13 +2909,38 @@ mod tests {
 
     use super::{
         approval_scope_hash, build_execution_config, operation_limits, sha256_bytes,
-        validate_physical_policy, verify_result_artifacts, wire_uds_service,
-        AutomotiveApprovalEvidence, AutomotiveCommand, AutomotiveOperationRequest,
-        AutomotiveStateArtifactSource, AutomotiveStatePromotionRequest, REQUEST_EVIDENCE_FILE,
+        validate_approval_freshness_at, validate_physical_policy, verify_result_artifacts,
+        wire_uds_service, AutomotiveApprovalEvidence, AutomotiveCommand,
+        AutomotiveOperationRequest, AutomotiveStateArtifactSource, AutomotiveStatePromotionRequest,
+        APPROVAL_MAX_AGE, REQUEST_EVIDENCE_FILE,
     };
     use crate::automotive_report::AutomotiveReportAiStatus;
     use crate::config::AutomotiveSettings;
     use crate::ServiceContainer;
+
+    const IMMUTABLE_SIDECAR_SHA256: &str =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const IMMUTABLE_SIDECAR_IMAGE: &str =
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    #[test]
+    fn physical_approval_freshness_is_checked_again_at_claim_time() {
+        let first_check = Utc::now();
+        let approval = AutomotiveApprovalEvidence {
+            approval_id: "approval-near-expiry".to_owned(),
+            approved_by: "operator".to_owned(),
+            approved_at: first_check - APPROVAL_MAX_AGE + chrono::Duration::seconds(1),
+            scope_sha256: "a".repeat(64),
+            sidecar_image_sha256: IMMUTABLE_SIDECAR_SHA256.to_owned(),
+        };
+
+        validate_approval_freshness_at(&approval, first_check)
+            .expect("approval is initially fresh");
+        let error =
+            validate_approval_freshness_at(&approval, first_check + chrono::Duration::seconds(2))
+                .expect_err("approval must expire while waiting for final authorization");
+        assert!(error.to_string().contains("expired"), "{error}");
+    }
 
     #[derive(Default)]
     struct RecordingRuntime {
@@ -2933,6 +3077,16 @@ mod tests {
     impl RuntimeAdapter for RecordingRuntime {
         async fn image_present(&self, _image: &str) -> bool {
             !self.image_missing
+        }
+
+        async fn resolve_image_reference(
+            &self,
+            _image: &str,
+        ) -> Result<Option<ImmutableImageReference>, ClassifiedError> {
+            if self.image_missing {
+                return Ok(None);
+            }
+            ImmutableImageReference::from_sha256_id(IMMUTABLE_SIDECAR_IMAGE).map(Some)
         }
 
         async fn run_command(
@@ -3598,8 +3752,15 @@ mod tests {
                 approval_id: approval_id.clone(),
                 approved_by: "desktop-operator".to_owned(),
                 approved_at: chrono::Utc::now(),
-                scope_sha256: approval_scope_hash("can0", &plan, &settings.physical_bench, &limits)
-                    .unwrap(),
+                scope_sha256: approval_scope_hash(
+                    "can0",
+                    &plan,
+                    &settings.physical_bench,
+                    &limits,
+                    IMMUTABLE_SIDECAR_SHA256,
+                )
+                .unwrap(),
+                sidecar_image_sha256: IMMUTABLE_SIDECAR_SHA256.to_owned(),
             };
             AutomotiveOperationRequest {
                 project_root: project.clone(),
@@ -3717,10 +3878,7 @@ mod tests {
             .contains_key("OXFUZZ_SCAPY_EXECUTION_CONFIG_JSON"));
         assert_eq!(options.network_mode, SandboxNetworkMode::None);
         assert!(options.capabilities.is_empty());
-        assert_eq!(
-            options.image.as_deref(),
-            Some("oxfuzz/scapy-automotive:2.7.0")
-        );
+        assert_eq!(options.image.as_deref(), Some(IMMUTABLE_SIDECAR_IMAGE));
         assert!(options.workspace_read_only);
         let input = String::from_utf8(options.stdin.clone().expect("JSONL stdin")).unwrap();
         assert!(input.ends_with('\n'));
@@ -4081,12 +4239,61 @@ mod tests {
         let plan = uds_replay_plan(AutomotiveMode::PhysicalBench);
         let limits = operation_limits(&settings).unwrap();
         let approval_id = "approval-exact-scope".to_owned();
+        let substituted_image_sha256 = "b".repeat(64);
+        let substituted_approval = AutomotiveApprovalEvidence {
+            approval_id: approval_id.clone(),
+            approved_by: "desktop-operator".to_owned(),
+            approved_at: chrono::Utc::now(),
+            scope_sha256: approval_scope_hash(
+                "can0",
+                &plan,
+                &settings.physical_bench,
+                &limits,
+                &substituted_image_sha256,
+            )
+            .unwrap(),
+            sidecar_image_sha256: substituted_image_sha256,
+        };
+        let mismatch = service
+            .execute_automotive_with_context(
+                AutomotiveOperationRequest {
+                    project_root: project.clone(),
+                    command: AutomotiveCommand::ExecuteReplay {
+                        mode: ModeConfig::PhysicalBench {
+                            interface: "can0".to_owned(),
+                            approval_id: approval_id.clone(),
+                        },
+                        plan: plan.clone(),
+                    },
+                    approval: Some(substituted_approval),
+                },
+                settings.clone(),
+                &workspace,
+            )
+            .await
+            .expect_err("approval for a substituted sidecar image must be rejected");
+        assert!(
+            mismatch.to_string().contains("image identity"),
+            "{mismatch}"
+        );
+        assert!(
+            runtime.calls().is_empty(),
+            "image mismatch must fail before sandbox execution"
+        );
+
         let approval = AutomotiveApprovalEvidence {
             approval_id: approval_id.clone(),
             approved_by: "desktop-operator".to_owned(),
             approved_at: chrono::Utc::now(),
-            scope_sha256: approval_scope_hash("can0", &plan, &settings.physical_bench, &limits)
-                .unwrap(),
+            scope_sha256: approval_scope_hash(
+                "can0",
+                &plan,
+                &settings.physical_bench,
+                &limits,
+                IMMUTABLE_SIDECAR_SHA256,
+            )
+            .unwrap(),
+            sidecar_image_sha256: IMMUTABLE_SIDECAR_SHA256.to_owned(),
         };
         let request = AutomotiveOperationRequest {
             project_root: project,
@@ -4110,6 +4317,7 @@ mod tests {
         let (_, limits, options) = &calls[0];
         assert_eq!(options.network_mode, SandboxNetworkMode::Host);
         assert_eq!(options.capabilities, vec![SandboxCapability::NetRaw]);
+        assert_eq!(options.image.as_deref(), Some(IMMUTABLE_SIDECAR_IMAGE));
         let execution = limits
             .env
             .get("OXFUZZ_SCAPY_EXECUTION_CONFIG_JSON")
@@ -4155,8 +4363,15 @@ mod tests {
                 approval_id: approval_id.clone(),
                 approved_by: "desktop-operator".to_owned(),
                 approved_at: chrono::Utc::now(),
-                scope_sha256: approval_scope_hash("can0", &plan, &settings.physical_bench, &limits)
-                    .unwrap(),
+                scope_sha256: approval_scope_hash(
+                    "can0",
+                    &plan,
+                    &settings.physical_bench,
+                    &limits,
+                    IMMUTABLE_SIDECAR_SHA256,
+                )
+                .unwrap(),
+                sidecar_image_sha256: IMMUTABLE_SIDECAR_SHA256.to_owned(),
             };
             AutomotiveOperationRequest {
                 project_root: project.clone(),
@@ -4236,9 +4451,16 @@ mod tests {
             }],
         };
         let limits = operation_limits(&settings).unwrap();
-        let err =
-            validate_physical_policy("can0", "id", &plan, None, &settings.physical_bench, &limits)
-                .unwrap_err();
+        let err = validate_physical_policy(
+            "can0",
+            "id",
+            &plan,
+            None,
+            &settings.physical_bench,
+            &limits,
+            Some(IMMUTABLE_SIDECAR_SHA256),
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("dangerous"),
             "unexpected error: {err}"
@@ -4265,9 +4487,10 @@ mod tests {
             plan: uds_replay_plan(AutomotiveMode::PhysicalBench), // uses only 0x7e0 / 0x22
         };
         let limits = operation_limits(&settings).unwrap();
-        let cfg_json = build_execution_config(&command, None, &settings, &limits)
-            .unwrap()
-            .unwrap();
+        let cfg_json =
+            build_execution_config(&command, None, &settings, &limits, IMMUTABLE_SIDECAR_SHA256)
+                .unwrap()
+                .unwrap();
         let cfg: serde_json::Value = serde_json::from_str(&cfg_json).unwrap();
         assert_eq!(
             cfg["arbitration_id_allowlist"],
@@ -4494,13 +4717,37 @@ mod tests {
         settings.physical_bench.uds_services = vec![0x3e, 0x22];
         let limits = operation_limits(&settings).unwrap();
         let plan = uds_replay_plan(AutomotiveMode::PhysicalBench);
-        let first = approval_scope_hash("can0", &plan, &settings.physical_bench, &limits).unwrap();
+        let first = approval_scope_hash(
+            "can0",
+            &plan,
+            &settings.physical_bench,
+            &limits,
+            IMMUTABLE_SIDECAR_SHA256,
+        )
+        .unwrap();
         settings.physical_bench.arbitration_ids.reverse();
         settings.physical_bench.uds_services.reverse();
 
-        let second = approval_scope_hash("can0", &plan, &settings.physical_bench, &limits).unwrap();
+        let second = approval_scope_hash(
+            "can0",
+            &plan,
+            &settings.physical_bench,
+            &limits,
+            IMMUTABLE_SIDECAR_SHA256,
+        )
+        .unwrap();
 
         assert_eq!(first, second);
+
+        let substituted_image = approval_scope_hash(
+            "can0",
+            &plan,
+            &settings.physical_bench,
+            &limits,
+            "b".repeat(64).as_str(),
+        )
+        .unwrap();
+        assert_ne!(first, substituted_image);
     }
 
     #[test]
@@ -4542,11 +4789,18 @@ mod tests {
             max_rate_per_second: 20,
         };
 
-        let digest = approval_scope_hash("can0", &plan, &settings.physical_bench, &limits).unwrap();
+        let digest = approval_scope_hash(
+            "can0",
+            &plan,
+            &settings.physical_bench,
+            &limits,
+            IMMUTABLE_SIDECAR_SHA256,
+        )
+        .unwrap();
 
         assert_eq!(
             digest,
-            "660296f1a2b63c7e341b0c23e414cc8c38e712ee0614f1fabc08870562b706fe"
+            "3bdff1e65d5f82ca3d332dd56fbbd322d8a51e89ccb24cbdb10bf2001534c82d"
         );
     }
 

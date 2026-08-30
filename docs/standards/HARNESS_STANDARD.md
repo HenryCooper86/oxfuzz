@@ -13,7 +13,10 @@ A harness is acceptable only if it satisfies all of:
 3. **Deterministic** -- same input -> same behavior (no time-based or RNG
    branches that break reproducibility).
 4. **Compiles** with the selected sanitizer + engine flags in the sandbox.
-5. **Smoke fuzz passes** -- 60s run, no crash on empty input, execs/sec > 0.
+5. **Independent LLM review passes before execution** -- the exact source is
+   judged to exercise the target with fuzzer input and avoid unsafe side effects;
+   missing or malformed review fails closed.
+6. **Smoke fuzz passes** -- 60s run, no crash on empty input, execs/sec > 0.
 
 ## 2. Static Rules
 
@@ -84,6 +87,12 @@ later campaign recompute the active source/executable digests and fail closed
 if either differs from the qualified pair. A crash during smoke is useful
 evidence but is not a clean pass and cannot be promoted. Only an explicit human
 action moves a clean `SmokePassed` revision to `Promoted`.
+
+Before the `RunHarness` human approval and the first smoke instruction, the
+service persists a successful LLM review bound to the exact harness id and
+source and compiled-binary SHA-256 values. The staged binary digest is checked
+again before execution. Recompilation creates a new harness id and digests, so
+it cannot inherit review evidence from the prior revision.
 
 Every full, scheduled, CI, or agent-started `FuzzRun` must resolve the active
 binary/source record and reject it unless its status is `Promoted`. Recompiling

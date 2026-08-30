@@ -1221,6 +1221,15 @@ async fn cmd_discover(
 ) -> anyhow::Result<()> {
     let lang = parse_lang(lang)?;
     let container = ServiceContainer::bootstrap().await;
+    #[cfg(feature = "native-analysis")]
+    let mut inv = {
+        let analyzed = container.discover_analyzed(&project, lang).await?;
+        for line in native_overlay_lines(&analyzed) {
+            eprintln!("{line}");
+        }
+        analyzed.inventory
+    };
+    #[cfg(not(feature = "native-analysis"))]
     let mut inv = container.discover(&project, lang).await?;
     if rank {
         let (ranked, note) = rank_inventory(&container, inv, ai).await?;

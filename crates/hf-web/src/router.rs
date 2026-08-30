@@ -27,6 +27,7 @@ use crate::WebSecurityConfig;
 
 const SSE_CHANNEL_CAPACITY: usize = 256;
 const MAX_SSE_EVENT_BYTES: usize = 64 * 1024;
+const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // AppState
@@ -280,6 +281,7 @@ fn scheduler_recovery_api_error(error: CampaignSchedulerError) -> RecoveryApiErr
 /// A `404` whose body names what was requested, so a probe cannot distinguish
 /// an absent id from one withheld for belonging to another project: the
 /// operation route returns it in both cases.
+#[cfg(feature = "automotive-scapy")]
 fn not_found_error(message: &'static str) -> impl Fn() -> ApiError {
     move || {
         (
@@ -551,6 +553,9 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
             async move { auth_audit(security, req, next).await }
         }))
         .layer(cors)
+        .layer(axum::extract::DefaultBodyLimit::max(
+            MAX_REQUEST_BODY_BYTES,
+        ))
         .with_state(state)
 }
 

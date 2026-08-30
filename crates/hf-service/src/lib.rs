@@ -147,8 +147,8 @@ pub use concolic::{
     content_digest, select_inputs, summarize, ConcolicAvailability, ConcolicOutcome,
     ConcolicStopReason, CONCOLIC_SCHEMA_VERSION,
 };
-#[cfg(feature = "native-analysis")]
 pub use container::AiPolicy;
+#[cfg(feature = "native-analysis")]
 pub use container::AnalyzedInventory;
 pub use container::{
     build_sandbox_image, copy_project_sources, generate_target_seeds, initialize_workspace_root,

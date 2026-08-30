@@ -200,6 +200,42 @@ fn sandbox_rejects_an_unsafe_image_override_before_launch() {
 }
 
 #[test]
+fn physical_host_network_profile_requires_a_direct_immutable_image_id() {
+    use hf_core::runtime::{SandboxCapability, SandboxNetworkMode};
+
+    let temp = tempfile::tempdir().expect("temp root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let runtime = DockerRuntime::new(RuntimeConfig::default(), &workspace);
+    let physical_options = |image: &str| SandboxOptions {
+        image: Some(image.to_owned()),
+        network_mode: SandboxNetworkMode::Host,
+        capabilities: vec![SandboxCapability::NetRaw],
+        ..SandboxOptions::default()
+    };
+
+    for mutable_image in [
+        "oxfuzz/scapy-automotive:2.7.0",
+        "oxfuzz/scapy-automotive@sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    ] {
+        assert!(
+            runtime
+                .validate_sandbox_options(&physical_options(mutable_image))
+                .is_err(),
+            "dangerous physical profile accepted non-local image identity {mutable_image}"
+        );
+    }
+
+    let immutable_image = format!("sha256:{}", "a".repeat(64));
+    assert!(
+        runtime
+            .validate_sandbox_options(&physical_options(&immutable_image))
+            .is_ok(),
+        "resolved local image identity must remain executable"
+    );
+}
+
+#[test]
 fn specialized_profile_rejects_pid_limit_outside_configured_ceiling() {
     let temp = tempfile::tempdir().expect("temp root");
     let workspace = temp.path().join("workspace");

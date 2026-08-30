@@ -43,20 +43,27 @@ pub struct Harness {
    sources are staged preserving their directory layout, so an include
    directory at `<project>/include` resolves at `/work/include` and every
    nested translation unit is handed to the compiler.
-3. **Smoke fuzz** -- request a 60-second run with a tiny seed corpus; before
+3. **LLM safety review** -- before any compiled harness binary executes, a
+   separate model call reviews the exact persisted source for target exercise,
+   fuzz-input use, and unsafe side effects. The structured verdict, model,
+   response id, exact source and compiled-binary digests, and review time are persisted. Missing
+   provider, provider failure, malformed output, a source larger than the review
+   ceiling, or a negative verdict fails closed. A draft/model generation call is
+   not its own independent review.
+4. **Smoke fuzz** -- after the LLM review passes, request a 60-second run with a tiny seed corpus; before
    staging evidence, `hf-service` validates that engine and duration against the
    current fuzzing policy. The resolved duration, memory, and CPU values are one
    immutable `FuzzRunConfig` used unchanged by the engine command, runtime limits,
    persisted run evidence, and smoke summary. Require no immediate crash on
    empty input and at least one exec/sec.
-4. **Iterate** -- on a static-rule error (`docs/standards/HARNESS_STANDARD.md`
+5. **Iterate** -- on a static-rule error (`docs/standards/HARNESS_STANDARD.md`
    section 2), compile failure, or smoke failure, feed diagnostics back to the
    LLM for up to N rounds (default 3). A rule error short-circuits before the
    container starts.
-5. **Review** -- persist the smoke evidence on the exact active harness record;
+6. **Review** -- persist the smoke evidence on the exact active harness record;
    the evidence binds the full source and executable SHA-256 digests to the
    smoke-run id, and a crash-free run leaves it at `SmokePassed`.
-6. **Promote** -- only an explicit human action changes that exact revision to
+7. **Promote** -- only an explicit human action changes that exact revision to
    `Promoted`. Promotion and every full or scheduled fuzz run recompute both
    digests and fail closed for a mismatch or every other state.
 
@@ -71,6 +78,10 @@ fills the template; the template guarantees the engine entry point is present.
   project unless the user opts in.
 - Generated harness source passes the static rules in
   `docs/standards/HARNESS_STANDARD.md` section 2 before any container starts.
+- The exact compiled source passes a separate fail-closed LLM review before the
+  high-risk human approval prompt and smoke execution. Review evidence is
+  durable and bound to both source and compiled-binary digests; a review of an
+  earlier or substituted revision is invalid.
 - A `compile_commands.json` is a file inside the untrusted project whose values
   reach a compiler invocation, so it is validated by an allowlist rather than a
   denylist: include directories must resolve inside the project root, a `-D`

@@ -47,6 +47,26 @@ fn allow_open_dev_mode() {
     }
 }
 
+#[tokio::test]
+async fn oversized_json_request_is_rejected_before_handler_execution() {
+    allow_open_dev_mode();
+    let oversized = serde_json::json!({"message": "x".repeat(1024 * 1024)});
+
+    let response = hf_web::router::build()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/chat/send")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&oversized).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
 struct WebRecoveryFixture {
     recovery: hf_service::test_support::OneTimeRecoveryTestFixture,
     app: axum::Router,
@@ -457,7 +477,7 @@ async fn semgrep_routes_are_absent_without_the_feature() {
             .oneshot(
                 Request::builder()
                     .uri(uri)
-                    .method(method.as_str())
+                    .method(method)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -976,6 +996,7 @@ async fn automotive_replay_route_is_typed_and_rejects_an_incomplete_request() {
 
 /// An approved project root for the state-corpus routes: `approve_project`
 /// needs a real directory, so every fixture hands it one.
+#[cfg(feature = "automotive-scapy")]
 fn automotive_corpus_project() -> (tempfile::TempDir, std::path::PathBuf) {
     let directory = tempfile::tempdir().unwrap();
     let project = directory.path().join("project");

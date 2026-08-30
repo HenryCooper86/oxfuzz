@@ -133,10 +133,14 @@ evidence needed to reproduce the result.
 
 ## 5. Runtime and Service Boundary
 
-The Python adapter runs only as a pinned, operation-scoped sidecar through
-`hf-runtime`. The Rust process will never import or link Scapy. Inputs are
-service-staged, digest-verified, read-only artifacts; outputs are bounded files
-inside a unique workspace. Runtime networking and capabilities are typed:
+The Python adapter runs only as an operation-scoped sidecar through
+`hf-runtime`. Before admission, the service resolves the configured image
+selector to an immutable SHA-256 image ID and passes only that ID to the
+runtime. Physical approval evidence and its scope digest include the same image
+ID, so changing a tag cannot substitute different executable code after an
+operator approves a plan. The Rust process will never import or link Scapy.
+Inputs are service-staged, digest-verified, read-only artifacts; outputs are
+bounded files inside a unique workspace. Runtime networking and capabilities are typed:
 offline analysis uses `SandboxNetworkMode::None` with no added capabilities;
 vcan uses `SandboxNetworkMode::None` plus only `SandboxCapability::NetAdmin`
 and `SandboxCapability::NetRaw`; physical bench uses
@@ -166,7 +170,11 @@ enable the feature, choose an unlisted interface, manufacture approval evidence,
 relax limits, or authorize physical execution. Offline analysis is non-live but
 still sandboxed through the sidecar. Virtual execution is supervised.
 Every physical-bench operation requires a fresh service-verified human approval
-after the exact plan and budgets are known. Approvals are single-use: the
+after the exact plan, budgets, and immutable sidecar image identity are known.
+Because guardrail interaction and workspace leasing may wait, the service
+revalidates the complete scope and freshness at the timestamp used for the
+atomic approval claim; an approval that expires while waiting cannot execute.
+Approvals are single-use: the
 service records each consumed approval id in a durable ledger
 (`automotive_consumed_approvals`) and claims it with an atomic, uniqueness-backed
 insert before any bus access, so one approval authorizes exactly one physical

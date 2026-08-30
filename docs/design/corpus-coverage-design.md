@@ -113,7 +113,11 @@ a run through the normal run path with that exact seed, persisting a new row
 whose config links back via `replay_of`. Seed flags per engine are specified
 in `docs/standards/ENGINE_ADAPTER_STANDARD.md` section 3.1. Replay pins the
 RNG seed, not the corpus: the run still seeds from the canonical root's
-current state, which may have grown since the original run.
+current state, which may have grown since the original run. A replay is a new
+execution, so the recorded engine and duration must still be admitted by the
+current operator policy. The current sandbox resource limits apply to that new
+execution; lowering a limit or disabling an engine cannot be bypassed through
+historical run data.
 
 Coverage-guided minimization is an execution workflow, not a direct corpus
 filesystem operation. The service accepts only the exact promoted libFuzzer

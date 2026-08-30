@@ -460,6 +460,21 @@ pub(super) fn document_staging_dir(project: &Path, import_id: Uuid) -> PathBuf {
         .join(import_id.to_string())
 }
 
+/// Create a unique Build Doctor snapshot directory below the managed runtime
+/// root without following any pre-existing workspace symlink.
+#[cfg(feature = "build-doctor")]
+pub(crate) fn build_doctor_staging_dir(
+    project: &Path,
+    operation_id: Uuid,
+) -> Result<PathBuf, ClassifiedError> {
+    let root = prepare_configured_workspace_root()?;
+    let relative = PathBuf::from(project_slug(project))
+        .join(".service")
+        .join("build-doctor")
+        .join(operation_id.to_string());
+    ensure_workspace_directory(&root, &relative)
+}
+
 /// Workspace-relative output directory owned by one fuzz or smoke run.
 pub(super) fn run_output_relative(run_id: Uuid) -> PathBuf {
     PathBuf::from("runs").join(run_id.to_string()).join("out")
