@@ -668,7 +668,9 @@ mod workspace_lease_tests {
         let (_, gate) = workspace_operation_gate(&workspace_root()).unwrap();
         let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel();
         let writer = tokio::spawn(async move {
-            let _ = waiting_tx.send(());
+            waiting_tx
+                .send(())
+                .expect("cleanup-writer observer remains active");
             let _cleanup = gate.write_owned().await;
         });
         (writer, waiting_rx)
