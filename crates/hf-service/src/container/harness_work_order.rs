@@ -46,8 +46,9 @@ impl ServiceContainer {
         lang: TargetLanguage,
         engine: EngineKind,
     ) -> Result<HarnessWorkOrder, ClassifiedError> {
+        let project_root = super::project_identity::canonical_project_root(project)?;
         super::require_fuzzing_harness_engine(engine, lang)?;
-        let inventory = self.discover(project, lang).await?;
+        let inventory = self.discover(&project_root, lang).await?;
         let candidate = inventory
             .candidates
             .iter()
@@ -57,10 +58,9 @@ impl ServiceContainer {
         // A present-but-broken compile database is a configuration fault the
         // operator must see; an absent one is stated in the packet.
         let build_context = self
-            .resolve_build_context(project)?
+            .resolve_build_context(&project_root)?
             .unwrap_or_else(empty_build_context);
 
-        let project_root = canonical_project_root(project)?;
         let candidate_source = resolve_candidate_source(&project_root, &candidate.location.file)?;
         let source = source_evidence(&project_root, &candidate_source, candidate.location.line)?;
         let relative_source = project_relative_path(&project_root, &candidate_source)?;
@@ -125,19 +125,6 @@ fn empty_build_context() -> BuildContext {
         entry_count: 0,
         dropped: Vec::new(),
     }
-}
-
-/// Resolve a project root to a canonical directory before collecting evidence.
-fn canonical_project_root(project: &Path) -> Result<PathBuf, ClassifiedError> {
-    let project_root = std::fs::canonicalize(project).map_err(|error| {
-        ClassifiedError::Validation(format!("canonicalize project root: {error}"))
-    })?;
-    if !project_root.is_dir() {
-        return Err(ClassifiedError::Validation(
-            "project root is not a directory".to_owned(),
-        ));
-    }
-    Ok(project_root)
 }
 
 /// Resolve a candidate source file and confine it beneath the canonical root.
@@ -288,11 +275,12 @@ fn open_regular_file_beneath(
 
 #[cfg(not(unix))]
 fn open_regular_file_beneath(
-    project_root: &Path,
-    relative_source: &Path,
+    _project_root: &Path,
+    _relative_source: &Path,
 ) -> Result<File, ClassifiedError> {
-    File::open(project_root.join(relative_source))
-        .map_err(|error| ClassifiedError::Validation(format!("open candidate source: {error}")))
+    Err(ClassifiedError::Sandbox(
+        "harness work order source reads require descriptor-relative filesystem access".to_owned(),
+    ))
 }
 
 fn work_order_compile_context(
@@ -397,10 +385,7 @@ mod tests {
         InputSurface, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
     };
 
-    use super::{
-        canonical_project_root, open_regular_file_beneath, resolve_candidate_source,
-        work_order_compile_context,
-    };
+    use super::{open_regular_file_beneath, resolve_candidate_source, work_order_compile_context};
 
     #[test]
     fn compile_context_replaces_rejected_host_paths_with_safe_categories() {
@@ -468,7 +453,8 @@ mod tests {
             accumulated_complexity: 1,
         };
 
-        let project_root = canonical_project_root(project.path()).expect("canonical project root");
+        let project_root = super::super::project_identity::canonical_project_root(project.path())
+            .expect("canonical project root");
         assert!(resolve_candidate_source(&project_root, &candidate.location.file).is_err());
     }
 
@@ -483,5 +469,13 @@ mod tests {
             .expect("create final symlink");
 
         assert!(open_regular_file_beneath(project.path(), Path::new("source.c")).is_err());
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn source_file_handle_fails_closed_without_descriptor_access() {
+        let error = open_regular_file_beneath(Path::new("/project"), Path::new("source.c"))
+            .expect_err("non-Unix source reads must fail closed");
+        assert!(matches!(error, hf_core::error::ClassifiedError::Sandbox(_)));
     }
 }

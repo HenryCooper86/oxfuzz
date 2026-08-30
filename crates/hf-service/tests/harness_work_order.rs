@@ -366,3 +366,56 @@ async fn work_order_export_propagates_a_malformed_compile_database() {
     assert!(matches!(error, ClassifiedError::Validation(_)));
     assert!(error.to_string().contains("compile"), "{error}");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn work_order_export_through_a_symlinked_root_uses_relative_compile_evidence() {
+    let workspace = tempfile::tempdir().expect("create workspace");
+    let project = workspace.path().join("project");
+    let alias = workspace.path().join("project-alias");
+    std::fs::create_dir_all(project.join("include")).expect("create include directory");
+    std::fs::write(
+        project.join("parser.c"),
+        "#include <stddef.h>\nint parse_packet(const unsigned char *data, size_t len) { return len > 0 && data[0]; }\n",
+    )
+    .expect("write source");
+    let compile_database = serde_json::json!([{
+        "directory": project,
+        "file": project.join("parser.c"),
+        "arguments": [
+            "cc",
+            format!("-I{}", project.join("include").display()),
+            "-c",
+            "parser.c",
+        ],
+    }]);
+    std::fs::write(
+        project.join("compile_commands.json"),
+        serde_json::to_vec(&compile_database).expect("serialize compile database"),
+    )
+    .expect("write compile database");
+    std::os::unix::fs::symlink(&project, &alias).expect("create project alias");
+
+    let store = Arc::new(
+        hf_storage::Store::connect(workspace.path().join("work-order.db"))
+            .await
+            .expect("create store"),
+    );
+    let container =
+        ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None).with_store(store);
+
+    let order = container
+        .harness_work_order(
+            &alias,
+            "parse_packet",
+            TargetLanguage::C,
+            EngineKind::LibFuzzer,
+        )
+        .await
+        .expect("export work order through project alias");
+    let packet_json = serde_json::to_string(&order).expect("serialize packet");
+
+    assert_eq!(order.payload.compile_context.include_dirs, vec!["include"]);
+    assert!(!packet_json.contains(&alias.display().to_string()));
+    assert!(!packet_json.contains(&project.display().to_string()));
+}
