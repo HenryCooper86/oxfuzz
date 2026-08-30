@@ -1816,6 +1816,9 @@ impl Store {
         // `automotive_state_corpus` is deleted before `automotive_operations`
         // because it holds a foreign key into it.
         for table in [
+            "harness_work_order_attempts",
+            "harness_work_order_submissions",
+            "harness_work_orders",
             "crashes",
             "corpus_entries",
             "harnesses",
@@ -1850,6 +1853,30 @@ impl Store {
     /// Returns an error on a SQL failure.
     pub async fn delete_project(&self, project_root: &str) -> Result<(), StorageError> {
         let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "DELETE FROM harness_work_order_attempts
+             WHERE submission_id IN (
+                 SELECT s.id FROM harness_work_order_submissions s
+                 JOIN harness_work_orders w ON w.id = s.work_order_id
+                 WHERE w.project_root = ?1
+             )",
+        )
+        .bind(project_root)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "DELETE FROM harness_work_order_submissions
+             WHERE work_order_id IN (
+                 SELECT id FROM harness_work_orders WHERE project_root = ?1
+             )",
+        )
+        .bind(project_root)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM harness_work_orders WHERE project_root = ?1")
+            .bind(project_root)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query(
             "DELETE FROM semgrep_findings
              WHERE scan_id IN (
@@ -2024,6 +2051,31 @@ impl Store {
     /// Returns an error on a SQL failure.
     pub async fn delete_orphans(&self) -> Result<(), StorageError> {
         let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "DELETE FROM harness_work_order_attempts
+             WHERE submission_id NOT IN (
+                 SELECT s.id FROM harness_work_order_submissions s
+                 JOIN harness_work_orders w ON w.id = s.work_order_id
+                 JOIN targets t ON t.id = w.target_id
+             )",
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "DELETE FROM harness_work_order_submissions
+             WHERE work_order_id NOT IN (
+                 SELECT w.id FROM harness_work_orders w
+                 JOIN targets t ON t.id = w.target_id
+             )",
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "DELETE FROM harness_work_orders
+             WHERE target_id NOT IN (SELECT id FROM targets)",
+        )
+        .execute(&mut *tx)
+        .await?;
         for table in ["harnesses", "corpus_entries", "crashes"] {
             sqlx::query(&format!(
                 "DELETE FROM {table} WHERE target_id NOT IN (SELECT id FROM targets)"
