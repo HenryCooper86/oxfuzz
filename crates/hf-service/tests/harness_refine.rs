@@ -122,16 +122,19 @@ async fn harness_refine_recompiles_from_existing_harness() {
     .unwrap();
 
     let container = ServiceContainer::new(Arc::new(OkRuntime), Some(Arc::new(RefinePool)));
-    let outcome = container
-        .harness_refine(
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        container.harness_refine(
             &project,
             target,
             EngineKind::LibFuzzer,
             TargetLanguage::C,
             1,
-        )
-        .await
-        .expect("refine should produce a compiled harness");
+        ),
+    )
+    .await
+    .expect("refinement must not recursively acquire its workspace lease")
+    .expect("refine should produce a compiled harness");
     assert_eq!(outcome.status, hf_core::harness::HarnessStatus::Compiled);
 }
 

@@ -97,13 +97,20 @@ impl ServiceContainer {
             Vec<hf_core::crash::Crash>,
             std::collections::HashMap<PathBuf, String>,
         ) = match self
-            .run_casr_triage(&workspace, &out_dir, &run_binary, engine, run_id, target_id)
+            .run_casr_triage_locked(&workspace, &out_dir, &run_binary, engine, run_id, target_id)
             .await?
         {
             Some(crashes) if !crashes.is_empty() => (crashes, std::collections::HashMap::new()),
             _ => {
-                self.legacy_triage(&out_dir, &workspace, &run_binary, engine, run_id, target_id)
-                    .await?
+                self.legacy_triage_locked(
+                    &out_dir,
+                    &workspace,
+                    &run_binary,
+                    engine,
+                    run_id,
+                    target_id,
+                )
+                .await?
             }
         };
 
@@ -132,7 +139,7 @@ impl ServiceContainer {
         // original crash input. Legacy records without binary digest evidence
         // remain triageable but cannot claim a verified minimized artifact.
         if run.binary_rev.is_some() {
-            self.minimize_triaged_crashes(
+            self.minimize_triaged_crashes_locked(
                 &workspace,
                 run_id,
                 engine,
@@ -214,7 +221,8 @@ impl ServiceContainer {
         Ok(deduped)
     }
 
-    async fn minimize_triaged_crashes(
+    /// Minimize immutable run evidence while the caller owns the workspace lease.
+    async fn minimize_triaged_crashes_locked(
         &self,
         workspace: &Path,
         run_id: Uuid,
@@ -224,10 +232,6 @@ impl ServiceContainer {
         logs: &mut std::collections::HashMap<PathBuf, String>,
     ) {
         use crate::crash_minimization::{prepare, PreparedMinimization, MAX_CRASH_MINIMIZATIONS};
-        let Ok(_workspace_operation) = self.acquire_workspace_operation().await else {
-            tracing::warn!("crash minimization skipped because the workspace is unavailable");
-            return;
-        };
 
         let limits = hf_core::runtime::ResourceLimits {
             max_mem_mb: 2048,
@@ -390,17 +394,6 @@ impl ServiceContainer {
     /// Replay a single crash input through the compiled harness in the sandbox
     /// and return the combined stdout+stderr (the sanitizer trace). A forced
     /// stop or runtime failure is inconclusive and returns `None`.
-    async fn reproduce_crash(
-        &self,
-        workspace: &Path,
-        binary_host: &Path,
-        input_host_path: &Path,
-    ) -> Option<String> {
-        let _workspace_operation = self.acquire_workspace_operation().await.ok()?;
-        self.reproduce_crash_locked(workspace, binary_host, input_host_path)
-            .await
-    }
-
     /// Reproduce one input while the caller owns the necessary workspace lease.
     async fn reproduce_crash_locked(
         &self,
@@ -448,7 +441,8 @@ impl ServiceContainer {
     /// Run CASR over the crash dir in the sandbox, returning one `Crash` per
     /// unique (clustered) report with its severity/analysis. Returns `None` when
     /// CASR is unavailable or produced nothing, so the caller can fall back.
-    async fn run_casr_triage(
+    /// Run CASR while the caller owns the workspace lease.
+    async fn run_casr_triage_locked(
         &self,
         workspace: &Path,
         out_dir: &Path,
@@ -457,7 +451,6 @@ impl ServiceContainer {
         run_id: Uuid,
         target_id: Uuid,
     ) -> Result<Option<Vec<hf_core::crash::Crash>>, ClassifiedError> {
-        let _workspace_operation = self.acquire_workspace_operation().await?;
         if !binary_host.is_file() {
             return Ok(None);
         }
@@ -586,7 +579,8 @@ impl ServiceContainer {
     /// Built-in triage fallback: replay crashes in the sandbox until the set of
     /// distinct stack signatures saturates, classify, and dedup. Returns the
     /// deduped crashes plus captured sanitizer traces for bug-report drafting.
-    async fn legacy_triage(
+    /// Replay immutable run evidence while the caller owns the workspace lease.
+    async fn legacy_triage_locked(
         &self,
         out_dir: &Path,
         workspace: &Path,
@@ -628,7 +622,7 @@ impl ServiceContainer {
                 break;
             }
             let log = self
-                .reproduce_crash(workspace, binary_host, &crash.input_path)
+                .reproduce_crash_locked(workspace, binary_host, &crash.input_path)
                 .await;
             if log.as_deref().is_none_or(|value| value.trim().is_empty()) {
                 since_new_signature += 1;
