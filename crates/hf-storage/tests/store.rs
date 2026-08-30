@@ -539,6 +539,70 @@ async fn harness_work_order_evidence_columns_enforce_json_and_byte_limits() {
         .await
         .is_err());
     }
+
+    for (failure_code, failure_message) in [("X'63'", "NULL"), ("NULL", "X'6d'")] {
+        let statement = format!(
+            "INSERT INTO harness_work_order_attempts
+                (id, submission_id, status, current_stage, harness_id, smoke_run_id,
+                 result_json, failure_code, failure_message, started_at, updated_at, ended_at)
+             VALUES (?1, ?2, 'compile_failed', 'complete', NULL, NULL, NULL,
+                     {failure_code}, {failure_message}, '2026-08-30T00:00:00Z',
+                     '2026-08-30T00:00:00Z', '2026-08-30T00:00:00Z')"
+        );
+        assert!(
+            sqlx::query(&statement)
+                .bind(Uuid::new_v4().to_string())
+                .bind(origin_submission.to_string())
+                .execute(store.pool())
+                .await
+                .is_err(),
+            "nullable failure evidence must reject SQLite BLOB values"
+        );
+    }
+}
+
+#[tokio::test]
+async fn harness_work_order_attempt_reader_rejects_blob_failure_evidence() {
+    let (store, _dir) = temp_store().await;
+    let work_order_id = "9".repeat(64);
+    insert_work_order_with_timestamp(&store, work_order_id.clone(), "2026-08-30T00:00:00Z")
+        .await
+        .unwrap();
+    let submission_id = insert_work_order_submission(
+        &store,
+        &work_order_id,
+        "8".repeat(64),
+        "{}",
+        "[]",
+        "2026-08-30T00:00:00Z",
+    )
+    .await
+    .unwrap();
+    let mut connection = store.pool().acquire().await.unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = ON")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    let attempt_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO harness_work_order_attempts
+            (id, submission_id, status, current_stage, harness_id, smoke_run_id,
+             result_json, failure_code, failure_message, started_at, updated_at, ended_at)
+         VALUES (?1, ?2, 'compile_failed', 'complete', NULL, NULL, NULL, X'63', X'6d',
+                 '2026-08-30T00:00:00Z', '2026-08-30T00:00:00Z',
+                 '2026-08-30T00:00:00Z')",
+    )
+    .bind(attempt_id.to_string())
+    .bind(submission_id.to_string())
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    drop(connection);
+
+    assert!(matches!(
+        store.harness_work_order_attempt(attempt_id).await,
+        Err(StorageError::Db(_))
+    ));
 }
 
 #[test]
