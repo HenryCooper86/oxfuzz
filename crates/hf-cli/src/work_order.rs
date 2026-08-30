@@ -345,7 +345,10 @@ mod tests {
     };
 
     use clap::{CommandFactory as _, Parser as _};
-    use hf_service::ServiceContainer;
+    use hf_service::{
+        work_order_commands, HarnessWorkOrder, ServiceContainer, WorkOrderArg,
+        WorkOrderPlaceholder, WorkOrderStep,
+    };
     use tempfile::tempdir;
     use uuid::Uuid;
 
@@ -447,6 +450,118 @@ mod tests {
                 WorkOrderCommand::Promote { .. } => "promote",
             };
             assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn emitted_validation_commands_round_trip_through_the_real_cli() {
+        let packet: HarnessWorkOrder = serde_json::from_value(serde_json::json!({
+            "schema_version": 2,
+            "id": "a".repeat(64),
+            "payload": {
+                "target": {
+                    "symbol": "ns::parse_packet",
+                    "signature": "int ns::parse_packet(const unsigned char *, size_t)",
+                    "language": "Cpp",
+                    "relative_source": "src/parser.cpp",
+                    "line": 42,
+                    "rationale": "parses an untrusted packet"
+                },
+                "engine": "libfuzzer",
+                "source": {
+                    "excerpt": "int ns::parse_packet() { return 0; }",
+                    "excerpt_truncated": false,
+                    "sha256": "b".repeat(64)
+                },
+                "compile_context": {
+                    "include_dirs": [],
+                    "defines": [],
+                    "std_flag": "-std=c++17",
+                    "extra_flags": [],
+                    "compile_units": 1,
+                    "dropped_flags": []
+                },
+                "compile_context_sha256": "c".repeat(64),
+                "harness_rules": [],
+                "seeds": [],
+                "validation_steps": [
+                    "import",
+                    "qualify",
+                    "rank",
+                    "promote",
+                    {"run_campaign": {"duration_secs": 300}},
+                    "coverage"
+                ]
+            }
+        }))
+        .expect("construct command packet");
+        let submission_id = "0e1c781f-7ff1-4bd3-a4e6-a8faf94067a6";
+        let attempt_id = "bd909496-01df-4be3-8ff9-76ff5386c4a8";
+
+        for command in work_order_commands(&packet) {
+            let step = command.step;
+            let args = command
+                .argv
+                .into_iter()
+                .map(|argument| match argument {
+                    WorkOrderArg::Literal(value) => value,
+                    WorkOrderArg::Placeholder(WorkOrderPlaceholder::Project) => {
+                        "/tmp/project".to_owned()
+                    }
+                    WorkOrderArg::Placeholder(WorkOrderPlaceholder::SourceFile) => {
+                        "/tmp/harness.cpp".to_owned()
+                    }
+                    WorkOrderArg::Placeholder(WorkOrderPlaceholder::SubmissionOrigin) => {
+                        "human".to_owned()
+                    }
+                    WorkOrderArg::Placeholder(WorkOrderPlaceholder::SubmissionId) => {
+                        submission_id.to_owned()
+                    }
+                    WorkOrderArg::Placeholder(WorkOrderPlaceholder::AttemptIds)
+                    | WorkOrderArg::Placeholder(WorkOrderPlaceholder::AttemptId) => {
+                        attempt_id.to_owned()
+                    }
+                })
+                .collect::<Vec<_>>();
+            let cli = Cli::try_parse_from(args).expect("emitted argv parses through the real CLI");
+
+            match (step, cli.command) {
+                (WorkOrderStep::Import, Commands::WorkOrder { command }) => {
+                    assert!(matches!(command, WorkOrderCommand::Import { .. }));
+                }
+                (WorkOrderStep::Qualify, Commands::WorkOrder { command }) => {
+                    assert!(matches!(command, WorkOrderCommand::Qualify { .. }));
+                }
+                (WorkOrderStep::Rank, Commands::WorkOrder { command }) => {
+                    assert!(matches!(command, WorkOrderCommand::Rank { .. }));
+                }
+                (WorkOrderStep::Promote, Commands::WorkOrder { command }) => {
+                    assert!(matches!(command, WorkOrderCommand::Promote { .. }));
+                }
+                (
+                    WorkOrderStep::RunCampaign { duration_secs: 300 },
+                    Commands::Run {
+                        project,
+                        target,
+                        engine,
+                        lang,
+                        duration,
+                        replay,
+                    },
+                ) => {
+                    assert_eq!(project, PathBuf::from("/tmp/project"));
+                    assert_eq!(target.as_deref(), Some("src/parser.cpp::ns::parse_packet"));
+                    assert_eq!(engine.as_deref(), Some("libfuzzer"));
+                    assert_eq!(lang, "cpp");
+                    assert_eq!(duration.as_deref(), Some("300s"));
+                    assert!(replay.is_none());
+                }
+                (WorkOrderStep::Coverage, Commands::Coverage { project, target }) => {
+                    assert_eq!(project, PathBuf::from("/tmp/project"));
+                    assert_eq!(target, "src/parser.cpp::ns::parse_packet");
+                }
+                (step, _) => panic!("unexpected parsed command for {step:?}"),
+            }
         }
     }
 
