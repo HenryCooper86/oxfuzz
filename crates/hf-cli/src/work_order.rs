@@ -1,5 +1,6 @@
 use std::{
     fs::{self, File},
+    future::Future,
     io::Read as _,
     path::{Path, PathBuf},
 };
@@ -140,12 +141,28 @@ impl WorkOrderCommand {
 
 /// Read one bounded, regular, non-symlink UTF-8 submission source file.
 pub fn read_submission_source(path: &Path) -> anyhow::Result<String> {
-    let metadata = fs::symlink_metadata(path).context("cannot inspect submission source")?;
-    let file_type = metadata.file_type();
+    read_submission_source_after_check(path, || {})
+}
+
+fn read_submission_source_after_check(
+    path: &Path,
+    before_open: impl FnOnce(),
+) -> anyhow::Result<String> {
+    let preliminary = fs::symlink_metadata(path).context("cannot inspect submission source")?;
+    let file_type = preliminary.file_type();
     if file_type.is_symlink() {
         anyhow::bail!("submission source must not be a symlink");
     }
     if !file_type.is_file() {
+        anyhow::bail!("submission source must be a regular file");
+    }
+
+    before_open();
+    let file = open_submission_source_without_following_final_link(path)?;
+    let metadata = file
+        .metadata()
+        .context("cannot inspect opened submission source")?;
+    if !metadata.file_type().is_file() {
         anyhow::bail!("submission source must be a regular file");
     }
     if metadata.len() == 0 {
@@ -156,9 +173,7 @@ pub fn read_submission_source(path: &Path) -> anyhow::Result<String> {
     }
 
     let mut source = Vec::with_capacity(metadata.len() as usize);
-    File::open(path)
-        .context("cannot open submission source")?
-        .take(MAX_SUBMISSION_SOURCE_BYTES + 1)
+    file.take(MAX_SUBMISSION_SOURCE_BYTES + 1)
         .read_to_end(&mut source)
         .context("cannot read submission source")?;
     if source.len() as u64 > MAX_SUBMISSION_SOURCE_BYTES {
@@ -170,8 +185,43 @@ pub fn read_submission_source(path: &Path) -> anyhow::Result<String> {
     String::from_utf8(source).map_err(|_| anyhow::anyhow!("submission source must be valid UTF-8"))
 }
 
+#[cfg(unix)]
+fn open_submission_source_without_following_final_link(path: &Path) -> anyhow::Result<File> {
+    use rustix::{
+        fs::{open, Mode, OFlags},
+        io::Errno,
+    };
+
+    let descriptor = open(
+        path,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .map_err(|error| {
+        if error == Errno::LOOP {
+            anyhow::anyhow!("submission source must not be a symlink")
+        } else {
+            anyhow::anyhow!("cannot securely open submission source: {error}")
+        }
+    })?;
+    Ok(File::from(descriptor))
+}
+
+#[cfg(not(unix))]
+fn open_submission_source_without_following_final_link(_path: &Path) -> anyhow::Result<File> {
+    anyhow::bail!("secure no-follow submission source reads are unsupported on this platform")
+}
+
 /// Dispatch one work-order command through `hf-service`.
 pub async fn run(command: WorkOrderCommand) -> anyhow::Result<()> {
+    run_with_bootstrap(command, ServiceContainer::bootstrap).await
+}
+
+async fn run_with_bootstrap<F, Fut>(command: WorkOrderCommand, bootstrap: F) -> anyhow::Result<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = ServiceContainer>,
+{
     match command {
         WorkOrderCommand::Export {
             project,
@@ -182,7 +232,7 @@ pub async fn run(command: WorkOrderCommand) -> anyhow::Result<()> {
         } => {
             let language = parse_lang(&lang)?;
             let engine = parse_engine(&engine)?;
-            let container = ServiceContainer::bootstrap().await;
+            let container = bootstrap().await;
             let work_order = container
                 .export_harness_work_order(HarnessWorkOrderExportRequest {
                     project,
@@ -196,7 +246,7 @@ pub async fn run(command: WorkOrderCommand) -> anyhow::Result<()> {
         }
         command @ WorkOrderCommand::Import { .. } => {
             let request = import_submission_request(command)?;
-            let container = ServiceContainer::bootstrap().await;
+            let container = bootstrap().await;
             let submission = container
                 .import_harness_work_order_submission(request)
                 .await?;
@@ -204,7 +254,7 @@ pub async fn run(command: WorkOrderCommand) -> anyhow::Result<()> {
             print_json(&value)?;
         }
         WorkOrderCommand::List { project } => {
-            let container = ServiceContainer::bootstrap().await;
+            let container = bootstrap().await;
             let work_orders = container
                 .list_harness_work_orders(project.as_deref())
                 .await?;
@@ -212,7 +262,7 @@ pub async fn run(command: WorkOrderCommand) -> anyhow::Result<()> {
             print_json(&value)?;
         }
         WorkOrderCommand::Submissions { work_order } => {
-            let container = ServiceContainer::bootstrap().await;
+            let container = bootstrap().await;
             let submissions = container
                 .list_harness_work_order_submissions(&work_order)
                 .await?;
@@ -220,7 +270,7 @@ pub async fn run(command: WorkOrderCommand) -> anyhow::Result<()> {
             print_json(&value)?;
         }
         WorkOrderCommand::Qualify { submission } => {
-            let container = ServiceContainer::bootstrap().await;
+            let container = bootstrap().await;
             let attempt = container
                 .qualify_harness_work_order_submission(submission)
                 .await?;
@@ -228,13 +278,13 @@ pub async fn run(command: WorkOrderCommand) -> anyhow::Result<()> {
             print_json(&value)?;
         }
         WorkOrderCommand::Rank { attempt } => {
-            let container = ServiceContainer::bootstrap().await;
+            let container = bootstrap().await;
             let ranking = container.rank_harness_work_order_attempts(&attempt).await?;
             let value = serde_json::to_value(ranking)?;
             print_json(&value)?;
         }
         WorkOrderCommand::Promote { attempt } => {
-            let container = ServiceContainer::bootstrap().await;
+            let container = bootstrap().await;
             let harness = container
                 .promote_harness_work_order_attempt(attempt)
                 .await?;
@@ -285,13 +335,23 @@ fn print_json(value: &serde_json::Value) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+    };
 
     use clap::{CommandFactory as _, Parser as _};
+    use hf_service::ServiceContainer;
     use tempfile::tempdir;
+    use uuid::Uuid;
 
     use super::{
-        import_submission_request, read_submission_source, SubmissionOriginArg, WorkOrderCommand,
+        import_submission_request, read_submission_source, read_submission_source_after_check,
+        run_with_bootstrap, SubmissionOriginArg, WorkOrderCommand,
     };
     use crate::{Cli, Commands};
 
@@ -388,6 +448,160 @@ mod tests {
             };
             assert_eq!(actual, expected);
         }
+    }
+
+    #[test]
+    fn parser_preserves_every_approved_work_order_field() {
+        let export = parse_work_order_command([
+            "oxfuzz",
+            "work-order",
+            "export",
+            "/tmp/project",
+            "--target",
+            "parse",
+            "--lang",
+            "c",
+            "--engine",
+            "libfuzzer",
+            "--out",
+            "packet.md",
+        ]);
+        let WorkOrderCommand::Export {
+            project,
+            target,
+            lang,
+            engine,
+            out,
+        } = export
+        else {
+            panic!("expected export command");
+        };
+        assert_eq!(project, PathBuf::from("/tmp/project"));
+        assert_eq!(target, "parse");
+        assert_eq!(lang, "c");
+        assert_eq!(engine, "libfuzzer");
+        assert_eq!(out, Some(PathBuf::from("packet.md")));
+
+        let import = parse_work_order_command([
+            "oxfuzz",
+            "work-order",
+            "import",
+            "--work-order",
+            "order",
+            "--source",
+            "harness.c",
+            "--origin",
+            "external-tool",
+            "--tool",
+            "author",
+            "--model",
+            "model-a",
+            "--response-id",
+            "response-1",
+            "--parent",
+            "0e1c781f-7ff1-4bd3-a4e6-a8faf94067a6",
+        ]);
+        let WorkOrderCommand::Import {
+            work_order,
+            source,
+            origin,
+            tool,
+            model,
+            response_id,
+            parent,
+        } = import
+        else {
+            panic!("expected import command");
+        };
+        assert_eq!(work_order, "order");
+        assert_eq!(source, PathBuf::from("harness.c"));
+        assert!(matches!(origin, SubmissionOriginArg::ExternalTool));
+        assert_eq!(tool.as_deref(), Some("author"));
+        assert_eq!(model.as_deref(), Some("model-a"));
+        assert_eq!(response_id.as_deref(), Some("response-1"));
+        assert_eq!(
+            parent.unwrap(),
+            "0e1c781f-7ff1-4bd3-a4e6-a8faf94067a6"
+                .parse::<Uuid>()
+                .unwrap()
+        );
+
+        let list =
+            parse_work_order_command(["oxfuzz", "work-order", "list", "--project", "/tmp/project"]);
+        let WorkOrderCommand::List { project } = list else {
+            panic!("expected list command");
+        };
+        assert_eq!(project, Some(PathBuf::from("/tmp/project")));
+
+        let submissions = parse_work_order_command([
+            "oxfuzz",
+            "work-order",
+            "submissions",
+            "--work-order",
+            "order",
+        ]);
+        let WorkOrderCommand::Submissions { work_order } = submissions else {
+            panic!("expected submissions command");
+        };
+        assert_eq!(work_order, "order");
+
+        let qualify = parse_work_order_command([
+            "oxfuzz",
+            "work-order",
+            "qualify",
+            "--submission",
+            "0e1c781f-7ff1-4bd3-a4e6-a8faf94067a6",
+        ]);
+        let WorkOrderCommand::Qualify { submission } = qualify else {
+            panic!("expected qualify command");
+        };
+        assert_eq!(
+            submission,
+            "0e1c781f-7ff1-4bd3-a4e6-a8faf94067a6"
+                .parse::<Uuid>()
+                .unwrap()
+        );
+
+        let rank = parse_work_order_command([
+            "oxfuzz",
+            "work-order",
+            "rank",
+            "--attempt",
+            "0e1c781f-7ff1-4bd3-a4e6-a8faf94067a6",
+            "--attempt",
+            "bd909496-01df-4be3-8ff9-76ff5386c4a8",
+        ]);
+        let WorkOrderCommand::Rank { attempt } = rank else {
+            panic!("expected rank command");
+        };
+        assert_eq!(
+            attempt,
+            vec![
+                "0e1c781f-7ff1-4bd3-a4e6-a8faf94067a6"
+                    .parse::<Uuid>()
+                    .unwrap(),
+                "bd909496-01df-4be3-8ff9-76ff5386c4a8"
+                    .parse::<Uuid>()
+                    .unwrap(),
+            ]
+        );
+
+        let promote = parse_work_order_command([
+            "oxfuzz",
+            "work-order",
+            "promote",
+            "--attempt",
+            "bd909496-01df-4be3-8ff9-76ff5386c4a8",
+        ]);
+        let WorkOrderCommand::Promote { attempt } = promote else {
+            panic!("expected promote command");
+        };
+        assert_eq!(
+            attempt,
+            "bd909496-01df-4be3-8ff9-76ff5386c4a8"
+                .parse::<Uuid>()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -500,6 +714,15 @@ mod tests {
     }
 
     #[test]
+    fn accepts_a_submission_source_of_exactly_65536_bytes() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("maximum.c");
+        fs::write(&path, vec![b'a'; 65_536]).unwrap();
+
+        assert_eq!(read_submission_source(&path).unwrap().len(), 65_536);
+    }
+
+    #[test]
     fn rejects_symlink_directory_empty_invalid_utf8_and_oversized_source_files() {
         let directory = tempdir().unwrap();
         let empty = directory.path().join("empty.c");
@@ -564,5 +787,60 @@ mod tests {
 
         let error = import_submission_request(command).expect_err("empty source is rejected");
         assert_eq!(error.to_string(), "submission source must not be empty");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_final_symlink_swapped_after_the_preliminary_check() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("harness.c");
+        let target = directory.path().join("target.c");
+        fs::write(&source, "regular source").unwrap();
+        fs::write(&target, "target bytes must never be returned").unwrap();
+
+        let error = read_submission_source_after_check(&source, || {
+            fs::remove_file(&source).unwrap();
+            symlink(&target, &source).unwrap();
+        })
+        .expect_err("final symlink swap must be rejected");
+        assert_eq!(error.to_string(), "submission source must not be a symlink");
+    }
+
+    #[tokio::test]
+    async fn run_rejects_invalid_import_before_bootstrapping_the_service() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("empty.c");
+        fs::write(&source, []).unwrap();
+        let command = WorkOrderCommand::Import {
+            work_order: "order".to_owned(),
+            source,
+            origin: SubmissionOriginArg::Human,
+            tool: None,
+            model: None,
+            response_id: None,
+            parent: None,
+        };
+        let bootstrap_count = Arc::new(AtomicUsize::new(0));
+        let count_for_bootstrap = Arc::clone(&bootstrap_count);
+
+        let error: anyhow::Error = run_with_bootstrap(command, move || {
+            count_for_bootstrap.fetch_add(1, Ordering::SeqCst);
+            ServiceContainer::bootstrap()
+        })
+        .await
+        .expect_err("invalid import input must fail");
+
+        assert_eq!(error.to_string(), "submission source must not be empty");
+        assert_eq!(bootstrap_count.load(Ordering::SeqCst), 0);
+    }
+
+    fn parse_work_order_command<const N: usize>(args: [&str; N]) -> WorkOrderCommand {
+        let cli = Cli::try_parse_from(args).expect("work-order command parses");
+        let Commands::WorkOrder { command } = cli.command else {
+            panic!("expected work-order command");
+        };
+        command
     }
 }
