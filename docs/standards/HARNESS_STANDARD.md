@@ -80,6 +80,13 @@ Templates live in `config/prompts/harness_<lang>_<engine>.md`. They contain:
 
 ## 6. Promotion Gate
 
+A Harness Work Order import creates an immutable draft and records its
+deterministic lint findings without executing it. Any blocking lint finding
+prevents qualification before sandbox work. Qualification binds the independent
+review and smoke evidence to the exact harness id and complete source and
+executable digests; it never promotes. Only an explicit promotion request for
+that exact attempt can activate the revision.
+
 A harness moves to `SmokePassed` only after its smoke evidence is persisted on
 the exact active revision. That evidence records the full SHA-256 digest of the
 staged source and executable plus the owning smoke-run id. Promotion and every
@@ -87,6 +94,13 @@ later campaign recompute the active source/executable digests and fail closed
 if either differs from the qualified pair. A crash during smoke is useful
 evidence but is not a clean pass and cannot be promoted. Only an explicit human
 action moves a clean `SmokePassed` revision to `Promoted`.
+
+Work-order ranking retains the smoke verdict order `Pass`, `Suspect`, `Fail`,
+then absent. A crash-bearing `Fail` is not a clean smoke result and is ineligible
+for exact promotion. A crash-free `Suspect` remains technically eligible only
+when the operator explicitly requests promotion of that exact attempt. The
+advisory recommendation is to refine the harness and smoke the new revision
+before promotion; ranking never promotes its winner implicitly.
 
 Before the `RunHarness` human approval and the first smoke instruction, the
 service persists a successful LLM review bound to the exact harness id and

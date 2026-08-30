@@ -57,7 +57,7 @@ all under human-in-the-loop supervision.
 | Unreached surface | hf-service + hf-discovery | never-covered candidates and attempt history | unreached-surface-design.md |
 | Campaign health | hf-service | typed health conditions with dedup keys | campaign-health-design.md |
 | Run closeout | hf-service | durable, resumable post-run step chain | run-closeout-design.md |
-| Harness work order | hf-service | provider-free harness authoring packet | harness-work-order-design.md |
+| Harness work order | hf-service | durable export, import, and qualification | harness-work-order-design.md |
 | Concolic enrichment | hf-service + hf-runtime | solver-produced corpus inputs, bounded | concolic-enrichment-design.md |
 
 ## 4. Crate Dependency Rules
