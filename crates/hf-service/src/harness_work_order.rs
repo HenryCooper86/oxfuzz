@@ -559,75 +559,137 @@ fn sanitize_diagnostic_token(token: &str, redact_next: &mut bool) -> String {
         *redact_next = false;
         return "<redacted>".to_owned();
     }
-    for (index, suffix) in diagnostic_marker_suffixes(token) {
-        let normalized = normalized_diagnostic_token(suffix);
-        if normalized.eq_ignore_ascii_case("bearer") {
-            *redact_next = true;
-            return format!("{}Bearer", &token[..index]);
+
+    let significant_end = token
+        .trim_end_matches(|character: char| character.is_ascii_punctuation())
+        .len();
+    let normalized = token[..significant_end]
+        .trim_start_matches(|character: char| character.is_ascii_punctuation());
+    if normalized.eq_ignore_ascii_case("bearer") {
+        *redact_next = true;
+        return "Bearer".to_owned();
+    }
+    if secret_key(normalized) {
+        *redact_next = true;
+        return token.to_owned();
+    }
+    if secret_value_starts(normalized) {
+        return "<redacted>".to_owned();
+    }
+
+    let mut at_word_start = true;
+    for (index, character) in token.char_indices() {
+        if at_word_start {
+            if let Some(redacted) = redact_marker_at(token, index, significant_end, redact_next) {
+                return redacted;
+            }
         }
-        if secret_key(normalized) {
-            *redact_next = true;
-            return token.to_owned();
-        }
-        if let Some(redacted) = redact_secret_assignment(suffix, redact_next) {
-            return format!("{}{redacted}", &token[..index]);
-        }
-        if secret_value(normalized) {
-            return format!("{}<redacted>", &token[..index]);
-        }
+        at_word_start = !character.is_alphanumeric();
     }
     redact_absolute_path(token).unwrap_or_else(|| token.to_owned())
 }
 
-fn diagnostic_marker_suffixes(token: &str) -> impl Iterator<Item = (usize, &str)> {
-    std::iter::once((0, token)).chain(token.char_indices().filter_map(move |(index, character)| {
-        let suffix_index = index + character.len_utf8();
-        (!character.is_alphanumeric() && suffix_index < token.len())
-            .then_some((suffix_index, &token[suffix_index..]))
-    }))
-}
-
-fn normalized_diagnostic_token(token: &str) -> &str {
-    token.trim_matches(|character: char| character.is_ascii_punctuation())
-}
-
-fn secret_key(value: &str) -> bool {
-    matches!(
-        value.to_ascii_lowercase().as_str(),
-        "password" | "secret" | "token" | "api_key" | "api-key" | "apikey"
-    )
-}
-
-fn secret_value(value: &str) -> bool {
-    let lowercase = value.to_ascii_lowercase();
-    lowercase.starts_with("sk-")
-        || lowercase.starts_with("ghp_")
-        || lowercase.starts_with("github_pat_")
-        || lowercase.starts_with("xoxb-")
-        || lowercase.starts_with("xoxp-")
-        || lowercase.starts_with("xoxa-")
-        || lowercase.starts_with("hf_")
-        || (lowercase.starts_with("akia") && lowercase.len() > 8)
-}
-
-fn redact_secret_assignment(token: &str, redact_next: &mut bool) -> Option<String> {
-    for (index, character) in token.char_indices() {
-        if !matches!(character, '=' | ':') {
-            continue;
-        }
-        let key = normalized_diagnostic_token(&token[..index]);
-        if !secret_key(key) && !key.eq_ignore_ascii_case("authorization") {
-            continue;
-        }
-        let value = &token[index + character.len_utf8()..];
-        if normalized_diagnostic_token(value).eq_ignore_ascii_case("bearer")
-            || (value.is_empty() && secret_key(key))
-        {
+fn redact_marker_at(
+    token: &str,
+    index: usize,
+    significant_end: usize,
+    redact_next: &mut bool,
+) -> Option<String> {
+    let suffix = &token[index..];
+    if marker_is_complete(token, index, significant_end, "bearer") {
+        *redact_next = true;
+        return Some(format!("{}Bearer", &token[..index]));
+    }
+    if let Some(key) = secret_key_at(suffix) {
+        if marker_is_complete(token, index, significant_end, key) {
             *redact_next = true;
+            return Some(token.to_owned());
         }
-        return Some(format!("{}<redacted>", &token[..=index]));
+        if let Some(delimiter_end) = assignment_delimiter(suffix, key.len()) {
+            let value = &suffix[delimiter_end..];
+            if value.is_empty() || trim_ascii_punctuation(value).eq_ignore_ascii_case("bearer") {
+                *redact_next = true;
+            }
+            return Some(format!(
+                "{}{}<redacted>",
+                &token[..index],
+                &suffix[..delimiter_end]
+            ));
+        }
+    }
+    if ascii_case_prefix(suffix, "authorization") {
+        if let Some(delimiter_end) = assignment_delimiter(suffix, "authorization".len()) {
+            if trim_ascii_punctuation(&suffix[delimiter_end..]).eq_ignore_ascii_case("bearer") {
+                *redact_next = true;
+            }
+            return Some(format!(
+                "{}{}<redacted>",
+                &token[..index],
+                &suffix[..delimiter_end]
+            ));
+        }
+    }
+    secret_value_starts(suffix).then(|| format!("{}<redacted>", &token[..index]))
+}
+
+fn assignment_delimiter(value: &str, marker_bytes: usize) -> Option<usize> {
+    for (index, character) in value[marker_bytes..].char_indices() {
+        if matches!(character, '=' | ':') {
+            return Some(marker_bytes + index + character.len_utf8());
+        }
+        if !character.is_ascii_punctuation() {
+            return None;
+        }
     }
     None
+}
+
+fn marker_is_complete(token: &str, index: usize, significant_end: usize, marker: &str) -> bool {
+    index + marker.len() == significant_end && ascii_case_prefix(&token[index..], marker)
+}
+
+fn ascii_case_prefix(value: &str, prefix: &str) -> bool {
+    value
+        .as_bytes()
+        .get(..prefix.len())
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix.as_bytes()))
+}
+
+fn trim_ascii_punctuation(value: &str) -> &str {
+    value.trim_matches(|character: char| character.is_ascii_punctuation())
+}
+
+const DIAGNOSTIC_SECRET_KEYS: [&str; 6] = [
+    "password", "secret", "token", "api_key", "api-key", "apikey",
+];
+
+fn secret_key(value: &str) -> bool {
+    DIAGNOSTIC_SECRET_KEYS
+        .into_iter()
+        .any(|key| value.eq_ignore_ascii_case(key))
+}
+
+fn secret_key_at(value: &str) -> Option<&'static str> {
+    DIAGNOSTIC_SECRET_KEYS
+        .into_iter()
+        .find(|key| ascii_case_prefix(value, key))
+}
+
+const DIAGNOSTIC_SECRET_PREFIXES: [&str; 7] = [
+    "sk-",
+    "ghp_",
+    "github_pat_",
+    "xoxb-",
+    "xoxp-",
+    "xoxa-",
+    "hf_",
+];
+
+fn secret_value_starts(value: &str) -> bool {
+    DIAGNOSTIC_SECRET_PREFIXES
+        .into_iter()
+        .any(|prefix| ascii_case_prefix(value, prefix))
+        || (value.len() > 8 && ascii_case_prefix(value, "akia"))
 }
 
 fn redact_absolute_path(token: &str) -> Option<String> {

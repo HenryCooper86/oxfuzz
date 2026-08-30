@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use hf_core::corpus::{CorpusEntry, CorpusSource};
@@ -545,6 +546,39 @@ fn diagnostic_sanitizer_redacts_embedded_markers_and_preserves_ordinary_prefixes
         "ordinary diagnostic detail;<redacted> detail;token=<redacted> \
          detail;Bearer <redacted> unix;<redacted-path> win];<redacted-path>"
     );
+}
+
+#[test]
+fn diagnostic_sanitizer_finishes_punctuation_dense_input_within_linear_budget() {
+    let diagnostic = ";".repeat(20 * 1_024);
+    let started = Instant::now();
+
+    let sanitized = sanitize_work_order_diagnostic(&diagnostic, diagnostic.len());
+    let elapsed = started.elapsed();
+
+    assert!(
+        sanitized == diagnostic,
+        "punctuation-dense diagnostic changed"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "punctuation-dense diagnostic took {elapsed:?}"
+    );
+}
+
+#[test]
+fn diagnostic_sanitizer_redacts_markers_across_utf8_output_cutoff() {
+    const EXPECTED: &str =
+        "<redacted> ordinary;prefix middle;token=<redacted> plain near;Bearer <redacted> γ";
+    let maximum_bytes = EXPECTED.len() + 1;
+
+    let sanitized = sanitize_work_order_diagnostic(
+        "sk-leading-secret ordinary;prefix middle;token=middle-secret \
+         plain near;Bearer cutoff-secret γγ",
+        maximum_bytes,
+    );
+
+    assert_eq!(sanitized, EXPECTED);
 }
 
 #[tokio::test]
