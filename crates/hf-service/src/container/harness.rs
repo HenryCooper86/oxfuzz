@@ -1793,7 +1793,9 @@ mod exact_qualification_tests {
     use hf_core::runtime::{
         CommandResult, CommandTermination, ImmutableImageReference, ResourceLimits, RuntimeAdapter,
     };
-    use hf_core::target::{Sanitizer, TargetLanguage};
+    use hf_core::target::{
+        InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
+    };
     use uuid::Uuid;
 
     use super::{harness_binary_name, workspace_dir, ServiceContainer};
@@ -2211,6 +2213,262 @@ mod exact_qualification_tests {
             .await
             .expect("cleanup must acquire after promotion releases its read")
             .unwrap();
+        cleanup.await.unwrap();
+    }
+
+    async fn promoted_fixture() -> (
+        tempfile::TempDir,
+        Arc<hf_storage::Store>,
+        ServiceContainer,
+        Harness,
+    ) {
+        let review = Arc::new(CountingReviewPool::approving());
+        let (project, store, container, _runtime, _id) = fixture(review).await;
+        let compiled = store.list_all_harnesses().await.unwrap().pop().unwrap();
+        store
+            .upsert_target(
+                &TargetCandidate {
+                    id: compiled.target_id,
+                    project_root: project.path().to_path_buf(),
+                    language: TargetLanguage::C,
+                    symbol: TARGET.to_owned(),
+                    kind: TargetKind::Parser,
+                    location: SourceLocation {
+                        file: project.path().join("parse.c"),
+                        line: 1,
+                        col: 1,
+                        end_line: None,
+                        end_col: None,
+                    },
+                    signature: None,
+                    input_surface: InputSurface::Bytes,
+                    complexity: 1,
+                    fit_score: 1.0,
+                    sanitizers: vec![Sanitizer::Address],
+                    rationale: "test target".to_owned(),
+                    reachable_functions: Vec::new(),
+                    accumulated_complexity: 1,
+                },
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+        container
+            .harness_smoke(
+                project.path(),
+                TARGET,
+                EngineKind::LibFuzzer,
+                TargetLanguage::C,
+            )
+            .await
+            .unwrap();
+        let promoted = container
+            .harness_promote(project.path(), TARGET, EngineKind::LibFuzzer)
+            .await
+            .unwrap();
+        (project, store, container, promoted)
+    }
+
+    #[tokio::test]
+    async fn conditional_revert_rejects_a_newer_harness_id_without_mutation() {
+        let _gate = qualification_test_gate().lock().await;
+        let (project, store, container, active) = promoted_fixture().await;
+        let (qualification_run, source_sha256, binary_sha256) = {
+            let (run, source, binary) = super::qualification_evidence(&active).unwrap();
+            (run, source.to_owned(), binary.to_owned())
+        };
+        let workspace = workspace_dir(project.path(), TARGET);
+        let before_source = std::fs::read(workspace.join("harness.source")).unwrap();
+        let before_binary = std::fs::read(workspace.join(harness_binary_name(TARGET))).unwrap();
+        let before_marker = std::fs::read(workspace.join("harness.active")).unwrap();
+        let before_row_ids = store
+            .list_harnesses(active.target_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|harness| harness.id)
+            .collect::<Vec<_>>();
+        let before_approval = store
+            .harness_approval(active.id, &source_sha256, &binary_sha256)
+            .await
+            .unwrap();
+
+        let mut newer = active.clone();
+        newer.id = Uuid::new_v4();
+        store.upsert_harness(&newer).await.unwrap();
+        std::fs::write(workspace.join("harness.active"), newer.id.to_string()).unwrap();
+        let marker_after_newer = std::fs::read(workspace.join("harness.active")).unwrap();
+
+        let error = container
+            .revert_harness_from_run_if_current(
+                &qualification_run.to_string(),
+                Some(super::super::policy::CurrentHarnessEvidence {
+                    id: active.id,
+                    source_sha256: &source_sha256,
+                    binary_sha256: &binary_sha256,
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("active harness changed"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(workspace.join("harness.source")).unwrap(),
+            before_source
+        );
+        assert_eq!(
+            std::fs::read(workspace.join(harness_binary_name(TARGET))).unwrap(),
+            before_binary
+        );
+        assert_eq!(
+            std::fs::read(workspace.join("harness.active")).unwrap(),
+            marker_after_newer
+        );
+        assert_eq!(
+            store
+                .list_harnesses(active.target_id)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|harness| harness.id)
+                .collect::<Vec<_>>(),
+            [before_row_ids, vec![newer.id]].concat()
+        );
+        assert_eq!(
+            store
+                .harness_approval(active.id, &source_sha256, &binary_sha256)
+                .await
+                .unwrap(),
+            before_approval
+        );
+        assert_ne!(before_marker, marker_after_newer);
+    }
+
+    #[tokio::test]
+    async fn conditional_revert_rejects_changed_current_binary_without_mutation() {
+        let _gate = qualification_test_gate().lock().await;
+        let (project, store, container, active) = promoted_fixture().await;
+        let (qualification_run, source_sha256, binary_sha256) =
+            super::qualification_evidence(&active).unwrap();
+        let workspace = workspace_dir(project.path(), TARGET);
+        let before_source = std::fs::read(workspace.join("harness.source")).unwrap();
+        let before_marker = std::fs::read(workspace.join("harness.active")).unwrap();
+        let before_row_ids = store
+            .list_harnesses(active.target_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|harness| harness.id)
+            .collect::<Vec<_>>();
+        let before_approval = store
+            .harness_approval(active.id, source_sha256, binary_sha256)
+            .await
+            .unwrap();
+        std::fs::write(
+            workspace.join(harness_binary_name(TARGET)),
+            b"changed executable",
+        )
+        .unwrap();
+        let changed_binary = std::fs::read(workspace.join(harness_binary_name(TARGET))).unwrap();
+
+        assert!(container
+            .revert_harness_from_run_if_current(
+                &qualification_run.to_string(),
+                Some(super::super::policy::CurrentHarnessEvidence {
+                    id: active.id,
+                    source_sha256,
+                    binary_sha256,
+                }),
+            )
+            .await
+            .is_err());
+        assert_eq!(
+            std::fs::read(workspace.join("harness.source")).unwrap(),
+            before_source
+        );
+        assert_eq!(
+            std::fs::read(workspace.join(harness_binary_name(TARGET))).unwrap(),
+            changed_binary
+        );
+        assert_eq!(
+            std::fs::read(workspace.join("harness.active")).unwrap(),
+            before_marker
+        );
+        assert_eq!(
+            store
+                .list_harnesses(active.target_id)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|harness| harness.id)
+                .collect::<Vec<_>>(),
+            before_row_ids
+        );
+        assert_eq!(
+            store
+                .harness_approval(active.id, source_sha256, binary_sha256)
+                .await
+                .unwrap(),
+            before_approval
+        );
+    }
+
+    #[tokio::test]
+    async fn conditional_revert_completes_after_a_queued_workspace_cleanup() {
+        let _gate = qualification_test_gate().lock().await;
+        let (_project, _store, container, active) = promoted_fixture().await;
+        let (qualification_run, source_sha256, binary_sha256) = {
+            let (run, source, binary) = super::qualification_evidence(&active).unwrap();
+            (run, source.to_owned(), binary.to_owned())
+        };
+        let held = container.acquire_workspace_operation().await.unwrap();
+        let (_, workspace_gate) = super::super::workspace::workspace_operation_gate(
+            &super::super::workspace::workspace_root(),
+        )
+        .unwrap();
+        let (queued_tx, queued_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let cleanup = tokio::spawn(async move {
+            let _cleanup = workspace_gate.write_owned().await;
+            let _ = queued_tx.send(());
+            let _ = release_rx.await;
+        });
+        tokio::task::yield_now().await;
+        drop(held);
+        queued_rx.await.unwrap();
+
+        let worker = container.clone();
+        let run_id = qualification_run.to_string();
+        let active_id = active.id;
+        let expected_source = source_sha256.clone();
+        let expected_binary = binary_sha256.clone();
+        let mut revert = tokio::spawn(async move {
+            worker
+                .revert_harness_from_run_if_current(
+                    &run_id,
+                    Some(super::super::policy::CurrentHarnessEvidence {
+                        id: active_id,
+                        source_sha256: &expected_source,
+                        binary_sha256: &expected_binary,
+                    }),
+                )
+                .await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut revert)
+                .await
+                .is_err(),
+            "conditional reversion must wait behind the queued cleanup writer"
+        );
+        let _ = release_tx.send(());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), &mut revert)
+                .await
+                .is_ok(),
+            "conditional reversion must complete after cleanup releases the writer lease"
+        );
         cleanup.await.unwrap();
     }
 
