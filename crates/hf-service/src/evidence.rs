@@ -252,6 +252,15 @@ impl ServiceContainer {
         pricing: CampaignEvidencePricing,
     ) -> Result<EvidenceManifest, ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
+        self.campaign_evidence_manifest_locked(run_id, pricing)
+            .await
+    }
+
+    pub(crate) async fn campaign_evidence_manifest_locked(
+        &self,
+        run_id: Uuid,
+        pricing: CampaignEvidencePricing,
+    ) -> Result<EvidenceManifest, ClassifiedError> {
         let managed_workspace_root = crate::container::initialize_workspace_root()?;
         validate_pricing(pricing)?;
         let store = self.store().ok_or_else(|| {

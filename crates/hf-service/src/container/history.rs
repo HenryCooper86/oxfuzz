@@ -45,12 +45,11 @@ impl ServiceContainer {
         Ok(())
     }
 
-    async fn run_evidence_root(
+    async fn run_evidence_root_locked(
         &self,
         store: &Store,
         run: &RunRecord,
     ) -> Result<Option<PathBuf>, ClassifiedError> {
-        let _workspace_operation = self.acquire_workspace_operation().await?;
         let Some(recorded) = run.evidence_dir.as_deref() else {
             return Ok(None);
         };
@@ -231,6 +230,10 @@ impl ServiceContainer {
     /// Returns `ClassifiedError` on a storage failure.
     pub async fn delete_run(&self, run_id: &str) -> Result<(), ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
+        self.delete_run_locked(run_id).await
+    }
+
+    async fn delete_run_locked(&self, run_id: &str) -> Result<(), ClassifiedError> {
         let store = self
             .store
             .as_ref()
@@ -247,7 +250,7 @@ impl ServiceContainer {
             )));
         }
         self.ensure_run_is_not_qualification(store, id).await?;
-        let evidence_root = self.run_evidence_root(store, &run).await?;
+        let evidence_root = self.run_evidence_root_locked(store, &run).await?;
         store
             .delete_run(run_id)
             .await
@@ -269,6 +272,10 @@ impl ServiceContainer {
     /// Returns `ClassifiedError` on a storage failure.
     pub async fn clear_all_runs(&self) -> Result<(), ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
+        self.clear_all_runs_locked().await
+    }
+
+    async fn clear_all_runs_locked(&self) -> Result<(), ClassifiedError> {
         let store = self
             .store
             .as_ref()
@@ -289,7 +296,7 @@ impl ServiceContainer {
         }
         let mut evidence_roots = Vec::new();
         for run in &runs {
-            if let Some(root) = self.run_evidence_root(store, run).await? {
+            if let Some(root) = self.run_evidence_root_locked(store, run).await? {
                 evidence_roots.push(root);
             }
         }
@@ -530,5 +537,181 @@ impl ServiceContainer {
             "runs": runs,
             "evidence": evidence,
         }))
+    }
+}
+
+#[cfg(test)]
+mod workspace_lease_tests {
+    use std::path::PathBuf;
+    use std::sync::{Arc, OnceLock};
+    use std::time::Duration;
+
+    use chrono::Utc;
+    use hf_core::engine::{EngineKind, FuzzRunConfig};
+    use hf_core::harness::{BuildCommand, Harness, HarnessStatus};
+    use hf_core::target::{
+        InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
+    };
+    use hf_storage::{RunRecord, RunStatus, Store};
+    use uuid::Uuid;
+
+    use super::super::workspace::{workspace_dir, workspace_operation_gate, workspace_root};
+    use super::ServiceContainer;
+
+    fn install_workspace() {
+        static ROOT: OnceLock<PathBuf> = OnceLock::new();
+        let root = ROOT.get_or_init(|| {
+            let root = std::env::temp_dir().join(format!("oxfuzz-history-{}", Uuid::new_v4()));
+            std::fs::create_dir_all(&root).unwrap();
+            let canonical = std::fs::canonicalize(&root).unwrap();
+            std::fs::write(
+                canonical.join(".oxfuzz-workspace.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "application": "oxfuzz",
+                    "version": 1,
+                    "canonical_root": canonical,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            canonical
+        });
+        std::env::set_var("HF_WORKSPACE_DIR", root);
+    }
+
+    async fn fixture() -> (ServiceContainer, Arc<Store>, RunRecord, PathBuf) {
+        install_workspace();
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.keep().join(format!("project-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&project).unwrap();
+        let store = Arc::new(Store::connect(project.join("history.db")).await.unwrap());
+        let target = TargetCandidate {
+            id: Uuid::new_v4(),
+            project_root: project.clone(),
+            symbol: "parse_history".to_owned(),
+            language: TargetLanguage::C,
+            kind: TargetKind::Parser,
+            location: SourceLocation {
+                file: project.join("parser.c"),
+                line: 1,
+                col: 1,
+                end_line: None,
+                end_col: None,
+            },
+            signature: None,
+            input_surface: InputSurface::Bytes,
+            complexity: 1,
+            accumulated_complexity: 1,
+            reachable_functions: Vec::new(),
+            fit_score: 1.0,
+            sanitizers: vec![Sanitizer::Address],
+            rationale: "history lease fixture".to_owned(),
+        };
+        store.upsert_target(&target, Utc::now()).await.unwrap();
+        let harness = Harness {
+            id: Uuid::new_v4(),
+            target_id: target.id,
+            engine: EngineKind::LibFuzzer,
+            source: "int LLVMFuzzerTestOneInput(const unsigned char*d,unsigned long n){return 0;}"
+                .to_owned(),
+            language: TargetLanguage::C,
+            build_cmd: BuildCommand {
+                compiler: "clang".to_owned(),
+                args: Vec::new(),
+                output: PathBuf::from("fuzz_parse_history"),
+                extra_flags: Vec::new(),
+            },
+            sanitizer: Sanitizer::Address,
+            status: HarnessStatus::Compiled,
+            smoke_run: None,
+        };
+        store.upsert_harness(&harness).await.unwrap();
+        let config = FuzzRunConfig {
+            harness_id: harness.id,
+            engine: harness.engine,
+            duration: Some(Duration::from_secs(1)),
+            max_mem_mb: 64,
+            max_cpus: 1,
+            seed_corpus: None,
+            sanitizer: harness.sanitizer,
+            env: Vec::new(),
+            extra_args: Vec::new(),
+            seed: None,
+            replay_of: None,
+        };
+        let mut run = RunRecord::new(
+            project.to_string_lossy(),
+            harness.engine,
+            Some(config),
+            Utc::now(),
+        );
+        run.status = RunStatus::Done;
+        run.ended_at = Some(Utc::now());
+        run.evidence_dir = Some(format!("runs/{}/out", run.id));
+        store.insert_run(&run).await.unwrap();
+        let evidence_root = workspace_dir(&project, &target.symbol)
+            .join("runs")
+            .join(run.id.to_string());
+        std::fs::create_dir_all(evidence_root.join("out")).unwrap();
+        (
+            ServiceContainer::stubbed().with_store(Arc::clone(&store)),
+            store,
+            run,
+            evidence_root,
+        )
+    }
+
+    async fn queue_cleanup_writer() -> (
+        tokio::task::JoinHandle<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let (_, gate) = workspace_operation_gate(&workspace_root()).unwrap();
+        let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel();
+        let writer = tokio::spawn(async move {
+            let _ = waiting_tx.send(());
+            let _cleanup = gate.write_owned().await;
+        });
+        (writer, waiting_rx)
+    }
+
+    #[tokio::test]
+    async fn delete_run_locked_completes_with_a_queued_cleanup_writer() {
+        let (container, store, run, evidence_root) = fixture().await;
+        let lease = container.acquire_workspace_operation().await.unwrap();
+        let (writer, waiting) = queue_cleanup_writer().await;
+        waiting.await.unwrap();
+        tokio::task::yield_now().await;
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            container.delete_run_locked(&run.id.to_string()),
+        )
+        .await
+        .expect("already-locked run deletion must not reacquire the workspace lease")
+        .unwrap();
+        assert!(store.get_run(run.id).await.unwrap().is_none());
+        assert!(!evidence_root.exists());
+
+        drop(lease);
+        writer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn clear_all_runs_locked_completes_with_a_queued_cleanup_writer() {
+        let (container, store, run, evidence_root) = fixture().await;
+        let lease = container.acquire_workspace_operation().await.unwrap();
+        let (writer, waiting) = queue_cleanup_writer().await;
+        waiting.await.unwrap();
+        tokio::task::yield_now().await;
+
+        tokio::time::timeout(Duration::from_secs(1), container.clear_all_runs_locked())
+            .await
+            .expect("already-locked history clearing must not reacquire the workspace lease")
+            .unwrap();
+        assert!(store.get_run(run.id).await.unwrap().is_none());
+        assert!(!evidence_root.exists());
+
+        drop(lease);
+        writer.await.unwrap();
     }
 }
