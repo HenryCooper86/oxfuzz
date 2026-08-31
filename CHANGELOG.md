@@ -74,6 +74,13 @@ Versions match the release commits that bump `Cargo.toml`.
   components remain rejected; source metadata, size validation, and bounded
   reads use one opened handle.
 
+  **Known Windows limitation:** the project-root pathname is reopened after
+  canonicalization. Another local process that can rename that selected root
+  and create a directory junction in its parent could redirect the confined
+  read. Until root-handle hardening lands, keep the selected project parent
+  trusted and immutable during export, or avoid Harness Work Order export on
+  Windows.
+
 - **Processes oxfuzz spawns on the host no longer inherit its environment.**
   The `docker` CLI, `git`, `pandoc`, the DefectDojo lifecycle commands, and the
   daemon-start helpers now start from a scrubbed copy: variables whose names
