@@ -9,7 +9,44 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ## Unreleased
 
+## 0.3.0 - 2026-08-31
+
+### Added
+
+- **Native C/C++ analysis now complements optional Semgrep enrichment.** The
+  bounded tree-sitter analyzer reports deterministic memory, lifetime,
+  arithmetic, and dangerous-API signals, with measured benchmark recall and
+  no observed false positives on the retained evaluation corpus.
+- **Harness generation now consumes real project build context.** Nested C/C++
+  sources retain their layout, compile databases supply allowlisted include
+  paths, definitions, and language standards, generated source is linted
+  before sandbox compilation, and crash reports distinguish harness defects
+  from target findings.
+- **Bounded concolic corpus enrichment is available through CLI and REST.**
+  SymCC with the QSym backend runs only through the sandbox, enforces input and
+  time limits, and promotes solver-produced inputs only when their content is
+  novel.
+- **Harness Work Order v2 provides durable provider-free authoring.** Operators
+  can export content-addressed target evidence, import immutable external
+  candidates, qualify them through sandbox compile, independent review, and
+  smoke stages, rank retained attempts, and explicitly promote one exact
+  qualified revision.
+- **Evidence-backed professional workflows cover the campaign lifecycle.**
+  Finding proof cards, sandboxed patch verification, change-aware comparison,
+  build diagnosis, non-crash oracles, coverage-blocker ranking, crash
+  disposition, campaign trust and health, unreached-surface reporting, and
+  resumable run closeout are available through service-owned operations.
+- **Automotive workflows now include responder modeling, state-sequence
+  planning, state coverage, and approved state-corpus promotion** across CLI,
+  REST, and desktop surfaces.
+- **Syzkaller campaigns persist runs and ingest kernel crash evidence** through
+  the existing sandboxed campaign and triage path.
+
 ### Changed
+
+- Existing SQLite stores migrate automatically on first open. Work-order,
+  campaign-evidence, automotive, and run-closeout records are retained as
+  durable service evidence.
 
 - **The campaign scheduler starts disarmed, and missed occurrences are held
   until it is armed.** A schedule with a `catch_up` or `backfill` missed policy
@@ -31,6 +68,11 @@ Versions match the release commits that bump `Cargo.toml`.
   evicting the oldest artifacts as new ones arrive.
 
 ### Security
+
+- **Windows Harness Work Order exports now use handle-relative project reads.**
+  Ordinary project files work on Windows while link-like parent and leaf
+  components remain rejected; source metadata, size validation, and bounded
+  reads use one opened handle.
 
 - **Processes oxfuzz spawns on the host no longer inherit its environment.**
   The `docker` CLI, `git`, `pandoc`, the DefectDojo lifecycle commands, and the
