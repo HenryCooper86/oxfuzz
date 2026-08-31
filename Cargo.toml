@@ -129,6 +129,8 @@ dialoguer = "0.11"
 criterion = { version = "0.5", features = ["async_tokio"] }
 tempfile = "3"
 rustix = { version = "1", features = ["fs"] }
+cap-primitives = "4.0.3"
+windows-sys = "0.61"
 
 # Markdown rendering
 pulldown-cmark = { version = "0.12", default-features = false, features = ["simd"] }

@@ -1,6 +1,6 @@
 # Windows-Confined Harness Work-Order Reads
 
-Status: **proposed for approval**. Owner: `hf-service`. Target release:
+Status: **approved for implementation**. Owner: `hf-service`. Target release:
 `v0.3.0`.
 
 ## 1. Goal
