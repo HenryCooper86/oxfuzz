@@ -71,6 +71,15 @@ jobs:
             oxfuzz builds and runs untrusted code, so it requires a sandbox.
             Docker must be installed and running, and at least one LLM provider
             must be configured. See the Getting Started guide in the repository.
+
+            ### Known Windows limitation
+
+            Harness Work Order export reopens the selected project-root pathname
+            after canonicalization. Another local process that can rename that
+            root and create a directory junction in its parent could redirect the
+            confined source read. Keep the selected project parent trusted and
+            immutable during export, or avoid this export feature on Windows until
+            root-handle hardening lands.
         with:
           result-encoding: string
           script: |
