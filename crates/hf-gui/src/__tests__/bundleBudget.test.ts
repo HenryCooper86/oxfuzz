@@ -1,11 +1,14 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 
 const script = fileURLToPath(new URL("../../scripts/check-bundle-budget.mjs", import.meta.url));
+const pathHelpers = fileURLToPath(
+  new URL("../../scripts/bundle-budget-paths.mjs", import.meta.url),
+);
 const fixtures: string[] = [];
 
 afterEach(() => {
@@ -57,6 +60,14 @@ function check(root: string, overrides: Record<string, string> = {}) {
 }
 
 describe("bundle budget", () => {
+  it("matches Windows asset paths to Vite manifest paths", async () => {
+    const helpers = (await import(pathToFileURL(pathHelpers).href)) as {
+      normalizeAssetPath(path: string): string;
+    };
+
+    expect(helpers.normalizeAssetPath("assets\\index.js")).toBe("assets/index.js");
+  });
+
   it("accepts a build within every configured JavaScript limit", () => {
     const result = check(fixture(80, 120, 400));
     expect(result.status, result.stderr || result.stdout).toBe(0);
