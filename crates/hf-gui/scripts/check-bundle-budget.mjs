@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { resolve, join, relative } from "node:path";
+import { normalizeAssetPath } from "./bundle-budget-paths.mjs";
 
 const distDir = resolve(process.argv[2] ?? "dist");
 const manifestPath = join(distDir, ".vite", "manifest.json");
@@ -108,7 +109,7 @@ const allAssets = allFiles.map((file) => ({
   bytes: statSync(file).size,
   // `javascriptFiles` yields paths under `distDir`; manifest `file` values are
   // relative to it, so membership is tested on the relative form.
-  app: ours.has(relative(distDir, file)),
+  app: ours.has(normalizeAssetPath(relative(distDir, file))),
 }));
 const appBytes = allAssets
   .filter((asset) => asset.app)
