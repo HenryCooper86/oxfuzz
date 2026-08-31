@@ -105,8 +105,7 @@ impl ServiceContainer {
             .resolve_build_context(&project)
             .map_err(service_validation)?
             .unwrap_or_else(empty_build_context);
-        let relative_source =
-            project_relative_regular_file(&project, &candidate.location.file, MAX_SOURCE_BYTES)?;
+        let (relative_source, source) = source_evidence(&project, candidate)?;
         let payload = HarnessWorkOrderPayload {
             target: WorkOrderTargetEvidence {
                 symbol: candidate.symbol.clone(),
@@ -122,7 +121,7 @@ impl ServiceContainer {
                 rationale: candidate.rationale.clone(),
             },
             engine: request.engine,
-            source: source_evidence(&project, candidate)?,
+            source,
             compile_context: normalized_build_context(&project, build_context)?,
             compile_context_sha256: String::new(),
             harness_rules: crate::harness_work_order::work_order_rules(candidate.language),
@@ -736,17 +735,12 @@ impl ServiceContainer {
         {
             return Err(stale_work_order());
         }
-        let relative_source =
-            project_relative_regular_file(&project, &candidate.location.file, MAX_SOURCE_BYTES)
-                .map_err(|_| stale_work_order())?;
+        let (relative_source, source) =
+            source_evidence(&project, &candidate).map_err(|_| stale_work_order())?;
         if relative_source.to_string_lossy() != work_order.payload.target.relative_source {
             return Err(stale_work_order());
         }
-        if source_evidence(&project, &candidate)
-            .map_err(|_| stale_work_order())?
-            .sha256
-            != work_order.payload.source.sha256
-        {
+        if source.sha256 != work_order.payload.source.sha256 {
             return Err(stale_work_order());
         }
         let build_context = self
@@ -1527,10 +1521,9 @@ fn retained_packet(
     Ok(packet)
 }
 
-fn project_relative_regular_file(
+fn project_relative_path(
     project: &Path,
     candidate: &Path,
-    max_bytes: u64,
 ) -> Result<PathBuf, HarnessWorkOrderError> {
     let relative = if candidate.is_absolute() {
         candidate
@@ -1546,26 +1539,25 @@ fn project_relative_regular_file(
     {
         return Err(invalid_project_path());
     }
-    let file = open_regular_file_beneath(project, relative)?;
-    let metadata = file.metadata().map_err(|_| invalid_project_path())?;
-    if !metadata.file_type().is_file() {
-        return Err(invalid_project_path());
-    }
-    if metadata.len() > max_bytes {
-        return Err(HarnessWorkOrderError::validation(
-            HarnessWorkOrderErrorCode::SourceTooLarge,
-            "candidate source exceeds the maximum size",
-        ));
-    }
     Ok(relative.to_path_buf())
 }
 
 fn source_evidence(
     project: &Path,
     target: &TargetCandidate,
-) -> Result<WorkOrderSourceEvidence, HarnessWorkOrderError> {
-    let relative = project_relative_regular_file(project, &target.location.file, MAX_SOURCE_BYTES)?;
+) -> Result<(PathBuf, WorkOrderSourceEvidence), HarnessWorkOrderError> {
+    let relative = project_relative_path(project, &target.location.file)?;
     let mut file = open_regular_file_beneath(project, &relative)?;
+    let metadata = file.metadata().map_err(|_| invalid_project_path())?;
+    if !metadata.file_type().is_file() {
+        return Err(invalid_project_path());
+    }
+    if metadata.len() > MAX_SOURCE_BYTES {
+        return Err(HarnessWorkOrderError::validation(
+            HarnessWorkOrderErrorCode::SourceTooLarge,
+            "candidate source exceeds the maximum size",
+        ));
+    }
     let mut bytes = Vec::new();
     file.by_ref()
         .take(MAX_SOURCE_BYTES + 1)
@@ -1597,11 +1589,14 @@ fn source_evidence(
         ));
     }
     let (excerpt, excerpt_truncated) = bounded_excerpt(&lines[start..]);
-    Ok(WorkOrderSourceEvidence {
-        excerpt,
-        excerpt_truncated,
-        sha256: hex::encode(sha2::Sha256::digest(text.as_bytes())),
-    })
+    Ok((
+        relative,
+        WorkOrderSourceEvidence {
+            excerpt,
+            excerpt_truncated,
+            sha256: hex::encode(sha2::Sha256::digest(text.as_bytes())),
+        },
+    ))
 }
 
 fn bounded_excerpt(lines: &[&str]) -> (String, bool) {
@@ -1767,19 +1762,23 @@ fn serialization_error(_error: serde_json::Error) -> HarnessWorkOrderError {
     )
 }
 
+fn normal_path_components(relative: &Path) -> Result<Vec<&std::ffi::OsStr>, HarnessWorkOrderError> {
+    relative
+        .components()
+        .map(|component| match component {
+            Component::Normal(value) => Ok(value),
+            _ => Err(invalid_project_path()),
+        })
+        .collect()
+}
+
 #[cfg(unix)]
 fn open_regular_file_beneath(
     project: &Path,
     relative: &Path,
 ) -> Result<File, HarnessWorkOrderError> {
     use rustix::fs::{open, openat, Mode, OFlags};
-    let components = relative
-        .components()
-        .map(|component| match component {
-            Component::Normal(value) => Ok(value),
-            _ => Err(invalid_project_path()),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let components = normal_path_components(relative)?;
     let (leaf, parents) = components.split_last().ok_or_else(invalid_project_path)?;
     let directory_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     let root = open(project, directory_flags, Mode::empty()).map_err(|_| invalid_project_path())?;
@@ -1794,14 +1793,39 @@ fn open_regular_file_beneath(
         openat(
             &directory,
             *leaf,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
             Mode::empty(),
         )
         .map_err(|_| invalid_project_path())?,
     ))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn open_regular_file_beneath(
+    project: &Path,
+    relative: &Path,
+) -> Result<File, HarnessWorkOrderError> {
+    use cap_primitives::fs::{
+        open, open_ambient_dir, open_dir_nofollow, OpenOptions, OpenOptionsExt,
+    };
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+
+    let components = normal_path_components(relative)?;
+    let (leaf, parents) = components.split_last().ok_or_else(invalid_project_path)?;
+    let mut directory = open_ambient_dir(project, cap_primitives::ambient_authority())
+        .map_err(|_| invalid_project_path())?;
+    for parent in parents {
+        directory = open_dir_nofollow(&directory, Path::new(*parent))
+            .map_err(|_| invalid_project_path())?;
+    }
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    open(&directory, Path::new(*leaf), &options).map_err(|_| invalid_project_path())
+}
+
+#[cfg(not(any(unix, windows)))]
 fn open_regular_file_beneath(
     _project: &Path,
     _relative: &Path,

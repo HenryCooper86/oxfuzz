@@ -1245,6 +1245,53 @@ async fn service_export_rejects_symlinked_or_escaping_retained_sources() {
     );
 }
 
+#[cfg(windows)]
+#[tokio::test]
+async fn service_export_rejects_a_junctioned_source_directory_on_windows() {
+    let workspace = tempfile::tempdir().expect("create workspace");
+    let project = workspace.path().join("project");
+    let outside = workspace.path().join("outside");
+    std::fs::create_dir_all(&project).expect("create project");
+    std::fs::create_dir_all(&outside).expect("create outside directory");
+    std::fs::write(
+        outside.join("parser.c"),
+        "// heading\nint parse_packet(void) { return 0; }\n",
+    )
+    .expect("write outside source");
+    let junction = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(project.join("src"))
+        .arg(&outside)
+        .output()
+        .expect("create directory junction");
+    assert!(
+        junction.status.success(),
+        "create directory junction: {}",
+        String::from_utf8_lossy(&junction.stderr)
+    );
+    let store = Arc::new(
+        hf_storage::Store::connect(workspace.path().join("work-order.db"))
+            .await
+            .expect("create store"),
+    );
+    persist_target(
+        &store,
+        retained_target(&project, PathBuf::from("src/parser.c"), TargetLanguage::C),
+    )
+    .await;
+    let container =
+        ServiceContainer::new(Arc::new(CountingRuntime::default()), None).with_store(store);
+
+    assert_eq!(
+        container
+            .export_harness_work_order(export_request(&project))
+            .await
+            .expect_err("junctioned source directory must fail closed")
+            .code,
+        HarnessWorkOrderErrorCode::InvalidProjectPath
+    );
+}
+
 #[tokio::test]
 async fn service_export_rejects_retained_source_paths_that_escape_the_project() {
     let workspace = tempfile::tempdir().expect("create workspace");
