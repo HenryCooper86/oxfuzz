@@ -107,11 +107,12 @@ The database row separately stores the canonical project root and target id so
 the service can find and delete project-owned records. Those lookup fields are
 not model-visible packet content.
 
-Persistence is write-first and receipt-idempotent. One transaction performs an
-`INSERT ... ON CONFLICT(id) DO NOTHING`, loads the durable row, and compares all
-immutable fields before commit. Concurrent exports of identical evidence
-therefore return the same row without a read-before-write transaction upgrade;
-the same identifier with different evidence remains an error.
+Persistence is write-first and receipt-idempotent. One auto-committed
+`INSERT ... ON CONFLICT(id) DO NOTHING` statement serializes concurrent writers.
+After that statement returns, storage loads the immutable durable row and
+compares every field. Concurrent exports of identical evidence therefore return
+the same row without a deferred transaction that can contend during a write
+upgrade; the same identifier with different evidence remains an error.
 
 ## 5. Typed Validation Steps
 
