@@ -932,7 +932,7 @@ impl ServiceContainer {
         })
     }
 
-    #[cfg(all(test, feature = "semgrep-enrichment"))]
+    #[cfg(all(test, feature = "semgrep-enrichment", unix))]
     pub(crate) fn semgrep_test_workspace_cleanup_lease(
         root: &Path,
     ) -> Result<WorkspaceCleanupLease, ClassifiedError> {
