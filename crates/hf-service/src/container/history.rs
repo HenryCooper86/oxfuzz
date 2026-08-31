@@ -661,7 +661,7 @@ mod workspace_lease_tests {
         )
     }
 
-    async fn queue_cleanup_writer() -> (
+    fn queue_cleanup_writer() -> (
         tokio::task::JoinHandle<()>,
         tokio::sync::oneshot::Receiver<()>,
     ) {
@@ -683,7 +683,7 @@ mod workspace_lease_tests {
             .await;
         let (container, store, run, evidence_root) = fixture().await;
         let lease = container.acquire_workspace_operation().await.unwrap();
-        let (writer, waiting) = queue_cleanup_writer().await;
+        let (writer, waiting) = queue_cleanup_writer();
         waiting.await.unwrap();
         tokio::task::yield_now().await;
 
@@ -708,7 +708,7 @@ mod workspace_lease_tests {
             .await;
         let (container, store, run, evidence_root) = fixture().await;
         let lease = container.acquire_workspace_operation().await.unwrap();
-        let (writer, waiting) = queue_cleanup_writer().await;
+        let (writer, waiting) = queue_cleanup_writer();
         waiting.await.unwrap();
         tokio::task::yield_now().await;
 
