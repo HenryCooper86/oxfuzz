@@ -153,16 +153,11 @@ impl ServiceContainer {
             packet_json,
             created_at: Utc::now(),
         };
-        if let Ok(persisted) = store.insert_harness_work_order(&record).await {
-            retained_packet(&persisted, Some((&project, candidate.id)))
-        } else {
-            let existing = store
-                .harness_work_order(&packet.id)
-                .await
-                .map_err(storage_error)?
-                .ok_or_else(|| HarnessWorkOrderError::storage("persist work order"))?;
-            retained_packet(&existing, Some((&project, candidate.id)))
-        }
+        let persisted = store
+            .insert_harness_work_order(&record)
+            .await
+            .map_err(storage_error)?;
+        retained_packet(&persisted, Some((&project, candidate.id)))
     }
 
     /// Read and verify one immutable durable packet.
