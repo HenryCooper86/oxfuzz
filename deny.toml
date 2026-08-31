@@ -40,6 +40,7 @@ skip-tree = [
 # stale entries fail the strict policy gate instead of accumulating silently.
 skip = [
     { crate = "hashbrown@0.15.5", reason = "SQLx 0.8 and Ratatui 0.28 require this series" },
+    { crate = "io-lifetimes@2.0.4", reason = "cap-primitives 4.0.3 retains this series through fs-set-times 0.20.3" },
     { crate = "phf@0.11.3", reason = "jieba-rs 0.7 requires this series" },
     { crate = "phf_shared@0.11.3", reason = "jieba-rs 0.7 requires this series" },
     { crate = "strum@0.26.3", reason = "Ratatui 0.28 requires this series" },
