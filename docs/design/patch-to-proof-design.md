@@ -16,6 +16,12 @@ its kernel build, VM reset, and reproducer requirements need a separate typed
 workflow. A visible unavailable result is preferable to reusing userspace
 assumptions for a kernel finding.
 
+Windows Patch-to-Proof remains unavailable in this release. Evidence assembly
+fails closed before draft persistence because Windows does not yet have the
+handle-relative traversal required to read a retained reproducer without a
+path-reopen race. Positive workflow verification runs on Unix; Windows tests
+assert the explicit refusal. A canonicalize-then-open fallback is rejected.
+
 ## 2. Feature and Ownership
 
 The subsystem is enabled by the `patch-to-proof` feature, which depends on

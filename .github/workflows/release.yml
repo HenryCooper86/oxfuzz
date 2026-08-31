@@ -72,7 +72,7 @@ jobs:
             Docker must be installed and running, and at least one LLM provider
             must be configured. See the Getting Started guide in the repository.
 
-            ### Known Windows limitation
+            ### Known Windows limitations
 
             Harness Work Order export reopens the selected project-root pathname
             after canonicalization. Another local process that can rename that
@@ -80,6 +80,11 @@ jobs:
             confined source read. Keep the selected project parent trusted and
             immutable during export, or avoid this export feature on Windows until
             root-handle hardening lands.
+
+            Patch-to-Proof is unavailable on Windows in this release because
+            secure handle-relative reads of retained crash evidence are not yet
+            implemented. Use Patch-to-Proof on Linux or macOS; Windows fails
+            closed instead of using a path-reopen fallback.
         with:
           result-encoding: string
           script: |
