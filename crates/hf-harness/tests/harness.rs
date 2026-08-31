@@ -12,9 +12,11 @@ use hf_core::target::{
     InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
 };
 use hf_core::types::TokenUsage;
+#[cfg(unix)]
+use hf_harness::smoke_fuzz_in_paths;
 use hf_harness::{
-    compile, draft, smoke_fuzz, smoke_fuzz_in, smoke_fuzz_in_paths,
-    smoke_fuzz_in_paths_with_config, smoke_fuzz_in_paths_with_config_and_sandbox_image,
+    compile, draft, smoke_fuzz, smoke_fuzz_in, smoke_fuzz_in_paths_with_config,
+    smoke_fuzz_in_paths_with_config_and_sandbox_image,
 };
 use std::path::{Path, PathBuf};
 use uuid::Uuid;

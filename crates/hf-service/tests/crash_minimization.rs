@@ -124,7 +124,7 @@ impl RuntimeAdapter for MinimizeRuntime {
 }
 
 struct Fixture {
-    root: tempfile::TempDir,
+    _workspace_lifetime: tempfile::TempDir,
     project: PathBuf,
     target: TargetCandidate,
     run: hf_storage::RunRecord,
@@ -225,7 +225,7 @@ async fn fixture(name: &str) -> Fixture {
     store.insert_run(&run).await.unwrap();
 
     Fixture {
-        root,
+        _workspace_lifetime: root,
         project,
         target,
         run,
@@ -321,7 +321,7 @@ async fn triage_rejects_symlinked_minimization_output_directory() {
         .join(fixture.run.id.to_string())
         .join("triage");
     std::fs::create_dir_all(&triage_dir).unwrap();
-    let outside = fixture.root.path().join("outside-minimized");
+    let outside = fixture.project.parent().unwrap().join("outside-minimized");
     std::fs::create_dir(&outside).unwrap();
     symlink(&outside, triage_dir.join("minimized")).unwrap();
 

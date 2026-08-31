@@ -350,9 +350,11 @@ fn print_json(value: &serde_json::Value) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::path::Path;
     use std::{
         fs,
-        path::{Path, PathBuf},
+        path::PathBuf,
         sync::{
             atomic::{AtomicUsize, Ordering},
             Arc,
@@ -367,9 +369,11 @@ mod tests {
     use tempfile::tempdir;
     use uuid::Uuid;
 
+    #[cfg(unix)]
+    use super::read_submission_source_after_check;
     use super::{
-        import_submission_request, read_submission_source, read_submission_source_after_check,
-        run_with_bootstrap, SubmissionOriginArg, WorkOrderCommand,
+        import_submission_request, read_submission_source, run_with_bootstrap, SubmissionOriginArg,
+        WorkOrderCommand,
     };
     use crate::{Cli, Commands};
 

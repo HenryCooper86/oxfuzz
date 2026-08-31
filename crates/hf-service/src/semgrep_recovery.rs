@@ -20,6 +20,7 @@ const JOURNAL_VERSION: u32 = 1;
 const MAX_JOURNAL_BYTES: usize = 64 * 1024;
 const MAX_LINE_BYTES: usize = 16 * 1024;
 const MAX_LIFECYCLE_RECORDS: usize = 3;
+#[cfg(unix)]
 const TRANSACTION_LOCK_FILE: &str = ".semgrep-journal.lock";
 
 /// Provenance made durable immediately before atomic database publication.
@@ -616,12 +617,12 @@ impl SemgrepJournal {
         ClassifiedError::Storage(sticky)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn install_test_race_hook(&self, hook: impl Fn(AppendRacePoint) + Send + Sync + 'static) {
         *lock_recover(&self.race_hook) = Some(Arc::new(hook));
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn install_test_append_failure(&self, point: AppendFailurePoint) {
         *lock_recover(&self.append_failure) = Some(point);
     }
@@ -985,6 +986,7 @@ fn open_operation_file(
     ))
 }
 
+#[cfg(unix)]
 fn operation_file_name(operation_id: Uuid) -> String {
     format!("{operation_id}.jsonl")
 }
