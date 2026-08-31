@@ -58,6 +58,7 @@ run-closeout = [
 harness-work-order = [
     "build-context",
     "dep:rustix",
+    "dep:windows-sys",
     "hf-service/harness-work-order",
     "hf-web/harness-work-order",
 ]
@@ -83,6 +84,9 @@ reqwest = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
 rustix = { workspace = true, optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, optional = true, features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

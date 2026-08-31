@@ -207,7 +207,22 @@ fn open_submission_source_without_following_final_link(path: &Path) -> anyhow::R
     Ok(File::from(descriptor))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn open_submission_source_without_following_final_link(path: &Path) -> anyhow::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|error| anyhow::anyhow!("cannot securely open submission source: {error}"))
+}
+
+#[cfg(not(any(unix, windows)))]
 fn open_submission_source_without_following_final_link(_path: &Path) -> anyhow::Result<File> {
     anyhow::bail!("secure no-follow submission source reads are unsupported on this platform")
 }
