@@ -154,12 +154,17 @@ fn a_rust_project_needs_no_compile_database() {
 #[test]
 fn a_project_that_already_ships_a_database_is_ready_and_gets_no_plan() {
     let dir = project(&["CMakeLists.txt"]);
-    let root = dir.path().to_string_lossy();
+    let root = dir.path().to_string_lossy().into_owned();
+    let source = dir.path().join("a.c").to_string_lossy().into_owned();
+    let include = format!("-I{}", dir.path().join("include").to_string_lossy());
     std::fs::write(
         dir.path().join("compile_commands.json"),
-        format!(
-            r#"[{{"directory":"{root}","file":"{root}/a.c","arguments":["clang","-I{root}/include","-c","{root}/a.c"]}}]"#
-        ),
+        serde_json::to_vec(&serde_json::json!([{
+            "directory": root,
+            "file": source,
+            "arguments": ["clang", include, "-c", source],
+        }]))
+        .unwrap(),
     )
     .unwrap();
     let found = detect_build_systems(dir.path());
