@@ -107,6 +107,12 @@ The database row separately stores the canonical project root and target id so
 the service can find and delete project-owned records. Those lookup fields are
 not model-visible packet content.
 
+Persistence is write-first and receipt-idempotent. One transaction performs an
+`INSERT ... ON CONFLICT(id) DO NOTHING`, loads the durable row, and compares all
+immutable fields before commit. Concurrent exports of identical evidence
+therefore return the same row without a read-before-write transaction upgrade;
+the same identifier with different evidence remains an error.
+
 ## 5. Typed Validation Steps
 
 V2 stores semantic steps rather than interpolated shell strings:
@@ -435,6 +441,7 @@ to `active implementation` when the first production task lands.
 ### Pure and service tests
 
 - Identical retained evidence produces byte-identical packets and ids.
+- Concurrent exports of identical retained evidence return one durable packet.
 - A changed source excerpt, complete source digest, compile context, rule, seed
   reference, engine, or language changes the id.
 - Absolute and escaping project paths fail before persistence, including
