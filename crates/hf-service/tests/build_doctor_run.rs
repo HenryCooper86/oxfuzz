@@ -70,12 +70,17 @@ impl RuntimeAdapter for BuildRuntime {
                 std::fs::create_dir_all(path.parent().unwrap()).unwrap();
                 // A real database references paths inside the project, which is
                 // what the build-context allowlist requires.
-                let root = cwd.display();
+                let root = cwd.to_string_lossy().into_owned();
+                let source = cwd.join("a.c").to_string_lossy().into_owned();
+                let include = format!("-I{}", cwd.join("include").to_string_lossy());
                 std::fs::write(
                     path,
-                    format!(
-                        r#"[{{"directory":"{root}","file":"{root}/a.c","arguments":["clang","-I{root}/include","-std=c11","-c","{root}/a.c"]}}]"#
-                    ),
+                    serde_json::to_vec(&serde_json::json!([{
+                        "directory": root,
+                        "file": source,
+                        "arguments": ["clang", include, "-std=c11", "-c", source],
+                    }]))
+                    .unwrap(),
                 )
                 .unwrap();
             }

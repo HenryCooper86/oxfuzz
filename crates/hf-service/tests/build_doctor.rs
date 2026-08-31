@@ -193,12 +193,17 @@ fn validated_build_doctor_database_is_reported_as_ready() {
     let dir = project(&["CMakeLists.txt"]);
     let owned = dir.path().join(".oxfuzz-build");
     std::fs::create_dir(&owned).unwrap();
-    let root = dir.path().to_string_lossy();
+    let root = dir.path().to_string_lossy().into_owned();
+    let source = dir.path().join("a.c").to_string_lossy().into_owned();
+    let include = format!("-I{}", dir.path().join("include").to_string_lossy());
     std::fs::write(
         owned.join("compile_commands.json"),
-        format!(
-            r#"[{{"directory":"{root}","file":"{root}/a.c","arguments":["clang","-I{root}/include","-c","{root}/a.c"]}}]"#
-        ),
+        serde_json::to_vec(&serde_json::json!([{
+            "directory": root,
+            "file": source,
+            "arguments": ["clang", include, "-c", source],
+        }]))
+        .unwrap(),
     )
     .unwrap();
 
