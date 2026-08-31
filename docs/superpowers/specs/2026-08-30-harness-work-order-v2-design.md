@@ -111,10 +111,12 @@ Persistence is write-first and receipt-idempotent. Store clones share an async
 publication lock, then one auto-committed
 `INSERT ... ON CONFLICT(id) DO NOTHING` statement handles conflicts from other
 store instances or processes. After that statement returns, storage loads the
-immutable durable row and compares every field. Concurrent exports of identical
-evidence therefore return the same row without concurrent writes through the
-same connection pool or a deferred transaction upgrade; the same identifier
-with different evidence remains an error.
+immutable durable row and compares the packet plus its target and project lookup
+evidence. `created_at` is receipt metadata: an exact retry retains the winning
+insert's timestamp rather than treating the retry time as conflicting evidence.
+Concurrent exports of identical evidence therefore return the same row without
+concurrent writes through the same connection pool or a deferred transaction
+upgrade; the same identifier with different evidence remains an error.
 
 ## 5. Typed Validation Steps
 

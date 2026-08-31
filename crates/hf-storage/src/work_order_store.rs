@@ -223,7 +223,13 @@ impl Store {
         let persisted = load_work_order(self.pool(), &record.id)
             .await?
             .ok_or_else(|| StorageError::InvalidData("work order insert returned no row".into()))?;
-        exact_or_conflict(persisted, record, "work order identifier conflicts")
+        if same_work_order_evidence(&persisted, record) {
+            Ok(persisted)
+        } else {
+            Err(StorageError::InvalidData(
+                "work order identifier conflicts".to_owned(),
+            ))
+        }
     }
 
     /// Load one work-order packet by its content identifier.
@@ -726,6 +732,17 @@ fn exact_or_conflict<T: PartialEq>(
     } else {
         Err(StorageError::InvalidData(message.to_owned()))
     }
+}
+
+fn same_work_order_evidence(
+    existing: &HarnessWorkOrderRecord,
+    incoming: &HarnessWorkOrderRecord,
+) -> bool {
+    existing.id == incoming.id
+        && existing.target_id == incoming.target_id
+        && existing.project_root == incoming.project_root
+        && existing.schema_version == incoming.schema_version
+        && existing.packet_json == incoming.packet_json
 }
 
 fn parse_uuid(field: &str, value: &str) -> Result<Uuid, StorageError> {

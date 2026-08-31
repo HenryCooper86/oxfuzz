@@ -642,6 +642,13 @@ async fn harness_work_order_store_preserves_immutable_rows_and_submission_constr
         first,
         "an exact work-order retry returns the first persisted row"
     );
+    let mut later_retry = first.clone();
+    later_retry.created_at += Duration::seconds(1);
+    assert_eq!(
+        store.insert_harness_work_order(&later_retry).await.unwrap(),
+        first,
+        "a receipt retry retains the first persistence timestamp"
+    );
     let mut conflicting_retry = first.clone();
     conflicting_retry.packet_json = r#"{"schema_version":2,"changed":true}"#.to_owned();
     assert!(matches!(
