@@ -81,6 +81,12 @@ Versions match the release commits that bump `Cargo.toml`.
   trusted and immutable during export, or avoid Harness Work Order export on
   Windows.
 
+- **Patch-to-Proof is unavailable on Windows in this release.** The service
+  fails closed before creating a remediation draft because secure
+  handle-relative reads of retained crash evidence are not implemented there.
+  Use Patch-to-Proof on Linux or macOS; Windows does not fall back to a
+  canonicalize-then-open read.
+
 - **Processes oxfuzz spawns on the host no longer inherit its environment.**
   The `docker` CLI, `git`, `pandoc`, the DefectDojo lifecycle commands, and the
   daemon-start helpers now start from a scrubbed copy: variables whose names
