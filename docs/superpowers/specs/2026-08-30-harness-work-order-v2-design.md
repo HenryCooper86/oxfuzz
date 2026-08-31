@@ -348,7 +348,10 @@ oxfuzz work-order promote --attempt <id>
 
 CLI import accepts a file path only. It uses symlink metadata, requires a
 regular non-symlink file, checks size before reading, and reads at most one byte
-beyond the limit before rejection.
+beyond the limit before rejection. The final open does not follow a link and
+holds a handle that prevents rename or deletion until the bounded read ends.
+Unix uses `O_NOFOLLOW`; Windows uses `FILE_FLAG_OPEN_REPARSE_POINT` and omits
+delete sharing. Metadata, size validation, and the read use that same handle.
 
 REST exposes these routes:
 
@@ -466,6 +469,8 @@ to `active implementation` when the first production task lands.
 
 - CLI import refuses symlinks, directories, and oversized regular files before
   service invocation.
+- CLI import accepts bounded regular files on every shipped desktop platform;
+  the native Windows suite verifies the exact 65,536-byte limit.
 - REST import enforces the body limit and returns stable service errors.
 - REST hides service-created outside-root records and denies every ID route
   before mutation, provider use, or runtime dispatch.
