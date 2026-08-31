@@ -36,6 +36,7 @@ pub const RULES_COMMIT: &str = "4d66ecf30bfb1809a984085f2c86a8c3915bfc71";
 pub const COMMAND_SCHEMA_VERSION: u32 = 1;
 
 const SEMGREP_COMMAND: &str = "/usr/local/bin/oxfuzz-semgrep-scan";
+#[cfg(unix)]
 const SEMGREP_OUTPUT_FILE: &str = "semgrep.json";
 const MAX_SEMGREP_OUTPUT_BYTES: u64 = 67_108_864;
 const OUTPUT_TRUNCATION_MARKER: &str = "[output truncated]";
@@ -460,7 +461,7 @@ impl SemgrepCoordinator {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn active_operation_for_project(&self, project: &Path) -> Option<Uuid> {
         self.active.lock().ok().and_then(|active| {
             active
@@ -524,7 +525,7 @@ impl SemgrepCoordinator {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn install_completion_pause(
         &self,
         point: CompletionPausePoint,
@@ -541,7 +542,7 @@ impl SemgrepCoordinator {
         (reached, release)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn install_test_cleanup_failure(&self) {
         *self
             .cleanup_failure
@@ -596,7 +597,7 @@ impl Drop for ActiveSemgrepGuard {
 }
 
 impl crate::ServiceContainer {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) async fn semgrep_test_publish_inventory(
         &self,
         inventory: &TargetInventory,
@@ -2087,6 +2088,7 @@ fn read_semgrep_output(_output_dir: &Path) -> Result<Vec<u8>, OutputFailure> {
     })
 }
 
+#[cfg(unix)]
 fn read_bounded_output(mut file: File) -> Result<Vec<u8>, OutputFailure> {
     let metadata = file.metadata().map_err(|_| OutputFailure {
         code: "output_invalid",
@@ -2242,7 +2244,7 @@ fn stage_selected_paths_at_with_limits(
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn stage_selected_paths_at_with_hook<F>(
     canonical_project: &Path,
     relative_paths: Vec<PathBuf>,
@@ -2273,7 +2275,7 @@ enum StageMutationPoint {
     DestinationParent,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn stage_selected_paths_at_with_stage_hook<H>(
     canonical_project: &Path,
     relative_paths: Vec<PathBuf>,
@@ -2980,7 +2982,7 @@ fn cleanup_operation_root_in(
     cleanup_operation_root_in_with_hooks(managed_workspace, operation_root, || {}, || {}, || {})
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn cleanup_operation_root_in_with_hook<F>(
     managed_workspace: &Path,
     operation_root: &Path,
@@ -3225,7 +3227,7 @@ fn append_error_context(error: ClassifiedError, context: &str) -> ClassifiedErro
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 macro_rules! assert_f64_eq {
     ($left:expr, $right:expr) => {
         assert_eq!($left.to_bits(), f64::to_bits($right));

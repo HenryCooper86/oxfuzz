@@ -89,12 +89,11 @@ pub(super) fn collect_workspace_crash_inputs(workspace: &Path) -> Vec<PathBuf> {
     inputs
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod crash_input_boundary_tests {
     use super::{collect_crash_inputs, stage_crash_inputs};
     use hf_core::engine::EngineKind;
 
-    #[cfg(unix)]
     #[test]
     fn crash_staging_and_collection_ignore_symlinks() {
         use std::os::unix::fs::symlink;
