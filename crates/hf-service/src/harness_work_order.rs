@@ -933,6 +933,7 @@ fn validate_project_relative_path(value: &str) -> Result<(), HarnessWorkOrderErr
         && value.as_bytes()[1] == b':'
         && matches!(value.as_bytes()[2], b'/' | b'\\');
     if value.is_empty()
+        || value.starts_with('/')
         || Path::new(value).is_absolute()
         || value.starts_with('\\')
         || windows_drive

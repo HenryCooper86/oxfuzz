@@ -205,6 +205,7 @@ impl Store {
         &self,
         record: &HarnessWorkOrderRecord,
     ) -> Result<HarnessWorkOrderRecord, StorageError> {
+        let _publish_guard = self.work_order_publish_lock.lock().await;
         sqlx::query(
             "INSERT INTO harness_work_orders
                 (id, target_id, project_root, schema_version, packet_json, created_at)
