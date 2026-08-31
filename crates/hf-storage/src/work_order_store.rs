@@ -206,14 +206,11 @@ impl Store {
         record: &HarnessWorkOrderRecord,
     ) -> Result<HarnessWorkOrderRecord, StorageError> {
         let mut transaction = self.pool().begin().await?;
-        if let Some(existing) = load_work_order(&mut *transaction, &record.id).await? {
-            transaction.commit().await?;
-            return exact_or_conflict(existing, record, "work order identifier conflicts");
-        }
         sqlx::query(
             "INSERT INTO harness_work_orders
                 (id, target_id, project_root, schema_version, packet_json, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO NOTHING",
         )
         .bind(&record.id)
         .bind(record.target_id.to_string())
@@ -223,8 +220,12 @@ impl Store {
         .bind(utc_timestamp(record.created_at))
         .execute(&mut *transaction)
         .await?;
+        let persisted = load_work_order(&mut *transaction, &record.id)
+            .await?
+            .ok_or_else(|| StorageError::InvalidData("work order insert returned no row".into()))?;
+        let persisted = exact_or_conflict(persisted, record, "work order identifier conflicts")?;
         transaction.commit().await?;
-        Ok(record.clone())
+        Ok(persisted)
     }
 
     /// Load one work-order packet by its content identifier.
