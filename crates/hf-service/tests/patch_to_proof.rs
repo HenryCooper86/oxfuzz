@@ -16,9 +16,9 @@ use hf_core::target::{
     InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
 };
 use hf_service::evidence::CampaignEvidencePricing;
-use hf_service::{
-    RemediationDraftRequest, RemediationOperationStatus, RemediationStartRequest, ServiceContainer,
-};
+use hf_service::{RemediationDraftRequest, ServiceContainer};
+#[cfg(unix)]
+use hf_service::{RemediationOperationStatus, RemediationStartRequest};
 use hf_storage::{HarnessApprovalKind, RunRecord, RunStatus, Store};
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
@@ -266,6 +266,7 @@ async fn fixture() -> (
     (container, runtime, project, run.id, crash.id)
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn approved_patch_runs_all_required_stages_and_persists_verified_evidence() {
     let (container, runtime, _project, run_id, finding_id) = fixture().await;
@@ -342,6 +343,7 @@ async fn approved_patch_runs_all_required_stages_and_persists_verified_evidence(
         .any(|value| value.starts_with("-max_total_time="))));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn unapproved_operation_cannot_start_or_claim_verified_status() {
     let (container, runtime, _project, run_id, finding_id) = fixture().await;
@@ -372,6 +374,7 @@ async fn unapproved_operation_cannot_start_or_claim_verified_status() {
 /// The design requires guardrail authorization before the first sandbox
 /// command. A denial must refuse the start and leave the approved operation
 /// exactly as it was, rather than claiming it and stranding it in `running`.
+#[cfg(unix)]
 #[tokio::test]
 async fn verification_does_not_start_without_guardrail_authorization() {
     use hf_guardrails::{DenyAll, GuardrailPolicy, Guardrails, RiskTier};
@@ -428,5 +431,36 @@ async fn verification_does_not_start_without_guardrail_authorization() {
     assert!(
         runtime.calls().is_empty(),
         "a denied start executes nothing"
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_refuses_patch_to_proof_without_secure_evidence_reads() {
+    let (container, runtime, _project, run_id, finding_id) = fixture().await;
+
+    let error = container
+        .create_remediation_operation(RemediationDraftRequest {
+            run_id,
+            finding_id,
+            patch: "--- a/parser.c\n+++ b/parser.c\n@@ -1 +1 @@\n-unsafe();\n+safe();\n".to_owned(),
+            follow_up_fuzz_seconds: 1,
+            pricing: CampaignEvidencePricing {
+                compute_usd_per_hour: 0.0,
+                model_cost_usd: 0.0,
+            },
+        })
+        .await
+        .expect_err("Windows must refuse an evidence read without handle-relative traversal");
+
+    assert!(
+        error.to_string().contains(
+            "proof-carrying evidence reads require descriptor-relative filesystem access"
+        ),
+        "the refusal names the unavailable secure read: {error}"
+    );
+    assert!(
+        runtime.calls().is_empty(),
+        "an unavailable evidence read executes nothing"
     );
 }
