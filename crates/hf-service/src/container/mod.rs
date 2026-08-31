@@ -853,7 +853,7 @@ impl ServiceContainer {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "proof-carrying"))]
     pub(crate) fn workspace_test_operation_gate() -> Arc<tokio::sync::RwLock<()>> {
         workspace_operation_gate(&workspace_root())
             .expect("test workspace operation gate")
