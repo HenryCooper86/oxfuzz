@@ -64,3 +64,11 @@ The REST adapter resolves every durable work-order, submission, and attempt id
 to its immutable project through `hf-service` before applying the configured
 approved-root policy. Unscoped REST lists omit records outside those roots, and
 authorization precedes every ID-based service read, mutation, or dispatch.
+
+Source evidence is read through a platform-specific handle traversal rather
+than a canonicalize-then-open sequence. Unix uses descriptor-relative
+`openat`; Windows uses handle-relative capability primitives. Both reject
+link-like path components. Common service code classifies, size-checks, and
+reads the returned handle without reopening its path. The Windows
+implementation and its release verification are specified in
+[Windows-Confined Harness Work-Order Reads](../superpowers/specs/2026-08-31-windows-confined-work-order-read-design.md).
