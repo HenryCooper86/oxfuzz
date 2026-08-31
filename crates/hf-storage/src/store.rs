@@ -1,6 +1,6 @@
 //! The SQLite-backed [`Store`] and its repository methods.
 
-use std::{path::Path, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
 
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
@@ -474,6 +474,7 @@ pub struct SemgrepPublication {
 #[derive(Clone)]
 pub struct Store {
     pool: SqlitePool,
+    pub(crate) work_order_publish_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Store {
@@ -516,7 +517,10 @@ impl Store {
             .await?;
         sqlx::migrate!("./migrations").run(&pool).await?;
         crate::retired_engine::validate_no_active_retired_engine_records(&pool).await?;
-        let store = Self { pool };
+        let store = Self {
+            pool,
+            work_order_publish_lock: Arc::new(tokio::sync::Mutex::new(())),
+        };
         // One-time, self-healing cleanup of legacy duplicate crash rows left by
         // pre-deterministic-id triages. Idempotent: a no-op on a clean DB.
         store.dedupe_crashes().await?;
