@@ -255,7 +255,7 @@ impl ApiFixture {
 }
 
 struct ControlledApiFixture {
-    _directory: tempfile::TempDir,
+    directory: tempfile::TempDir,
     project: PathBuf,
     managed_workspace: PathBuf,
     store: Arc<Store>,
@@ -303,7 +303,7 @@ impl ControlledApiFixture {
             .expect("controlled web security");
         let app = build_with_state_and_security(AppState::new(container.clone()), security);
         Self {
-            _directory: directory,
+            directory,
             project,
             managed_workspace,
             store,
@@ -809,7 +809,7 @@ async fn list_filter_returns_only_the_approved_project_work_orders() {
 #[tokio::test]
 async fn service_created_outside_root_records_are_hidden_and_all_id_routes_deny_first() {
     let fixture = ControlledApiFixture::new(ControlledRuntimeMode::Pass).await;
-    let outside = fixture._directory.path().join("outside-web-roots");
+    let outside = fixture.directory.path().join("outside-web-roots");
     std::fs::create_dir(&outside).expect("create outside-root project");
     std::fs::write(
         outside.join("outside.c"),

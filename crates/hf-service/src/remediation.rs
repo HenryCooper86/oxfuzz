@@ -447,9 +447,8 @@ mod workspace_lease_tests {
         )
         .await
         .expect("already-locked remediation assembly must not reacquire the workspace lease");
-        let error = match result {
-            Ok(_) => panic!("the missing run must remain a validation failure"),
-            Err(error) => error,
+        let Err(error) = result else {
+            panic!("the missing run must remain a validation failure");
         };
         assert!(error.to_string().contains("was not found"));
 

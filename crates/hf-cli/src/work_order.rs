@@ -517,10 +517,9 @@ mod tests {
                     WorkOrderArg::Placeholder(WorkOrderPlaceholder::SubmissionId) => {
                         submission_id.to_owned()
                     }
-                    WorkOrderArg::Placeholder(WorkOrderPlaceholder::AttemptIds)
-                    | WorkOrderArg::Placeholder(WorkOrderPlaceholder::AttemptId) => {
-                        attempt_id.to_owned()
-                    }
+                    WorkOrderArg::Placeholder(
+                        WorkOrderPlaceholder::AttemptIds | WorkOrderPlaceholder::AttemptId,
+                    ) => attempt_id.to_owned(),
                 })
                 .collect::<Vec<_>>();
             let cli = Cli::try_parse_from(args).expect("emitted argv parses through the real CLI");
