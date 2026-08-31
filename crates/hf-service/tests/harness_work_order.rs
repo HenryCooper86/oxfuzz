@@ -737,6 +737,43 @@ async fn service_export_complete_source_digest_changes_packet_identity_outside_b
     assert_eq!(runtime.calls.load(Ordering::Relaxed), 0);
 }
 
+#[cfg(windows)]
+#[tokio::test]
+async fn service_export_reads_a_nested_regular_source_on_windows() {
+    let workspace = tempfile::tempdir().expect("create workspace");
+    let project = workspace.path().join("project");
+    std::fs::create_dir_all(project.join("src")).expect("create nested source directory");
+    std::fs::write(
+        project.join("src/parser.c"),
+        "// heading\nint parse_packet(void) { return 0; }\n",
+    )
+    .expect("write nested source");
+    let store = Arc::new(
+        hf_storage::Store::connect(workspace.path().join("work-order.db"))
+            .await
+            .expect("create store"),
+    );
+    persist_target(
+        &store,
+        retained_target(&project, PathBuf::from("src/parser.c"), TargetLanguage::C),
+    )
+    .await;
+    let runtime = Arc::new(CountingRuntime::default());
+    let container = ServiceContainer::new(runtime.clone(), None).with_store(store);
+
+    let packet = container
+        .export_harness_work_order(export_request(&project))
+        .await
+        .expect("export nested Windows source");
+
+    assert_eq!(packet.payload.target.relative_source, "src/parser.c");
+    assert_eq!(
+        packet.payload.source.excerpt,
+        "int parse_packet(void) { return 0; }"
+    );
+    assert_eq!(runtime.calls.load(Ordering::Relaxed), 0);
+}
+
 #[tokio::test]
 async fn service_work_order_reads_and_lists_only_verified_durable_packets() {
     let workspace = tempfile::tempdir().expect("create workspace");
