@@ -1800,15 +1800,27 @@ fn open_regular_file_beneath(
     project: &Path,
     relative: &Path,
 ) -> Result<File, HarnessWorkOrderError> {
-    use cap_primitives::fs::{
-        open, open_ambient_dir, open_dir_nofollow, OpenOptions, OpenOptionsExt,
+    use cap_primitives::fs::{open, open_ambient, open_dir_nofollow, OpenOptions, OpenOptionsExt};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
     };
-    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
 
     let components = normal_path_components(relative)?;
     let (leaf, parents) = components.split_last().ok_or_else(invalid_project_path)?;
-    let mut directory = open_ambient_dir(project, cap_primitives::ambient_authority())
+    let mut root_options = OpenOptions::new();
+    root_options
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    let mut directory = open_ambient(project, &root_options, cap_primitives::ambient_authority())
         .map_err(|_| invalid_project_path())?;
+    if !directory
+        .metadata()
+        .map_err(|_| invalid_project_path())?
+        .is_dir()
+    {
+        return Err(invalid_project_path());
+    }
     for parent in parents {
         directory = open_dir_nofollow(&directory, Path::new(*parent))
             .map_err(|_| invalid_project_path())?;
@@ -1833,10 +1845,43 @@ fn open_regular_file_beneath(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    use super::open_regular_file_beneath;
     use super::{bounded_excerpt, portable_define};
     use crate::harness_work_order::{
         MAX_WORK_ORDER_SOURCE_EXCERPT_BYTES, MAX_WORK_ORDER_SOURCE_EXCERPT_LINES,
     };
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_confined_open_rejects_a_replaced_project_root() {
+        let workspace = tempfile::tempdir().unwrap();
+        let project = workspace.path().join("project");
+        let displaced_project = workspace.path().join("displaced-project");
+        let outside = workspace.path().join("outside");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("parser.c"), "int parser(void) { return 0; }\n").unwrap();
+
+        let canonical_project = project.canonicalize().unwrap();
+        std::fs::rename(&project, displaced_project).unwrap();
+        let junction = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&project)
+            .arg(&outside)
+            .output()
+            .unwrap();
+        assert!(
+            junction.status.success(),
+            "junction setup failed: {}",
+            String::from_utf8_lossy(&junction.stderr)
+        );
+
+        assert!(
+            open_regular_file_beneath(&canonical_project, std::path::Path::new("parser.c"))
+                .is_err()
+        );
+    }
 
     #[test]
     fn bounded_excerpt_honors_byte_and_line_limits_on_utf8_edges() {

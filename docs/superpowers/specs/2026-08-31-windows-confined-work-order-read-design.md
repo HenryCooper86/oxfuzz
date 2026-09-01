@@ -37,6 +37,8 @@ REST, storage, or discovery defect.
 The file-open operation must preserve these properties:
 
 - the project root is the already canonical service-owned root;
+- the project-root handle is opened without following a name-surrogate reparse
+  point and cannot be renamed or deleted while traversal uses it;
 - every supplied relative component is a normal component;
 - each parent component is opened relative to the previously opened directory;
 - a link-like parent or final component is rejected;
@@ -62,8 +64,10 @@ a non-regular node cannot stall before it is classified. Replace the Windows
 stub with the following sequence:
 
 1. Collect and revalidate normal path components.
-2. Open the canonical project root with
-   `cap_primitives::fs::open_ambient_dir`.
+2. Open the canonical project root with `cap_primitives::fs::open_ambient`,
+   `FILE_FLAG_BACKUP_SEMANTICS`, and `FILE_FLAG_OPEN_REPARSE_POINT`; omit
+   delete sharing and reject the returned handle unless Windows reports a
+   directory rather than a name-surrogate reparse point.
 3. Open every parent component individually with
    `cap_primitives::fs::open_dir_nofollow`.
 4. Open the final component relative to the last directory handle with
@@ -80,9 +84,10 @@ source-evidence calculation and the validation-to-use gap between them.
 
 `cap-primitives` is a Windows-only `hf-service` dependency. Its Windows
 implementation uses `NtCreateFile` with an open directory as
-`OBJECT_ATTRIBUTES.RootDirectory`; directory handles omit
-`FILE_SHARE_DELETE`, preventing a traversed directory from being renamed or
-deleted while it is the active starting point. Version `4.0.3` is selected.
+`OBJECT_ATTRIBUTES.RootDirectory`. The explicit root options and subsequent
+directory opens omit `FILE_SHARE_DELETE`, preventing each active directory
+handle from being renamed or deleted while traversal uses it. Version `4.0.3`
+is selected.
 The known special-device-name traversal issue affected versions before `3.4.1`
 and is fixed in the selected version.
 
@@ -105,6 +110,8 @@ focused service regressions before production code:
 
 - an ordinary nested retained source exports successfully on Windows;
 - a retained source reached through a Windows directory junction is rejected;
+- a canonical project-root pathname replaced by a Windows directory junction
+  before the confined open is rejected;
 - absolute paths and parent traversal retain their existing cross-platform
   rejection;
 - oversized and non-regular sources retain their existing stable errors; and
