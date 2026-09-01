@@ -9,6 +9,32 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ## Unreleased
 
+### Added
+
+- **Harness lint now covers Rust and Python harnesses.** Lexical rules are
+  scoped per language: Rust (cargo-fuzz) harnesses are checked for
+  `std::process::exit`, `Command::new`, `thread::sleep`, socket use, and
+  `catch_unwind`; Python (Atheris) harnesses for `sys.exit`, `subprocess`,
+  `time.sleep`, socket use, `random`, and bare `except:`. Go still returns no
+  findings (unchecked rather than clean). Harness Work Order packets now carry
+  exactly the rules that apply to the target's language instead of the C table
+  for every language.
+- **Repair prompts now receive summarized compiler diagnostics.** Distinct
+  diagnostic lines (clang/GCC and rustc formats) are extracted, deduplicated,
+  and bounded before reaching the model, instead of a raw head-truncated dump
+  that could spend the whole budget on build noise before the first error.
+- **A coverage gate measures the TEST_STRATEGY targets.** `scripts/tests/gates.sh
+  coverage` reports per-crate line coverage for the four domain crates via
+  cargo-llvm-cov, and CI records it on every push; thresholds are not enforced
+  until a trusted baseline exists.
+
+### Changed
+
+- Corrected stale documentation references: the repository layout no longer
+  lists nonexistent `config/agents/` and `skills/` directories, the harness
+  prompt template location now names the real renderer, and the design
+  overview's dead "y-agent" rows name their actual owners.
+
 ## 0.3.0 - 2026-08-31
 
 ### Added
