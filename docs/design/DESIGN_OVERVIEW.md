@@ -26,7 +26,7 @@ all under human-in-the-loop supervision.
 
 | Concept | Owner Crate | Contract | Design Doc |
 | --- | --- | --- | --- |
-| LLM provider pool | hf-provider | `LlmProvider`, `ProviderPool` | (reuse y-agent) |
+| LLM provider pool | hf-provider | `LlmProvider`, `ProviderPool` | (none; ported from the retired y-agent prototype, documented in crate docs) |
 | Target discovery | hf-discovery | `TargetCandidate`, `TargetInventory` | target-discovery-design.md |
 | Semgrep target enrichment | hf-discovery + hf-service | `SemgrepFinding`, `SemgrepTargetScore`, `SemgrepInventoryView` | target-discovery-design.md + service-orchestration-design.md |
 | Project build context | hf-discovery + hf-core | `BuildContext`, `CompileEntry` | harness-generation-design.md |
@@ -40,7 +40,7 @@ all under human-in-the-loop supervision.
 | Campaign evidence and advice | hf-service + hf-coverage | versioned evidence/advice DTOs | proof-carrying-campaign-intelligence.md |
 | Sandbox / runtime | hf-runtime | `RuntimeAdapter` | runtime-design.md |
 | Tool registry | hf-tools | `Tool`, `ToolRegistry` | ../standards/TOOL_CALL_PROTOCOL.md |
-| Skill evolution | hf-skills | `SkillRegistry` | (reuse y-agent) |
+| Skill evolution | hf-skills | `SkillRegistry` | (none; built-in skills ship in `crates/hf-skills/src/builtins/`) |
 | Agent prompt security | hf-prompt | - | agent-prompt-security-design.md |
 | Service orchestration | hf-service | - | service-orchestration-design.md |
 | Durable one-time schedule occurrences | hf-scheduler + hf-storage + hf-service | `OneTimeOccurrence`, `OneTimeRecoveryView` | portfolio-campaigns.md + service-orchestration-design.md + DATABASE_SCHEMA.md |
