@@ -873,10 +873,9 @@ pub fn render_work_order(work_order: &HarnessWorkOrder) -> String {
 /// Return the lint rules applicable to one target language.
 #[must_use]
 pub fn work_order_rules(language: TargetLanguage) -> Vec<WorkOrderRule> {
-    let is_cpp = language == TargetLanguage::Cpp;
     let mut rules = harness_rules()
         .into_iter()
-        .filter(|rule: &HarnessRuleSummary| is_cpp || !rule.cpp_only)
+        .filter(|rule: &HarnessRuleSummary| rule.languages.contains(&language.as_str()))
         .map(|rule| WorkOrderRule {
             id: rule.id,
             blocking: rule.severity == LintSeverity::Error,

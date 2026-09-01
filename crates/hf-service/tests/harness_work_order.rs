@@ -17,11 +17,11 @@ use hf_core::target::{
 };
 use hf_service::harness_work_order::{
     build_work_order, quote_posix_arg, render_work_order, sanitize_work_order_diagnostic,
-    verify_work_order, work_order_commands, HarnessWorkOrderErrorCode, HarnessWorkOrderErrorKind,
-    HarnessWorkOrderPayload, ImportHarnessWorkOrderSubmissionRequest, WorkOrderArg,
-    WorkOrderCompileContext, WorkOrderPlaceholder, WorkOrderRule, WorkOrderSeedReference,
-    WorkOrderSourceEvidence, WorkOrderStep, WorkOrderSubmissionOrigin, WorkOrderTargetEvidence,
-    HARNESS_WORK_ORDER_SCHEMA_VERSION, MAX_WORK_ORDER_PACKET_BYTES,
+    verify_work_order, work_order_commands, work_order_rules, HarnessWorkOrderErrorCode,
+    HarnessWorkOrderErrorKind, HarnessWorkOrderPayload, ImportHarnessWorkOrderSubmissionRequest,
+    WorkOrderArg, WorkOrderCompileContext, WorkOrderPlaceholder, WorkOrderRule,
+    WorkOrderSeedReference, WorkOrderSourceEvidence, WorkOrderStep, WorkOrderSubmissionOrigin,
+    WorkOrderTargetEvidence, HARNESS_WORK_ORDER_SCHEMA_VERSION, MAX_WORK_ORDER_PACKET_BYTES,
     MAX_WORK_ORDER_SOURCE_EXCERPT_BYTES,
 };
 use hf_service::{HarnessWorkOrderExportRequest, ServiceContainer};
@@ -1927,4 +1927,39 @@ async fn submission_reads_reject_invalid_or_noncanonical_durable_provenance() {
             assert_eq!(error.kind, HarnessWorkOrderErrorKind::Validation);
         }
     }
+}
+
+#[test]
+fn work_order_rules_are_scoped_to_the_target_language() {
+    // A work order for one language must carry that language's rules, not
+    // the whole table: the packet states the constraints an author will be
+    // checked against, and a C-only rule in a Rust packet is noise an
+    // author cannot act on.
+    let ids_for = |language: TargetLanguage| -> Vec<String> {
+        work_order_rules(language)
+            .into_iter()
+            .map(|rule| rule.id)
+            .collect()
+    };
+
+    let c = ids_for(TargetLanguage::C);
+    assert!(c.iter().any(|id| id == "no-strlen-on-fuzz-data"), "{c:?}");
+    assert!(!c.iter().any(|id| id == "no-catch-all"), "{c:?}");
+    assert!(!c.iter().any(|id| id == "no-process-spawn"), "{c:?}");
+
+    let cpp = ids_for(TargetLanguage::Cpp);
+    assert!(cpp.iter().any(|id| id == "no-catch-all"), "{cpp:?}");
+
+    let rust = ids_for(TargetLanguage::Rust);
+    assert!(rust.iter().any(|id| id == "no-process-spawn"), "{rust:?}");
+    assert!(
+        !rust.iter().any(|id| id == "no-strlen-on-fuzz-data"),
+        "{rust:?}"
+    );
+
+    let python = ids_for(TargetLanguage::Python);
+    assert!(python.iter().any(|id| id == "no-subprocess"), "{python:?}");
+
+    // Go has no rule set yet: an empty packet section, not the C table.
+    assert!(ids_for(TargetLanguage::Go).is_empty());
 }

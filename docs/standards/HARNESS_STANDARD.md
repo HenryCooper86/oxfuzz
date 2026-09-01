@@ -23,30 +23,39 @@ A harness is acceptable only if it satisfies all of:
 Requirement 3 above, and the process and network half of requirement 2, are
 checked before the harness reaches the sandbox by
 `hf_harness::lint_harness_source`. The check is lexical, deterministic, and
-free: no model call and no container. It covers C and C++; other languages have
-no rule set yet and return no findings, which means unchecked rather than clean.
+free: no model call and no container. Rules are scoped per language: C, C++,
+Rust (cargo-fuzz/libFuzzer targets), and Python (Atheris) have rule sets; a
+language without one (Go) returns no findings, which means unchecked rather
+than clean.
 
 An `Error` finding blocks the build and is handed to the repair loop in section
 5 as if it were compiler output. That is strictly cheaper than building first,
 and it catches a class of defect the compiler accepts happily. A `Warning` is
 recorded on the compile outcome and surfaced to the operator without blocking.
 
-| Rule | Severity | Why |
-| --- | --- | --- |
-| `no-process-exit` | Error | `exit`/`_exit`/`abort` on malformed input makes every such input look like a crash and ends the fuzz process. |
-| `no-shell` | Error | `system`/`popen`/`exec*` move execution outside the sandbox that is measuring the target. |
-| `no-sleep` | Error | Sleeping in the fuzz loop destroys throughput, and a slow input is reported as a hang. |
-| `no-network` | Error | A socket reaches outside the sandbox and makes the result depend on a service the run does not control. |
-| `no-signal-handler` | Warning | A handler can swallow the fault the sanitizer exists to report. |
-| `no-nondeterminism` | Warning | A clock or RNG branch makes a crash irreproducible and breaks corpus minimization. |
-| `no-catch-all` | Warning | `catch (...)` hides target failures the fuzzer exists to observe (C++ only). |
-| `no-strlen-on-fuzz-data` | Warning | Fuzz input is not NUL-terminated, so treating it as a C string reads out of bounds inside the harness itself. |
+| Rule | Severity | Languages | Why |
+| --- | --- | --- | --- |
+| `no-process-exit` | Error | C, C++, Rust, Python | `exit`/`_exit`/`abort`/`sys.exit` on malformed input makes every such input look like a crash and ends the fuzz process. |
+| `no-shell` | Error | C, C++, Python | `system`/`popen`/`exec*` (and Python's `os.system`) move execution outside the sandbox that is measuring the target. |
+| `no-sleep` | Error | C, C++, Rust, Python | Sleeping in the fuzz loop destroys throughput, and a slow input is reported as a hang. |
+| `no-network` | Error | C, C++, Rust, Python | A socket reaches outside the sandbox and makes the result depend on a service the run does not control. |
+| `no-signal-handler` | Warning | C, C++ | A handler can swallow the fault the sanitizer exists to report. |
+| `no-nondeterminism` | Warning | C, C++, Rust | A clock or RNG branch makes a crash irreproducible and breaks corpus minimization. |
+| `no-catch-all` | Warning | C++ | `catch (...)` hides target failures the fuzzer exists to observe. |
+| `no-strlen-on-fuzz-data` | Warning | C, C++ | Fuzz input is not NUL-terminated, so treating it as a C string reads out of bounds inside the harness itself. |
+| `no-process-spawn` | Error | Rust | `Command::new` moves execution outside the sandbox that is measuring the target. |
+| `no-catch-unwind` | Warning | Rust | `catch_unwind` hides the panic the fuzzing runtime treats as a finding. |
+| `no-subprocess` | Error | Python | The `subprocess` module moves execution outside the sandbox that is measuring the target. |
+| `no-random-module` | Warning | Python | A `random` branch makes a crash irreproducible and breaks corpus minimization. |
+| `no-bare-except` | Warning | Python | A bare `except:` hides target failures the fuzzer exists to observe. |
 
 Each call rule requires a non-identifier character before the name and an
-opening parenthesis after it, so `exit_code` and `parse_time` are not calls.
-Comment-only lines are skipped; a rule name in a string literal or a trailing
-comment still matches, which is the safe direction for findings that only
-advise a repair prompt.
+opening parenthesis after it, so `exit_code` and `parse_time` are not calls;
+path-qualified calls (`std::process::exit`, `sys.exit`, `time.sleep`) match the
+same way. Comment-only lines are skipped (`//` and `/*` for the C family, `#`
+for Python); a rule name in a string literal or a trailing comment still
+matches, which is the safe direction for findings that only advise a repair
+prompt.
 
 Two deliberate omissions. File I/O is not a rule: an AFL++ file-mode harness
 must open `argv[1]`, so the rule would fire on correct code, and a check with
@@ -60,7 +69,10 @@ a safety check that a build configuration can remove is not one.
 
 ## 4. Templates
 
-Templates live in `config/prompts/harness_<lang>_<engine>.md`. They contain:
+Task prompts are rendered by `hf-prompt` (`crates/hf-prompt/src/render.rs`)
+from built-in templates; `config/prompts/prompts.example.toml` documents the
+configuration override format, and no per-language template files exist in the
+repository. The harness prompt contains:
 
 - The engine entry point skeleton.
 - Include/import guidance, and the project's real include directories, defines,
