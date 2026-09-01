@@ -9,7 +9,7 @@ description = "Optional sandboxed Scapy sidecar for oxfuzz automotive protocols"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "oxfuzz contributors" }]
+authors = [{ name = "HenryCooper86" }]
 dependencies = ["Scapy==2.7.0"]
 classifiers = [
   "Development Status :: 3 - Alpha",
