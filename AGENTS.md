@@ -18,10 +18,10 @@ full observability - WAL-based recoverability - user-extensible skills -
 ### 1.1 Workspace Crates
 
 **Core**: `hf-core`
-**Infrastructure**: `hf-provider` - `hf-session` - `hf-context` - `hf-storage` - `hf-knowledge` - `hf-diagnostics`
+**Infrastructure**: `hf-provider` - `hf-session` - `hf-context` - `hf-storage` - `hf-knowledge` - `hf-diagnostics` - `hf-spill`
 **Middleware**: `hf-guardrails` - `hf-prompt`
 **Capabilities**: `hf-tools` - `hf-skills` - `hf-runtime` - `hf-scheduler`
-**Fuzzing Domain**: `hf-discovery` - `hf-harness` - `hf-engine` - `hf-crash` - `hf-corpus` - `hf-coverage`
+**Fuzzing Domain**: `hf-discovery` - `hf-harness` - `hf-engine` - `hf-crash` - `hf-corpus` - `hf-coverage` - `hf-analysis` - `hf-automotive`
 **Orchestration**: `hf-agent`
 **Service**: `hf-service` (all business logic)
 **Presentation**: `hf-cli` (CLI + TUI) - `hf-web` (REST API) - `hf-gui` (Tauri desktop app, `crates/hf-gui/src-tauri`)
@@ -33,15 +33,20 @@ full observability - WAL-based recoverability - user-extensible skills -
 oxfuzz/
   docs/
     design/            -- detailed design documents
-    standards/         -- engineering, testing, DB, DSL, skills, tool-call, target, harness standards
+    standards/         -- engineering, testing, DB, skills, tool-call, target, harness standards
   config/
-    agents/            -- agent configuration
-    prompts/           -- prompt templates (discovery, harness, triage)
-  crates/              -- Rust workspace crates
+    prompts/           -- core prompt sections bundled by hf-prompt; prompts.example.toml
+                          documents the override format
+  crates/              -- Rust workspace crates (skills and agent definitions are built into
+                          hf-skills and hf-agent; user definitions may be dropped into the
+                          runtime config dir, none ship as repository files)
   data/                -- runtime SQLite data
+  docker/              -- sandbox image build context
+  examples/            -- small example projects used by demos and tests
   scripts/             -- automation, release, health-check, test helper scripts
-  skills/              -- bundled skill content (target-triage, harness-author, crash-triage)
+  sidecars/            -- sandbox-external helper services (e.g. scapy automotive lab)
   tests/               -- workspace-level integration tests
+  third_party/         -- vendored third-party material (semgrep, semgrep-rules)
   fuzz_workspace/      -- runtime corpora, crashes, build artifacts (gitignored)
 ```
 
