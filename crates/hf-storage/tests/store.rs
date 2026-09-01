@@ -5170,3 +5170,61 @@ async fn prune_guardrail_decisions_keeps_the_newest_window() {
     assert_eq!(kept[0].id, "00000000-0000-0000-0000-000000000000");
     assert_eq!(kept[1].id, "00000000-0000-0000-0000-000000000001");
 }
+
+#[tokio::test]
+async fn promoted_harnesses_for_project_returns_only_that_projects_promotions() {
+    let (store, _dir) = temp_store().await;
+    let now = Utc::now();
+    let mut first = sample_target("/projects/alpha");
+    first.symbol = "parse_header".to_owned();
+    let mut second = sample_target("/projects/alpha");
+    second.symbol = "parse_body".to_owned();
+    let mut other = sample_target("/projects/beta");
+    other.symbol = "parse_other".to_owned();
+    store.upsert_target(&first, now).await.unwrap();
+    store.upsert_target(&second, now).await.unwrap();
+    store.upsert_target(&other, now).await.unwrap();
+
+    let mut promoted = sample_harness(first.id);
+    promoted.status = HarnessStatus::Promoted;
+    let still_draft = sample_harness(second.id);
+    let mut promoted_elsewhere = sample_harness(other.id);
+    promoted_elsewhere.status = HarnessStatus::Promoted;
+    store.upsert_harness(&promoted).await.unwrap();
+    store.upsert_harness(&still_draft).await.unwrap();
+    store.upsert_harness(&promoted_elsewhere).await.unwrap();
+
+    let rows = store
+        .promoted_harnesses_for_project(std::path::Path::new("/projects/alpha"))
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].harness.id, promoted.id);
+    assert_eq!(rows[0].target_symbol, "parse_header");
+}
+
+#[tokio::test]
+async fn promoted_harnesses_for_project_orders_newest_first() {
+    let (store, _dir) = temp_store().await;
+    let now = Utc::now();
+    let mut first = sample_target("/projects/alpha");
+    first.symbol = "parse_header".to_owned();
+    let mut second = sample_target("/projects/alpha");
+    second.symbol = "parse_body".to_owned();
+    store.upsert_target(&first, now).await.unwrap();
+    store.upsert_target(&second, now).await.unwrap();
+
+    let mut older = sample_harness(first.id);
+    older.status = HarnessStatus::Promoted;
+    let mut newer = sample_harness(second.id);
+    newer.status = HarnessStatus::Promoted;
+    store.upsert_harness(&older).await.unwrap();
+    store.upsert_harness(&newer).await.unwrap();
+
+    let rows = store
+        .promoted_harnesses_for_project(std::path::Path::new("/projects/alpha"))
+        .await
+        .unwrap();
+    let ids: Vec<uuid::Uuid> = rows.iter().map(|row| row.harness.id).collect();
+    assert_eq!(ids, vec![newer.id, older.id]);
+}

@@ -177,6 +177,74 @@ pub fn render_harness_prompt_with_context(
     prompt
 }
 
+/// One previously promoted harness, shown to a new draft as an example of what
+/// human review accepted for this project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedExample {
+    /// The target the accepted harness was written for.
+    pub target_symbol: String,
+    /// The accepted harness source.
+    pub source: String,
+}
+
+/// Characters of one accepted example's source shown to the model. An accepted
+/// harness is the strongest conditioning signal the prompt carries, but a whole
+/// oversized harness crowds out the target's own context (AGENTS.md 2.4).
+pub const MAX_ACCEPTED_EXAMPLE_CHARS: usize = 6000;
+
+/// Render previously accepted harnesses as a prompt section.
+///
+/// Each harness a human promoted for this project is evidence about house
+/// style, entry-point shape, and which include paths actually work -- none of
+/// which the base prompt states. An empty slice renders an empty string, so a
+/// project with no promotions yet degrades to the context prompt unchanged.
+#[must_use]
+pub fn render_accepted_examples_section(examples: &[AcceptedExample]) -> String {
+    if examples.is_empty() {
+        return String::new();
+    }
+    let mut body = String::new();
+    for example in examples {
+        body.push_str("--- ");
+        body.push_str(&example.target_symbol);
+        body.push_str(" ---\n");
+        if example.source.chars().count() > MAX_ACCEPTED_EXAMPLE_CHARS {
+            body.extend(example.source.chars().take(MAX_ACCEPTED_EXAMPLE_CHARS));
+            body.push_str("\n... (source truncated)");
+        } else {
+            body.push_str(&example.source);
+        }
+        body.push('\n');
+    }
+    format!(
+        "Previously accepted harnesses for this project (each promoted by human \
+         review; match their shape and conventions, not their target):\n{body}"
+    )
+}
+
+/// Render the harness generation prompt with related context, build context,
+/// and previously accepted harness examples.
+///
+/// An empty `examples` slice renders exactly what
+/// [`render_harness_prompt_with_context`] renders, so callers can pass
+/// whatever the store returned without branching.
+#[must_use]
+pub fn render_harness_prompt_with_examples(
+    target: &TargetCandidate,
+    engine: EngineKind,
+    related: &[RelatedContext],
+    build: Option<&BuildContext>,
+    examples: &[AcceptedExample],
+) -> String {
+    let mut prompt = render_harness_prompt_with_context(target, engine, related, build);
+    let section = render_accepted_examples_section(examples);
+    if !section.is_empty() {
+        prompt.push_str("\n\n");
+        prompt.push_str(&section);
+    }
+    prompt
+}
+
 /// Include directories listed in a prompt. Past this the list stops helping the
 /// model choose a header and starts consuming the budget (AGENTS.md 2.4).
 const MAX_PROMPT_INCLUDE_DIRS: usize = 20;
@@ -735,6 +803,78 @@ mod tests {
         assert!(
             body.chars().count() <= MAX_RELATED_CONTEXT_CHARS,
             "section body exceeds the {MAX_RELATED_CONTEXT_CHARS} char budget"
+        );
+    }
+
+    #[test]
+    fn accepted_examples_section_names_target_and_carries_source() {
+        let section = render_accepted_examples_section(&[AcceptedExample {
+            target_symbol: "parse_header".to_owned(),
+            source: "int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n) { return 0; }"
+                .to_owned(),
+        }]);
+        assert!(
+            section.contains("parse_header"),
+            "must name the target: {section}"
+        );
+        assert!(
+            section.contains("LLVMFuzzerTestOneInput"),
+            "must carry the source: {section}"
+        );
+        assert!(
+            section.to_lowercase().contains("accepted"),
+            "must say what the examples are: {section}"
+        );
+    }
+
+    #[test]
+    fn accepted_examples_section_is_empty_without_examples() {
+        assert_eq!(render_accepted_examples_section(&[]), "");
+    }
+
+    #[test]
+    fn accepted_examples_section_caps_each_source() {
+        let section = render_accepted_examples_section(&[AcceptedExample {
+            target_symbol: "t".to_owned(),
+            source: "x".repeat(MAX_ACCEPTED_EXAMPLE_CHARS + 500),
+        }]);
+        assert!(
+            section.chars().count() < MAX_ACCEPTED_EXAMPLE_CHARS + 500,
+            "an over-long source must be shortened, not carried whole"
+        );
+        assert!(
+            section.contains("truncated"),
+            "a shortened source must say so: {section}"
+        );
+    }
+
+    #[test]
+    fn harness_prompt_with_examples_appends_the_section() {
+        let target = sample_target();
+        let prompt = render_harness_prompt_with_examples(
+            &target,
+            EngineKind::LibFuzzer,
+            &[],
+            None,
+            &[AcceptedExample {
+                target_symbol: "parse_header".to_owned(),
+                source: "int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n){return 0;}"
+                    .to_owned(),
+            }],
+        );
+        assert!(
+            prompt.contains("Previously accepted"),
+            "the section must reach the prompt: tail:\n{}",
+            prompt.chars().rev().take(400).collect::<String>()
+        );
+    }
+
+    #[test]
+    fn harness_prompt_with_examples_and_none_rendered_matches_the_context_prompt() {
+        let target = sample_target();
+        assert_eq!(
+            render_harness_prompt_with_examples(&target, EngineKind::LibFuzzer, &[], None, &[]),
+            render_harness_prompt_with_context(&target, EngineKind::LibFuzzer, &[], None)
         );
     }
 }

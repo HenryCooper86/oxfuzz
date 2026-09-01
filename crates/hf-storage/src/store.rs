@@ -92,6 +92,16 @@ pub struct ProjectAutoRevert {
     pub notify_only: bool,
 }
 
+/// A harness human review promoted, with its target symbol: the retrieval
+/// result the harness draft prompt conditions on (accepted examples).
+#[derive(Debug, Clone)]
+pub struct PromotedHarness {
+    /// The target the harness was written for (`targets.symbol`).
+    pub target_symbol: String,
+    /// The promoted harness record.
+    pub harness: Harness,
+}
+
 /// One auto-revert policy firing, for the durable audit trail.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AutoRevertEvent {
@@ -2234,6 +2244,43 @@ impl Store {
             .fetch_all(&self.pool)
             .await?;
         rows.iter().map(|r| json_col(r, "data_json")).collect()
+    }
+
+    /// List a project's promoted harnesses with their target symbols, newest
+    /// first.
+    ///
+    /// The accepted-example retrieval for harness drafting: each row is a
+    /// harness human review promoted for this project, which the draft prompt
+    /// conditions on. Promotion status is filtered after deserialization so
+    /// the status text has one serialization source (`enum_str` on write).
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure or malformed stored data.
+    pub async fn promoted_harnesses_for_project(
+        &self,
+        project_root: &Path,
+    ) -> Result<Vec<PromotedHarness>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT t.symbol, h.data_json FROM harnesses h \
+             JOIN targets t ON t.id = h.target_id \
+             WHERE t.project_root = ?1 \
+             ORDER BY h.rowid DESC",
+        )
+        .bind(project_root.to_string_lossy().to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::new();
+        for row in rows {
+            let symbol: String = row.try_get("symbol")?;
+            let harness: Harness = json_col(&row, "data_json")?;
+            if harness.status == hf_core::harness::HarnessStatus::Promoted {
+                out.push(PromotedHarness {
+                    target_symbol: symbol,
+                    harness,
+                });
+            }
+        }
+        Ok(out)
     }
 
     /// Persist the independent LLM review for one exact harness source.

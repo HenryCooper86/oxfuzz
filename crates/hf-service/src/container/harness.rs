@@ -28,7 +28,8 @@ use super::output_budget::{
     output_budget_status, OutputBudget, MAX_RUN_OUTPUT_BYTES, MAX_RUN_OUTPUT_ENTRIES,
 };
 use super::project_identity::{
-    canonical_project_root, select_target_candidate, stored_project_matches,
+    canonical_project_root, project_lookup_identity, select_target_candidate,
+    stored_project_matches,
 };
 use super::staging::{
     qualification_evidence, resolve_run_sandbox_image, retain_run_context, run_context_digests,
@@ -484,11 +485,13 @@ impl ServiceContainer {
                 .with_diagnostics(Arc::clone(&self.diagnostics), "harness_draft");
             let related = crate::knowledge::harness_related_context(project, candidate);
             let build = project_build_context(self, project);
-            match hf_harness::draft_with_context(
+            let examples = self.accepted_examples(project, candidate).await;
+            match hf_harness::draft_with_examples(
                 candidate,
                 engine,
                 &related,
                 build.as_ref(),
+                &examples,
                 Box::new(provider),
             )
             .await
@@ -501,6 +504,43 @@ impl ServiceContainer {
             }
         }
         heuristic_draft(candidate, engine).source
+    }
+
+    /// Accepted examples for one draft: previously promoted harnesses of this
+    /// project, same language as the candidate, newest first. Each is a
+    /// persisted record (the `harnesses` row a human promotion approved), so
+    /// the model-visible prompt section stays reconstructable from durable
+    /// state (AGENTS.md 2.13).
+    ///
+    /// Degrades to no examples: without a store, or on a store read failure,
+    /// the draft prompt renders exactly as it did before this conditioning
+    /// existed.
+    async fn accepted_examples(
+        &self,
+        project: &Path,
+        candidate: &TargetCandidate,
+    ) -> Vec<hf_prompt::AcceptedExample> {
+        let Some(store) = self.store() else {
+            return Vec::new();
+        };
+        // Swallowed: a failed store read must not block drafting -- no
+        // examples is the pre-existing base prompt, and nothing else reaches
+        // this read.
+        let Ok(promoted) = store
+            .promoted_harnesses_for_project(&project_lookup_identity(project))
+            .await
+        else {
+            return Vec::new();
+        };
+        promoted
+            .into_iter()
+            .filter(|row| row.harness.language == candidate.language)
+            .take(MAX_ACCEPTED_EXAMPLES)
+            .map(|row| hf_prompt::AcceptedExample {
+                target_symbol: row.target_symbol,
+                source: row.harness.source,
+            })
+            .collect()
     }
 
     /// Compile `initial_source` in the sandbox, and on a compile failure feed the
@@ -1865,6 +1905,11 @@ impl ServiceContainer {
 /// Bound on retained per-candidate compile diagnostics.
 #[cfg(feature = "harness-tournament")]
 const MAX_CANDIDATE_ERROR_BYTES: usize = 2048;
+
+/// Accepted examples conditioning one draft. Two carry the house style
+/// without crowding the target's own context out of the prompt budget
+/// (AGENTS.md 2.4).
+const MAX_ACCEPTED_EXAMPLES: usize = 2;
 
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest as _;

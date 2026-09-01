@@ -11,8 +11,8 @@ use hf_core::runtime::RuntimeAdapter;
 use hf_core::target::{TargetCandidate, TargetLanguage};
 use hf_core::types::Message;
 use hf_prompt::{
-    render_harness_prompt_with_context, render_harness_refine_prompt, render_harness_repair_prompt,
-    render_seed_prompt, RelatedContext,
+    render_harness_prompt_with_examples, render_harness_refine_prompt,
+    render_harness_repair_prompt, render_seed_prompt, RelatedContext,
 };
 
 /// Draft a harness for a target using the LLM.
@@ -46,7 +46,30 @@ pub async fn draft_with_context(
     build: Option<&BuildContext>,
     llm: Box<dyn LlmProvider>,
 ) -> Result<HarnessDraft, ClassifiedError> {
-    let prompt = render_harness_prompt_with_context(target, engine, related, build);
+    draft_with_examples(target, engine, related, build, &[], llm).await
+}
+
+/// Draft a harness for a target using the LLM, additionally conditioning the
+/// prompt on harnesses a human previously promoted for this project: the
+/// strongest available signal about house style, entry-point shape, and which
+/// include paths actually work.
+///
+/// An empty `examples` slice renders exactly what
+/// [`draft_with_context`] renders, so a project without promotions yet
+/// drafts unchanged.
+///
+/// # Errors
+/// Returns `ClassifiedError` if the LLM call fails or the response contains
+/// no fenced code block.
+pub async fn draft_with_examples(
+    target: &TargetCandidate,
+    engine: EngineKind,
+    related: &[RelatedContext],
+    build: Option<&BuildContext>,
+    examples: &[hf_prompt::AcceptedExample],
+    llm: Box<dyn LlmProvider>,
+) -> Result<HarnessDraft, ClassifiedError> {
+    let prompt = render_harness_prompt_with_examples(target, engine, related, build, examples);
     let messages = vec![Message::user(prompt)];
     let req = ChatRequest::from_messages(messages);
     let resp = llm.chat_completion(&req).await?;
@@ -1529,6 +1552,62 @@ mod tests {
         assert_eq!(
             prompt,
             hf_prompt::render_harness_prompt(&target, EngineKind::LibFuzzer)
+        );
+    }
+
+    #[tokio::test]
+    async fn draft_with_examples_conditions_the_prompt_on_accepted_harnesses() {
+        let target = sample_target();
+        let seen = Arc::new(Mutex::new(String::new()));
+        let examples = vec![hf_prompt::AcceptedExample {
+            target_symbol: "parse_frame".to_owned(),
+            source: "int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n){return 0;}".to_owned(),
+        }];
+        draft_with_examples(
+            &target,
+            EngineKind::LibFuzzer,
+            &[],
+            None,
+            &examples,
+            Box::new(CaptureProvider {
+                seen: Arc::clone(&seen),
+            }),
+        )
+        .await
+        .expect("draft should succeed");
+        let prompt = seen.lock().expect("capture lock").clone();
+        assert!(
+            prompt.contains("Previously accepted"),
+            "the examples section must reach the model: {prompt}"
+        );
+        assert!(prompt.contains("parse_frame"), "{prompt}");
+    }
+
+    #[tokio::test]
+    async fn draft_with_examples_and_none_matches_the_context_prompt() {
+        let target = sample_target();
+        let seen = Arc::new(Mutex::new(String::new()));
+        draft_with_examples(
+            &target,
+            EngineKind::LibFuzzer,
+            &[],
+            None,
+            &[],
+            Box::new(CaptureProvider {
+                seen: Arc::clone(&seen),
+            }),
+        )
+        .await
+        .expect("draft should succeed");
+        let prompt = seen.lock().expect("capture lock").clone();
+        assert_eq!(
+            prompt,
+            hf_prompt::render_harness_prompt_with_context(
+                &target,
+                EngineKind::LibFuzzer,
+                &[],
+                None
+            )
         );
     }
 

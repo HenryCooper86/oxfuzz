@@ -11,6 +11,12 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ### Added
 
+- **Harness drafts learn from accepted harnesses.** The draft prompt is
+  conditioned on the project's previously promoted harnesses (accepted
+  examples): house style, entry-point shape, and working include paths, read
+  from the persisted harness records -- at most two, same language as the
+  target, each source bounded. Projects without promotions draft exactly as
+  before.
 - **Harness lint now covers Rust and Python harnesses.** Lexical rules are
   scoped per language: Rust (cargo-fuzz) harnesses are checked for
   `std::process::exit`, `Command::new`, `thread::sleep`, socket use, and

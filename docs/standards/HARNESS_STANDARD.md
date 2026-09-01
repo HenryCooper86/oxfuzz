@@ -78,6 +78,9 @@ repository. The harness prompt contains:
 - Include/import guidance, and the project's real include directories, defines,
   and language standard when it ships a compile database (see
   `docs/design/harness-generation-design.md` section 3).
+- Previously promoted harnesses of the project as accepted examples: at most
+  two, same language as the target, each source bounded, read from the
+  persisted harness records. A project without promotions drafts unchanged.
 - Compiler definitions are portable values only: embedded Unix, UNC, and
   drive-qualified Windows absolute paths are excluded before persistence or
   model use, while relative values and non-file URIs remain valid.

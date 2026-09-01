@@ -38,6 +38,12 @@ pub struct Harness {
    one, the project's real include directories, defines, and standard. Without
    those the model guesses header paths and guesses whether a configuration
    macro is set, and each wrong guess costs a repair round through the provider.
+   The draft is also conditioned on the project's previously promoted
+   harnesses (accepted examples): up to two, same language as the target,
+   newest first, read from the persisted `harnesses` rows a human promotion
+   approved, each source bounded to 6 000 characters. A project without
+   promotions, a failed read, or a missing store renders the prompt exactly
+   as without this step, so the conditioning only ever adds signal.
 2. **Compile** -- `hf-runtime` builds the harness in-sandbox with the
    selected sanitizer + engine link flags, plus the step 0 flags. Project
    sources are staged preserving their directory layout, so an include
