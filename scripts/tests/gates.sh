@@ -12,7 +12,12 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-ALL_GATES=(fmt clippy check check-no-default-features check-feature-matrix test doc deny script-tests translation-pairing frontend-test frontend-lint)
+ALL_GATES=(fmt clippy check check-no-default-features check-feature-matrix test doc deny coverage script-tests translation-pairing frontend-test frontend-lint)
+
+# The crates TEST_STRATEGY.md section 4 names for its >= 80% unit-test line
+# coverage target. Measuring exactly what the standard names keeps the
+# instrumented rebuild small enough for every run.
+COVERAGE_CRATES=(hf-discovery hf-harness hf-engine hf-crash)
 
 # Each product subsystem is independently selectable in hf-cli and forwards to
 # hf-web and hf-service. Checking them one at a time catches undeclared feature
@@ -107,6 +112,30 @@ gate_deny() {
   # prevents advisory, duplicate-version, and stale-policy notices from being
   # reported while the gate still exits successfully.
   "${binary}" check -D warnings
+}
+
+gate_coverage() {
+  # TEST_STRATEGY.md section 4 sets line-coverage targets that no gate measured,
+  # so the numbers were asserted but never observed. This gate REPORTS per-crate
+  # line coverage for the domain crates; thresholds are not enforced yet: the
+  # measurement must exist and be trusted before a threshold can gate on it.
+  # Enforcement is a separate decision once a baseline is recorded.
+  local binary
+  if command -v cargo-llvm-cov >/dev/null; then
+    binary="$(command -v cargo-llvm-cov)"
+  elif [ -x "${HOME}/.cargo/bin/cargo-llvm-cov" ]; then
+    binary="${HOME}/.cargo/bin/cargo-llvm-cov"
+  else
+    echo "cargo-llvm-cov is required; install it with: cargo install cargo-llvm-cov --locked" >&2
+    echo "the llvm-tools-preview rustup component is also required" >&2
+    return 1
+  fi
+  local crate_args=()
+  local crate
+  for crate in "${COVERAGE_CRATES[@]}"; do
+    crate_args+=(-p "${crate}")
+  done
+  "${binary}" --summary-only "${crate_args[@]}"
 }
 
 gate_script_tests() {

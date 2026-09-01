@@ -143,6 +143,36 @@ jobs:
       - name: Deny
         run: scripts/tests/gates.sh deny
 
+  # Informational, deliberately NOT in gates-passed' needs: TEST_STRATEGY.md
+  # section 4 sets line-coverage targets that went unmeasured, and the number
+  # must exist and be trusted before a threshold can gate on it. Promoting
+  # this job to required (and adding it to gates-passed) is a separate
+  # decision once a baseline is recorded.
+  coverage:
+    name: Coverage report
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Provision the pinned toolchain
+        run: rustup show active-toolchain
+
+      - name: Add llvm-tools-preview
+        run: rustup component add llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2.85.7
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Coverage
+        run: scripts/tests/gates.sh coverage
+
   # Branch protection requires this one check instead of each job above. A
   # matrix job's check name is built from its label, so requiring those by name
   # silently drops a required check the moment a label changes; requiring one
