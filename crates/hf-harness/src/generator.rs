@@ -72,8 +72,9 @@ pub const MAX_REPAIR_DIAGNOSTICS_CHARS: usize = 4000;
 /// compiler/smoke diagnostics. This is one repair step; the caller decides how
 /// many attempts to make.
 ///
-/// `diagnostics` is truncated to [`MAX_REPAIR_DIAGNOSTICS_CHARS`] before being
-/// sent, so an enormous compiler dump does not blow the context window.
+/// `diagnostics` is summarized by [`summarize_diagnostics`] (distinct
+/// diagnostic lines first, then a bounded head-truncation fallback) so an
+/// enormous compiler dump does not blow the context window.
 ///
 /// # Errors
 /// Returns `ClassifiedError` if the LLM call fails or the response contains no
@@ -85,8 +86,8 @@ pub async fn repair(
     diagnostics: &str,
     llm: Box<dyn LlmProvider>,
 ) -> Result<HarnessDraft, ClassifiedError> {
-    let diagnostics = truncate_diagnostics(diagnostics);
-    let prompt = render_harness_repair_prompt(target, engine, failing_source, diagnostics);
+    let diagnostics = summarize_diagnostics(diagnostics);
+    let prompt = render_harness_repair_prompt(target, engine, failing_source, &diagnostics);
     let messages = vec![Message::user(prompt)];
     let req = ChatRequest::from_messages(messages);
     let resp = llm.chat_completion(&req).await?;
@@ -218,6 +219,75 @@ fn truncate_diagnostics(diagnostics: &str) -> &str {
         end -= 1;
     }
     &diagnostics[..end]
+}
+
+/// Maximum distinct diagnostic lines a repair prompt carries. Beyond this the
+/// model is re-reading variations of the same defect, not new information.
+pub const MAX_DISTINCT_DIAGNOSTIC_LINES: usize = 20;
+
+/// Summarize compiler diagnostics for a repair prompt.
+///
+/// Compilers emit the actionable content as distinct diagnostic lines --
+/// clang/GCC `path:line:col: error: ...`, rustc `error[E0308]: ...` plus its
+/// `--> path:line:col` location -- wrapped in build noise and repeated
+/// macro-expansion backtraces. Head-truncating the raw log can spend the whole
+/// budget on noise before the first error, or lose later distinct errors to
+/// repetition. This keeps the distinct diagnostic lines in emission order,
+/// bounded to [`MAX_DISTINCT_DIAGNOSTIC_LINES`] entries and
+/// [`MAX_REPAIR_DIAGNOSTICS_CHARS`] characters, and names how many lines were
+/// elided so the model knows the list is not exhaustive.
+///
+/// Output with no diagnostic-shaped line degrades to a bounded head
+/// truncation: an unknown tool's output still reaches the prompt, just
+/// unfiltered.
+#[must_use]
+pub fn summarize_diagnostics(diagnostics: &str) -> String {
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut kept: Vec<&str> = Vec::new();
+    for line in diagnostics.lines() {
+        if is_diagnostic_line(line) && seen.insert(line) {
+            kept.push(line);
+        }
+    }
+    if kept.is_empty() {
+        return truncate_diagnostics(diagnostics).to_owned();
+    }
+    let elided = kept.len().saturating_sub(MAX_DISTINCT_DIAGNOSTIC_LINES);
+    kept.truncate(MAX_DISTINCT_DIAGNOSTIC_LINES);
+    let mut summary = kept.join("\n");
+    if elided > 0 {
+        summary = format!("{summary}\n... and {elided} more diagnostic lines (elided)");
+    }
+    if summary.len() > MAX_REPAIR_DIAGNOSTICS_CHARS {
+        let mut end = MAX_REPAIR_DIAGNOSTICS_CHARS;
+        while end > 0 && !summary.is_char_boundary(end) {
+            end -= 1;
+        }
+        summary.truncate(end);
+    }
+    summary
+}
+
+/// Whether a line is a compiler diagnostic.
+///
+/// Matches the clang/GCC family (`path:line:col: severity: message`, also
+/// MSVC's `file(line,col): error ...`) and the rustc family (`error: ...`,
+/// `error[E0308]: ...`, `warning: ...`, and the `--> path:line:col` location
+/// line that follows a rustc header).
+fn is_diagnostic_line(line: &str) -> bool {
+    if line.contains(": error:") || line.contains(": warning:") || line.contains(": fatal error:") {
+        return true;
+    }
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("-->") {
+        return true;
+    }
+    for prefix in ["error", "warning"] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return rest.starts_with(": ") || rest.starts_with('[');
+        }
+    }
+    false
 }
 
 /// A build that ran in the sandbox but returned a non-zero exit code. Carries
@@ -1595,6 +1665,85 @@ mod tests {
         );
         let small = "short";
         assert_eq!(truncate_diagnostics(small), "short");
+    }
+
+    #[test]
+    fn summarize_diagnostics_keeps_distinct_error_lines_and_names_the_elided_rest() {
+        let mut lines = vec!["clang version 17.0.0".to_owned()];
+        lines.extend((0..30).map(|i| {
+            format!("src/harness.c:{i}:5: error: use of undeclared identifier 'sym_{i}'")
+        }));
+        let diagnostics = lines.join("\n");
+        let summary = summarize_diagnostics(&diagnostics);
+        assert!(
+            summary.contains("src/harness.c:0:5: error: use of undeclared identifier 'sym_0'"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("src/harness.c:19:5: error: use of undeclared identifier 'sym_19'"),
+            "{summary}"
+        );
+        assert!(
+            !summary.contains("sym_20"),
+            "the 21st distinct error must be elided: {summary}"
+        );
+        assert!(summary.contains("10 more"), "{summary}");
+    }
+
+    #[test]
+    fn summarize_diagnostics_dedupes_repeated_macro_expansion_errors() {
+        // clang repeats the same error once per macro-expansion backtrace frame.
+        let line = "src/harness.c:7:9: error: expected expression";
+        let diagnostics = format!("{line}\n{line}\n{line}\n");
+        let summary = summarize_diagnostics(&diagnostics);
+        assert_eq!(summary.matches(line).count(), 1, "{summary}");
+        assert!(!summary.contains("more"), "{summary}");
+    }
+
+    #[test]
+    fn summarize_diagnostics_keeps_rustc_headers_and_locations_and_drops_build_noise() {
+        let diagnostics = "   Compiling fuzz v0.1.0 (/work/fuzz)\n\
+                           error[E0308]: mismatched types\n\
+                            --> fuzz_targets/fuzz_x.rs:5:21\n\
+                           warning: unused variable: `data`\n";
+        let summary = summarize_diagnostics(diagnostics);
+        assert!(
+            summary.contains("error[E0308]: mismatched types"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("--> fuzz_targets/fuzz_x.rs:5:21"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("warning: unused variable: `data`"),
+            "{summary}"
+        );
+        assert!(
+            !summary.contains("Compiling"),
+            "build noise must be dropped: {summary}"
+        );
+    }
+
+    #[test]
+    fn summarize_diagnostics_falls_back_to_head_truncation_without_diagnostic_lines() {
+        // An unknown tool's output still reaches the repair prompt, unfiltered.
+        let noise = "word ".repeat(2_000);
+        assert_eq!(summarize_diagnostics(&noise), truncate_diagnostics(&noise));
+    }
+
+    #[test]
+    fn summarize_diagnostics_respects_the_character_budget() {
+        let diagnostics = (0..40)
+            .map(|i| format!("src/file{i}.c:{i}:1: error: {}", "x".repeat(300)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let summary = summarize_diagnostics(&diagnostics);
+        assert!(
+            summary.len() <= MAX_REPAIR_DIAGNOSTICS_CHARS,
+            "summary exceeded the budget: {}",
+            summary.len()
+        );
     }
 
     #[test]
