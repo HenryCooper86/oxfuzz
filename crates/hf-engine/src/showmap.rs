@@ -22,6 +22,16 @@ pub fn build_showmap_args(binary: &str, input: &str) -> Vec<String> {
     args
 }
 
+/// The parsed, sorted, de-duplicated `(edge_id, hit-count bucket)` tuples of
+/// one input's `afl-showmap` output. Empty when the binary ran no edge at all.
+#[must_use]
+pub fn coverage_tuples(showmap_stdout: &str) -> Vec<(u64, u8)> {
+    let mut tuples: Vec<(u64, u8)> = showmap_stdout.lines().filter_map(parse_edge).collect();
+    tuples.sort_unstable();
+    tuples.dedup();
+    tuples
+}
+
 /// Compute a coverage fingerprint from `afl-showmap` output: the deterministic
 /// hash of the sorted, de-duplicated set of `(edge_id, hit-count bucket)` tuples.
 /// Returns `None` when the output contains no edges (e.g. the binary failed to
@@ -35,12 +45,10 @@ pub fn build_showmap_args(binary: &str, input: &str) -> Vec<String> {
 /// input AFL considers uniquely covering.
 #[must_use]
 pub fn coverage_hash(showmap_stdout: &str) -> Option<String> {
-    let mut tuples: Vec<(u64, u8)> = showmap_stdout.lines().filter_map(parse_edge).collect();
+    let tuples = coverage_tuples(showmap_stdout);
     if tuples.is_empty() {
         return None;
     }
-    tuples.sort_unstable();
-    tuples.dedup();
     // FNV-1a over the sorted (edge, bucket) tuples: deterministic and
     // dependency-free (the key only needs to be equal for equal coverage, not
     // cryptographic).
@@ -56,6 +64,49 @@ pub fn coverage_hash(showmap_stdout: &str) -> Option<String> {
         fold(bucket);
     }
     Some(format!("cov:{hash:016x}"))
+}
+
+/// Whether one seed input gets past a harness's entry validation, judged by
+/// comparing its coverage tuples against the empty input's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeedSurvival {
+    /// The seed covered at least one tuple the empty input did not: the
+    /// harness let it deeper than the entry path.
+    Survives,
+    /// The seed covered only tuples the empty input already covers: it died
+    /// at entry validation, the most common reason a seed corpus finds
+    /// nothing.
+    DiesAtEntry,
+    /// The seed produced no coverage map at all (crash or measurement
+    /// failure); distinct from dying at entry, and never silently treated as
+    /// either verdict.
+    NotMeasured,
+}
+
+/// Classify one seed's survival against the empty input's coverage map.
+///
+/// Survival is a proxy, stated honestly: a seed that walks a few validation
+/// edges the empty input misses and then still rejects has technically new
+/// tuples. The verdict is advisory -- it tells an operator which seeds are
+/// worth keeping and which to regenerate -- not a gate.
+#[must_use]
+pub fn classify_seed_survival(seed_map: &str, empty_input_map: &str) -> SeedSurvival {
+    let seed = coverage_tuples(seed_map);
+    if seed.is_empty() {
+        return SeedSurvival::NotMeasured;
+    }
+    let baseline = coverage_tuples(empty_input_map);
+    // Both tuples are sorted, so membership is a binary search; an edge set is
+    // small enough that this never matters, but the sorted invariant is free.
+    let reaches_further = seed
+        .iter()
+        .any(|tuple| baseline.binary_search(tuple).is_err());
+    if reaches_further {
+        SeedSurvival::Survives
+    } else {
+        SeedSurvival::DiesAtEntry
+    }
 }
 
 /// Parse `(edge_id, hit-count bucket)` from an `afl-showmap` line of the form
@@ -138,5 +189,62 @@ mod tests {
     fn empty_output_has_no_hash() {
         assert!(coverage_hash("").is_none());
         assert!(coverage_hash("\n  \n").is_none());
+    }
+
+    #[test]
+    fn coverage_tuples_parses_sorts_and_dedupes() {
+        // Counts 4 and 7 share AFL bucket 8; a missing count is a single hit.
+        let tuples = coverage_tuples("3:1\n1:4\n1:7\n2:\n");
+        assert_eq!(tuples, vec![(1, 8), (2, 1), (3, 1)]);
+    }
+
+    #[test]
+    fn a_seed_covering_a_new_tuple_survives() {
+        let baseline = "1:1\n2:1\n";
+        let deep_seed = "1:1\n2:1\n3:1\n";
+        assert_eq!(
+            classify_seed_survival(deep_seed, baseline),
+            SeedSurvival::Survives
+        );
+    }
+
+    #[test]
+    fn a_seed_covering_only_baseline_tuples_dies_at_entry() {
+        let baseline = "1:1\n2:1\n";
+        assert_eq!(
+            classify_seed_survival(baseline, baseline),
+            SeedSurvival::DiesAtEntry
+        );
+        // A subset (a different early return) is still only baseline coverage.
+        assert_eq!(
+            classify_seed_survival("1:1\n", baseline),
+            SeedSurvival::DiesAtEntry
+        );
+    }
+
+    #[test]
+    fn a_seed_with_no_measured_coverage_is_not_measured() {
+        // No tuples means the binary produced no map on this input -- crash or
+        // infrastructure -- which is not the same verdict as dying at entry.
+        assert_eq!(
+            classify_seed_survival("", "1:1\n"),
+            SeedSurvival::NotMeasured
+        );
+    }
+
+    #[test]
+    fn a_seed_covering_a_new_bucket_of_a_known_edge_survives() {
+        // Same edge id, different AFL bucket: a distinct coverage tuple.
+        assert_eq!(
+            classify_seed_survival("1:2\n", "1:1\n"),
+            SeedSurvival::Survives
+        );
+    }
+
+    #[test]
+    fn against_an_empty_baseline_any_covering_seed_survives() {
+        // The empty input itself produced no tuples; covering anything at all
+        // got further than it did.
+        assert_eq!(classify_seed_survival("1:1\n", ""), SeedSurvival::Survives);
     }
 }

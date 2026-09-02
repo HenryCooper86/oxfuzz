@@ -23,8 +23,9 @@ use super::staging::{
 use super::workspace::workspace_dir;
 use super::{
     ensure_workspace_directory, prepare_configured_workspace_root, resolve_internal_run,
-    run_has_crash_evidence, MinimizeOutcome, ServiceContainer, CORPUS_MINIMIZE_SECS,
-    COVERAGE_PRUNE_COMMAND_SECS, COVERAGE_PRUNE_OPERATION_SECS,
+    run_has_crash_evidence, MinimizeOutcome, SeedSurvivalReport, ServiceContainer,
+    CORPUS_MINIMIZE_SECS, COVERAGE_PRUNE_COMMAND_SECS, COVERAGE_PRUNE_OPERATION_SECS,
+    SEED_SURVIVAL_COMMAND_SECS, SEED_SURVIVAL_OPERATION_SECS,
 };
 
 impl ServiceContainer {
@@ -279,6 +280,182 @@ impl ServiceContainer {
         let after = pruned.entries.len();
         self.persist_corpus(qualified.target_id, &pruned).await?;
         Ok(MinimizeOutcome { before, after })
+    }
+
+    /// Measure seed survival for one target's corpus: how many seeds reach
+    /// past the harness's entry validation instead of dying at it, judged by
+    /// each seed's `afl-showmap` edge tuples against the empty input's.
+    ///
+    /// Read-only: no corpus entry is added, dropped, or rewritten. A seed
+    /// whose showmap run fails (non-zero exit, no map) is reported as
+    /// `not_measured` rather than aborting -- unlike
+    /// [`Self::corpus_prune_coverage`], which must abort because it deletes,
+    /// this only tallies, and one unmeasurable seed must not cost the
+    /// verdicts of the rest. Infrastructure failures (sandbox, timeouts)
+    /// still fail the whole measurement.
+    ///
+    /// Requires an explicitly promoted AFL++ harness for the same reason
+    /// coverage pruning does: only an AFL-instrumented binary produces a
+    /// showmap, and only a promoted one may be executed against corpus input.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` when the corpus cannot be read, no promoted
+    /// AFL++ harness qualifies, or the sandbox infrastructure fails.
+    pub async fn seed_survival(
+        &self,
+        project: &Path,
+        target: &str,
+    ) -> Result<SeedSurvivalReport, ClassifiedError> {
+        let resolved = resolve_internal_run(EngineKind::AflPlusPlus, SEED_SURVIVAL_OPERATION_SECS)?;
+        let _workspace_operation = self.acquire_workspace_operation().await?;
+        self.authorize_recorded(Action::CorpusOp, "seed_survival", Some(project))
+            .await?;
+        prepare_configured_workspace_root()?;
+        let workspace = workspace_dir(project, target);
+        let corpus_dir = workspace.join("corpus");
+        let corpus = hf_corpus::list(&corpus_dir)?;
+        let total = corpus.entries.len();
+        if total > 10_000 {
+            return Err(ClassifiedError::Validation(
+                "seed survival measurement is limited to 10000 corpus inputs per operation"
+                    .to_owned(),
+            ));
+        }
+        let _target_revision = self.acquire_target_revision(project, target).await?;
+        let qualified = self
+            .active_harness_locked(project, target, EngineKind::AflPlusPlus)
+            .await?;
+        if qualified.status != HarnessStatus::Promoted {
+            return Err(ClassifiedError::Validation(
+                "seed survival measurement requires an explicitly promoted AFL++ harness"
+                    .to_owned(),
+            ));
+        }
+        self.verify_harness_qualification_locked(project, target, &qualified)
+            .await?;
+        self.authorize_recorded(
+            Action::RunFuzzer {
+                engine: "AFL++ showmap".to_owned(),
+                duration_secs: resolved.duration_secs,
+            },
+            "seed_survival",
+            Some(project),
+        )
+        .await?;
+
+        let bin = harness_binary_name(target);
+        let binary = workspace.join(&bin);
+        if !is_regular_file(&binary) {
+            return Err(ClassifiedError::Validation(format!(
+                "promoted AFL++ harness binary is missing: {}",
+                binary.display()
+            )));
+        }
+        // An empty corpus is a valid zero measurement, but only once every
+        // gate above has confirmed the harness is qualified to measure with:
+        // reporting a measurement for a harness that would not qualify would
+        // put an unqualified verdict into the audit trail.
+        if total == 0 {
+            return Ok(SeedSurvivalReport {
+                total,
+                survives: 0,
+                dies_at_entry: 0,
+                not_measured: 0,
+                survival_ratio: None,
+            });
+        }
+        let binary_container = format!("/work/{bin}");
+        let limits = hf_core::runtime::ResourceLimits {
+            max_mem_mb: resolved.max_mem_mb,
+            max_cpus: resolved.max_cpus,
+            max_duration_secs: SEED_SURVIVAL_COMMAND_SECS.min(resolved.duration_secs),
+            env: std::collections::HashMap::new(),
+            ptrace: false,
+        };
+        let sandbox = hf_core::runtime::SandboxOptions {
+            workspace_read_only: true,
+            ..hf_core::runtime::SandboxOptions::default()
+        };
+        // The empty input is the baseline a seed must beat: a hidden file in
+        // the workspace, never a corpus entry, removed after the measurement.
+        let baseline_path = workspace.join(".seed-survival-baseline");
+        std::fs::write(&baseline_path, b"").map_err(|error| {
+            ClassifiedError::Internal(format!("cannot write the seed-survival baseline: {error}"))
+        })?;
+        let baseline_args = hf_engine::showmap::build_showmap_args(
+            &binary_container,
+            &container_input_path(&workspace, &baseline_path),
+        );
+        let baseline = match self
+            .runtime
+            .run_command_opts(&baseline_args, &workspace, &limits, &sandbox)
+            .await
+        {
+            Ok(result) => {
+                let result = result.require_completed("AFL++ seed-survival baseline")?;
+                if result.exit_code == 0 {
+                    result.stdout
+                } else {
+                    // A baseline the binary refuses to run has no map, so
+                    // every covering seed counts as surviving; per-seed
+                    // verdicts state this honestly rather than guessing.
+                    String::new()
+                }
+            }
+            Err(error) => return Err(error),
+        };
+        // Swallowed: the baseline file is bookkeeping inside oxfuzz's own
+        // workspace; a failed cleanup cannot affect any verdict.
+        let _ = std::fs::remove_file(&baseline_path);
+
+        let deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(resolved.duration_secs);
+        let mut report = SeedSurvivalReport {
+            total,
+            survives: 0,
+            dies_at_entry: 0,
+            not_measured: 0,
+            survival_ratio: None,
+        };
+        for entry in &corpus.entries {
+            let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now())
+            else {
+                return Err(ClassifiedError::Sandbox(
+                    "seed survival measurement exceeded its 10-minute operation budget".to_owned(),
+                ));
+            };
+            let input_container = container_input_path(&workspace, &entry.path);
+            let args = hf_engine::showmap::build_showmap_args(&binary_container, &input_container);
+            let result = tokio::time::timeout(
+                remaining,
+                self.runtime
+                    .run_command_opts(&args, &workspace, &limits, &sandbox),
+            )
+            .await
+            .map_err(|_| {
+                ClassifiedError::Sandbox(
+                    "seed survival measurement exceeded its 10-minute operation budget".to_owned(),
+                )
+            })?;
+            let result = result?.require_completed("AFL++ seed-survival measurement")?;
+            // A seed the binary will not run gets no map; that is
+            // `not_measured`, never silently a survival or a death.
+            let measured_map = if result.exit_code == 0 {
+                result.stdout
+            } else {
+                String::new()
+            };
+            match hf_engine::showmap::classify_seed_survival(&measured_map, &baseline) {
+                hf_engine::showmap::SeedSurvival::Survives => report.survives += 1,
+                hf_engine::showmap::SeedSurvival::DiesAtEntry => report.dies_at_entry += 1,
+                hf_engine::showmap::SeedSurvival::NotMeasured => report.not_measured += 1,
+            }
+        }
+        let classified = report.survives + report.dies_at_entry;
+        if classified > 0 {
+            report.survival_ratio = Some(report.survives as f64 / classified as f64);
+        }
+        Ok(report)
     }
 
     /// Feed triaged crash reproducers back into the corpus.

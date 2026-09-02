@@ -94,6 +94,8 @@ use workspace::{
 const SMOKE_FUZZ_SECS: u64 = 60;
 const COVERAGE_PRUNE_OPERATION_SECS: u64 = 600;
 const COVERAGE_PRUNE_COMMAND_SECS: u64 = 10;
+const SEED_SURVIVAL_OPERATION_SECS: u64 = 600;
+const SEED_SURVIVAL_COMMAND_SECS: u64 = 10;
 const CORPUS_MINIMIZE_SECS: u64 = 300;
 /// Bound on the stored policy reason; denial reasons embed action labels that
 /// can carry long parameters (e.g. a shell command).
@@ -1375,6 +1377,24 @@ pub struct SeedEntry {
 pub struct MinimizeOutcome {
     pub before: usize,
     pub after: usize,
+}
+
+/// The result of a seed-survival measurement over one target's corpus: how
+/// many seeds reach past the harness's entry validation, how many die at it,
+/// and how many could not be measured at all.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct SeedSurvivalReport {
+    /// Corpus entries examined.
+    pub total: usize,
+    /// Seeds covering at least one edge tuple the empty input does not.
+    pub survives: usize,
+    /// Seeds whose coverage never leaves the empty input's footprint.
+    pub dies_at_entry: usize,
+    /// Seeds that produced no coverage map (crash or measurement failure).
+    pub not_measured: usize,
+    /// `survives / (survives + dies_at_entry)`; `None` when no seed received
+    /// a verdict.
+    pub survival_ratio: Option<f64>,
 }
 
 /// Outcome of an autonomous end-to-end campaign

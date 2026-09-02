@@ -11,6 +11,13 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ### Added
 
+- **Seed survival is now measured.** `oxfuzz corpus survival <project>
+  <target>` runs each corpus seed once through `afl-showmap` on the promoted
+  AFL++ harness and classifies it against the empty input's edge coverage:
+  seeds that reach past the harness's entry validation, seeds that die at it
+  (the most common reason a seed corpus finds nothing), and seeds that could
+  not be measured are counted separately, with a survival ratio. Read-only
+  and advisory: it tells the operator which seeds to regenerate.
 - **Harness drafts learn from accepted harnesses.** The draft prompt is
   conditioned on the project's previously promoted harnesses (accepted
   examples): house style, entry-point shape, and working include paths, read
