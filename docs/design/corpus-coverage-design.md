@@ -31,6 +31,15 @@ pub struct CorpusEntry {
 - **Seed** -- initialize from project-supplied seeds or LLM-suggested seeds.
 - **Grow** -- pull new coverage-inducing inputs from engine output queue.
 - **Prune** -- remove entries that no longer increase coverage.
+- **Survive** -- measure seed survival: each corpus seed runs once through
+  `afl-showmap` on the promoted AFL++ harness and is classified against the
+  empty input's edge tuples. A seed covering at least one tuple the empty
+  input does not reaches past the harness's entry validation (`survives`); a
+  seed whose coverage never leaves that footprint dies at entry -- the most
+  common reason a seed corpus finds nothing. Seeds that produce no map are
+  `not_measured`, never guessed at. Read-only, gated on an explicitly promoted
+  AFL++ harness like coverage pruning, and advisory: it tells the operator
+  which seeds to regenerate, it does not delete or gate anything.
 - **Merge** -- combine corpora across engines for the same target.
 - **Snapshot** -- copy the retained flat corpus into an empty run-owned corpus
   before sandbox execution.
