@@ -306,9 +306,41 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
     ) -> Result<SeedSurvivalReport, ClassifiedError> {
-        let resolved = resolve_internal_run(EngineKind::AflPlusPlus, SEED_SURVIVAL_OPERATION_SECS)?;
         let _workspace_operation = self.acquire_workspace_operation().await?;
-        self.authorize_recorded(Action::CorpusOp, "seed_survival", Some(project))
+        let (_corpus, report, _verdicts) = self
+            .measure_corpus_survival(project, target, "seed_survival")
+            .await?;
+        Ok(report)
+    }
+
+    /// The shared survival measurement behind [`Self::seed_survival`] and
+    /// [`Self::regenerate_dead_seeds`]: gates (an explicitly promoted AFL++
+    /// harness, its qualification evidence, guardrail authorizations recorded
+    /// under `operation`), one `afl-showmap` per corpus entry against the
+    /// empty input's baseline, and both the folded report and the per-entry
+    /// verdicts regeneration filters on.
+    ///
+    /// The caller owns the workspace-operation lock, so a multi-step flow
+    /// (measure, mutate, re-measure) holds one operation across all of it.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` when the corpus cannot be read, no promoted
+    /// AFL++ harness qualifies, or the sandbox infrastructure fails.
+    pub(super) async fn measure_corpus_survival(
+        &self,
+        project: &Path,
+        target: &str,
+        operation: &'static str,
+    ) -> Result<
+        (
+            hf_core::corpus::Corpus,
+            SeedSurvivalReport,
+            Vec<(String, hf_engine::showmap::SeedSurvival)>,
+        ),
+        ClassifiedError,
+    > {
+        let resolved = resolve_internal_run(EngineKind::AflPlusPlus, SEED_SURVIVAL_OPERATION_SECS)?;
+        self.authorize_recorded(Action::CorpusOp, operation, Some(project))
             .await?;
         prepare_configured_workspace_root()?;
         let workspace = workspace_dir(project, target);
@@ -338,7 +370,7 @@ impl ServiceContainer {
                 engine: "AFL++ showmap".to_owned(),
                 duration_secs: resolved.duration_secs,
             },
-            "seed_survival",
+            operation,
             Some(project),
         )
         .await?;
@@ -356,13 +388,17 @@ impl ServiceContainer {
         // reporting a measurement for a harness that would not qualify would
         // put an unqualified verdict into the audit trail.
         if total == 0 {
-            return Ok(SeedSurvivalReport {
-                total,
-                survives: 0,
-                dies_at_entry: 0,
-                not_measured: 0,
-                survival_ratio: None,
-            });
+            return Ok((
+                corpus,
+                SeedSurvivalReport {
+                    total,
+                    survives: 0,
+                    dies_at_entry: 0,
+                    not_measured: 0,
+                    survival_ratio: None,
+                },
+                Vec::new(),
+            ));
         }
         let binary_container = format!("/work/{bin}");
         let limits = hf_core::runtime::ResourceLimits {
@@ -417,6 +453,7 @@ impl ServiceContainer {
             not_measured: 0,
             survival_ratio: None,
         };
+        let mut verdicts = Vec::with_capacity(corpus.entries.len());
         for entry in &corpus.entries {
             let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now())
             else {
@@ -445,17 +482,25 @@ impl ServiceContainer {
             } else {
                 String::new()
             };
-            match hf_engine::showmap::classify_seed_survival(&measured_map, &baseline) {
+            let verdict = hf_engine::showmap::classify_seed_survival(&measured_map, &baseline);
+            match verdict {
                 hf_engine::showmap::SeedSurvival::Survives => report.survives += 1,
                 hf_engine::showmap::SeedSurvival::DiesAtEntry => report.dies_at_entry += 1,
                 hf_engine::showmap::SeedSurvival::NotMeasured => report.not_measured += 1,
             }
+            verdicts.push((
+                entry
+                    .path
+                    .file_name()
+                    .map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
+                verdict,
+            ));
         }
         let classified = report.survives + report.dies_at_entry;
         if classified > 0 {
             report.survival_ratio = Some(report.survives as f64 / classified as f64);
         }
-        Ok(report)
+        Ok((corpus, report, verdicts))
     }
 
     /// Feed triaged crash reproducers back into the corpus.

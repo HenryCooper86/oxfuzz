@@ -309,6 +309,20 @@ pub(crate) async fn cmd_corpus(project: PathBuf, target: &str, op: &str) -> anyh
                 report.survives, report.dies_at_entry, report.not_measured, report.total
             );
         }
+        "regen" => {
+            let outcome = container
+                .regenerate_dead_seeds(&project, target, TargetLanguage::C)
+                .await?;
+            println!(
+                "Regenerated {}/{} dying seed(s); {} replacement(s) written: {} survive, {} die at entry, {} not measured.",
+                outcome.removed_dead,
+                outcome.replacements_requested,
+                outcome.replacements_added,
+                outcome.replacement_survives,
+                outcome.replacement_dies_at_entry,
+                outcome.replacement_not_measured
+            );
+        }
         "minimize" | "cmin" => {
             let outcome = container.corpus_minimize(&project, target).await?;
             println!("Minimized {} -> {} entries.", outcome.before, outcome.after);
@@ -340,7 +354,7 @@ pub(crate) async fn cmd_corpus(project: PathBuf, target: &str, op: &str) -> anyh
         other => {
             anyhow::bail!(
                 "unknown corpus op: {other} \
-                 (use seed|llmseed|grow|prune|cprune|survival|minimize|absorb|concolic|list)"
+                 (use seed|llmseed|grow|prune|cprune|survival|regen|minimize|absorb|concolic|list)"
             )
         }
     }

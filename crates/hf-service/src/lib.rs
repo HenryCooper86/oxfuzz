@@ -159,7 +159,8 @@ pub use container::{
     ArtifactSummary, CompileOutcome, CoverageSample, EffectiveAutoRevert, MemorySnapshot,
     MinimizeOutcome, ProviderSnapshot, RegressionResult, RunCancelOutcome, RunControlStatus,
     RunHistoryItem, RunLifecycleStatus, RunSummary, SchedulableTarget, SeedEntry,
-    SeedSurvivalReport, ServiceContainer, SystemSnapshot, SyzkallerRunOpts, SyzkallerSummary,
+    SeedRegenerationOutcome, SeedSurvivalReport, ServiceContainer, SystemSnapshot,
+    SyzkallerRunOpts, SyzkallerSummary,
 };
 #[cfg(feature = "coverage-blockers")]
 pub use coverage_blockers::{

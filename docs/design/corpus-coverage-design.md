@@ -40,6 +40,14 @@ pub struct CorpusEntry {
   `not_measured`, never guessed at. Read-only, gated on an explicitly promoted
   AFL++ harness like coverage pruning, and advisory: it tells the operator
   which seeds to regenerate, it does not delete or gate anything.
+- **Regenerate** -- act on the survival metric: one bounded pass removes the
+  generated seeds flagged `dies_at_entry`, requests that many replacements
+  from the provider, writes them, and re-measures so the outcome reports how
+  the replacements fared. Eligibility is the reserved generated-seed name
+  namespace (`seed_`, `llmseed_`, `regen_` prefixes): a filesystem listing
+  carries no durable source tag, and every other entry is an input a fuzzer
+  or a human earned. Provider-only replacements (heuristic replacements for
+  dead seeds would die the same way); one round per invocation, idempotent.
 - **Merge** -- combine corpora across engines for the same target.
 - **Snapshot** -- copy the retained flat corpus into an empty run-owned corpus
   before sandbox execution.

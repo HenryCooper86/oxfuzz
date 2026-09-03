@@ -68,7 +68,7 @@ impl hf_core::runtime::RuntimeAdapter for SurvivalRuntime {
         let input = cmd.last().cloned().unwrap_or_default();
         let (stdout, exit_code) = if input.ends_with("blind") {
             (String::new(), 1)
-        } else if input.ends_with("deep") {
+        } else if input.ends_with("deep") || input.contains("regen_") {
             ("1:1\n2:1\n3:1\n".to_owned(), 0)
         } else {
             // The empty baseline and the shallow seed share the entry edges.
@@ -236,4 +236,205 @@ async fn seed_survival_requires_a_promoted_afl_harness() {
         error.to_string().contains("promoted"),
         "the denial must name the promotion requirement: {error}"
     );
+}
+
+/// Serves a fixed seed-array JSON to seed-generation requests and the
+/// approving review verdict to everything else (the qualification calls in
+/// the fixture), so both flows share one pool.
+struct SeedRegenPool {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+const REPLACEMENT_SEEDS: &str = r#"["deadbeef01", "cafebabe02"]"#;
+const APPROVING_REVIEW: &str = r#"{"exercises_target":true,"safe_to_execute":true,"reasons":["target receives fuzz input without unsafe side effects"]}"#;
+
+#[async_trait::async_trait]
+impl hf_core::provider::ProviderPool for SeedRegenPool {
+    async fn chat_completion(
+        &self,
+        request: &hf_core::provider::ChatRequest,
+        _route: &hf_core::provider::RouteRequest,
+    ) -> Result<hf_core::provider::ChatResponse, hf_core::provider::ProviderError> {
+        let is_seed_request = request
+            .messages
+            .last()
+            .is_some_and(|message| message.content.contains("seed-corpus author"));
+        if is_seed_request {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            return Ok(hf_test_utils::fixtures::make_chat_response(
+                REPLACEMENT_SEEDS,
+            ));
+        }
+        Ok(hf_test_utils::fixtures::make_chat_response(
+            APPROVING_REVIEW,
+        ))
+    }
+
+    async fn chat_completion_stream(
+        &self,
+        _request: &hf_core::provider::ChatRequest,
+        _route: &hf_core::provider::RouteRequest,
+    ) -> Result<hf_core::provider::ChatStreamResponse, hf_core::provider::ProviderError> {
+        Err(hf_core::provider::ProviderError::Other {
+            message: "unused".to_owned(),
+        })
+    }
+
+    fn report_error(
+        &self,
+        _provider_id: &hf_core::types::ProviderId,
+        _error: &hf_core::provider::ProviderError,
+    ) {
+    }
+
+    async fn provider_statuses(&self) -> Vec<hf_core::provider::ProviderStatus> {
+        Vec::new()
+    }
+
+    async fn freeze(&self, _provider_id: &hf_core::types::ProviderId, _reason: String) {}
+
+    async fn thaw(
+        &self,
+        _provider_id: &hf_core::types::ProviderId,
+    ) -> Result<(), hf_core::provider::ProviderError> {
+        Ok(())
+    }
+}
+
+async fn promoted_afl_harness_with_regen_pool(target: &str) -> PromotedFixture {
+    isolate_workspace();
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("regenproj");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("parse.c"),
+        format!(
+            "#include <stddef.h>\nint {target}(const unsigned char *data, size_t size) {{ return size && data[0]; }}\n"
+        ),
+    )
+    .unwrap();
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("regen.db"))
+            .await
+            .unwrap(),
+    );
+    let container = ServiceContainer::new(
+        Arc::new(SurvivalRuntime),
+        Some(Arc::new(SeedRegenPool {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        })),
+    )
+    .with_store(store);
+    container
+        .harness_compile(
+            "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }".to_owned(),
+            &project,
+            hf_core::engine::EngineKind::AflPlusPlus,
+            target,
+            hf_core::target::TargetLanguage::C,
+        )
+        .await
+        .unwrap();
+    let workspace = hf_service::workspace_dir(&project, target);
+    std::fs::create_dir_all(workspace.join("corpus")).unwrap();
+    std::fs::write(workspace.join(format!("fuzz_{target}")), b"#!/bin/true").unwrap();
+    container
+        .harness_smoke(
+            &project,
+            target,
+            hf_core::engine::EngineKind::AflPlusPlus,
+            hf_core::target::TargetLanguage::C,
+        )
+        .await
+        .unwrap();
+    container
+        .harness_promote(&project, target, hf_core::engine::EngineKind::AflPlusPlus)
+        .await
+        .unwrap();
+    PromotedFixture {
+        _dir: dir,
+        project,
+        container,
+    }
+}
+
+#[tokio::test]
+async fn regeneration_replaces_only_dying_generated_seeds() {
+    let fixture = promoted_afl_harness_with_regen_pool("parse_regen").await;
+    let workspace = hf_service::workspace_dir(&fixture.project, "parse_regen");
+    let corpus = workspace.join("corpus");
+    // Generated seeds (reserved namespace): one dies at entry, one survives.
+    hf_corpus::seed(
+        uuid::Uuid::new_v4(),
+        &corpus,
+        vec![
+            (b"shallow-bytes".to_vec(), "seed_shallow".to_owned()),
+            (b"deep-bytes".to_vec(), "seed_deep".to_owned()),
+        ],
+    )
+    .await
+    .unwrap();
+    // An earned input the fuzzer found: also dies at entry under this runtime,
+    // but regeneration must never touch it.
+    std::fs::write(corpus.join("earned"), b"fuzzer found me").unwrap();
+
+    let outcome = fixture
+        .container
+        .regenerate_dead_seeds(
+            &fixture.project,
+            "parse_regen",
+            hf_core::target::TargetLanguage::C,
+        )
+        .await
+        .expect("regeneration should run");
+
+    assert_eq!(outcome.removed_dead, 1, "{outcome:?}");
+    assert_eq!(outcome.replacements_requested, 1, "{outcome:?}");
+    assert_eq!(outcome.replacements_added, 1, "{outcome:?}");
+    assert_eq!(outcome.replacement_survives, 1, "{outcome:?}");
+    assert!(
+        !corpus.join("seed_shallow").exists(),
+        "the dead seed is gone"
+    );
+    assert!(
+        corpus.join("seed_deep").exists(),
+        "the surviving seed stays"
+    );
+    assert!(
+        corpus.join("earned").exists(),
+        "an earned input is never regenerated away"
+    );
+    assert!(
+        corpus.join("regen_0").exists(),
+        "the replacement seed is written"
+    );
+}
+
+#[tokio::test]
+async fn regeneration_without_dying_seeds_is_a_no_op() {
+    let fixture = promoted_afl_harness_with_regen_pool("parse_noregen").await;
+    let workspace = hf_service::workspace_dir(&fixture.project, "parse_noregen");
+    let corpus = workspace.join("corpus");
+    hf_corpus::seed(
+        uuid::Uuid::new_v4(),
+        &corpus,
+        vec![(b"deep-bytes".to_vec(), "seed_deep".to_owned())],
+    )
+    .await
+    .unwrap();
+
+    let outcome = fixture
+        .container
+        .regenerate_dead_seeds(
+            &fixture.project,
+            "parse_noregen",
+            hf_core::target::TargetLanguage::C,
+        )
+        .await
+        .expect("regeneration should run");
+
+    assert_eq!(outcome.removed_dead, 0, "{outcome:?}");
+    assert_eq!(outcome.replacements_added, 0, "{outcome:?}");
+    assert!(corpus.join("seed_deep").exists());
+    assert!(!corpus.join("regen_0").exists());
 }

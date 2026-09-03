@@ -103,6 +103,69 @@ fn seed_blocking(
     })
 }
 
+/// Remove named entries from a corpus root, returning the corpus as it stands
+/// after removal. The inverse of [`seed`] for generated seeds a measurement
+/// has disqualified.
+///
+/// Removal is confined to regular files directly inside `corpus_root`,
+/// addressed by names that pass the same `safe_entry_name` confinement as
+/// writes. A named entry that does not exist, or is not a regular file, is an
+/// error rather than a silent skip: a concurrent mutation must never let a
+/// caller believe it replaced something it did not. The root itself is
+/// re-listed (bounded) before and after, so the returned corpus is exact.
+///
+/// # Errors
+/// Returns `ClassifiedError` when the root is not a regular directory, a name
+/// is not one safe path component, a named entry is missing or not a regular
+/// file, or the filesystem refuses the removal.
+pub fn remove(corpus_root: &Path, names: &[String]) -> Result<Corpus, ClassifiedError> {
+    remove_with_limits(corpus_root, names, DEFAULT_CORPUS_LIMITS)
+}
+
+/// Remove named entries under an explicit I/O budget.
+///
+/// # Errors
+/// Returns `ClassifiedError` under the same conditions as [`remove`], plus a
+/// limit violation during the surrounding listings.
+pub fn remove_with_limits(
+    corpus_root: &Path,
+    names: &[String],
+    limits: CorpusLimits,
+) -> Result<Corpus, ClassifiedError> {
+    validate_limits(limits)?;
+    ensure_regular_directory(corpus_root)?;
+    // Validate every name against the filesystem before deleting anything, so
+    // a bad name cannot leave a half-removed corpus. The check is on
+    // `symlink_metadata` (the exact inode to be unlinked): `list_with_limits`
+    // skips non-regular entries rather than failing, so listing membership
+    // could neither prove existence nor regularity here.
+    for name in names {
+        let safe = safe_entry_name(name)?;
+        let path = corpus_root.join(safe);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_file() => {}
+            Ok(_) => {
+                return Err(ClassifiedError::Validation(format!(
+                    "corpus entry to remove is not a regular file: {name}"
+                )));
+            }
+            Err(_) => {
+                return Err(ClassifiedError::Validation(format!(
+                    "corpus entry to remove does not exist: {name}"
+                )));
+            }
+        }
+    }
+    for name in names {
+        let safe = safe_entry_name(name)?;
+        let path = corpus_root.join(safe);
+        std::fs::remove_file(&path).map_err(|error| {
+            ClassifiedError::Internal(format!("cannot remove corpus entry {name}: {error}"))
+        })?;
+    }
+    list_with_limits(corpus_root, limits)
+}
+
 fn validate_seed_result(
     corpus_root: &Path,
     inputs: &[(Vec<u8>, String)],

@@ -1397,6 +1397,24 @@ pub struct SeedSurvivalReport {
     pub survival_ratio: Option<f64>,
 }
 
+/// The result of one bounded seed-regeneration pass: the generated seeds the
+/// survival metric disqualified, and how their replacements fared.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct SeedRegenerationOutcome {
+    /// Generated (Seed-source) seeds removed: dying at entry.
+    pub removed_dead: usize,
+    /// Replacement seeds requested from the provider.
+    pub replacements_requested: usize,
+    /// Replacement seeds actually written.
+    pub replacements_added: usize,
+    /// Of the replacements: reached past entry validation.
+    pub replacement_survives: usize,
+    /// Of the replacements: died at entry (kept; visible to the next pass).
+    pub replacement_dies_at_entry: usize,
+    /// Of the replacements: produced no measurable coverage.
+    pub replacement_not_measured: usize,
+}
+
 /// Outcome of an autonomous end-to-end campaign
 /// ([`ServiceContainer::run_campaign`]).
 #[derive(Debug, Clone, serde::Serialize)]
