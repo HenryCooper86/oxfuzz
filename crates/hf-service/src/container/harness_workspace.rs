@@ -74,6 +74,19 @@ pub(super) fn harness_binary_name(target: &str) -> String {
 // Seed generation
 // ---------------------------------------------------------------------------
 
+/// Whether a corpus entry name belongs to the reserved generated-seed
+/// namespace: the `seed_` (heuristic), `llmseed_` (provider), and `regen_`
+/// (survival-driven regeneration) prefixes oxfuzz's seed writers use.
+///
+/// A filesystem listing cannot carry a durable source tag -- every re-list
+/// re-tags entries -- so the name is the marker. Only generated seeds are
+/// eligible for survival-driven regeneration; every other entry is an input
+/// a fuzzer or a human earned.
+#[must_use]
+pub fn is_generated_seed_name(name: &str) -> bool {
+    name.starts_with("seed_") || name.starts_with("llmseed_") || name.starts_with("regen_")
+}
+
 /// Generate target-aware seed inputs for a corpus.
 #[must_use]
 pub fn generate_target_seeds(target: &str) -> Vec<(Vec<u8>, String)> {

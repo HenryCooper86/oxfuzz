@@ -812,3 +812,88 @@ async fn corpus_operations_ignore_symlinked_inputs() {
         .any(|entry| entry.path == corpus_root.join("keep")));
     assert_eq!(fs::read(&host_file).unwrap(), b"must-not-be-ingested");
 }
+
+#[tokio::test]
+async fn remove_deletes_only_named_entries_and_returns_the_survivors() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    seed(
+        target_id(),
+        &corpus_root,
+        vec![
+            (b"first".to_vec(), "keep".to_owned()),
+            (b"second".to_vec(), "drop".to_owned()),
+        ],
+    )
+    .await
+    .unwrap();
+    std::fs::write(corpus_root.join("earned"), b"fuzzer found me").unwrap();
+
+    let survivors = hf_corpus::remove(&corpus_root, &["drop".to_owned()]).unwrap();
+
+    assert!(!corpus_root.join("drop").exists(), "named entry removed");
+    assert!(corpus_root.join("keep").exists(), "other seeds stay");
+    assert!(corpus_root.join("earned").exists(), "unnamed entries stay");
+    let names: Vec<String> = survivors
+        .entries
+        .iter()
+        .map(|entry| {
+            entry
+                .path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(names, vec!["earned".to_owned(), "keep".to_owned()]);
+}
+
+#[test]
+fn remove_rejects_a_name_absent_from_the_corpus() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    fs::create_dir_all(&corpus_root).unwrap();
+
+    let error = hf_corpus::remove(&corpus_root, &["missing".to_owned()]).unwrap_err();
+    assert!(
+        error.to_string().contains("missing"),
+        "the denial must name the entry: {error}"
+    );
+}
+
+#[test]
+fn remove_rejects_traversal_names() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    fs::create_dir_all(&corpus_root).unwrap();
+    std::fs::write(dir.path().join("outside"), b"stay").unwrap();
+
+    let error = hf_corpus::remove(&corpus_root, &["../outside".to_owned()]).unwrap_err();
+    assert!(error.to_string().contains("one path component"), "{error}");
+    assert!(
+        std::fs::read(dir.path().join("outside")).is_ok(),
+        "nothing outside the corpus root may be touched"
+    );
+}
+
+#[test]
+fn remove_rejects_a_non_regular_named_entry() {
+    // A symlink inside the corpus root must never be followed to its target.
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    fs::create_dir_all(&corpus_root).unwrap();
+    std::fs::write(dir.path().join("target"), b"precious").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(dir.path().join("target"), corpus_root.join("evil")).unwrap();
+
+    #[cfg(unix)]
+    {
+        let error = hf_corpus::remove(&corpus_root, &["evil".to_owned()]).unwrap_err();
+        assert!(error.to_string().contains("regular file"), "{error}");
+        assert!(
+            std::fs::read(dir.path().join("target")).is_ok(),
+            "the symlink target must be untouched"
+        );
+    }
+}

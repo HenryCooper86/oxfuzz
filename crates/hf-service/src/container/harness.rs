@@ -1684,6 +1684,121 @@ impl ServiceContainer {
         self.persist_corpus(target_id, &corpus).await?;
         Ok(entries)
     }
+
+    /// Replace the generated seeds the survival metric flags as dying at the
+    /// harness's entry validation: measure, remove the dying generated seeds,
+    /// request that many replacements from the provider, write them, and
+    /// re-measure once so the outcome reports how the replacements fared.
+    ///
+    /// Only generated seeds are eligible -- the reserved name namespace
+    /// (`seed_`, `llmseed_`, `regen_` prefixes; see `is_generated_seed_name`
+    /// in `container/harness_workspace.rs`) -- because a filesystem listing
+    /// carries no durable source tag. Every
+    /// other entry is an input a fuzzer or a human earned and is never
+    /// removed. Replacement generation is provider-only: the heuristic
+    /// fallback already produced whatever it can, and heuristic replacements
+    /// for dead seeds would die the same way; an unavailable provider or
+    /// failed call reports zero replacements rather than guessing. The pass
+    /// is bounded to one round per invocation and is idempotent: a
+    /// replacement that also dies at entry stays in the corpus, visible to
+    /// the next survival report, and the next invocation can replace it
+    /// again.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` under the same conditions as
+    /// [`Self::seed_survival`], plus corpus removal or seeding failures.
+    pub async fn regenerate_dead_seeds(
+        &self,
+        project: &Path,
+        target: &str,
+        lang: TargetLanguage,
+    ) -> Result<super::SeedRegenerationOutcome, ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
+        let (corpus, _report, verdicts) = self
+            .measure_corpus_survival(project, target, "regenerate_dead_seeds")
+            .await?;
+        let dead_generated: Vec<String> = corpus
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                let name = entry.path.file_name()?.to_str()?.to_owned();
+                if !super::harness_workspace::is_generated_seed_name(&name) {
+                    return None;
+                }
+                let dies = verdicts.iter().any(|(other, verdict)| {
+                    other == &name
+                        && matches!(verdict, hf_engine::showmap::SeedSurvival::DiesAtEntry)
+                });
+                dies.then_some(name)
+            })
+            .collect();
+        let mut outcome = super::SeedRegenerationOutcome {
+            removed_dead: dead_generated.len(),
+            replacements_requested: dead_generated.len(),
+            replacements_added: 0,
+            replacement_survives: 0,
+            replacement_dies_at_entry: 0,
+            replacement_not_measured: 0,
+        };
+        if dead_generated.is_empty() {
+            return Ok(outcome);
+        }
+        let workspace = workspace_dir(project, target);
+        let corpus_dir = workspace.join("corpus");
+        hf_corpus::remove(&corpus_dir, &dead_generated)?;
+
+        let count = dead_generated.len().clamp(1, 64);
+        let mut replacements: Vec<(Vec<u8>, String)> = Vec::new();
+        if let Some(pool) = self.provider_pool() {
+            if let Ok(inv) = self.discover(project, lang).await {
+                if let Ok(Some(candidate)) = select_target_candidate(&inv.candidates, target) {
+                    let provider = LlmProviderBridge::new(pool)
+                        .with_diagnostics(Arc::clone(&self.diagnostics), "seed_regen");
+                    match hf_harness::generate_seeds(candidate, count, Box::new(provider)).await {
+                        Ok(seeds) => {
+                            let mut seen = std::collections::HashSet::new();
+                            for (i, data) in seeds.into_iter().enumerate() {
+                                use sha2::Digest as _;
+                                let sha = format!("{:x}", sha2::Sha256::digest(&data));
+                                if !seen.insert(sha) {
+                                    continue;
+                                }
+                                replacements.push((data, format!("regen_{i}")));
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("LLM seed regeneration for '{target}' failed: {e}");
+                        }
+                    }
+                }
+            }
+        }
+        let target_id = self.resolve_target_id(project, target, lang).await?;
+        if !replacements.is_empty() {
+            let seeded = hf_corpus::seed(target_id, &corpus_dir, replacements).await?;
+            outcome.replacements_added = seeded.entries.len();
+        }
+        let (_corpus_after, _report_after, verdicts_after) = self
+            .measure_corpus_survival(project, target, "regenerate_dead_seeds")
+            .await?;
+        for (name, verdict) in verdicts_after {
+            if !name.starts_with("regen_") {
+                continue;
+            }
+            match verdict {
+                hf_engine::showmap::SeedSurvival::Survives => outcome.replacement_survives += 1,
+                hf_engine::showmap::SeedSurvival::DiesAtEntry => {
+                    outcome.replacement_dies_at_entry += 1;
+                }
+                hf_engine::showmap::SeedSurvival::NotMeasured => {
+                    outcome.replacement_not_measured += 1;
+                }
+            }
+        }
+        self.persist_corpus(target_id, &hf_corpus::list(&corpus_dir)?)
+            .await?;
+        Ok(outcome)
+    }
 }
 
 #[cfg(all(test, feature = "build-context"))]

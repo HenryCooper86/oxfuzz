@@ -11,6 +11,13 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ### Added
 
+- **Dying seeds can now be regenerated.** `oxfuzz corpus regen <project>
+  <target>` runs one bounded pass: remove the generated seeds the survival
+  metric flags as dying at entry, request that many replacements from the
+  provider, write them, and re-measure so the outcome reports how the
+  replacements fared. Only entries in the reserved generated-seed name
+  namespace (`seed_`, `llmseed_`, `regen_`) are eligible; earned inputs are
+  never removed.
 - **Seed survival is now measured.** `oxfuzz corpus survival <project>
   <target>` runs each corpus seed once through `afl-showmap` on the promoted
   AFL++ harness and classifies it against the empty input's edge coverage:
