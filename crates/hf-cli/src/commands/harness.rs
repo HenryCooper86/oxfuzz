@@ -270,7 +270,12 @@ pub(crate) async fn cmd_triage(project: PathBuf, target: &str, lang: &str) -> an
     Ok(())
 }
 
-pub(crate) async fn cmd_corpus(project: PathBuf, target: &str, op: &str) -> anyhow::Result<()> {
+pub(crate) async fn cmd_corpus(
+    project: PathBuf,
+    target: &str,
+    op: &str,
+    from: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
     let container = ServiceContainer::bootstrap().await;
     match op {
         "seed" => {
@@ -323,6 +328,16 @@ pub(crate) async fn cmd_corpus(project: PathBuf, target: &str, op: &str) -> anyh
                 outcome.replacement_not_measured
             );
         }
+        "import" => {
+            let source =
+                from.ok_or_else(|| anyhow::anyhow!("corpus import requires --from <directory>"))?;
+            let added = container.corpus_import(&project, target, source).await?;
+            if added == 0 {
+                println!("Import added nothing -- every input was already retained.");
+            } else {
+                println!("Imported {added} new input(s).");
+            }
+        }
         "minimize" | "cmin" => {
             let outcome = container.corpus_minimize(&project, target).await?;
             println!("Minimized {} -> {} entries.", outcome.before, outcome.after);
@@ -354,7 +369,7 @@ pub(crate) async fn cmd_corpus(project: PathBuf, target: &str, op: &str) -> anyh
         other => {
             anyhow::bail!(
                 "unknown corpus op: {other} \
-                 (use seed|llmseed|grow|prune|cprune|survival|regen|minimize|absorb|concolic|list)"
+                 (use seed|llmseed|grow|prune|cprune|survival|regen|minimize|absorb|concolic|import|list)"
             )
         }
     }

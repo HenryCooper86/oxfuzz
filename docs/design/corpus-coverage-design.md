@@ -49,6 +49,15 @@ pub struct CorpusEntry {
   or a human earned. Provider-only replacements (heuristic replacements for
   dead seeds would die the same way); one round per invocation, idempotent.
 - **Merge** -- combine corpora across engines for the same target.
+- **Import** -- bring an external corpus directory (for example an OSS-Fuzz
+  corpus checkout) into the target's corpus: bounded listing of regular files
+  only, hash-deduplicated against what the corpus already retains and within
+  the import itself, committed through fresh-inode atomic writes under
+  content-addressed names, so re-importing the same directory adds nothing.
+  Unlike grow, whose input filter is engine-output-shaped, every regular file
+  of a flat external corpus is imported, tagged `Fuzzer`: a fuzzer earned
+  them, just not ours. The source must be a regular directory; a mistyped
+  path fails loudly instead of silently importing nothing.
 - **Snapshot** -- copy the retained flat corpus into an empty run-owned corpus
   before sandbox execution.
 - **Merge snapshot** -- hash-deduplicate new run-owned inputs back into the

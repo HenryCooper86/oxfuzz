@@ -503,6 +503,33 @@ impl ServiceContainer {
         Ok((corpus, report, verdicts))
     }
 
+    /// Import an external corpus directory (for example an OSS-Fuzz corpus
+    /// checkout) into the target's corpus: bounded, hash-deduplicated against
+    /// what the corpus already retains, and content-addressed, so re-importing
+    /// the same directory adds nothing.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the source is not a regular directory,
+    /// the corpus cannot be read or written, or the target cannot be resolved.
+    pub async fn corpus_import(
+        &self,
+        project: &Path,
+        target: &str,
+        source: &Path,
+    ) -> Result<usize, ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
+        self.authorize_recorded(Action::CorpusOp, "corpus_import", Some(project))
+            .await?;
+        prepare_configured_workspace_root()?;
+        let workspace = workspace_dir(project, target);
+        let corpus_dir = workspace.join("corpus");
+        let (mut corpus, added) = hf_corpus::import(&corpus_dir, source)?;
+        let target_id = self.resolve_target_id_any_language(project, target).await?;
+        corpus.target_id = target_id;
+        self.persist_corpus(target_id, &corpus).await?;
+        Ok(added)
+    }
+
     /// Feed triaged crash reproducers back into the corpus.
     ///
     /// Closes the run -> triage -> corpus loop: every crash-triggering input
