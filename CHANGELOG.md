@@ -11,6 +11,11 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ### Added
 
+- **External corpora can be imported.** `oxfuzz corpus import --project ...
+  --target ... --from <dir>` brings an OSS-Fuzz corpus checkout (or any flat
+  corpus directory) into the target's corpus: bounded, hash-deduplicated,
+  content-addressed, and idempotent -- re-importing adds nothing. A source
+  path that is not a regular directory fails loudly.
 - **Coverage attribution ranks the whole inventory for the next harness.**
   `oxfuzz attribution <project>` attributes every discovered target against
   the union of retained coverage -- untouched, partial (the stall frontier),

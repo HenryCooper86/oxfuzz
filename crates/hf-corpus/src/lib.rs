@@ -518,6 +518,80 @@ fn atomic_write(path: &Path, data: &[u8]) -> Result<(), ClassifiedError> {
 
 /// Destination path for a pulled input: keep the source filename, falling back
 /// to a content-hash suffix if a different file already occupies that name.
+/// Import an external corpus directory (for example an OSS-Fuzz corpus
+/// checkout) into a corpus root: bounded listing, content-addressed
+/// destination names, hash-deduplicated against the retained corpus and
+/// within the import itself, committed through fresh-inode atomic writes.
+///
+/// Unlike [`grow`], whose input filter is engine-output-shaped (`queue/`
+/// directories, coverage-input naming), an external corpus is a flat
+/// directory of input files and every regular file is imported, tagged
+/// [`CorpusSource::Fuzzer`] -- a fuzzer earned them, just not ours. The
+/// source must be a regular directory: an import from a mistyped path
+/// silently importing nothing would be a swallowed misconfiguration.
+///
+/// Returns the whole corpus and how many entries the import added. Re-importing
+/// the same directory adds nothing: names derive from content, so the second
+/// pass finds every hash already retained.
+///
+/// # Errors
+/// Returns `ClassifiedError` when either root is not a regular directory, a
+/// limit is exceeded, or a payload cannot be read or written safely.
+pub fn import(corpus_root: &Path, source: &Path) -> Result<(Corpus, usize), ClassifiedError> {
+    let limits = DEFAULT_CORPUS_LIMITS;
+    ensure_regular_directory(corpus_root)?;
+    if !is_regular_directory(source) {
+        return Err(ClassifiedError::Validation(format!(
+            "import source is not a regular directory: {}",
+            source.display()
+        )));
+    }
+    let existing = list_with_limits(corpus_root, limits)?;
+    let mut seen: HashSet<String> = existing.entries.iter().map(|e| e.sha256.clone()).collect();
+    let mut entries = existing.entries;
+    let mut total_bytes = corpus_size(&entries, limits)?;
+    let mut inspected = 0_usize;
+    let mut added = 0usize;
+    for entry in sorted_directory_entries(source, &mut inspected, limits)? {
+        // Swallowed: an entry whose type cannot be inspected is skipped --
+        // the bounded budget still counted it, and one unreadable member
+        // must not cost the rest of the import.
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let Some(data) = read_regular_file_bounded(&entry.path(), limits)? else {
+            continue;
+        };
+        if data.is_empty() {
+            continue;
+        }
+        let hash = sha256_hex(&data);
+        if !seen.insert(hash.clone()) {
+            continue;
+        }
+        enforce_entry_limit(entries.len().saturating_add(1), limits)?;
+        total_bytes = checked_total(total_bytes, data_len_u64(&data)?, limits)?;
+        // Content-addressed names: two imports of the same corpus are
+        // idempotent, and different content never collides.
+        let dest = corpus_root.join(format!("imported_{}", &hash[..16.min(hash.len())]));
+        atomic_write(&dest, &data)?;
+        entries.push(make_entry(&dest, &data, CorpusSource::Fuzzer));
+        added += 1;
+    }
+    Ok((
+        Corpus {
+            id: Uuid::new_v4(),
+            target_id: Uuid::nil(),
+            root: corpus_root.to_path_buf(),
+            entries,
+        },
+        added,
+    ))
+}
+
 fn grow_dest_path(corpus_root: &Path, src: &Path, hash: &str) -> std::path::PathBuf {
     let name = src
         .file_name()

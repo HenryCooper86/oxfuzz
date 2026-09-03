@@ -139,7 +139,8 @@ async fn main() -> anyhow::Result<()> {
             project,
             target,
             op,
-        } => cmd_corpus(project, &target, &op).await?,
+            from,
+        } => cmd_corpus(project, &target, &op, from.as_deref()).await?,
         Commands::Coverage { project, target } => cmd_coverage(project, &target).await?,
         #[cfg(feature = "campaign-trust")]
         Commands::Trust { run } => cmd_trust(&run).await?,

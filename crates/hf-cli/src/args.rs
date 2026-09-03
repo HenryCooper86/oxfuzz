@@ -161,9 +161,13 @@ pub(crate) enum Commands {
         /// Target symbol.
         #[arg(long)]
         target: String,
-        /// Operation: seed, grow, prune, minimize, absorb, concolic, list.
+        /// Operation: seed, llmseed, grow, prune, cprune, survival, regen,
+        /// minimize, absorb, concolic, import, list.
         #[arg(long)]
         op: String,
+        /// Source directory for `import` (an external corpus, e.g. OSS-Fuzz).
+        #[arg(long)]
+        from: Option<PathBuf>,
     },
     /// Report line/function/region coverage for a target's corpus.
     Coverage {

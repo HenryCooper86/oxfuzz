@@ -897,3 +897,81 @@ fn remove_rejects_a_non_regular_named_entry() {
         );
     }
 }
+
+#[tokio::test]
+async fn import_copies_new_content_and_skips_duplicates() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    seed(
+        target_id(),
+        &corpus_root,
+        vec![(b"already-here".to_vec(), "seed_existing".to_owned())],
+    )
+    .await
+    .unwrap();
+    let external = dir.path().join("external");
+    fs::create_dir_all(&external).unwrap();
+    fs::write(external.join("oss_input_a"), b"from oss-fuzz").unwrap();
+    // Same content the corpus already retains, under another name.
+    fs::write(external.join("oss_input_dup"), b"already-here").unwrap();
+    // Duplicate content within the import itself.
+    fs::write(external.join("oss_input_b"), b"from oss-fuzz").unwrap();
+    // OSS-Fuzz corpus seeds are never empty, and neither is an import.
+    fs::write(external.join("empty"), b"").unwrap();
+
+    let (corpus, added) = hf_corpus::import(&corpus_root, &external).unwrap();
+
+    assert_eq!(added, 1, "only genuinely new content is added");
+    let names: Vec<String> = corpus
+        .entries
+        .iter()
+        .map(|entry| {
+            entry
+                .path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert!(names.contains(&"seed_existing".to_owned()), "{names:?}");
+    // Content-addressed naming: the imported input lands under its hash.
+    let imported = corpus
+        .entries
+        .iter()
+        .find(|entry| {
+            entry.sha256 == {
+                use sha2::Digest as _;
+                let mut hasher = sha2::Sha256::new();
+                hasher.update(b"from oss-fuzz");
+                format!("{:x}", hasher.finalize())
+            }
+        })
+        .expect("the imported input is retained");
+    assert!(matches!(imported.source, CorpusSource::Fuzzer));
+    assert!(corpus_root
+        .join(imported.path.file_name().unwrap())
+        .exists());
+}
+
+#[test]
+fn import_fails_loudly_when_the_source_is_not_a_directory() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    fs::create_dir_all(&corpus_root).unwrap();
+
+    let missing = dir.path().join("typo-path");
+    let error = hf_corpus::import(&corpus_root, &missing).unwrap_err();
+    assert!(
+        error.to_string().contains("typo-path"),
+        "the denial must name the source: {error}"
+    );
+
+    let file_source = dir.path().join("afile");
+    fs::write(&file_source, b"x").unwrap();
+    let error = hf_corpus::import(&corpus_root, &file_source).unwrap_err();
+    assert!(
+        error.to_string().contains("directory"),
+        "a non-directory source must be rejected: {error}"
+    );
+}
