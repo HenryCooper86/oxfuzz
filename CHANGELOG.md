@@ -11,6 +11,13 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ### Added
 
+- **The approval gate now shows its evidence.** Every harness review item
+  carries the qualification evidence an approval attests to: the independent
+  LLM review verdict and reasons bound to the exact source and binary, the
+  SHA-256 digest binding, the lexical lint findings recomputed for that exact
+  source, and the smoke statistics. The GUI's human-approval step renders it
+  all in one glance beside the promote action, and missing evidence is stated
+  ("no independent review persisted"), never implied.
 - **The 90-second CVE-pattern rediscovery demo.**
   `scripts/demo-cve-rediscovery.sh` runs the full pipeline against a
   deliberately vulnerable example target -- discovery, harness qualification,

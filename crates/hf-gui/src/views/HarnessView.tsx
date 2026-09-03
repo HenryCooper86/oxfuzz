@@ -8,6 +8,7 @@ import type { TargetInventory, HarnessReviewItem } from "../types";
 import { Button, Input, Select, ViewHeader, EmptyState } from "../components/ui";
 import { SandboxBanner } from "../components/SandboxBanner";
 import { BuildDoctorPanel } from "../components/BuildDoctorPanel";
+import { HarnessApprovalEvidence } from "../components/HarnessApprovalEvidence";
 import { HarnessTournamentPanel } from "../components/HarnessTournamentPanel";
 import { OracleStudioPanel } from "../components/OracleStudioPanel";
 import {
@@ -440,6 +441,9 @@ export function HarnessView({
               {existing.source_preview}
             </pre>
           )}
+          <div className="mt-2">
+            <HarnessApprovalEvidence item={existing} />
+          </div>
           <p className="text-xs text-text-muted mt-2">
             {t("harness.generatedPreviously")}
           </p>
@@ -717,6 +721,13 @@ export function HarnessView({
             <p className="mt-2 text-xs text-text-secondary">
               {t("harness.approvalBinds")}
             </p>
+            {/* Everything the approval decision attests to, in one glance:
+                review verdict, digest binding, lint findings, smoke stats. */}
+            {existing && promotionStatus !== "done" && (
+              <div className="mt-2">
+                <HarnessApprovalEvidence item={existing} />
+              </div>
+            )}
             {smokeCrashed && promotionStatus !== "done" && (
               <p className="mt-1 text-xs" style={{ color: "var(--warning)" }}>
                 {t("harness.approveFindingsNotice", { n: smokeResult?.crashes ?? 0 })}

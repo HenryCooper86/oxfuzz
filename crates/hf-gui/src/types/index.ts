@@ -246,6 +246,23 @@ export interface WorkbenchTarget {
   rationale: string;
 }
 
+/** Verdict half of the persisted independent LLM review for one harness. */
+export interface HarnessAiReviewSummary {
+  exercises_target: boolean;
+  safe_to_execute: boolean;
+  reasons: string[];
+  /** RFC 3339; empty when unknown. */
+  reviewed_at: string;
+}
+
+/** One lexical lint finding for a harness source. */
+export interface HarnessLintFinding {
+  severity: "error" | "warning";
+  rule: string;
+  message: string;
+  line: number;
+}
+
 export interface HarnessReviewItem {
   harness_id: string;
   target_id: string;
@@ -260,6 +277,12 @@ export interface HarnessReviewItem {
   needs_review: boolean;
   next_action: string;
   source_preview: string;
+  /** Independent review bound to this exact source and binary; null = none
+   * persisted, which the approval surface must state, not imply. */
+  ai_review: HarnessAiReviewSummary | null;
+  source_sha256: string | null;
+  binary_sha256: string | null;
+  lint: HarnessLintFinding[];
 }
 
 export type FindingProofStatus = "supported" | "not_verified" | "unavailable";

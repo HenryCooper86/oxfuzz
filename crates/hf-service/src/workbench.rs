@@ -101,6 +101,33 @@ pub struct HarnessReviewItem {
     pub needs_review: bool,
     pub next_action: String,
     pub source_preview: String,
+    /// The independent LLM review bound to this exact source and binary,
+    /// when one is persisted. `None` states its absence; the approval
+    /// surface must show that, not imply approval.
+    pub ai_review: Option<HarnessAiReviewSummary>,
+    /// SHA-256 of the reviewed harness source (the review record's binding,
+    /// falling back to the smoke evidence's).
+    pub source_sha256: Option<String>,
+    /// SHA-256 of the reviewed harness binary, same binding rule.
+    pub binary_sha256: Option<String>,
+    /// Lexical lint findings for this exact source, recomputed by the same
+    /// rules the pre-compile gate applied -- deterministic, free, and shown
+    /// so the approver sees what the gate saw.
+    pub lint: Vec<hf_harness::LintFinding>,
+}
+
+/// The verdict half of a persisted harness AI review, parsed from the
+/// durable `review_json` for display beside the approve action.
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
+pub struct HarnessAiReviewSummary {
+    pub exercises_target: bool,
+    pub safe_to_execute: bool,
+    #[serde(default)]
+    pub reasons: Vec<String>,
+    /// When the accepted review was persisted (RFC 3339). Not part of the
+    /// stored verdict JSON -- joined from the record's column.
+    #[serde(default)]
+    pub reviewed_at: String,
 }
 
 /// One crash that may need a human-created issue.
@@ -286,13 +313,24 @@ pub async fn dashboard<S: std::hash::BuildHasher>(
 
     let target_by_id: HashMap<Uuid, TargetCandidate> =
         targets.iter().map(|t| (t.id, t.clone())).collect();
+    // Pre-fetch the persisted AI review per harness so the review items can
+    // join it synchronously. A read failure leaves that item without review
+    // evidence -- stated, not hidden -- rather than dropping the harness from
+    // its own approval queue.
+    let mut review_by_harness: HashMap<Uuid, hf_storage::HarnessAiReviewRecord> = HashMap::new();
+    for harness in &filtered_harnesses {
+        if let Ok(Some(record)) = store.harness_ai_review(harness.id).await {
+            review_by_harness.insert(harness.id, record);
+        }
+    }
     let crash_count_by_run = crash_count_by_run(&filtered_crashes);
     // A project is always selected past the early return above, so the count is
     // 0 or 1 depending on whether this project has any persisted work.
     let project_count =
         usize::from(!project_scoped_targets.is_empty() || !filtered_runs.is_empty());
 
-    let harness_reviews = harness_review_items(filtered_harnesses, &target_by_id);
+    let harness_reviews =
+        harness_review_items(filtered_harnesses, &target_by_id, &review_by_harness);
     // Patch-to-Proof: pre-fetch the latest terminal remediation per finding so the
     // proof card's fix-verification claim can reflect sandbox evidence. No-op
     // (empty map) when the feature is off; the base card stays `not_verified`.
@@ -575,6 +613,7 @@ fn target_view(target: TargetCandidate) -> WorkbenchTarget {
 fn harness_review_items(
     harnesses: Vec<Harness>,
     target_by_id: &HashMap<Uuid, TargetCandidate>,
+    review_by_harness: &HashMap<Uuid, hf_storage::HarnessAiReviewRecord>,
 ) -> Vec<HarnessReviewItem> {
     let mut items: Vec<HarnessReviewItem> = harnesses
         .into_iter()
@@ -585,6 +624,20 @@ fn harness_review_items(
                 h.status,
                 HarnessStatus::Draft | HarnessStatus::Compiled | HarnessStatus::SmokePassed
             );
+            let record = review_by_harness.get(&h.id);
+            // The review record is the binding evidence an approval attests
+            // to, so its digests lead; the smoke evidence's are the fallback
+            // for a harness whose review predates the record format.
+            let (source_sha256, binary_sha256) = match record {
+                Some(record) => (
+                    Some(record.source_sha256.clone()),
+                    Some(record.binary_sha256.clone()),
+                ),
+                None => (
+                    smoke.and_then(|s| s.source_sha256.clone()),
+                    smoke.and_then(|s| s.binary_sha256.clone()),
+                ),
+            };
             HarnessReviewItem {
                 harness_id: h.id.to_string(),
                 target_id: h.target_id.to_string(),
@@ -601,11 +654,26 @@ fn harness_review_items(
                 needs_review,
                 next_action: next_harness_action(h.status, smoke.is_some_and(|s| s.passed)),
                 source_preview: source_preview(&h.source),
+                ai_review: record.and_then(ai_review_summary),
+                source_sha256,
+                binary_sha256,
+                lint: hf_harness::lint_harness_source(&h.source, h.language),
             }
         })
         .collect();
     items.sort_by_key(|h| (!h.needs_review, h.target_symbol.clone()));
     items
+}
+
+/// Parse a persisted review record's verdict half for display. A `review_json`
+/// that does not parse is `None`: the durable-format boundary admits foreign
+/// shapes, and an unparseable verdict must read as absent, never as approval.
+fn ai_review_summary(record: &hf_storage::HarnessAiReviewRecord) -> Option<HarnessAiReviewSummary> {
+    let mut summary: HarnessAiReviewSummary = serde_json::from_str(&record.review_json).ok()?;
+    summary.reviewed_at = record
+        .reviewed_at
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    Some(summary)
 }
 
 fn crash_review_items(
