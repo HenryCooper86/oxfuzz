@@ -100,6 +100,11 @@ class GateDispatcherTests(unittest.TestCase):
                 stub_dir, "cargo-deny", f'echo "cargo-deny" >> "{log}"\nexit 0'
             )
             self.make_stub(
+                stub_dir,
+                "cargo-llvm-cov",
+                f'echo "cargo-llvm-cov" >> "{log}"\nexit 0',
+            )
+            self.make_stub(
                 stub_dir, "python3", f'echo "python3" >> "{log}"\nexit 0'
             )
             result = self.run_gates([], stub_dir, timeout=60.0)
@@ -123,10 +128,11 @@ class GateDispatcherTests(unittest.TestCase):
         self.assertEqual(recorded[23], "cargo test")
         self.assertEqual(recorded[24], "cargo doc")
         self.assertEqual(recorded[25], "cargo-deny")
-        self.assertEqual(recorded[26], "python3")
+        self.assertEqual(recorded[26], "cargo-llvm-cov")
         self.assertEqual(recorded[27], "python3")
-        self.assertEqual(recorded[28], "npm --prefix crates/hf-gui ci")
-        self.assertEqual(recorded[32], "npm --prefix crates/hf-gui run lint")
+        self.assertEqual(recorded[28], "python3")
+        self.assertEqual(recorded[29], "npm --prefix crates/hf-gui ci")
+        self.assertEqual(recorded[33], "npm --prefix crates/hf-gui run lint")
 
     def test_named_subset_runs_only_those_gates(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
