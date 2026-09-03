@@ -68,6 +68,22 @@ oxfuzz triage   <project> --target <symbol>
 Docker 必须已安装并正在运行，且至少配置一个 LLM 提供方。完整搭建见
 **[安装与构建](docs/guides/INSTALL.md)** 与 **[配置](docs/guides/CONFIGURATION.md)**。
 
+## 90 秒演示
+
+完成上面的快速开始后，观看 oxfuzz 端到端地重新发现一个植入的、CVE 级别的缺陷——
+其中包括人工晋升门禁，这正是关键所在：
+
+```bash
+./scripts/demo-cve-rediscovery.sh            # 完整运行；晋升前会征询确认
+./scripts/demo-cve-rediscovery.sh --preflight-only   # 无副作用的就绪检查
+```
+
+默认目标（`examples/aflpp_persistent`）信任声明的长度字节而非实际存在的载荷——
+这是众多真实解析器 CVE 背后的"长度字段信任"模式。发现阶段找到入口点，模型编写
+的 harness 必须通过 lint、沙箱编译、独立评审和冒烟运行，然后**脚本会停下来等待
+你的批准**，才会开始任何完整模糊测试。一次有界的运行与缺陷分诊（triage）收尾。
+其他示例隔离其他缺陷类别；见 **[examples/README.md](examples/README.md)**。
+
 ---
 
 ## 文档

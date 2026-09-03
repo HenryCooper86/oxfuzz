@@ -11,6 +11,14 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ### Added
 
+- **The 90-second CVE-pattern rediscovery demo.**
+  `scripts/demo-cve-rediscovery.sh` runs the full pipeline against a
+  deliberately vulnerable example target -- discovery, harness qualification,
+  the human promotion gate (the script stops and waits), a bounded fuzz run,
+  and triage -- ending in the rediscovery of a planted length-field-trust
+  bug, the pattern behind a long line of real parser CVEs. Honest by design:
+  the fixture is modeled on the CVE class, never claimed as a specific
+  historical CVE. `--preflight-only` checks readiness side-effect-free.
 - **External corpora can be imported.** `oxfuzz corpus import --project ...
   --target ... --from <dir>` brings an OSS-Fuzz corpus checkout (or any flat
   corpus directory) into the target's corpus: bounded, hash-deduplicated,
