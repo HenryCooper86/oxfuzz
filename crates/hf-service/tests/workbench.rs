@@ -641,3 +641,83 @@ async fn the_crash_queue_is_ordered_by_disposition_and_carries_one_next_action()
     assert_eq!(last.disposition.disposition, Disposition::HarnessDefect);
     assert_eq!(last.disposition.claim_ceiling, ClaimCeiling::NoTargetClaim);
 }
+
+#[tokio::test]
+async fn harness_review_items_carry_the_qualification_evidence() {
+    let (container, dir) = test_container().await;
+    let store = container.store().expect("store configured");
+    let project = dir.path().join("evidence-proj");
+    let target = sample_target(project.to_string_lossy().as_ref());
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    let mut harness = sample_harness(target.id);
+    harness.status = HarnessStatus::SmokePassed;
+    // A lint-detectable defect in the exact source: the approval surface must
+    // recompute and show the lexical findings for this revision.
+    harness.source = "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return strlen(data); }".to_owned();
+    harness.smoke_run = Some(SmokeRunSummary {
+        duration_secs: 60,
+        execs_per_sec: 128.0,
+        crashes: 0,
+        passed: true,
+        source_sha256: Some("a".repeat(64)),
+        binary_sha256: Some("b".repeat(64)),
+        run_id: None,
+    });
+    store.upsert_harness(&harness).await.unwrap();
+    store
+        .record_harness_ai_review(&hf_storage::HarnessAiReviewRecord {
+            harness_id: harness.id,
+            source_sha256: "a".repeat(64),
+            binary_sha256: "b".repeat(64),
+            review_json: r#"{"exercises_target":true,"safe_to_execute":true,"reasons":["drives parse_packet with fuzz input"]}"#.to_owned(),
+            reviewed_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    let items = container
+        .harness_review_queue(Some(project.as_path()), Some("parse_packet"))
+        .await
+        .unwrap();
+
+    assert_eq!(items.len(), 1);
+    let item = &items[0];
+    let review = item.ai_review.as_ref().expect("review evidence attached");
+    assert!(review.exercises_target);
+    assert!(review.safe_to_execute);
+    assert!(
+        review.reasons.iter().any(|r| r.contains("parse_packet")),
+        "{review:?}"
+    );
+    assert_eq!(item.source_sha256.as_deref(), Some("a".repeat(64).as_str()));
+    assert_eq!(item.binary_sha256.as_deref(), Some("b".repeat(64).as_str()));
+    assert!(
+        item.lint.iter().any(|f| f.rule == "no-strlen-on-fuzz-data"),
+        "{:?}",
+        item.lint
+    );
+}
+
+#[tokio::test]
+async fn harness_review_items_state_missing_evidence_rather_than_hiding_it() {
+    let (container, dir) = test_container().await;
+    let store = container.store().expect("store configured");
+    let project = dir.path().join("no-evidence-proj");
+    let target = sample_target(project.to_string_lossy().as_ref());
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    // Compiled only: no smoke digests, no persisted review.
+    let harness = sample_harness(target.id);
+    store.upsert_harness(&harness).await.unwrap();
+
+    let items = container
+        .harness_review_queue(Some(project.as_path()), Some("parse_packet"))
+        .await
+        .unwrap();
+
+    assert_eq!(items.len(), 1);
+    let item = &items[0];
+    assert_eq!(item.ai_review, None, "no review was recorded");
+    assert_eq!(item.source_sha256, None);
+    assert_eq!(item.binary_sha256, None);
+    assert!(item.lint.is_empty(), "{:?}", item.lint);
+}
