@@ -51,6 +51,11 @@ Swap the directory and `--target` for any row in the table above, and swap
 a different engine. Every target crashes within seconds under a coverage-guided
 engine with AddressSanitizer.
 
+For the guided end-to-end version -- discovery through triage with the human
+promotion gate in the middle -- run
+`scripts/demo-cve-rediscovery.sh` (see the README's demo section;
+`--preflight-only` checks readiness side-effect-free).
+
 Corpora and crash artifacts are generated at runtime and are not committed to
 this repository -- only the `.c`, `.h`, and this `.md` file live here. The
 framework writes generated corpora, harnesses, and crash reproducers into its

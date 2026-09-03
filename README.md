@@ -82,6 +82,26 @@ Docker must be installed and running, and at least one LLM provider configured.
 See **[Install & Build](docs/guides/INSTALL.md)** and
 **[Configuration](docs/guides/CONFIGURATION.md)** for the full setup.
 
+## The 90-second demo
+
+Once the quick start above is done, watch oxfuzz rediscover a planted,
+CVE-class bug end to end -- including the human promotion gate, which is the
+point:
+
+```bash
+./scripts/demo-cve-rediscovery.sh            # full run; asks before promoting
+./scripts/demo-cve-rediscovery.sh --preflight-only   # side-effect-free readiness check
+```
+
+The default target (`examples/aflpp_persistent`) trusts a declared length
+byte over the payload actually present -- the length-field-trust pattern
+behind a long line of real parser CVEs. Discovery finds the entry point, the
+model writes a harness that must pass lint, sandboxed compilation,
+independent review, and a smoke run, then **the script stops and waits for
+your approval** before any full fuzzing. A bounded run and triage close the
+story. Other fixtures isolate other bug classes; see
+**[examples/README.md](examples/README.md)**.
+
 ---
 
 ## Documentation
