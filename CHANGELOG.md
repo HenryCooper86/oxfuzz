@@ -11,6 +11,13 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ### Added
 
+- **Coverage attribution ranks the whole inventory for the next harness.**
+  `oxfuzz attribution <project>` attributes every discovered target against
+  the union of retained coverage -- untouched, partial (the stall frontier),
+  or saturated -- and orders the list untouched-first, saturated-last, with
+  discovery's own order preserved inside each tier and no score rewritten.
+  Saturated targets stop headlining the next-harness list even when their
+  static score is the project's highest.
 - **Dying seeds can now be regenerated.** `oxfuzz corpus regen <project>
   <target>` runs one bounded pass: remove the generated seeds the survival
   metric flags as dying at entry, request that many replacements from the

@@ -191,6 +191,17 @@ pub(crate) enum Commands {
         #[arg(long, default_value = "c")]
         lang: String,
     },
+    /// Attribute every discovered target against retained coverage and order
+    /// the result for the next harness: untouched first, partial frontier
+    /// next, saturated last. Reads cached measurements; never triggers one.
+    #[cfg(feature = "unreached-surface")]
+    Attribution {
+        /// Project root path.
+        project: PathBuf,
+        /// Source language.
+        #[arg(long, default_value = "c")]
+        lang: String,
+    },
     /// Report campaign health conditions for a run. Reads retained state;
     /// never stops, restarts, or resizes a campaign.
     #[cfg(feature = "campaign-health")]

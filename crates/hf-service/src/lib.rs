@@ -230,8 +230,10 @@ pub use triage_disposition::{
 };
 #[cfg(feature = "unreached-surface")]
 pub use unreached_surface::{
-    unreached_surface, AttemptHistory, SurfaceMeasurement, UnreachedCandidate,
-    UnreachedSurfaceRequest, UnreachedSurfaceView, UNREACHED_SURFACE_SCHEMA_VERSION,
+    coverage_attribution, unreached_surface, AttemptHistory, AttributionCandidate, AttributionTier,
+    CoverageAttributionRequest, CoverageAttributionView, SurfaceMeasurement, UnreachedCandidate,
+    UnreachedSurfaceRequest, UnreachedSurfaceView, COVERAGE_ATTRIBUTION_SCHEMA_VERSION,
+    UNREACHED_SURFACE_SCHEMA_VERSION,
 };
 pub use workbench::{
     CrashReviewItem, HarnessReviewItem, IssueExport, WorkbenchDashboard, WorkbenchReadiness,

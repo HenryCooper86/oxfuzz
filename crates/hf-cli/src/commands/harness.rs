@@ -399,3 +399,53 @@ pub(crate) async fn cmd_unreached(project: PathBuf, lang: &str) -> anyhow::Resul
     }
     Ok(())
 }
+
+/// Rendering only: the attribution tiers and ordering arrive decided by
+/// `hf-service` (AGENTS.md 2.9).
+#[cfg(feature = "unreached-surface")]
+pub(crate) async fn cmd_attribution(project: PathBuf, lang: &str) -> anyhow::Result<()> {
+    use hf_service::{AttributionTier, SurfaceMeasurement};
+
+    let language = parse_lang(lang)?;
+    let container = ServiceContainer::bootstrap().await;
+    let view = container.coverage_attribution(&project, language).await?;
+
+    match &view.measurement {
+        SurfaceMeasurement::Unavailable { reason } => {
+            eprintln!(
+                "No coverage measurement is retained for this project ({reason}); \
+                 nothing can be attributed until something has been measured."
+            );
+            return Ok(());
+        }
+        SurfaceMeasurement::Retained { measurements } => {
+            println!(
+                "Coverage attribution over {measurements} retained measurement(s), \
+                 ordered for the next harness:"
+            );
+        }
+    }
+    if view.candidates.is_empty() {
+        println!("  none -- no discovered candidates.");
+        return Ok(());
+    }
+    for candidate in &view.candidates {
+        let tier = match &candidate.tier {
+            AttributionTier::Untouched => "untouched".to_owned(),
+            AttributionTier::Partial { covered, total } => {
+                format!("partial {covered}/{total}")
+            }
+            AttributionTier::Saturated { covered, total } => {
+                format!("saturated {covered}/{total}")
+            }
+        };
+        println!(
+            "  {:<40} score {:.2}  covered {:.0}%  {}",
+            candidate.symbol,
+            candidate.discovery_score,
+            candidate.covered_share * 100.0,
+            tier
+        );
+    }
+    Ok(())
+}

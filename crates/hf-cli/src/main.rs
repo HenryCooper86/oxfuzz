@@ -33,6 +33,7 @@ use crate::commands::campaign::{
 };
 use crate::commands::discovery::cmd_discover;
 #[cfg(feature = "unreached-surface")]
+use crate::commands::harness::cmd_attribution;
 use crate::commands::harness::cmd_unreached;
 use crate::commands::harness::{cmd_corpus, cmd_harness, cmd_run, cmd_triage};
 use crate::commands::system::{
@@ -144,6 +145,8 @@ async fn main() -> anyhow::Result<()> {
         Commands::Trust { run } => cmd_trust(&run).await?,
         #[cfg(feature = "unreached-surface")]
         Commands::Unreached { project, lang } => cmd_unreached(project, &lang).await?,
+        #[cfg(feature = "unreached-surface")]
+        Commands::Attribution { project, lang } => cmd_attribution(project, &lang).await?,
         #[cfg(feature = "campaign-health")]
         Commands::Health { run } => cmd_health(&run).await?,
         #[cfg(feature = "run-closeout")]
