@@ -116,3 +116,38 @@ which overwrites the discovery judgment with arithmetic.
 - Attempt history changes the order only between candidates of equal discovery
   rank; it never reorders candidates whose discovery ranks differ.
 - Ranking is total and stable.
+
+## 9. Coverage Attribution
+
+`coverage_attribution` is the sibling view over the whole inventory rather
+than the uncovered subset: every discovered candidate, attributed against the
+same union of retained coverage, ordered for the next harness.
+
+The attribution set of a candidate is itself plus its retained
+`reachable_functions`. `covered / total` over that set is the covered share,
+and the tier names its shape: `untouched` (nothing covered), `partial` (the
+frontier where coverage stalls), `saturated` (the whole attribution set
+covered). Ordering is tier first -- untouched, then partial, then saturated --
+with discovery's own order deciding inside each tier.
+
+This is deliberately not the rejected re-scoring of section 7: no constant is
+added to any discovery score, and discovery's relative order is preserved
+within every tier. Coverage decides only which tier a candidate headlines in,
+which is the one fact discovery cannot know. The practical effect is that a
+target the retained measurements already saturate stops headlining the
+next-harness list even when its static score is the highest in the project.
+
+Two scope limits, stated rather than implied:
+
+- `saturated` claims the *attribution set* is covered -- the candidate and its
+  retained reachable functions -- not that the target has no more surface. The
+  reachable set is bounded (section 7), so it cannot establish absence
+  elsewhere; a code change or a wider reachability pass can reopen a
+  saturated target, and the next measurement will.
+- The no-measurement rule of section 4 applies unchanged: zero measurements
+  yield `Unavailable` and no list, because attribution derived from nothing
+  measured would be fabrication.
+
+Evidence sources are those of section 3 (the same covered-function union,
+gathered per project), so the two views can never disagree about what was
+measured. Exposed as `oxfuzz attribution` beside `oxfuzz unreached`.

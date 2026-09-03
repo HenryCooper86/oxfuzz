@@ -196,3 +196,128 @@ fn every_candidate_is_reported_when_nothing_at_all_was_covered() {
         SurfaceMeasurement::Retained { measurements: 2 }
     );
 }
+
+fn attribution_request(
+    ranked: Vec<(String, f64, Vec<String>)>,
+    covered: HashSet<String>,
+    measurements: usize,
+) -> hf_service::unreached_surface::CoverageAttributionRequest {
+    hf_service::unreached_surface::CoverageAttributionRequest {
+        ranked_candidates: ranked,
+        covered_functions: covered,
+        measurements,
+    }
+}
+
+fn attributed(
+    view: &hf_service::unreached_surface::CoverageAttributionView,
+) -> Vec<(&str, &hf_service::unreached_surface::AttributionTier)> {
+    view.candidates
+        .iter()
+        .map(|entry| (entry.symbol.as_str(), &entry.tier))
+        .collect()
+}
+
+#[test]
+fn attribution_with_no_measurement_names_the_gap_and_lists_nothing() {
+    let view = hf_service::unreached_surface::coverage_attribution(&attribution_request(
+        vec![("a".to_owned(), 0.9, vec!["a_helper".to_owned()])],
+        covered(&[]),
+        0,
+    ));
+    assert!(matches!(
+        view.measurement,
+        SurfaceMeasurement::Unavailable { .. }
+    ));
+    assert!(view.candidates.is_empty());
+}
+
+#[test]
+fn attribution_counts_the_candidate_itself_plus_its_reachable_set() {
+    // Attribution set = {symbol} U reachable. Here "a" itself is covered and
+    // one of two helpers is: 2 of 3 -> partial.
+    let view = hf_service::unreached_surface::coverage_attribution(&attribution_request(
+        vec![(
+            "a".to_owned(),
+            0.9,
+            vec!["helper_one".to_owned(), "helper_two".to_owned()],
+        )],
+        covered(&["a", "helper_one"]),
+        1,
+    ));
+    let tiers = attributed(&view);
+    assert_eq!(
+        tiers,
+        vec![(
+            "a",
+            &hf_service::unreached_surface::AttributionTier::Partial {
+                covered: 2,
+                total: 3
+            }
+        )]
+    );
+    assert!((view.candidates[0].covered_share - 2.0 / 3.0).abs() < 1e-9);
+}
+
+#[test]
+fn attribution_ranks_untouched_first_partial_next_and_saturated_last() {
+    // Static discovery alone would headline "saturated" (0.99); attribution
+    // sinks it below the untouched and partial candidates.
+    let view = hf_service::unreached_surface::coverage_attribution(&attribution_request(
+        vec![
+            ("saturated".to_owned(), 0.99, vec!["sat_helper".to_owned()]),
+            ("untouched".to_owned(), 0.5, vec!["un_helper".to_owned()]),
+            ("partial".to_owned(), 0.7, vec!["part_helper".to_owned()]),
+        ],
+        covered(&["saturated", "sat_helper", "partial"]),
+        4,
+    ));
+    let names: Vec<&str> = view.candidates.iter().map(|c| c.symbol.as_str()).collect();
+    assert_eq!(names, vec!["untouched", "partial", "saturated"]);
+    assert!(matches!(
+        view.candidates[2].tier,
+        hf_service::unreached_surface::AttributionTier::Saturated {
+            covered: 2,
+            total: 2
+        }
+    ));
+}
+
+#[test]
+fn attribution_breaks_ties_by_discovery_score_then_symbol() {
+    let view = hf_service::unreached_surface::coverage_attribution(&attribution_request(
+        vec![
+            ("b_low".to_owned(), 0.2, vec![]),
+            ("a_high".to_owned(), 0.8, vec![]),
+            ("c_high".to_owned(), 0.8, vec![]),
+        ],
+        covered(&[]),
+        1,
+    ));
+    let names: Vec<&str> = view.candidates.iter().map(|c| c.symbol.as_str()).collect();
+    assert_eq!(names, vec!["a_high", "c_high", "b_low"]);
+}
+
+#[test]
+fn attribution_without_reachable_functions_is_binary() {
+    let view = hf_service::unreached_surface::coverage_attribution(&attribution_request(
+        vec![
+            ("covered_bare".to_owned(), 0.9, vec![]),
+            ("bare".to_owned(), 0.8, vec![]),
+        ],
+        covered(&["covered_bare"]),
+        1,
+    ));
+    assert!(matches!(
+        view.candidates[1].tier,
+        hf_service::unreached_surface::AttributionTier::Saturated {
+            covered: 1,
+            total: 1
+        }
+    ));
+    assert!(matches!(
+        view.candidates[0].tier,
+        hf_service::unreached_surface::AttributionTier::Untouched
+    ));
+    assert!((view.candidates[1].covered_share - 1.0).abs() < 1e-9);
+}

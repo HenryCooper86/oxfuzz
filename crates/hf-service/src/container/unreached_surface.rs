@@ -12,7 +12,8 @@ use hf_core::target::TargetLanguage;
 
 use crate::container::ServiceContainer;
 use crate::unreached_surface::{
-    unreached_surface, AttemptHistory, UnreachedSurfaceRequest, UnreachedSurfaceView,
+    coverage_attribution, unreached_surface, AttemptHistory, CoverageAttributionRequest,
+    CoverageAttributionView, UnreachedSurfaceRequest, UnreachedSurfaceView,
 };
 use crate::ClassifiedError;
 
@@ -103,4 +104,60 @@ fn attempt_history(harnesses: &[hf_core::harness::Harness]) -> Option<AttemptHis
         return Some(AttemptHistory::AttemptedSmokeFailed { attempts });
     }
     Some(AttemptHistory::AttemptedCompileFailed { attempts })
+}
+
+impl ServiceContainer {
+    /// Attribute every discovered candidate against the union of retained
+    /// coverage, ordered for the next harness: untouched ground first, the
+    /// partial frontier next, saturated targets last.
+    ///
+    /// Reads cached measurements only; never triggers one. A project with no
+    /// completed measurement yields an unavailable result and no list, for
+    /// the same honesty reason as [`Self::unreached_surface`].
+    ///
+    /// # Errors
+    /// Returns a discovery error, or `ClassifiedError::Validation` when the
+    /// persistent store is not configured.
+    pub async fn coverage_attribution(
+        &self,
+        project: &Path,
+        lang: TargetLanguage,
+    ) -> Result<CoverageAttributionView, ClassifiedError> {
+        if self.store().is_none() {
+            return Err(ClassifiedError::Validation(
+                "coverage attribution requires the persistent store".to_owned(),
+            ));
+        }
+        let inventory = self.discover(project, lang).await?;
+
+        let mut covered_functions: HashSet<String> = HashSet::new();
+        let mut measurements = 0usize;
+        for candidate in &inventory.candidates {
+            // The covered set is unioned across every target of the project,
+            // matching `unreached_surface`: a function covered by a harness
+            // retired two runs ago has still been reached.
+            let covered = self.coverage_functions(project, &candidate.symbol).await;
+            if !covered.is_empty() {
+                measurements += 1;
+                covered_functions.extend(covered);
+            }
+        }
+        let ranked_candidates = inventory
+            .candidates
+            .iter()
+            .map(|candidate| {
+                (
+                    candidate.symbol.clone(),
+                    candidate.fit_score,
+                    candidate.reachable_functions.clone(),
+                )
+            })
+            .collect();
+
+        Ok(coverage_attribution(&CoverageAttributionRequest {
+            ranked_candidates,
+            covered_functions,
+            measurements,
+        }))
+    }
 }
