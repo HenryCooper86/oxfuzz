@@ -730,7 +730,7 @@ impl ServiceContainer {
 
     /// The target a persisted run exercised, resolved through its harness
     /// (`run.config.harness_id -> harness.target_id`). `None` if unrecorded.
-    async fn run_target_id(
+    pub(crate) async fn run_target_id(
         &self,
         store: &Store,
         run: &RunRecord,
@@ -1802,6 +1802,10 @@ pub struct SchedulableTarget {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RunHistoryItem {
     pub id: String,
+    /// Exact target identity resolved from the retained harness.
+    pub target_id: Option<Uuid>,
+    /// Requested campaign budget from retained config, distinct from elapsed time.
+    pub requested_duration_secs: Option<u64>,
     pub project_root: String,
     /// Target symbol resolved through the run's persisted harness.
     pub target: Option<String>,

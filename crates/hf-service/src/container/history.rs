@@ -232,7 +232,14 @@ impl ServiceContainer {
                 let duration_secs = r
                     .ended_at
                     .map(|end| (end - r.started_at).num_seconds().max(0));
+                let requested_duration_secs = r
+                    .config
+                    .as_ref()
+                    .and_then(|config| config.duration)
+                    .map(|duration| duration.as_secs());
                 RunHistoryItem {
+                    target_id,
+                    requested_duration_secs,
                     id: r.id.to_string(),
                     project_root: r.project_root,
                     target,
@@ -294,13 +301,13 @@ impl ServiceContainer {
     /// Delete a single run and the crashes it produced.
     ///
     /// # Errors
-    /// Returns `ClassifiedError` on a storage failure.
-    pub async fn delete_run(&self, run_id: &str) -> Result<(), ClassifiedError> {
+    /// Returns a typed retention refusal or the existing classified failure.
+    pub async fn delete_run(&self, run_id: &str) -> Result<(), crate::RunHistoryError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
         self.delete_run_locked(run_id).await
     }
 
-    async fn delete_run_locked(&self, run_id: &str) -> Result<(), ClassifiedError> {
+    async fn delete_run_locked(&self, run_id: &str) -> Result<(), crate::RunHistoryError> {
         let store = self
             .store
             .as_ref()
@@ -314,14 +321,16 @@ impl ServiceContainer {
         if !run_has_crash_evidence(run.status) || self.active_run_ids().contains(&id) {
             return Err(ClassifiedError::Validation(format!(
                 "run {id} is still active and cannot be deleted"
-            )));
+            ))
+            .into());
         }
         self.ensure_run_is_not_qualification(store, id).await?;
+        ensure_run_not_retained_by_experiment(store, id).await?;
         let evidence_root = self.run_evidence_root_locked(store, &run).await?;
         store
             .delete_run(run_id)
             .await
-            .map_err(|e| ClassifiedError::Internal(format!("delete run: {e}")))?;
+            .map_err(crate::RunHistoryError::deleting)?;
         if let Some(root) = evidence_root {
             std::fs::remove_dir_all(&root).map_err(|error| {
                 ClassifiedError::Internal(format!(
@@ -336,13 +345,13 @@ impl ServiceContainer {
     /// Clear every persisted run and the crashes it produced (Run History).
     ///
     /// # Errors
-    /// Returns `ClassifiedError` on a storage failure.
-    pub async fn clear_all_runs(&self) -> Result<(), ClassifiedError> {
+    /// Returns a typed retention refusal or the existing classified failure.
+    pub async fn clear_all_runs(&self) -> Result<(), crate::RunHistoryError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
         self.clear_all_runs_locked().await
     }
 
-    async fn clear_all_runs_locked(&self) -> Result<(), ClassifiedError> {
+    async fn clear_all_runs_locked(&self) -> Result<(), crate::RunHistoryError> {
         let store = self
             .store
             .as_ref()
@@ -356,10 +365,12 @@ impl ServiceContainer {
         }) {
             return Err(ClassifiedError::Validation(
                 "run history contains an active run and cannot be cleared".to_owned(),
-            ));
+            )
+            .into());
         }
         for run in &runs {
             self.ensure_run_is_not_qualification(store, run.id).await?;
+            ensure_run_not_retained_by_experiment(store, run.id).await?;
         }
         let mut evidence_roots = Vec::new();
         for run in &runs {
@@ -370,7 +381,7 @@ impl ServiceContainer {
         store
             .clear_all_runs()
             .await
-            .map_err(|e| ClassifiedError::Internal(format!("clear runs: {e}")))?;
+            .map_err(crate::RunHistoryError::clearing)?;
         for root in evidence_roots {
             std::fs::remove_dir_all(&root).map_err(|error| {
                 ClassifiedError::Internal(format!(
@@ -605,6 +616,20 @@ impl ServiceContainer {
             "evidence": evidence,
         }))
     }
+}
+
+async fn ensure_run_not_retained_by_experiment(
+    store: &Store,
+    run_id: Uuid,
+) -> Result<(), crate::RunHistoryError> {
+    if let Some(reference) = store.coverage_experiment_run_reference(run_id).await? {
+        return Err(crate::RunHistoryError::RunRetainedByExperiment {
+            run_id,
+            experiment_id: reference.experiment_id,
+            role: reference.role,
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]

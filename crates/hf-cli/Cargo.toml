@@ -9,10 +9,11 @@ description = "CLI + TUI for oxfuzz"
 # of every build (including `cargo build`/dev). Build with `--no-default-features`
 # to drop the pure-Rust automotive dependency and use the feature-absent paths.
 [features]
-default = ["automotive-lab", "automotive-scapy", "campaign-health", "build-context", "concolic-enrichment", "build-doctor", "campaign-trust", "change-aware", "coverage-blockers", "harness-tournament", "harness-work-order", "native-analysis", "oracle-studio", "patch-to-proof", "proof-carrying", "run-closeout", "semgrep-enrichment", "triage-disposition", "unreached-surface"]
+default = ["automotive-lab", "automotive-scapy", "campaign-health", "build-context", "concolic-enrichment", "build-doctor", "campaign-trust", "change-aware", "coverage-blockers", "coverage-experiments", "harness-tournament", "harness-work-order", "native-analysis", "oracle-studio", "patch-to-proof", "proof-carrying", "run-closeout", "semgrep-enrichment", "triage-disposition", "unreached-surface"]
 automotive-scapy = ["hf-service/automotive-scapy", "hf-web/automotive-scapy"]
 build-context = ["hf-service/build-context", "hf-web/build-context"]
 build-doctor = ["build-context", "hf-service/build-doctor", "hf-web/build-doctor"]
+coverage-experiments = ["hf-service/coverage-experiments", "hf-web/coverage-experiments"]
 coverage-blockers = ["hf-service/coverage-blockers", "hf-web/coverage-blockers"]
 automotive-lab = ["automotive-scapy", "hf-service/automotive-lab", "hf-web/automotive-lab"]
 oracle-studio = ["hf-service/oracle-studio", "hf-web/oracle-studio"]

@@ -22,7 +22,7 @@ import { HarnessView } from "./views/HarnessView";
 import { RunView } from "./views/RunView";
 import { TriageView } from "./views/TriageView";
 import { DashboardView } from "./views/DashboardView";
-import { CorpusView } from "./views/CorpusView";
+const CorpusView = lazy(() => import("./views/CorpusView").then(module => ({ default: module.CorpusView })));
 import { ProjectsView } from "./views/ProjectsView";
 import { ArtifactsView } from "./views/ArtifactsView";
 import { ReportsView } from "./views/ReportsView";
@@ -239,7 +239,7 @@ function AppInner() {
                 )}
                 {activeView === "corpus" && (
                   <ViewCanvas>
-                    <CorpusView />
+                    <Suspense fallback={<div role="status">{t("common.loading")}</div>}><CorpusView onNavigate={navigate} /></Suspense>
                   </ViewCanvas>
                 )}
                 {activeView === "projects" && (

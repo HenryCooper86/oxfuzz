@@ -570,7 +570,14 @@ impl CampaignSchedulerPersistence {
                     StorageError::InvalidData(_)
                     | StorageError::Serde(_)
                     | StorageError::Timestamp(_)
-                    | StorageError::NotFound(_) => OccurrenceJournalFailure::Corrupt,
+                    | StorageError::NotFound(_)
+                    | StorageError::CoverageExperimentConflict { .. }
+                    | StorageError::CoverageExperimentSourceChanged { .. }
+                    | StorageError::CoverageExperimentInvalidChronology
+                    | StorageError::CoverageExperimentMissingSetup { .. }
+                    | StorageError::RunRetainedByExperiment { .. } => {
+                        OccurrenceJournalFailure::Corrupt
+                    }
                     StorageError::Db(_) | StorageError::Migrate(_) => {
                         OccurrenceJournalFailure::Unavailable
                     }

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getTransport, onDataChanged, emitDataChanged } from "../lib";
+import { formatRunHistoryError } from "../lib/invokeError";
 import { useI18n } from "../i18nContext";
 import { useProject } from "../providers/project";
 import { useToast } from "../components/ui/toastContext";
@@ -110,7 +111,7 @@ function ScopedRunsView() {
       setSelected((s) => s.filter((id) => id !== r.id));
       emitDataChanged();
     } catch (e) {
-      toast({ title: t("runs.deleteFailed"), description: String(e), variant: "error" });
+      toast({ title: t("runs.deleteFailed"), description: formatRunHistoryError(e, t), variant: "error" });
     }
   }
 
@@ -123,7 +124,7 @@ function ScopedRunsView() {
       emitDataChanged();
       toast({ title: t("runs.historyCleared"), variant: "success" });
     } catch (e) {
-      toast({ title: t("runs.clearFailed"), description: String(e), variant: "error" });
+      toast({ title: t("runs.clearFailed"), description: formatRunHistoryError(e, t), variant: "error" });
     }
   }
 

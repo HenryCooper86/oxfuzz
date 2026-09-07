@@ -138,15 +138,15 @@ class GateDispatcherTests(unittest.TestCase):
         self.assertEqual(recorded[2], "cargo check")
         self.assertEqual(recorded[3], "cargo clippy")
         self.assertEqual(recorded[4], "cargo clippy")
-        self.assertEqual(recorded[22], "cargo clippy")
-        self.assertEqual(recorded[23], "cargo test")
-        self.assertEqual(recorded[24], "cargo doc")
-        self.assertEqual(recorded[25], "cargo-deny")
-        self.assertEqual(recorded[26], "cargo-llvm-cov")
-        self.assertEqual(recorded[27], "python3")
+        self.assertEqual(recorded[23], "cargo clippy")
+        self.assertEqual(recorded[24], "cargo test")
+        self.assertEqual(recorded[25], "cargo doc")
+        self.assertEqual(recorded[26], "cargo-deny")
+        self.assertEqual(recorded[27], "cargo-llvm-cov")
         self.assertEqual(recorded[28], "python3")
-        self.assertEqual(recorded[29], "npm --prefix crates/hf-gui ci")
-        self.assertEqual(recorded[33], "npm --prefix crates/hf-gui run lint")
+        self.assertEqual(recorded[29], "python3")
+        self.assertEqual(recorded[30], "npm --prefix crates/hf-gui ci")
+        self.assertEqual(recorded[34], "npm --prefix crates/hf-gui run lint")
 
     def test_named_subset_runs_only_those_gates(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -195,6 +195,7 @@ class GateDispatcherTests(unittest.TestCase):
             "campaign-trust",
             "change-aware",
             "coverage-blockers",
+            "coverage-experiments",
             "harness-tournament",
             "harness-work-order",
             "native-analysis",

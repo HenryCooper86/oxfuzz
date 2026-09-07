@@ -10,6 +10,8 @@ function run(
 ): RunHistoryItem {
   return {
     id,
+    target_id: null,
+    requested_duration_secs: 60,
     kind: "Campaign",
     project_root: "/project",
     target: id.startsWith("parser") ? "parse" : "decode",

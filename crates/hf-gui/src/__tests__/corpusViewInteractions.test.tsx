@@ -160,6 +160,7 @@ describe("CorpusView interactions", () => {
           ? Promise.resolve([entry("target-b-row", 7)])
           : Promise.reject(new Error("refresh failed"));
       }
+      if (command === "run_history") return Promise.resolve([]);
       throw new Error(`unexpected ${command}`);
     });
 
@@ -185,6 +186,7 @@ describe("CorpusView interactions", () => {
         return Promise.resolve([entry(String(args?.target), 4)]);
       }
       if (command === "corpus_seed") return seed.promise;
+      if (command === "run_history") return Promise.resolve([]);
       throw new Error(`unexpected ${command}`);
     });
 
@@ -210,6 +212,7 @@ describe("CorpusView interactions", () => {
       if (command === "corpus_capabilities") return Promise.resolve(ready);
       if (command === "corpus_list") return Promise.resolve([entry("retained", 4)]);
       if (command === "corpus_prune") return Promise.resolve({});
+      if (command === "run_history") return Promise.resolve([]);
       throw new Error(`unexpected ${command}`);
     });
 
@@ -255,6 +258,7 @@ describe("CorpusView interactions", () => {
           survival_ratio: null,
         });
       }
+      if (command === "run_history") return Promise.resolve([]);
       throw new Error(`unexpected ${command}`);
     });
 
@@ -290,6 +294,7 @@ describe("CorpusView interactions", () => {
       if (["corpus_prune", "corpus_prune_coverage", "corpus_minimize"].includes(command)) {
         return Promise.resolve({ before: 2, after: 1, before_bytes: 8, after_bytes: 4 });
       }
+      if (command === "run_history") return Promise.resolve([]);
       throw new Error(`unexpected ${command}`);
     });
     await act(async () => root.render(<Providers confirm={confirm} />));
@@ -328,6 +333,7 @@ describe("CorpusView interactions", () => {
           experiment: { kind: "grow_corpus", target_function: "old-target-only", reason_code: "near_covered_frontier" },
         });
       }
+      if (command === "run_history") return Promise.resolve([]);
       throw new Error(`unexpected ${command}`);
     });
     await act(async () => root.render(<Providers />));
@@ -348,6 +354,7 @@ describe("CorpusView interactions", () => {
     mocks.invoke.mockImplementation((command: string) => {
       if (command === "corpus_capabilities") return Promise.resolve(ready);
       if (command === "corpus_list") return Promise.resolve([]);
+      if (command === "run_history") return Promise.resolve([]);
       throw new Error(`unexpected ${command}`);
     });
     await act(async () => root.render(<Providers />));
@@ -379,6 +386,7 @@ describe("CorpusView interactions", () => {
         reads += 1;
         return reads === 1 ? initial.promise : Promise.resolve([entry("manual-newer", 8)]);
       }
+      if (command === "run_history") return Promise.resolve([]);
       throw new Error(`unexpected ${command}`);
     });
     await act(async () => root.render(<Providers />));
@@ -402,6 +410,7 @@ describe("CorpusView interactions", () => {
         if (capabilityReads === 1) return olderCapability.promise;
         return Promise.resolve(ready);
       }
+      if (command === "run_history") return Promise.resolve([]);
       throw new Error(`unexpected ${command}`);
     });
     await act(async () => root.render(<Providers />));
@@ -429,6 +438,7 @@ describe("CorpusView interactions", () => {
           ? Promise.reject(new Error("readiness unavailable"))
           : Promise.resolve(ready);
       }
+      if (command === "run_history") return Promise.resolve([]);
       throw new Error(`unexpected ${command}`);
     });
     await act(async () => root.render(<Providers />));
@@ -448,6 +458,7 @@ describe("CorpusView interactions", () => {
       if (command === "corpus_list") return Promise.resolve([entry("retained", 4)]);
       if (command === "seed_survival") return Promise.resolve({ total: 1, survives: 1, dies_at_entry: 0, not_measured: 0, survival_ratio: 1 });
       if (command === "corpus_seed") return Promise.resolve({ seeded: 2 });
+      if (command === "run_history") return Promise.resolve([]);
       throw new Error(`unexpected ${command}`);
     });
     await act(async () => root.render(<Providers />));
@@ -466,6 +477,7 @@ describe("CorpusView interactions", () => {
       if (command === "corpus_capabilities") return Promise.resolve(ready);
       if (command === "corpus_list") return Promise.resolve([entry("retained", 4)]);
       if (command === "seed_survival") return measurement.promise;
+      if (command === "run_history") return Promise.resolve([]);
       throw new Error(`unexpected ${command}`);
     });
     await act(async () => root.render(<Providers />));
@@ -486,6 +498,7 @@ describe("CorpusView interactions", () => {
     mocks.invoke.mockImplementation((command: string) => {
       if (command === "corpus_capabilities") return Promise.resolve(ready);
       if (command === "corpus_list") return inventory.promise;
+      if (command === "run_history") return Promise.resolve([]);
       throw new Error(`unexpected ${command}`);
     });
     await act(async () => root.render(<Providers />));
@@ -505,6 +518,7 @@ describe("CorpusView interactions", () => {
     mocks.invoke.mockImplementation((command: string) => {
       if (command === "corpus_capabilities") return Promise.resolve(ready);
       if (command === "corpus_list") return Promise.resolve([]);
+      if (command === "run_history") return Promise.resolve([]);
       throw new Error(`unexpected ${command}`);
     });
     await act(async () => root.render(<Providers />));

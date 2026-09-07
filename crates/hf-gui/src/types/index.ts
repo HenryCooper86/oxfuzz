@@ -32,6 +32,8 @@ export interface CoverageSample {
 
 export interface RunHistoryItem {
   id: string;
+  target_id: string | null;
+  requested_duration_secs: number | null;
   kind: string;
   project_root: string;
   target: string | null;

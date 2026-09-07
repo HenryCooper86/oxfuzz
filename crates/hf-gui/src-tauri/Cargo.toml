@@ -8,10 +8,11 @@ description = "Tauri v2 desktop GUI for oxfuzz"
 # Product capabilities are on by default; `--no-default-features` drops their
 # presentation entrypoints.
 [features]
-default = ["automotive-lab", "automotive-scapy", "campaign-health", "build-context", "concolic-enrichment", "build-doctor", "campaign-trust", "change-aware", "coverage-blockers", "harness-tournament", "harness-work-order", "native-analysis", "oracle-studio", "patch-to-proof", "proof-carrying", "run-closeout", "semgrep-enrichment", "triage-disposition", "unreached-surface"]
+default = ["automotive-lab", "automotive-scapy", "campaign-health", "build-context", "concolic-enrichment", "build-doctor", "campaign-trust", "change-aware", "coverage-blockers", "coverage-experiments", "harness-tournament", "harness-work-order", "native-analysis", "oracle-studio", "patch-to-proof", "proof-carrying", "run-closeout", "semgrep-enrichment", "triage-disposition", "unreached-surface"]
 automotive-scapy = ["hf-service/automotive-scapy"]
 build-context = ["hf-service/build-context"]
 build-doctor = ["build-context", "hf-service/build-doctor"]
+coverage-experiments = ["hf-service/coverage-experiments"]
 coverage-blockers = ["hf-service/coverage-blockers"]
 automotive-lab = ["automotive-scapy", "hf-service/automotive-lab"]
 oracle-studio = ["hf-service/oracle-studio"]
@@ -67,6 +68,7 @@ sha2 = { workspace = true }
 hf-service = { workspace = true }
 
 [dev-dependencies]
+hf-service = { workspace = true, features = ["test-support"] }
 tauri = { version = "2.11", features = ["test"] }
 tempfile = { workspace = true }
 

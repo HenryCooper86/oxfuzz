@@ -1171,22 +1171,20 @@ pub async fn clear_all_artifacts(
 pub async fn delete_run(
     state: tauri::State<'_, crate::state::AppState>,
     run_id: String,
-) -> Result<(), String> {
+) -> Result<(), NativeRunHistoryError> {
     state
         .container
         .delete_run(&run_id)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(Into::into)
 }
 
 /// Clear every persisted run and the crashes it produced.
 #[tauri::command]
-pub async fn clear_all_runs(state: tauri::State<'_, crate::state::AppState>) -> Result<(), String> {
-    state
-        .container
-        .clear_all_runs()
-        .await
-        .map_err(|e| e.to_string())
+pub async fn clear_all_runs(
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Result<(), NativeRunHistoryError> {
+    state.container.clear_all_runs().await.map_err(Into::into)
 }
 
 /// Delete every on-disk fuzz workspace (compiled harnesses, corpora, crash
@@ -4300,6 +4298,27 @@ pub fn config_value_to_toml(value: serde_json::Value) -> Result<String, String> 
     hf_service::config::json_to_toml(&value)
 }
 
+/// Existing run-history failures remain strings; retained references are structured.
+#[derive(Debug, serde::Serialize)]
+#[serde(untagged)]
+pub enum NativeRunHistoryError {
+    /// Typed deletion refusal shared with REST.
+    Retained(hf_service::coverage_experiments::CoverageExperimentError),
+    /// Existing native command error representation.
+    Existing(String),
+}
+impl From<hf_service::RunHistoryError> for NativeRunHistoryError {
+    fn from(error: hf_service::RunHistoryError) -> Self {
+        match error {
+            hf_service::RunHistoryError::Classified(error)=>Self::Existing(error.to_string()),
+            hf_service::RunHistoryError::RunRetainedByExperiment{run_id,experiment_id,role}=>Self::Retained(hf_service::coverage_experiments::CoverageExperimentError{
+                run_id:Some(run_id),experiment_id:Some(experiment_id),role:Some(role),
+                ..hf_service::coverage_experiments::CoverageExperimentError::new(hf_service::coverage_experiments::CoverageExperimentErrorCode::RunRetainedByExperiment)
+            }),
+        }
+    }
+}
+
 #[cfg(test)]
 mod export_dialog_tests {
     /// This file's own source. A native save dialog cannot be opened from a
@@ -4686,6 +4705,261 @@ mod build_operator_tests {
                     "{command}"
                 );
             }
+        }
+        scheduler.stop().await;
+    }
+}
+
+#[cfg(test)]
+mod run_history_error_tests {
+    #[test]
+    fn retention_is_structured_and_other_errors_keep_their_string() {
+        let run_id = uuid::Uuid::new_v4();
+        let experiment_id = uuid::Uuid::new_v4();
+        let error = super::NativeRunHistoryError::from(
+            hf_service::RunHistoryError::RunRetainedByExperiment {
+                run_id,
+                experiment_id,
+                role: hf_service::coverage_experiments::CoverageExperimentRunRole::Baseline,
+            },
+        );
+        assert_eq!(
+            serde_json::to_value(error).unwrap(),
+            serde_json::json!({"code":"run_retained_by_experiment","error":"run_retained_by_experiment","run_id":run_id,"experiment_id":experiment_id,"role":"baseline"})
+        );
+        let error = super::NativeRunHistoryError::from(hf_service::RunHistoryError::Classified(
+            hf_service::ClassifiedError::Validation("active".into()),
+        ));
+        assert_eq!(
+            serde_json::to_value(error).unwrap(),
+            "validation error: active"
+        );
+    }
+}
+
+#[cfg(test)]
+mod coverage_experiment_ingress_tests {
+    use std::sync::Arc;
+    #[tokio::test(flavor = "multi_thread")]
+    async fn actual_native_handlers_require_bounded_raw_requests() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = hf_service::ServiceContainer::stubbed();
+        let scheduler = Arc::new(
+            hf_service::scheduler::CampaignScheduler::try_start(
+                service.clone(),
+                directory.path().join("schedules.json"),
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+        let app = tauri::test::mock_builder()
+            .manage(crate::state::AppState::new(service, Arc::clone(&scheduler)))
+            .invoke_handler(tauri::generate_handler![
+                crate::coverage_experiment_commands::coverage_experiment_create,
+                crate::coverage_experiment_commands::coverage_experiment_get,
+                crate::coverage_experiment_commands::coverage_experiment_list,
+                crate::coverage_experiment_commands::coverage_experiment_complete,
+                crate::coverage_experiment_commands::coverage_experiment_cancel
+            ])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let window = tauri::WebviewWindowBuilder::new(&app, "main", tauri::WebviewUrl::default())
+            .build()
+            .unwrap();
+        let invoke = |cmd: &str, body| {
+            tauri::test::get_ipc_response(
+                &window,
+                tauri::webview::InvokeRequest {
+                    cmd: cmd.into(),
+                    callback: tauri::ipc::CallbackFn(0),
+                    error: tauri::ipc::CallbackFn(1),
+                    url: window.url().unwrap(),
+                    body,
+                    headers: tauri::http::HeaderMap::new(),
+                    invoke_key: tauri::test::INVOKE_KEY.into(),
+                },
+            )
+            .map(|body| body.deserialize::<serde_json::Value>().unwrap())
+        };
+        for cmd in [
+            "coverage_experiment_create",
+            "coverage_experiment_get",
+            "coverage_experiment_list",
+            "coverage_experiment_complete",
+            "coverage_experiment_cancel",
+        ] {
+            for body in [
+                tauri::ipc::InvokeBody::Raw(vec![b'!'; 16_384]),
+                tauri::ipc::InvokeBody::Raw(vec![b'!'; 16_385]),
+                tauri::ipc::InvokeBody::Raw(vec![0xff]),
+                tauri::ipc::InvokeBody::Json(serde_json::json!({})),
+            ] {
+                assert_eq!(invoke(cmd, body).unwrap_err()["code"], "invalid_request");
+            }
+        }
+        let mut bytes = serde_json::json!({"project":directory.path(),"target_id":null,"limit":10,"before":null}).to_string().into_bytes();
+        bytes.resize(16_384, b' ');
+        let result = invoke(
+            "coverage_experiment_list",
+            tauri::ipc::InvokeBody::Raw(bytes.clone()),
+        )
+        .unwrap_err();
+        #[cfg(feature = "coverage-experiments")]
+        assert_eq!(result["code"], "storage_unavailable");
+        #[cfg(not(feature = "coverage-experiments"))]
+        assert_eq!(
+            result,
+            serde_json::json!({"code":"feature_unavailable","error":"coverage experiments are not included in this application build"})
+        );
+        bytes.push(b' ');
+        assert_eq!(
+            invoke(
+                "coverage_experiment_list",
+                tauri::ipc::InvokeBody::Raw(bytes)
+            )
+            .unwrap_err()["code"],
+            "invalid_request"
+        );
+        scheduler.stop().await;
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn actual_native_retained_scope_checks_precede_feature_absence() {
+        let (directory, service, record, result_id) =
+            hf_service::test_support::coverage_experiments::presentation_fixture().await;
+        let scheduler = Arc::new(
+            hf_service::scheduler::CampaignScheduler::try_start(
+                service.clone(),
+                directory.path().join("schedules.json"),
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+        let app = tauri::test::mock_builder()
+            .manage(crate::state::AppState::new(
+                service.clone(),
+                Arc::clone(&scheduler),
+            ))
+            .invoke_handler(tauri::generate_handler![
+                crate::coverage_experiment_commands::coverage_experiment_create,
+                crate::coverage_experiment_commands::coverage_experiment_get,
+                crate::coverage_experiment_commands::coverage_experiment_list,
+                crate::coverage_experiment_commands::coverage_experiment_complete,
+                crate::coverage_experiment_commands::coverage_experiment_cancel
+            ])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let window = tauri::WebviewWindowBuilder::new(&app, "main", tauri::WebviewUrl::default())
+            .build()
+            .unwrap();
+        let invoke = |cmd: &str, body: serde_json::Value| {
+            tauri::test::get_ipc_response(
+                &window,
+                tauri::webview::InvokeRequest {
+                    cmd: cmd.into(),
+                    callback: tauri::ipc::CallbackFn(0),
+                    error: tauri::ipc::CallbackFn(1),
+                    url: window.url().unwrap(),
+                    body: tauri::ipc::InvokeBody::Raw(body.to_string().into_bytes()),
+                    headers: tauri::http::HeaderMap::new(),
+                    invoke_key: tauri::test::INVOKE_KEY.into(),
+                },
+            )
+            .map(|body| body.deserialize::<serde_json::Value>().unwrap())
+        };
+        let scope = serde_json::json!({"project":record.project_root,"target_id":record.target_id});
+        for (command, args) in [
+            (
+                "coverage_experiment_get",
+                serde_json::json!({"id":record.id,"scope":scope}),
+            ),
+            (
+                "coverage_experiment_list",
+                serde_json::json!({"project":record.project_root,"target_id":record.target_id,"limit":10,"before":null}),
+            ),
+            (
+                "coverage_experiment_create",
+                serde_json::json!({"project":record.project_root,"target_id":record.target_id,"baseline_run_id":record.baseline_run_id,"duration_secs":60,"goal_function":"parse_value","hypothesis":"operator hypothesis","kind":"grow_corpus"}),
+            ),
+        ] {
+            let result = invoke(command, args);
+            #[cfg(feature = "coverage-experiments")]
+            assert!(result.is_ok(), "{command}: {result:?}");
+            #[cfg(not(feature = "coverage-experiments"))]
+            assert_eq!(
+                result.unwrap_err(),
+                serde_json::json!({"code":"feature_unavailable","error":"coverage experiments are not included in this application build"})
+            );
+        }
+        let other = tempfile::tempdir().unwrap();
+        for changed in [
+            serde_json::json!({"project":other.path(),"target_id":record.target_id}),
+            serde_json::json!({"project":record.project_root,"target_id":uuid::Uuid::new_v4()}),
+        ] {
+            for (command, args) in [
+                (
+                    "coverage_experiment_get",
+                    serde_json::json!({"id":record.id,"scope":changed}),
+                ),
+                (
+                    "coverage_experiment_complete",
+                    serde_json::json!({"id":record.id,"request":{"scope":changed,"result_run_id":result_id}}),
+                ),
+                (
+                    "coverage_experiment_cancel",
+                    serde_json::json!({"id":record.id,"request":{"scope":changed,"reason":"abandoned"}}),
+                ),
+            ] {
+                let error = invoke(command, args).unwrap_err();
+                assert!(
+                    error["code"] == "different_project" || error["code"] == "different_target",
+                    "{error}"
+                );
+            }
+        }
+        assert_eq!(
+            invoke(
+                "coverage_experiment_get",
+                serde_json::json!({"id":uuid::Uuid::new_v4(),"scope":scope})
+            )
+            .unwrap_err()["code"],
+            "not_found"
+        );
+        assert_eq!(
+            invoke(
+                "coverage_experiment_get",
+                serde_json::json!({"id":record.id.to_string().to_uppercase(),"scope":scope})
+            )
+            .unwrap_err()["code"],
+            "invalid_request"
+        );
+        let result = invoke(
+            "coverage_experiment_complete",
+            serde_json::json!({"id":record.id,"request":{"scope":scope,"result_run_id":result_id}}),
+        );
+        #[cfg(feature = "coverage-experiments")]
+        {
+            let value = result.unwrap();
+            assert_eq!(value["result"]["run"]["run_id"], result_id.to_string());
+            assert_eq!(value["result"]["run"]["status"], "failed");
+        }
+        #[cfg(not(feature = "coverage-experiments"))]
+        assert_eq!(result.unwrap_err()["code"], "feature_unavailable");
+        let result = invoke(
+            "coverage_experiment_cancel",
+            serde_json::json!({"id":record.id,"request":{"scope":scope,"reason":"abandoned"}}),
+        );
+        #[cfg(feature = "coverage-experiments")]
+        assert_eq!(result.unwrap_err()["code"], "terminal_conflict");
+        #[cfg(not(feature = "coverage-experiments"))]
+        assert_eq!(result.unwrap_err()["code"], "feature_unavailable");
+        #[cfg(feature = "coverage-experiments")]
+        {
+            let created = invoke("coverage_experiment_create", serde_json::json!({"project":record.project_root,"target_id":record.target_id,"baseline_run_id":record.baseline_run_id,"duration_secs":60,"goal_function":"parse_value","hypothesis":"operator hypothesis","kind":"grow_corpus"})).unwrap();
+            let cancelled = invoke("coverage_experiment_cancel", serde_json::json!({"id":created["id"],"request":{"scope":scope,"reason":"abandoned deliberately"}})).unwrap();
+            assert_eq!(cancelled["status"], "cancelled");
+            assert_eq!(cancelled["cancellation_reason"], "abandoned deliberately");
         }
         scheduler.stop().await;
     }

@@ -32,6 +32,7 @@ PRODUCT_FEATURES=(
   campaign-trust
   change-aware
   coverage-blockers
+  coverage-experiments
   harness-tournament
   harness-work-order
   native-analysis

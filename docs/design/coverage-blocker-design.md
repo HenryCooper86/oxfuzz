@@ -11,7 +11,10 @@ unreached code, shows where the fuzzer actually got to relative to each, and
 proposes one concrete next experiment.
 
 It proposes only. Refining a harness and growing a corpus already have approved
-paths, and the explorer does not add a second one.
+paths, and the explorer does not add a second one. Optional durable preparation,
+manual result attachment, cancellation, and attempt history are specified in
+[Coverage Experiments](coverage-experiments-design.md). Preparation persists the
+operator-reviewed intent before navigation and starts no work.
 
 ## 2. Feature and Ownership
 
@@ -93,20 +96,27 @@ the one an experiment can act on first.
 One typed proposal per target, from a fixed vocabulary:
 
 - **`grow_corpus`** -- the top blocker has an observed path from covered code.
-  The fuzzer reaches the caller but never takes the branch, which is an input
-  problem. The proposal names the first function on that path the measurement
-  shows as uncovered, which is the first thing an input actually has to reach.
+  The measurement records a covered caller and an uncovered next function;
+  trying new inputs is an advisory hypothesis, not a demonstrated cause. The
+  proposal names the first function on that path the measurement shows as uncovered, which is the first thing an input actually has to reach.
   Because the walk is seeded with every covered function, that hop is never
   something the fuzzer already reaches.
 - **`refine_harness`** -- the top blocker has no path from any covered function.
-  No input to the current harness can get there, so the harness shape is the
-  problem, not the corpus.
+  The retained graph has no observed covered route. Refining the harness is
+  an advisory hypothesis; missing graph evidence does not prove that no input
+  could reach the function.
 - **`no_experiment_available`** -- there is no coverage measurement, or nothing
   uncovered was found. Reported with a reason code rather than an empty
   suggestion.
 
 The proposal carries a reason code and the function to aim at. It starts
-nothing.
+nothing. The engineer may copy its kind/function into a reviewed experiment,
+choose a terminal Campaign baseline (Done, Failed, or Cancelled), and write a
+hypothesis and duration budget. `coverage-experiments` is independent of
+`coverage-blockers`, so manually prepared investigations do not require an
+explorer measurement. Explorer coverage describes the mutable workspace; it
+cannot establish historical goal-function entry for an attached run. Aggregate
+edge deltas remain descriptive, with function entry explicitly unavailable.
 
 ## 7. Rejected Alternatives
 

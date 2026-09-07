@@ -38,6 +38,7 @@ pub mod config;
 pub mod container;
 #[cfg(feature = "coverage-blockers")]
 pub mod coverage_blockers;
+pub mod coverage_experiments;
 mod crash_minimization;
 pub mod defectdojo;
 pub mod defectdojo_lifecycle;
@@ -71,6 +72,8 @@ pub mod repro;
     feature = "run-closeout"
 ))]
 pub mod run_closeout;
+mod run_history_error;
+pub use run_history_error::RunHistoryError;
 pub mod sarif;
 mod schedule_retirement;
 pub mod scheduler;
