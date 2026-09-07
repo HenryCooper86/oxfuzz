@@ -42,11 +42,9 @@ consumer that wants to know why reads the card it was derived from
 ## 4. Dispositions
 
 One ordered enum. Ordering is by descending operator attention: the first
-variant is what to open first.
+variant is what to open first. Completed work sorts last and is excluded from
+the default queue; an operator can include it explicitly.
 
-- **`Resolved`** -- `fix_verification` is `Verified`. A sandbox verification
-  workflow reproduced the finding before a patch and confirmed it no longer
-  reproduces after. No triage work remains.
 - **`ReportReady`** -- fault origin is `Target`, the input is minimized, and
   external reachability is `Demonstrated`. Everything a report needs is
   retained.
@@ -66,6 +64,9 @@ variant is what to open first.
 - **`HarnessDefect`** -- fault origin is `Harness`. The fault is in code oxfuzz
   generated. It blocks the campaign and must be fixed, but it is never a finding
   about the target.
+- **`Resolved`** -- `fix_verification` is `Verified`. A sandbox verification
+  workflow reproduced the finding before a patch and confirmed it no longer
+  reproduces after. No triage work remains.
 
 `ReportReady` is currently unreachable by construction, and that is deliberate.
 `finding_proof_card` returns `external_reachability` as `NotVerified` for every
@@ -148,6 +149,21 @@ disposition shares rank two and falls through to the stable id order, which is
 the correct outcome: with no exploitability evidence there is no basis to
 prefer one over another.
 
+The service applies disposition filtering before returning a queue. Its default
+filter includes every unresolved disposition and excludes `Resolved`. Report
+draft presence is not a disposition input and never removes an unresolved
+finding. An explicit all or resolved filter provides retained-history access.
+
+Latest-run report and DefectDojo requests may carry the run identifier the
+operator selected. The service resolves the target's latest retained run once
+inside the operation and rejects the action when that run differs from the
+expected identifier. This prevents a run completing between detail loading and
+the explicit action from silently changing the evidence that is reported or
+published. Callers that intentionally request the latest run omit the expected
+identifier. Historical findings keep these actions unavailable; their report
+must not combine retained crash evidence with coverage from the current
+workspace.
+
 ## 8. Rejected Alternatives
 
 - **A numeric value score** -- fuzzctl's approach. A scalar assembled from
@@ -184,8 +200,8 @@ prefer one over another.
   `FaultObserved`, and is never attributed to the target.
 - An unminimized target fault yields `MinimizationPending`; the same crash
   minimized yields `ReachabilityUnproven`.
-- A verified remediation yields `Resolved` and `RemediationVerified`, and
-  outranks every unresolved crash.
+- A verified remediation yields `Resolved` and `RemediationVerified`, sorts
+  after every unresolved crash, and is excluded from the default queue.
 - A rejected or inconclusive remediation does not yield `Resolved`.
 - CASR evidence raises the claim ceiling only for an attributed target fault,
   and never raises the disposition.

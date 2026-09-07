@@ -166,6 +166,7 @@ export interface Crash {
   minimized: boolean;
   bug_report: { title: string; summary: string; repro_steps: string; stack: string; severity_guess: string } | null;
   casr: CasrReport | null;
+  origin: "target" | "harness" | "runtime" | "unknown";
 }
 
 /** On-demand LLM verdict for a triaged crash (matches hf-service CrashVerdict). */
@@ -803,6 +804,32 @@ export interface CrashReviewItem {
   has_bug_report: boolean;
   proof: FindingProofCard;
   disposition: TriageDisposition;
+}
+
+export type FindingDispositionFilter =
+  | { mode: "open" }
+  | { mode: "all" }
+  | { mode: "only"; value: TriageDisposition["disposition"] };
+
+export interface FindingReviewFilter {
+  target_id?: string | null;
+  run_id?: string | null;
+  disposition: FindingDispositionFilter;
+  origin?: Crash["origin"] | null;
+  severity?: CasrExploitabilityDetermination | null;
+}
+
+export interface FindingReviewItem {
+  crash: Crash;
+  project_root: string;
+  target_id: string;
+  target_symbol: string;
+  target_language: string;
+  engine: string;
+  proof: FindingProofCard;
+  disposition: TriageDisposition;
+  latest_scoped_actions_allowed: boolean;
+  latest_scoped_action_reason: string | null;
 }
 
 /** A localizable readiness/next-action note: a stable code plus a count. */

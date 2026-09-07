@@ -426,7 +426,7 @@ pub async fn harness_review_queue(
 /// URLs come from that config -- so issues go to the fuzzed project's repo. When
 /// it is not, this falls back to deriving a GitLab-style URL from the project's
 /// git remote (the legacy behaviour), which is best-effort only.
-pub async fn issue_export(
+pub(crate) async fn issue_export(
     store: Option<&Store>,
     project: &Path,
     crash_id: &str,
@@ -676,7 +676,7 @@ fn ai_review_summary(record: &hf_storage::HarnessAiReviewRecord) -> Option<Harne
     Some(summary)
 }
 
-fn crash_review_items(
+pub(crate) fn crash_review_items(
     crashes: Vec<Crash>,
     target_by_id: &HashMap<Uuid, TargetCandidate>,
     remediation_by_crash: &HashMap<Uuid, RemediationOperationRecord>,

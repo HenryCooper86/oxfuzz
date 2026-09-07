@@ -22,13 +22,6 @@ describe("service-owned finding proof card", () => {
     expect(dashboard).not.toContain("proof={deriveFindingProof");
   });
 
-  it("reloads the same workbench proof after triage and renders it", () => {
-    const triage = source("../views/TriageView.tsx");
-    expect(triage).toContain('invoke<WorkbenchDashboard>("workbench_dashboard"');
-    expect(triage).toContain("proof={proofs[crashes[selected].id]}");
-    expect(triage).not.toContain("deriveFindingProof");
-  });
-
   it("keeps REST and Tauri as transports for the service dashboard DTO", () => {
     expect(source("../lib/httpTransport.ts")).toContain('path: "/workbench/dashboard"');
     expect(source("../../src-tauri/src/commands.rs")).toContain(

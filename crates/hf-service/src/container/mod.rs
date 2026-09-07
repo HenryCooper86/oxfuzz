@@ -18,8 +18,11 @@ mod concolic;
 mod corpus;
 mod coverage_cache;
 mod crash_inputs;
+mod crash_owner;
 mod discovery;
 mod export;
+#[cfg(feature = "triage-disposition")]
+mod finding_review;
 mod guards;
 mod harness;
 #[cfg(feature = "harness-work-order")]
@@ -77,7 +80,9 @@ use hf_storage::{GuardrailDecisionRecord, RunRecord, RunStatus, Store};
 pub(crate) use project_identity::canonical_project_root;
 #[cfg(not(feature = "build-doctor"))]
 use project_identity::canonical_project_root;
-use project_identity::{project_slug, select_target_candidate, stored_project_matches};
+use project_identity::{
+    project_lookup_identity, project_slug, select_target_candidate, stored_project_matches,
+};
 #[cfg(feature = "patch-to-proof")]
 pub(crate) use staging::run_context_source_digest;
 use staging::{qualification_evidence, sha256_file, RunArtifacts};
@@ -688,10 +693,13 @@ impl ServiceContainer {
         let Some(harness_id) = run.config.as_ref().map(|c| c.harness_id) else {
             return Ok(None);
         };
-        Ok(store
-            .get_harness(harness_id)
-            .await?
-            .map(|harness| harness.target_id))
+        let harness = store.get_harness(harness_id).await?.ok_or_else(|| {
+            ClassifiedError::Validation(format!(
+                "run {} names missing harness {harness_id}",
+                run.id
+            ))
+        })?;
+        Ok(Some(harness.target_id))
     }
 
     /// The effective auto-revert policy for a project: its stored per-project
@@ -1205,22 +1213,35 @@ impl ServiceContainer {
         let Some(store) = self.store.as_ref() else {
             return Ok(None);
         };
-        let runs = store
-            .list_runs(None)
-            .await?
-            .into_iter()
-            .filter(|run| stored_project_matches(Path::new(&run.project_root), project))
-            .collect::<Vec<_>>();
         let Some(target) = target else {
-            return Ok(runs
+            return Ok(store
+                .list_runs(None)
+                .await?
                 .into_iter()
+                .filter(|run| stored_project_matches(Path::new(&run.project_root), project))
                 .find(|run| run_has_crash_evidence(run.status)));
         };
         let target_id = self.resolve_target_id_any_language(project, target).await?;
         if target_id.is_nil() {
             return Ok(None);
         }
-        for run in runs {
+        self.latest_run_record_for_target_id(project, target_id)
+            .await
+    }
+
+    pub(crate) async fn latest_run_record_for_target_id(
+        &self,
+        project: &Path,
+        target_id: Uuid,
+    ) -> Result<Option<RunRecord>, ClassifiedError> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(None);
+        };
+        let project = project_lookup_identity(project);
+        for run in store.list_runs(None).await? {
+            if !stored_project_matches(Path::new(&run.project_root), &project) {
+                continue;
+            }
             if !run_has_crash_evidence(run.status) {
                 continue;
             }

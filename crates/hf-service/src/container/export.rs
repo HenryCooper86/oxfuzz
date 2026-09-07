@@ -132,10 +132,24 @@ impl ServiceContainer {
         project: &Path,
         target: Option<&str>,
     ) -> Result<Vec<hf_core::crash::Crash>, ClassifiedError> {
+        self.crashes_for_latest_run_matching(project, target, None)
+            .await
+    }
+
+    /// Resolve the latest run once and reject a stale UI selection before an
+    /// operation can publish findings from a different run.
+    async fn crashes_for_latest_run_matching(
+        &self,
+        project: &Path,
+        target: Option<&str>,
+        expected_run_id: Option<Uuid>,
+    ) -> Result<Vec<hf_core::crash::Crash>, ClassifiedError> {
         let Some(store) = &self.store else {
+            ensure_expected_latest_run(expected_run_id, None)?;
             return Ok(Vec::new());
         };
         let run = self.latest_run_record(project, target).await?;
+        ensure_expected_latest_run(expected_run_id, run.as_ref().map(|run| run.id))?;
         Ok(match run {
             // Guard against any pre-existing duplicate rows (e.g. crashes
             // persisted before the deterministic-id fix): collapse by signature.
@@ -389,6 +403,19 @@ impl ServiceContainer {
         target: &str,
         language: crate::report::ReportLanguage,
     ) -> Result<String, ClassifiedError> {
+        self.generate_report_for_run(project, target, language, None)
+            .await
+    }
+
+    /// Compose a report only if `expected_run_id` is still the target's latest
+    /// retained run. An omitted identifier intentionally selects latest.
+    pub async fn generate_report_for_run(
+        &self,
+        project: &Path,
+        target: &str,
+        language: crate::report::ReportLanguage,
+        expected_run_id: Option<Uuid>,
+    ) -> Result<String, ClassifiedError> {
         use crate::report::{render_markdown, ReportData};
 
         let project_root = canonical_project_root(project)?;
@@ -403,6 +430,7 @@ impl ServiceContainer {
         // Latest run + its crashes from the store, when persistence is wired.
         let (run, crashes) = if let Some(store) = &self.store {
             let run = self.latest_run_record(project, Some(target)).await?;
+            ensure_expected_latest_run(expected_run_id, run.as_ref().map(|run| run.id))?;
             let crashes = match &run {
                 // Collapse any pre-existing duplicate rows by signature so the
                 // report never lists the same crash twice.
@@ -411,6 +439,7 @@ impl ServiceContainer {
             };
             (run, crashes)
         } else {
+            ensure_expected_latest_run(expected_run_id, None)?;
             (None, Vec::new())
         };
 
@@ -472,10 +501,26 @@ impl ServiceContainer {
         out_path: &Path,
         language: crate::report::ReportLanguage,
     ) -> Result<(), ClassifiedError> {
+        self.export_report_for_run(project, target, format, out_path, language, None)
+            .await
+    }
+
+    /// Export a report only if the selected run is still latest.
+    pub async fn export_report_for_run(
+        &self,
+        project: &Path,
+        target: &str,
+        format: &str,
+        out_path: &Path,
+        language: crate::report::ReportLanguage,
+        expected_run_id: Option<Uuid>,
+    ) -> Result<(), ClassifiedError> {
         let fmt = crate::report_export::ReportFormat::parse(format).ok_or_else(|| {
             ClassifiedError::Validation(format!("unknown report format: {format}"))
         })?;
-        let markdown = self.generate_report(project, target, language).await?;
+        let markdown = self
+            .generate_report_for_run(project, target, language, expected_run_id)
+            .await?;
         // The title is document metadata rather than report body content, so it
         // is not written by the renderer -- but it is still prose, and follows
         // the report's language. The target symbol stays verbatim.
@@ -561,6 +606,10 @@ impl ServiceContainer {
         project: &Path,
         crash_id: &str,
     ) -> Result<crate::workbench::IssueExport, ClassifiedError> {
+        let crash_id_value = Uuid::parse_str(crash_id)
+            .map_err(|error| ClassifiedError::Validation(format!("bad crash id: {error}")))?;
+        self.ensure_crash_owned_by_project(project, crash_id_value)
+            .await?;
         crate::workbench::issue_export(self.store.as_deref(), project, crash_id).await
     }
 
@@ -645,6 +694,17 @@ impl ServiceContainer {
         project: &Path,
         target: Option<&str>,
     ) -> Result<crate::defectdojo::PushOutcome, ClassifiedError> {
+        self.push_to_defectdojo_for_run(project, target, None).await
+    }
+
+    /// Push findings only if the selected run is still latest. An omitted
+    /// identifier intentionally selects the latest retained run.
+    pub async fn push_to_defectdojo_for_run(
+        &self,
+        project: &Path,
+        target: Option<&str>,
+        expected_run_id: Option<Uuid>,
+    ) -> Result<crate::defectdojo::PushOutcome, ClassifiedError> {
         self.authorize_recorded(
             Action::PublishFindings {
                 destination: "defectdojo".to_owned(),
@@ -653,9 +713,11 @@ impl ServiceContainer {
             Some(project),
         )
         .await?;
+        let crashes = self
+            .crashes_for_latest_run_matching(project, target, expected_run_id)
+            .await?;
         let cfg = crate::defectdojo::load_config()?;
         let token = crate::defectdojo::resolve_token(&cfg)?;
-        let crashes = self.crashes_for_latest_run(project, target).await?;
         if crashes.is_empty() {
             return Err(ClassifiedError::Validation(
                 "no triaged crashes to push to DefectDojo".to_owned(),
@@ -689,4 +751,19 @@ impl ServiceContainer {
         };
         client.import(&import, &findings).await
     }
+}
+
+fn ensure_expected_latest_run(
+    expected_run_id: Option<Uuid>,
+    actual_run_id: Option<Uuid>,
+) -> Result<(), ClassifiedError> {
+    if let Some(expected) = expected_run_id {
+        if actual_run_id != Some(expected) {
+            let actual = actual_run_id.map_or_else(|| "none".to_owned(), |id| id.to_string());
+            return Err(ClassifiedError::Validation(format!(
+                "selected run {expected} is no longer latest; latest run is {actual}"
+            )));
+        }
+    }
+    Ok(())
 }

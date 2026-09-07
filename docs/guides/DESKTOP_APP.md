@@ -113,8 +113,20 @@ the database is the evidence, not the exit code.
 
 **4. Triage the crashes.** Crashes are ingested, deduplicated by stack
 signature, minimized, and classified with CASR for severity and exploitability.
-The agent can draft a report from retained evidence for human review, and the
-result can be exported or handed off to DefectDojo.
+The default queue shows unfinished findings first. Filters expose resolved
+history and narrow by target, run, fault origin, disposition, or CASR
+classification. A selected finding is restored per project by its retained
+crash and run identifiers, so an older crash keeps its original input path,
+target language, and engine even after a newer run completes. Opening the queue
+or a finding is read-only; Scan and report creation remain explicit actions.
+
+Current report, reproduction, and DefectDojo actions operate on the latest run
+for a target. They are disabled with an explanation when the selected finding
+belongs to an older run, instead of substituting newer evidence. The agent can
+Report and DefectDojo requests from a selected finding also carry its run
+identifier, so the service refuses the action if a newer run completed after
+the detail was loaded. The agent can draft a latest-run report for human
+review, and that result can be exported or handed off to DefectDojo.
 
 ![Triage -- deduplicated sanitizer crash and exploitability classification](../screenshots/triage.png)
 

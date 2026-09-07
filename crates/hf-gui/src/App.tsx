@@ -41,6 +41,7 @@ import { useI18n } from "./i18nContext";
 import { RunStatusProvider } from "./providers/RunStatusContext";
 import { RunOutputProvider } from "./providers/RunOutputContext";
 import { TargetProvider } from "./providers/TargetContext";
+import { FindingSelectionProvider } from "./providers/FindingSelectionContext";
 import { ProgressPanel } from "./components/ProgressPanel";
 import { isTauriEnvironment, pickFolder } from "./lib";
 import { MessageSquare, Crosshair, Play, Bug, Database, Settings, FileCode, FileText, History, Activity, Gauge, Info, FolderOpen, Boxes, ListChecks, Bot, Puzzle, BookOpen, Zap, LayoutDashboard, ScrollText, ShieldCheck, LifeBuoy, CarFront , GitCompare} from "lucide-react";
@@ -382,7 +383,8 @@ export default function App() {
     <I18nProvider>
       <PrefsProvider>
         <ProjectProvider>
-          <TargetProvider>
+          <FindingSelectionProvider>
+            <TargetProvider>
             <PipelineProvider>
               <RunStatusProvider>
                 <RunOutputProvider>
@@ -392,7 +394,8 @@ export default function App() {
                 </RunOutputProvider>
               </RunStatusProvider>
             </PipelineProvider>
-          </TargetProvider>
+            </TargetProvider>
+          </FindingSelectionProvider>
         </ProjectProvider>
       </PrefsProvider>
     </I18nProvider>

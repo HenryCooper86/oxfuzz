@@ -642,6 +642,165 @@ async fn the_crash_queue_is_ordered_by_disposition_and_carries_one_next_action()
     assert_eq!(last.disposition.claim_ceiling, ClaimCeiling::NoTargetClaim);
 }
 
+#[cfg(all(feature = "triage-disposition", feature = "patch-to-proof"))]
+#[tokio::test]
+async fn actual_workbench_enrichment_places_three_actionable_findings_before_one_hundred_resolved()
+{
+    use hf_crash::remediation::{
+        RemediationBinding, RemediationVerificationSpec, SandboxVerificationEvidence,
+        VerificationStageEvidence, VerificationStageStatus, REMEDIATION_VERIFICATION_SPEC_VERSION,
+    };
+    use hf_service::Disposition;
+    use hf_storage::{
+        RemediationOperationCompletion, RemediationOperationRecord, RemediationOperationStage,
+        RemediationOperationStatus,
+    };
+    use sha2::{Digest as _, Sha256};
+
+    let (container, _dir) = test_container().await;
+    let store = container.store().unwrap();
+    let target = sample_target("/proj");
+    let harness = sample_harness(target.id);
+    let mut run = sample_run("/proj", harness.id);
+    run.status = RunStatus::Done;
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    store.upsert_harness(&harness).await.unwrap();
+    store.insert_run(&run).await.unwrap();
+
+    for index in 0..103_u128 {
+        let crash = Crash {
+            id: Uuid::from_u128(index + 1),
+            run_id: run.id,
+            target_id: target.id,
+            input_path: PathBuf::from(format!("out/crash-{index}")),
+            stack_signature: format!("signature-{index}"),
+            kind: CrashKind::Asan,
+            summary: "heap-buffer-overflow".to_owned(),
+            minimized: index != 100,
+            bug_report: None,
+            casr: None,
+            origin: if index == 101 {
+                CrashOrigin::Unknown
+            } else {
+                CrashOrigin::Target
+            },
+        };
+        store.upsert_crash(&crash).await.unwrap();
+        if index >= 100 {
+            continue;
+        }
+
+        let patch = "--- a/parser.c\n+++ b/parser.c\n@@ -1 +1 @@\n-old\n+new\n";
+        let digest = |value: &str| hex::encode(Sha256::digest(value.as_bytes()));
+        let spec = RemediationVerificationSpec {
+            schema_version: REMEDIATION_VERIFICATION_SPEC_VERSION,
+            engine: EngineKind::LibFuzzer,
+            replay_timeout_secs: 10,
+            max_regression_cases: 1,
+            follow_up_fuzz_seconds: 1,
+            max_mem_mb: 512,
+            max_cpus: 1,
+            seed: 1,
+        };
+        let binding = RemediationBinding {
+            finding_id: crash.id,
+            run_id: run.id,
+            source_revision_sha256: digest("source"),
+            patch_sha256: digest(patch),
+            patch: patch.to_owned(),
+            reproducer_sha256: digest("reproducer"),
+            harness_sha256: digest("harness"),
+            original_binary_sha256: digest("original"),
+            sandbox_image_sha256: digest("image"),
+            evidence_manifest_sha256: digest("manifest"),
+            regression_corpus_sha256: digest("corpus"),
+            verification_spec_sha256: spec.sha256().unwrap(),
+            verification_spec: spec,
+        };
+        let passed = VerificationStageEvidence {
+            status: VerificationStageStatus::Passed,
+            detail_code: "passed".to_owned(),
+            cases: 1,
+            failures: 0,
+            findings: 0,
+        };
+        let evidence = SandboxVerificationEvidence {
+            verification_id: Uuid::new_v4(),
+            source_revision_sha256: binding.source_revision_sha256.clone(),
+            patch_sha256: binding.patch_sha256.clone(),
+            reproducer_sha256: binding.reproducer_sha256.clone(),
+            harness_sha256: binding.harness_sha256.clone(),
+            original_binary_sha256: binding.original_binary_sha256.clone(),
+            patched_binary_sha256: Some(digest("patched")),
+            sandbox_image_sha256: binding.sandbox_image_sha256.clone(),
+            regression_corpus_sha256: binding.regression_corpus_sha256.clone(),
+            verification_spec_sha256: binding.verification_spec_sha256.clone(),
+            original_replay: passed.clone(),
+            patch_build: passed.clone(),
+            patched_replay: passed.clone(),
+            regression: passed.clone(),
+            follow_up_fuzz: passed,
+        };
+        let operation_id = Uuid::new_v4();
+        let now = Utc::now();
+        store
+            .insert_remediation_operation(&RemediationOperationRecord {
+                id: operation_id,
+                run_id: run.id,
+                finding_id: crash.id,
+                project_root: "/proj".to_owned(),
+                target: target.symbol.clone(),
+                status: RemediationOperationStatus::Draft,
+                current_stage: RemediationOperationStage::Review,
+                binding_json: serde_json::to_string(&binding).unwrap(),
+                approval_json: None,
+                verification_json: None,
+                artifact_dir: format!("remediations/{operation_id}"),
+                created_at: now,
+                updated_at: now,
+                ended_at: None,
+                failure_code: None,
+                failure_message: None,
+            })
+            .await
+            .unwrap();
+        store
+            .approve_remediation_operation(operation_id, "{}", now)
+            .await
+            .unwrap();
+        store
+            .claim_remediation_operation(operation_id, now)
+            .await
+            .unwrap();
+        let evidence_json = serde_json::to_string(&evidence).unwrap();
+        store
+            .finish_remediation_operation(
+                operation_id,
+                &RemediationOperationCompletion {
+                    status: RemediationOperationStatus::Verified,
+                    verification_json: Some(&evidence_json),
+                    failure_code: None,
+                    failure_message: None,
+                    completed_at: now,
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let dashboard = container
+        .workbench_dashboard(Some(Path::new("/proj")), None)
+        .await
+        .unwrap();
+    assert_eq!(dashboard.crash_reviews.len(), 103);
+    assert!(dashboard.crash_reviews[..3]
+        .iter()
+        .all(|item| item.disposition.disposition != Disposition::Resolved));
+    assert!(dashboard.crash_reviews[3..]
+        .iter()
+        .all(|item| item.disposition.disposition == Disposition::Resolved));
+}
+
 #[tokio::test]
 async fn harness_review_items_carry_the_qualification_evidence() {
     let (container, dir) = test_container().await;

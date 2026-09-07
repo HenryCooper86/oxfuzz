@@ -1,7 +1,7 @@
 //! Service-owned, evidence-grounded finding determinations.
 
 use hf_core::crash::{Crash, CrashOrigin, CrashSeverity};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Current serialized Finding Proof Card schema.
@@ -62,7 +62,7 @@ pub enum ReproductionDetermination {
 /// Variants are declared most severe first, so the derived order sorts the
 /// most severe classification first and an absent report last. That order is
 /// the triage queue's tie-break; see `triage_disposition::TriageOrderKey`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CasrExploitabilityDetermination {
     Exploitable,

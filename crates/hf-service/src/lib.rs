@@ -44,6 +44,8 @@ pub mod diagnostics;
 #[cfg(feature = "proof-carrying")]
 pub mod evidence;
 pub mod finding_proof;
+#[cfg(feature = "triage-disposition")]
+pub mod finding_review;
 #[cfg(feature = "harness-tournament")]
 pub mod harness_tournament;
 #[cfg(feature = "harness-work-order")]
@@ -177,6 +179,8 @@ pub use finding_proof::{
     FixVerificationDetermination, ReachabilityDetermination, ReproductionDetermination,
     FINDING_PROOF_SCHEMA_VERSION,
 };
+#[cfg(feature = "triage-disposition")]
+pub use finding_review::{FindingDispositionFilter, FindingReviewFilter, FindingReviewItem};
 #[cfg(feature = "harness-tournament")]
 pub use harness_tournament::{
     HarnessCandidateEvidence, HarnessTournamentRequest, HarnessTournamentResult,

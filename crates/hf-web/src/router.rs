@@ -4,7 +4,11 @@
 //! via a `tokio::sync::broadcast` channel, and the router matches the
 //! `httpTransport.ts` `COMMAND_MAP` used by the web-mode frontend.
 
-#[cfg(feature = "automotive-scapy")]
+#[cfg(any(
+    feature = "automotive-scapy",
+    feature = "patch-to-proof",
+    feature = "triage-disposition"
+))]
 use axum::extract::Query;
 use axum::extract::{Json, Path, State};
 use axum::http::{header, HeaderValue, StatusCode};
@@ -421,6 +425,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .route("/runs/{id}/cancel", post(cancel_run_by_id))
         .merge(proof_carrying_routes())
         .merge(patch_to_proof_routes())
+        .merge(triage_disposition_routes())
         .merge(change_aware_routes())
         .merge(build_doctor_routes())
         .merge(harness_tournament_routes())
@@ -653,6 +658,18 @@ fn patch_to_proof_routes() -> Router<AppState> {
             "/findings/{id}/proof-card",
             get(finding_proof_card_for_crash),
         )
+}
+
+#[cfg(feature = "triage-disposition")]
+fn triage_disposition_routes() -> Router<AppState> {
+    Router::new()
+        .route("/findings/review", post(finding_review_queue))
+        .route("/findings/{id}/review", get(finding_review))
+}
+
+#[cfg(not(feature = "triage-disposition"))]
+fn triage_disposition_routes() -> Router<AppState> {
+    Router::new()
 }
 
 #[cfg(not(feature = "patch-to-proof"))]
@@ -1385,13 +1402,58 @@ async fn campaign_trust_report(
 async fn finding_proof_card_for_crash(
     State(state): State<AppState>,
     Path(id): Path<uuid::Uuid>,
+    Query(query): Query<FindingProjectQuery>,
 ) -> ApiResult<serde_json::Value> {
+    let project = approved_project(&state, &query.project)?;
     let card = state
         .container
-        .finding_proof_card_for_crash(id)
+        .finding_proof_card_for_crash(&project, id)
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(card)))
+}
+
+#[cfg(any(feature = "patch-to-proof", feature = "triage-disposition"))]
+#[derive(Debug, Deserialize)]
+struct FindingProjectQuery {
+    project: PathBuf,
+}
+
+#[cfg(feature = "triage-disposition")]
+#[derive(Debug, Deserialize)]
+struct FindingReviewRequest {
+    project: PathBuf,
+    #[serde(default)]
+    filter: hf_service::FindingReviewFilter,
+}
+
+#[cfg(feature = "triage-disposition")]
+async fn finding_review_queue(
+    State(state): State<AppState>,
+    Json(request): Json<FindingReviewRequest>,
+) -> ApiResult<serde_json::Value> {
+    let project = approved_project(&state, &request.project)?;
+    let items = state
+        .container
+        .finding_review_queue(&project, request.filter)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(items)))
+}
+
+#[cfg(feature = "triage-disposition")]
+async fn finding_review(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+    Query(query): Query<FindingProjectQuery>,
+) -> ApiResult<serde_json::Value> {
+    let project = approved_project(&state, &query.project)?;
+    let item = state
+        .container
+        .finding_review_for_project(&project, id)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(item)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2151,6 +2213,8 @@ struct DefectDojoPushRequest {
     project: String,
     #[serde(default)]
     target: Option<String>,
+    #[serde(default)]
+    expected_run_id: Option<uuid::Uuid>,
 }
 
 async fn defectdojo_push(
@@ -2160,7 +2224,7 @@ async fn defectdojo_push(
     let project = approved_project(&state, std::path::Path::new(&req.project))?;
     let outcome = state
         .container
-        .push_to_defectdojo(&project, req.target.as_deref())
+        .push_to_defectdojo_for_run(&project, req.target.as_deref(), req.expected_run_id)
         .await
         .map_err(classified_api_error)?;
     Ok(Json(outcome))
@@ -2386,6 +2450,8 @@ struct ReportRequest {
     target: String,
     #[serde(default)]
     language: hf_service::ReportLanguage,
+    #[serde(default)]
+    expected_run_id: Option<uuid::Uuid>,
 }
 
 async fn report(
@@ -2395,7 +2461,7 @@ async fn report(
     let project = approved_project(&state, std::path::Path::new(&req.project))?;
     let markdown = state
         .container
-        .generate_report(&project, &req.target, req.language)
+        .generate_report_for_run(&project, &req.target, req.language, req.expected_run_id)
         .await
         .map_err(classified_api_error)?;
     Ok(Json(markdown))

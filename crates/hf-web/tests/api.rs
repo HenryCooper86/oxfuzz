@@ -1328,6 +1328,36 @@ async fn workbench_dashboard_without_db_returns_empty_summary() {
     assert!(json["next_actions"].is_array());
 }
 
+#[cfg(feature = "triage-disposition")]
+#[tokio::test]
+async fn finding_review_routes_require_an_approved_project_and_do_not_start_work() {
+    let (status, json) = post_json(
+        "/findings/review",
+        serde_json::json!({"project": ".", "filter": {"origin": "target"}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(json
+        .to_string()
+        .contains("finding review requires persistent storage"));
+
+    allow_open_dev_mode();
+    let app = hf_web::router::build();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/findings/{}/review?project=/etc",
+                    uuid::Uuid::new_v4()
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
 #[tokio::test]
 async fn report_drafts_can_be_saved_listed_and_deleted() {
     let dir = tempfile::tempdir().unwrap();
