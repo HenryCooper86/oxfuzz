@@ -57,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
             println!("  database: {}", report.db_path.display());
         }
         Commands::Doctor { json } => cmd_doctor(json).await?,
+        Commands::Build { command } => commands::build::run(command).await?,
         Commands::Discover {
             project,
             lang,

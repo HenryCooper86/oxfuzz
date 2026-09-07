@@ -2249,6 +2249,9 @@ impl Store {
         // `automotive_state_corpus` is deleted before `automotive_operations`
         // because it holds a foreign key into it.
         for table in [
+            "harness_build_inputs",
+            "harness_build_contexts",
+            "build_diagnosis_runs",
             "harness_work_order_attempts",
             "harness_work_order_submissions",
             "harness_work_orders",
@@ -2286,6 +2289,17 @@ impl Store {
     /// Returns an error on a SQL failure.
     pub async fn delete_project(&self, project_root: &str) -> Result<(), StorageError> {
         let mut tx = self.pool.begin().await?;
+        for table in [
+            "harness_build_inputs",
+            "harness_build_contexts",
+            "build_diagnosis_runs",
+            "project_build_profiles",
+        ] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE project_root = ?1"))
+                .bind(project_root)
+                .execute(&mut *tx)
+                .await?;
+        }
         sqlx::query(
             "DELETE FROM harness_work_order_attempts
              WHERE submission_id IN (
@@ -2573,11 +2587,20 @@ impl Store {
     /// # Errors
     /// Returns an error on a SQL failure or serialization failure.
     pub async fn upsert_harness(&self, h: &Harness) -> Result<(), StorageError> {
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        Self::upsert_harness_in_transaction(&mut transaction, h).await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub(crate) async fn upsert_harness_in_transaction(
+        transaction: &mut sqlx::SqliteConnection,
+        h: &Harness,
+    ) -> Result<(), StorageError> {
         let smoke_json = match &h.smoke_run {
             Some(s) => Some(serde_json::to_string(s)?),
             None => None,
         };
-        let mut transaction = self.pool.begin().await?;
         let existing = sqlx::query("SELECT data_json FROM harnesses WHERE id = ?1")
             .bind(h.id.to_string())
             .fetch_optional(&mut *transaction)
@@ -2624,7 +2647,6 @@ impl Store {
             .execute(&mut *transaction)
             .await?;
         }
-        transaction.commit().await?;
         Ok(())
     }
 
@@ -2782,6 +2804,28 @@ impl Store {
         binary_sha256: &str,
         approved_at: DateTime<Utc>,
     ) -> Result<HarnessApprovalRecord, StorageError> {
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let approval = Self::promote_harness_in_transaction(
+            &mut transaction,
+            harness,
+            approval_kind,
+            source_sha256,
+            binary_sha256,
+            approved_at,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(approval)
+    }
+
+    pub(crate) async fn promote_harness_in_transaction(
+        transaction: &mut sqlx::SqliteConnection,
+        harness: &Harness,
+        approval_kind: HarnessApprovalKind,
+        source_sha256: &str,
+        binary_sha256: &str,
+        approved_at: DateTime<Utc>,
+    ) -> Result<HarnessApprovalRecord, StorageError> {
         if harness.status != hf_core::harness::HarnessStatus::Promoted
             || !is_sha256(source_sha256)
             || !is_sha256(binary_sha256)
@@ -2792,7 +2836,6 @@ impl Store {
             ));
         }
 
-        let mut transaction = self.pool.begin().await?;
         let approval_kind_text = enum_str(&approval_kind);
         let current_row = sqlx::query("SELECT data_json FROM harnesses WHERE id = ?1")
             .bind(harness.id.to_string())
@@ -2896,7 +2939,6 @@ impl Store {
                 ));
             }
         }
-        transaction.commit().await?;
         Ok(approval)
     }
 
@@ -4089,7 +4131,7 @@ fn harness_ai_review_from_row(
     })
 }
 
-fn is_sha256(value: &str) -> bool {
+pub(crate) fn is_sha256(value: &str) -> bool {
     value.len() == 64
         && value
             .bytes()

@@ -114,3 +114,7 @@ max_concurrent_executions = 10
 default_missed_policy = "skip" # catch_up | skip | backfill
 default_concurrency_policy = "skip_if_running" # allow | skip_if_running | queue | cancel_previous
 history_retention_limit = 100
+
+# Allowed names for explicitly saved CMake definitions; no values are injected.
+[build_profiles]
+allowed_cmake_options = ["BUILD_SHARED_LIBS", "BUILD_TESTING"]

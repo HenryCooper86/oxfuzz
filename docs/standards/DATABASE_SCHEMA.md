@@ -1,6 +1,8 @@
 # Database Schema
 
-Status: **implemented**. Scope: `hf-storage` and `hf-diagnostics`.
+Status: **implemented through migration 0030**; Phase 6 tables in section 5.1
+are **planned for migration 0031**, not shipped. Scope: `hf-storage` and
+`hf-diagnostics`.
 
 ## 1. Storage and migration ownership
 
@@ -868,6 +870,157 @@ conditions rather than truncating to a display page.
 | `evidence_json` | `TEXT NOT NULL` | strict version 2 evidence object |
 | `observed_at` | `TEXT NOT NULL` | RFC 3339 assessment time |
 
+## 5.1 Build profile and input tables (planned Phase 6)
+
+Migration `0031_build_profiles.sql` adds the following three tables after
+Phase 5 migration `0030_campaign_health.sql`, without changing Phase 5 declarations.
+[Build Doctor](../design/build-doctor-design.md) owns profile normalization,
+diagnosis policy, limits, and plan execution; [Harness Generation
+Design](../design/harness-generation-design.md) owns captured input checks.
+
+These typed storage records are always compiled, including when the service's
+`build-doctor` feature is disabled. Storage methods are
+`set_project_build_profile`, `project_build_profile`,
+`clear_project_build_profile`, `append_build_diagnosis`,
+`build_diagnosis_history`, `set_harness_build_inputs`, `harness_build_inputs`,
+`upsert_harness_with_build_inputs`, and
+`promote_harness_with_approval_and_build_identity`. Profile normalization,
+readiness, and digest composition belong to `hf-service`; durable decoding in
+`hf-storage` rejects malformed JSON, unknown enums, invalid UUIDs/timestamps,
+noncanonical paths, and invalid digests rather than returning optional absence.
+SHA-256 columns contain 64 lowercase hexadecimal characters; image IDs are
+validated immutable `sha256:<64 lowercase hexadecimal characters>` references.
+The Store writes top-level timestamps as UTC RFC 3339 with nine fractional
+second digits and UUIDs as lowercase hyphenated text. Durable reads require
+these canonical ordering keys so textual history ordering matches time/UUID
+ordering. Profile snapshots inside diagnosis JSON use typed UTC timestamps.
+Project-root validation accepts canonical Unix, Windows drive, UNC, and
+verbatim-root syntax without filesystem access; saved relative paths use the
+portable slash-separated syntax specified below.
+
+### `project_build_profiles`
+
+One current row per canonical project. Saving identical normalized fields is
+idempotent; a changed save deliberately replaces configuration, preserves
+`created_at`, and updates `updated_at`. Historical diagnosis and harness input
+rows reference a digest value, not this mutable row through a foreign key.
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `project_root` | `TEXT PRIMARY KEY` | canonical project root; configuration identity |
+| `component_root` | `TEXT NOT NULL` | normalized UTF-8 project-relative component directory; `.` is the root |
+| `build_system` | `TEXT NOT NULL CHECK (build_system IN ('cmake', 'make'))` | supported saved system |
+| `compile_database_path` | `TEXT NOT NULL` | normalized project-relative path ending in `compile_commands.json` |
+| `cmake_definitions_json` | `TEXT NOT NULL` | canonical sorted definition map; valid JSON, at most 65,536 UTF-8 bytes |
+| `dependencies_json` | `TEXT NOT NULL` | canonical sorted unique typed dependency array; valid JSON, at most 65,536 UTF-8 bytes |
+| `sandbox_image_tag` | `TEXT NOT NULL` | configured image tag captured at save |
+| `sandbox_image_id` | `TEXT NOT NULL` | resolved immutable image reference captured at save |
+| `marker_path` | `TEXT NOT NULL` | selected marker's normalized project-relative path |
+| `marker_sha256` | `TEXT NOT NULL` | digest of selected marker bytes |
+| `profile_sha256` | `TEXT NOT NULL` | versioned canonical digest of all saved assumptions; excludes timestamps |
+| `created_at` | `TEXT NOT NULL` | RFC 3339 first-save time |
+| `updated_at` | `TEXT NOT NULL` | RFC 3339 latest-save time |
+
+The JSON size limits also apply at save validation, and the service rejects
+profile/plan metadata that cannot fit the retained diagnosis envelope. SQL checks use
+`json_valid(...)` and `length(CAST(... AS BLOB)) <= 65536`. Typed reads validate
+exact map/array content, path syntax, build system, option/dependency identifiers,
+and digest formats. The service additionally validates current deployment
+allowlists and filesystem/image assumptions at the earliest relevant operation.
+It must not accept a configured-but-unreadable row as `Unconfigured`.
+
+### `build_diagnosis_runs`
+
+Retained terminal diagnosis/build evidence. A record captures its profile digest
+before work starts and retains it even after profile save/clear. Diagnosis and
+project-build outcomes share strict versioned JSON containing the operation
+kind, profile snapshot when present, detected systems, state/reasons, dependencies,
+reviewed argv/component/image, and bounded terminal output. A completed diagnosis
+can report `NeedsBuild`, `Invalid`, or `Stale` without being an operation error.
+Runtime failures and terminal build failures remain explicit failed evidence.
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | retained operation UUID |
+| `project_root` | `TEXT NOT NULL` | canonical project root for history and cleanup |
+| `profile_sha256` | `TEXT` | nullable captured profile digest; null for unconfigured diagnosis |
+| `status` | `TEXT NOT NULL CHECK (status IN ('succeeded', 'failed', 'cancelled'))` | terminal operation outcome; state and kind are in typed JSON |
+| `diagnosis_json` | `TEXT NOT NULL` | strict versioned JSON, at most 65,536 UTF-8 bytes |
+| `created_at` | `TEXT NOT NULL` | RFC 3339 retained terminal time |
+
+Index: `idx_build_diagnosis_runs_project(project_root, created_at DESC, id
+DESC)`. SQL checks require valid JSON and
+`length(CAST(diagnosis_json AS BLOB)) <= 65536`. The service bounds individual
+outputs before serialization and includes explicit truncation evidence; valid
+JSON itself is never cut. Rows are immutable once appended. SQL triggers reject updates and duplicate-ID
+insert/replace attempts; the Store handles exact retries before insertion. History validates
+`limit` in 1–100 and returns newest first by `(created_at, id)`, without silently
+clamping invalid limits. Do not delete old-profile records merely because the
+current profile changed or disappeared. Read-only readiness uses only successful
+diagnosis evidence whose captured profile/image match and whose dependencies
+were satisfied; absence is named unavailable evidence, not a live image probe.
+
+### `harness_build_inputs`
+
+Immutable evidence for the exact inputs captured before a successful compile.
+There is one row per harness UUID; source/binary and human approval remain in
+the existing harness evidence tables and core types.
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `harness_id` | `TEXT PRIMARY KEY REFERENCES harnesses(id) ON DELETE CASCADE` | exact compiled harness revision UUID |
+| `project_root` | `TEXT NOT NULL` | canonical project root for lookup and cleanup |
+| `profile_sha256` | `TEXT` | nullable profile digest captured before the attempt |
+| `compile_database_sha256` | `TEXT` | nullable SHA-256 of exact bounded database bytes read for the attempt; null when no database applies |
+| `compile_flags_sha256` | `TEXT NOT NULL` | SHA-256 of canonical ordered staged flags actually emitted |
+| `sandbox_image_id` | `TEXT NOT NULL` | immutable image reference actually dispatched |
+| `build_input_sha256` | `TEXT NOT NULL` | versioned canonical digest of optional profile/database digests, flags digest, and image ID |
+| `created_at` | `TEXT NOT NULL` | RFC 3339 capture time |
+
+Index: `idx_harness_build_inputs_project(project_root)`. The table check
+`CHECK (profile_sha256 IS NULL OR compile_database_sha256 IS NOT NULL)`
+requires actual database evidence for configured compilation; typed reads
+validate the same persisted relationship. A row cannot be replaced with different evidence for its UUID. The Store accepts an identical
+retry only after comparing all immutable fields; updates and conflicting
+REPLACE/UPSERT attempts must not replace existing evidence. SQL triggers reject updates and duplicate-ID insert/replace attempts. Deletion
+remains possible through explicit cleanup and the harness foreign-key cascade.
+
+The new-harness-plus-input operation reserves the SQLite writer before reads
+(for example, `BEGIN IMMEDIATE`), checks exact existing revision/identity,
+inserts both rows, and commits once. Failure rolls back both. It must validate
+that the input UUID/project correspond to the inserted harness and its target.
+The shared transaction helper also preserves existing `upsert_harness` and
+`promote_harness_with_approval` exact-revision and approval checks while avoiding
+a deferred read-then-write transaction upgrade. Qualification status updates
+do not rewrite immutable inputs. Direct standalone input insertion cannot
+substitute for atomic creation in production compile paths.
+
+`hf-service` publishes `harness.source` and `harness.active` only after that
+commit. A failed compilation stores no input row. Changes to a profile while
+compilation awaits never relabel the successful binary: commit its captured old
+inputs, then reject them at the next guarded action if they no longer match.
+Promotion reserves the writer before reads and verifies the expected current
+profile/input digest in the same transaction as the existing exact promotion
+and approval write, ordering concurrent profile saves against promotion. No
+extra fields are added solely for profiles to core Harness/approval types or
+Work Order v2 packets.
+
+Configured harnesses without matching input evidence cannot review, smoke,
+promote, or run until rebuilt and requalified. Unconfigured historical harnesses
+without rows keep existing exact source/binary approval behavior. These rules
+remain enforced with optional Build Doctor surfaces disabled.
+
+Cleanup classification: profiles are configuration, diagnosis runs are learned
+operation evidence, and harness inputs belong to harness revisions.
+`clear_knowledge` preserves `project_build_profiles` just as it preserves
+`project_settings`, deletes all `build_diagnosis_runs`, and removes
+`harness_build_inputs` before or with harness deletion. `Store::delete_project`
+explicitly removes all three row families for the canonical project in its
+existing transaction, including profiles/history when no targets remain. Target
+cleanup removes harness children before targets; SQL/read failures propagate.
+Tests must exercise atomic rollback, immutable retries, malformed durable reads,
+bounded deterministic history, and both cleanup operations.
+
 ## 6. Migration inventory
 
 | migration | schema effect |
@@ -902,6 +1055,8 @@ conditions rather than truncating to a display page.
 | `0028_harness_ai_reviews.sql` | creates source-digest-bound independent pre-execution harness review evidence |
 | `0029_harness_work_orders.sql` | creates immutable work-order packets, submissions, and qualification attempts with bounded durable evidence |
 | `0030_campaign_health.sql` | creates monotonic run telemetry and immutable version 2 campaign-health event evidence with run-scoped deduplication |
+| `0031_build_profiles.sql` | creates optional project build profiles, strict retained diagnosis evidence, and immutable harness build inputs |
+| `0032_harness_build_contexts.sql` | retains immutable configured BuildContext provider inputs |
 
 ## 7. Read failure contract
 
@@ -928,3 +1083,26 @@ database record, or restored to its prior value if a later step fails. A service
 method must not return an authoritative model that the configured store rejected.
 Optional stores may remain absent, but a present broken store is never treated as
 if persistence were disabled.
+
+
+### `harness_build_contexts`
+
+Migration 0032 retains configured provider-visible compile context before dispatch.
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | immutable context UUID |
+| `project_root` | `TEXT NOT NULL` | canonical project root for lookup and cleanup |
+| `profile_sha256` | `TEXT NOT NULL` | profile identity at provider admission |
+| `compile_database_sha256` | `TEXT NOT NULL` | digest of exact selected database bytes |
+| `context_json` | `TEXT NOT NULL` | bounded versioned exact rendered context |
+| `created_at` | `TEXT NOT NULL` | canonical UTC nanosecond capture time |
+
+Index: `idx_harness_build_contexts_project(project_root, created_at DESC, id DESC)`.
+`context_json` is a strict version-1 envelope with `schema_version` and `context`;
+context carries include_dirs, defines, explicit nullable std_flag, extra_flags,
+entry_count and dropped tokens exactly as rendered. Its UTF-8 serialization is
+bounded to 65,536 bytes. Identity/time/digest validation follows 0031. Exact retries
+are accepted; differing retries, UPDATE and duplicate INSERT/REPLACE are refused.
+Project deletion and clear_knowledge delete these records explicitly. They have no
+harness foreign key because drafting precedes compilation and may fail.

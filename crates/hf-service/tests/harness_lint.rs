@@ -23,6 +23,11 @@ async fn compile(
     let project = tempfile::tempdir().unwrap();
     std::fs::write(project.path().join("a.c"), "int a(void){return 0;}").unwrap();
     test_container()
+        .with_store(Arc::new(
+            hf_storage::Store::connect(project.path().join("state.db"))
+                .await
+                .unwrap(),
+        ))
         .harness_compile(
             source.to_owned(),
             project.path(),

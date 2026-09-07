@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, lazy, Suspense } from "react";
 import { useI18n } from "../i18nContext";
 import { getTransport, pickFolder } from "../lib";
 import { useProject } from "../providers/project";
@@ -7,7 +7,7 @@ import { useTarget } from "../providers/target";
 import type { TargetInventory, HarnessReviewItem } from "../types";
 import { Button, Input, Select, ViewHeader, EmptyState } from "../components/ui";
 import { SandboxBanner } from "../components/SandboxBanner";
-import { BuildDoctorPanel } from "../components/BuildDoctorPanel";
+const BuildDoctorPanel = lazy(() => import("../components/BuildDoctorPanel").then((module) => ({ default: module.BuildDoctorPanel })));
 import { HarnessApprovalEvidence } from "../components/HarnessApprovalEvidence";
 import { HarnessTournamentPanel } from "../components/HarnessTournamentPanel";
 import { OracleStudioPanel } from "../components/OracleStudioPanel";
@@ -124,6 +124,9 @@ export function HarnessView({
   // Embedded in the workflow, the project comes from the workflow's gate.
   const [localProject, setLocalProject] = useState(activeProject);
   const project = embedded ? activeProject : localProject;
+  const [buildAdmission, setBuildAdmission] = useState<{ project: string; blocked: boolean } | null>(null);
+  const onBuildAdmission = useCallback((owner: string, blocked: boolean) => setBuildAdmission({ project: owner, blocked }), []);
+  const buildBlocked = buildAdmission?.project === project ? buildAdmission.blocked : Boolean(project);
   const [inventory, setInventory] = useState<TargetInventory | null>(null);
   const [harness, setHarness] = useState<HarnessResult | null>(null);
   const [aiPolicy, setAiPolicy] = useState<AiPolicy>("auto");
@@ -232,7 +235,7 @@ export function HarnessView({
   }, [project, selectedTarget, lang, engine, harness, selectionBlocked, setCompiled, markDone, reviewRefresh, externalPromotion]);
 
   async function generateHarness(target: string): Promise<HarnessResult | null> {
-    if (!fuzzingSettings || selectionBlocked) return null;
+    if (!fuzzingSettings || selectionBlocked || buildBlocked) return null;
     const prior = harness?.source ?? null;
     setHarnessStatus("loading");
     setHarnessError(null);
@@ -477,6 +480,8 @@ export function HarnessView({
         </div>
       )}
 
+      {project && <Suspense fallback={<p role="status">{t("buildDoctor.pending")}</p>}><BuildDoctorPanel project={project} onGenerationBlocked={onBuildAdmission} /></Suspense>}
+
       {/* Target + Engine selection */}
       {inventory && inventory.candidates.length > 0 && (
         <div className="flex flex-wrap gap-3 items-end">
@@ -551,7 +556,7 @@ export function HarnessView({
           <Button
             variant="primary"
             onClick={runAll}
-            disabled={selectionBlocked || !selectedTarget || engineOptions.length === 0 || harnessStatus === "loading"}
+            disabled={buildBlocked || selectionBlocked || !selectedTarget || engineOptions.length === 0 || harnessStatus === "loading"}
             title={t("harness.buildSmokeTitle")}
           >
             <Sparkles size={14} />
@@ -602,7 +607,7 @@ export function HarnessView({
             status={harnessStatus}
             actionLabel={t("common.generate")}
             actionClick={() => generateHarness(selectedTarget)}
-            disabled={selectionBlocked || !fuzzingEnabled}
+            disabled={buildBlocked || selectionBlocked || !fuzzingEnabled}
           >
             {harness && (
               <div className="mt-2">
@@ -685,13 +690,6 @@ export function HarnessView({
                 <span style={{ color: compileResult.status === "Compiled" ? "var(--success)" : "var(--error)" }}>
                   {compileResult.message}
                 </span>
-              </div>
-            )}
-            {/* A failed compile is exactly when missing build context matters,
-                so the diagnosis appears at the point of failure. */}
-            {compileResult && compileResult.status !== "Compiled" && project && (
-              <div className="mt-3">
-                <BuildDoctorPanel project={project} />
               </div>
             )}
             {/* Evaluating several candidates is a choice about the compile step,

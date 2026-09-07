@@ -67,6 +67,7 @@ sha2 = { workspace = true }
 hf-service = { workspace = true }
 
 [dev-dependencies]
+tauri = { version = "2.11", features = ["test"] }
 tempfile = { workspace = true }
 
 # Tauri's command ABI requires deserializable owned arguments and injects

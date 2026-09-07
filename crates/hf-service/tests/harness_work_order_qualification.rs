@@ -2094,3 +2094,116 @@ async fn interrupted_attempt_recovery_preserves_identity_and_start_time() {
     );
     assert!(recovered.ended_at.is_some());
 }
+
+#[cfg(feature = "build-doctor")]
+#[tokio::test]
+async fn exact_work_order_smoke_refuses_database_changed_during_review() {
+    let fixture =
+        QualificationFixture::new(RuntimeMode::Pass, ReviewMode::Approve, VALID_HARNESS).await;
+    std::fs::write(fixture.project.join("CMakeLists.txt"), "project(parser)\n").unwrap();
+    let profile = fixture
+        .service
+        .save_build_profile(hf_service::SaveBuildProfileRequest {
+            project: fixture.project.to_string_lossy().into_owned(),
+            component_root: ".".into(),
+            build_system: hf_service::ProfileBuildSystem::CMake,
+            compile_database_path: "compile_commands.json".into(),
+            cmake_definitions: std::collections::BTreeMap::new(),
+            dependencies: Vec::new(),
+        })
+        .await
+        .unwrap();
+    // Retained immutable-image probe evidence keeps this test's runtime focused on exact Work Order stages.
+    fixture
+        .store
+        .append_build_diagnosis(&hf_storage::BuildDiagnosisRecord {
+            id: Uuid::new_v4(),
+            project_root: profile.project_root.clone(),
+            profile_sha256: Some(profile.profile_sha256.clone()),
+            status: hf_storage::BuildDiagnosisStatus::Succeeded,
+            diagnosis: hf_storage::BuildDiagnosisEvidence {
+                schema_version: 1,
+                operation: hf_storage::BuildDiagnosisOperation::Diagnose,
+                profile: Some(profile),
+                detected: vec![],
+                profile_state: hf_storage::BuildProfileState::Ready,
+                dependency_statuses: ["cmake", "make"]
+                    .into_iter()
+                    .map(|name| hf_storage::BuildDependencyStatus {
+                        dependency: hf_storage::BuildDependency {
+                            kind: hf_storage::BuildDependencyKind::Command,
+                            name: name.into(),
+                        },
+                        available: true,
+                    })
+                    .collect(),
+                reasons: vec![],
+                plan: None,
+                legacy_build_context_available: false,
+                terminal: None,
+            },
+            created_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+    let review = Arc::new(DatabaseChangingReview {
+        project: fixture.project.clone(),
+        calls: AtomicUsize::new(0),
+    });
+    let service = fixture.service.clone().with_provider_pool(review.clone());
+    let attempt = service
+        .qualify_harness_work_order_submission(fixture.submission.id)
+        .await
+        .unwrap();
+    assert_eq!(attempt.status, HarnessWorkOrderAttemptStatus::SmokeFailed);
+    assert!(attempt.harness_id.is_some());
+    assert!(attempt.smoke_run_id.is_none());
+    assert_eq!(fixture.runtime.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(review.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fixture
+            .store
+            .get_harness(attempt.harness_id.unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        HarnessStatus::Compiled
+    );
+}
+
+#[cfg(feature = "build-doctor")]
+struct DatabaseChangingReview {
+    project: PathBuf,
+    calls: AtomicUsize,
+}
+#[cfg(feature = "build-doctor")]
+#[async_trait::async_trait]
+impl ProviderPool for DatabaseChangingReview {
+    async fn chat_completion(
+        &self,
+        _: &hf_core::provider::ChatRequest,
+        _: &hf_core::provider::RouteRequest,
+    ) -> Result<hf_core::provider::ChatResponse, ProviderError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        write_compile_database(&self.project, "CHANGED_DURING_REVIEW=1");
+        Ok(hf_test_utils::fixtures::make_chat_response(
+            APPROVING_REVIEW,
+        ))
+    }
+    async fn chat_completion_stream(
+        &self,
+        _: &hf_core::provider::ChatRequest,
+        _: &hf_core::provider::RouteRequest,
+    ) -> Result<hf_core::provider::ChatStreamResponse, ProviderError> {
+        unreachable!()
+    }
+    fn report_error(&self, _: &hf_core::types::ProviderId, _: &ProviderError) {}
+    async fn provider_statuses(&self) -> Vec<hf_core::provider::ProviderStatus> {
+        vec![]
+    }
+    async fn freeze(&self, _: &hf_core::types::ProviderId, _: String) {}
+    async fn thaw(&self, _: &hf_core::types::ProviderId) -> Result<(), ProviderError> {
+        Ok(())
+    }
+}

@@ -121,7 +121,12 @@ async fn harness_refine_recompiles_from_existing_harness() {
     )
     .unwrap();
 
-    let container = ServiceContainer::new(Arc::new(OkRuntime), Some(Arc::new(RefinePool)));
+    let container = ServiceContainer::new(Arc::new(OkRuntime), Some(Arc::new(RefinePool)))
+        .with_store(Arc::new(
+            hf_storage::Store::connect(project.join("state.db"))
+                .await
+                .unwrap(),
+        ));
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         container.harness_refine(
@@ -151,7 +156,12 @@ async fn harness_refine_errors_without_existing_harness() {
     )
     .unwrap();
 
-    let container = ServiceContainer::new(Arc::new(OkRuntime), Some(Arc::new(RefinePool)));
+    let container = ServiceContainer::new(Arc::new(OkRuntime), Some(Arc::new(RefinePool)))
+        .with_store(Arc::new(
+            hf_storage::Store::connect(project.join("state.db"))
+                .await
+                .unwrap(),
+        ));
     let err = container
         .harness_refine(
             &project,

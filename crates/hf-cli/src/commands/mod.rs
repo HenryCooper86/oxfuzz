@@ -4,3 +4,5 @@ pub(crate) mod campaign;
 pub(crate) mod discovery;
 pub(crate) mod harness;
 pub(crate) mod system;
+
+pub(crate) mod build;

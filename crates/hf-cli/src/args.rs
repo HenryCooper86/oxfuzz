@@ -33,6 +33,11 @@ pub(crate) enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Diagnose and configure project builds.
+    Build {
+        #[command(subcommand)]
+        command: BuildCommand,
+    },
     /// Discover fuzzing targets in a project.
     Discover {
         /// Project root path.
@@ -790,5 +795,145 @@ mod semgrep_absence_tests {
             "--semgrep",
         ]);
         assert!(parsed.is_err());
+    }
+}
+
+#[cfg(all(test, feature = "build-doctor"))]
+mod build_surface_tests {
+    use super::*;
+
+    #[test]
+    fn build_commands_accept_explicit_reviewed_inputs() {
+        for args in [
+            vec!["oxfuzz", "build", "diagnose", "/project", "--json"],
+            vec!["oxfuzz", "build", "profile", "show", "/project", "--json"],
+            vec!["oxfuzz", "build", "profile", "clear", "/project"],
+            vec![
+                "oxfuzz", "build", "history", "/project", "--limit", "3", "--json",
+            ],
+            vec![
+                "oxfuzz",
+                "build",
+                "run",
+                "/project",
+                "--expected-profile-sha256",
+                "reviewed-digest",
+            ],
+            vec![
+                "oxfuzz",
+                "build",
+                "profile",
+                "set",
+                "/project",
+                "--component-root",
+                "parser",
+                "--build-system",
+                "cmake",
+                "--compile-database-path",
+                "build/compile_commands.json",
+                "--define",
+                "BUILD_TESTING=OFF",
+                "--dependency",
+                "command:clang",
+                "--dependency",
+                "pkg_config:zlib",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(&args).is_ok(), "{args:?}");
+        }
+        assert!(Cli::try_parse_from(["oxfuzz", "build", "run", "/project"]).is_err());
+        assert!(Cli::try_parse_from([
+            "oxfuzz",
+            "build",
+            "profile",
+            "set",
+            "/project",
+            "--build-system",
+            "meson"
+        ])
+        .is_err());
+    }
+}
+
+#[derive(Subcommand)]
+pub(crate) enum BuildCommand {
+    /// Diagnose current build prerequisites without building the project.
+    Diagnose {
+        project: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read or explicitly change the optional build profile.
+    Profile {
+        #[command(subcommand)]
+        command: BuildProfileCommand,
+    },
+    /// Read retained diagnosis and build output.
+    History {
+        project: PathBuf,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Execute the exact previously reviewed profile in the sandbox.
+    Run {
+        project: PathBuf,
+        #[arg(long)]
+        expected_profile_sha256: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum BuildProfileCommand {
+    /// Display the retained configuration.
+    Show {
+        project: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Validate and save an explicit configuration.
+    Set {
+        project: PathBuf,
+        #[arg(long)]
+        component_root: String,
+        #[arg(long, value_enum)]
+        build_system: ProfileSystemArg,
+        #[arg(long)]
+        compile_database_path: String,
+        /// Repeat `NAME=VALUE` for each `CMake` definition.
+        #[arg(long = "define")]
+        definitions: Vec<String>,
+        /// Repeat `command:NAME` or `pkg_config:MODULE`.
+        #[arg(long = "dependency")]
+        dependencies: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove the current profile, retaining operation history.
+    Clear {
+        project: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub(crate) enum ProfileSystemArg {
+    Cmake,
+    Make,
+}
+
+#[cfg(all(test, not(feature = "build-doctor")))]
+mod build_read_feature_off_tests {
+    use super::*;
+    #[test]
+    fn profile_show_is_available_without_build_doctor() {
+        assert!(
+            Cli::try_parse_from(["oxfuzz", "build", "profile", "show", "/project", "--json"])
+                .is_ok()
+        );
     }
 }

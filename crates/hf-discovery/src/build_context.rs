@@ -67,9 +67,9 @@ struct RawEntry {
 
 /// Parse a JSON Compilation Database.
 ///
-/// The `command` form is split on whitespace. That loses shell quoting, so an
-/// argument containing a space arrives as two tokens; both halves then fail the
-/// allowlist and are dropped, which is the safe direction to be wrong in.
+/// The `command` form decodes quotes and escapes without shell execution or
+/// expansion. An `arguments` array takes precedence. Empty compiler invocations
+/// and malformed quoting are rejected before flag extraction.
 ///
 /// # Errors
 /// Returns [`BuildContextError::Parse`] for malformed JSON or an entry carrying
@@ -85,7 +85,12 @@ pub fn parse_compile_database(json: &str) -> Result<Vec<CompileEntry>, BuildCont
         .map(|entry| {
             let arguments = match (entry.arguments, entry.command) {
                 (Some(arguments), _) => arguments,
-                (None, Some(command)) => command.split_whitespace().map(str::to_owned).collect(),
+                (None, Some(command)) => shlex::split(&command).ok_or_else(|| {
+                    BuildContextError::Parse(format!(
+                        "entry for {} has malformed command quoting",
+                        entry.file.display()
+                    ))
+                })?,
                 (None, None) => {
                     return Err(BuildContextError::Parse(format!(
                         "entry for {} has neither arguments nor command",
@@ -93,6 +98,15 @@ pub fn parse_compile_database(json: &str) -> Result<Vec<CompileEntry>, BuildCont
                     )))
                 }
             };
+            if arguments
+                .first()
+                .is_none_or(|compiler| compiler.trim().is_empty())
+            {
+                return Err(BuildContextError::Parse(format!(
+                    "entry for {} has an empty compiler invocation",
+                    entry.file.display()
+                )));
+            }
             Ok(CompileEntry {
                 file: entry.file,
                 directory: entry.directory,
@@ -461,6 +475,48 @@ mod tests {
             entries[0].arguments,
             vec!["cc", "-I/proj/include", "-DA=1", "-c", "/proj/a.c"]
         );
+    }
+
+    #[test]
+    fn command_quoting_preserves_tokens_without_shell_expansion() {
+        let command = r#"cc -I"/work/my include" -I/work/escaped\ include '-DNAME=$HOME' -c a.c"#;
+        let database = serde_json::json!([{"directory":"/work", "file":"a.c", "command":command}]);
+        let entries = parse_compile_database(&database.to_string()).unwrap();
+        assert_eq!(
+            entries[0].arguments,
+            [
+                "cc",
+                "-I/work/my include",
+                "-I/work/escaped include",
+                "-DNAME=$HOME",
+                "-c",
+                "a.c"
+            ]
+        );
+    }
+
+    #[test]
+    fn command_quoting_and_empty_invocations_are_validated() {
+        for command in ["cc \"unterminated", "", "   "] {
+            let database =
+                serde_json::json!([{"directory":"/work", "file":"a.c", "command":command}]);
+            assert!(
+                parse_compile_database(&database.to_string()).is_err(),
+                "{command:?}"
+            );
+        }
+        for arguments in [vec![], vec![""], vec!["  "]] {
+            let database =
+                serde_json::json!([{"directory":"/work", "file":"a.c", "arguments":arguments}]);
+            assert!(parse_compile_database(&database.to_string()).is_err());
+        }
+    }
+
+    #[test]
+    fn command_quoting_does_not_override_arguments_array_precedence() {
+        let database = serde_json::json!([{"directory":"/work", "file":"a.c", "command":"cc \"unterminated", "arguments":["cc", "-I/work/my include", "-c", "a.c"]}]);
+        let entries = parse_compile_database(&database.to_string()).unwrap();
+        assert_eq!(entries[0].arguments[1], "-I/work/my include");
     }
 
     #[test]

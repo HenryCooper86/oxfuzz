@@ -353,7 +353,26 @@ pub async fn compile(
     rt: &dyn RuntimeAdapter,
     workspace: &Path,
 ) -> Result<Harness, ClassifiedError> {
-    match try_compile(harness, rt, workspace).await? {
+    compile_with_options(
+        harness,
+        rt,
+        workspace,
+        &hf_core::runtime::SandboxOptions::default(),
+    )
+    .await
+}
+
+/// Compile with explicit sandbox options, including an immutable image selection.
+///
+/// # Errors
+/// Returns compilation or runtime errors.
+pub async fn compile_with_options(
+    harness: Harness,
+    rt: &dyn RuntimeAdapter,
+    workspace: &Path,
+    options: &hf_core::runtime::SandboxOptions,
+) -> Result<Harness, ClassifiedError> {
+    match try_compile_with_options(harness, rt, workspace, options).await? {
         CompileResult::Ok(h) => Ok(*h),
         CompileResult::Failed(f) => Err(ClassifiedError::Harness(format!(
             "compile failed (exit {}): {}",
@@ -370,15 +389,34 @@ pub async fn compile(
 /// Returns `ClassifiedError` only for infrastructure failures (cannot write the
 /// source, sandbox cannot run). A non-zero compiler exit is `CompileResult::Failed`.
 pub async fn try_compile(
+    harness: Harness,
+    rt: &dyn RuntimeAdapter,
+    workspace: &Path,
+) -> Result<CompileResult, ClassifiedError> {
+    try_compile_with_options(
+        harness,
+        rt,
+        workspace,
+        &hf_core::runtime::SandboxOptions::default(),
+    )
+    .await
+}
+
+/// Compile one attempt using the supplied sandbox options for either language path.
+///
+/// # Errors
+/// Returns source staging or runtime errors; compiler failures retain diagnostics.
+pub async fn try_compile_with_options(
     mut harness: Harness,
     rt: &dyn RuntimeAdapter,
     workspace: &Path,
+    options: &hf_core::runtime::SandboxOptions,
 ) -> Result<CompileResult, ClassifiedError> {
     // Rust fuzz targets take the cargo-fuzz path (project scaffold + `cargo fuzz
     // build`) rather than the single-file compile below, which assumes a C-style
     // `compiler args source -o output` invocation.
     if harness.language == TargetLanguage::Rust {
-        return try_compile_cargo_fuzz(harness, rt, workspace).await;
+        return try_compile_cargo_fuzz(harness, rt, workspace, options).await;
     }
     // Write the harness source to the host workspace (the Docker mount
     // makes it visible inside the container at container_workspace). Use a
@@ -426,7 +464,7 @@ pub async fn try_compile(
         ptrace: false,
     };
     let result = rt
-        .run_command(&cmd, workspace, &limits)
+        .run_command_opts(&cmd, workspace, &limits, options)
         .await?
         .require_completed("harness compile")?;
     if result.exit_code != 0 {
@@ -455,6 +493,7 @@ async fn try_compile_cargo_fuzz(
     mut harness: Harness,
     rt: &dyn RuntimeAdapter,
     workspace: &Path,
+    options: &hf_core::runtime::SandboxOptions,
 ) -> Result<CompileResult, ClassifiedError> {
     let output_name = harness
         .build_cmd
@@ -513,7 +552,7 @@ async fn try_compile_cargo_fuzz(
         ptrace: false,
     };
     let result = rt
-        .run_command(&cmd, workspace, &limits)
+        .run_command_opts(&cmd, workspace, &limits, options)
         .await?
         .require_completed("cargo-fuzz harness compile")?;
     if result.exit_code != 0 {

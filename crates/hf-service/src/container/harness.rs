@@ -166,65 +166,60 @@ fn require_expected_promotion(
     Ok(())
 }
 
-/// The project's compile context for prompt rendering, or `None` when it ships
-/// no database or the database cannot be read.
-///
-/// Drafting is best-effort and never fails, so an unreadable database degrades
-/// to a prompt without build context. `project_compile_flags` still fails the
-/// build for that same project, which is where an operator needs to see it.
-#[cfg(feature = "build-context")]
-fn project_build_context(container: &ServiceContainer, project: &Path) -> Option<BuildContext> {
-    match container.resolve_build_context(project) {
-        Ok(context) => context,
-        Err(error) => {
-            tracing::warn!(
-                "compile database for {} is unusable ({error}); drafting without build context",
-                project.display()
-            );
-            None
-        }
-    }
-}
-
-/// Compile-database support is not built in, so prompts carry no build context.
-#[cfg(not(feature = "build-context"))]
-fn project_build_context(_container: &ServiceContainer, _project: &Path) -> Option<BuildContext> {
-    None
-}
-
-/// The container path the sandbox stages the project at. Compile-database
-/// include directories are rewritten against it.
-#[cfg(feature = "build-context")]
-const CONTAINER_WORKSPACE: &str = "/work";
-
-/// Project-derived compile flags for a harness build, empty when the project
-/// ships no compile database.
-///
-/// A broken database propagates rather than degrading to no flags: a project
-/// that has one and cannot parse it is misconfigured, and building without the
-/// flags would fail later with a confusing missing-header error instead.
-#[cfg(feature = "build-context")]
-fn project_compile_flags(
+/// Retain configured provider context before rendering; legacy prompts remain best-effort.
+async fn project_build_context(
     container: &ServiceContainer,
     project: &Path,
-) -> Result<Vec<String>, ClassifiedError> {
-    Ok(container
-        .resolve_build_context(project)?
-        .map(|context| {
-            hf_discovery::build_context::staged_compile_flags(
-                &context,
-                project,
-                CONTAINER_WORKSPACE,
+    language: TargetLanguage,
+) -> Result<Option<BuildContext>, ClassifiedError> {
+    if container.configured_build_profile(project).await?.is_some() {
+        let captured = container
+            .capture_harness_build_inputs(project, language, true)
+            .await?;
+        let context = captured.context.as_ref().ok_or_else(|| {
+            ClassifiedError::Validation("configured compile context is absent".into())
+        })?;
+        let profile_sha256 = captured.record.profile_sha256.as_ref().ok_or_else(|| {
+            ClassifiedError::Validation(
+                "profile was removed during provider admission; retry drafting".into(),
             )
-        })
-        .unwrap_or_default())
-}
-
-/// Compile-database support is not built in, so a harness compiles with the
-/// engine arguments alone.
-#[cfg(not(feature = "build-context"))]
-fn project_compile_flags(_container: &ServiceContainer, _project: &Path) -> Vec<String> {
-    Vec::new()
+        })?;
+        let compile_database_sha256 = captured
+            .record
+            .compile_database_sha256
+            .as_ref()
+            .ok_or_else(|| {
+                ClassifiedError::Validation("configured database digest is absent".into())
+            })?;
+        container
+            .compilation_store()?
+            .append_harness_build_context(&hf_storage::HarnessBuildContextRecord {
+                id: Uuid::new_v4(),
+                project_root: captured.record.project_root,
+                profile_sha256: profile_sha256.clone(),
+                compile_database_sha256: compile_database_sha256.clone(),
+                evidence: hf_storage::HarnessBuildContextEvidence {
+                    schema_version: 1,
+                    context: context.clone(),
+                },
+                created_at: Utc::now(),
+            })
+            .await
+            .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
+        return Ok(captured.context);
+    }
+    if !cfg!(feature = "build-context") {
+        return Ok(None);
+    }
+    // Profile absence was resolved above; use that legacy selection without a
+    // second async profile read that could introduce unretained configured context.
+    match super::build_context::resolve_project_build_context(project) {
+        Ok(context) => Ok(context),
+        Err(error) => {
+            tracing::warn!("legacy compile database for {} is unusable ({error}); drafting without build context", project.display());
+            Ok(None)
+        }
+    }
 }
 
 impl ServiceContainer {
@@ -255,6 +250,8 @@ impl ServiceContainer {
             ))
             .into());
         }
+        self.verify_harness_build_inputs(project, &harness, true)
+            .await?;
         let store = self.store.as_ref().ok_or_else(|| {
             ClassifiedError::Validation(
                 "harness qualification requires the persistent service store".to_owned(),
@@ -479,12 +476,12 @@ impl ServiceContainer {
         project: &Path,
         candidate: &TargetCandidate,
         engine: EngineKind,
-    ) -> String {
+    ) -> Result<String, ClassifiedError> {
         if let Some(pool) = self.provider_pool() {
             let provider = LlmProviderBridge::new(pool)
                 .with_diagnostics(Arc::clone(&self.diagnostics), "harness_draft");
             let related = crate::knowledge::harness_related_context(project, candidate);
-            let build = project_build_context(self, project);
+            let build = project_build_context(self, project, candidate.language).await?;
             let examples = self.accepted_examples(project, candidate).await;
             match hf_harness::draft_with_examples(
                 candidate,
@@ -496,14 +493,14 @@ impl ServiceContainer {
             )
             .await
             {
-                Ok(draft) => return draft.source,
+                Ok(draft) => return Ok(draft.source),
                 Err(e) => tracing::warn!(
                     "LLM harness draft for '{}' failed ({e}); using heuristic draft",
                     candidate.symbol
                 ),
             }
         }
-        heuristic_draft(candidate, engine).source
+        Ok(heuristic_draft(candidate, engine).source)
     }
 
     /// Accepted examples for one draft: previously promoted harnesses of this
@@ -562,15 +559,19 @@ impl ServiceContainer {
         engine: EngineKind,
         source: &str,
         diagnostics: &str,
-    ) -> Option<String> {
-        let pool = self.provider_pool()?;
+    ) -> Result<Option<String>, ClassifiedError> {
+        self.admit_harness_build(&candidate.project_root, candidate.language)
+            .await?;
+        let Some(pool) = self.provider_pool() else {
+            return Ok(None);
+        };
         let provider = LlmProviderBridge::new(pool)
             .with_diagnostics(Arc::clone(&self.diagnostics), "harness_repair");
         match hf_harness::repair(candidate, engine, source, diagnostics, Box::new(provider)).await {
-            Ok(draft) => Some(draft.source),
+            Ok(draft) => Ok(Some(draft.source)),
             Err(error) => {
                 tracing::warn!("harness repair for '{}' failed: {error}", candidate.symbol);
-                None
+                Ok(None)
             }
         }
     }
@@ -612,6 +613,9 @@ impl ServiceContainer {
         initial_source: String,
         max_repairs: usize,
     ) -> Result<HarnessGenOutcome, ClassifiedError> {
+        self.compilation_store()?;
+        self.admit_harness_build(&candidate.project_root, lang)
+            .await?;
         let target = &candidate.symbol;
         let mut source = initial_source;
         let mut repairs_used = 0usize;
@@ -627,7 +631,7 @@ impl ServiceContainer {
                 last_diagnostics = hf_harness::render_findings(&lint);
                 match self
                     .repair_harness_source(candidate, engine, &source, &last_diagnostics)
-                    .await
+                    .await?
                 {
                     Some(repaired) if repairs_used < max_repairs => {
                         source = repaired;
@@ -640,16 +644,13 @@ impl ServiceContainer {
             let mut build_cmd =
                 hf_harness::build_command(engine, lang, &harness_binary_name(target));
             build_cmd.output = PathBuf::from(harness_binary_name(target));
-            #[cfg(feature = "build-context")]
-            {
-                build_cmd.extra_flags = project_compile_flags(self, &candidate.project_root)?;
-            }
-            #[cfg(not(feature = "build-context"))]
-            {
-                build_cmd.extra_flags = project_compile_flags(self, &candidate.project_root);
-            }
+            let captured = self
+                .capture_harness_build_inputs(&candidate.project_root, lang, true)
+                .await?;
+            captured.stage_marker(workspace)?;
+            build_cmd.extra_flags = captured.flags.clone();
             let harness = Harness {
-                id: Uuid::new_v4(),
+                id: captured.record.harness_id,
                 target_id: candidate.id,
                 engine,
                 source: source.clone(),
@@ -659,14 +660,23 @@ impl ServiceContainer {
                 status: HarnessStatus::Draft,
                 smoke_run: None,
             };
-            match hf_harness::try_compile(harness, self.runtime.as_ref(), workspace).await? {
+            let options = hf_core::runtime::SandboxOptions {
+                image: Some(captured.record.sandbox_image_id.clone()),
+                ..Default::default()
+            };
+            match hf_harness::try_compile_with_options(
+                harness,
+                self.runtime.as_ref(),
+                workspace,
+                &options,
+            )
+            .await?
+            {
                 hf_harness::CompileResult::Ok(compiled) => {
-                    if let Some(store) = &self.store {
-                        store
-                            .upsert_harness(&compiled)
-                            .await
-                            .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
-                    }
+                    self.compilation_store()?
+                        .upsert_harness_with_build_inputs(&compiled, &captured.record)
+                        .await
+                        .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
                     write_current_harness_source(workspace, &compiled.source)?;
                     // Point `harness.active` at the freshly-compiled harness, as
                     // `harness_compile` does. Without this, a repair/refine that
@@ -697,7 +707,7 @@ impl ServiceContainer {
                     }
                     match self
                         .repair_harness_source(candidate, engine, &source, &last_diagnostics)
-                        .await
+                        .await?
                     {
                         Some(repaired) => {
                             source = repaired;
@@ -766,6 +776,7 @@ impl ServiceContainer {
         lang: TargetLanguage,
         policy: AiPolicy,
     ) -> Result<HarnessDraft, ClassifiedError> {
+        self.admit_harness_build(project, lang).await?;
         require_fuzzing_harness_engine(engine, lang)?;
         self.authorize_recorded(Action::DraftHarness, "harness_draft", Some(project))
             .await?;
@@ -796,7 +807,7 @@ impl ServiceContainer {
             // project has been indexed; empty on any failure, which renders
             // the un-augmented prompt.
             let related = crate::knowledge::harness_related_context(project, &candidate);
-            let build = project_build_context(self, project);
+            let build = project_build_context(self, project, candidate.language).await?;
             match hf_harness::draft_with_context(
                 &candidate,
                 engine,
@@ -839,6 +850,8 @@ impl ServiceContainer {
         target: &str,
         lang: TargetLanguage,
     ) -> Result<CompileOutcome, ClassifiedError> {
+        self.compilation_store()?;
+        self.admit_harness_build(project, lang).await?;
         let _workspace_operation = self.acquire_workspace_operation().await?;
         let _target_revision = self.acquire_target_revision(project, target).await?;
         require_fuzzing_harness_engine(engine, lang)?;
@@ -860,17 +873,15 @@ impl ServiceContainer {
         copy_project_sources(project, &workspace);
 
         let mut build_cmd = hf_harness::build_command(engine, lang, &harness_binary_name(target));
-        #[cfg(feature = "build-context")]
-        {
-            build_cmd.extra_flags = project_compile_flags(self, project)?;
-        }
-        #[cfg(not(feature = "build-context"))]
-        {
-            build_cmd.extra_flags = project_compile_flags(self, project);
-        }
+        let target_id = self.resolve_target_id(project, target, lang).await?;
+        let captured = self
+            .capture_harness_build_inputs(project, lang, true)
+            .await?;
+        captured.stage_marker(&workspace)?;
+        build_cmd.extra_flags = captured.flags.clone();
         let harness = Harness {
-            id: Uuid::new_v4(),
-            target_id: self.resolve_target_id(project, target, lang).await?,
+            id: captured.record.harness_id,
+            target_id,
             engine,
             source,
             language: lang,
@@ -879,17 +890,17 @@ impl ServiceContainer {
             status: HarnessStatus::Draft,
             smoke_run: None,
         };
-        let compiled = hf_harness::compile(harness, self.runtime.as_ref(), &workspace).await?;
-        // Persist the compiled harness so it survives restarts and the
-        // Harness/list views can show it before pointing the active marker at
-        // the record. Qualification is safety-critical, so a configured store
-        // must durably accept the record.
-        if let Some(store) = &self.store {
-            store
-                .upsert_harness(&compiled)
-                .await
-                .map_err(|e| ClassifiedError::Storage(e.to_string()))?;
-        }
+        let options = hf_core::runtime::SandboxOptions {
+            image: Some(captured.record.sandbox_image_id.clone()),
+            ..Default::default()
+        };
+        let compiled =
+            hf_harness::compile_with_options(harness, self.runtime.as_ref(), &workspace, &options)
+                .await?;
+        self.compilation_store()?
+            .upsert_harness_with_build_inputs(&compiled, &captured.record)
+            .await
+            .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
         write_current_harness_source(&workspace, &compiled.source)?;
         write_current_harness_id(&workspace, compiled.id)?;
         Ok(CompileOutcome {
@@ -928,6 +939,8 @@ impl ServiceContainer {
         lang: TargetLanguage,
         max_repairs: usize,
     ) -> Result<HarnessGenOutcome, ClassifiedError> {
+        self.compilation_store()?;
+        self.admit_harness_build(project, lang).await?;
         let _workspace_operation = self.acquire_workspace_operation().await?;
         require_fuzzing_harness_engine(engine, lang)?;
         self.authorize_recorded(Action::CompileHarness, "harness_generate", Some(project))
@@ -946,7 +959,9 @@ impl ServiceContainer {
             .map_err(|e| ClassifiedError::Internal(format!("mkdir: {e}")))?;
         copy_project_sources(project, &workspace);
 
-        let source = self.draft_harness_source(project, &candidate, engine).await;
+        let source = self
+            .draft_harness_source(project, &candidate, engine)
+            .await?;
         self.compile_source_with_repair_locked(
             &candidate,
             engine,
@@ -978,6 +993,8 @@ impl ServiceContainer {
         lang: TargetLanguage,
         max_repairs: usize,
     ) -> Result<HarnessGenOutcome, ClassifiedError> {
+        self.compilation_store()?;
+        self.admit_harness_build(project, lang).await?;
         let _workspace_operation = self.acquire_workspace_operation().await?;
         require_fuzzing_harness_engine(engine, lang)?;
         self.authorize_recorded(Action::CompileHarness, "harness_refine", Some(project))
@@ -1171,6 +1188,8 @@ impl ServiceContainer {
                 harness.status
             )));
         }
+        self.verify_harness_build_inputs(project, &harness, true)
+            .await?;
         let store = self.store.as_ref().ok_or_else(|| {
             ClassifiedError::Validation(
                 "harness qualification requires the persistent service store".to_owned(),
@@ -1226,6 +1245,8 @@ impl ServiceContainer {
         smoke_record.config = Some(smoke_config.clone());
         smoke_record.kind = RunKind::Smoke;
         let sandbox_image = resolve_run_sandbox_image(self.runtime.as_ref()).await?;
+        self.verify_harness_dispatch_image(project, &harness, Some(sandbox_image.reference()))
+            .await?;
         let context = run_context_digests(&workspace, sandbox_image.sha256())?;
         retain_run_context(&mut smoke_record, context);
         let artifacts = stage_run_artifacts(&workspace, smoke_record.id, &harness.source, &binary)?;
@@ -1298,15 +1319,20 @@ impl ServiceContainer {
         }
         let mut staged_harness = harness;
         staged_harness.build_cmd.output = artifacts.binary_host.clone();
-        let mut smoked = match hf_harness::smoke_fuzz_in_paths_with_config_and_sandbox_image(
-            staged_harness,
-            self.runtime.as_ref(),
-            &workspace,
-            &artifacts.corpus_relative,
-            &artifacts.output_relative,
-            &smoke_config,
-            Some(sandbox_image.reference().to_owned()),
-        )
+        let mut smoked = match async {
+            self.verify_harness_dispatch_image(project, &active, Some(sandbox_image.reference()))
+                .await?;
+            hf_harness::smoke_fuzz_in_paths_with_config_and_sandbox_image(
+                staged_harness,
+                self.runtime.as_ref(),
+                &workspace,
+                &artifacts.corpus_relative,
+                &artifacts.output_relative,
+                &smoke_config,
+                Some(sandbox_image.reference().to_owned()),
+            )
+            .await
+        }
         .await
         {
             Ok(smoked) => smoked,
@@ -1481,33 +1507,15 @@ impl ServiceContainer {
         let source_sha256 = source_sha256.to_owned();
         let binary_sha256 = binary_sha256.to_owned();
         harness.status = HarnessStatus::Promoted;
-        self.persist_clean_harness_promotion(&harness, &source_sha256, &binary_sha256)
-            .await?;
+        self.persist_harness_promotion(
+            project,
+            &harness,
+            hf_storage::HarnessApprovalKind::CleanSmoke,
+            &source_sha256,
+            &binary_sha256,
+        )
+        .await?;
         Ok(harness)
-    }
-
-    async fn persist_clean_harness_promotion(
-        &self,
-        harness: &Harness,
-        source_sha256: &str,
-        binary_sha256: &str,
-    ) -> Result<(), ClassifiedError> {
-        let store = self.store.as_ref().ok_or_else(|| {
-            ClassifiedError::Validation(
-                "harness promotion requires the persistent service store".to_owned(),
-            )
-        })?;
-        store
-            .promote_harness_with_approval(
-                harness,
-                hf_storage::HarnessApprovalKind::CleanSmoke,
-                source_sha256,
-                binary_sha256,
-                Utc::now(),
-            )
-            .await
-            .map_err(|e| ClassifiedError::Storage(e.to_string()))?;
-        Ok(())
     }
 
     /// Promote a harness with documented smoke findings. This is intentionally
@@ -1536,21 +1544,14 @@ impl ServiceContainer {
         let source_sha256 = source_sha256.to_owned();
         let binary_sha256 = binary_sha256.to_owned();
         harness.status = HarnessStatus::Promoted;
-        let store = self.store.as_ref().ok_or_else(|| {
-            ClassifiedError::Validation(
-                "harness promotion requires the persistent service store".into(),
-            )
-        })?;
-        store
-            .promote_harness_with_approval(
-                &harness,
-                hf_storage::HarnessApprovalKind::KnownFindings,
-                &source_sha256,
-                &binary_sha256,
-                Utc::now(),
-            )
-            .await
-            .map_err(|e| ClassifiedError::Storage(e.to_string()))?;
+        self.persist_harness_promotion(
+            project,
+            &harness,
+            hf_storage::HarnessApprovalKind::KnownFindings,
+            &source_sha256,
+            &binary_sha256,
+        )
+        .await?;
         Ok(harness)
     }
 
@@ -1612,6 +1613,18 @@ impl ServiceContainer {
         lang: TargetLanguage,
         count: usize,
     ) -> Result<Vec<SeedEntry>, ClassifiedError> {
+        self.generate_seeds_llm_with_campaign_harness(project, target, lang, count, None)
+            .await
+    }
+
+    pub(super) async fn generate_seeds_llm_with_campaign_harness(
+        &self,
+        project: &Path,
+        target: &str,
+        lang: TargetLanguage,
+        count: usize,
+        campaign_harness: Option<&Harness>,
+    ) -> Result<Vec<SeedEntry>, ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
         // Clamp the requested count to a sane range so no presentation layer can
         // ask the LLM for zero or an absurd number of seeds. Owning the bound
@@ -1624,8 +1637,24 @@ impl ServiceContainer {
         // LLM seeds when a provider and the target candidate are available.
         let mut datas: Vec<Vec<u8>> = Vec::new();
         if let Some(pool) = self.provider_pool() {
-            if let Ok(inv) = self.discover(project, lang).await {
-                if let Ok(Some(candidate)) = select_target_candidate(&inv.candidates, target) {
+            let inventory = match self.discover(project, lang).await {
+                Ok(inventory) => Some(inventory),
+                Err(error) if campaign_harness.is_some() => return Err(error),
+                // Standalone seeding retains its heuristic fallback when discovery fails.
+                Err(_) => None,
+            };
+            if let Some(inv) = inventory {
+                let candidate = match select_target_candidate(&inv.candidates, target) {
+                    Ok(candidate) => candidate,
+                    Err(error) if campaign_harness.is_some() => return Err(error),
+                    // Standalone seeding retains its heuristic fallback for ambiguous targets.
+                    Err(_) => None,
+                };
+                if let Some(candidate) = candidate {
+                    if let Some(harness) = campaign_harness {
+                        self.verify_harness_build_inputs(project, harness, true)
+                            .await?;
+                    }
                     let provider = LlmProviderBridge::new(pool)
                         .with_diagnostics(Arc::clone(&self.diagnostics), "seed_gen");
                     match hf_harness::generate_seeds(candidate, count, Box::new(provider)).await {
@@ -1661,6 +1690,10 @@ impl ServiceContainer {
         // disk. Listing the dir also folds in any pre-existing entries; the
         // exact target reconciliation stays idempotent.
         let target_id = self.resolve_target_id(project, target, lang).await?;
+        if let Some(harness) = campaign_harness {
+            self.verify_harness_build_inputs(project, harness, true)
+                .await?;
+        }
         let generated = hf_corpus::seed(target_id, &corpus_dir, named_seeds).await?;
         let entries = generated
             .entries
@@ -1745,6 +1778,13 @@ impl ServiceContainer {
         }
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
+        self.verify_corpus_build_inputs(
+            project,
+            target,
+            EngineKind::AflPlusPlus,
+            "regenerate_dead_seeds",
+        )
+        .await?;
         hf_corpus::remove(&corpus_dir, &dead_generated)?;
 
         let count = dead_generated.len().clamp(1, 64);
@@ -1752,6 +1792,13 @@ impl ServiceContainer {
         if let Some(pool) = self.provider_pool() {
             if let Ok(inv) = self.discover(project, lang).await {
                 if let Ok(Some(candidate)) = select_target_candidate(&inv.candidates, target) {
+                    self.verify_corpus_build_inputs(
+                        project,
+                        target,
+                        EngineKind::AflPlusPlus,
+                        "regenerate_dead_seeds",
+                    )
+                    .await?;
                     let provider = LlmProviderBridge::new(pool)
                         .with_diagnostics(Arc::clone(&self.diagnostics), "seed_regen");
                     match hf_harness::generate_seeds(candidate, count, Box::new(provider)).await {
@@ -1774,6 +1821,13 @@ impl ServiceContainer {
             }
         }
         let target_id = self.resolve_target_id(project, target, lang).await?;
+        self.verify_corpus_build_inputs(
+            project,
+            target,
+            EngineKind::AflPlusPlus,
+            "regenerate_dead_seeds",
+        )
+        .await?;
         if !replacements.is_empty() {
             let seeded = hf_corpus::seed(target_id, &corpus_dir, replacements).await?;
             outcome.replacements_added = seeded.entries.len();
@@ -1798,60 +1852,6 @@ impl ServiceContainer {
         self.persist_corpus(target_id, &hf_corpus::list(&corpus_dir)?)
             .await?;
         Ok(outcome)
-    }
-}
-
-#[cfg(all(test, feature = "build-context"))]
-mod build_context_wiring_tests {
-    use std::sync::Arc;
-
-    use super::{project_compile_flags, ServiceContainer};
-
-    #[test]
-    fn a_compile_database_reaches_the_harness_build_command() {
-        let project = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(project.path().join("include")).unwrap();
-        // Built with serde_json rather than string interpolation: a Windows
-        // temporary directory is `C:\Users\...`, and those separators are
-        // invalid JSON escapes when pasted into a string literal.
-        let document = serde_json::json!([{
-            "directory": project.path(),
-            "file": project.path().join("a.c"),
-            "arguments": [
-                "cc".to_owned(),
-                format!("-I{}", project.path().join("include").display()),
-                "-DA=1".to_owned(),
-                "-c".to_owned(),
-                "a.c".to_owned(),
-            ],
-        }]);
-        std::fs::write(
-            project.path().join("compile_commands.json"),
-            serde_json::to_vec(&document).unwrap(),
-        )
-        .unwrap();
-        let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
-
-        let flags = project_compile_flags(&container, project.path()).unwrap();
-
-        assert_eq!(flags, vec!["-I/work/include", "-DA=1"]);
-    }
-
-    #[test]
-    fn a_project_without_a_database_builds_with_no_extra_flags() {
-        let project = tempfile::tempdir().unwrap();
-        let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
-        assert!(project_compile_flags(&container, project.path())
-            .unwrap()
-            .is_empty());
-    }
-
-    #[test]
-    fn a_broken_database_fails_the_build_instead_of_dropping_the_flags() {
-        let project = tempfile::tempdir().unwrap();
-        std::fs::write(project.path().join("compile_commands.json"), "{not json").unwrap();
-        let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
-        assert!(project_compile_flags(&container, project.path()).is_err());
     }
 }
 
@@ -1887,6 +1887,8 @@ impl ServiceContainer {
             )));
         }
         let project = std::path::Path::new(&req.project);
+        self.compilation_store()?;
+        self.admit_harness_build(project, req.lang).await?;
         require_fuzzing_harness_engine(req.engine, req.lang)?;
         self.authorize_recorded(Action::CompileHarness, "harness_tournament", Some(project))
             .await?;
@@ -1916,7 +1918,7 @@ impl ServiceContainer {
             sources.push((
                 CandidateOrigin::Llm,
                 self.draft_harness_source(project, &candidate, req.engine)
-                    .await,
+                    .await?,
             ));
         }
 
@@ -2026,7 +2028,7 @@ const MAX_CANDIDATE_ERROR_BYTES: usize = 2048;
 /// (AGENTS.md 2.4).
 const MAX_ACCEPTED_EXAMPLES: usize = 2;
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(super) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest as _;
     hex::encode(sha2::Sha256::digest(bytes))
 }
@@ -2296,7 +2298,7 @@ mod exact_qualification_tests {
             .upsert_target(
                 &TargetCandidate {
                     id: target_id,
-                    project_root: project.path().to_path_buf(),
+                    project_root: project.path().canonicalize().unwrap(),
                     language: TargetLanguage::C,
                     symbol: TARGET.to_owned(),
                     kind: TargetKind::Parser,
@@ -2556,7 +2558,7 @@ mod exact_qualification_tests {
             .upsert_target(
                 &TargetCandidate {
                     id: compiled.target_id,
-                    project_root: project.path().to_path_buf(),
+                    project_root: project.path().canonicalize().unwrap(),
                     language: TargetLanguage::C,
                     symbol: TARGET.to_owned(),
                     kind: TargetKind::Parser,

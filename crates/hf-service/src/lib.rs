@@ -19,6 +19,7 @@ pub mod automotive_offline;
 pub mod automotive_report;
 #[cfg(feature = "build-doctor")]
 pub mod build_doctor;
+pub mod build_profiles;
 #[cfg(feature = "campaign-health")]
 pub mod campaign_health;
 #[cfg(feature = "proof-carrying")]
@@ -88,6 +89,12 @@ pub mod unreached_surface;
 pub mod verification;
 pub mod workbench;
 
+#[cfg(feature = "build-doctor")]
+pub use build_profiles::SaveBuildProfileRequest;
+pub use build_profiles::{
+    BuildDependency, BuildDependencyKind, BuildProfileView, ProfileBuildSystem,
+};
+
 pub use verification::{
     Confidence, CrashVerdict, HarnessNextStep, HarnessVerdict, SmokeOutcome, VerdictLevel,
 };
@@ -128,8 +135,9 @@ pub use automotive_lab::{
 };
 #[cfg(feature = "build-doctor")]
 pub use build_doctor::{
-    BuildPlan, BuildPlanRunOutcome, BuildPlanRunStatus, BuildPlanStep, BuildSystem,
-    BuildSystemDiagnosis, BuildSystemStatus, RunBuildPlanRequest,
+    BuildDependencyStatus, BuildPlan, BuildPlanRunOutcome, BuildPlanRunStatus, BuildPlanStep,
+    BuildProfileState, BuildSystem, BuildSystemDiagnosis, BuildSystemStatus, ProjectBuildDiagnosis,
+    RunBuildPlanRequest,
 };
 #[cfg(feature = "campaign-health")]
 pub use campaign_health::{

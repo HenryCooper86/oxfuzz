@@ -103,6 +103,7 @@ impl ServiceContainer {
 
         let build_context = self
             .resolve_build_context(&project)
+            .await
             .map_err(service_validation)?
             .unwrap_or_else(empty_build_context);
         let (relative_source, source) = source_evidence(&project, candidate)?;
@@ -740,6 +741,7 @@ impl ServiceContainer {
         }
         let build_context = self
             .resolve_build_context(&project)
+            .await
             .map_err(|_| stale_work_order())?
             .unwrap_or_else(empty_build_context);
         let mut current_payload = work_order.payload.clone();

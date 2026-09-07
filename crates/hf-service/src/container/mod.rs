@@ -6,7 +6,6 @@
 //! ensures every build / fuzz run goes through `hf-runtime` sandboxing
 //! (AGENTS.md 2.12).
 
-#[cfg(feature = "build-context")]
 pub(crate) mod build_context;
 #[cfg(feature = "campaign-health")]
 mod campaign_health;
@@ -25,6 +24,7 @@ mod export;
 mod finding_review;
 mod guards;
 mod harness;
+mod harness_inputs;
 #[cfg(feature = "harness-work-order")]
 mod harness_work_order;
 #[cfg(feature = "campaign-health")]
@@ -82,10 +82,7 @@ use hf_core::target::{TargetCandidate, TargetLanguage};
 use hf_guardrails::{Action, Decision, Guardrails};
 use hf_runtime::{RuntimeConfig, SANDBOX_IMAGE};
 use hf_storage::{GuardrailDecisionRecord, RunRecord, RunStatus, Store};
-#[cfg(feature = "build-doctor")]
 pub(crate) use project_identity::canonical_project_root;
-#[cfg(not(feature = "build-doctor"))]
-use project_identity::canonical_project_root;
 use project_identity::{
     project_lookup_identity, project_slug, select_target_candidate, stored_project_matches,
 };
@@ -1190,6 +1187,18 @@ impl ServiceContainer {
     /// read guards in promotion and protects the checked artifacts through the
     /// persistence decision.
     async fn verify_harness_qualification_locked(
+        &self,
+        project: &Path,
+        target: &str,
+        harness: &Harness,
+    ) -> Result<(), ClassifiedError> {
+        self.verify_harness_build_inputs(project, harness, true)
+            .await?;
+        self.verify_harness_qualification_files_locked(project, target, harness)
+            .await
+    }
+
+    async fn verify_harness_qualification_files_locked(
         &self,
         project: &Path,
         target: &str,

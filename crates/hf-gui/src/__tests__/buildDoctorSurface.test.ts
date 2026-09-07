@@ -1,65 +1,34 @@
-import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createHttpTransport } from "../lib/httpTransport";
+import { enExtra, zhExtra } from "../i18n.extra";
 
-function source(relativePath: string): string {
-  return readFileSync(new URL(relativePath, import.meta.url), "utf8");
-}
+afterEach(() => vi.unstubAllGlobals());
 
-describe("service-owned build doctor surface", () => {
-  it("declares the serialized diagnosis and run outcome", () => {
-    const types = source("../types/index.ts");
-    expect(types).toContain("interface BuildSystemDiagnosis");
-    expect(types).toContain("interface BuildPlan");
-    expect(types).toContain("interface BuildPlanRunOutcome");
-    expect(types).toContain("type BuildSystemStatus");
-    expect(types).toContain("expected_artifact");
-    expect(types).toContain("missing_tool");
-    expect(types).toContain('"cmake"');
+describe("build profile wire adapters", () => {
+  it("maps profile CRUD, bounded history and the reviewed digest to REST", async () => {
+    const requests: Array<{ url: string; method?: string; body: unknown }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, options: RequestInit) => {
+      requests.push({ url, method: options.method, body: options.body ? JSON.parse(String(options.body)) : null });
+      return new Response("null", { status: 200, headers: { "content-type": "application/json" } });
+    }));
+    const transport = createHttpTransport({ baseUrl: "http://localhost:8081" });
+    await transport.invoke("build_profile", { project: "/a b" });
+    await transport.invoke("build_profile_set", { project: "/a b", componentRoot: ".", buildSystem: "cmake", compileDatabasePath: "build/compile_commands.json", cmakeDefinitions: { BUILD_TESTING: "OFF" }, dependencies: [{ kind: "pkg_config", name: "zlib" }] });
+    await transport.invoke("build_history", { project: "/a b", limit: 20 });
+    await transport.invoke("build_run", { project: "/a b", expectedProfileSha256: "reviewed" });
+    await transport.invoke("build_profile_clear", { project: "/a b" });
+    expect(requests).toEqual([
+      { url: "http://localhost:8081/build/profile?project=%2Fa+b", method: "GET", body: null },
+      { url: "http://localhost:8081/build/profile", method: "PUT", body: { project: "/a b", component_root: ".", build_system: "cmake", compile_database_path: "build/compile_commands.json", cmake_definitions: { BUILD_TESTING: "OFF" }, dependencies: [{ kind: "pkg_config", name: "zlib" }] } },
+      { url: "http://localhost:8081/build/history?project=%2Fa+b&limit=20", method: "GET", body: null },
+      { url: "http://localhost:8081/build/run", method: "POST", body: { project: "/a b", expected_profile_sha256: "reviewed" } },
+      { url: "http://localhost:8081/build/profile", method: "DELETE", body: { project: "/a b" } },
+    ]);
   });
-
-  it("shows the whole plan before anything runs", () => {
-    const panel = source("../components/BuildDoctorPanel.tsx");
-    expect(panel).toContain("plan.steps");
-    expect(panel).toContain("step.argv");
-    expect(panel).toContain("plan.expected_artifact");
-    // The run is a separate, later, confirmed call.
-    expect(panel).toContain("buildDoctor.confirmRun");
-    const diagnoseIndex = panel.indexOf('invoke<BuildSystemDiagnosis[]>("build_diagnose"');
-    const runIndex = panel.indexOf('invoke<BuildPlanRunOutcome>("build_run"');
-    expect(diagnoseIndex).toBeGreaterThan(-1);
-    expect(runIndex).toBeGreaterThan(diagnoseIndex);
-  });
-
-  it("renders the service status and never decides supportability itself", () => {
-    const panel = source("../components/BuildDoctorPanel.tsx");
-    expect(panel).toContain("entry.status");
-    expect(panel).toContain("entry.missing_tool");
-    expect(panel).toContain("outcome.status");
-    expect(panel).not.toContain("deriveSupported");
-    expect(panel).not.toMatch(/status\s*===\s*["']supported["']\s*\?\s*true/);
-    // A run button only exists where the service supplied a plan.
-    expect(panel).toMatch(/entry\.plan\s*&&/);
-  });
-
-  it("keeps REST and Tauri as transports", () => {
-    const transport = source("../lib/httpTransport.ts");
-    expect(transport).toContain('path: "/build/diagnose"');
-    expect(transport).toContain('path: "/build/run"');
-    const commands = source("../../src-tauri/src/commands.rs");
-    expect(commands).toContain("pub async fn build_diagnose");
-    expect(commands).toContain("pub async fn build_run");
-    expect(source("../../../hf-web/src/router.rs")).toContain('.route("/build/diagnose"');
-  });
-
-  it("is mounted where a build failure is discovered", () => {
-    expect(source("../views/HarnessView.tsx")).toContain("BuildDoctorPanel");
-  });
-
-  it("keeps English and Chinese build doctor labels paired", () => {
-    const translations = source("../i18n.extra.ts");
-    expect(translations).toContain('"buildDoctor.title": "Build Doctor"');
-    expect(translations).toContain('"buildDoctor.title": "构建诊断"');
-    expect(translations).toContain('"buildDoctor.status.unsupported_in_image": "Not runnable here"');
-    expect(translations).toContain('"buildDoctor.status.unsupported_in_image": "当前镜像无法运行"');
+  it("pairs all build profile states and terminal outcomes in both languages", () => {
+    for (const key of ["unconfigured", "needs_build", "ready", "stale", "invalid"].map((state) => `buildDoctor.profileState.${state}`).concat(["succeeded", "step_failed", "timed_out", "cancelled", "artifact_missing", "artifact_invalid", "runtime_failed", "denied", "profile_changed"].map((state) => `buildDoctor.runStatus.${state}`))) {
+      expect(enExtra[key], key).toBeTruthy();
+      expect(zhExtra[key], key).toBeTruthy();
+    }
   });
 });

@@ -7,7 +7,7 @@ description = "Target discovery: static analysis, semantic ranking, Target Inven
 
 [features]
 default = ["native-analysis"]
-build-context = []
+build-context = ["dep:shlex"]
 native-analysis = ["dep:hf-analysis"]
 semgrep-enrichment = []
 
@@ -20,6 +20,7 @@ async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+shlex = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

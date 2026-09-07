@@ -159,7 +159,8 @@ async fn ranking_propagates_a_configured_store_write_failure() {
 async fn harness_compile_rejects_an_unknown_target_before_runtime_execution() {
     common::install_managed_workspace("oxfuzz_release_identity_it");
     let project = sample_project();
-    let service = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
+    let store = store_in(&project).await;
+    let service = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None).with_store(store);
 
     let error = service
         .harness_compile(

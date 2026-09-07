@@ -52,7 +52,11 @@ fn unavailable_capability(code: &str, reason: impl Into<String>) -> CorpusCapabi
 }
 
 fn qualification_reason_code(message: &str) -> &'static str {
-    if message.contains("another target") {
+    if message.contains("build_diagnosis_unavailable") {
+        "build_diagnosis_unavailable"
+    } else if message.contains("Stale build inputs") {
+        "build_inputs_stale"
+    } else if message.contains("another target") {
         "active_harness_target_mismatch"
     } else if message.contains(" uses ") && message.contains(" rather than ") {
         "active_harness_engine_mismatch"
@@ -179,10 +183,14 @@ impl ServiceContainer {
                 ),
             ));
         }
-        match self
-            .verify_harness_qualification_locked(project, target, &qualified)
-            .await
-        {
+        let verification = async {
+            self.verify_harness_build_inputs(project, &qualified, false)
+                .await?;
+            self.verify_harness_qualification_files_locked(project, target, &qualified)
+                .await
+        }
+        .await;
+        match verification {
             Ok(()) => Ok(CorpusCapability {
                 available: true,
                 reason_code: None,
@@ -417,6 +425,7 @@ impl ServiceContainer {
             ptrace: false,
         };
         let sandbox = hf_core::runtime::SandboxOptions {
+            image: self.configured_harness_image(project, &qualified).await?,
             workspace_read_only: true,
             ..hf_core::runtime::SandboxOptions::default()
         };
@@ -431,6 +440,8 @@ impl ServiceContainer {
             };
             let input_container = container_input_path(&workspace, &entry.path);
             let args = hf_engine::showmap::build_showmap_args(&binary_container, &input_container);
+            self.verify_harness_dispatch_image(project, &qualified, sandbox.image.as_deref())
+                .await?;
             let result = tokio::time::timeout(
                 remaining,
                 self.runtime
@@ -455,6 +466,11 @@ impl ServiceContainer {
             }
         }
 
+        self.verify_harness_build_inputs(project, &qualified, true)
+            .await
+            .map_err(|error| {
+                super::harness_inputs::corpus_input_error("corpus_prune_coverage", error)
+            })?;
         let pruned = hf_corpus::prune(corpus)?;
         let after = corpus_inventory(&pruned)?;
         self.persist_corpus(qualified.target_id, &pruned).await?;
@@ -593,6 +609,7 @@ impl ServiceContainer {
             ptrace: false,
         };
         let sandbox = hf_core::runtime::SandboxOptions {
+            image: self.configured_harness_image(project, &qualified).await?,
             workspace_read_only: true,
             ..hf_core::runtime::SandboxOptions::default()
         };
@@ -606,6 +623,8 @@ impl ServiceContainer {
             &binary_container,
             &container_input_path(&workspace, &baseline_path),
         );
+        self.verify_harness_dispatch_image(project, &qualified, sandbox.image.as_deref())
+            .await?;
         let baseline = match self
             .runtime
             .run_command_opts(&baseline_args, &workspace, &limits, &sandbox)
@@ -647,6 +666,8 @@ impl ServiceContainer {
             };
             let input_container = container_input_path(&workspace, &entry.path);
             let args = hf_engine::showmap::build_showmap_args(&binary_container, &input_container);
+            self.verify_harness_dispatch_image(project, &qualified, sandbox.image.as_deref())
+                .await?;
             let result = tokio::time::timeout(
                 remaining,
                 self.runtime
@@ -879,7 +900,8 @@ impl ServiceContainer {
             env: std::collections::HashMap::new(),
             ptrace: false,
         };
-        let sandbox = minimization_sandbox_options(&artifacts);
+        let mut sandbox = minimization_sandbox_options(&artifacts);
+        sandbox.image = self.configured_harness_image(project, &qualified).await?;
         let cancel = CancellationToken::new();
         let monitor_stop = CancellationToken::new();
         let budget_exceeded = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -925,6 +947,9 @@ impl ServiceContainer {
                 "corpus minimization produced an empty survivor set".to_owned(),
             ));
         }
+        self.verify_harness_build_inputs(project, &qualified, true)
+            .await
+            .map_err(|error| super::harness_inputs::corpus_input_error("corpus_minimize", error))?;
         let mut minimized = match hf_corpus::minimize(&corpus_dir, &artifacts.output_host) {
             Ok(corpus) => corpus,
             Err(error) => {

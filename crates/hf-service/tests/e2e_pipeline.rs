@@ -137,9 +137,12 @@ impl RuntimeAdapter for PipelineRuntime {
         &self,
         cmd: &[String],
         cwd: &Path,
-        _limits: &ResourceLimits,
+        limits: &ResourceLimits,
         opts: &SandboxOptions,
     ) -> Result<CommandResult, ClassifiedError> {
+        if cmd.iter().any(|argument| argument.contains(" -o ")) {
+            return self.run_command(cmd, cwd, limits).await;
+        }
         if cmd.first().is_some_and(|part| part.starts_with("casr-")) {
             return Err(ClassifiedError::Sandbox(
                 "CASR unavailable in test".to_owned(),

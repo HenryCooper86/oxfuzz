@@ -5,6 +5,7 @@
 //! write it through these functions so the logic lives in the service layer and
 //! never diverges between presentations (AGENTS.md 2.9).
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
@@ -858,6 +859,79 @@ impl FuzzingSettings {
     }
 }
 
+/// Deployment allowance for explicit `CMake` definitions in saved build profiles.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BuildProfileSettings {
+    /// Allowed option names. Saving a profile never inserts definitions for them.
+    #[serde(deserialize_with = "deserialize_cmake_allowance")]
+    pub allowed_cmake_options: BTreeSet<String>,
+}
+
+impl Default for BuildProfileSettings {
+    fn default() -> Self {
+        Self {
+            allowed_cmake_options: ["BUILD_SHARED_LIBS".to_owned(), "BUILD_TESTING".to_owned()]
+                .into_iter()
+                .collect(),
+        }
+    }
+}
+
+impl BuildProfileSettings {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        for name in &self.allowed_cmake_options {
+            if !valid_cmake_option_name(name) {
+                return Err(format!(
+                    "build_profiles.allowed_cmake_options contains invalid name '{name}'"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn valid_cmake_option_name(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && name.as_bytes()[0].is_ascii_uppercase()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+fn deserialize_cmake_allowance<'de, D>(deserializer: D) -> Result<BTreeSet<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let names = Vec::<String>::deserialize(deserializer)?;
+    let mut unique = BTreeSet::new();
+    for name in names {
+        if !unique.insert(name.clone()) {
+            return Err(serde::de::Error::custom(format!(
+                "build_profiles.allowed_cmake_options contains duplicate name '{name}'"
+            )));
+        }
+    }
+    Ok(unique)
+}
+
+/// Parse strict build-profile settings without reading a global config file.
+///
+/// # Errors
+/// Returns malformed configuration, invalid names, duplicates, or unknown fields.
+pub fn parse_build_profile_settings(raw: &str) -> Result<BuildProfileSettings, String> {
+    Ok(parse_oxfuzz_runtime_config(raw)?.build_profiles)
+}
+
+/// Read the current deployment allowance before a profile-dependent operation.
+///
+/// # Errors
+/// Returns config read or validation errors without substituting default settings.
+pub fn effective_build_profile_settings() -> Result<BuildProfileSettings, String> {
+    let raw = read_config("oxfuzz")?;
+    parse_build_profile_settings(&raw)
+}
+
 /// Typed global settings whose values are consumed during service bootstrap.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -869,6 +943,7 @@ struct OxfuzzRuntimeConfig {
     auto_revert_threshold_pct: f64,
     auto_revert_notify_only: bool,
     fuzzing: FuzzingSettings,
+    build_profiles: BuildProfileSettings,
     campaign_health: CampaignHealthSettings,
     concolic: ConcolicSettings,
     automotive: AutomotiveSettings,
@@ -887,6 +962,7 @@ impl Default for OxfuzzRuntimeConfig {
             auto_revert_threshold_pct: DEFAULT_AUTO_REVERT_THRESHOLD_PCT,
             auto_revert_notify_only: false,
             fuzzing: FuzzingSettings::default(),
+            build_profiles: BuildProfileSettings::default(),
             campaign_health: CampaignHealthSettings::default(),
             concolic: ConcolicSettings::default(),
             automotive: AutomotiveSettings::default(),
@@ -912,6 +988,7 @@ impl OxfuzzRuntimeConfig {
             );
         }
         self.fuzzing.validate()?;
+        self.build_profiles.validate()?;
         self.campaign_health.validate()?;
         self.concolic.validate()?;
         self.automotive.validate()?;
@@ -2237,13 +2314,27 @@ fn read_config_from(directory: &Path, name: &str) -> Result<String, String> {
     let section = validated_section(name)?;
     let live = directory.join(format!("{section}.toml"));
     let example = directory.join(format!("{section}.example.toml"));
-    if live.is_file() {
-        std::fs::read_to_string(&live).map_err(|e| e.to_string())
-    } else if example.is_file() {
-        std::fs::read_to_string(&example).map_err(|e| e.to_string())
-    } else {
-        Ok(bundled_example(section).to_owned())
+    for candidate in [&live, &example] {
+        match std::fs::symlink_metadata(candidate) {
+            Ok(metadata) => {
+                let effective = if metadata.file_type().is_symlink() {
+                    std::fs::metadata(candidate).map_err(|error| error.to_string())?
+                } else {
+                    metadata
+                };
+                if !effective.is_file() {
+                    return Err(format!(
+                        "config candidate {} must resolve to a regular file",
+                        candidate.display()
+                    ));
+                }
+                return std::fs::read_to_string(candidate).map_err(|error| error.to_string());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
     }
+    Ok(bundled_example(section).to_owned())
 }
 
 /// The example TOML for a section, embedded at compile time so an installed app
@@ -3814,6 +3905,7 @@ default_duration_secs = 22
             "auto_revert_notify_only",
             "auto_revert_threshold_pct",
             "automotive",
+            "build_profiles",
             "campaign_health",
             "coverage_stagnation_new_harness_windows",
             "coverage_stagnation_secs",
@@ -3936,5 +4028,215 @@ default_duration_secs = 22
             "[campaign_health]\nplateau_window = 256\nmax_live_samples = 256\n"
         )
         .is_ok());
+    }
+    #[test]
+    fn build_profile_config_accepts_defaults_and_custom_names() {
+        assert_eq!(
+            parse_build_profile_settings("")
+                .unwrap()
+                .allowed_cmake_options,
+            ["BUILD_SHARED_LIBS".to_owned(), "BUILD_TESTING".to_owned()]
+                .into_iter()
+                .collect()
+        );
+        assert!(parse_oxfuzz_runtime_config(
+            "[build_profiles]\nallowed_cmake_options = [\"BUILD_TESTING\", \"WITH_ZLIB\"]\n"
+        )
+        .is_ok());
+        assert!(
+            parse_oxfuzz_runtime_config("[build_profiles]\nallowed_cmake_options = []\n").is_ok()
+        );
+    }
+
+    #[test]
+    fn build_profile_config_rejects_duplicates_invalid_names_and_unknown_fields() {
+        for raw in [
+            "[build_profiles]\nallowed_cmake_options = [\"BUILD_TESTING\", \"BUILD_TESTING\"]\n",
+            "[build_profiles]\nallowed_cmake_options = [\"build_testing\"]\n",
+            "[build_profiles]\nallowed_cmake_options = [\"_OPTION\"]\n",
+            "[build_profiles]\nallowed_cmake_options = [\"OPTION;ARG\"]\n",
+            "[build_profiles]\nallowed_cmake_options = [\"\"]\n",
+            "[build_profiles]\nunknown = true\n",
+        ] {
+            assert!(parse_oxfuzz_runtime_config(raw).is_err(), "accepted {raw}");
+        }
+        let raw = format!(
+            "[build_profiles]\nallowed_cmake_options = [\"{}\"]\n",
+            "X".repeat(65)
+        );
+        assert!(parse_oxfuzz_runtime_config(&raw).is_err());
+    }
+
+    #[test]
+    fn build_profile_config_load_surfaces_existing_invalid_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let live = directory.path().join("oxfuzz.toml");
+        std::fs::write(
+            &live,
+            "[build_profiles]\nallowed_cmake_options = [\"BAD NAME\"]",
+        )
+        .unwrap();
+        let raw = read_config_from(directory.path(), "oxfuzz").unwrap();
+        assert!(parse_build_profile_settings(&raw).is_err());
+        std::fs::remove_file(&live).unwrap();
+        std::fs::create_dir(&live).unwrap();
+        assert!(read_config_from(directory.path(), "oxfuzz").is_err());
+    }
+    #[test]
+    fn config_file_loading_preserves_live_example_and_embedded_precedence() {
+        let directory = tempfile::tempdir().unwrap();
+        assert_eq!(
+            read_config_from(directory.path(), "oxfuzz").unwrap(),
+            bundled_example("oxfuzz")
+        );
+        let example = directory.path().join("oxfuzz.example.toml");
+        std::fs::write(&example, "# example").unwrap();
+        assert_eq!(
+            read_config_from(directory.path(), "oxfuzz").unwrap(),
+            "# example"
+        );
+        let live = directory.path().join("oxfuzz.toml");
+        std::fs::write(&live, "# live").unwrap();
+        assert_eq!(
+            read_config_from(directory.path(), "oxfuzz").unwrap(),
+            "# live"
+        );
+        std::fs::remove_file(live).unwrap();
+        std::fs::remove_file(&example).unwrap();
+        std::fs::create_dir(example).unwrap();
+        assert!(read_config_from(directory.path(), "oxfuzz").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_config_candidate_is_an_error_without_example_fallback() {
+        let directory = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(
+            directory.path().join("missing"),
+            directory.path().join("oxfuzz.toml"),
+        )
+        .unwrap();
+        assert!(read_config_from(directory.path(), "oxfuzz").is_err());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn special_config_candidates_fail_promptly() {
+        use std::os::unix::{fs::symlink, net::UnixListener};
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        if let Some(directory) = std::env::var_os("HF_SPECIAL_CONFIG_TEST_DIRECTORY") {
+            assert!(read_config_from(Path::new(&directory), "oxfuzz").is_err());
+            return;
+        }
+        for filename in ["oxfuzz.toml", "oxfuzz.example.toml"] {
+            for kind in [
+                "fifo",
+                "fifo_link",
+                "socket",
+                "socket_link",
+                "device_link",
+                "directory_link",
+                "dangling_link",
+            ] {
+                let directory = tempfile::tempdir().unwrap();
+                let candidate = directory.path().join(filename);
+                let target = directory.path().join("target");
+                let mut socket = None;
+                match kind {
+                    "fifo" | "fifo_link" => {
+                        let path = if kind == "fifo" { &candidate } else { &target };
+                        assert!(Command::new("mkfifo").arg(path).status().unwrap().success());
+                        if kind == "fifo_link" {
+                            symlink(&target, &candidate).unwrap();
+                        }
+                    }
+                    "socket" | "socket_link" => {
+                        let path = if kind == "socket" {
+                            &candidate
+                        } else {
+                            &target
+                        };
+                        socket = Some(UnixListener::bind(path).unwrap());
+                        if kind == "socket_link" {
+                            symlink(&target, &candidate).unwrap();
+                        }
+                    }
+                    "device_link" => symlink("/dev/null", &candidate).unwrap(),
+                    "directory_link" => {
+                        std::fs::create_dir(&target).unwrap();
+                        symlink(&target, &candidate).unwrap();
+                    }
+                    "dangling_link" => symlink(&target, &candidate).unwrap(),
+                    _ => unreachable!(),
+                }
+                let mut child = Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "config::tests::special_config_candidates_fail_promptly",
+                    ])
+                    .env("HF_SPECIAL_CONFIG_TEST_DIRECTORY", directory.path())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                let started = Instant::now();
+                let mut timed_out = false;
+                while child.try_wait().unwrap().is_none() {
+                    if started.elapsed() >= Duration::from_secs(3) {
+                        child.kill().unwrap();
+                        timed_out = true;
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let output = child.wait_with_output().unwrap();
+                drop(socket);
+                assert!(
+                    !timed_out,
+                    "config loader blocked reading {filename} ({kind}) without a writer"
+                );
+                assert!(
+                    output.status.success(),
+                    "config loader accepted or failed to reject {filename} ({kind}): {}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn regular_config_symlinks_preserve_live_example_and_embedded_precedence() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let live_target = directory.path().join("live-target");
+        let example_target = directory.path().join("example-target");
+        std::fs::write(&live_target, "# linked live").unwrap();
+        std::fs::write(&example_target, "# linked example").unwrap();
+        let live = directory.path().join("oxfuzz.toml");
+        let example = directory.path().join("oxfuzz.example.toml");
+        symlink(&example_target, &example).unwrap();
+        assert_eq!(
+            read_config_from(directory.path(), "oxfuzz").unwrap(),
+            "# linked example"
+        );
+        symlink(&live_target, &live).unwrap();
+        assert_eq!(
+            read_config_from(directory.path(), "oxfuzz").unwrap(),
+            "# linked live"
+        );
+        std::fs::remove_file(live).unwrap();
+        assert_eq!(
+            read_config_from(directory.path(), "oxfuzz").unwrap(),
+            "# linked example"
+        );
+        std::fs::remove_file(example).unwrap();
+        assert_eq!(
+            read_config_from(directory.path(), "oxfuzz").unwrap(),
+            bundled_example("oxfuzz")
+        );
     }
 }
