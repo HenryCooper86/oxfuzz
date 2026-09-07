@@ -6,9 +6,9 @@ DefectDojo integrations, and rendering in `hf-gui`.
 
 ## 1. Goal
 
-Answer one question about a proposed source change, from retained evidence
-only: does this change introduce a finding or lose coverage that the base
-revision did not have?
+Describe what comparable retained runs observed before and after a proposed
+source change. The comparison does not establish that the change introduced or
+remediated a finding, or that a particular source path caused a coverage delta.
 
 The subsystem maps a source diff to the discovered targets it affects, compares
 retained base and head run evidence, and offers a human-approved publication of
@@ -83,10 +83,19 @@ budget, or approval of its own.
 Two retained runs are comparable for a pull-request comparison when all hold:
 
 - both are terminal `Done` campaign runs for the same target;
+- both reference retained harness records;
 - their engines match;
+- their approved harness source digests (`harness_rev`) are present and match;
+- their retained run settings match exactly: sanitizer, duration budget,
+  memory limit, CPU limit, ordered engine arguments, ordered environment, and
+  random seed;
 - their starting corpus digests (`corpus_rev`) match;
 - their sandbox image identities (`sandbox_rev`) match and are exact; and
 - their source revisions (`source_rev`) differ.
+
+The staged binary digest is not compared. A source change can produce a
+different target binary while the approved harness source remains identical;
+requiring binary identity would refuse the intended cross-revision comparison.
 
 The existing coverage-baseline rules require whole-context equality
 (`context_rev`), which combines source, corpus, and sandbox. A pull-request
@@ -98,26 +107,31 @@ Any unmet condition yields an explicit incomparable result naming the first
 condition that failed. An incomparable pair never produces a coverage verdict or
 a finding classification.
 
-## 7. Finding Classification
+## 7. Finding Observation Classification
 
 Findings are compared by retained stack signature, the same identity triage
 already uses for deduplication:
 
-- **`introduced`** -- present in the head run, absent from the base run;
-- **`carried_over`** -- present in both; and
-- **`resolved`** -- present in the base run, absent from the head run.
+- **`observed_only_in_head`** -- present in the head run, absent from the base
+  run;
+- **`observed_in_both`** -- present in both; and
+- **`observed_only_in_base`** -- present in the base run, absent from the head
+  run.
 
-A signature the base run could not have observed is not `introduced`. When the
-base run retains no crash evidence at all, every head finding is `unknown`
-rather than `introduced`, because an empty base is indistinguishable from an
-unexamined one.
+These values describe the retained observations only. An empty base is a valid
+observation set, so every head finding is `observed_only_in_head`; that label
+does not claim the source change introduced the finding. Causal claims require
+cross-revision replay or other controlled evidence. Verified remediation
+continues to use the Patch to Proof workflow and its exact sandbox evidence.
 
 ## 8. Coverage Regression
 
-Coverage regression is the peak-edge delta between comparable runs, taken from
-the retained `edges` of each run. A regression is reported when head peak edges
-are below base peak edges by at least the configured percentage. A run missing
-retained peak edges makes the coverage comparison unavailable, not zero.
+Coverage comparison is the peak-edge delta between runs with matched harness
+source and run settings, taken from the retained `edges` of each run. A measured
+drop is reported when head peak edges are below base peak edges by at least the
+configured percentage. This numeric delta is descriptive and does not prove
+that a particular source path was lost. A run missing retained peak edges makes
+the coverage comparison unavailable, not zero.
 
 ## 9. Publication
 
@@ -142,7 +156,7 @@ references so a reader can reconstruct the claim.
   already produces the evidence this phase consumes.
 - **Classifying findings by summary or crash kind** -- stack signature is the
   identity triage already dedupes on; anything looser would invent or hide
-  introduced findings.
+  head-only observations.
 - **Publishing automatically on a regression** -- publication is outward-facing
   and stays human-approved.
 
@@ -155,8 +169,9 @@ references so a reader can reconstruct the claim.
   evidence is `unknown`.
 - Comparability requires matching engine, target, corpus, and sandbox with a
   differing source revision, and names the first failed condition otherwise.
-- Introduced, carried-over, and resolved findings follow stack-signature
-  identity, and an empty base run yields `unknown`.
+- Observed-only-in-base, observed-only-in-head, and observed-in-both findings
+  follow stack-signature identity, including when the base observation set is
+  empty.
 - Coverage regression uses retained peak edges of comparable runs only, and is
   unavailable rather than zero when either is missing.
 - Publication requires human approval and reuses existing dedup markers.

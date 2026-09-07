@@ -14,6 +14,10 @@ describe("service-owned change-aware surface", () => {
     expect(types).toContain("type TargetImpact");
     expect(types).toContain("type FindingChange");
     expect(types).toContain("type ComparabilityRefusal");
+    expect(types).toContain('"observed_only_in_base"');
+    expect(types).toContain('"observed_only_in_head"');
+    expect(types).toContain('"observed_in_both"');
+    expect(types).toContain("observed_only_in_head: number");
     // There is deliberately no "unaffected" member of the impact union.
     expect(types).not.toContain('| "unaffected"');
     expect(types).toContain('"changes"');
@@ -72,5 +76,7 @@ describe("service-owned change-aware surface", () => {
     expect(translations).toContain('"changeAware.title": "变更审查"');
     expect(translations).toContain('"changeAware.impact.changed": "Changed"');
     expect(translations).toContain('"changeAware.impact.changed": "已更改"');
+    expect(translations).toContain('"changeAware.finding.observed_only_in_head": "Observed only in head"');
+    expect(translations).toContain('"changeAware.finding.observed_only_in_head": "仅变更侧运行观察到"');
   });
 });

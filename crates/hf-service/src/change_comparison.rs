@@ -3,7 +3,7 @@
 //! Resolves a source diff (from a validated revision range or supplied text),
 //! maps it to the discovered targets it affects, and compares retained base and
 //! head run evidence. It starts no campaign, checks out no revision, and never
-//! converts missing evidence into a verdict.
+//! converts missing evidence or observational differences into a causal claim.
 //!
 //! See `docs/design/change-aware-pr-fuzzing-design.md`.
 
@@ -20,7 +20,7 @@ use crate::change_impact::{
 use crate::container::ServiceContainer;
 
 /// Schema version of the change-aware views.
-pub const CHANGE_AWARE_SCHEMA_VERSION: u32 = 1;
+pub const CHANGE_AWARE_SCHEMA_VERSION: u32 = 2;
 
 /// Longest accepted git revision argument.
 const MAX_REVISION_LEN: usize = 256;
@@ -119,7 +119,7 @@ pub struct PublishComparisonRequest {
 #[derive(Debug, Clone, Serialize)]
 pub struct PublishedComparison {
     pub destination: String,
-    pub introduced: usize,
+    pub observed_only_in_head: usize,
     pub coverage_regressed: bool,
     /// Browser URL of the created record, when the integration returns one.
     pub url: Option<String>,
@@ -291,15 +291,15 @@ impl ServiceContainer {
                 refusal_code(comparison.refusal)
             )));
         }
-        let introduced: Vec<&ClassifiedFinding> = comparison
+        let observed_only_in_head: Vec<&ClassifiedFinding> = comparison
             .findings
             .iter()
-            .filter(|entry| entry.change == FindingChange::Introduced)
+            .filter(|entry| entry.change == FindingChange::ObservedOnlyInHead)
             .collect();
         let regressed = matches!(comparison.coverage, CoverageComparison::Regressed { .. });
-        if introduced.is_empty() && !regressed {
+        if observed_only_in_head.is_empty() && !regressed {
             return Err(ClassifiedError::Validation(
-                "the comparison reports no introduced finding and no coverage regression, so there is nothing to publish".to_owned(),
+                "the comparison reports no head-only observation and no measured coverage drop, so there is nothing to publish".to_owned(),
             ));
         }
 
@@ -317,7 +317,7 @@ impl ServiceContainer {
         .await
         .map_err(|error| ClassifiedError::Validation(error.to_string()))?;
 
-        let signatures: Vec<&str> = introduced
+        let signatures: Vec<&str> = observed_only_in_head
             .iter()
             .map(|entry| entry.stack_signature.as_str())
             .collect();
@@ -327,13 +327,13 @@ impl ServiceContainer {
                     .await?
             }
             PublishDestination::DefectDojo => {
-                self.publish_to_defectdojo(store, req.head_run_id, &signatures)
+                self.publish_to_defectdojo(store, &comparison, &signatures)
                     .await?
             }
         };
         Ok(PublishedComparison {
             destination: req.destination.as_str().to_owned(),
-            introduced: introduced.len(),
+            observed_only_in_head: observed_only_in_head.len(),
             coverage_regressed: regressed,
             url,
         })
@@ -349,7 +349,7 @@ impl ServiceContainer {
         let cfg = crate::issue_tracker::load_config()?;
         let token = crate::issue_tracker::resolve_token(&cfg)?;
         let client = crate::issue_tracker::IssueTrackerClient::from_config(&cfg, &token)?;
-        // Dedup on the first introduced signature, matching how a single crash
+        // Dedup on the first head-only signature, matching how a single crash
         // is deduped when filed on its own.
         if let Some(first) = signatures.first() {
             if let Some(existing) = client.find_existing_issue(first).await {
@@ -357,7 +357,7 @@ impl ServiceContainer {
             }
         }
         let title = format!(
-            "oxfuzz: {} finding(s) introduced by the change under test",
+            "oxfuzz: {} finding observation(s) retained only in the head run",
             signatures.len()
         );
         let body = comparison_issue_body(comparison, signatures);
@@ -365,18 +365,18 @@ impl ServiceContainer {
         Ok(Some(created.url))
     }
 
-    /// Import only the introduced findings, so a comparison never re-reports
+    /// Import only the head-only observations, so a comparison never re-reports
     /// crashes the base revision already had.
     async fn publish_to_defectdojo(
         &self,
         store: &Store,
-        head_run_id: Uuid,
+        comparison: &RevisionComparisonView,
         signatures: &[&str],
     ) -> Result<Option<String>, ClassifiedError> {
         let cfg = crate::defectdojo::load_config()?;
         let token = crate::defectdojo::resolve_token(&cfg)?;
         let crashes: Vec<hf_core::crash::Crash> = store
-            .list_crashes_by_run(head_run_id)
+            .list_crashes_by_run(comparison.head_run_id)
             .await
             .map_err(|error| ClassifiedError::Storage(error.to_string()))?
             .into_iter()
@@ -384,10 +384,10 @@ impl ServiceContainer {
             .collect();
         if crashes.is_empty() {
             return Err(ClassifiedError::Validation(
-                "no retained crash matches the introduced findings".to_owned(),
+                "no retained crash matches the head-only observations".to_owned(),
             ));
         }
-        let findings = crate::defectdojo::crashes_to_generic(&crashes);
+        let findings = change_comparison_defectdojo_document(comparison, &crashes);
         let client = crate::defectdojo::DefectDojoClient::from_config(&cfg, &token)?;
         let import = crate::defectdojo::ImportTarget {
             product_name: cfg
@@ -401,10 +401,13 @@ impl ServiceContainer {
                 .clone()
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| "Fuzzing".to_owned()),
-            test_title: Some("oxfuzz: change comparison".to_owned()),
+            test_title: Some(format!(
+                "oxfuzz: findings observed only in head run {} compared with base {}",
+                comparison.head_run_id, comparison.base_run_id
+            )),
             reimport: cfg.reimport,
             auto_create: cfg.auto_create,
-            // This upload carries only the introduced findings, never the
+            // This upload carries only the head-only observations, never the
             // target's complete set, so it must not close anything.
             close_old_findings: false,
         };
@@ -427,14 +430,39 @@ impl ServiceContainer {
         run: &RunRecord,
     ) -> Result<crate::change_impact::RunComparisonInput, ClassifiedError> {
         Ok(crate::change_impact::RunComparisonInput {
-            target_id: self.run_target(store, run).await.unwrap_or_else(Uuid::nil),
+            target_id: self.comparison_target(store, run).await?,
             engine: run.engine.as_str().to_owned(),
             terminal: run.status == RunStatus::Done && run.kind == RunKind::Campaign,
             source_rev: run.source_rev.clone(),
             corpus_rev: run.corpus_rev.clone(),
             sandbox_rev: run.sandbox_rev.clone(),
+            harness_source_rev: run.harness_rev.clone(),
+            sanitizer: run.config.as_ref().map(|config| config.sanitizer),
+            duration: run.config.as_ref().and_then(|config| config.duration),
+            max_mem_mb: run.config.as_ref().map(|config| config.max_mem_mb),
+            max_cpus: run.config.as_ref().map(|config| config.max_cpus),
+            engine_env: run.config.as_ref().map(|config| config.env.clone()),
+            engine_args: run.config.as_ref().map(|config| config.extra_args.clone()),
+            random_seed: run.config.as_ref().and_then(|config| config.seed),
             edges: run.edges,
         })
+    }
+
+    /// Resolve the retained harness target without hiding storage failures or a
+    /// deleted harness record.
+    async fn comparison_target(
+        &self,
+        store: &Store,
+        run: &RunRecord,
+    ) -> Result<Option<Uuid>, ClassifiedError> {
+        let Some(config) = run.config.as_ref() else {
+            return Ok(None);
+        };
+        store
+            .get_harness(config.harness_id)
+            .await
+            .map(|harness| harness.map(|value| value.target_id))
+            .map_err(|error| ClassifiedError::Storage(error.to_string()))
     }
 
     /// Resolve a run's target through its persisted harness.
@@ -551,19 +579,66 @@ fn comparison_issue_body(comparison: &RevisionComparisonView, signatures: &[&str
     let _ = writeln!(
         body,
         "- coverage: {}",
-        match comparison.coverage {
-            CoverageComparison::Regressed { delta_pct } => format!("regressed by {delta_pct:.2}%"),
-            CoverageComparison::Stable { delta_pct } => format!("stable ({delta_pct:.2}%)"),
-            CoverageComparison::Unavailable => "unavailable".to_owned(),
-        }
+        coverage_publication_text(comparison.coverage)
     );
-    let _ = writeln!(body, "\n## Findings introduced by this change\n");
+    let _ = writeln!(body, "\n## Findings observed only in the head run\n");
     for signature in signatures {
         let _ = writeln!(body, "- `{signature}`");
     }
     let _ = writeln!(
         body,
-        "\nFindings are identified by retained stack signature. Findings the base\nrun already reproduced are excluded."
+        "\nFindings are identified by retained stack signature. These are retained\nobservations, not evidence that the source change introduced them. Findings\nobserved in the base run are excluded. The coverage delta is descriptive under\nmatched settings and does not identify a lost source path."
     );
     body
+}
+
+/// Render head-only crash observations as a `DefectDojo` Generic Findings
+/// Import document with the retained comparison evidence attached.
+#[must_use]
+pub fn change_comparison_defectdojo_document(
+    comparison: &RevisionComparisonView,
+    crashes: &[hf_core::crash::Crash],
+) -> serde_json::Value {
+    use std::fmt::Write as _;
+
+    let mut document = crate::defectdojo::crashes_to_generic(crashes);
+    let coverage = coverage_publication_text(comparison.coverage);
+    if let Some(findings) = document["findings"].as_array_mut() {
+        for finding in findings {
+            if let Some(title) = finding["title"].as_str() {
+                finding["title"] = serde_json::json!(format!("{title} — observed only in head"));
+            }
+            let mut description = finding["description"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            // Formatting into a String is infallible, so no error can reach
+            // this call.
+            let _ = write!(
+                description,
+                "\n\n## Change comparison observation\n\
+                 This finding was observed only in the retained head run. This does not establish that the source change introduced it.\n\
+                 - base run: `{}`\n\
+                 - head run: `{}`\n\
+                 - coverage: {coverage}\n\
+                 The coverage measurement is descriptive under matched settings and does not identify a lost source path.",
+                comparison.base_run_id,
+                comparison.head_run_id
+            );
+            finding["description"] = serde_json::json!(description);
+        }
+    }
+    document
+}
+
+fn coverage_publication_text(coverage: CoverageComparison) -> String {
+    match coverage {
+        CoverageComparison::Regressed { delta_pct } => {
+            format!("measured coverage drop of {:.2}%", delta_pct.abs())
+        }
+        CoverageComparison::Stable { delta_pct } => {
+            format!("measured coverage change of {delta_pct:+.2}%")
+        }
+        CoverageComparison::Unavailable => "measured coverage unavailable".to_owned(),
+    }
 }

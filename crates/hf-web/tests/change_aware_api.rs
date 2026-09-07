@@ -84,9 +84,9 @@ async fn rest_serves_the_service_comparison_and_never_publishes_on_its_own() {
     assert_eq!(comparison["comparable"], true);
     assert_eq!(comparison["coverage"]["status"], "regressed");
     let findings = comparison["findings"].as_array().expect("findings");
-    assert!(findings
-        .iter()
-        .any(|entry| entry["stack_signature"] == "fresh" && entry["change"] == "introduced"));
+    assert!(findings.iter().any(|entry| {
+        entry["stack_signature"] == "fresh" && entry["change"] == "observed_only_in_head"
+    }));
 
     // Publication is outward-facing: the transport cannot make it happen
     // without an authorized, configured integration.

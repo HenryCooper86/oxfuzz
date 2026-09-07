@@ -427,7 +427,10 @@ export interface RemediationDraftView {
 /// bounded and syntactic, so absence from it is missing analysis, not proof.
 export type TargetImpact = "changed" | "reaches_change" | "unknown";
 
-export type FindingChange = "introduced" | "carried_over" | "resolved" | "unknown";
+export type FindingChange =
+  | "observed_only_in_base"
+  | "observed_only_in_head"
+  | "observed_in_both";
 
 export type ComparabilityRefusal =
   | "base_not_terminal"
@@ -436,6 +439,17 @@ export type ComparabilityRefusal =
   | "sandbox_not_exact"
   | "different_target"
   | "different_engine"
+  | "missing_harness"
+  | "missing_harness_source"
+  | "different_harness_source"
+  | "missing_run_settings"
+  | "different_sanitizer"
+  | "different_duration"
+  | "different_memory_limit"
+  | "different_cpu_limit"
+  | "different_engine_environment"
+  | "different_engine_arguments"
+  | "different_random_seed"
   | "different_corpus"
   | "different_sandbox"
   | "same_source_revision";
@@ -497,7 +511,7 @@ export interface RevisionComparisonView {
 
 export interface PublishedComparison {
   destination: string;
-  introduced: number;
+  observed_only_in_head: number;
   coverage_regressed: boolean;
   url: string | null;
 }

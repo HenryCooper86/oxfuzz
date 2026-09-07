@@ -192,12 +192,20 @@ fn targets_are_changed_reaching_or_unknown_but_never_unaffected() {
 
 fn run_input(source: &str, corpus: &str, sandbox: &str) -> RunComparisonInput {
     RunComparisonInput {
-        target_id: Uuid::nil(),
+        target_id: Some(Uuid::nil()),
         engine: "libfuzzer".to_owned(),
         terminal: true,
         source_rev: Some(source.to_owned()),
         corpus_rev: Some(corpus.to_owned()),
         sandbox_rev: Some(format!("docker-image-id-sha256:{sandbox}")),
+        harness_source_rev: Some("harness-source".to_owned()),
+        sanitizer: Some(hf_core::target::Sanitizer::Address),
+        duration: Some(std::time::Duration::from_secs(60)),
+        max_mem_mb: Some(2048),
+        max_cpus: Some(1),
+        engine_env: Some(Vec::new()),
+        engine_args: Some(Vec::new()),
+        random_seed: Some(7),
         edges: Some(100),
     }
 }
@@ -236,7 +244,7 @@ fn comparability_requires_a_differing_source_over_an_otherwise_identical_context
     );
 
     let mut other_target = run_input("head-source", "corpus", "image");
-    other_target.target_id = Uuid::new_v4();
+    other_target.target_id = Some(Uuid::new_v4());
     assert_eq!(
         check_comparability(&base, &other_target),
         Err(ComparabilityRefusal::DifferentTarget),
@@ -265,7 +273,7 @@ fn comparability_requires_a_differing_source_over_an_otherwise_identical_context
 }
 
 #[test]
-fn findings_are_classified_by_stack_signature_and_an_empty_base_is_unknown() {
+fn findings_are_classified_as_observations_by_stack_signature() {
     let classified = classify_findings(
         &["shared".to_owned(), "gone".to_owned()],
         &["shared".to_owned(), "fresh".to_owned()],
@@ -277,15 +285,86 @@ fn findings_are_classified_by_stack_signature_and_an_empty_base_is_unknown() {
             .map(|entry| entry.change)
             .expect("signature is classified")
     };
-    assert_eq!(change("fresh"), FindingChange::Introduced);
-    assert_eq!(change("shared"), FindingChange::CarriedOver);
-    assert_eq!(change("gone"), FindingChange::Resolved);
+    assert_eq!(change("fresh"), FindingChange::ObservedOnlyInHead);
+    assert_eq!(change("shared"), FindingChange::ObservedInBoth);
+    assert_eq!(change("gone"), FindingChange::ObservedOnlyInBase);
+    assert_eq!(
+        serde_json::to_value(change("gone")).unwrap(),
+        "observed_only_in_base"
+    );
 
-    // An empty base is indistinguishable from an unexamined one, so nothing is
-    // called introduced against it.
+    // The result records retained observations without making a causal claim.
     let no_base = classify_findings(&[], &["fresh".to_owned()]);
     assert_eq!(no_base.len(), 1);
-    assert_eq!(no_base[0].change, FindingChange::Unknown);
+    assert_eq!(no_base[0].change, FindingChange::ObservedOnlyInHead);
+    assert_eq!(
+        serde_json::to_value(no_base[0].change).unwrap(),
+        "observed_only_in_head"
+    );
+}
+
+#[test]
+fn comparability_requires_matching_harness_source_and_run_settings() {
+    let base = run_input("base-source", "corpus", "image");
+
+    let cases = [
+        ("missing harness source", {
+            let mut value = run_input("head-source", "corpus", "image");
+            value.harness_source_rev = None;
+            (value, ComparabilityRefusal::MissingHarnessSource)
+        }),
+        ("different harness source", {
+            let mut value = run_input("head-source", "corpus", "image");
+            value.harness_source_rev = Some("different".to_owned());
+            (value, ComparabilityRefusal::DifferentHarnessSource)
+        }),
+        ("different sanitizer", {
+            let mut value = run_input("head-source", "corpus", "image");
+            value.sanitizer = Some(hf_core::target::Sanitizer::Memory);
+            (value, ComparabilityRefusal::DifferentSanitizer)
+        }),
+        ("different duration", {
+            let mut value = run_input("head-source", "corpus", "image");
+            value.duration = Some(std::time::Duration::from_secs(120));
+            (value, ComparabilityRefusal::DifferentDuration)
+        }),
+        ("different memory", {
+            let mut value = run_input("head-source", "corpus", "image");
+            value.max_mem_mb = Some(4096);
+            (value, ComparabilityRefusal::DifferentMemoryLimit)
+        }),
+        ("different cpu", {
+            let mut value = run_input("head-source", "corpus", "image");
+            value.max_cpus = Some(2);
+            (value, ComparabilityRefusal::DifferentCpuLimit)
+        }),
+        ("different engine environment", {
+            let mut value = run_input("head-source", "corpus", "image");
+            value.engine_env = Some(vec![("MODE".to_owned(), "strict".to_owned())]);
+            (value, ComparabilityRefusal::DifferentEngineEnvironment)
+        }),
+        ("different engine arguments", {
+            let mut value = run_input("head-source", "corpus", "image");
+            value.engine_args = Some(vec!["-runs=1".to_owned()]);
+            (value, ComparabilityRefusal::DifferentEngineArguments)
+        }),
+        ("different random seed", {
+            let mut value = run_input("head-source", "corpus", "image");
+            value.random_seed = Some(8);
+            (value, ComparabilityRefusal::DifferentRandomSeed)
+        }),
+    ];
+
+    for (name, (head, expected)) in cases {
+        assert_eq!(check_comparability(&base, &head), Err(expected), "{name}");
+    }
+
+    let mut missing_settings = run_input("head-source", "corpus", "image");
+    missing_settings.duration = None;
+    assert_eq!(
+        check_comparability(&base, &missing_settings),
+        Err(ComparabilityRefusal::MissingRunSettings)
+    );
 }
 
 #[test]
