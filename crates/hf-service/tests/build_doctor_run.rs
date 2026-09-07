@@ -315,13 +315,15 @@ async fn cmake_uses_exact_options_whole_snapshot_component_workdir_and_selected_
     let entries = hf_discovery::build_context::parse_compile_database(&raw).unwrap();
     assert_eq!(entries.len(), 1);
     let root = Path::new(&f.profile.project_root);
+    assert!(std::fs::metadata(&entries[0].directory).unwrap().is_dir());
+    assert_eq!(std::fs::read_to_string(&entries[0].file).unwrap(), "int a;");
     assert_eq!(entries[0].directory, root.join("components/parser"));
     assert_eq!(entries[0].file, root.join("components/parser/a.c"));
     assert_eq!(
         entries[0].arguments,
         [
             "cc".to_owned(),
-            format!("-I{}/include", root.display()),
+            format!("-I{}", root.join("include").display()),
             "-DSELECTED=1".to_owned(),
             "-std=c11".to_owned(),
             "-c".to_owned(),
@@ -851,6 +853,73 @@ async fn normalization_rewrites_only_execution_path_prefixes_and_preserves_other
 }
 
 #[tokio::test]
+async fn normalization_rejects_doubled_separator_suffixes() {
+    assert_normalization_rejects_suffixes(&["/outside"]).await;
+}
+
+#[tokio::test]
+async fn normalization_rejects_windows_rooted_suffixes() {
+    assert_normalization_rejects_suffixes(&[
+        r"\outside",
+        r"\\server\share\outside",
+        r"\\?\C:\outside",
+    ])
+    .await;
+}
+
+#[tokio::test]
+async fn normalization_rejects_windows_drive_qualified_suffixes() {
+    assert_normalization_rejects_suffixes(&["C:/outside", r"C:\outside", "C:outside"]).await;
+}
+
+async fn assert_normalization_rejects_suffixes(suffixes: &[&str]) {
+    for suffix in suffixes {
+        for field in [
+            "directory",
+            "file",
+            "output",
+            "source_argument",
+            "include_argument",
+        ] {
+            let path = format!("/work/{suffix}");
+            let mut entry = serde_json::json!({
+                "directory":"/work/components/parser",
+                "file":"/work/components/parser/a.c",
+                "arguments":["cc", "-c", "a.c"]
+            });
+            match field {
+                "source_argument" => entry["arguments"][2] = path.into(),
+                "include_argument" => {
+                    entry["arguments"] =
+                        serde_json::json!(["cc", format!("-I{path}"), "-c", "a.c"]);
+                }
+                _ => entry[field] = path.into(),
+            }
+            let mut runtime = BuildRuntime::new();
+            runtime.artifact = Some(serde_json::json!([entry]).to_string());
+            let f = fixture(runtime, ProfileBuildSystem::CMake).await;
+            let (selected, previous) = install_prior_database(&f);
+            let outcome = f.service.run_build_plan(f.request()).await.unwrap();
+            assert_eq!(
+                outcome.status,
+                BuildTerminalStatus::ArtifactInvalid,
+                "{field}: {suffix}"
+            );
+            assert_eq!(std::fs::read_to_string(selected).unwrap(), previous);
+            assert!(outcome.build_context.is_none());
+            let history = f.history().await;
+            let terminal = history[0].diagnosis.terminal.as_ref().unwrap();
+            assert_eq!(terminal.status, BuildTerminalStatus::ArtifactInvalid);
+            assert!(terminal
+                .failure_message
+                .as_ref()
+                .unwrap()
+                .contains("relative path suffix"));
+        }
+    }
+}
+
+#[tokio::test]
 async fn cancelled_and_timed_out_probes_are_retained_without_missing_dependency_results() {
     for (termination, status) in [
         (
@@ -1054,7 +1123,7 @@ async fn cmake_command_database_preserves_safe_includes_with_spaced_host_and_inc
     assert!(raw[0].get("command").is_none());
     assert_eq!(
         raw[0]["arguments"][2],
-        format!("-I{}/my include", root.display())
+        format!("-I{}", root.join("my include").display())
     );
     assert_eq!(raw[0]["note"], "unchanged");
     assert_eq!(

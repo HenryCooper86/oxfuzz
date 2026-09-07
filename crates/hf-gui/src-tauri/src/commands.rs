@@ -4584,7 +4584,7 @@ mod build_operator_tests {
                     cmd: command.to_owned(),
                     callback: tauri::ipc::CallbackFn(0),
                     error: tauri::ipc::CallbackFn(1),
-                    url: "tauri://localhost".parse().unwrap(),
+                    url: window.url().unwrap(),
                     body: tauri::ipc::InvokeBody::Json(body),
                     headers: tauri::http::HeaderMap::new(),
                     invoke_key: tauri::test::INVOKE_KEY.to_owned(),
