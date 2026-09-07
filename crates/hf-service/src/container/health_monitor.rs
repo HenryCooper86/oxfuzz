@@ -21,6 +21,8 @@ pub(crate) fn workspace_available_bytes(path: &std::path::Path) -> std::io::Resu
 
 #[cfg(windows)]
 pub(crate) fn workspace_available_bytes(path: &std::path::Path) -> std::io::Result<u64> {
+    std::fs::metadata(path)?;
+    // fs2 resolves the containing volume, so it can otherwise accept a missing trailing path.
     fs2::available_space(path)
 }
 
