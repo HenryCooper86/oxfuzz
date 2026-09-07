@@ -135,7 +135,7 @@ gate_coverage() {
   for crate in "${COVERAGE_CRATES[@]}"; do
     crate_args+=(-p "${crate}")
   done
-  "${binary}" --summary-only "${crate_args[@]}"
+  "${binary}" llvm-cov --summary-only "${crate_args[@]}"
 }
 
 gate_script_tests() {
