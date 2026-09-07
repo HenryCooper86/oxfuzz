@@ -1264,7 +1264,9 @@ async fn corpus_minimize_uses_the_promoted_revision_and_an_isolated_snapshot() {
     let outcome = container.corpus_minimize(&project, target).await.unwrap();
 
     assert_eq!(outcome.before, 2);
+    assert_eq!(outcome.before_bytes, 6);
     assert_eq!(outcome.after, 1);
+    assert_eq!(outcome.after_bytes, 3);
     assert!(runtime
         .saw_minimize
         .load(std::sync::atomic::Ordering::Relaxed));

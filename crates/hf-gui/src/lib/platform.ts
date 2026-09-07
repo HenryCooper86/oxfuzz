@@ -34,9 +34,9 @@ export async function openExternal(url: string): Promise<void> {
 }
 
 /// Open a native folder picker dialog and return the selected path.
-export async function pickFolder(): Promise<string | null> {
+export async function pickFolder(title?: string): Promise<string | null> {
   if (isTauriEnvironment()) {
-    const result = await getTransport().invoke<string | null>("open_folder_dialog");
+    const result = await getTransport().invoke<string | null>("open_folder_dialog", { title });
     return result ?? null;
   }
   // Web fallback

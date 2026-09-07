@@ -367,20 +367,35 @@ attacker could likely abuse it. Each finding is a real, reproduced crash.
 const SCREEN_CORPUS = `
 # Corpus (Corpus Management)
 
-**Purpose:** seed, grow, prune, and inspect the collection of example inputs the
-fuzzer mutates, for the selected target.
+**Purpose:** import, inspect, grow, measure, and reduce the retained inputs for
+the selected target. The inventory reports the current input and byte totals.
 
 **What you can do** (all disabled until a target is selected):
 
 - **Generate with AI** -- ask the LLM to synthesize seed inputs.
 - **Seed** -- create a starter corpus.
 - **Grow** -- expand the corpus.
-- **Prune** -- minimize it (confirms first).
-- **List** -- show the current entries.
+- **Import** -- add the nonempty regular files directly inside a directory. The
+  desktop app opens a native folder picker; the browser accepts a server path
+  inside an approved root. The result distinguishes added inputs and bytes,
+  duplicates, and skipped entries.
+- **Remove byte duplicates** -- delete byte-identical inputs after confirmation.
+  This operation makes no statement about equivalent coverage.
+- **Measure seed survival** -- use AFL++ to compare each input's edge tuples with
+  empty input coverage. This is a heuristic, not proof of parser progress.
+  **Unknown** means the input was not measured; it does not mean 0%.
+- **Reduce by showmap fingerprint** -- retain one input per whole-showmap
+  fingerprint after confirmation. Unmeasured inputs use byte deduplication. This
+  is not a global minimum set.
+- **libFuzzer -merge=1** -- replace the corpus with libFuzzer's canonical merge
+  survivors after confirmation.
+- **List** -- refresh the exact current entries and capability status.
 
 **Gotchas:** the corpus is scoped to the selected target's workspace. With no
-target it prompts you to pick one in Harness. A good starter corpus helps the
-fuzzer find bugs faster.
+target it prompts you to pick one in Harness. Engine-backed actions require the
+exact promoted, smoke-qualified harness revision and run only in the sandbox.
+The screen reports why an action is unavailable. Opening or refreshing this
+screen checks retained state only; it does not discover targets or run engines.
 
 **What it shows:** a table of File, SHA256 (truncated), Source, and Size.
 `;

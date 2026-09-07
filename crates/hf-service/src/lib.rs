@@ -158,11 +158,11 @@ pub use container::{
     build_sandbox_image, copy_project_sources, generate_target_seeds, initialize_workspace_root,
     project_workspace_dir, provider_pool_from_config, provider_pool_from_env, repo_root,
     runtime_from_env, workspace_dir, workspace_root, AgentInstanceSnapshot, AgentPoolSnapshot,
-    ArtifactSummary, CompileOutcome, CoverageSample, EffectiveAutoRevert, MemorySnapshot,
-    MinimizeOutcome, ProviderSnapshot, RegressionResult, RunCancelOutcome, RunControlStatus,
-    RunHistoryItem, RunLifecycleStatus, RunSummary, SchedulableTarget, SeedEntry,
-    SeedRegenerationOutcome, SeedSurvivalReport, ServiceContainer, SystemSnapshot,
-    SyzkallerRunOpts, SyzkallerSummary,
+    ArtifactSummary, CompileOutcome, CorpusCapabilities, CorpusCapability, CorpusImportOutcome,
+    CorpusInventory, CoverageSample, EffectiveAutoRevert, MemorySnapshot, MinimizeOutcome,
+    ProviderSnapshot, RegressionResult, RunCancelOutcome, RunControlStatus, RunHistoryItem,
+    RunLifecycleStatus, RunSummary, SchedulableTarget, SeedEntry, SeedRegenerationOutcome,
+    SeedSurvivalReport, ServiceContainer, SystemSnapshot, SyzkallerRunOpts, SyzkallerSummary,
 };
 #[cfg(feature = "coverage-blockers")]
 pub use coverage_blockers::{

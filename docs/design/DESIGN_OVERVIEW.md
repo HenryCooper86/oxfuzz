@@ -35,7 +35,7 @@ all under human-in-the-loop supervision.
 | Automotive protocol contracts | hf-automotive | versioned DTO + `Validate` contract | automotive-protocol-fuzzing-design.md |
 | Crash triage | hf-crash | `Crash`, `CrashReport`, `CrashOrigin` | crash-triage-design.md |
 | Finding proof view | hf-service | `FindingProofCard`, `CrashReviewItem` | finding-proof-card-design.md |
-| Corpus management | hf-corpus | `Corpus`, `CorpusEntry` | corpus-coverage-design.md |
+| Corpus management | hf-corpus + hf-service | bounded corpus I/O plus service-owned inventory, import outcome, and engine-operation availability | corpus-coverage-design.md |
 | Coverage tracking | hf-coverage | `CoverageReport` | corpus-coverage-design.md |
 | Campaign evidence and advice | hf-service + hf-coverage | versioned evidence/advice DTOs | proof-carrying-campaign-intelligence.md |
 | Sandbox / runtime | hf-runtime | `RuntimeAdapter` | runtime-design.md |

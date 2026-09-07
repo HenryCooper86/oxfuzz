@@ -90,7 +90,7 @@ Binary Tool integration is outside this release's scope.
 | `run <project> --target <sym> --engine <e> --duration 60m` | Run a sandboxed campaign with the active promoted harness (Ctrl-C cancels cooperatively). |
 | `campaign <project> --target <sym> --engine <e>` | Run and triage a bounded campaign using an already smoke-qualified, human-promoted harness. |
 | `triage <project> --target <sym>` | Ingest, dedup, classify (CASR), and draft reports for crashes. |
-| `corpus <project> --target <sym> --op seed\|llmseed\|grow\|prune\|cprune\|minimize\|cmin\|absorb\|list` | Manage the corpus (`llmseed` = LLM-authored seeds, `cprune`/`cmin` = coverage-guided prune/minimize). |
+| `corpus <project> --target <sym> --op seed\|llmseed\|grow\|prune\|cprune\|survival\|minimize\|absorb\|import\|list [--from <dir>]` | Manage the corpus. `prune` removes byte duplicates; `cprune` and `minimize` run the qualified harness in the sandbox; `import` reports exact added-byte, duplicate, and skipped counts and requires `--from`. |
 | `coverage <project> --target <sym>` | Summarize line/region/function coverage. |
 | `regress <project> --target <sym>` | Re-run the known crash reproducers to verify they still (or no longer) crash. |
 | `ci <project> --target <sym> --engine <e> [--sarif out.sarif]` | CI gate: seed, run, triage, and export SARIF; exits non-zero when crashes are found. |

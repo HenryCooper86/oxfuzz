@@ -116,6 +116,47 @@ describe("transport", () => {
     }
   });
 
+  it("maps advanced corpus commands to their exact service routes", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      return new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    try {
+      const transport = createHttpTransport();
+      await transport.invoke("corpus_import", {
+        project: "/srv/project",
+        target: "parse",
+        source: "/srv/corpus",
+      });
+      await transport.invoke("seed_survival", { project: "/srv/project", target: "parse" });
+      await transport.invoke("corpus_prune_coverage", { project: "/srv/project", target: "parse" });
+      await transport.invoke("corpus_minimize", { project: "/srv/project", target: "parse" });
+      await transport.invoke("corpus_capabilities", { project: "/srv/project", target: "parse" });
+
+      expect(calls.map((call) => new URL(call.url).pathname)).toEqual([
+        "/corpus/import",
+        "/corpus/survival",
+        "/corpus/prune-coverage",
+        "/corpus/minimize",
+        "/corpus/capabilities",
+      ]);
+      expect(calls.every((call) => call.init.method === "POST")).toBe(true);
+      expect(JSON.parse(String(calls[0].init.body))).toEqual({
+        project: "/srv/project",
+        target: "parse",
+        source: "/srv/corpus",
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("bridges run_fuzzer to the durable asynchronous run contract", async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     const progress: RunProgressEvent[] = [];

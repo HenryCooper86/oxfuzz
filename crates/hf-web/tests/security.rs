@@ -244,6 +244,136 @@ async fn cors_preflight_allows_typed_config_patch_from_an_approved_origin() {
 }
 
 #[tokio::test]
+async fn corpus_import_rejects_a_source_outside_the_approved_roots() {
+    let approved = tempfile::tempdir().unwrap();
+    let project = approved.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let app = build_with_state_and_security(
+        AppState::new(hf_service::ServiceContainer::stubbed()),
+        open_local_security(approved.path()),
+    );
+    let body = serde_json::json!({
+        "project": project,
+        "target": "parse",
+        "source": outside.path(),
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/corpus/import")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn corpus_import_from_an_approved_source_returns_exact_accounting() {
+    let approved = tempfile::tempdir().unwrap();
+    let project = approved.path().join("project");
+    let source = approved.path().join("external-corpus");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&source).unwrap();
+    let target = format!("parse_web_import_{}", uuid::Uuid::new_v4().simple());
+    std::fs::write(
+        project.join("parse.c"),
+        format!("int {target}(const unsigned char *data, unsigned long size) {{ return size && data[0]; }}"),
+    )
+    .unwrap();
+    std::fs::write(source.join("a"), b"new").unwrap();
+    std::fs::write(source.join("b"), b"new").unwrap();
+    std::fs::write(source.join("empty"), b"").unwrap();
+    let app = build_with_state_and_security(
+        AppState::new(hf_service::ServiceContainer::stubbed()),
+        open_local_security(approved.path()),
+    );
+    let body = serde_json::json!({ "project": project, "target": target, "source": source });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/corpus/import")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(json["inspected"], 3);
+    assert_eq!(json["eligible"], 2);
+    assert_eq!(json["duplicates"], 1);
+    assert_eq!(json["skipped"], 1);
+    assert_eq!(json["added"], 1);
+    assert_eq!(json["added_bytes"], 3);
+    assert_eq!(
+        json["before"],
+        serde_json::json!({ "inputs": 0, "bytes": 0 })
+    );
+    assert_eq!(
+        json["after"],
+        serde_json::json!({ "inputs": 1, "bytes": 3 })
+    );
+
+    // Best-effort test cleanup: a missing temporary workspace needs no further action.
+    let _ = std::fs::remove_dir_all(hf_service::workspace_dir(
+        approved.path().join("project").as_path(),
+        body["target"].as_str().unwrap(),
+    ));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn corpus_import_rejects_an_approved_root_symlink_to_an_outside_source() {
+    use std::os::unix::fs::symlink;
+
+    let approved = tempfile::tempdir().unwrap();
+    let project = approved.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let linked_source = approved.path().join("linked-source");
+    symlink(outside.path(), &linked_source).unwrap();
+    let app = build_with_state_and_security(
+        AppState::new(hf_service::ServiceContainer::stubbed()),
+        open_local_security(approved.path()),
+    );
+    let body = serde_json::json!({
+        "project": project,
+        "target": "parse",
+        "source": linked_source,
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/corpus/import")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
 async fn project_paths_outside_the_allowlist_fail_before_service_access() {
     let allowed = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();

@@ -70,10 +70,20 @@ Settings affects subsequent operations without rewriting an active run.
 This preflight also covers smoke qualification and maintenance commands that
 invoke an engine. Smoke resolves its 60-second qualification request into the
 single `FuzzRunConfig` shared unchanged by persistence, `hf-harness`, the engine
-command, and the runtime deadline. AFL++ coverage
-pruning and libFuzzer corpus minimization validate their bounded operation
+command, and the runtime deadline. AFL++ coverage pruning and libFuzzer corpus minimization validate their bounded operation
 durations and resolve sandbox resources before workspace preparation, corpus
 reads, artifact staging, or guardrail authorization.
+
+Corpus operation availability is also service-owned. The read-only query uses
+the validated engine policy and exact active harness qualification and target
+ownership evidence; it does not probe the runtime, contact a provider, or run
+an engine. Presentation controls may explain and disable unavailable work,
+while the corpus executor still repeats policy, promotion, smoke-run, and
+artifact checks at execution. Import and byte deduplication resolve the
+canonical target before filesystem mutation and report exact input and byte
+inventories measured under the same workspace operation. Browser imports also
+require the web layer to approve the canonical source directory and destination
+project.
 
 Every persisted execution, including smoke qualification, carries the harness
 identifier in its run configuration. Target-specific consumers resolve the run

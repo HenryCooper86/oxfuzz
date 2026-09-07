@@ -1095,6 +1095,23 @@ impl ServiceContainer {
         target: &str,
         engine: EngineKind,
     ) -> Result<Harness, ClassifiedError> {
+        if self.store.is_none() {
+            return Err(ClassifiedError::Validation(
+                "harness qualification requires the persistent service store".to_owned(),
+            ));
+        }
+        let target_id = self.resolve_target_id_any_language(project, target).await?;
+        self.active_harness_for_target_locked(project, target, target_id, engine)
+            .await
+    }
+
+    async fn active_harness_for_target_locked(
+        &self,
+        project: &Path,
+        target: &str,
+        target_id: Uuid,
+        engine: EngineKind,
+    ) -> Result<Harness, ClassifiedError> {
         let store = self.store.as_ref().ok_or_else(|| {
             ClassifiedError::Validation(
                 "harness qualification requires the persistent service store".to_owned(),
@@ -1117,7 +1134,19 @@ impl ServiceContainer {
                         "active harness record {id} is missing; compile '{target}' again"
                     ))
                 })?;
-            if harness.engine != engine || harness.source != source {
+            if harness.target_id != target_id {
+                return Err(ClassifiedError::Validation(format!(
+                    "active harness record {id} belongs to another target; compile '{target}' again"
+                )));
+            }
+            if harness.engine != engine {
+                return Err(ClassifiedError::Validation(format!(
+                    "active harness for '{target}' uses {} rather than {}; compile it again",
+                    harness.engine.as_str(),
+                    engine.as_str()
+                )));
+            }
+            if harness.source != source {
                 return Err(ClassifiedError::Validation(format!(
                     "active harness metadata for '{target}' does not match its binary/source; compile it again"
                 )));
@@ -1125,7 +1154,6 @@ impl ServiceContainer {
             return Ok(harness);
         }
 
-        let target_id = self.resolve_target_id_any_language(project, target).await?;
         let harnesses = store
             .list_harnesses(target_id)
             .await
@@ -1431,11 +1459,50 @@ pub struct SeedEntry {
     pub sha256: String,
 }
 
-/// The result of a corpus minimization pass: entry counts before and after.
+/// Exact input and byte inventory for one retained corpus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct CorpusInventory {
+    pub inputs: usize,
+    pub bytes: u64,
+}
+
+/// Exact accounting for one external flat-directory corpus import.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct CorpusImportOutcome {
+    pub inspected: usize,
+    pub eligible: usize,
+    pub duplicates: usize,
+    pub skipped: usize,
+    pub added: usize,
+    pub added_bytes: u64,
+    pub before: CorpusInventory,
+    pub after: CorpusInventory,
+}
+
+/// Availability of one engine-backed corpus operation for the selected
+/// target's exact active harness revision.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CorpusCapability {
+    pub available: bool,
+    pub reason_code: Option<String>,
+    pub reason: Option<String>,
+}
+
+/// Engine-backed corpus operation availability for one project and target.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CorpusCapabilities {
+    pub seed_survival: CorpusCapability,
+    pub coverage_prune: CorpusCapability,
+    pub minimize: CorpusCapability,
+}
+
+/// The result of a corpus minimization pass: inventory before and after.
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct MinimizeOutcome {
     pub before: usize,
     pub after: usize,
+    pub before_bytes: u64,
+    pub after_bytes: u64,
 }
 
 /// The result of a seed-survival measurement over one target's corpus: how

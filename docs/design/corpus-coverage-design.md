@@ -52,12 +52,18 @@ pub struct CorpusEntry {
 - **Import** -- bring an external corpus directory (for example an OSS-Fuzz
   corpus checkout) into the target's corpus: bounded listing of regular files
   only, hash-deduplicated against what the corpus already retains and within
-  the import itself, committed through fresh-inode atomic writes under
-  content-addressed names, so re-importing the same directory adds nothing.
+  the import itself, and validate every candidate plus the final entry and byte
+  budgets before the first destination write. Accepted inputs are committed
+  through fresh-inode atomic writes under content-addressed names, so
+  re-importing the same directory adds nothing.
   Unlike grow, whose input filter is engine-output-shaped, every regular file
   of a flat external corpus is imported, tagged `Fuzzer`: a fuzzer earned
-  them, just not ours. The source must be a regular directory; a mistyped
-  path fails loudly instead of silently importing nothing.
+  them, just not ours. The source must be a regular directory; a mistyped path
+  fails loudly instead of silently importing nothing. The result reports exact
+  before/after input and byte inventories plus added input and byte counts,
+  measured while the target workspace operation is held. Validation failures
+  leave the destination unchanged. A later destination I/O failure may follow
+  an earlier atomic file commit; import is not a whole-directory transaction.
 - **Snapshot** -- copy the retained flat corpus into an empty run-owned corpus
   before sandbox execution.
 - **Merge snapshot** -- hash-deduplicate new run-owned inputs back into the
@@ -161,6 +167,43 @@ Whole-directory transactions were rejected: they require platform-specific
 directory exchange primitives and do not compose with a retained directory
 that may be observed by the UI. Instead, all validation is front-loaded and
 each accepted file is committed atomically.
+
+### 3.4 Operator-visible corpus operations
+
+The service exposes current corpus inventory and engine-specific operation
+availability. Availability is derived without invoking a provider, runtime, or
+engine: it reads the validated fuzzing policy and the exact active harness,
+promotion, smoke-run, source-digest, binary-digest, target ownership, and
+on-disk artifact evidence. A disabled engine is an unavailable capability with
+a stable reason; storage or configuration failures remain errors. The executor
+repeats policy and qualification checks immediately before any harness
+execution, so a stale client capability cannot authorize work.
+
+The operations have distinct evidence and claims:
+
+- Basic prune is SHA-256 byte deduplication because filesystem corpus listings
+  do not contain measured coverage hashes. It makes no coverage-preservation
+  claim and resolves the selected target before deleting files.
+- AFL++ coverage reduction executes the exact promoted and smoke-qualified
+  harness through sandboxed `afl-showmap`, then retains one input for each
+  whole-map fingerprint. Inputs that were not measured fall back to their
+  distinct content hash. This is fingerprint reduction, not a global minimum
+  covering set.
+- Seed survival executes that same qualified AFL++ harness. A survivor has an
+  edge tuple absent from the empty-input baseline; this is a heuristic that it
+  passed entry validation, not proof that parsing succeeded. Missing maps are
+  reported as `not_measured`, and a run with no measured verdict has an unknown
+  ratio rather than zero.
+- libFuzzer minimization executes the exact promoted and smoke-qualified
+  harness with `-merge=1` over immutable staged inputs. Only a successful,
+  bounded merge output replaces the retained corpus.
+
+Browser directory import names a server-side directory. Both the destination
+project and source directory must resolve within administrator-approved roots;
+symlink escapes are rejected before the service reads the source. A trusted
+desktop import may use an explicitly selected external directory. Presentation
+layers only collect the path, show destructive confirmations, and render the
+service result.
 
 ## 4. Coverage
 

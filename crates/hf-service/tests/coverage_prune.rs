@@ -36,6 +36,7 @@ max_duration_secs = 7200
 /// A runtime that returns canned `afl-showmap` output keyed on the input path:
 /// inputs `a` and `b` cover the same edges; `c` covers an extra edge.
 struct ShowmapRuntime {
+    calls: std::sync::atomic::AtomicUsize,
     saw_read_only: std::sync::atomic::AtomicBool,
     showmap_limits: std::sync::Mutex<Option<hf_core::runtime::ResourceLimits>>,
     fail_showmap: bool,
@@ -48,6 +49,7 @@ impl hf_core::runtime::RuntimeAdapter for ShowmapRuntime {
         _image: &str,
     ) -> Result<Option<hf_core::runtime::ImmutableImageReference>, hf_core::error::ClassifiedError>
     {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(Some(hf_test_utils::immutable_test_image()?))
     }
 
@@ -57,6 +59,7 @@ impl hf_core::runtime::RuntimeAdapter for ShowmapRuntime {
         cwd: &std::path::Path,
         _limits: &hf_core::runtime::ResourceLimits,
     ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let is_showmap = cmd.first().is_some_and(|command| command == "afl-showmap");
         if is_showmap && self.fail_showmap {
             return Err(hf_core::error::ClassifiedError::Sandbox(
@@ -123,7 +126,7 @@ async fn coverage_prune_collapses_same_coverage_inputs() {
     let target = "parse_entry";
     std::fs::write(
         project.join("parse.c"),
-        "#include <stddef.h>\nint parse_entry(const unsigned char *data, size_t size) { return size && data[0]; }\n",
+        "#include <stddef.h>\nint parse_entry(const unsigned char *data, size_t size) { return size && data[0]; }\nint parse_foreign(const unsigned char *data, size_t size) { return size > 1 && data[1]; }\n",
     )
     .unwrap();
 
@@ -133,6 +136,7 @@ async fn coverage_prune_collapses_same_coverage_inputs() {
             .unwrap(),
     );
     let runtime = Arc::new(ShowmapRuntime {
+        calls: std::sync::atomic::AtomicUsize::new(0),
         saw_read_only: std::sync::atomic::AtomicBool::new(false),
         showmap_limits: std::sync::Mutex::new(None),
         fail_showmap: false,
@@ -174,14 +178,73 @@ async fn coverage_prune_collapses_same_coverage_inputs() {
         .harness_promote(&project, target, hf_core::engine::EngineKind::AflPlusPlus)
         .await
         .unwrap();
+    let foreign_workspace = hf_service::workspace_dir(&project, "parse_foreign");
+    let foreign_corpus = foreign_workspace.join("corpus");
+    std::fs::create_dir_all(&foreign_corpus).unwrap();
+    std::fs::copy(
+        workspace.join("harness.source"),
+        foreign_workspace.join("harness.source"),
+    )
+    .unwrap();
+    std::fs::copy(
+        workspace.join("harness.active"),
+        foreign_workspace.join("harness.active"),
+    )
+    .unwrap();
+    std::fs::write(foreign_workspace.join("fuzz_parse_foreign"), b"#!/bin/true").unwrap();
+    std::fs::write(foreign_corpus.join("a"), b"foreign-a").unwrap();
+    std::fs::write(foreign_corpus.join("b"), b"foreign-b").unwrap();
+    let calls_before_foreign = runtime.calls.load(std::sync::atomic::Ordering::SeqCst);
+    let foreign_capabilities = container
+        .corpus_capabilities(&project, "parse_foreign")
+        .await
+        .expect("foreign marker ownership is an unavailable readiness result");
+    assert_eq!(
+        foreign_capabilities.coverage_prune.reason_code.as_deref(),
+        Some("active_harness_target_mismatch")
+    );
+    assert!(!foreign_capabilities.coverage_prune.available);
+    let foreign_error = container
+        .corpus_prune_coverage(&project, "parse_foreign")
+        .await
+        .expect_err("another target's active harness marker must not authorize execution");
+    assert!(
+        foreign_error.to_string().contains("another target"),
+        "{foreign_error}"
+    );
+    assert_eq!(hf_corpus::list(&foreign_corpus).unwrap().entries.len(), 2);
+    assert_eq!(
+        runtime.calls.load(std::sync::atomic::Ordering::SeqCst),
+        calls_before_foreign,
+        "target ownership denial must happen before runtime execution"
+    );
+    let calls_before_readiness = runtime.calls.load(std::sync::atomic::Ordering::SeqCst);
+    let capabilities = container
+        .corpus_capabilities(&project, target)
+        .await
+        .expect("readiness should inspect retained evidence");
+    assert!(capabilities.seed_survival.available);
+    assert!(capabilities.coverage_prune.available);
+    assert!(!capabilities.minimize.available);
+    assert_eq!(
+        capabilities.minimize.reason_code.as_deref(),
+        Some("active_harness_engine_mismatch")
+    );
+    assert_eq!(
+        runtime.calls.load(std::sync::atomic::Ordering::SeqCst),
+        calls_before_readiness,
+        "capability inspection must not invoke the runtime"
+    );
     let outcome = container
         .corpus_prune_coverage(&project, target)
         .await
         .expect("coverage prune should run");
 
     assert_eq!(outcome.before, 3);
+    assert_eq!(outcome.before_bytes, 30);
     // a and b collapse (same coverage); c survives. => 2.
     assert_eq!(outcome.after, 2, "coverage-equal inputs should collapse");
+    assert_eq!(outcome.after_bytes, 20);
     assert!(runtime
         .saw_read_only
         .load(std::sync::atomic::Ordering::Relaxed));
@@ -210,6 +273,7 @@ async fn coverage_prune_propagates_sandbox_failure_without_pruning() {
             .unwrap(),
     );
     let runtime = Arc::new(ShowmapRuntime {
+        calls: std::sync::atomic::AtomicUsize::new(0),
         saw_read_only: std::sync::atomic::AtomicBool::new(false),
         showmap_limits: std::sync::Mutex::new(None),
         fail_showmap: true,

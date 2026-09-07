@@ -15,7 +15,9 @@ use super::crash_inputs::{collect_crash_inputs, collect_legacy_crash_inputs, is_
 use super::guards::StagingDirectoryGuard;
 use super::harness_workspace::{container_input_path, harness_binary_name};
 use super::output_budget::{monitor_run_output, run_artifacts_within_budget};
-use super::project_identity::{canonical_project_root, stored_project_matches};
+use super::project_identity::{
+    canonical_project_root, select_target_candidate, stored_project_matches,
+};
 use super::staging::{
     minimization_failure_with_rollback, minimization_sandbox_options, run_output_dir,
     stage_run_artifacts, verify_run_artifacts, verify_staged_qualification,
@@ -23,12 +25,177 @@ use super::staging::{
 use super::workspace::workspace_dir;
 use super::{
     ensure_workspace_directory, prepare_configured_workspace_root, resolve_internal_run,
-    run_has_crash_evidence, MinimizeOutcome, SeedSurvivalReport, ServiceContainer,
-    CORPUS_MINIMIZE_SECS, COVERAGE_PRUNE_COMMAND_SECS, COVERAGE_PRUNE_OPERATION_SECS,
-    SEED_SURVIVAL_COMMAND_SECS, SEED_SURVIVAL_OPERATION_SECS,
+    run_has_crash_evidence, CorpusCapabilities, CorpusCapability, CorpusImportOutcome,
+    CorpusInventory, MinimizeOutcome, SeedSurvivalReport, ServiceContainer, CORPUS_MINIMIZE_SECS,
+    COVERAGE_PRUNE_COMMAND_SECS, COVERAGE_PRUNE_OPERATION_SECS, SEED_SURVIVAL_COMMAND_SECS,
+    SEED_SURVIVAL_OPERATION_SECS,
 };
 
+fn corpus_inventory(corpus: &hf_core::corpus::Corpus) -> Result<CorpusInventory, ClassifiedError> {
+    let bytes = corpus.entries.iter().try_fold(0_u64, |total, entry| {
+        total.checked_add(entry.size).ok_or_else(|| {
+            ClassifiedError::Internal("corpus inventory byte count overflow".to_owned())
+        })
+    })?;
+    Ok(CorpusInventory {
+        inputs: corpus.entries.len(),
+        bytes,
+    })
+}
+
+fn unavailable_capability(code: &str, reason: impl Into<String>) -> CorpusCapability {
+    CorpusCapability {
+        available: false,
+        reason_code: Some(code.to_owned()),
+        reason: Some(reason.into()),
+    }
+}
+
+fn qualification_reason_code(message: &str) -> &'static str {
+    if message.contains("another target") {
+        "active_harness_target_mismatch"
+    } else if message.contains(" uses ") && message.contains(" rather than ") {
+        "active_harness_engine_mismatch"
+    } else if message.contains("no active harness")
+        || message.contains("active harness record")
+        || message.contains("no persisted qualification record")
+    {
+        "active_harness_missing"
+    } else if message.contains("explicitly promoted") {
+        "harness_not_promoted"
+    } else if message.contains("artifacts are missing") {
+        "artifact_missing"
+    } else if message.contains("digest") {
+        "artifact_digest_mismatch"
+    } else if message.contains("qualification") {
+        "qualification_missing"
+    } else if message.contains("persistent service store") {
+        "persistent_store_required"
+    } else {
+        "qualification_unavailable"
+    }
+}
+
 impl ServiceContainer {
+    /// Inspect advanced corpus-operation readiness for the selected target's
+    /// exact active harness without invoking a provider, runtime, or engine.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` when configuration, target discovery, or
+    /// retained storage cannot be read reliably.
+    pub async fn corpus_capabilities(
+        &self,
+        project: &Path,
+        target: &str,
+    ) -> Result<CorpusCapabilities, ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
+        let project_root = canonical_project_root(project)?;
+        let project = project_root.as_path();
+        let settings = crate::config::effective_fuzzing_settings().map_err(|error| {
+            ClassifiedError::Validation(format!("invalid fuzzing settings: {error}"))
+        })?;
+        let Some(store) = &self.store else {
+            let unavailable = unavailable_capability(
+                "persistent_store_required",
+                "corpus readiness requires the persistent service store",
+            );
+            return Ok(CorpusCapabilities {
+                seed_survival: unavailable.clone(),
+                coverage_prune: unavailable.clone(),
+                minimize: unavailable,
+            });
+        };
+        let project_text = project.to_str().ok_or_else(|| {
+            ClassifiedError::Validation("project path is not valid UTF-8".to_owned())
+        })?;
+        let retained = store
+            .list_targets(project_text)
+            .await
+            .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
+        let target_id = select_target_candidate(&retained, target)?
+            .map(|candidate| candidate.id)
+            .ok_or_else(|| {
+                ClassifiedError::Validation(format!(
+                    "retained target '{target}' was not found; run discovery first"
+                ))
+            })?;
+        let _target_revision = self.acquire_target_revision(project, target).await?;
+
+        let afl = self
+            .corpus_engine_capability_locked(
+                project,
+                target,
+                target_id,
+                EngineKind::AflPlusPlus,
+                &settings,
+            )
+            .await?;
+        let minimize = self
+            .corpus_engine_capability_locked(
+                project,
+                target,
+                target_id,
+                EngineKind::LibFuzzer,
+                &settings,
+            )
+            .await?;
+        Ok(CorpusCapabilities {
+            seed_survival: afl.clone(),
+            coverage_prune: afl,
+            minimize,
+        })
+    }
+
+    async fn corpus_engine_capability_locked(
+        &self,
+        project: &Path,
+        target: &str,
+        target_id: Uuid,
+        engine: EngineKind,
+        settings: &crate::config::FuzzingSettings,
+    ) -> Result<CorpusCapability, ClassifiedError> {
+        if let Err(reason) = settings.require_engine(engine) {
+            return Ok(unavailable_capability("engine_disabled", reason));
+        }
+        let qualified = match self
+            .active_harness_for_target_locked(project, target, target_id, engine)
+            .await
+        {
+            Ok(harness) => harness,
+            Err(ClassifiedError::Validation(message)) => {
+                return Ok(unavailable_capability(
+                    qualification_reason_code(&message),
+                    message,
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        if qualified.status != HarnessStatus::Promoted {
+            return Ok(unavailable_capability(
+                "harness_not_promoted",
+                format!(
+                    "{} corpus operations require an explicitly promoted harness",
+                    engine.as_str()
+                ),
+            ));
+        }
+        match self
+            .verify_harness_qualification_locked(project, target, &qualified)
+            .await
+        {
+            Ok(()) => Ok(CorpusCapability {
+                available: true,
+                reason_code: None,
+                reason: None,
+            }),
+            Err(ClassifiedError::Validation(message)) => Ok(unavailable_capability(
+                qualification_reason_code(&message),
+                message,
+            )),
+            Err(error) => Err(error),
+        }
+    }
+
     async fn corpus_absorb_run_record(
         &self,
         project: &Path,
@@ -138,7 +305,7 @@ impl ServiceContainer {
         Ok(corpus.entries.len())
     }
 
-    /// Prune duplicate-coverage entries from the corpus.
+    /// Remove byte-identical entries from the corpus.
     ///
     /// # Errors
     /// Returns `ClassifiedError` if files cannot be removed.
@@ -146,18 +313,28 @@ impl ServiceContainer {
         &self,
         project: &Path,
         target: &str,
-    ) -> Result<usize, ClassifiedError> {
+    ) -> Result<MinimizeOutcome, ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
+        let project_root = canonical_project_root(project)?;
+        let project = project_root.as_path();
         self.authorize_recorded(Action::CorpusOp, "corpus_prune", Some(project))
             .await?;
+        let target_id = self.resolve_target_id_any_language(project, target).await?;
         prepare_configured_workspace_root()?;
+        let _target_revision = self.acquire_target_revision(project, target).await?;
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
         let corpus = hf_corpus::list(&corpus_dir)?;
+        let before = corpus_inventory(&corpus)?;
         let pruned = hf_corpus::prune(corpus)?;
-        let target_id = self.resolve_target_id_any_language(project, target).await?;
+        let after = corpus_inventory(&pruned)?;
         self.persist_corpus(target_id, &pruned).await?;
-        Ok(pruned.entries.len())
+        Ok(MinimizeOutcome {
+            before: before.inputs,
+            after: after.inputs,
+            before_bytes: before.bytes,
+            after_bytes: after.bytes,
+        })
     }
 
     /// Coverage-based corpus minimization: run each input through `afl-showmap`
@@ -187,14 +364,16 @@ impl ServiceContainer {
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
         let mut corpus = hf_corpus::list(&corpus_dir)?;
-        let before = corpus.entries.len();
-        if before == 0 {
+        let before = corpus_inventory(&corpus)?;
+        if before.inputs == 0 {
             return Ok(MinimizeOutcome {
                 before: 0,
                 after: 0,
+                before_bytes: 0,
+                after_bytes: 0,
             });
         }
-        if before > 10_000 {
+        if before.inputs > 10_000 {
             return Err(ClassifiedError::Validation(
                 "coverage pruning is limited to 10000 corpus inputs per operation".to_owned(),
             ));
@@ -277,9 +456,14 @@ impl ServiceContainer {
         }
 
         let pruned = hf_corpus::prune(corpus)?;
-        let after = pruned.entries.len();
+        let after = corpus_inventory(&pruned)?;
         self.persist_corpus(qualified.target_id, &pruned).await?;
-        Ok(MinimizeOutcome { before, after })
+        Ok(MinimizeOutcome {
+            before: before.inputs,
+            after: after.inputs,
+            before_bytes: before.bytes,
+            after_bytes: after.bytes,
+        })
     }
 
     /// Measure seed survival for one target's corpus: how many seeds reach
@@ -505,8 +689,8 @@ impl ServiceContainer {
 
     /// Import an external corpus directory (for example an OSS-Fuzz corpus
     /// checkout) into the target's corpus: bounded, hash-deduplicated against
-    /// what the corpus already retains, and content-addressed, so re-importing
-    /// the same directory adds nothing.
+    /// what the corpus already retains, and collision-safe, so re-importing the
+    /// same directory adds nothing. Returns exact import and inventory counts.
     ///
     /// # Errors
     /// Returns `ClassifiedError` if the source is not a regular directory,
@@ -516,18 +700,43 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
         source: &Path,
-    ) -> Result<usize, ClassifiedError> {
+    ) -> Result<CorpusImportOutcome, ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
+        let project_root = canonical_project_root(project)?;
+        let project = project_root.as_path();
         self.authorize_recorded(Action::CorpusOp, "corpus_import", Some(project))
             .await?;
+        let target_id = self.resolve_target_id_any_language(project, target).await?;
         prepare_configured_workspace_root()?;
+        let _target_revision = self.acquire_target_revision(project, target).await?;
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
-        let (mut corpus, added) = hf_corpus::import(&corpus_dir, source)?;
-        let target_id = self.resolve_target_id_any_language(project, target).await?;
+        let outcome = hf_corpus::import(&corpus_dir, source)?;
+        let mut corpus = outcome.corpus;
         corpus.target_id = target_id;
+        let after = corpus_inventory(&corpus)?;
+        let before = CorpusInventory {
+            inputs: after.inputs.checked_sub(outcome.added).ok_or_else(|| {
+                ClassifiedError::Internal("import input accounting underflow".to_owned())
+            })?,
+            bytes: after
+                .bytes
+                .checked_sub(outcome.added_bytes)
+                .ok_or_else(|| {
+                    ClassifiedError::Internal("import byte accounting underflow".to_owned())
+                })?,
+        };
         self.persist_corpus(target_id, &corpus).await?;
-        Ok(added)
+        Ok(CorpusImportOutcome {
+            inspected: outcome.inspected,
+            eligible: outcome.eligible,
+            duplicates: outcome.duplicates,
+            skipped: outcome.skipped,
+            added: outcome.added,
+            added_bytes: outcome.added_bytes,
+            before,
+            after,
+        })
     }
 
     /// Feed triaged crash reproducers back into the corpus.
@@ -610,11 +819,13 @@ impl ServiceContainer {
         prepare_configured_workspace_root()?;
         let workspace = workspace_dir(project, target);
         let corpus_dir = ensure_workspace_directory(&workspace, Path::new("corpus"))?;
-        let before = hf_corpus::list(&corpus_dir)?.entries.len();
-        if before == 0 {
+        let before = corpus_inventory(&hf_corpus::list(&corpus_dir)?)?;
+        if before.inputs == 0 {
             return Ok(MinimizeOutcome {
                 before: 0,
                 after: 0,
+                before_bytes: 0,
+                after_bytes: 0,
             });
         }
 
@@ -732,9 +943,12 @@ impl ServiceContainer {
                 error,
             ));
         }
+        let after = corpus_inventory(&minimized)?;
         Ok(MinimizeOutcome {
-            before,
-            after: minimized.entries.len(),
+            before: before.inputs,
+            after: after.inputs,
+            before_bytes: before.bytes,
+            after_bytes: after.bytes,
         })
     }
 }
