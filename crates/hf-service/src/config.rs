@@ -201,6 +201,14 @@ pub struct CampaignHealthSettings {
     /// Free workspace bytes below which the disk is reported as under
     /// pressure.
     pub disk_floor_bytes: u64,
+    /// Seconds between live campaign assessments.
+    pub assessment_interval_secs: u64,
+    /// Maximum structured progress samples retained in live telemetry.
+    pub max_live_samples: usize,
+    /// Days terminal campaign health events remain eligible for pruning.
+    pub event_retention_days: u64,
+    /// Hours included in the morning campaign summary.
+    pub morning_summary_lookback_hours: u64,
 }
 
 impl Default for CampaignHealthSettings {
@@ -209,6 +217,10 @@ impl Default for CampaignHealthSettings {
             plateau_window: 3,
             stale_progress_secs: 180,
             disk_floor_bytes: 3 * 1024 * 1024 * 1024,
+            assessment_interval_secs: 30,
+            max_live_samples: 120,
+            event_retention_days: 30,
+            morning_summary_lookback_hours: 24,
         }
     }
 }
@@ -225,6 +237,45 @@ impl CampaignHealthSettings {
         }
         if self.disk_floor_bytes == 0 {
             return Err("campaign_health.disk_floor_bytes must be greater than zero".to_owned());
+        }
+        if self.assessment_interval_secs == 0 {
+            return Err(
+                "campaign_health.assessment_interval_secs must be greater than zero".to_owned(),
+            );
+        }
+        if self.max_live_samples < 2 {
+            return Err("campaign_health.max_live_samples must be at least 2".to_owned());
+        }
+        if self.max_live_samples < self.plateau_window {
+            return Err(
+                "campaign_health.max_live_samples must be at least campaign_health.plateau_window"
+                    .to_owned(),
+            );
+        }
+        if self.max_live_samples > hf_storage::MAX_CAMPAIGN_HEALTH_SAMPLES {
+            return Err(format!(
+                "campaign_health.max_live_samples must not exceed {}",
+                hf_storage::MAX_CAMPAIGN_HEALTH_SAMPLES
+            ));
+        }
+        if self.event_retention_days == 0 {
+            return Err(
+                "campaign_health.event_retention_days must be greater than zero".to_owned(),
+            );
+        }
+        if self.event_retention_days > 36_500 {
+            return Err("campaign_health.event_retention_days must not exceed 36500".to_owned());
+        }
+        if self.morning_summary_lookback_hours == 0 {
+            return Err(
+                "campaign_health.morning_summary_lookback_hours must be greater than zero"
+                    .to_owned(),
+            );
+        }
+        if self.morning_summary_lookback_hours > 876_000 {
+            return Err(
+                "campaign_health.morning_summary_lookback_hours must not exceed 876000".to_owned(),
+            );
         }
         Ok(())
     }
@@ -3763,6 +3814,7 @@ default_duration_secs = 22
             "auto_revert_notify_only",
             "auto_revert_threshold_pct",
             "automotive",
+            "campaign_health",
             "coverage_stagnation_new_harness_windows",
             "coverage_stagnation_secs",
             "coverage_stagnation_stop_windows",
@@ -3873,5 +3925,16 @@ default_duration_secs = 22
             let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
+    }
+    #[test]
+    fn campaign_health_live_sample_capacity_fits_durable_evidence() {
+        assert!(parse_campaign_health_settings(
+            "[campaign_health]\nplateau_window = 257\nmax_live_samples = 257\n"
+        )
+        .is_err());
+        assert!(parse_campaign_health_settings(
+            "[campaign_health]\nplateau_window = 256\nmax_live_samples = 256\n"
+        )
+        .is_ok());
     }
 }

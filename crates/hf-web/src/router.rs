@@ -6,6 +6,7 @@
 
 #[cfg(any(
     feature = "automotive-scapy",
+    feature = "campaign-health",
     feature = "patch-to-proof",
     feature = "triage-disposition"
 ))]
@@ -188,6 +189,12 @@ pub enum SseEvent {
     },
     /// `run:status` -- one run changed lifecycle state.
     RunStatus { run_id: String, status: String },
+    /// `campaign:health` -- one newly retained health condition.
+    #[cfg(feature = "campaign-health")]
+    CampaignHealth {
+        owner: hf_service::RunOwnerView,
+        event: Box<hf_service::HealthEvent>,
+    },
     /// `stream:lagged` -- this subscriber fell behind the bounded channel.
     StreamLagged { dropped: u64 },
 }
@@ -197,6 +204,8 @@ impl SseEvent {
         match self {
             SseEvent::RunProgress { .. } => "run:progress",
             SseEvent::RunStatus { .. } => "run:status",
+            #[cfg(feature = "campaign-health")]
+            SseEvent::CampaignHealth { .. } => "campaign:health",
             SseEvent::StreamLagged { .. } => "stream:lagged",
         }
     }
@@ -373,6 +382,25 @@ pub fn build_with_state(state: AppState) -> Router {
 /// process-global environment mutation.
 pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityConfig) -> Router {
     state.security = security;
+    #[cfg(feature = "campaign-health")]
+    {
+        let event_tx = state.event_tx.clone();
+        let security = state.security.clone();
+        state
+            .container
+            .bind_campaign_health_delivery(std::sync::Arc::new(move |owner, event| {
+                if security
+                    .approve_project(std::path::Path::new(&owner.project_root))
+                    .is_err()
+                {
+                    return;
+                }
+                let _no_subscribers = event_tx.send(SseEvent::CampaignHealth {
+                    owner,
+                    event: Box::new(event),
+                });
+            }));
+    }
     match (
         state.security.token_configured(),
         state.security.allows_open_access(),
@@ -426,6 +454,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .route("/runs/harness-source", post(run_harness_source))
         .route("/runs/revert-harness", post(revert_harness_from_run))
         .route("/runs/start", post(run_start))
+        .route("/runs/{id}/owner", get(run_owner))
         .route("/runs/{id}/status", get(run_status))
         .route("/runs/{id}/cancel", post(cancel_run_by_id))
         .merge(proof_carrying_routes())
@@ -742,7 +771,11 @@ fn run_closeout_routes() -> Router<AppState> {
 
 #[cfg(feature = "campaign-health")]
 fn campaign_health_routes() -> Router<AppState> {
-    Router::new().route("/runs/{id}/health", get(campaign_health))
+    Router::new()
+        .route("/runs/{id}/health", get(campaign_health))
+        .route("/runs/{id}/telemetry", get(campaign_telemetry))
+        .route("/runs/{id}/health/events", get(campaign_health_events))
+        .route("/campaign-health/morning", post(morning_health_summary))
 }
 
 #[cfg(not(feature = "campaign-health"))]
@@ -1371,12 +1404,103 @@ async fn campaign_health(
     State(state): State<AppState>,
     Path(id): Path<uuid::Uuid>,
 ) -> ApiResult<serde_json::Value> {
+    let owner = state
+        .container
+        .run_project(id)
+        .await
+        .map_err(classified_api_error)?;
+    let _approved_owner = approved_project(&state, &owner)?;
     let report = state
         .container
         .campaign_health(id)
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(report)))
+}
+
+async fn run_owner(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> ApiResult<serde_json::Value> {
+    let owner = state
+        .container
+        .run_owner(id)
+        .await
+        .map_err(classified_api_error)?;
+    let _approved_owner = approved_project(&state, std::path::Path::new(&owner.project_root))?;
+    Ok(Json(public_value(owner)))
+}
+
+#[cfg(feature = "campaign-health")]
+async fn campaign_telemetry(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> ApiResult<serde_json::Value> {
+    let owner = state
+        .container
+        .run_project(id)
+        .await
+        .map_err(classified_api_error)?;
+    let _approved_owner = approved_project(&state, &owner)?;
+    let telemetry = state
+        .container
+        .campaign_telemetry(id)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(telemetry)))
+}
+
+#[cfg(feature = "campaign-health")]
+#[derive(Debug, Deserialize)]
+struct CampaignHealthEventQuery {
+    cursor: Option<uuid::Uuid>,
+    limit: Option<u32>,
+}
+
+#[cfg(feature = "campaign-health")]
+async fn campaign_health_events(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+    Query(query): Query<CampaignHealthEventQuery>,
+) -> ApiResult<serde_json::Value> {
+    let owner = state
+        .container
+        .run_project(id)
+        .await
+        .map_err(classified_api_error)?;
+    let _approved_owner = approved_project(&state, &owner)?;
+    let page = state
+        .container
+        .campaign_health_event_page(
+            id,
+            query.cursor,
+            query
+                .limit
+                .unwrap_or(hf_service::MAX_CAMPAIGN_HEALTH_EVENT_PAGE_SIZE),
+        )
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(page)))
+}
+
+#[cfg(feature = "campaign-health")]
+#[derive(Debug, Deserialize)]
+struct MorningHealthSummaryRequest {
+    project: PathBuf,
+}
+
+#[cfg(feature = "campaign-health")]
+async fn morning_health_summary(
+    State(state): State<AppState>,
+    Json(request): Json<MorningHealthSummaryRequest>,
+) -> ApiResult<serde_json::Value> {
+    let project = approved_project(&state, &request.project)?;
+    let summary = state
+        .container
+        .morning_health_summary(&project, chrono::Utc::now())
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(summary)))
 }
 
 #[cfg(feature = "unreached-surface")]
@@ -1816,6 +1940,12 @@ async fn run_status(
                 }),
             )
         })?;
+    let owner = state
+        .container
+        .run_project(run_id)
+        .await
+        .map_err(classified_api_error)?;
+    let _approved_owner = approved_project(&state, &owner)?;
     Ok(Json(public_value(status)))
 }
 
@@ -1824,6 +1954,26 @@ async fn cancel_run_by_id(
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let run_id = uuid::Uuid::parse_str(&id).map_err(map_err(StatusCode::BAD_REQUEST))?;
+    if state
+        .container
+        .run_control_status(run_id)
+        .await
+        .map_err(classified_api_error)?
+        .is_none()
+    {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "run not found".to_owned(),
+            }),
+        ));
+    }
+    let owner = state
+        .container
+        .run_project(run_id)
+        .await
+        .map_err(classified_api_error)?;
+    let _approved_owner = approved_project(&state, &owner)?;
     match state
         .container
         .request_run_cancel(run_id)

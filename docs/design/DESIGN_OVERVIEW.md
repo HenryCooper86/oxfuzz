@@ -55,7 +55,7 @@ all under human-in-the-loop supervision.
 | Crash disposition | hf-service | ordered disposition, next action, claim ceiling | triage-disposition-design.md |
 | Campaign trust | hf-service | per-run claim gates and overall determination | campaign-trust-report-design.md |
 | Unreached surface | hf-service + hf-discovery | never-covered candidates, attempt history, and coverage attribution tiers | unreached-surface-design.md |
-| Campaign health | hf-service | typed health conditions with dedup keys | campaign-health-design.md |
+| Campaign health | hf-service + hf-storage | run-scoped telemetry, durable versioned health events, morning summary | campaign-health-design.md |
 | Run closeout | hf-service | durable, resumable post-run step chain | run-closeout-design.md |
 | Harness work order | hf-service | durable export, import, and qualification | harness-work-order-design.md |
 | Concolic enrichment | hf-service + hf-runtime | solver-produced corpus inputs, bounded | concolic-enrichment-design.md |

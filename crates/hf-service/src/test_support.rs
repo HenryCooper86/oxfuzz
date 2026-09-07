@@ -4,6 +4,8 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+#[cfg(feature = "campaign-health")]
+use chrono::SubsecRound as _;
 pub use hf_core::provider::{
     ChatRequest, ChatResponse, ChatStreamResponse, ProviderError, ProviderPool, ProviderStatus,
     RouteRequest,
@@ -19,6 +21,46 @@ use crate::ServiceContainer;
 /// Stable immutable image identity for controlled presentation tests.
 pub fn immutable_test_image() -> Result<crate::ImmutableImageReference, crate::ClassifiedError> {
     crate::ImmutableImageReference::from_sha256_id(format!("sha256:{}", "a".repeat(64)))
+}
+
+/// Build retained Campaign Health state for presentation-adapter tests.
+#[cfg(feature = "campaign-health")]
+pub async fn campaign_health_presentation_fixture(
+) -> Result<(tempfile::TempDir, PathBuf, uuid::Uuid, ServiceContainer), Box<dyn Error + Send + Sync>>
+{
+    let directory = tempfile::tempdir()?;
+    let project = directory.path().join("project");
+    std::fs::create_dir(&project)?;
+    let project = std::fs::canonicalize(project)?;
+    let store = Arc::new(Store::connect(directory.path().join("health.db")).await?);
+    let observed_at = chrono::Utc::now().trunc_subsecs(0);
+    let mut run = hf_storage::RunRecord::new(
+        project.to_string_lossy(),
+        crate::EngineKind::LibFuzzer,
+        None,
+        observed_at,
+    );
+    run.status = hf_storage::RunStatus::Failed;
+    store.insert_run(&run).await?;
+    store
+        .upsert_run_telemetry(&hf_storage::RunTelemetryRecord {
+            run_id: run.id,
+            observed_at,
+            last_progress_at: Some(observed_at),
+            samples_json: "[]".to_owned(),
+            current_execs: Some(5.0),
+            mean_execs: Some(5.0),
+            peak_execs: Some(5.0),
+            edges: None,
+            throughput_sample_count: 1,
+            throughput_sample_sum: 5.0,
+            managed_invocations_expected: 1,
+            managed_invocations_alive: 1,
+            free_disk_bytes: None,
+        })
+        .await?;
+    let container = ServiceContainer::stubbed().with_store(store);
+    Ok((directory, project, run.id, container))
 }
 
 /// Builds a successful provider response for controlled presentation tests.

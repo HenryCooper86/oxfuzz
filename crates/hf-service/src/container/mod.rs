@@ -27,6 +27,8 @@ mod guards;
 mod harness;
 #[cfg(feature = "harness-work-order")]
 mod harness_work_order;
+#[cfg(feature = "campaign-health")]
+pub(crate) mod health_monitor;
 #[cfg(feature = "harness-work-order")]
 pub use harness_work_order::HarnessWorkOrderExportRequest;
 mod harness_workspace;
@@ -92,6 +94,10 @@ pub(crate) use staging::run_context_source_digest;
 use staging::{qualification_evidence, sha256_file, RunArtifacts};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+#[cfg(feature = "campaign-health")]
+pub type CampaignHealthDelivery =
+    Arc<dyn Fn(RunOwnerView, crate::campaign_health::HealthEvent) + Send + Sync>;
 #[cfg(feature = "build-doctor")]
 pub(crate) use workspace::build_doctor_staging_dir;
 use workspace::{
@@ -537,6 +543,10 @@ pub struct ServiceContainer {
     /// registers its token on start and removes it on completion;
     /// [`Self::cancel_run`] fires the token to stop the run cooperatively.
     active_runs: Arc<std::sync::Mutex<std::collections::HashMap<Uuid, CancellationToken>>>,
+    #[cfg(feature = "campaign-health")]
+    campaign_telemetry: Arc<health_monitor::RunTelemetryRegistry>,
+    #[cfg(feature = "campaign-health")]
+    campaign_health_delivery: Arc<std::sync::Mutex<Option<CampaignHealthDelivery>>>,
     /// Labels of agent turns currently executing, so the Observability panel can
     /// show live agent activity instead of always "No active agent instances".
     /// A turn registers via [`Self::track_agent`] and is removed when the
@@ -1806,6 +1816,25 @@ pub struct RunHistoryItem {
     pub binary_rev: Option<String>,
     /// Workspace-relative run output directory.
     pub evidence_dir: Option<String>,
+}
+
+/// Durable owner metadata used to route concurrent run output.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RunOwnerView {
+    /// Durable run identifier.
+    pub run_id: Uuid,
+    /// Canonical retained project root.
+    pub project_root: String,
+    /// Harness target symbol, when the run retained one.
+    pub target: Option<String>,
+    /// Canonical engine name.
+    pub engine: String,
+    /// Retained run purpose.
+    pub kind: String,
+    /// Durable lifecycle status.
+    pub status: String,
+    /// Durable start time.
+    pub started_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Public lifecycle states used by non-blocking run-control transports.

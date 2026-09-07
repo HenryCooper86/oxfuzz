@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { getTransport, onDataChanged, emitDataChanged } from "../lib";
 import { useI18n } from "../i18nContext";
 import { useProject } from "../providers/project";
@@ -10,6 +10,8 @@ import { Play, Bug, Clock, GitCompare, X, Search, Activity, Zap, TrendingUp, Lin
 import { DiffView } from "../components/DiffView";
 import { buildRunComparisons } from "../lib/runComparison";
 import { RunCloseoutPanel } from "../components/RunCloseoutPanel";
+import { uuid } from "../providers/runOutputValidation";
+import type { MorningHealthSummary } from "../lib/transport";
 
 function fmtDuration(secs: number | null): string {
   if (secs == null) return "—";
@@ -31,6 +33,11 @@ const STATUS_COLOR: Record<string, string> = {
 // selected), with crash counts and durations, plus a two-run compare. Runs are
 // read from the persisted store, so the history survives restarts.
 export function RunsView() {
+  const { activeProject } = useProject();
+  return <ScopedRunsView key={activeProject} />;
+}
+
+function ScopedRunsView() {
   const { t } = useI18n();
   const { activeProject } = useProject();
   const [runs, setRuns] = useState<RunHistoryItem[]>([]);
@@ -50,6 +57,10 @@ export function RunsView() {
     | null
   >(null);
   const [reverting, setReverting] = useState(false);
+  const [morning, setMorning] = useState<MorningHealthSummary | null>(null);
+  const [morningError, setMorningError] = useState<string | null>(null);
+  const [morningLoading, setMorningLoading] = useState(true);
+  const requestGeneration = useRef(0);
 
   const toggleCurve = useCallback(async (id: string) => {
     setExpanded((cur) => (cur === id ? null : id));
@@ -64,18 +75,31 @@ export function RunsView() {
   }, [series]);
 
   const load = useCallback(async () => {
+    const generation = ++requestGeneration.current;
+    setLoading(true);
     setError(null);
-    try {
-      const list = await getTransport().invoke<RunHistoryItem[]>("run_history", {
-        project: activeProject || undefined,
-      });
-      setRuns(list);
-    } catch (e) {
-      setError(String(e));
-      setRuns([]);
-    } finally {
-      setLoading(false);
-    }
+    setMorningLoading(true);
+    setMorningError(null);
+    await Promise.allSettled([
+      getTransport().invoke<RunHistoryItem[]>("run_history", { project: activeProject || undefined })
+        .then((list) => {
+          if (generation === requestGeneration.current) setRuns(list);
+        }).catch((error: unknown) => {
+          if (generation === requestGeneration.current) { setRuns([]); setError(String(error)); }
+        }).finally(() => {
+          if (generation === requestGeneration.current) setLoading(false);
+        }),
+      (activeProject ? getTransport().invoke<MorningHealthSummary>("morning_health_summary", { project: activeProject }) : Promise.resolve(null))
+        .then((summary) => {
+          if (generation !== requestGeneration.current) return;
+          if (summary && (summary.schema_version !== 2 || summary.project_root !== activeProject || ![summary.failed, summary.stalled, summary.interrupted, summary.unprocessed].every((ids) => Array.isArray(ids) && ids.every(uuid)))) throw new Error("Invalid morning health summary");
+          setMorning(summary);
+        }).catch((error: unknown) => {
+          if (generation === requestGeneration.current) { setMorning(null); setMorningError(String(error)); }
+        }).finally(() => {
+          if (generation === requestGeneration.current) setMorningLoading(false);
+        }),
+    ]);
   }, [activeProject]);
 
   async function deleteRun(r: RunHistoryItem) {
@@ -103,10 +127,14 @@ export function RunsView() {
     }
   }
 
+  const invalidateRequests = useCallback(() => { ++requestGeneration.current; }, []);
+
   useEffect(() => {
-    queueMicrotask(() => void load());
-    return onDataChanged(() => void load());
-  }, [load]);
+    let active = true;
+    queueMicrotask(() => { if (active) void load(); });
+    const dispose = onDataChanged(() => void load());
+    return () => { active = false; invalidateRequests(); dispose(); };
+  }, [load, invalidateRequests]);
 
   const toggle = (id: string) =>
     setSelected((prev) =>
@@ -118,7 +146,7 @@ export function RunsView() {
     .filter((r): r is RunHistoryItem => !!r);
 
   const q = filter.trim().toLowerCase();
-  const shownRuns = q ? runs.filter((r) => `${r.target ?? ""} ${r.engine} ${r.status}`.toLowerCase().includes(q)) : runs;
+  const shownRuns = q ? runs.filter((r) => `${r.id} ${r.target ?? ""} ${r.engine} ${r.status}`.toLowerCase().includes(q)) : runs;
 
   // Chronological (oldest->newest) finished runs with recorded coverage, for the
   // trend charts. Capped so a long history stays readable.
@@ -217,6 +245,8 @@ export function RunsView() {
           <Button variant="outline" size="sm" onClick={() => void load()}>{t("common.retry")}</Button>
         </div>
       )}
+
+      <MorningHealth summary={morning} loading={morningLoading} error={morningError} t={t} onSelect={(id) => { setFilter(id); if (expanded !== id) void toggleCurve(id); }} />
 
       <AutoRevertPolicyCard project={activeProject} />
 
@@ -317,7 +347,7 @@ export function RunsView() {
             const isOpen = expanded === r.id;
             const data = series[r.id];
             return (
-              <div key={r.id} className="flex flex-col">
+              <div key={r.id} id={`run-${r.id}`} className="flex flex-col">
                 <div
                   className="surface-card flex items-center gap-3 transition-colors"
                   style={{ padding: "var(--space-sm) var(--space-md)", borderColor: isSel || isOpen ? "var(--accent)" : undefined }}
@@ -468,6 +498,17 @@ export function RunsView() {
       )}
     </div>
   );
+}
+
+function MorningHealth({ summary, loading, error, t, onSelect }: { onSelect: (id: string) => void; summary: MorningHealthSummary | null; loading: boolean; error: string | null; t: (key: string) => string }) {
+  if (loading) return <p className="text-sm text-text-muted" role="status">{t("runs.healthLoading")}</p>;
+  if (error) return <p className="text-sm" role="alert" style={{ color: "var(--warning, #d9a441)" }}>{t("runs.healthUnavailable")}</p>;
+  if (!summary) return <p className="text-sm text-text-muted">{t("runs.healthUnknown")}</p>;
+  const groups: Array<[string, string[]]> = [["runs.healthFailed", summary.failed], ["runs.healthStalled", summary.stalled], ["runs.healthInterrupted", summary.interrupted], ["runs.healthUnprocessed", summary.unprocessed]];
+  return <section className="surface-card flex flex-col gap-2" style={{ padding: "var(--space-md)" }} aria-label={t("runs.healthTitle")}>
+    <span className="text-sm font-semibold">{t("runs.healthTitle")}</span>
+    {groups.map(([label, ids]) => <div key={label} className="text-xs"><span className="text-text-muted">{t(label)}: </span>{ids.length === 0 ? t("runs.healthMeasuredZero") : ids.map((id) => <a key={`${label}:${id}`} href={`#run-${id}`} className="mr-1" onClick={() => onSelect(id)}>{id}</a>)}</div>)}
+  </section>;
 }
 
 interface ProjectAutoRevert {

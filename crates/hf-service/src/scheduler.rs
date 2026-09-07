@@ -939,12 +939,23 @@ pub const EVENT_CRASH_FOUND: &str = "crash.found";
 pub const EVENT_RUN_COMPLETED: &str = "run.completed";
 /// Event type emitted when a started fuzz run terminates with a failure.
 pub const EVENT_RUN_FAILED: &str = "run.failed";
+/// A newly retained campaign-health event.
+#[cfg(feature = "campaign-health")]
+pub const EVENT_CAMPAIGN_HEALTH: &str = "campaign.health";
 
 /// Every event type an event-driven schedule may listen for.
 ///
 /// These are the events the service genuinely emits today; schedule creation
 /// rejects anything else so a typo can never silently arm a schedule that can
 /// never fire.
+#[cfg(feature = "campaign-health")]
+pub const KNOWN_EVENT_TYPES: &[&str] = &[
+    EVENT_CRASH_FOUND,
+    EVENT_RUN_COMPLETED,
+    EVENT_RUN_FAILED,
+    EVENT_CAMPAIGN_HEALTH,
+];
+#[cfg(not(feature = "campaign-health"))]
 pub const KNOWN_EVENT_TYPES: &[&str] = &[EVENT_CRASH_FOUND, EVENT_RUN_COMPLETED, EVENT_RUN_FAILED];
 
 tokio::task_local! {
@@ -962,6 +973,20 @@ tokio::task_local! {
 /// the interactive `start_fuzzer` path, none of which are a cascade risk.
 pub(crate) fn dispatching_schedule() -> Option<String> {
     DISPATCHING_SCHEDULE.try_with(Clone::clone).ok()
+}
+
+/// Run one future with the originating schedule restored across a task spawn.
+pub(crate) async fn with_dispatching_schedule<F>(
+    schedule_id: Option<String>,
+    future: F,
+) -> F::Output
+where
+    F: std::future::Future,
+{
+    match schedule_id {
+        Some(schedule_id) => DISPATCHING_SCHEDULE.scope(schedule_id, future).await,
+        None => future.await,
+    }
 }
 
 /// Parameters for a scheduled fuzz campaign (stored in `Schedule.parameter_values`).
@@ -1470,9 +1495,11 @@ impl WorkflowDispatcher for FuzzCampaignDispatcher {
         // the campaign emits carries the schedule that produced it and the
         // event bridge can refuse to re-fire that same schedule.
         let schedule_id = params.schedule_id.clone();
-        DISPATCHING_SCHEDULE
-            .scope(schedule_id, self.dispatch_campaign(workflow_id, params))
-            .await
+        Box::pin(with_dispatching_schedule(
+            Some(schedule_id),
+            self.dispatch_campaign(workflow_id, params),
+        ))
+        .await
     }
 }
 
@@ -6760,6 +6787,10 @@ mod tests {
             "rejection must name the problem: {error}"
         );
         assert!(parse_trigger("event", "   ").is_err());
+        #[cfg(feature = "campaign-health")]
+        assert!(parse_trigger("event", EVENT_CAMPAIGN_HEALTH).is_ok());
+        #[cfg(not(feature = "campaign-health"))]
+        assert!(parse_trigger("event", "campaign.health").is_err());
     }
 
     #[test]

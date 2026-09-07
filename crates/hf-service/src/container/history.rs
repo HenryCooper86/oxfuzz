@@ -24,6 +24,56 @@ use super::{
 };
 
 impl ServiceContainer {
+    /// Resolve durable metadata for routing one run's asynchronous output.
+    ///
+    /// # Errors
+    /// Returns an error when the run or its retained ownership data is invalid.
+    pub async fn run_owner(&self, run_id: Uuid) -> Result<super::RunOwnerView, ClassifiedError> {
+        let run = self.run_record(run_id).await?;
+        let target = if let Some(config) = &run.config {
+            let store = self.store().ok_or_else(|| {
+                ClassifiedError::Validation("run owner requires persistent storage".to_owned())
+            })?;
+            let Some(harness) = store
+                .get_harness(config.harness_id)
+                .await
+                .map_err(|error| ClassifiedError::Storage(error.to_string()))?
+            else {
+                return Err(ClassifiedError::Validation(format!(
+                    "run '{run_id}' references a missing harness"
+                )));
+            };
+            let target = store
+                .list_all_targets()
+                .await
+                .map_err(|error| ClassifiedError::Storage(error.to_string()))?
+                .into_iter()
+                .find(|candidate| candidate.id == harness.target_id)
+                .ok_or_else(|| {
+                    ClassifiedError::Validation(format!(
+                        "run '{run_id}' references a missing target"
+                    ))
+                })?;
+            if !stored_project_matches(&target.project_root, Path::new(&run.project_root)) {
+                return Err(ClassifiedError::Validation(format!(
+                    "run '{run_id}' target belongs to another project"
+                )));
+            }
+            Some(target.symbol)
+        } else {
+            None
+        };
+        Ok(super::RunOwnerView {
+            run_id,
+            project_root: run.project_root,
+            target,
+            engine: run.engine.as_str().to_owned(),
+            kind: format!("{:?}", run.kind).to_ascii_lowercase(),
+            status: format!("{:?}", run.status).to_ascii_lowercase(),
+            started_at: run.started_at,
+        })
+    }
+
     /// Resolve the durable project owner of a run identifier.
     pub async fn run_project(&self, run_id: Uuid) -> Result<PathBuf, ClassifiedError> {
         Ok(PathBuf::from(self.run_record(run_id).await?.project_root))

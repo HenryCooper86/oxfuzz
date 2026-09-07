@@ -64,7 +64,11 @@ pub mod report;
 pub mod report_export;
 pub mod report_store;
 pub mod repro;
-#[cfg(any(feature = "campaign-trust", feature = "run-closeout"))]
+#[cfg(any(
+    feature = "campaign-health",
+    feature = "campaign-trust",
+    feature = "run-closeout"
+))]
 pub mod run_closeout;
 pub mod sarif;
 mod schedule_retirement;
@@ -108,6 +112,7 @@ pub use hf_runtime::{
     platform_short, sandbox_image_arch, sandbox_image_present, scrubbed_command,
 };
 pub use hf_skills::{SkillDefinition, SkillRegistry, TrustTier};
+pub use hf_storage::MAX_CAMPAIGN_HEALTH_EVENT_PAGE_SIZE;
 
 pub use agent::{AgentRegistryInfo, AgentToolDefinition, AgentTurnRequest};
 /// Harness lint findings, re-exported so presentation layers can render them
@@ -128,8 +133,9 @@ pub use build_doctor::{
 };
 #[cfg(feature = "campaign-health")]
 pub use campaign_health::{
-    assess_campaign_health, undelivered, CampaignHealthInput, CampaignHealthReport,
-    CampaignHealthSettings, HealthCondition, HealthEvent, HealthSeverity, PlateauCheck,
+    assess_campaign_health, undelivered, CampaignHealthEventPage, CampaignHealthInput,
+    CampaignHealthReport, CampaignHealthSettings, CampaignTelemetryView, HealthCondition,
+    HealthEvent, HealthSeverity, MorningHealthSummary, PlateauCheck,
     CAMPAIGN_HEALTH_SCHEMA_VERSION,
 };
 #[cfg(feature = "campaign-trust")]
@@ -161,8 +167,9 @@ pub use container::{
     ArtifactSummary, CompileOutcome, CorpusCapabilities, CorpusCapability, CorpusImportOutcome,
     CorpusInventory, CoverageSample, EffectiveAutoRevert, MemorySnapshot, MinimizeOutcome,
     ProviderSnapshot, RegressionResult, RunCancelOutcome, RunControlStatus, RunHistoryItem,
-    RunLifecycleStatus, RunSummary, SchedulableTarget, SeedEntry, SeedRegenerationOutcome,
-    SeedSurvivalReport, ServiceContainer, SystemSnapshot, SyzkallerRunOpts, SyzkallerSummary,
+    RunLifecycleStatus, RunOwnerView, RunSummary, SchedulableTarget, SeedEntry,
+    SeedRegenerationOutcome, SeedSurvivalReport, ServiceContainer, SystemSnapshot,
+    SyzkallerRunOpts, SyzkallerSummary,
 };
 #[cfg(feature = "coverage-blockers")]
 pub use coverage_blockers::{

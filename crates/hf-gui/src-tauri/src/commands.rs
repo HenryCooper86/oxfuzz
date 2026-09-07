@@ -1784,8 +1784,26 @@ pub async fn chat_agent(
 // Streaming fuzz run
 // ---------------------------------------------------------------------------
 
+fn run_progress_payload(run_id: Option<uuid::Uuid>, progress: FuzzProgress) -> serde_json::Value {
+    let (kind, data) = match progress {
+        FuzzProgress::EdgesCovered(value) => ("EdgesCovered", serde_json::json!(value)),
+        FuzzProgress::ExecsPerSec(value) => ("ExecsPerSec", serde_json::json!(value)),
+        FuzzProgress::CrashesFound(value) => ("CrashesFound", serde_json::json!(value)),
+        FuzzProgress::LogLine(value) => ("LogLine", serde_json::json!(value)),
+        FuzzProgress::Done => ("Done", serde_json::Value::Null),
+    };
+    serde_json::json!({ "run_id": run_id, "type": kind, "data": data })
+}
+
+fn send_run_admission(
+    channel: Option<&tauri::ipc::Channel<String>>,
+    run_id: uuid::Uuid,
+) -> tauri::Result<()> {
+    channel.map_or(Ok(()), |channel| channel.send(run_id.to_string()))
+}
+
 /// Drive a compiled harness against its target inside the sandbox, streaming
-/// progress to the GUI as `run:progress` events (`{ type, data }`).
+/// progress to the GUI as `run:progress` events (`{ run_id, type, data }`).
 ///
 /// Uses `hf-service::ServiceContainer::run_fuzzer` which routes through
 /// `hf-engine::runner::EngineRunner` and `hf-runtime::DockerRuntime` (with
@@ -1794,18 +1812,20 @@ pub async fn chat_agent(
 pub async fn run_fuzzer(
     state: tauri::State<'_, crate::state::AppState>,
     app: tauri::AppHandle,
+    webview: tauri::Webview,
     project: String,
     target: String,
     engine: String,
     duration: u64,
+    on_run_started: Option<tauri::ipc::JavaScriptChannelId>,
 ) -> Result<serde_json::Value, String> {
     use tauri::Emitter;
 
     let engine_kind = parse_engine(&engine)?;
     let emit = |ty: &str, data: serde_json::Value| {
-        let _ = app.emit(
+        let _event_has_no_listener = app.emit(
             "run:progress",
-            serde_json::json!({ "type": ty, "data": data }),
+            serde_json::json!({ "run_id": serde_json::Value::Null, "type": ty, "data": data }),
         );
     };
 
@@ -1873,38 +1893,37 @@ pub async fn run_fuzzer(
         )),
     );
 
+    let on_run_started = on_run_started.map(|channel| channel.channel_on(webview));
+    let run_id = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let progress_id = std::sync::Arc::clone(&run_id);
     let app_handle = app.clone();
-    let on_progress = move |p: FuzzProgress| match p {
-        FuzzProgress::EdgesCovered(v) => {
-            let _ = app_handle.emit(
+    let on_progress = move |progress: FuzzProgress| {
+        // A poisoned identity lock leaves progress unattributed; scoped admission remains separate.
+        let run_id = progress_id.lock().ok().and_then(|value| *value);
+        let _event_has_no_listener =
+            app_handle.emit("run:progress", run_progress_payload(run_id, progress));
+    };
+    let started_id = std::sync::Arc::clone(&run_id);
+    let started_app = app.clone();
+    let on_started = move |id: uuid::Uuid| {
+        if let Ok(mut current) = started_id.lock() {
+            *current = Some(id);
+        }
+        if let Err(error) = send_run_admission(on_run_started.as_ref(), id) {
+            let _event_has_no_listener = started_app.emit(
                 "run:progress",
-                serde_json::json!({"type": "EdgesCovered", "data": v}),
+                run_progress_payload(
+                    Some(id),
+                    FuzzProgress::LogLine(format!(
+                        "Run {id} was admitted, but request-scoped admission delivery failed: {error}"
+                    )),
+                ),
             );
         }
-        FuzzProgress::ExecsPerSec(v) => {
-            let _ = app_handle.emit(
-                "run:progress",
-                serde_json::json!({"type": "ExecsPerSec", "data": v}),
-            );
-        }
-        FuzzProgress::CrashesFound(n) => {
-            let _ = app_handle.emit(
-                "run:progress",
-                serde_json::json!({"type": "CrashesFound", "data": n}),
-            );
-        }
-        FuzzProgress::LogLine(s) => {
-            let _ = app_handle.emit(
-                "run:progress",
-                serde_json::json!({"type": "LogLine", "data": s}),
-            );
-        }
-        FuzzProgress::Done => {
-            let _ = app_handle.emit(
-                "run:progress",
-                serde_json::json!({"type": "Done", "data": serde_json::Value::Null}),
-            );
-        }
+        let _event_has_no_listener = started_app.emit(
+            "run:status",
+            serde_json::json!({ "run_id": id, "status": "running" }),
+        );
     };
 
     // The explicit "Run Fuzzer" click is the human approval for this high-risk
@@ -1915,12 +1934,13 @@ pub async fn run_fuzzer(
         std::sync::Arc::new(AutoApproveGate),
     ));
     let result = container
-        .run_fuzzer(
+        .run_fuzzer_observed(
             std::path::Path::new(&project),
             &target,
             engine_kind,
             duration,
             &(on_progress),
+            &(on_started),
         )
         .await;
 
@@ -1948,18 +1968,104 @@ pub async fn run_fuzzer(
     }
 }
 
-/// Cancel any in-flight fuzz run, stopping the sandboxed fuzzer cooperatively.
-///
-/// The GUI runs one campaign at a time, so this cancels every active run rather
-/// than tracking individual run ids. The interrupted `run_fuzzer` returns with
-/// its partial results and the run is recorded as cancelled. Returns the number
-/// of runs that were signalled.
+/// Cancel one exact in-flight run, leaving scheduled and unrelated runs alone.
 #[tauri::command]
-pub fn cancel_run(state: tauri::State<'_, crate::state::AppState>) -> usize {
-    // The active-run registry is shared (Arc) across container clones, so the
-    // base container sees runs started by the guardrail-adjusted clone in
-    // `run_fuzzer`.
-    state.container.cancel_all_runs()
+pub async fn cancel_run(
+    state: tauri::State<'_, crate::state::AppState>,
+    run_id: String,
+) -> Result<usize, String> {
+    let run_id = uuid::Uuid::parse_str(&run_id).map_err(|error| error.to_string())?;
+    let outcome = state
+        .container
+        .request_run_cancel(run_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(usize::from(matches!(
+        outcome,
+        hf_service::RunCancelOutcome::Accepted
+    )))
+}
+
+/// Resolve the durable owner used to route one run's output.
+#[tauri::command]
+pub async fn run_owner(
+    state: tauri::State<'_, crate::state::AppState>,
+    run_id: String,
+) -> Result<hf_service::RunOwnerView, String> {
+    let run_id = uuid::Uuid::parse_str(&run_id).map_err(|error| error.to_string())?;
+    state
+        .container
+        .run_owner(run_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Read the current Campaign Health assessment without starting work.
+#[cfg(feature = "campaign-health")]
+#[tauri::command]
+pub async fn campaign_health_report(
+    state: tauri::State<'_, crate::state::AppState>,
+    run_id: String,
+) -> Result<hf_service::CampaignHealthReport, String> {
+    let run_id = uuid::Uuid::parse_str(&run_id).map_err(|error| error.to_string())?;
+    state
+        .container
+        .campaign_health(run_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Read authoritative cumulative telemetry for one campaign.
+#[cfg(feature = "campaign-health")]
+#[tauri::command]
+pub async fn campaign_telemetry(
+    state: tauri::State<'_, crate::state::AppState>,
+    run_id: String,
+) -> Result<hf_service::CampaignTelemetryView, String> {
+    let run_id = uuid::Uuid::parse_str(&run_id).map_err(|error| error.to_string())?;
+    state
+        .container
+        .campaign_telemetry(run_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Hydrate durable health events for one campaign.
+#[cfg(feature = "campaign-health")]
+#[tauri::command]
+pub async fn campaign_health_events(
+    state: tauri::State<'_, crate::state::AppState>,
+    run_id: String,
+    cursor: Option<String>,
+    limit: Option<u32>,
+) -> Result<hf_service::CampaignHealthEventPage, String> {
+    let run_id = uuid::Uuid::parse_str(&run_id).map_err(|error| error.to_string())?;
+    let cursor = cursor
+        .map(|value| uuid::Uuid::parse_str(&value).map_err(|error| error.to_string()))
+        .transpose()?;
+    state
+        .container
+        .campaign_health_event_page(
+            run_id,
+            cursor,
+            limit.unwrap_or(hf_service::MAX_CAMPAIGN_HEALTH_EVENT_PAGE_SIZE),
+        )
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Read retained overnight categories for the selected project.
+#[cfg(feature = "campaign-health")]
+#[tauri::command]
+pub async fn morning_health_summary(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+) -> Result<hf_service::MorningHealthSummary, String> {
+    state
+        .container
+        .morning_health_summary(std::path::Path::new(&project), chrono::Utc::now())
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Compose the Markdown campaign report for a target and return it as a string,
@@ -3441,22 +3547,42 @@ pub struct SyzkallerOpts {
 pub async fn run_syzkaller(
     state: tauri::State<'_, crate::state::AppState>,
     app: tauri::AppHandle,
+    webview: tauri::Webview,
     opts: SyzkallerOpts,
+    on_run_started: Option<tauri::ipc::JavaScriptChannelId>,
 ) -> Result<serde_json::Value, String> {
     use tauri::Emitter;
 
+    let on_run_started = on_run_started.map(|channel| channel.channel_on(webview));
+    let run_id = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let progress_id = std::sync::Arc::clone(&run_id);
     let app_handle = app.clone();
-    let on_progress = move |p: FuzzProgress| {
-        let (ty, data) = match p {
-            FuzzProgress::EdgesCovered(v) => ("EdgesCovered", serde_json::json!(v)),
-            FuzzProgress::ExecsPerSec(v) => ("ExecsPerSec", serde_json::json!(v)),
-            FuzzProgress::CrashesFound(n) => ("CrashesFound", serde_json::json!(n)),
-            FuzzProgress::LogLine(s) => ("LogLine", serde_json::json!(s)),
-            FuzzProgress::Done => ("Done", serde_json::Value::Null),
-        };
-        let _ = app_handle.emit(
-            "run:progress",
-            serde_json::json!({ "type": ty, "data": data }),
+    let on_progress = move |progress: FuzzProgress| {
+        // A poisoned identity lock leaves progress unattributed; scoped admission remains separate.
+        let run_id = progress_id.lock().ok().and_then(|value| *value);
+        let _event_has_no_listener =
+            app_handle.emit("run:progress", run_progress_payload(run_id, progress));
+    };
+    let started_id = std::sync::Arc::clone(&run_id);
+    let started_app = app.clone();
+    let on_started = move |id: uuid::Uuid| {
+        if let Ok(mut current) = started_id.lock() {
+            *current = Some(id);
+        }
+        if let Err(error) = send_run_admission(on_run_started.as_ref(), id) {
+            let _event_has_no_listener = started_app.emit(
+                "run:progress",
+                run_progress_payload(
+                    Some(id),
+                    FuzzProgress::LogLine(format!(
+                        "Run {id} was admitted, but request-scoped admission delivery failed: {error}"
+                    )),
+                ),
+            );
+        }
+        let _event_has_no_listener = started_app.emit(
+            "run:status",
+            serde_json::json!({ "run_id": id, "status": "running" }),
         );
     };
 
@@ -3479,7 +3605,10 @@ pub async fn run_syzkaller(
         std::sync::Arc::new(AutoApproveGate),
     ));
 
-    match container.run_syzkaller(&svc_opts, &on_progress).await {
+    match container
+        .run_syzkaller_observed(&svc_opts, &on_progress, &on_started)
+        .await
+    {
         Ok(summary) => Ok(serde_json::json!({
             "edges": summary.edges,
             "crashes": summary.crashes,
@@ -4224,6 +4353,57 @@ mod filename_stem_tests {
         assert_eq!(
             filename_stem_or("Untitled fuzzing report", "oxfuzz_report"),
             "Untitled_fuzzing_report"
+        );
+    }
+}
+
+#[cfg(test)]
+mod run_progress_payload_tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::{run_progress_payload, send_run_admission};
+    use tauri::ipc::{Channel, InvokeResponseBody};
+
+    #[test]
+    fn admitted_progress_carries_the_exact_service_run_id() {
+        let run_id = uuid::Uuid::from_u128(41);
+        let payload =
+            run_progress_payload(Some(run_id), hf_service::FuzzProgress::ExecsPerSec(25.0));
+        assert_eq!(payload["run_id"], run_id.to_string());
+        assert_eq!(payload["type"], "ExecsPerSec");
+        assert_eq!(payload["data"], 25.0);
+    }
+
+    #[test]
+    fn pre_admission_feedback_has_no_invented_run_id() {
+        let payload = run_progress_payload(
+            None,
+            hf_service::FuzzProgress::LogLine("preflight".to_owned()),
+        );
+        assert!(payload["run_id"].is_null());
+    }
+
+    #[test]
+    fn request_scoped_channel_receives_the_exact_service_run_id() {
+        let run_id = uuid::Uuid::from_u128(73);
+        let delivered = Arc::new(Mutex::new(Vec::new()));
+        let received = Arc::clone(&delivered);
+        let channel = Channel::<String>::new(move |body| {
+            received.lock().expect("delivery lock").push(body);
+            Ok(())
+        });
+
+        send_run_admission(Some(&channel), run_id).expect("channel delivery");
+        send_run_admission(None, uuid::Uuid::from_u128(99)).expect("optional channel");
+
+        let messages = delivered.lock().expect("delivery lock");
+        assert_eq!(messages.len(), 1);
+        let InvokeResponseBody::Json(json) = &messages[0] else {
+            panic!("run admission must use JSON IPC")
+        };
+        assert_eq!(
+            json,
+            &serde_json::to_string(&run_id.to_string()).expect("serialize run id")
         );
     }
 }

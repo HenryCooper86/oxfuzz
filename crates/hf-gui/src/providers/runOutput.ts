@@ -1,9 +1,11 @@
 import { createContext, useContext } from "react";
 
 export interface RunStats {
-  execs: number;
-  edges: number;
-  crashes: number;
+  currentExecs: number | null;
+  meanExecs: number | null;
+  peakExecs: number | null;
+  edges: number | null;
+  rawCrashSignals: number | null;
 }
 
 export interface AutoRevert {
@@ -17,14 +19,18 @@ export interface AutoRevert {
 }
 
 export interface RunSummary {
-  edges: number;
+  edges: number | null;
   crashes: number;
-  execs: number;
+  execs: number | null;
   stagnation?: string | null;
   autoRevert?: AutoRevert | null;
 }
 
 export interface RunOutputValue {
+  selectedRun?: import("../lib/transport").RunOwner | null;
+  requestState?: "idle" | "pending" | "admitted";
+  requestError?: string | null;
+  healthState?: { loading: boolean; error: string | null; hasOlder: boolean };
   log: string[];
   stats: RunStats;
   summary: RunSummary | null;
@@ -32,6 +38,13 @@ export interface RunOutputValue {
   cancelling: boolean;
   lastTarget: string;
   lastEngine: string;
+  healthEvents?: Array<{
+    id: string;
+    severity: "warning" | "error";
+    condition: string;
+    detail: string;
+  }>;
+  loadOlderHealthEvents?: () => Promise<void>;
   runFuzzer: (params: {
     project: string;
     target: string;
@@ -43,7 +56,13 @@ export interface RunOutputValue {
   clear: () => void;
 }
 
-export const EMPTY_RUN_STATS: RunStats = { execs: 0, edges: 0, crashes: 0 };
+export const EMPTY_RUN_STATS: RunStats = {
+  currentExecs: null,
+  meanExecs: null,
+  peakExecs: null,
+  edges: null,
+  rawCrashSignals: null,
+};
 export const RunOutputContext = createContext<RunOutputValue | null>(null);
 
 /** Access shared run output. Safe outside a provider. */
@@ -57,6 +76,8 @@ export function useRunOutput(): RunOutputValue {
       cancelling: false,
       lastTarget: "",
       lastEngine: "",
+      healthEvents: [],
+      loadOlderHealthEvents: async () => {},
       runFuzzer: async () => 0,
       runSyzkaller: async () => 0,
       cancelRun: async () => {},

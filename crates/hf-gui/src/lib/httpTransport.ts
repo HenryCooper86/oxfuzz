@@ -80,7 +80,12 @@ const COMMAND_MAP: Record<string, CommandEndpoint> = {
   run_harness_source: { method: "POST", path: "/runs/harness-source" },
   revert_harness_from_run: { method: "POST", path: "/runs/revert-harness" },
   run_fuzzer: { method: "POST", path: "/runs/start" },
+  run_owner: { method: "GET", path: "/runs/{run_id}/owner" },
   run_status: { method: "GET", path: "/runs/{run_id}/status" },
+  campaign_health_report: { method: "GET", path: "/runs/{run_id}/health" },
+  campaign_telemetry: { method: "GET", path: "/runs/{run_id}/telemetry" },
+  campaign_health_events: { method: "GET", path: "/runs/{run_id}/health/events" },
+  morning_health_summary: { method: "POST", path: "/campaign-health/morning" },
   run_closeout_report: { method: "GET", path: "/runs/{run_id}/closeout" },
   run_closeout: {
     method: "POST",
@@ -315,8 +320,11 @@ function runStartArgs(args?: Record<string, unknown>): Record<string, unknown> {
 }
 
 function serviceRunId(start: RunStartResponse): string {
-  if (typeof start.run_id !== "string" || start.run_id.trim().length === 0) {
-    throw new Error("POST /runs/start did not return a service-owned run id");
+  if (
+    typeof start.run_id !== "string"
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(start.run_id)
+  ) {
+    throw new Error("POST /runs/start did not return a valid UUID service-owned run id");
   }
   return start.run_id;
 }
@@ -335,13 +343,6 @@ function serviceSemgrepOperationId(start: SemgrepStartResponse): string {
 
 function isTerminalStatus(status: RunLifecycleStatus): boolean {
   return status === "done" || status === "failed" || status === "cancelled";
-}
-
-function isAttributedRunEvent(payload: unknown, runId: string | null): boolean {
-  if (!runId || !payload || typeof payload !== "object" || !("run_id" in payload)) {
-    return false;
-  }
-  return (payload as { run_id?: unknown }).run_id === runId;
 }
 
 function finiteMetric(value: number | null): number {
@@ -432,7 +433,10 @@ export function createHttpTransport(options: HttpTransportOptions = {}): Transpo
     });
   }
 
-  async function runFuzzer(args?: Record<string, unknown>): Promise<FuzzerRunResult> {
+  async function runFuzzer(
+    args?: Record<string, unknown>,
+    options?: InvokeOptions,
+  ): Promise<FuzzerRunResult> {
     if (activeRunId || pendingRunStart) {
       throw new Error("A browser fuzz run is already active");
     }
@@ -452,6 +456,7 @@ export function createHttpTransport(options: HttpTransportOptions = {}): Transpo
     const runId = serviceRunId(start);
     activeRunId = runId;
     try {
+      options?.onRunStarted?.(runId);
       const status = await waitForTerminalStatus(runId);
       if (status === "failed") {
         throw new Error(`Fuzz run ${runId} failed`);
@@ -478,8 +483,8 @@ export function createHttpTransport(options: HttpTransportOptions = {}): Transpo
     }
   }
 
-  async function cancelActiveRun(): Promise<number> {
-    let runId = activeRunId;
+  async function cancelActiveRun(args?: Record<string, unknown>): Promise<number> {
+    let runId = typeof args?.runId === "string" ? args.runId : activeRunId;
     if (!runId && pendingRunStart) {
       runId = serviceRunId(await pendingRunStart);
     }
@@ -532,16 +537,19 @@ export function createHttpTransport(options: HttpTransportOptions = {}): Transpo
       args?: Record<string, unknown>,
       options?: InvokeOptions,
     ): Promise<T> {
-      if (command === "run_fuzzer") return runFuzzer(args) as Promise<T>;
-      if (command === "cancel_run") return cancelActiveRun() as Promise<T>;
+      if (command === "run_fuzzer") return runFuzzer(args, options) as Promise<T>;
+      if (command === "cancel_run") return cancelActiveRun(args) as Promise<T>;
       if (command === "semgrep_enrich") return startSemgrep(args) as Promise<T>;
       if (command === "semgrep_cancel") {
         return cancelSemgrep(args, options) as Promise<T>;
       }
+      if (command === "run_syzkaller") {
+        throw new Error("Syzkaller campaigns are unavailable in web mode");
+      }
       const endpoint = COMMAND_MAP[command];
       if (!endpoint) {
         // Lifecycle/noop commands return undefined in web mode.
-        if (["show_window", "heartbeat_pong", "toggle_devtools", "open_folder_dialog", "open_file_dialog", "run_syzkaller", "save_report"].includes(command)) {
+        if (["show_window", "heartbeat_pong", "toggle_devtools", "open_folder_dialog", "open_file_dialog", "save_report"].includes(command)) {
           if (command === "open_folder_dialog") {
             // Web fallback: use <input type="file" webkitdirectory>
             return new Promise((resolve) => {
@@ -574,11 +582,6 @@ export function createHttpTransport(options: HttpTransportOptions = {}): Transpo
       return request<T>(endpoint, requestArgs, options);
     },
     async listen<T = unknown>(event: string, callback: (event: { payload: T }) => void): Promise<UnlistenFn> {
-      if (event === "run:progress" || event === "run:status") {
-        return sse.listen<T>(event, (message) => {
-          if (isAttributedRunEvent(message.payload, activeRunId)) callback(message);
-        });
-      }
       return sse.listen(event, callback);
     },
   };

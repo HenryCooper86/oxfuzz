@@ -12,23 +12,28 @@
 
 use std::collections::HashSet;
 
-use serde::Serialize;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::container::CoverageSample;
-use hf_storage::RunStatus;
+use hf_storage::{CampaignHealthEvidenceRecord, RetainedHealthSample, RunStatus};
+
+pub use crate::container::health_monitor::{
+    ManagedInvocationGuard, RunTelemetryObservation, RunTelemetryRegistry,
+};
 
 /// Current serialized Campaign Health schema.
-pub const CAMPAIGN_HEALTH_SCHEMA_VERSION: u32 = 1;
+pub const CAMPAIGN_HEALTH_SCHEMA_VERSION: u32 = 2;
 
 /// A named campaign condition worth an operator's attention.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HealthCondition {
     /// Coverage stopped growing while execution continued.
     CoveragePlateau,
-    /// Fewer live engine processes than the run expects.
-    WorkersMissing,
+    /// Explicit invocation evidence reports fewer live awaits than expected.
+    ManagedInvocationMissing,
     /// An engine's progress record has not advanced within its interval.
     WorkerStatsStale,
     /// Free space in the fuzz workspace is below the configured floor.
@@ -37,8 +42,28 @@ pub enum HealthCondition {
     RunFailed,
 }
 
+impl HealthCondition {
+    /// Stable persisted and wire name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CoveragePlateau => "coverage_plateau",
+            Self::ManagedInvocationMissing => "managed_invocation_missing",
+            Self::WorkerStatsStale => "worker_stats_stale",
+            Self::DiskPressure => "disk_pressure",
+            Self::RunFailed => "run_failed",
+        }
+    }
+}
+
+impl std::fmt::Display for HealthCondition {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// How loudly a condition should be carried.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HealthSeverity {
     /// The campaign is degraded and still producing.
@@ -47,11 +72,24 @@ pub enum HealthSeverity {
     Error,
 }
 
+impl HealthSeverity {
+    /// Stable persisted and wire name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Warning => "warning",
+            Self::Error => "error",
+        }
+    }
+}
+
 /// One condition, with the key that prevents it being said twice.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct HealthEvent {
     /// Serialization version of this event.
     pub schema_version: u32,
+    /// Stable durable event identifier, present only after `SQLite` admission.
+    pub id: Option<Uuid>,
     /// The run the condition belongs to.
     pub run_id: Uuid,
     /// What is wrong.
@@ -65,6 +103,10 @@ pub struct HealthEvent {
     pub dedup_key: String,
     /// What is wrong, in a sentence.
     pub detail: String,
+    /// Time the condition was assessed.
+    pub observed_at: DateTime<Utc>,
+    /// Exact version 2 input and thresholds retained with the event.
+    pub evidence: CampaignHealthEvidenceRecord,
 }
 
 /// Whether there was a coverage series to judge a plateau against.
@@ -90,14 +132,28 @@ pub use crate::config::CampaignHealthSettings;
 pub struct CampaignHealthInput {
     /// The run being assessed.
     pub run_id: Uuid,
+    /// Time this input was assembled.
+    pub observed_at: DateTime<Utc>,
     /// Its lifecycle state.
     pub run_status: RunStatus,
     /// The retained coverage series, oldest first.
     pub coverage_series: Vec<CoverageSample>,
-    /// Engine processes the run expects.
-    pub workers_expected: usize,
-    /// Engine processes observed alive.
-    pub workers_alive: usize,
+    /// Latest finite executions-per-second report.
+    pub current_execs: Option<f64>,
+    /// Whole-run arithmetic mean of valid throughput reports.
+    pub mean_execs: Option<f64>,
+    /// Peak finite executions-per-second report.
+    pub peak_execs: Option<f64>,
+    /// Number of reports included in the whole-run mean.
+    pub throughput_sample_count: u64,
+    /// Sum paired with `throughput_sample_count`.
+    pub throughput_sample_sum: f64,
+    /// Service-managed invocations explicitly expected at this instant.
+    pub managed_invocations_expected: u32,
+    /// Expected invocations still within their runtime await.
+    pub managed_invocations_alive: u32,
+    /// Latest valid structured metric observation.
+    pub last_progress_at: Option<DateTime<Utc>>,
     /// Seconds since the progress record last advanced, when known.
     pub progress_stale_secs: Option<u64>,
     /// Free bytes in the fuzz workspace, when known.
@@ -105,7 +161,7 @@ pub struct CampaignHealthInput {
 }
 
 /// One assessment of a run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CampaignHealthReport {
     /// Serialization version of this view.
     pub schema_version: u32,
@@ -118,6 +174,67 @@ pub struct CampaignHealthReport {
     pub events: Vec<HealthEvent>,
 }
 
+/// One bounded newest-first page of retained health events.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CampaignHealthEventPage {
+    /// Strictly decoded retained events.
+    pub events: Vec<HealthEvent>,
+    /// Last returned event to pass when requesting the next older page.
+    pub next_cursor: Option<Uuid>,
+}
+
+/// Authoritative cumulative telemetry for one live or retained campaign.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CampaignTelemetryView {
+    /// Current schema version.
+    pub schema_version: u32,
+    /// Durable run identifier.
+    pub run_id: Uuid,
+    /// Time of the service-owned snapshot.
+    pub observed_at: DateTime<Utc>,
+    /// Latest valid structured metric time.
+    pub last_progress_at: Option<DateTime<Utc>>,
+    /// Bounded coverage/throughput series.
+    pub coverage_series: Vec<CoverageSample>,
+    /// Latest finite executions per second.
+    pub current_execs: Option<f64>,
+    /// Whole-run arithmetic mean of valid throughput reports.
+    pub mean_execs: Option<f64>,
+    /// Peak finite executions per second.
+    pub peak_execs: Option<f64>,
+    /// Number of reports included in the whole-run mean.
+    pub throughput_sample_count: u64,
+    /// Finite sum paired with `throughput_sample_count`.
+    pub throughput_sample_sum: f64,
+    /// Latest edge observation.
+    pub edges: Option<u64>,
+    /// Explicitly expected service-managed invocations.
+    pub managed_invocations_expected: u32,
+    /// Expected invocations still inside the runtime await.
+    pub managed_invocations_alive: u32,
+    /// Free fuzz-workspace bytes, when available.
+    pub free_disk_bytes: Option<u64>,
+}
+
+/// Retained overnight campaign categories for one project.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MorningHealthSummary {
+    /// Current schema version.
+    pub schema_version: u32,
+    /// Canonical requested project.
+    pub project_root: String,
+    /// Inclusive lookback start.
+    pub since: DateTime<Utc>,
+    /// Failed campaign runs.
+    pub failed: Vec<Uuid>,
+    /// Runs with retained plateau, stale-stat, or missing-invocation evidence.
+    pub stalled: Vec<Uuid>,
+    /// Runs left open in the recovery journal.
+    pub interrupted: Vec<Uuid>,
+    /// Terminal runs whose closeout remains pending or retryable.
+    pub unprocessed: Vec<Uuid>,
+}
+
 /// Assess one run against the operator thresholds.
 #[must_use]
 pub fn assess_campaign_health(
@@ -125,11 +242,14 @@ pub fn assess_campaign_health(
     settings: &CampaignHealthSettings,
 ) -> CampaignHealthReport {
     let mut events = Vec::new();
-    let active = matches!(input.run_status, RunStatus::Running | RunStatus::Pending);
+    let invocation_active = matches!(input.run_status, RunStatus::Running | RunStatus::Pending)
+        && input.managed_invocations_expected > 0
+        && input.managed_invocations_alive > 0;
 
     if input.run_status == RunStatus::Failed {
         events.push(event(
-            input.run_id,
+            input,
+            settings,
             HealthCondition::RunFailed,
             HealthSeverity::Error,
             "failed",
@@ -139,26 +259,33 @@ pub fn assess_campaign_health(
 
     let plateau_check = evaluate_plateau(input, settings, &mut events);
 
-    if input.workers_expected > 0 && input.workers_alive < input.workers_expected {
+    if input.managed_invocations_expected > 0
+        && input.managed_invocations_alive < input.managed_invocations_expected
+    {
         events.push(event(
-            input.run_id,
-            HealthCondition::WorkersMissing,
+            input,
+            settings,
+            HealthCondition::ManagedInvocationMissing,
             HealthSeverity::Error,
-            &format!("{}of{}", input.workers_alive, input.workers_expected),
             &format!(
-                "{} of {} expected engine processes are alive.",
-                input.workers_alive, input.workers_expected
+                "{}of{}",
+                input.managed_invocations_alive, input.managed_invocations_expected
+            ),
+            &format!(
+                "{} of {} explicitly admitted managed invocations are active.",
+                input.managed_invocations_alive, input.managed_invocations_expected
             ),
         ));
     }
 
     // A finished run's progress is supposed to stop moving, so staleness is
     // only a condition while the run is still meant to be producing.
-    if active {
+    if invocation_active {
         if let Some(stale) = input.progress_stale_secs {
             if stale > settings.stale_progress_secs {
                 events.push(event(
-                    input.run_id,
+                    input,
+                    settings,
                     HealthCondition::WorkerStatsStale,
                     HealthSeverity::Error,
                     &format!("{}s", stale / settings.stale_progress_secs.max(1)),
@@ -171,7 +298,8 @@ pub fn assess_campaign_health(
     if let Some(free) = input.free_disk_bytes {
         if free < settings.disk_floor_bytes {
             events.push(event(
-                input.run_id,
+                input,
+                settings,
                 HealthCondition::DiskPressure,
                 HealthSeverity::Error,
                 &format!("{}", free / (1024 * 1024)),
@@ -210,19 +338,17 @@ pub fn undelivered<S: std::hash::BuildHasher>(
 
 /// Judge a plateau from the coverage series.
 ///
-/// Keys on coverage rather than on the exec counter: a fuzzer executing
+/// Keys on coverage rather than on throughput: a fuzzer executing
 /// millions of inputs per second against a harness that rejects all of them has
-/// a rising exec count and is learning nothing. Execution is still evidence --
-/// a plateau is only reported while execution is progressing, because a run
-/// whose execs are also flat is stopped rather than stalled, and the worker
-/// conditions name that instead.
+/// positive throughput and is learning nothing. Execution is still evidence:
+/// a plateau requires at least one positive throughput sample in the window.
 fn evaluate_plateau(
     input: &CampaignHealthInput,
     settings: &CampaignHealthSettings,
     events: &mut Vec<HealthEvent>,
 ) -> PlateauCheck {
     let window = settings.plateau_window.max(1);
-    if input.coverage_series.len() <= window {
+    if input.coverage_series.len() < window {
         return PlateauCheck::Unavailable {
             reason: if input.coverage_series.is_empty() {
                 "no_retained_coverage_series".to_owned()
@@ -238,7 +364,8 @@ fn evaluate_plateau(
 
     if edges_flat && executing {
         events.push(event(
-            input.run_id,
+            input,
+            settings,
             HealthCondition::CoveragePlateau,
             HealthSeverity::Warning,
             &format!("{}edges{window}", tail[0].edges),
@@ -253,25 +380,52 @@ fn evaluate_plateau(
 }
 
 fn event(
-    run_id: Uuid,
+    input: &CampaignHealthInput,
+    settings: &CampaignHealthSettings,
     condition: HealthCondition,
     severity: HealthSeverity,
     state: &str,
     detail: &str,
 ) -> HealthEvent {
-    let code = serde_json::to_value(condition)
-        .ok()
-        .and_then(|value| value.as_str().map(str::to_owned))
-        // `HealthCondition` is a fieldless enum with a snake_case rename, so it
-        // always serializes to a string; the fallback is unreachable and exists
-        // only so this stays total.
-        .unwrap_or_else(|| format!("{condition:?}"));
+    let code = condition.as_str();
+    let evidence = CampaignHealthEvidenceRecord {
+        schema_version: CAMPAIGN_HEALTH_SCHEMA_VERSION,
+        run_id: input.run_id,
+        condition: code.to_owned(),
+        observed_at: input.observed_at,
+        run_status: input.run_status,
+        plateau_window: settings.plateau_window,
+        stale_progress_secs: settings.stale_progress_secs,
+        disk_floor_bytes: settings.disk_floor_bytes,
+        coverage_samples: input
+            .coverage_series
+            .iter()
+            .map(|sample| RetainedHealthSample {
+                elapsed_secs: sample.t,
+                edges: sample.edges,
+                execs: sample.execs,
+            })
+            .collect(),
+        last_progress_at: input.last_progress_at,
+        progress_stale_secs: input.progress_stale_secs,
+        current_execs: input.current_execs,
+        mean_execs: input.mean_execs,
+        peak_execs: input.peak_execs,
+        throughput_sample_count: input.throughput_sample_count,
+        throughput_sample_sum: input.throughput_sample_sum,
+        managed_invocations_expected: input.managed_invocations_expected,
+        managed_invocations_alive: input.managed_invocations_alive,
+        free_disk_bytes: input.free_disk_bytes,
+    };
     HealthEvent {
         schema_version: CAMPAIGN_HEALTH_SCHEMA_VERSION,
-        run_id,
+        id: None,
+        run_id: input.run_id,
         condition,
         severity,
-        dedup_key: format!("{run_id}:{code}:{state}"),
+        dedup_key: format!("{}:{code}:{state}", input.run_id),
         detail: detail.to_owned(),
+        observed_at: input.observed_at,
+        evidence,
     }
 }

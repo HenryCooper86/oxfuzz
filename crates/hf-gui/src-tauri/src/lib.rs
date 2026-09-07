@@ -45,13 +45,13 @@ use commands::{
     project_auto_revert_override, project_auto_revert_overrides, promote_automotive_state_artifact,
     provider_test, push_to_defectdojo, read_config, read_skill, remediation_operation,
     report_formats, reveal_path, revert_harness_from_run, run_coverage_series, run_fuzzer,
-    run_harness_source, run_history, run_syzkaller, save_agent, save_report_draft, save_skill,
-    schedule_concurrency_limits, schedule_concurrency_set, schedule_create, schedule_delete,
-    schedule_history, schedule_history_clear, schedule_list, schedule_recovery_acknowledge,
-    schedule_recovery_list, schedule_set_enabled, schedule_targets, seed_survival,
-    semgrep_available, set_automotive_settings, set_project_auto_revert_override, set_providers,
-    start_remediation_verification, system_snapshot, system_status_cmd, triage, verify_crash,
-    workbench_dashboard, write_config,
+    run_harness_source, run_history, run_owner, run_syzkaller, save_agent, save_report_draft,
+    save_skill, schedule_concurrency_limits, schedule_concurrency_set, schedule_create,
+    schedule_delete, schedule_history, schedule_history_clear, schedule_list,
+    schedule_recovery_acknowledge, schedule_recovery_list, schedule_set_enabled, schedule_targets,
+    seed_survival, semgrep_available, set_automotive_settings, set_project_auto_revert_override,
+    set_providers, start_remediation_verification, system_snapshot, system_status_cmd, triage,
+    verify_crash, workbench_dashboard, write_config,
 };
 use work_order_commands::{
     work_order_attempt, work_order_attempts, work_order_export, work_order_get, work_order_import,
@@ -61,6 +61,11 @@ use work_order_commands::{
 
 #[cfg(feature = "semgrep-enrichment")]
 use commands::{semgrep_cancel, semgrep_enrich, semgrep_status};
+
+#[cfg(feature = "campaign-health")]
+use commands::{
+    campaign_health_events, campaign_health_report, campaign_telemetry, morning_health_summary,
+};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// Run the Tauri GUI application.
@@ -79,6 +84,24 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(app_state)
+        .setup(|app| {
+            #[cfg(not(feature = "campaign-health"))]
+            let _ = app;
+            #[cfg(feature = "campaign-health")]
+            {
+                use tauri::Emitter as _;
+                let handle = app.handle().clone();
+                app.state::<AppState>()
+                    .container
+                    .bind_campaign_health_delivery(std::sync::Arc::new(move |owner, event| {
+                        let _event_has_no_listener = handle.emit(
+                            "campaign:health",
+                            serde_json::json!({ "owner": owner, "event": event }),
+                        );
+                    }));
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             discover,
             semgrep_available,
@@ -155,6 +178,15 @@ pub fn run() {
             run_fuzzer,
             run_syzkaller,
             cancel_run,
+            run_owner,
+            #[cfg(feature = "campaign-health")]
+            campaign_health_report,
+            #[cfg(feature = "campaign-health")]
+            campaign_telemetry,
+            #[cfg(feature = "campaign-health")]
+            campaign_health_events,
+            #[cfg(feature = "campaign-health")]
+            morning_health_summary,
             generate_report,
             export_report,
             export_repro,

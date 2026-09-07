@@ -12,6 +12,7 @@ import { useI18n } from "../../i18nContext";
 import { usePipeline } from "../../providers/pipeline";
 import { useProject } from "../../providers/project";
 import { useTarget } from "../../providers/target";
+import { activeStatus } from "../../providers/runOutputValidation";
 import { useRunOutput } from "../../providers/runOutput";
 
 interface ArtifactSummary {
@@ -25,7 +26,8 @@ export function InfoPanel() {
   const { coreStages } = usePipeline();
   const { activeProject } = useProject();
   const { target, engine } = useTarget();
-  const { running, lastTarget, lastEngine } = useRunOutput();
+  const { selectedRun, lastTarget, lastEngine } = useRunOutput();
+  const running = activeStatus(selectedRun?.status ?? null);
   const [artifacts, setArtifacts] = useState<ArtifactSummary | null>(null);
 
   const planSteps = coreStages.map((s) => ({

@@ -6,7 +6,8 @@ use std::sync::Arc;
 use chrono::Utc;
 use hf_core::engine::{EngineKind, FuzzProgress, FuzzRunConfig};
 use hf_core::error::ClassifiedError;
-use hf_core::harness::HarnessStatus;
+use hf_core::harness::{Harness, HarnessStatus};
+use hf_core::runtime::SandboxOptions;
 use hf_core::target::TargetLanguage;
 use hf_guardrails::{Action, Decision};
 use hf_storage::{AutoRevertEvent, RunKind, RunRecord, RunStatus};
@@ -26,6 +27,7 @@ use super::project_identity::canonical_project_root;
 use super::staging::{
     resolve_run_sandbox_image, retain_run_context, run_context_digests, run_sandbox_options,
     stage_run_artifacts, verify_run_artifacts, verify_staged_qualification, ReplayProvenance,
+    RunArtifacts,
 };
 use super::workspace::{
     prepare_configured_workspace_root, run_output_relative, workspace_dir,
@@ -40,7 +42,170 @@ use super::{
     TerminalRunMetrics,
 };
 
+struct PreparedUserspaceRun {
+    config: FuzzRunConfig,
+    record: RunRecord,
+    artifacts: RunArtifacts,
+    sandbox: SandboxOptions,
+    persistence: PersistedRunGuard,
+}
+
+struct SyzkallerInputs {
+    manager_cfg: Option<String>,
+    kernel_image: Option<String>,
+    disk_image: Option<String>,
+    ssh_key: Option<String>,
+}
+
+fn syzkaller_inputs(
+    opts: &SyzkallerRunOpts,
+    on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
+) -> Option<SyzkallerInputs> {
+    let nonempty = |value: &Option<String>| {
+        value
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+    };
+    let inputs = SyzkallerInputs {
+        manager_cfg: nonempty(&opts.manager_cfg),
+        kernel_image: nonempty(&opts.kernel_image),
+        disk_image: nonempty(&opts.disk_image),
+        ssh_key: nonempty(&opts.ssh_key),
+    };
+    if inputs.manager_cfg.is_some() || inputs.kernel_image.is_some() && inputs.disk_image.is_some()
+    {
+        return Some(inputs);
+    }
+    for line in [
+        format!(
+            "syzkaller (kernel fuzzing) -- project: {}",
+            opts.project.display()
+        ),
+        "No campaign artifacts provided. syzkaller drives a VM against a".to_owned(),
+        "KCOV-instrumented kernel; it needs one of:".to_owned(),
+        "  (a) a kernel image (bzImage) + a rootfs disk image, or".to_owned(),
+        "  (b) an existing syz-manager config (manager.cfg).".to_owned(),
+        "Build a KCOV kernel + rootfs per the setup guide, then select them above:".to_owned(),
+        "https://github.com/google/syzkaller/blob/master/docs/linux/setup.md".to_owned(),
+    ] {
+        on_progress(FuzzProgress::LogLine(line));
+    }
+    on_progress(FuzzProgress::Done);
+    None
+}
+
+fn syzkaller_runtime_limits(
+    resolved: &crate::config::ResolvedFuzzingRun,
+    vm_count: Option<u32>,
+) -> (u64, hf_core::runtime::ResourceLimits) {
+    let vm_estimate = vm_count
+        .unwrap_or(2)
+        .clamp(1, crate::syzkaller::MAX_VM_COUNT);
+    let teardown_grace_secs =
+        hf_engine::runner::SANDBOX_TIMEOUT_HEADROOM_SECS.saturating_mul(u64::from(vm_estimate));
+    let inner_kill_after_secs = (teardown_grace_secs / 2).max(1);
+    let limits = hf_core::runtime::ResourceLimits {
+        max_mem_mb: resolved.max_mem_mb,
+        max_cpus: resolved.max_cpus,
+        max_duration_secs: resolved.duration_secs.saturating_add(teardown_grace_secs),
+        env: std::collections::HashMap::new(),
+        ptrace: false,
+    };
+    (inner_kill_after_secs, limits)
+}
+
+async fn retain_syzkaller_run_evidence(
+    stage_root: PathBuf,
+    kernel_workspace: &Path,
+    run_id: Uuid,
+) -> Result<Vec<String>, ClassifiedError> {
+    let evidence_dir =
+        match ensure_workspace_directory(kernel_workspace, &run_output_relative(run_id)) {
+            Ok(directory) => directory,
+            Err(error) => {
+                return Ok(vec![format!(
+                    "Warning: could not prepare the syzkaller evidence directory: {error}"
+                )]);
+            }
+        };
+    let evidence = tokio::task::spawn_blocking(move || {
+        crate::syzkaller::retain_campaign_evidence(&stage_root, &evidence_dir)
+    })
+    .await;
+    match evidence.map_err(|error| {
+        ClassifiedError::Internal(format!("join syzkaller evidence task: {error}"))
+    })? {
+        Ok(Some(path)) => Ok(vec![format!(
+            "Retained syzkaller crash reproducers and corpus under {}.",
+            path.display()
+        )]),
+        Ok(None) => Ok(Vec::new()),
+        Err(error) => Ok(vec![format!(
+            "Warning: could not retain syzkaller campaign evidence: {error}"
+        )]),
+    }
+}
+
+fn userspace_harness_binary(workspace: &Path, target: &str) -> Result<PathBuf, ClassifiedError> {
+    let name = harness_binary_name(target);
+    let binary = workspace.join(&name);
+    if !is_regular_file(&binary) {
+        return Err(ClassifiedError::Validation(format!(
+            "Compiled harness '{name}' not found -- compile the harness first."
+        )));
+    }
+    Ok(binary)
+}
+
+fn report_syzkaller_launch(
+    target_triple: &str,
+    duration_secs: u64,
+    provided_config: bool,
+    use_kvm: bool,
+    log: &dyn Fn(&str),
+) {
+    if provided_config {
+        log("Validated and rewrote the provided manager.cfg into isolated staging.");
+    } else {
+        log(&format!(
+            "Synthesized an isolated qemu manager.cfg ({target_triple})."
+        ));
+    }
+    log(&format!(
+        "Launching syz-manager in the sandbox for {duration_secs}s..."
+    ));
+    if use_kvm {
+        log(
+            "Note: qemu uses KVM acceleration (/dev/kvm passed through) -- expect good exec rates.",
+        );
+    } else {
+        log("Note: qemu runs under TCG emulation inside Docker (no KVM on this host) -- expect low exec rates.");
+    }
+}
+
+fn syzkaller_terminal_status(termination: hf_core::runtime::CommandTermination) -> RunStatus {
+    if termination == hf_core::runtime::CommandTermination::Cancelled {
+        RunStatus::Cancelled
+    } else {
+        RunStatus::Done
+    }
+}
+
 impl ServiceContainer {
+    fn register_active_run(&self, run_id: Uuid) -> (CancellationToken, ActiveRunGuard) {
+        let cancel = CancellationToken::new();
+        if let Ok(mut runs) = self.active_runs.lock() {
+            runs.insert(run_id, cancel.clone());
+        }
+        let guard = ActiveRunGuard {
+            active_runs: Arc::clone(&self.active_runs),
+            run_id,
+        };
+        (cancel, guard)
+    }
+
     /// Draft a targeted refined harness in response to a coverage plateau, as a
     /// proposal only. Returns `None` (no proposal) when refinement is not
     /// applicable: no LLM provider, no uncovered frontier (non-C target or full
@@ -460,6 +625,117 @@ impl ServiceContainer {
         result
     }
 
+    async fn prepare_userspace_run(
+        &self,
+        project: &Path,
+        target: &str,
+        resolved: crate::config::ResolvedFuzzingRun,
+        qualified: &Harness,
+        workspace: &Path,
+        corpus_dir: PathBuf,
+        replay: Option<ReplayProvenance>,
+    ) -> Result<PreparedUserspaceRun, ClassifiedError> {
+        let engine = resolved.engine;
+        let extra_args = self
+            .build_run_dictionary_args(project, target, workspace, engine)
+            .await;
+        let mut config = FuzzRunConfig {
+            harness_id: qualified.id,
+            engine,
+            duration: Some(std::time::Duration::from_secs(resolved.duration_secs)),
+            max_mem_mb: resolved.max_mem_mb,
+            max_cpus: resolved.max_cpus,
+            seed_corpus: Some(corpus_dir),
+            sanitizer: hf_core::target::Sanitizer::Address,
+            env: Vec::new(),
+            extra_args,
+            seed: None,
+            replay_of: None,
+        };
+        let store = self.store.as_ref().ok_or_else(|| {
+            ClassifiedError::Validation("fuzz runs require the persistent service store".to_owned())
+        })?;
+        let mut record = RunRecord::new(
+            project.to_string_lossy().to_string(),
+            engine,
+            None,
+            Utc::now(),
+        );
+        match replay {
+            Some(provenance) => {
+                config.seed = Some(provenance.seed);
+                config.replay_of = Some(provenance.original_run_id);
+            }
+            None => config.seed = Some(hf_engine::seed::derive_run_seed(record.id)),
+        }
+        record.config = Some(config.clone());
+        let sandbox_image = resolve_run_sandbox_image(self.runtime.as_ref()).await?;
+        let context = run_context_digests(workspace, sandbox_image.sha256())?;
+        retain_run_context(&mut record, context);
+        let artifacts = stage_run_artifacts(
+            workspace,
+            record.id,
+            &qualified.source,
+            &workspace.join(harness_binary_name(target)),
+        )?;
+        if let Err(error) = verify_staged_qualification(qualified, &artifacts) {
+            if let Some(run_root) = artifacts.output_host.parent() {
+                let _ignored_cleanup_error = std::fs::remove_dir_all(run_root);
+            }
+            return Err(error);
+        }
+        if let Err(error) = verify_run_artifacts(&artifacts) {
+            if let Some(run_root) = artifacts.output_host.parent() {
+                let _ignored_cleanup_error = std::fs::remove_dir_all(run_root);
+            }
+            return Err(error);
+        }
+        let sandbox = run_sandbox_options(&artifacts, Some(sandbox_image.reference().to_owned()));
+        record.status = RunStatus::Running;
+        record.harness_rev = Some(artifacts.source_sha256.clone());
+        record.binary_rev = Some(artifacts.binary_sha256.clone());
+        record.evidence_dir = Some(workspace_relative_record(&artifacts.output_relative));
+        let run_id = record.id;
+        if let Err(error) = store.insert_run(&record).await {
+            if let Some(run_root) = artifacts.output_host.parent() {
+                let _ignored_cleanup_error = std::fs::remove_dir_all(run_root);
+            }
+            return Err(ClassifiedError::Storage(error.to_string()));
+        }
+        self.run_journal.open_run(run_id, project, target, engine);
+        if let Err(error) = ensure_run_journal_durable(&self.run_journal) {
+            store
+                .set_run_status(run_id, RunStatus::Failed, Some(Utc::now()))
+                .await
+                .map_err(|status_error| ClassifiedError::Storage(status_error.to_string()))?;
+            return Err(error);
+        }
+        let persistence = PersistedRunGuard::new(
+            Arc::clone(store),
+            Some(Arc::clone(&self.run_journal)),
+            run_id,
+        );
+        if let Err(error) = store
+            .set_run_harness_source(run_id, &qualified.source)
+            .await
+        {
+            let failure_recorded = store
+                .set_run_status(run_id, RunStatus::Failed, Some(Utc::now()))
+                .await;
+            if failure_recorded.is_ok() {
+                self.run_journal.close_run(run_id);
+            }
+            return Err(ClassifiedError::Storage(error.to_string()));
+        }
+        Ok(PreparedUserspaceRun {
+            config,
+            record,
+            artifacts,
+            sandbox,
+            persistence,
+        })
+    }
+
     async fn run_fuzzer_with_started_inner(
         &self,
         project: &Path,
@@ -473,6 +749,12 @@ impl ServiceContainer {
         let workspace_operation = self.acquire_workspace_operation().await?;
         let project_root = canonical_project_root(project)?;
         let project = project_root.as_path();
+
+        #[cfg(feature = "campaign-health")]
+        let campaign_health_settings = crate::config::effective_campaign_health_settings()
+            .map_err(|error| {
+                ClassifiedError::Validation(format!("campaign health settings: {error}"))
+            })?;
 
         let (engine, duration_secs) = (resolved.engine, resolved.duration_secs);
 
@@ -499,111 +781,29 @@ impl ServiceContainer {
         let workspace = workspace_dir(project, target);
         let corpus_dir = ensure_workspace_directory(&workspace, Path::new("corpus"))?;
 
-        let bin = harness_binary_name(target);
-        let binary = workspace.join(&bin);
-        if !is_regular_file(&binary) {
-            return Err(ClassifiedError::Validation(format!(
-                "Compiled harness '{bin}' not found -- compile the harness first."
-            )));
-        }
+        userspace_harness_binary(&workspace, target)?;
 
-        // Build a dictionary from the target sources (statically extracted, then
-        // LLM-augmented) and point the engine at it -- one of the cheapest
-        // coverage multipliers; absent literals just yield no flag.
-        let extra_args = self
-            .build_run_dictionary_args(project, target, &workspace, engine)
-            .await;
-
-        let mut run_cfg = FuzzRunConfig {
-            // Link the run to the target's compiled harness so the target-scoped
-            // workbench dashboard can attribute it. A throwaway id here would
-            // leave every run unattributable (dashboard shows zero runs).
-            harness_id: qualified.id,
-            engine,
-            duration: Some(std::time::Duration::from_secs(duration_secs)),
-            max_mem_mb: resolved.max_mem_mb,
-            max_cpus: resolved.max_cpus,
-            seed_corpus: Some(corpus_dir.clone()),
-            sanitizer: hf_core::target::Sanitizer::Address,
-            env: Vec::new(),
-            extra_args,
-            seed: None,
-            replay_of: None,
-        };
         let store = self.store.as_ref().ok_or_else(|| {
             ClassifiedError::Validation("fuzz runs require the persistent service store".to_owned())
         })?;
-        let mut run_record = RunRecord::new(
-            project.to_string_lossy().to_string(),
-            engine,
-            None,
-            Utc::now(),
-        );
-        // Every run pins its RNG seed in the persisted config. A replay
-        // re-executes with the original run's seed and links back to it; a
-        // fresh run derives its seed deterministically from its own id, so
-        // every run is reproducible by default.
-        match replay {
-            Some(provenance) => {
-                run_cfg.seed = Some(provenance.seed);
-                run_cfg.replay_of = Some(provenance.original_run_id);
-            }
-            None => run_cfg.seed = Some(hf_engine::seed::derive_run_seed(run_record.id)),
-        }
-        run_record.config = Some(run_cfg.clone());
-        let sandbox_image = resolve_run_sandbox_image(self.runtime.as_ref()).await?;
-        let context = run_context_digests(&workspace, sandbox_image.sha256())?;
-        retain_run_context(&mut run_record, context);
-        let artifacts = stage_run_artifacts(&workspace, run_record.id, &qualified.source, &binary)?;
-        if let Err(error) = verify_staged_qualification(&qualified, &artifacts) {
-            if let Some(run_root) = artifacts.output_host.parent() {
-                let _ = std::fs::remove_dir_all(run_root);
-            }
-            return Err(error);
-        }
-        if let Err(error) = verify_run_artifacts(&artifacts) {
-            if let Some(run_root) = artifacts.output_host.parent() {
-                let _ = std::fs::remove_dir_all(run_root);
-            }
-            return Err(error);
-        }
-        let sandbox = run_sandbox_options(&artifacts, Some(sandbox_image.reference().to_owned()));
-        run_record.status = RunStatus::Running;
-        run_record.harness_rev = Some(artifacts.source_sha256.clone());
-        run_record.binary_rev = Some(artifacts.binary_sha256.clone());
-        run_record.evidence_dir = Some(workspace_relative_record(&artifacts.output_relative));
+        let PreparedUserspaceRun {
+            config: run_cfg,
+            record: run_record,
+            artifacts,
+            sandbox,
+            persistence: mut persisted_run,
+        } = self
+            .prepare_userspace_run(
+                project,
+                target,
+                resolved,
+                &qualified,
+                &workspace,
+                corpus_dir.clone(),
+                replay,
+            )
+            .await?;
         let run_id = run_record.id;
-        if let Err(error) = store.insert_run(&run_record).await {
-            if let Some(run_root) = artifacts.output_host.parent() {
-                let _ = std::fs::remove_dir_all(run_root);
-            }
-            return Err(ClassifiedError::Storage(error.to_string()));
-        }
-        self.run_journal.open_run(run_id, project, target, engine);
-        if let Err(error) = ensure_run_journal_durable(&self.run_journal) {
-            store
-                .set_run_status(run_record.id, RunStatus::Failed, Some(Utc::now()))
-                .await
-                .map_err(|status_error| ClassifiedError::Storage(status_error.to_string()))?;
-            return Err(error);
-        }
-        let mut persisted_run = PersistedRunGuard::new(
-            Arc::clone(store),
-            Some(Arc::clone(&self.run_journal)),
-            run_id,
-        );
-        if let Err(error) = store
-            .set_run_harness_source(run_record.id, &qualified.source)
-            .await
-        {
-            let failure_recorded = store
-                .set_run_status(run_record.id, RunStatus::Failed, Some(Utc::now()))
-                .await;
-            if failure_recorded.is_ok() {
-                self.run_journal.close_run(run_id);
-            }
-            return Err(ClassifiedError::Storage(error.to_string()));
-        }
 
         // Register a cancellation token so `cancel_run(run_id)` can stop this
         // run cooperatively. `ActiveRunGuard` removes it again when this scope
@@ -611,14 +811,24 @@ impl ServiceContainer {
         // (e.g. wrapped in a `timeout`) rather than returning normally. A plain
         // post-await removal would leak the entry on abort, leaving a phantom
         // run that `active_run_ids` reports and `cancel_run` can never clear.
-        let cancel = CancellationToken::new();
-        if let Ok(mut runs) = self.active_runs.lock() {
-            runs.insert(run_id, cancel.clone());
+        let (cancel, _active_run_guard) = self.register_active_run(run_id);
+        #[cfg(feature = "campaign-health")]
+        if !self
+            .campaign_telemetry
+            .prepare_with_limit(run_id, campaign_health_settings.max_live_samples)
+        {
+            return Err(ClassifiedError::Internal(format!(
+                "campaign telemetry run '{run_id}' could not be prepared"
+            )));
         }
-        let _active_run_guard = ActiveRunGuard {
-            active_runs: Arc::clone(&self.active_runs),
+        #[cfg(feature = "campaign-health")]
+        let campaign_health_monitor = crate::container::health_monitor::RunHealthMonitor::start(
+            self.clone(),
+            Arc::clone(&self.campaign_telemetry),
             run_id,
-        };
+            std::time::Duration::from_secs(campaign_health_settings.assessment_interval_secs),
+            campaign_health_settings,
+        );
         // The run is durable and cancellable at this point. Non-blocking
         // presentation transports may now return the exact UUID; no engine
         // process has been launched yet.
@@ -640,6 +850,8 @@ impl ServiceContainer {
         let last_edges = std::sync::atomic::AtomicU64::new(0);
         let run_started = std::time::Instant::now();
         let series_w = std::sync::Arc::clone(&series);
+        #[cfg(feature = "campaign-health")]
+        let campaign_telemetry = Arc::clone(&self.campaign_telemetry);
         let watched = |p: FuzzProgress| {
             use std::sync::atomic::Ordering::Relaxed;
             match &p {
@@ -660,8 +872,12 @@ impl ServiceContainer {
                 }
                 _ => {}
             }
+            #[cfg(feature = "campaign-health")]
+            campaign_telemetry.observe_progress(run_id, &p, Utc::now());
             on_progress(p);
         };
+        #[cfg(feature = "campaign-health")]
+        let managed_invocation = self.campaign_telemetry.register_invocation(run_id)?;
         let output_monitor_stop = CancellationToken::new();
         let output_budget_exceeded = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let output_monitor = tokio::spawn(monitor_run_output(
@@ -688,17 +904,23 @@ impl ServiceContainer {
                 &watched,
             )
             .await;
+        #[cfg(feature = "campaign-health")]
+        managed_invocation.finish();
         output_monitor_stop.cancel();
         let _ = output_monitor.await;
         if !run_artifacts_within_budget(&artifacts, 64 * 1024 * 1024).await {
             output_budget_exceeded.store(true, std::sync::atomic::Ordering::Release);
         }
         if output_budget_exceeded.load(std::sync::atomic::Ordering::Acquire) {
-            store
+            let status_update = store
                 .set_run_status(run_record.id, RunStatus::Failed, Some(Utc::now()))
-                .await
-                .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
-            self.run_journal.close_run(run_id);
+                .await;
+            if status_update.is_ok() {
+                self.run_journal.close_run(run_id);
+            }
+            #[cfg(feature = "campaign-health")]
+            campaign_health_monitor.finish().await;
+            status_update.map_err(|error| ClassifiedError::Storage(error.to_string()))?;
             return Err(ClassifiedError::Sandbox(
                 "fuzz run corpus/output exceeded its retained-evidence budget".to_owned(),
             ));
@@ -709,8 +931,12 @@ impl ServiceContainer {
                 let status_update = store
                     .set_run_status(run_record.id, RunStatus::Failed, Some(Utc::now()))
                     .await;
+                if status_update.is_ok() {
+                    self.run_journal.close_run(run_id);
+                }
+                #[cfg(feature = "campaign-health")]
+                campaign_health_monitor.finish().await;
                 status_update.map_err(|e| ClassifiedError::Storage(e.to_string()))?;
-                self.run_journal.close_run(run_id);
                 return Err(error);
             }
         };
@@ -727,11 +953,16 @@ impl ServiceContainer {
         let retained = match merge_run_discoveries(engine, &artifacts, &corpus_dir).await {
             Ok(corpus) => corpus,
             Err(error) => {
-                store
+                let status_update = store
                     .set_run_status(run_record.id, RunStatus::Failed, Some(Utc::now()))
-                    .await
+                    .await;
+                if status_update.is_ok() {
+                    self.run_journal.close_run(run_id);
+                }
+                #[cfg(feature = "campaign-health")]
+                campaign_health_monitor.finish().await;
+                status_update
                     .map_err(|status_error| ClassifiedError::Storage(status_error.to_string()))?;
-                self.run_journal.close_run(run_id);
                 return Err(error);
             }
         };
@@ -739,11 +970,16 @@ impl ServiceContainer {
         // argument and `retained.entries`, never `retained.target_id`, so no
         // identity copy is needed here.
         if let Err(error) = self.persist_corpus(qualified.target_id, &retained).await {
-            store
+            let status_update = store
                 .set_run_status(run_record.id, RunStatus::Failed, Some(Utc::now()))
-                .await
+                .await;
+            if status_update.is_ok() {
+                self.run_journal.close_run(run_id);
+            }
+            #[cfg(feature = "campaign-health")]
+            campaign_health_monitor.finish().await;
+            status_update
                 .map_err(|status_error| ClassifiedError::Storage(status_error.to_string()))?;
-            self.run_journal.close_run(run_id);
             return Err(error);
         }
 
@@ -752,21 +988,32 @@ impl ServiceContainer {
         let metrics = match terminal_run_metrics(engine, &artifacts, &result).await {
             Ok(metrics) => metrics,
             Err(error) => {
-                store
+                let status_update = store
                     .set_run_status(run_record.id, RunStatus::Failed, Some(Utc::now()))
-                    .await
+                    .await;
+                if status_update.is_ok() {
+                    self.run_journal.close_run(run_id);
+                }
+                #[cfg(feature = "campaign-health")]
+                campaign_health_monitor.finish().await;
+                status_update
                     .map_err(|status_error| ClassifiedError::Storage(status_error.to_string()))?;
-                self.run_journal.close_run(run_id);
                 return Err(error);
             }
         };
         if let Err(error) =
             persist_terminal_run_evidence(store, run_record.id, &metrics, &series).await
         {
-            let _ = store
+            let status_update = store
                 .set_run_status(run_record.id, RunStatus::Failed, Some(Utc::now()))
                 .await;
-            self.run_journal.close_run(run_id);
+            if status_update.is_ok() {
+                self.run_journal.close_run(run_id);
+            }
+            #[cfg(feature = "campaign-health")]
+            campaign_health_monitor.finish().await;
+            status_update
+                .map_err(|status_error| ClassifiedError::Storage(status_error.to_string()))?;
             return Err(error);
         }
         let TerminalRunMetrics {
@@ -787,16 +1034,25 @@ impl ServiceContainer {
         let status_update = store
             .set_run_status(run_record.id, status, Some(Utc::now()))
             .await;
-        status_update.map_err(|e| ClassifiedError::Storage(e.to_string()))?;
+        if let Err(error) = status_update {
+            #[cfg(feature = "campaign-health")]
+            campaign_health_monitor.finish().await;
+            return Err(ClassifiedError::Storage(error.to_string()));
+        }
         if let Err(error) = close_run_journal(&self.run_journal, run_id) {
-            store
+            let status_update = store
                 .set_run_status(run_record.id, RunStatus::Failed, Some(Utc::now()))
-                .await
+                .await;
+            #[cfg(feature = "campaign-health")]
+            campaign_health_monitor.finish().await;
+            status_update
                 .map_err(|status_error| ClassifiedError::Storage(status_error.to_string()))?;
             persisted_run.disarm();
             return Err(error);
         }
         persisted_run.disarm();
+        #[cfg(feature = "campaign-health")]
+        campaign_health_monitor.finish().await;
         let auto_revert = if truncated {
             None
         } else {
@@ -1182,6 +1438,25 @@ impl ServiceContainer {
             .await
     }
 
+    /// Run a userspace campaign and expose its service-created durable id
+    /// before any progress callback is admitted.
+    ///
+    /// # Errors
+    /// Returns the same errors as [`Self::run_fuzzer`].
+    pub async fn run_fuzzer_observed(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+        duration_secs: u64,
+        on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
+        on_started: &(dyn Fn(Uuid) + Send + Sync),
+    ) -> Result<RunSummary, ClassifiedError> {
+        let resolved = resolve_fuzzing_run(engine, duration_secs)?;
+        self.run_fuzzer_with_started(project, target, resolved, on_progress, on_started, None)
+            .await
+    }
+
     /// Re-execute a recorded run with its engine, duration, and RNG seed.
     ///
     /// The original run's persisted config supplies every reproducibility
@@ -1292,11 +1567,49 @@ impl ServiceContainer {
         opts: &SyzkallerRunOpts,
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
     ) -> Result<SyzkallerSummary, ClassifiedError> {
+        self.run_syzkaller_observed(opts, on_progress, &|_| {})
+            .await
+    }
+
+    /// Run a syzkaller campaign and expose its durable cancellable id before
+    /// any campaign progress callback is admitted.
+    ///
+    /// # Errors
+    /// Returns the same errors as [`Self::run_syzkaller`].
+    pub async fn run_syzkaller_observed(
+        &self,
+        opts: &SyzkallerRunOpts,
+        on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
+        on_started: &(dyn Fn(Uuid) + Send + Sync),
+    ) -> Result<SyzkallerSummary, ClassifiedError> {
+        self.run_syzkaller_observed_with_environment(
+            opts,
+            on_progress,
+            on_started,
+            hf_runtime::docker_daemon_ready(),
+            None,
+        )
+        .await
+    }
+
+    async fn run_syzkaller_observed_with_environment(
+        &self,
+        opts: &SyzkallerRunOpts,
+        on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
+        on_started: &(dyn Fn(Uuid) + Send + Sync),
+        docker_ready: bool,
+        workspace_override: Option<PathBuf>,
+    ) -> Result<SyzkallerSummary, ClassifiedError> {
         use std::sync::atomic::{AtomicU64, Ordering};
         let _workspace_operation = self.acquire_workspace_operation().await?;
 
         let resolved = resolve_fuzzing_run(EngineKind::Syzkaller, opts.duration_secs)?;
         let duration_secs = resolved.duration_secs;
+        #[cfg(feature = "campaign-health")]
+        let campaign_health_settings = crate::config::effective_campaign_health_settings()
+            .map_err(|error| {
+                ClassifiedError::Validation(format!("campaign health settings: {error}"))
+            })?;
 
         self.authorize_recorded(
             Action::RunFuzzer {
@@ -1315,41 +1628,11 @@ impl ServiceContainer {
         let target_triple = format!("linux/{}", hf_runtime::platform_short(&platform));
 
         let log = |s: &str| on_progress(FuzzProgress::LogLine(s.to_owned()));
-        let nonempty = |o: &Option<String>| {
-            o.as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned)
-        };
-        let manager_cfg = nonempty(&opts.manager_cfg);
-        let kernel_image = nonempty(&opts.kernel_image);
-        let disk_image = nonempty(&opts.disk_image);
-        let ssh_key = nonempty(&opts.ssh_key);
-
-        let have_artifacts = kernel_image.is_some() && disk_image.is_some();
-
-        // No artifacts at all: surface what a campaign needs and stop (no error).
-        if manager_cfg.is_none() && !have_artifacts {
-            for line in [
-                format!(
-                    "syzkaller (kernel fuzzing) -- project: {}",
-                    opts.project.display()
-                ),
-                "No campaign artifacts provided. syzkaller drives a VM against a".to_owned(),
-                "KCOV-instrumented kernel; it needs one of:".to_owned(),
-                "  (a) a kernel image (bzImage) + a rootfs disk image, or".to_owned(),
-                "  (b) an existing syz-manager config (manager.cfg).".to_owned(),
-                "Build a KCOV kernel + rootfs per the setup guide, then select them above:"
-                    .to_owned(),
-                "https://github.com/google/syzkaller/blob/master/docs/linux/setup.md".to_owned(),
-            ] {
-                log(&line);
-            }
-            on_progress(FuzzProgress::Done);
+        let Some(inputs) = syzkaller_inputs(opts, on_progress) else {
             return Ok(SyzkallerSummary::default());
-        }
+        };
 
-        if !hf_runtime::docker_daemon_ready() {
+        if !docker_ready {
             return Err(ClassifiedError::Sandbox(
                 "Docker daemon not running -- cannot launch syz-manager.".to_owned(),
             ));
@@ -1380,7 +1663,7 @@ impl ServiceContainer {
             Utc::now(),
         );
         let run_id = run_record.id;
-        run_record.status = RunStatus::Running;
+        run_record.status = RunStatus::Pending;
         // No harness and no binary: a kernel campaign fuzzes an instrumented
         // image, so `harness_rev`/`binary_rev` stay unset and triage skips the
         // digest checks that exist to pin a userspace harness.
@@ -1389,17 +1672,28 @@ impl ServiceContainer {
             .insert_run(&run_record)
             .await
             .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
+        self.run_journal
+            .open_run(run_id, &project_root, &target_label, EngineKind::Syzkaller);
+        let mut persisted_run = PersistedRunGuard::new(
+            Arc::clone(store),
+            Some(Arc::clone(&self.run_journal)),
+            run_id,
+        );
+        ensure_run_journal_durable(&self.run_journal)?;
 
-        let provided_config = manager_cfg.is_some();
-        let workspace_root = prepare_configured_workspace_root()?;
+        let provided_config = inputs.manager_cfg.is_some();
+        let workspace_root = match workspace_override {
+            Some(root) => root,
+            None => prepare_configured_workspace_root()?,
+        };
         let stage_request = crate::syzkaller::SyzkallerStageRequest {
             workspace_root,
             run_id,
             target_triple: target_triple.clone(),
-            manager_cfg: manager_cfg.map(PathBuf::from),
-            kernel_image: kernel_image.map(PathBuf::from),
-            disk_image: disk_image.map(PathBuf::from),
-            ssh_key: ssh_key.map(PathBuf::from),
+            manager_cfg: inputs.manager_cfg.map(PathBuf::from),
+            kernel_image: inputs.kernel_image.map(PathBuf::from),
+            disk_image: inputs.disk_image.map(PathBuf::from),
+            ssh_key: inputs.ssh_key.map(PathBuf::from),
             vm_count: opts.vm_count,
             use_kvm,
             // Size the VM fan-out to the same budget the container is given so
@@ -1417,22 +1711,13 @@ impl ServiceContainer {
                 })??;
         let workspace = stage.root.clone();
         let sandbox_opts = crate::syzkaller::sandbox_options(&stage, &platform, use_kvm);
-        if provided_config {
-            log("Validated and rewrote the provided manager.cfg into isolated staging.");
-        } else {
-            log(&format!(
-                "Synthesized an isolated qemu manager.cfg ({target_triple})."
-            ));
-        }
-
-        log(&format!(
-            "Launching syz-manager in the sandbox for {duration_secs}s..."
-        ));
-        if use_kvm {
-            log("Note: qemu uses KVM acceleration (/dev/kvm passed through) -- expect good exec rates.");
-        } else {
-            log("Note: qemu runs under TCG emulation inside Docker (no KVM on this host) -- expect low exec rates.");
-        }
+        report_syzkaller_launch(
+            &target_triple,
+            duration_secs,
+            provided_config,
+            use_kvm,
+            &log,
+        );
 
         // A graceful multi-VM syz-manager teardown scales with the VM count, so
         // the outer Docker deadline reuses the engine sandbox headroom per VM
@@ -1440,22 +1725,7 @@ impl ServiceContainer {
         // was classified as TimedOut and discarded the whole campaign summary.
         // The inner `timeout --kill-after` force-kills syz-manager well before
         // this backstop, so reaching it is genuinely exceptional.
-        let vm_estimate = opts
-            .vm_count
-            .unwrap_or(2)
-            .clamp(1, crate::syzkaller::MAX_VM_COUNT);
-        let teardown_grace_secs =
-            hf_engine::runner::SANDBOX_TIMEOUT_HEADROOM_SECS.saturating_mul(u64::from(vm_estimate));
-        let inner_kill_after_secs = (teardown_grace_secs / 2).max(1);
-        let limits = hf_core::runtime::ResourceLimits {
-            max_mem_mb: resolved.max_mem_mb,
-            max_cpus: resolved.max_cpus,
-            // The inner `timeout` governs the campaign; give the sandbox deadline
-            // a VM-scaled grace margin so it is only a teardown backstop.
-            max_duration_secs: duration_secs.saturating_add(teardown_grace_secs),
-            env: std::collections::HashMap::new(),
-            ptrace: false,
-        };
+        let (inner_kill_after_secs, limits) = syzkaller_runtime_limits(&resolved, opts.vm_count);
         // Cross-line state for the streaming callback.
         let peak_edges = AtomicU64::new(0);
         let last_execs = AtomicU64::new(0);
@@ -1463,6 +1733,13 @@ impl ServiceContainer {
         // Previous (sample time, cumulative execs) for deriving an exec *rate*
         // from syzkaller's cumulative counter.
         let exec_rate_state = std::sync::Mutex::new(Option::<(std::time::Instant, u64)>::None);
+        #[cfg(feature = "campaign-health")]
+        let campaign_telemetry = Arc::clone(&self.campaign_telemetry);
+        let emit_progress = |progress: FuzzProgress| {
+            #[cfg(feature = "campaign-health")]
+            campaign_telemetry.observe_progress(run_id, &progress, Utc::now());
+            on_progress(progress);
+        };
         let on_line = |line: &str| {
             if let Some((cover, executed, crash_ct)) =
                 hf_engine::progress::parse_syzkaller_status(line)
@@ -1471,12 +1748,12 @@ impl ServiceContainer {
                 last_execs.store(executed, Ordering::Relaxed);
                 let prev = peak_crashes.load(Ordering::Relaxed);
                 if crash_ct > prev {
-                    on_progress(FuzzProgress::CrashesFound(
+                    emit_progress(FuzzProgress::CrashesFound(
                         u32::try_from(crash_ct - prev).unwrap_or(u32::MAX),
                     ));
                     peak_crashes.store(crash_ct, Ordering::Relaxed);
                 }
-                on_progress(FuzzProgress::EdgesCovered(cover));
+                emit_progress(FuzzProgress::EdgesCovered(cover));
                 // syzkaller reports a cumulative execution count; convert it to a
                 // per-second rate before emitting on the rate channel so the
                 // throughput chart does not render a monotonically climbing total.
@@ -1486,28 +1763,45 @@ impl ServiceContainer {
                         let elapsed = now.duration_since(prev_time).as_secs_f64();
                         if elapsed > 0.0 && executed >= prev_execs {
                             let rate = (executed - prev_execs) as f64 / elapsed;
-                            on_progress(FuzzProgress::ExecsPerSec(rate));
+                            emit_progress(FuzzProgress::ExecsPerSec(rate));
                         }
                     }
                     *guard = Some((now, executed));
                 }
-                on_progress(FuzzProgress::LogLine(line.to_owned()));
+                emit_progress(FuzzProgress::LogLine(line.to_owned()));
             } else if !line.trim().is_empty() {
-                on_progress(FuzzProgress::LogLine(line.to_owned()));
+                emit_progress(FuzzProgress::LogLine(line.to_owned()));
             }
         };
 
         // Register the cancellation token so the UI Stop button (which fires
         // `cancel_all_runs`) and `cancel_run` can tear down a long KVM campaign.
         // `ActiveRunGuard` removes it again even if this future is aborted.
-        let cancel = CancellationToken::new();
-        if let Ok(mut runs) = self.active_runs.lock() {
-            runs.insert(run_id, cancel.clone());
+        let (cancel, _active_run_guard) = self.register_active_run(run_id);
+        #[cfg(feature = "campaign-health")]
+        if !self
+            .campaign_telemetry
+            .prepare_with_limit(run_id, campaign_health_settings.max_live_samples)
+        {
+            return Err(ClassifiedError::Internal(format!(
+                "campaign telemetry run '{run_id}' could not be prepared"
+            )));
         }
-        let _active_run_guard = ActiveRunGuard {
-            active_runs: Arc::clone(&self.active_runs),
+        #[cfg(feature = "campaign-health")]
+        let campaign_health_monitor = crate::container::health_monitor::RunHealthMonitor::start(
+            self.clone(),
+            Arc::clone(&self.campaign_telemetry),
             run_id,
-        };
+            std::time::Duration::from_secs(campaign_health_settings.assessment_interval_secs),
+            campaign_health_settings,
+        );
+        let running_update = store.set_run_status(run_id, RunStatus::Running, None).await;
+        if let Err(error) = running_update {
+            #[cfg(feature = "campaign-health")]
+            campaign_health_monitor.finish().await;
+            return Err(ClassifiedError::Storage(error.to_string()));
+        }
+        on_started(run_id);
         let cmd = syzkaller_manager_command(
             crate::syzkaller::CONTAINER_MANAGER_CONFIG,
             duration_secs,
@@ -1515,10 +1809,14 @@ impl ServiceContainer {
         );
         let writable_monitor =
             crate::syzkaller::WritableBudgetMonitor::start(&stage, cancel.clone());
+        #[cfg(feature = "campaign-health")]
+        let managed_invocation = self.campaign_telemetry.register_invocation(run_id)?;
         let run_result = self
             .runtime
             .run_command_streaming_opts(&cmd, &workspace, &limits, &sandbox_opts, &cancel, &on_line)
             .await;
+        #[cfg(feature = "campaign-health")]
+        managed_invocation.finish();
         // Always stop the monitor, but surface a genuine run failure (Docker
         // died, container setup error) ahead of the budget verdict: otherwise a
         // real failure that also happened to trip the scratch budget would be
@@ -1531,12 +1829,38 @@ impl ServiceContainer {
         let result = match run_result {
             Ok(result) => result,
             Err(error) => {
-                self.finish_syzkaller_run(run_id, RunStatus::Failed).await?;
+                let status_update = self.finish_syzkaller_run(run_id, RunStatus::Failed).await;
+                if status_update.is_ok() {
+                    match close_run_journal(&self.run_journal, run_id) {
+                        Ok(()) => persisted_run.disarm(),
+                        Err(journal_error) => tracing::warn!(
+                            %run_id,
+                            %journal_error,
+                            "failed to close failed syzkaller run journal"
+                        ),
+                    }
+                }
+                #[cfg(feature = "campaign-health")]
+                campaign_health_monitor.finish().await;
+                status_update?;
                 return Err(error);
             }
         };
         if !within_budget {
-            self.finish_syzkaller_run(run_id, RunStatus::Failed).await?;
+            let status_update = self.finish_syzkaller_run(run_id, RunStatus::Failed).await;
+            if status_update.is_ok() {
+                match close_run_journal(&self.run_journal, run_id) {
+                    Ok(()) => persisted_run.disarm(),
+                    Err(journal_error) => tracing::warn!(
+                        %run_id,
+                        %journal_error,
+                        "failed to close failed syzkaller run journal"
+                    ),
+                }
+            }
+            #[cfg(feature = "campaign-health")]
+            campaign_health_monitor.finish().await;
+            status_update?;
             return Err(ClassifiedError::Sandbox(
                 "syzkaller scratch/workdir exceeded its 4 GiB growth or 100000-entry budget"
                     .to_owned(),
@@ -1553,7 +1877,20 @@ impl ServiceContainer {
             {
                 let detail = result.stderr.lines().last().unwrap_or("no error output");
                 let message = format!("syz-manager exited with {}: {detail}", result.exit_code);
-                self.finish_syzkaller_run(run_id, RunStatus::Failed).await?;
+                let status_update = self.finish_syzkaller_run(run_id, RunStatus::Failed).await;
+                if status_update.is_ok() {
+                    match close_run_journal(&self.run_journal, run_id) {
+                        Ok(()) => persisted_run.disarm(),
+                        Err(journal_error) => tracing::warn!(
+                            %run_id,
+                            %journal_error,
+                            "failed to close failed syzkaller run journal"
+                        ),
+                    }
+                }
+                #[cfg(feature = "campaign-health")]
+                campaign_health_monitor.finish().await;
+                status_update?;
                 return Err(ClassifiedError::Sandbox(message));
             }
             hf_core::runtime::CommandTermination::TimedOut => {
@@ -1576,30 +1913,10 @@ impl ServiceContainer {
         // campaign's crashes from the persisted `evidence_dir` exactly as it
         // does for a userspace run. The old sibling `syzkaller/evidence/<id>`
         // tree was unreachable from triage.
-        match ensure_workspace_directory(&kernel_workspace, &run_output_relative(run_id)) {
-            Ok(evidence_dir) => {
-                let stage_root = workspace.clone();
-                let evidence = tokio::task::spawn_blocking(move || {
-                    crate::syzkaller::retain_campaign_evidence(&stage_root, &evidence_dir)
-                })
-                .await
-                .map_err(|error| {
-                    ClassifiedError::Internal(format!("join syzkaller evidence task: {error}"))
-                })?;
-                match evidence {
-                    Ok(Some(path)) => log(&format!(
-                        "Retained syzkaller crash reproducers and corpus under {}.",
-                        path.display()
-                    )),
-                    Ok(None) => {}
-                    Err(error) => log(&format!(
-                        "Warning: could not retain syzkaller campaign evidence: {error}"
-                    )),
-                }
-            }
-            Err(error) => log(&format!(
-                "Warning: could not prepare the syzkaller evidence directory: {error}"
-            )),
+        for message in
+            retain_syzkaller_run_evidence(workspace.clone(), &kernel_workspace, run_id).await?
+        {
+            log(&message);
         }
 
         if matches!(
@@ -1607,7 +1924,7 @@ impl ServiceContainer {
             hf_core::runtime::CommandTermination::Completed
                 | hf_core::runtime::CommandTermination::TimedOut
         ) {
-            on_progress(FuzzProgress::Done);
+            emit_progress(FuzzProgress::Done);
         }
         let summary = SyzkallerSummary {
             edges: peak_edges.load(Ordering::Relaxed),
@@ -1623,12 +1940,32 @@ impl ServiceContainer {
         // does it in that order: a `Done` record whose numbers were lost reads
         // as a campaign that found nothing.
         if let Some(store) = self.store.as_ref() {
-            store
+            let stats_update = store
                 .set_run_stats(run_id, summary.edges, summary.execs, summary.crashes)
-                .await
-                .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
+                .await;
+            if let Err(error) = stats_update {
+                if let Err(status_error) =
+                    self.finish_syzkaller_run(run_id, RunStatus::Failed).await
+                {
+                    tracing::warn!(%run_id, %status_error, "failed to retain failed syzkaller status");
+                }
+                #[cfg(feature = "campaign-health")]
+                campaign_health_monitor.finish().await;
+                return Err(ClassifiedError::Storage(error.to_string()));
+            }
         }
-        self.finish_syzkaller_run(run_id, RunStatus::Done).await?;
+        let terminal_status = syzkaller_terminal_status(result.termination);
+        let status_update = self.finish_syzkaller_run(run_id, terminal_status).await;
+        let journal_update = if status_update.is_ok() {
+            close_run_journal(&self.run_journal, run_id)
+        } else {
+            Ok(())
+        };
+        #[cfg(feature = "campaign-health")]
+        campaign_health_monitor.finish().await;
+        status_update?;
+        journal_update?;
+        persisted_run.disarm();
         Ok(summary)
     }
 
@@ -1649,6 +1986,250 @@ impl ServiceContainer {
             .set_run_status(run_id, status, Some(Utc::now()))
             .await
             .map_err(|error| ClassifiedError::Storage(error.to_string()))
+    }
+}
+
+#[cfg(all(test, feature = "campaign-health"))]
+mod syzkaller_health_lifecycle_tests {
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+
+    struct CancelledKernelRuntime;
+
+    struct FailingKernelRuntime;
+
+    #[async_trait::async_trait]
+    impl hf_core::runtime::RuntimeAdapter for CancelledKernelRuntime {
+        async fn run_command(
+            &self,
+            _cmd: &[String],
+            _cwd: &Path,
+            _limits: &hf_core::runtime::ResourceLimits,
+        ) -> Result<hf_core::runtime::CommandResult, ClassifiedError> {
+            unreachable!("syzkaller uses the streaming runtime method")
+        }
+
+        async fn run_command_streaming_opts(
+            &self,
+            _cmd: &[String],
+            cwd: &Path,
+            _limits: &hf_core::runtime::ResourceLimits,
+            _opts: &hf_core::runtime::SandboxOptions,
+            cancel: &CancellationToken,
+            _on_line: &hf_core::runtime::LineSink<'_>,
+        ) -> Result<hf_core::runtime::CommandResult, ClassifiedError> {
+            cancel.cancelled().await;
+            Ok(hf_core::runtime::CommandResult {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                workspace: cwd.to_path_buf(),
+                termination: hf_core::runtime::CommandTermination::Cancelled,
+            })
+        }
+
+        async fn write_file(&self, _path: &Path, _content: &str) -> Result<(), ClassifiedError> {
+            Ok(())
+        }
+
+        async fn read_file(&self, _path: &Path) -> Result<String, ClassifiedError> {
+            Ok(String::new())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl hf_core::runtime::RuntimeAdapter for FailingKernelRuntime {
+        async fn run_command(
+            &self,
+            _cmd: &[String],
+            _cwd: &Path,
+            _limits: &hf_core::runtime::ResourceLimits,
+        ) -> Result<hf_core::runtime::CommandResult, ClassifiedError> {
+            unreachable!("syzkaller uses the streaming runtime method")
+        }
+
+        async fn run_command_streaming_opts(
+            &self,
+            _cmd: &[String],
+            _cwd: &Path,
+            _limits: &hf_core::runtime::ResourceLimits,
+            _opts: &hf_core::runtime::SandboxOptions,
+            _cancel: &CancellationToken,
+            _on_line: &hf_core::runtime::LineSink<'_>,
+        ) -> Result<hf_core::runtime::CommandResult, ClassifiedError> {
+            Err(ClassifiedError::Sandbox("kernel runtime failed".to_owned()))
+        }
+
+        async fn write_file(&self, _path: &Path, _content: &str) -> Result<(), ClassifiedError> {
+            Ok(())
+        }
+
+        async fn read_file(&self, _path: &Path) -> Result<String, ClassifiedError> {
+            Ok(String::new())
+        }
+    }
+
+    fn write_manager_config(directory: &Path) -> PathBuf {
+        for (name, contents) in [
+            ("kernel", b"kernel".as_slice()),
+            ("rootfs.img", b"rootfs".as_slice()),
+            ("id_rsa", b"key".as_slice()),
+        ] {
+            std::fs::write(directory.join(name), contents).unwrap();
+        }
+        let config = serde_json::json!({
+            "target": "linux/amd64",
+            "http": "127.0.0.1:56741",
+            "workdir": "workdir",
+            "image": "rootfs.img",
+            "sshkey": "id_rsa",
+            "syzkaller": "/opt/syzkaller",
+            "type": "qemu",
+            "vm": {
+                "count": 1,
+                "kernel": "kernel",
+                "qemu_args": "-machine pc,accel=tcg -cpu max"
+            }
+        });
+        let path = directory.join("manager.cfg");
+        std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn admitted_syzkaller_run_has_exact_id_cancellation_and_health_cleanup() {
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let project = std::fs::canonicalize(project).unwrap();
+        let artifacts = directory.path().join("artifacts");
+        std::fs::create_dir(&artifacts).unwrap();
+        let manager_cfg = write_manager_config(&artifacts);
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = Arc::new(
+            hf_storage::Store::connect(directory.path().join("kernel.db"))
+                .await
+                .unwrap(),
+        );
+        let service = ServiceContainer::new(Arc::new(CancelledKernelRuntime), None)
+            .with_store(Arc::clone(&store));
+        let options = SyzkallerRunOpts {
+            project,
+            arch: Some("amd64".to_owned()),
+            duration_secs: 60,
+            kernel_image: None,
+            disk_image: None,
+            ssh_key: None,
+            manager_cfg: Some(manager_cfg.to_string_lossy().into_owned()),
+            vm_count: Some(1),
+        };
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let started_tx = Mutex::new(Some(started_tx));
+        let runner_service = service.clone();
+        let runner = tokio::spawn(async move {
+            runner_service
+                .run_syzkaller_observed_with_environment(
+                    &options,
+                    &|_| {},
+                    &|run_id| {
+                        if let Some(sender) = started_tx.lock().unwrap().take() {
+                            let _receiver_dropped = sender.send(run_id);
+                        }
+                    },
+                    true,
+                    Some(workspace),
+                )
+                .await
+        });
+        let run_id = tokio::time::timeout(std::time::Duration::from_secs(5), started_rx)
+            .await
+            .expect("started callback")
+            .expect("started id");
+        assert_eq!(service.active_run_ids(), vec![run_id]);
+        assert_eq!(
+            service.request_run_cancel(run_id).await.unwrap(),
+            crate::container::RunCancelOutcome::Accepted
+        );
+
+        let summary = tokio::time::timeout(std::time::Duration::from_secs(5), runner)
+            .await
+            .expect("kernel run returned")
+            .expect("kernel task joined")
+            .expect("cooperative cancellation retains a summary");
+        assert_eq!(summary.run_id, Some(run_id));
+        assert_eq!(
+            summary.termination,
+            Some(hf_core::runtime::CommandTermination::Cancelled)
+        );
+        assert_eq!(
+            store.get_run(run_id).await.unwrap().unwrap().status,
+            RunStatus::Cancelled
+        );
+        let telemetry = store.run_telemetry(run_id).await.unwrap().unwrap();
+        assert_eq!(telemetry.managed_invocations_expected, 0);
+        assert_eq!(telemetry.managed_invocations_alive, 0);
+        assert!(service.live_campaign_telemetry(run_id).is_none());
+    }
+
+    #[tokio::test]
+    async fn admitted_syzkaller_runtime_failure_retains_final_health_before_returning_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let project = std::fs::canonicalize(project).unwrap();
+        let artifacts = directory.path().join("artifacts");
+        std::fs::create_dir(&artifacts).unwrap();
+        let manager_cfg = write_manager_config(&artifacts);
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = Arc::new(
+            hf_storage::Store::connect(directory.path().join("kernel.db"))
+                .await
+                .unwrap(),
+        );
+        let service = ServiceContainer::new(Arc::new(FailingKernelRuntime), None)
+            .with_store(Arc::clone(&store));
+        let options = SyzkallerRunOpts {
+            project,
+            arch: Some("amd64".to_owned()),
+            duration_secs: 60,
+            kernel_image: None,
+            disk_image: None,
+            ssh_key: None,
+            manager_cfg: Some(manager_cfg.to_string_lossy().into_owned()),
+            vm_count: Some(1),
+        };
+        let started = Mutex::new(None);
+
+        let error = service
+            .run_syzkaller_observed_with_environment(
+                &options,
+                &|_| {},
+                &|run_id| *started.lock().unwrap() = Some(run_id),
+                true,
+                Some(workspace),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("kernel runtime failed"));
+        let run_id = started.lock().unwrap().expect("admitted run id");
+        assert_eq!(
+            store.get_run(run_id).await.unwrap().unwrap().status,
+            RunStatus::Failed
+        );
+        assert!(store
+            .list_campaign_health_events(Some(run_id), 20)
+            .await
+            .unwrap()
+            .iter()
+            .any(|event| event.condition == "run_failed"));
+        let telemetry = store.run_telemetry(run_id).await.unwrap().unwrap();
+        assert_eq!(telemetry.managed_invocations_expected, 0);
+        assert_eq!(telemetry.managed_invocations_alive, 0);
+        assert!(service.live_campaign_telemetry(run_id).is_none());
     }
 }
 

@@ -2,6 +2,22 @@ import { describe, expect, it } from "vitest";
 import { SseAdapter } from "../lib/sseAdapter";
 
 describe("SseAdapter", () => {
+  it("announces a successful connection before streamed delivery", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(new ReadableStream<Uint8Array>(), { status: 200 })) as typeof fetch;
+    try {
+      const adapter = new SseAdapter("http://localhost:8081");
+      let unlisten = () => {};
+      await new Promise<void>((resolve) => {
+        unlisten = adapter.listen("stream:connected", () => resolve());
+      });
+      unlisten();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("uses authenticated fetch streaming and dispatches named SSE events", async () => {
     const originalFetch = globalThis.fetch;
     const requests: RequestInit[] = [];
@@ -86,6 +102,42 @@ describe("SseAdapter", () => {
         run_id: "run-42",
         type: "EdgesCovered",
         data: 17,
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("delivers owner-attributed campaign health without rewriting ids", async () => {
+    const originalFetch = globalThis.fetch;
+    const encoder = new TextEncoder();
+    globalThis.fetch = (async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              encoder.encode(
+                'event: campaign:health\ndata: {"type":"CampaignHealth","data":{"owner":{"run_id":"run-7","project_root":"/p"},"event":{"id":"event-9","run_id":"run-7","condition":"run_failed"}}}\n\n',
+              ),
+            );
+            controller.close();
+          },
+        }),
+        { status: 200 },
+      )) as typeof fetch;
+    try {
+      const adapter = new SseAdapter("http://localhost:8081");
+      let unlisten = () => {};
+      const payload = await new Promise<Record<string, unknown>>((resolve) => {
+        unlisten = adapter.listen<Record<string, unknown>>(
+          "campaign:health",
+          (event) => resolve(event.payload),
+        );
+      });
+      unlisten();
+      expect(payload).toMatchObject({
+        owner: { run_id: "run-7", project_root: "/p" },
+        event: { id: "event-9", run_id: "run-7", condition: "run_failed" },
       });
     } finally {
       globalThis.fetch = originalFetch;

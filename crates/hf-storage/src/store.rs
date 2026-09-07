@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
-use sqlx::{Row, SqlitePool};
+use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -21,6 +21,12 @@ use hf_core::target::{TargetCandidate, TargetInventory};
 const DEFAULT_DB_PATH: &str = "data/oxfuzz.db";
 /// Maximum time a connection waits for another `SQLite` writer to finish.
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_HEALTH_JSON_BYTES: usize = 64 * 1024;
+const MAX_HEALTH_DEDUP_KEY_BYTES: usize = 512;
+const MAX_HEALTH_DETAIL_BYTES: usize = 4 * 1024;
+pub const MAX_CAMPAIGN_HEALTH_EVENT_PAGE_SIZE: u32 = 100;
+/// Maximum number of structured live samples in a retained health snapshot.
+pub const MAX_CAMPAIGN_HEALTH_SAMPLES: usize = 256;
 
 /// Errors raised by the storage layer.
 #[derive(Debug, Error)]
@@ -346,6 +352,125 @@ impl RunRecord {
             sandbox_rev: None,
         }
     }
+}
+
+/// Latest bounded live telemetry retained for one campaign run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunTelemetryRecord {
+    /// Campaign run whose latest observation this record describes.
+    pub run_id: Uuid,
+    /// Time the retained observation was assembled.
+    pub observed_at: DateTime<Utc>,
+    /// Latest valid edge or throughput observation.
+    pub last_progress_at: Option<DateTime<Utc>>,
+    /// Bounded live samples encoded as a JSON array.
+    pub samples_json: String,
+    /// Latest finite reported executions per second.
+    pub current_execs: Option<f64>,
+    /// Arithmetic mean across every valid throughput report in the run.
+    pub mean_execs: Option<f64>,
+    /// Highest finite throughput observed in the run.
+    pub peak_execs: Option<f64>,
+    /// Latest reported edge count.
+    pub edges: Option<u64>,
+    /// Number of valid throughput reports included in the whole-run mean.
+    pub throughput_sample_count: u64,
+    /// Sum paired with `throughput_sample_count` for the whole-run mean.
+    pub throughput_sample_sum: f64,
+    /// Sandboxed invocations the service has explicitly admitted.
+    pub managed_invocations_expected: u32,
+    /// Admitted invocations whose lifecycle has not terminated.
+    pub managed_invocations_alive: u32,
+    /// Latest available bytes reported for the run workspace.
+    pub free_disk_bytes: Option<u64>,
+}
+
+/// One immutable version 2 campaign-health event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CampaignHealthEventRecord {
+    /// Durable event format version. New records use version 2.
+    pub schema_version: u32,
+    /// Stable event identifier.
+    pub id: Uuid,
+    /// Campaign run this event describes.
+    pub run_id: Uuid,
+    /// Stable condition-and-evidence identity used for atomic deduplication.
+    pub dedup_key: String,
+    /// Machine-readable health condition.
+    pub condition: String,
+    /// Machine-readable severity.
+    pub severity: String,
+    /// Bounded operator-facing explanation.
+    pub detail: String,
+    /// Version 2 evidence encoded as a JSON object.
+    pub evidence_json: String,
+    /// Time the condition was observed.
+    pub observed_at: DateTime<Utc>,
+}
+
+/// One bounded newest-first page of immutable campaign-health events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CampaignHealthEventPageRecord {
+    /// Strictly decoded events in durable order.
+    pub events: Vec<CampaignHealthEventRecord>,
+    /// Last returned event to pass when requesting the next older page.
+    pub next_cursor: Option<Uuid>,
+}
+
+/// One strictly decoded metric sample in retained campaign-health evidence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetainedHealthSample {
+    /// Seconds elapsed since this process first observed the run.
+    pub elapsed_secs: f64,
+    /// Structured edge count paired with the throughput report.
+    pub edges: u64,
+    /// Finite reported executions per second.
+    pub execs: f64,
+}
+
+/// Exact assessment input stored with one version 2 health event.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CampaignHealthEvidenceRecord {
+    /// Evidence format version.
+    pub schema_version: u32,
+    /// Run being assessed.
+    pub run_id: Uuid,
+    /// Condition this evidence triggered.
+    pub condition: String,
+    /// Time of assessment.
+    pub observed_at: DateTime<Utc>,
+    /// Durable lifecycle state used by the assessment.
+    pub run_status: RunStatus,
+    /// Configured coverage window.
+    pub plateau_window: usize,
+    /// Configured seconds before metric progress is stale.
+    pub stale_progress_secs: u64,
+    /// Configured minimum available workspace bytes.
+    pub disk_floor_bytes: u64,
+    /// Bounded structured metric samples, oldest first.
+    pub coverage_samples: Vec<RetainedHealthSample>,
+    /// Latest valid structured metric observation.
+    pub last_progress_at: Option<DateTime<Utc>>,
+    /// Seconds since structured metric progress, when measurable.
+    pub progress_stale_secs: Option<u64>,
+    /// Latest finite reported executions per second.
+    pub current_execs: Option<f64>,
+    /// Whole-run arithmetic mean of finite throughput reports.
+    pub mean_execs: Option<f64>,
+    /// Peak finite throughput report.
+    pub peak_execs: Option<f64>,
+    /// Number of reports included in the whole-run mean.
+    pub throughput_sample_count: u64,
+    /// Sum paired with `throughput_sample_count`.
+    pub throughput_sample_sum: f64,
+    /// Explicitly admitted managed invocations.
+    pub managed_invocations_expected: u32,
+    /// Admitted invocations still within their runtime await.
+    pub managed_invocations_alive: u32,
+    /// Available workspace bytes, when the filesystem probe succeeded.
+    pub free_disk_bytes: Option<u64>,
 }
 
 /// Lifecycle status of one explicit Semgrep enrichment operation.
@@ -1346,6 +1471,300 @@ impl Store {
                 .ok()
                 .flatten()
         }))
+    }
+
+    /// Persist the latest bounded telemetry snapshot for one campaign run.
+    ///
+    /// The whole-run throughput accumulator is stored separately from the
+    /// bounded live sample array so deque eviction cannot change the mean.
+    ///
+    /// # Errors
+    /// Returns an error when the record is malformed, its run is absent, or a
+    /// database operation fails.
+    pub async fn upsert_run_telemetry(
+        &self,
+        record: &RunTelemetryRecord,
+    ) -> Result<bool, StorageError> {
+        validate_run_telemetry(record)?;
+        require_existing_run(&self.pool, record.run_id).await?;
+        let result = sqlx::query(
+            "INSERT INTO run_telemetry
+                (run_id, observed_at, last_progress_at, samples_json,
+                 current_execs, mean_execs, peak_execs, edges,
+                 throughput_sample_count, throughput_sample_sum,
+                 managed_invocations_expected, managed_invocations_alive,
+                 free_disk_bytes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ON CONFLICT(run_id) DO UPDATE SET
+                 observed_at = excluded.observed_at,
+                 last_progress_at = excluded.last_progress_at,
+                 samples_json = excluded.samples_json,
+                 current_execs = excluded.current_execs,
+                 mean_execs = excluded.mean_execs,
+                 peak_execs = excluded.peak_execs,
+                 edges = excluded.edges,
+                 throughput_sample_count = excluded.throughput_sample_count,
+                 throughput_sample_sum = excluded.throughput_sample_sum,
+                 managed_invocations_expected = excluded.managed_invocations_expected,
+                 managed_invocations_alive = excluded.managed_invocations_alive,
+                 free_disk_bytes = excluded.free_disk_bytes
+             WHERE excluded.observed_at > run_telemetry.observed_at",
+        )
+        .bind(record.run_id.to_string())
+        .bind(record.observed_at.to_rfc3339())
+        .bind(record.last_progress_at.map(|time| time.to_rfc3339()))
+        .bind(&record.samples_json)
+        .bind(record.current_execs)
+        .bind(record.mean_execs)
+        .bind(record.peak_execs)
+        .bind(optional_u64_to_i64(record.edges, "telemetry edges")?)
+        .bind(u64_to_i64(
+            record.throughput_sample_count,
+            "telemetry throughput sample count",
+        )?)
+        .bind(record.throughput_sample_sum)
+        .bind(i64::from(record.managed_invocations_expected))
+        .bind(i64::from(record.managed_invocations_alive))
+        .bind(optional_u64_to_i64(
+            record.free_disk_bytes,
+            "telemetry free disk bytes",
+        )?)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Load the latest retained telemetry snapshot for one run.
+    ///
+    /// # Errors
+    /// Returns an error on database failure or malformed retained data.
+    pub async fn run_telemetry(
+        &self,
+        run_id: Uuid,
+    ) -> Result<Option<RunTelemetryRecord>, StorageError> {
+        let row = sqlx::query(
+            "SELECT run_id, observed_at, last_progress_at, samples_json,
+                    current_execs, mean_execs, peak_execs, edges,
+                    throughput_sample_count, throughput_sample_sum,
+                    managed_invocations_expected, managed_invocations_alive,
+                    free_disk_bytes
+             FROM run_telemetry WHERE run_id = ?1",
+        )
+        .bind(run_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref().map(run_telemetry_from_row).transpose()
+    }
+
+    /// Atomically insert one immutable version 2 campaign-health event.
+    ///
+    /// Returns `false` when an event with the same deduplication key already
+    /// exists.
+    ///
+    /// # Errors
+    /// Returns an error when the record is malformed, its run is absent, or a
+    /// database operation fails.
+    pub async fn insert_campaign_health_event(
+        &self,
+        event: &CampaignHealthEventRecord,
+    ) -> Result<bool, StorageError> {
+        validate_campaign_health_event(event)?;
+        require_existing_run(&self.pool, event.run_id).await?;
+        let result = sqlx::query(
+            "INSERT INTO campaign_health_events
+                (id, schema_version, run_id, dedup_key, condition, severity,
+                 detail, evidence_json, observed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(run_id, condition, dedup_key) DO NOTHING",
+        )
+        .bind(event.id.to_string())
+        .bind(i64::from(event.schema_version))
+        .bind(event.run_id.to_string())
+        .bind(&event.dedup_key)
+        .bind(&event.condition)
+        .bind(&event.severity)
+        .bind(&event.detail)
+        .bind(&event.evidence_json)
+        .bind(event.observed_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// List immutable health events newest first, optionally for one run.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid limit, database failure, or malformed
+    /// retained data.
+    pub async fn list_campaign_health_events(
+        &self,
+        run_id: Option<Uuid>,
+        limit: u32,
+    ) -> Result<Vec<CampaignHealthEventRecord>, StorageError> {
+        if !(1..=MAX_CAMPAIGN_HEALTH_EVENT_PAGE_SIZE).contains(&limit) {
+            return Err(StorageError::InvalidData(format!(
+                "campaign health event limit must be between 1 and {MAX_CAMPAIGN_HEALTH_EVENT_PAGE_SIZE}"
+            )));
+        }
+        let rows = match run_id {
+            Some(run_id) => {
+                sqlx::query(
+                    "SELECT id, schema_version, run_id, dedup_key, condition,
+                            severity, detail, evidence_json, observed_at
+                     FROM campaign_health_events WHERE run_id = ?1
+                     ORDER BY observed_at DESC, id DESC LIMIT ?2",
+                )
+                .bind(run_id.to_string())
+                .bind(i64::from(limit))
+                .fetch_all(&self.pool)
+                .await?
+            }
+            None => {
+                sqlx::query(
+                    "SELECT id, schema_version, run_id, dedup_key, condition,
+                            severity, detail, evidence_json, observed_at
+                     FROM campaign_health_events
+                     ORDER BY observed_at DESC, id DESC LIMIT ?1",
+                )
+                .bind(i64::from(limit))
+                .fetch_all(&self.pool)
+                .await?
+            }
+        };
+        rows.iter().map(campaign_health_event_from_row).collect()
+    }
+
+    /// Read one deterministic newest-first page for an exact run.
+    ///
+    /// A cursor must belong to the requested run. Events inserted after the
+    /// first page do not shift or skip older rows because the cursor names the
+    /// last returned `(observed_at, id)` key.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid limit, foreign/missing cursor, database
+    /// failure, or malformed retained data.
+    pub async fn campaign_health_event_page(
+        &self,
+        run_id: Uuid,
+        cursor: Option<Uuid>,
+        limit: u32,
+    ) -> Result<CampaignHealthEventPageRecord, StorageError> {
+        if !(1..=MAX_CAMPAIGN_HEALTH_EVENT_PAGE_SIZE).contains(&limit) {
+            return Err(StorageError::InvalidData(format!(
+                "campaign health event limit must be between 1 and {MAX_CAMPAIGN_HEALTH_EVENT_PAGE_SIZE}"
+            )));
+        }
+        let cursor_key = match cursor {
+            Some(cursor) => Some(
+                sqlx::query("SELECT observed_at, id FROM campaign_health_events WHERE run_id = ?1 AND id = ?2")
+                    .bind(run_id.to_string())
+                    .bind(cursor.to_string())
+                    .fetch_optional(&self.pool)
+                    .await?
+                    .ok_or_else(|| {
+                        StorageError::InvalidData(format!(
+                            "campaign health cursor '{cursor}' does not belong to run '{run_id}'"
+                        ))
+                    })?,
+            ),
+            None => None,
+        };
+        let fetch_limit = i64::from(limit) + 1;
+        let rows = if let Some(cursor) = cursor_key {
+            let observed_at: String = cursor.try_get("observed_at")?;
+            let id: String = cursor.try_get("id")?;
+            sqlx::query(
+                "SELECT id, schema_version, run_id, dedup_key, condition,
+                        severity, detail, evidence_json, observed_at
+                 FROM campaign_health_events
+                 WHERE run_id = ?1
+                   AND (observed_at < ?2 OR (observed_at = ?2 AND id < ?3))
+                 ORDER BY observed_at DESC, id DESC LIMIT ?4",
+            )
+            .bind(run_id.to_string())
+            .bind(observed_at)
+            .bind(id)
+            .bind(fetch_limit)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                "SELECT id, schema_version, run_id, dedup_key, condition,
+                        severity, detail, evidence_json, observed_at
+                 FROM campaign_health_events WHERE run_id = ?1
+                 ORDER BY observed_at DESC, id DESC LIMIT ?2",
+            )
+            .bind(run_id.to_string())
+            .bind(fetch_limit)
+            .fetch_all(&self.pool)
+            .await?
+        };
+        let mut events = rows
+            .iter()
+            .map(campaign_health_event_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        let has_more = events.len() > limit as usize;
+        if has_more {
+            events.pop();
+        }
+        let next_cursor = if has_more {
+            events.last().map(|event| event.id)
+        } else {
+            None
+        };
+        Ok(CampaignHealthEventPageRecord {
+            events,
+            next_cursor,
+        })
+    }
+
+    /// List distinct retained health conditions for exact summary
+    /// classification without applying display pagination.
+    ///
+    /// # Errors
+    /// Returns an error on database failure.
+    pub async fn campaign_health_event_conditions(
+        &self,
+        run_id: Uuid,
+    ) -> Result<Vec<String>, StorageError> {
+        sqlx::query_scalar(
+            "SELECT DISTINCT condition FROM campaign_health_events
+             WHERE run_id = ?1 ORDER BY condition ASC",
+        )
+        .bind(run_id.to_string())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StorageError::from)
+    }
+
+    /// Remove old events except those belonging to explicitly active runs.
+    ///
+    /// # Errors
+    /// Returns an error on a database failure.
+    pub async fn prune_campaign_health_events(
+        &self,
+        cutoff: DateTime<Utc>,
+        active_run_ids: &[Uuid],
+    ) -> Result<u64, StorageError> {
+        let mut query =
+            QueryBuilder::<Sqlite>::new("DELETE FROM campaign_health_events WHERE observed_at < ");
+        query.push_bind(cutoff.to_rfc3339());
+        query.push(
+            " AND run_id NOT IN (
+                 SELECT id FROM runs
+                 WHERE run_kind = 'campaign' AND status IN ('pending', 'running')
+             )",
+        );
+        if !active_run_ids.is_empty() {
+            query.push(" AND run_id NOT IN (");
+            let mut separated = query.separated(", ");
+            for run_id in active_run_ids {
+                separated.push_bind(run_id.to_string());
+            }
+            separated.push_unseparated(")");
+        }
+        let result = query.build().execute(&self.pool).await?;
+        Ok(result.rows_affected())
     }
 
     /// Store the harness source a run used (for revision diffs).
@@ -2841,7 +3260,11 @@ impl Store {
     ) -> Result<(), StorageError> {
         use std::collections::{HashMap, HashSet};
 
-        let mut tx = self.pool.begin().await?;
+        // This transaction reads retained provenance before replacing rows.
+        // Reserve the WAL writer before that read so a concurrent health tick
+        // cannot invalidate the snapshot and make the read-to-write upgrade
+        // fail with SQLITE_BUSY_SNAPSHOT.
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let existing_rows =
             sqlx::query("SELECT data_json FROM corpus_entries WHERE target_id = ?1")
                 .bind(target_id.to_string())
@@ -3748,4 +4171,287 @@ fn require_one_run(rows_affected: u64, id: Uuid) -> Result<(), StorageError> {
     } else {
         Err(StorageError::NotFound(format!("run {id}")))
     }
+}
+
+async fn require_existing_run(pool: &SqlitePool, id: Uuid) -> Result<(), StorageError> {
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM runs WHERE id = ?1)")
+        .bind(id.to_string())
+        .fetch_one(pool)
+        .await?;
+    if exists {
+        Ok(())
+    } else {
+        Err(StorageError::NotFound(format!("run {id}")))
+    }
+}
+
+fn validate_run_telemetry(record: &RunTelemetryRecord) -> Result<(), StorageError> {
+    let samples: Vec<RetainedHealthSample> = serde_json::from_str(&record.samples_json)?;
+    if record.samples_json.len() > MAX_HEALTH_JSON_BYTES
+        || samples.len() > MAX_CAMPAIGN_HEALTH_SAMPLES
+    {
+        return Err(StorageError::InvalidData(
+            "run telemetry samples exceed the retained count or 64 KiB limit".to_owned(),
+        ));
+    }
+    for sample in &samples {
+        if !sample.elapsed_secs.is_finite()
+            || sample.elapsed_secs < 0.0
+            || !sample.execs.is_finite()
+            || sample.execs < 0.0
+        {
+            return Err(StorageError::InvalidData(
+                "run telemetry samples require finite non-negative elapsed time and throughput"
+                    .to_owned(),
+            ));
+        }
+    }
+    for (name, value) in [
+        ("current executions", record.current_execs),
+        ("mean executions", record.mean_execs),
+        ("peak executions", record.peak_execs),
+    ] {
+        if value.is_some_and(|value| !value.is_finite() || value < 0.0) {
+            return Err(StorageError::InvalidData(format!(
+                "run telemetry {name} must be finite and non-negative"
+            )));
+        }
+    }
+    if !record.throughput_sample_sum.is_finite() || record.throughput_sample_sum < 0.0 {
+        return Err(StorageError::InvalidData(
+            "run telemetry throughput sum must be finite and non-negative".to_owned(),
+        ));
+    }
+    match (record.throughput_sample_count, record.mean_execs) {
+        (0, None) if record.throughput_sample_sum == 0.0 => {}
+        (count, Some(mean)) if count > 0 => {
+            let expected = record.throughput_sample_sum / count as f64;
+            let tolerance = f64::EPSILON * expected.abs().max(1.0) * 4.0;
+            if (mean - expected).abs() > tolerance {
+                return Err(StorageError::InvalidData(
+                    "run telemetry mean does not match its whole-run accumulator".to_owned(),
+                ));
+            }
+        }
+        _ => {
+            return Err(StorageError::InvalidData(
+                "run telemetry mean and whole-run accumulator are inconsistent".to_owned(),
+            ));
+        }
+    }
+    if record.managed_invocations_alive > record.managed_invocations_expected {
+        return Err(StorageError::InvalidData(
+            "alive managed invocations exceed admitted invocations".to_owned(),
+        ));
+    }
+    if record
+        .last_progress_at
+        .is_some_and(|last_progress| last_progress > record.observed_at)
+    {
+        return Err(StorageError::InvalidData(
+            "run telemetry progress time is later than its observation".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_campaign_health_event(event: &CampaignHealthEventRecord) -> Result<(), StorageError> {
+    if event.schema_version != 2 {
+        return Err(StorageError::InvalidData(
+            "campaign health event schema version must be 2".to_owned(),
+        ));
+    }
+    if event.dedup_key.is_empty() || event.dedup_key.len() > MAX_HEALTH_DEDUP_KEY_BYTES {
+        return Err(StorageError::InvalidData(
+            "campaign health event deduplication key is empty or too large".to_owned(),
+        ));
+    }
+    if event.detail.is_empty() || event.detail.len() > MAX_HEALTH_DETAIL_BYTES {
+        return Err(StorageError::InvalidData(
+            "campaign health event detail is empty or too large".to_owned(),
+        ));
+    }
+    if !matches!(
+        event.condition.as_str(),
+        "coverage_plateau"
+            | "managed_invocation_missing"
+            | "worker_stats_stale"
+            | "disk_pressure"
+            | "run_failed"
+    ) {
+        return Err(StorageError::InvalidData(
+            "campaign health event condition is unknown".to_owned(),
+        ));
+    }
+    if !matches!(event.severity.as_str(), "warning" | "error") {
+        return Err(StorageError::InvalidData(
+            "campaign health event severity is unknown".to_owned(),
+        ));
+    }
+    if event.evidence_json.len() > MAX_HEALTH_JSON_BYTES {
+        return Err(StorageError::InvalidData(
+            "campaign health event evidence exceeds the 64 KiB limit".to_owned(),
+        ));
+    }
+    let evidence: CampaignHealthEvidenceRecord = serde_json::from_str(&event.evidence_json)?;
+    validate_campaign_health_evidence(&evidence)?;
+    if evidence.run_id != event.run_id
+        || evidence.condition != event.condition
+        || evidence.observed_at != event.observed_at
+    {
+        return Err(StorageError::InvalidData(
+            "campaign health event envelope does not match its evidence".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_campaign_health_evidence(
+    evidence: &CampaignHealthEvidenceRecord,
+) -> Result<(), StorageError> {
+    if evidence.schema_version != 2
+        || evidence.plateau_window < 2
+        || evidence.stale_progress_secs == 0
+        || evidence.disk_floor_bytes == 0
+        || evidence.coverage_samples.len() > MAX_CAMPAIGN_HEALTH_SAMPLES
+    {
+        return Err(StorageError::InvalidData(
+            "campaign health evidence has an unsupported version or sample window".to_owned(),
+        ));
+    }
+    for sample in &evidence.coverage_samples {
+        if !sample.elapsed_secs.is_finite()
+            || sample.elapsed_secs < 0.0
+            || !sample.execs.is_finite()
+            || sample.execs < 0.0
+        {
+            return Err(StorageError::InvalidData(
+                "campaign health evidence contains an invalid metric sample".to_owned(),
+            ));
+        }
+    }
+    for (name, value) in [
+        ("current executions", evidence.current_execs),
+        ("mean executions", evidence.mean_execs),
+        ("peak executions", evidence.peak_execs),
+    ] {
+        if value.is_some_and(|value| !value.is_finite() || value < 0.0) {
+            return Err(StorageError::InvalidData(format!(
+                "campaign health evidence {name} must be finite and non-negative"
+            )));
+        }
+    }
+    if !evidence.throughput_sample_sum.is_finite()
+        || evidence.throughput_sample_sum < 0.0
+        || evidence.managed_invocations_alive > evidence.managed_invocations_expected
+        || evidence
+            .last_progress_at
+            .is_some_and(|last_progress| last_progress > evidence.observed_at)
+    {
+        return Err(StorageError::InvalidData(
+            "campaign health evidence contains inconsistent metric or invocation state".to_owned(),
+        ));
+    }
+    match (evidence.throughput_sample_count, evidence.mean_execs) {
+        (0, None) if evidence.throughput_sample_sum == 0.0 => Ok(()),
+        (count, Some(mean)) if count > 0 => {
+            let expected = evidence.throughput_sample_sum / count as f64;
+            let tolerance = f64::EPSILON * expected.abs().max(1.0) * 4.0;
+            if (mean - expected).abs() <= tolerance {
+                Ok(())
+            } else {
+                Err(StorageError::InvalidData(
+                    "campaign health evidence mean does not match its accumulator".to_owned(),
+                ))
+            }
+        }
+        _ => Err(StorageError::InvalidData(
+            "campaign health evidence mean and accumulator are inconsistent".to_owned(),
+        )),
+    }
+}
+
+fn run_telemetry_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<RunTelemetryRecord, StorageError> {
+    let record = RunTelemetryRecord {
+        run_id: parse_uuid_column(row, "run_id")?,
+        observed_at: ts(&row.try_get::<String, _>("observed_at")?)?,
+        last_progress_at: row
+            .try_get::<Option<String>, _>("last_progress_at")?
+            .as_deref()
+            .map(ts)
+            .transpose()?,
+        samples_json: row.try_get("samples_json")?,
+        current_execs: row.try_get("current_execs")?,
+        mean_execs: row.try_get("mean_execs")?,
+        peak_execs: row.try_get("peak_execs")?,
+        edges: optional_i64_to_u64(row.try_get("edges")?, "telemetry edges")?,
+        throughput_sample_count: i64_to_u64(
+            row.try_get("throughput_sample_count")?,
+            "telemetry throughput sample count",
+        )?,
+        throughput_sample_sum: row.try_get("throughput_sample_sum")?,
+        managed_invocations_expected: i64_to_u32(
+            row.try_get("managed_invocations_expected")?,
+            "telemetry admitted invocation count",
+        )?,
+        managed_invocations_alive: i64_to_u32(
+            row.try_get("managed_invocations_alive")?,
+            "telemetry alive invocation count",
+        )?,
+        free_disk_bytes: optional_i64_to_u64(
+            row.try_get("free_disk_bytes")?,
+            "telemetry free disk bytes",
+        )?,
+    };
+    validate_run_telemetry(&record)?;
+    Ok(record)
+}
+
+fn campaign_health_event_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<CampaignHealthEventRecord, StorageError> {
+    let record = CampaignHealthEventRecord {
+        schema_version: i64_to_u32(row.try_get("schema_version")?, "health schema version")?,
+        id: parse_uuid_column(row, "id")?,
+        run_id: parse_uuid_column(row, "run_id")?,
+        dedup_key: row.try_get("dedup_key")?,
+        condition: row.try_get("condition")?,
+        severity: row.try_get("severity")?,
+        detail: row.try_get("detail")?,
+        evidence_json: row.try_get("evidence_json")?,
+        observed_at: ts(&row.try_get::<String, _>("observed_at")?)?,
+    };
+    validate_campaign_health_event(&record)?;
+    Ok(record)
+}
+
+fn parse_uuid_column(row: &sqlx::sqlite::SqliteRow, column: &str) -> Result<Uuid, StorageError> {
+    let raw: String = row.try_get(column)?;
+    Uuid::parse_str(&raw)
+        .map_err(|error| StorageError::InvalidData(format!("invalid {column}: {error}")))
+}
+
+fn u64_to_i64(value: u64, name: &str) -> Result<i64, StorageError> {
+    i64::try_from(value)
+        .map_err(|_| StorageError::InvalidData(format!("{name} exceeds SQLite integer range")))
+}
+
+fn optional_u64_to_i64(value: Option<u64>, name: &str) -> Result<Option<i64>, StorageError> {
+    value.map(|value| u64_to_i64(value, name)).transpose()
+}
+
+fn i64_to_u64(value: i64, name: &str) -> Result<u64, StorageError> {
+    u64::try_from(value)
+        .map_err(|_| StorageError::InvalidData(format!("stored {name} is negative")))
+}
+
+fn optional_i64_to_u64(value: Option<i64>, name: &str) -> Result<Option<u64>, StorageError> {
+    value.map(|value| i64_to_u64(value, name)).transpose()
+}
+
+fn i64_to_u32(value: i64, name: &str) -> Result<u32, StorageError> {
+    u32::try_from(value)
+        .map_err(|_| StorageError::InvalidData(format!("stored {name} is outside the u32 range")))
 }

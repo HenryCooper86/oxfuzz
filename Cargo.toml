@@ -129,6 +129,7 @@ dialoguer = "0.11"
 criterion = { version = "0.5", features = ["async_tokio"] }
 tempfile = "3"
 rustix = { version = "1", features = ["fs"] }
+fs2 = "0.4.3"
 cap-primitives = "4.0.3"
 windows-sys = "0.61"
 
