@@ -526,3 +526,120 @@ pub async fn change_aware_fixture() -> Result<ChangeAwareTestFixture, Box<dyn Er
         target_symbol: target.symbol,
     })
 }
+
+/// Owns a terminal campaign run for Run Closeout presentation tests.
+#[cfg(feature = "run-closeout")]
+pub struct RunCloseoutTestFixture {
+    directory: tempfile::TempDir,
+    container: ServiceContainer,
+    run_id: uuid::Uuid,
+}
+
+#[cfg(feature = "run-closeout")]
+impl RunCloseoutTestFixture {
+    /// Returns the service container wired to the fixture's durable store.
+    pub fn container(&self) -> ServiceContainer {
+        self.container.clone()
+    }
+
+    /// Returns the terminal campaign run.
+    #[must_use]
+    pub fn run_id(&self) -> uuid::Uuid {
+        self.run_id
+    }
+
+    /// Returns the project root retained by the run and target.
+    #[must_use]
+    pub fn project_root(&self) -> &Path {
+        self.directory.path()
+    }
+}
+
+/// Build a store-backed terminal campaign run without executing a harness.
+///
+/// # Errors
+/// Returns an error when the temporary store or retained records cannot be
+/// created.
+#[cfg(feature = "run-closeout")]
+pub async fn run_closeout_fixture() -> Result<RunCloseoutTestFixture, Box<dyn Error + Send + Sync>>
+{
+    use hf_core::engine::{EngineKind, FuzzRunConfig};
+    use hf_core::harness::{BuildCommand, Harness, HarnessStatus};
+    use hf_core::target::{
+        InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
+    };
+    use hf_storage::{RunKind, RunRecord, RunStatus};
+
+    let directory = tempfile::tempdir()?;
+    let project = std::fs::canonicalize(directory.path())?;
+    let store = Arc::new(Store::connect(directory.path().join("closeout.db")).await?);
+    let target = TargetCandidate {
+        id: uuid::Uuid::new_v4(),
+        project_root: project.clone(),
+        language: TargetLanguage::C,
+        symbol: "parse_packet".to_owned(),
+        kind: TargetKind::Parser,
+        location: SourceLocation {
+            file: PathBuf::from("src/parser.c"),
+            line: 1,
+            col: 1,
+            end_line: None,
+            end_col: None,
+        },
+        signature: None,
+        input_surface: InputSurface::Bytes,
+        complexity: 1,
+        fit_score: 0.8,
+        sanitizers: vec![Sanitizer::Address],
+        rationale: "closeout fixture".to_owned(),
+        reachable_functions: Vec::new(),
+        accumulated_complexity: 1,
+    };
+    store.upsert_target(&target, chrono::Utc::now()).await?;
+    let harness = Harness {
+        id: uuid::Uuid::new_v4(),
+        target_id: target.id,
+        engine: EngineKind::LibFuzzer,
+        source: "int LLVMFuzzerTestOneInput(const unsigned char*d,unsigned long n){return 0;}"
+            .to_owned(),
+        language: TargetLanguage::C,
+        build_cmd: BuildCommand {
+            compiler: "clang".to_owned(),
+            args: Vec::new(),
+            output: PathBuf::from("fuzz_parse_packet"),
+            extra_flags: Vec::new(),
+        },
+        sanitizer: Sanitizer::Address,
+        status: HarnessStatus::Draft,
+        smoke_run: None,
+    };
+    store.upsert_harness(&harness).await?;
+    let mut run = RunRecord::new(
+        project.to_string_lossy(),
+        EngineKind::LibFuzzer,
+        Some(FuzzRunConfig {
+            harness_id: harness.id,
+            engine: EngineKind::LibFuzzer,
+            duration: None,
+            max_mem_mb: 512,
+            max_cpus: 1,
+            seed_corpus: None,
+            sanitizer: Sanitizer::Address,
+            env: Vec::new(),
+            extra_args: Vec::new(),
+            seed: None,
+            replay_of: None,
+        }),
+        chrono::Utc::now(),
+    );
+    run.kind = RunKind::Campaign;
+    run.status = RunStatus::Done;
+    run.crash_count = Some(0);
+    store.insert_run(&run).await?;
+
+    Ok(RunCloseoutTestFixture {
+        directory,
+        container: ServiceContainer::stubbed().with_store(store),
+        run_id: run.id,
+    })
+}

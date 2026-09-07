@@ -5,16 +5,17 @@
 //! a missing measurement never arrives as a negative determination.
 
 use std::path::Path;
-
 use uuid::Uuid;
 
+use super::project_identity::stored_project_matches;
 use crate::campaign_trust::{
     assess_campaign_trust, CampaignTrustInput, CampaignTrustReport, CorpusEvidence,
     CoverageEvidence, HarnessEvidence, RunEvidence, TriageEvidence,
 };
 use crate::container::ServiceContainer;
+use crate::finding_review::{FindingDispositionFilter, FindingReviewFilter, FindingReviewItem};
+use crate::run_closeout::{decode_outcome, decode_step, CloseoutStep, StepOutcome};
 use crate::ClassifiedError;
-use hf_core::harness::HarnessStatus;
 
 impl ServiceContainer {
     /// Audit one run's evidence and report which claims it licenses.
@@ -49,46 +50,93 @@ impl ServiceContainer {
             None => None,
         };
 
-        // Without a harness record there is no target to scope the corpus or
-        // the coverage measurement to, so both stay unavailable rather than
-        // being read against a guessed target.
-        let target_id = harness.as_ref().map_or_else(Uuid::nil, |h| h.target_id);
-
-        let harness_evidence = harness.as_ref().map_or(HarnessEvidence::Unavailable, |h| {
-            HarnessEvidence::Retained {
-                record_id: h.id,
-                compiled: !matches!(h.status, HarnessStatus::Draft | HarnessStatus::Failed),
-                smoke_passed: h.smoke_run.as_ref().is_some_and(|s| s.passed),
-                // Compilation already blocks on a lint error, so a harness that
-                // compiled carries none. Re-linting retained source here would
-                // give one rule two homes.
-                blocking_lint_findings: 0,
-            }
-        });
-
-        let corpus_evidence = if harness.is_some() {
-            let entries = store
-                .list_corpus_entries(target_id)
+        let target = if let Some(harness) = &harness {
+            let target = store
+                .list_all_targets()
                 .await
-                .map_err(|e| ClassifiedError::Validation(e.to_string()))?;
-            CorpusEvidence::Retained {
-                entries: entries.len(),
+                .map_err(|e| ClassifiedError::Storage(e.to_string()))?
+                .into_iter()
+                .find(|target| target.id == harness.target_id)
+                .ok_or_else(|| {
+                    ClassifiedError::Validation(format!("run '{run_id}' names an unknown target"))
+                })?;
+            if !stored_project_matches(&target.project_root, Path::new(&run.project_root)) {
+                return Err(ClassifiedError::Validation(format!(
+                    "run '{run_id}' target project does not match its retained project"
+                )));
             }
+            Some(target)
         } else {
-            CorpusEvidence::Unavailable
+            None
         };
 
-        let coverage_evidence = self.coverage_evidence(&run, target_id).await;
+        let target_id = harness.as_ref().map_or_else(Uuid::nil, |h| h.target_id);
 
-        let crashes = store
-            .list_crashes_by_run(run_id)
+        let harness_evidence = match (
+            harness.as_ref(),
+            run.harness_rev.as_deref(),
+            run.binary_rev.as_deref(),
+        ) {
+            (Some(harness), Some(source), Some(binary)) => store
+                .harness_approval(harness.id, source, binary)
+                .await
+                .map_err(|e| ClassifiedError::Storage(e.to_string()))?
+                .map_or(HarnessEvidence::Unavailable, |approval| {
+                    HarnessEvidence::Retained {
+                        record_id: harness.id,
+                        compiled: true,
+                        smoke_passed: true,
+                        blocking_lint_findings: 0,
+                        approval_kind: approval.approval_kind,
+                    }
+                }),
+            _ => HarnessEvidence::Unavailable,
+        };
+
+        // The run retains a corpus digest but not its starting entry count.
+        // Current target rows and run-local files can change after the run.
+        let corpus_evidence = CorpusEvidence::Unavailable;
+
+        // Aggregate run edges do not identify covered project functions, and
+        // the current workspace cache is not evidence for this exact run.
+        // Until source coverage is retained with the run, the audit must stay
+        // unavailable and must not build or replay anything on demand.
+        let coverage_evidence = CoverageEvidence::Unavailable;
+
+        let closeout = store
+            .closeout_steps(run_id)
             .await
-            .map_err(|e| ClassifiedError::Validation(e.to_string()))?;
-        let triage = triage_evidence(&crashes);
+            .map_err(|e| ClassifiedError::Storage(e.to_string()))?
+            .into_iter()
+            .map(|(step_name, outcome, detail)| {
+                let step = decode_step(&step_name).ok_or_else(|| {
+                    ClassifiedError::Storage(format!(
+                        "decode retained closeout step '{step_name}' for run '{run_id}'"
+                    ))
+                })?;
+                let outcome = decode_outcome(step, &outcome, detail).ok_or_else(|| {
+                    ClassifiedError::Storage(format!(
+                        "decode retained closeout outcome '{outcome}' for step '{step_name}' and run '{run_id}'"
+                    ))
+                })?;
+                Ok((step, outcome))
+            })
+            .collect::<Result<Vec<_>, ClassifiedError>>()?;
+        let reviews = self
+            .finding_review_queue(
+                Path::new(&run.project_root),
+                FindingReviewFilter {
+                    run_id: Some(run_id),
+                    disposition: FindingDispositionFilter::All,
+                    ..FindingReviewFilter::default()
+                },
+            )
+            .await?;
+        let triage = triage_evidence(&closeout, run.crash_count, &reviews);
 
         Ok(assess_campaign_trust(&CampaignTrustInput {
             run_id,
-            target_id,
+            target_id: target.as_ref().map_or(target_id, |value| value.id),
             harness: harness_evidence,
             corpus: corpus_evidence,
             run: RunEvidence::Retained {
@@ -100,69 +148,53 @@ impl ServiceContainer {
             triage,
         }))
     }
-
-    /// Coverage evidence for the run's target, from the cached measurement.
-    ///
-    /// Never triggers a measurement. A target whose symbol cannot be resolved,
-    /// or whose measurement has not been produced, yields `Unavailable`.
-    async fn coverage_evidence(
-        &self,
-        run: &hf_storage::RunRecord,
-        target_id: Uuid,
-    ) -> CoverageEvidence {
-        let Some(store) = self.store() else {
-            return CoverageEvidence::Unavailable;
-        };
-        let Ok(targets) = store.list_all_targets().await else {
-            return CoverageEvidence::Unavailable;
-        };
-        let Some(target) = targets.into_iter().find(|t| t.id == target_id) else {
-            return CoverageEvidence::Unavailable;
-        };
-
-        let covered = self
-            .coverage_functions(Path::new(&run.project_root), &target.symbol)
-            .await;
-        if covered.is_empty() {
-            // No cached export exists, or it recorded nothing. Either way this
-            // is an absent measurement, not a measurement that found nothing:
-            // `coverage_functions` cannot distinguish the two, so the weaker
-            // and honest reading is the one reported.
-            return CoverageEvidence::Unavailable;
-        }
-        let target_attributed = covered
-            .iter()
-            .filter(|name| !hf_crash::is_harness_function(name))
-            .count();
-        CoverageEvidence::Retained {
-            record_id: run.id,
-            covered_functions: covered.len(),
-            target_attributed_functions: target_attributed,
-        }
-    }
 }
 
-fn triage_evidence(crashes: &[hf_core::crash::Crash]) -> TriageEvidence {
-    use crate::finding_proof::finding_proof_card;
-    use crate::triage_disposition::{triage_disposition, Disposition};
+fn triage_evidence(
+    closeout: &[(CloseoutStep, StepOutcome)],
+    run_crash_count: Option<u64>,
+    items: &[FindingReviewItem],
+) -> TriageEvidence {
+    use crate::triage_disposition::Disposition;
     use hf_core::crash::CrashOrigin;
 
-    let attributed = crashes
+    let attributed = items
         .iter()
-        .filter(|c| c.origin != CrashOrigin::Unknown)
+        .filter(|item| item.crash.origin != CrashOrigin::Unknown)
         .count();
-    let reportable = crashes
+    let reportable = items
         .iter()
-        .filter(|c| {
+        .filter(|item| {
             matches!(
-                triage_disposition(c, &finding_proof_card(c)).disposition,
+                item.disposition.disposition,
                 Disposition::ReportReady | Disposition::ReachabilityUnproven
             )
         })
         .count();
-    TriageEvidence {
-        crashes: crashes.len(),
+    let counts = TriageEvidence::Retained {
+        crashes: items.len(),
         attributed,
         reportable,
+    };
+    match closeout
+        .iter()
+        .rev()
+        .find(|(step, _)| *step == CloseoutStep::Triage)
+        .map(|(_, outcome)| outcome)
+    {
+        Some(StepOutcome::Completed { .. }) => counts,
+        Some(StepOutcome::Failed { .. } | StepOutcome::Blocked { .. }) => {
+            TriageEvidence::Unavailable {
+                reason: "Crash ingestion did not complete for this run.".to_owned(),
+            }
+        }
+        Some(StepOutcome::Skipped { .. }) => TriageEvidence::Unavailable {
+            reason: "Crash ingestion has no successful retained outcome for this run.".to_owned(),
+        },
+        None if run_crash_count == Some(0) => counts,
+        None if run_crash_count.is_some() && !items.is_empty() => counts,
+        None => TriageEvidence::Unavailable {
+            reason: "Crash ingestion completion is not retained for this run.".to_owned(),
+        },
     }
 }

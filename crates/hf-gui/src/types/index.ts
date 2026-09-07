@@ -32,6 +32,7 @@ export interface CoverageSample {
 
 export interface RunHistoryItem {
   id: string;
+  kind: string;
   project_root: string;
   target: string | null;
   /** Service-owned key for runs with comparable coverage conditions. */
@@ -47,6 +48,81 @@ export interface RunHistoryItem {
   harness_rev: string | null;
   binary_rev: string | null;
   evidence_dir: string | null;
+}
+
+export interface HarnessWorkOrder {
+  schema_version: number;
+  id: string;
+  payload: Record<string, unknown>;
+  validation_commands?: Array<Record<string, unknown>>;
+}
+
+export type WorkOrderSubmissionOrigin =
+  | "human"
+  | { external_tool: { tool: string; model: string | null; response_id: string | null } };
+
+export interface HarnessWorkOrderSubmission {
+  id: string;
+  work_order_id: string;
+  source: string;
+  source_sha256: string;
+  origin: WorkOrderSubmissionOrigin;
+  parent_submission_id: string | null;
+  lint: HarnessLintFinding[];
+  submitted_at: string;
+}
+
+export interface HarnessWorkOrderAttemptResult {
+  compiled: boolean;
+  smoke_verdict: "pass" | "suspect" | "fail" | null;
+  repair_depth: number;
+  source_sha256: string | null;
+  binary_sha256: string | null;
+  execs_per_sec: number | null;
+  crashes: number | null;
+}
+
+export interface HarnessWorkOrderAttempt {
+  id: string;
+  submission_id: string;
+  status: string;
+  current_stage: string;
+  harness_id: string | null;
+  smoke_run_id: string | null;
+  result: HarnessWorkOrderAttemptResult | null;
+  failure_code: string | null;
+  failure_message: string | null;
+  started_at: string;
+  updated_at: string;
+  ended_at: string | null;
+}
+
+export interface HarnessWorkOrderRanking {
+  attempt_ids: string[];
+  winner_attempt_id: string | null;
+}
+
+export type CloseoutStep =
+  | "triage"
+  | "minimize"
+  | "corpus_absorb"
+  | "coverage"
+  | "blockers"
+  | "disposition"
+  | "trust_report";
+
+export type CloseoutStepOutcome =
+  | { outcome: "completed"; detail: string }
+  | { outcome: "skipped"; reason: string }
+  | { outcome: "blocked"; dependency: CloseoutStep }
+  | { outcome: "failed"; error: string };
+
+export interface RunCloseoutReport {
+  schema_version: number;
+  run_id: string;
+  availability: { status: "available" } | { status: "unavailable"; reason: string };
+  steps: Array<{ step: CloseoutStep; outcome: CloseoutStepOutcome }>;
+  resumed_at: CloseoutStep | null;
 }
 
 export interface TargetCandidate {

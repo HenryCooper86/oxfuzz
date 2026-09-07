@@ -4,12 +4,15 @@
 //! domain logic here (AGENTS.md 2.9). All builds and fuzz runs go through
 //! `hf-runtime` sandboxing (AGENTS.md 2.12).
 
+mod closeout_commands;
 mod commands;
 mod state;
+mod work_order_commands;
 
 use state::AppState;
 use tauri::Manager;
 
+use closeout_commands::{run_closeout, run_closeout_report};
 use commands::{
     agent_info, agent_tools, all_corpus, all_crashes, app_paths, approve_remediation_operation,
     artifact_summary, auto_revert_events, automotive_analyze_capture, automotive_build_replay_plan,
@@ -49,6 +52,11 @@ use commands::{
     start_remediation_verification, system_snapshot, system_status_cmd, triage, verify_crash,
     workbench_dashboard, write_config,
 };
+use work_order_commands::{
+    work_order_attempt, work_order_attempts, work_order_export, work_order_get, work_order_import,
+    work_order_list, work_order_promote, work_order_qualify, work_order_rank,
+    work_order_submissions,
+};
 
 #[cfg(feature = "semgrep-enrichment")]
 use commands::{semgrep_cancel, semgrep_enrich, semgrep_status};
@@ -86,6 +94,16 @@ pub fn run() {
             harness_smoke,
             harness_promote,
             harness_promote_with_findings,
+            work_order_export,
+            work_order_list,
+            work_order_get,
+            work_order_import,
+            work_order_submissions,
+            work_order_qualify,
+            work_order_attempts,
+            work_order_attempt,
+            work_order_rank,
+            work_order_promote,
             generate_seeds,
             generate_seeds_llm,
             corpus_list,
@@ -167,6 +185,8 @@ pub fn run() {
             run_history,
             run_coverage_series,
             run_harness_source,
+            run_closeout_report,
+            run_closeout,
             revert_harness_from_run,
             project_auto_revert_override,
             project_auto_revert_overrides,

@@ -14,7 +14,7 @@
 use serde::Serialize;
 
 /// Current serialized Run Closeout schema.
-pub const RUN_CLOSEOUT_SCHEMA_VERSION: u32 = 1;
+pub const RUN_CLOSEOUT_SCHEMA_VERSION: u32 = 2;
 
 /// One step of the closeout chain.
 ///
@@ -53,6 +53,12 @@ pub enum StepOutcome {
         /// Why it did not need to run.
         reason: String,
     },
+    /// An earlier required step failed. This is retryable after the dependency
+    /// changes, unlike a legitimate terminal skip.
+    Blocked {
+        /// The failed step whose output is required.
+        dependency: CloseoutStep,
+    },
     /// The step ran and failed. Retried by a later closeout.
     Failed {
         /// What went wrong.
@@ -63,9 +69,8 @@ pub enum StepOutcome {
 impl StepOutcome {
     /// Whether this outcome ends the step's work.
     ///
-    /// Completed and skipped are terminal. A failure is not: a later closeout
-    /// retries it, which is the difference between "there was nothing to do"
-    /// and "it broke".
+    /// Completed and skipped are terminal. Failure and blocked are retried by a
+    /// later closeout.
     #[must_use]
     pub fn is_terminal(&self) -> bool {
         matches!(self, Self::Completed { .. } | Self::Skipped { .. })
@@ -81,6 +86,19 @@ pub struct CloseoutStepRecord {
     pub outcome: StepOutcome,
 }
 
+/// Whether the retained run has enough exact scope to execute closeout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum CloseoutAvailability {
+    /// The run is a terminal campaign with a retained harness-backed target.
+    Available,
+    /// Closeout cannot safely address this retained run.
+    Unavailable {
+        /// Operator-facing reason owned by the service.
+        reason: String,
+    },
+}
+
 /// One closeout pass over a run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CloseoutReport {
@@ -88,6 +106,8 @@ pub struct CloseoutReport {
     pub schema_version: u32,
     /// The run closed out.
     pub run_id: uuid::Uuid,
+    /// Whether explicit Analyze/Resume is supported for this run.
+    pub availability: CloseoutAvailability,
     /// Every step's outcome, in ladder order.
     pub steps: Vec<CloseoutStepRecord>,
     /// The step this pass resumed at, when it resumed rather than started.
@@ -140,7 +160,9 @@ pub fn pending_steps(recorded: &[(CloseoutStep, StepOutcome)]) -> Vec<CloseoutSt
         .filter(|step| {
             !recorded
                 .iter()
-                .any(|(done, outcome)| done == step && outcome.is_terminal())
+                .rev()
+                .find(|(done, _)| done == step)
+                .is_some_and(|(_, outcome)| outcome.is_terminal())
         })
         .collect()
 }
@@ -155,8 +177,52 @@ pub fn blocked_by(
     recorded: &[(CloseoutStep, StepOutcome)],
 ) -> Option<CloseoutStep> {
     consumes(step).iter().copied().find(|dependency| {
-        recorded.iter().any(|(done, outcome)| {
-            done == dependency && matches!(outcome, StepOutcome::Failed { .. })
-        })
+        recorded
+            .iter()
+            .rev()
+            .find(|(done, _)| done == dependency)
+            .is_some_and(|(_, outcome)| {
+                matches!(
+                    outcome,
+                    StepOutcome::Failed { .. } | StepOutcome::Blocked { .. }
+                )
+            })
     })
+}
+
+/// Decode one retained step name from `SQLite`.
+pub(crate) fn decode_step(name: &str) -> Option<CloseoutStep> {
+    closeout_ladder()
+        .into_iter()
+        .find(|step| format!("{step:?}") == name)
+}
+
+/// Decode one retained outcome using the current and legacy spellings.
+pub(crate) fn decode_outcome(
+    step: CloseoutStep,
+    outcome: &str,
+    detail: String,
+) -> Option<StepOutcome> {
+    match outcome {
+        "completed" => Some(StepOutcome::Completed { detail }),
+        "skipped" => {
+            let legacy_dependency = consumes(step).iter().copied().find(|dependency| {
+                detail == format!("{dependency:?} failed, and this step reads its output")
+            });
+            legacy_dependency.map_or_else(
+                || Some(StepOutcome::Skipped { reason: detail }),
+                |dependency| Some(StepOutcome::Blocked { dependency }),
+            )
+        }
+        "blocked" => decode_step(&detail).and_then(|dependency| {
+            let valid = if step == CloseoutStep::TrustReport {
+                dependency < CloseoutStep::TrustReport
+            } else {
+                consumes(step).contains(&dependency)
+            };
+            valid.then_some(StepOutcome::Blocked { dependency })
+        }),
+        "failed" => Some(StepOutcome::Failed { error: detail }),
+        _ => None,
+    }
 }

@@ -698,6 +698,66 @@ describe("transport", () => {
     }
   });
 
+  it("uses exact work-order and closeout resources with truly empty action bodies", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      return new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    try {
+      const transport = createHttpTransport();
+      await transport.invoke("work_order_qualify", { submissionId: "submission/id" });
+      await transport.invoke("work_order_promote", { attemptId: "attempt/id" });
+      await transport.invoke("run_closeout", { runId: "run/id" });
+      await transport.invoke("run_closeout_report", { runId: "run/id" });
+      await transport.invoke("work_order_list", { project: "/tmp/project" });
+
+      expect(calls.map((call) => call.url)).toEqual([
+        "http://localhost:8081/harness/work-order-submissions/submission%2Fid/qualifications",
+        "http://localhost:8081/harness/work-order-attempts/attempt%2Fid/promotion",
+        "http://localhost:8081/runs/run%2Fid/closeout",
+        "http://localhost:8081/runs/run%2Fid/closeout",
+        "http://localhost:8081/harness/work-orders?project=%2Ftmp%2Fproject",
+      ]);
+      for (const call of calls.slice(0, 3)) {
+        expect(call.init.method).toBe("POST");
+        expect(call.init.body).toBeUndefined();
+        expect(new Headers(call.init.headers).has("content-type")).toBe(false);
+      }
+      expect(calls[3].init.method).toBe("GET");
+      expect(calls[4].init.method).toBe("GET");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("preserves structured service error codes and messages", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({ code: "work_order_stale", error: "target evidence changed" }),
+        { status: 409, headers: { "content-type": "application/json" } },
+      )) as typeof fetch;
+
+    try {
+      const transport = createHttpTransport();
+      await expect(
+        transport.invoke("work_order_import", {
+          workOrderId: "wo-1",
+          source: "source",
+          origin: { origin: "human" },
+        }),
+      ).rejects.toThrow("work_order_stale: target evidence changed");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("routes the diagnostics summary to the session-scoped web endpoint", async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     const originalFetch = globalThis.fetch;

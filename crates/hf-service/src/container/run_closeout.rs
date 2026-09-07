@@ -4,20 +4,22 @@
 //! `crate::run_closeout`. This runs the chain, composing service operations
 //! that already exist and implementing none of their logic.
 //!
-//! Each step's terminal outcome is written before the next begins, so a
-//! closeout interrupted after coverage resumes at blocker exploration rather
-//! than repeating the corpus replay that coverage measurement performs.
+//! Each step's terminal outcome is written before the next begins. Coverage
+//! and blocker rows written by older versions are projected to unavailable
+//! because they were derived from mutable workspace state.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use uuid::Uuid;
 
+use super::project_identity::stored_project_matches;
 use crate::container::ServiceContainer;
 use crate::run_closeout::{
-    blocked_by, closeout_ladder, pending_steps, CloseoutReport, CloseoutStep, CloseoutStepRecord,
-    StepOutcome, RUN_CLOSEOUT_SCHEMA_VERSION,
+    blocked_by, closeout_ladder, decode_outcome, decode_step, pending_steps, CloseoutAvailability,
+    CloseoutReport, CloseoutStep, CloseoutStepRecord, StepOutcome, RUN_CLOSEOUT_SCHEMA_VERSION,
 };
 use crate::ClassifiedError;
+use hf_storage::{RunKind, RunStatus};
 
 /// What every step needs to address the run it is closing out.
 struct RunScope {
@@ -44,8 +46,31 @@ impl ServiceContainer {
             ClassifiedError::Validation("run closeout requires the persistent store".to_owned())
         })?;
         let scope = self.run_scope(run_id).await?;
+        let _closeout_lease = super::acquire_run_closeout_lease(run_id)?;
 
         let mut recorded = self.recorded_steps(run_id).await?;
+        project_legacy_workspace_evidence(&mut recorded, true);
+        let initial_pending = pending_steps(&recorded);
+        if let Some(changed_step) = initial_pending
+            .iter()
+            .copied()
+            .find(|step| *step != CloseoutStep::TrustReport)
+        {
+            let trust_is_terminal = recorded
+                .iter()
+                .any(|(step, outcome)| *step == CloseoutStep::TrustReport && outcome.is_terminal());
+            if trust_is_terminal {
+                let invalidated = StepOutcome::Blocked {
+                    dependency: changed_step,
+                };
+                let (name, label, detail) = encode(CloseoutStep::TrustReport, &invalidated);
+                store
+                    .record_closeout_step(run_id, &name, label, &detail)
+                    .await
+                    .map_err(|e| ClassifiedError::Storage(e.to_string()))?;
+                replace_recorded(&mut recorded, CloseoutStep::TrustReport, invalidated);
+            }
+        }
         let pending = pending_steps(&recorded);
         let resumed_at = (pending.len() < closeout_ladder().len())
             .then(|| pending.first().copied())
@@ -53,9 +78,7 @@ impl ServiceContainer {
 
         for step in pending {
             let outcome = match blocked_by(step, &recorded) {
-                Some(dependency) => StepOutcome::Skipped {
-                    reason: format!("{dependency:?} failed, and this step reads its output"),
-                },
+                Some(dependency) => StepOutcome::Blocked { dependency },
                 None => self.run_step(step, run_id, &scope).await,
             };
             let (name, label, detail) = encode(step, &outcome);
@@ -63,28 +86,40 @@ impl ServiceContainer {
                 .record_closeout_step(run_id, &name, label, &detail)
                 .await
                 .map_err(|e| ClassifiedError::Storage(e.to_string()))?;
-            recorded.push((step, outcome));
+            replace_recorded(&mut recorded, step, outcome);
         }
-
-        let steps = closeout_ladder()
-            .into_iter()
-            .filter_map(|step| {
-                recorded
-                    .iter()
-                    .find(|(done, _)| *done == step)
-                    .map(|(_, outcome)| CloseoutStepRecord {
-                        step,
-                        outcome: outcome.clone(),
-                    })
-            })
-            .collect();
-
-        Ok(CloseoutReport {
-            schema_version: RUN_CLOSEOUT_SCHEMA_VERSION,
+        Ok(report_from_recorded(
             run_id,
-            steps,
+            CloseoutAvailability::Available,
+            &recorded,
             resumed_at,
-        })
+        ))
+    }
+
+    /// Read retained closeout state without running or resuming any step.
+    pub async fn retained_run_closeout(
+        &self,
+        run_id: Uuid,
+    ) -> Result<CloseoutReport, ClassifiedError> {
+        let mut recorded = self.recorded_steps(run_id).await?;
+        project_legacy_workspace_evidence(&mut recorded, false);
+        let availability = match self.run_scope(run_id).await {
+            Ok(_) => CloseoutAvailability::Available,
+            Err(ClassifiedError::Validation(reason)) => {
+                CloseoutAvailability::Unavailable { reason }
+            }
+            Err(error) => return Err(error),
+        };
+        let pending = pending_steps(&recorded);
+        let resumed_at = (!recorded.is_empty())
+            .then(|| pending.first().copied())
+            .flatten();
+        Ok(report_from_recorded(
+            run_id,
+            availability,
+            &recorded,
+            resumed_at,
+        ))
     }
 
     /// The project and target the run belongs to.
@@ -92,17 +127,28 @@ impl ServiceContainer {
         let store = self.store().ok_or_else(|| {
             ClassifiedError::Validation("run closeout requires the persistent store".to_owned())
         })?;
-        let run = store
-            .get_run(run_id)
-            .await
-            .map_err(|e| ClassifiedError::Storage(e.to_string()))?
-            .ok_or_else(|| ClassifiedError::Validation(format!("run '{run_id}' not found")))?;
+        let run = self.run_record(run_id).await?;
+        if run.kind != RunKind::Campaign {
+            return Err(ClassifiedError::Validation(format!(
+                "run '{run_id}' is not a campaign run"
+            )));
+        }
+        if !matches!(
+            run.status,
+            RunStatus::Done | RunStatus::Failed | RunStatus::Cancelled
+        ) {
+            return Err(ClassifiedError::Validation(format!(
+                "run '{run_id}' is not terminal"
+            )));
+        }
         let harness_id = run
             .config
             .as_ref()
             .map(|config| config.harness_id)
             .ok_or_else(|| {
-                ClassifiedError::Validation(format!("run '{run_id}' retained no run configuration"))
+                ClassifiedError::Validation(format!(
+                    "run '{run_id}' retained no harness-backed target; closeout is unavailable"
+                ))
             })?;
         let harness = store
             .get_harness(harness_id)
@@ -121,6 +167,14 @@ impl ServiceContainer {
             .ok_or_else(|| {
                 ClassifiedError::Validation(format!("run '{run_id}' names an unknown target"))
             })?;
+        if !stored_project_matches(
+            &target.project_root,
+            std::path::Path::new(&run.project_root),
+        ) {
+            return Err(ClassifiedError::Validation(format!(
+                "run '{run_id}' target project does not match its retained project"
+            )));
+        }
         Ok(RunScope {
             project: PathBuf::from(run.project_root),
             target: target.symbol,
@@ -128,8 +182,7 @@ impl ServiceContainer {
     }
 
     /// Outcomes already recorded for a run, decoded back into the ladder's
-    /// vocabulary. An unrecognized row is ignored rather than guessed at, so a
-    /// step recorded by a newer version simply re-runs.
+    /// vocabulary. An unrecognized row is a durable-data error.
     async fn recorded_steps(
         &self,
         run_id: Uuid,
@@ -141,12 +194,21 @@ impl ServiceContainer {
             .closeout_steps(run_id)
             .await
             .map_err(|e| ClassifiedError::Storage(e.to_string()))?;
-        Ok(rows
-            .into_iter()
-            .filter_map(|(step, outcome, detail)| {
-                Some((decode_step(&step)?, decode(&outcome, detail)?))
+        rows.into_iter()
+            .map(|(step_name, outcome, detail)| {
+                let step = decode_step(&step_name).ok_or_else(|| {
+                    ClassifiedError::Storage(format!(
+                        "decode retained closeout step '{step_name}' for run '{run_id}'"
+                    ))
+                })?;
+                let outcome = decode_outcome(step, &outcome, detail).ok_or_else(|| {
+                    ClassifiedError::Storage(format!(
+                        "decode retained closeout outcome '{outcome}' for step '{step_name}' and run '{run_id}'"
+                    ))
+                })?;
+                Ok((step, outcome))
             })
-            .collect())
+            .collect()
     }
 
     /// Run one step, turning any failure into a recorded outcome rather than
@@ -177,16 +239,13 @@ impl ServiceContainer {
                     },
                 }
             }
-            CloseoutStep::Coverage => match self.coverage_summary(project, target).await {
-                Some(summary) => StepOutcome::Completed {
-                    detail: format!("{:.1}% of lines covered", summary.line_percent()),
-                },
-                None => StepOutcome::Skipped {
-                    reason: "no coverage measurement is available for this harness".to_owned(),
-                },
+            CloseoutStep::Coverage => StepOutcome::Skipped {
+                reason: "exact run-bound source coverage is unavailable; use current-workspace coverage analysis separately".to_owned(),
             },
-            CloseoutStep::Blockers => self.closeout_blockers(project, target).await,
-            CloseoutStep::Disposition => self.closeout_disposition(run_id).await,
+            CloseoutStep::Blockers => StepOutcome::Skipped {
+                reason: "exact run-bound coverage blockers are unavailable; use current-workspace blocker analysis separately".to_owned(),
+            },
+            CloseoutStep::Disposition => self.closeout_disposition(project, run_id).await,
             CloseoutStep::TrustReport => match self.campaign_trust_report(run_id).await {
                 Ok(report) => StepOutcome::Completed {
                     detail: format!("{:?}", report.determination),
@@ -212,7 +271,10 @@ impl ServiceContainer {
             Ok(crashes) => {
                 let already = crashes.iter().filter(|crash| crash.minimized).count();
                 StepOutcome::Completed {
-                    detail: format!("{already} of {} crash(es) minimized", crashes.len()),
+                    detail: format!(
+                        "triage retained {already} of {} crash(es) as already minimized",
+                        crashes.len()
+                    ),
                 }
             }
             Err(error) => StepOutcome::Failed {
@@ -221,63 +283,29 @@ impl ServiceContainer {
         }
     }
 
-    /// Blocker exploration over the retained coverage measurement.
-    async fn closeout_blockers(&self, project: &Path, target: &str) -> StepOutcome {
-        #[cfg(feature = "coverage-blockers")]
-        {
-            use crate::coverage_blockers::CoverageBlockerRequest;
-            let request = CoverageBlockerRequest {
-                project: project.to_string_lossy().into_owned(),
-                target: target.to_owned(),
-                lang: hf_core::target::TargetLanguage::C,
-            };
-            return match self.explore_coverage_blockers(request).await {
-                Ok(view) => StepOutcome::Completed {
-                    detail: format!("{} blocker(s) ranked", view.blockers.len()),
-                },
-                Err(error) => StepOutcome::Failed {
-                    error: error.to_string(),
-                },
-            };
-        }
-        #[cfg(not(feature = "coverage-blockers"))]
-        {
-            let _ = (project, target);
-            StepOutcome::Skipped {
-                reason: "coverage blockers are not enabled in this build".to_owned(),
-            }
-        }
-    }
-
     /// Disposition derivation over the run's retained crashes.
-    async fn closeout_disposition(&self, run_id: Uuid) -> StepOutcome {
-        use crate::finding_proof::finding_proof_card;
-        use crate::triage_disposition::{triage_disposition, Disposition};
+    async fn closeout_disposition(&self, project: &std::path::Path, run_id: Uuid) -> StepOutcome {
+        use crate::finding_review::{FindingDispositionFilter, FindingReviewFilter};
+        use crate::triage_disposition::Disposition;
 
-        let Some(store) = self.store() else {
-            return StepOutcome::Failed {
-                error: "no persistent store".to_owned(),
-            };
+        let filter = FindingReviewFilter {
+            run_id: Some(run_id),
+            disposition: FindingDispositionFilter::All,
+            ..FindingReviewFilter::default()
         };
-        match store.list_crashes_by_run(run_id).await {
-            Ok(crashes) if crashes.is_empty() => StepOutcome::Skipped {
+        match self.finding_review_queue(project, filter).await {
+            Ok(items) if items.is_empty() => StepOutcome::Skipped {
                 reason: "the run retained no crashes".to_owned(),
             },
-            Ok(crashes) => {
-                // Dispositions are derived on read rather than stored, so the
-                // useful output of this step is the shape of the queue it
-                // produces, not a count of derivations performed.
-                let harness_defects = crashes
+            Ok(items) => {
+                let harness_defects = items
                     .iter()
-                    .filter(|crash| {
-                        triage_disposition(crash, &finding_proof_card(crash)).disposition
-                            == Disposition::HarnessDefect
-                    })
+                    .filter(|item| item.disposition.disposition == Disposition::HarnessDefect)
                     .count();
                 StepOutcome::Completed {
                     detail: format!(
                         "{} crash(es) dispositioned, {harness_defects} of them harness defects",
-                        crashes.len()
+                        items.len()
                     ),
                 }
             }
@@ -294,21 +322,86 @@ fn encode(step: CloseoutStep, outcome: &StepOutcome) -> (String, &'static str, S
     match outcome {
         StepOutcome::Completed { detail } => (name, "completed", detail.clone()),
         StepOutcome::Skipped { reason } => (name, "skipped", reason.clone()),
+        StepOutcome::Blocked { dependency } => (name, "blocked", format!("{dependency:?}")),
         StepOutcome::Failed { error } => (name, "failed", error.clone()),
     }
 }
 
-fn decode_step(name: &str) -> Option<CloseoutStep> {
-    closeout_ladder()
-        .into_iter()
-        .find(|step| format!("{step:?}") == name)
+fn replace_recorded(
+    recorded: &mut Vec<(CloseoutStep, StepOutcome)>,
+    step: CloseoutStep,
+    outcome: StepOutcome,
+) {
+    recorded.retain(|(recorded_step, _)| *recorded_step != step);
+    recorded.push((step, outcome));
 }
 
-fn decode(outcome: &str, detail: String) -> Option<StepOutcome> {
-    match outcome {
-        "completed" => Some(StepOutcome::Completed { detail }),
-        "skipped" => Some(StepOutcome::Skipped { reason: detail }),
-        "failed" => Some(StepOutcome::Failed { error: detail }),
-        _ => None,
+fn project_legacy_workspace_evidence(recorded: &mut Vec<(CloseoutStep, StepOutcome)>, retry: bool) {
+    let mut projected_legacy = false;
+    for (step, reason) in [
+        (
+            CloseoutStep::Coverage,
+            "exact run-bound source coverage is unavailable; use current-workspace coverage analysis separately",
+        ),
+        (
+            CloseoutStep::Blockers,
+            "exact run-bound coverage blockers are unavailable; use current-workspace blocker analysis separately",
+        ),
+    ] {
+        let legacy_completed = recorded
+            .iter()
+            .rev()
+            .find(|(recorded_step, _)| *recorded_step == step)
+            .is_some_and(|(_, outcome)| matches!(outcome, StepOutcome::Completed { .. }));
+        if legacy_completed {
+            projected_legacy = true;
+            let outcome = if retry {
+                StepOutcome::Failed {
+                    error: reason.to_owned(),
+                }
+            } else {
+                StepOutcome::Skipped {
+                    reason: reason.to_owned(),
+                }
+            };
+            replace_recorded(recorded, step, outcome);
+        }
+    }
+    if projected_legacy && !retry {
+        replace_recorded(
+            recorded,
+            CloseoutStep::TrustReport,
+            StepOutcome::Blocked {
+                dependency: CloseoutStep::Coverage,
+            },
+        );
+    }
+}
+
+fn report_from_recorded(
+    run_id: Uuid,
+    availability: CloseoutAvailability,
+    recorded: &[(CloseoutStep, StepOutcome)],
+    resumed_at: Option<CloseoutStep>,
+) -> CloseoutReport {
+    let steps = closeout_ladder()
+        .into_iter()
+        .filter_map(|step| {
+            recorded
+                .iter()
+                .rev()
+                .find(|(done, _)| *done == step)
+                .map(|(_, outcome)| CloseoutStepRecord {
+                    step,
+                    outcome: outcome.clone(),
+                })
+        })
+        .collect();
+    CloseoutReport {
+        schema_version: RUN_CLOSEOUT_SCHEMA_VERSION,
+        run_id,
+        availability,
+        steps,
+        resumed_at,
     }
 }

@@ -24,6 +24,22 @@ use super::{
 };
 
 impl ServiceContainer {
+    /// Resolve the durable project owner of a run identifier.
+    pub async fn run_project(&self, run_id: Uuid) -> Result<PathBuf, ClassifiedError> {
+        Ok(PathBuf::from(self.run_record(run_id).await?.project_root))
+    }
+
+    pub(crate) async fn run_record(&self, run_id: Uuid) -> Result<RunRecord, ClassifiedError> {
+        let store = self.store().ok_or_else(|| {
+            ClassifiedError::Validation("run history requires the persistent store".to_owned())
+        })?;
+        store
+            .get_run(run_id)
+            .await
+            .map_err(|error| ClassifiedError::Storage(error.to_string()))?
+            .ok_or_else(|| ClassifiedError::Validation(format!("run '{run_id}' not found")))
+    }
+
     async fn ensure_run_is_not_qualification(
         &self,
         store: &Store,
@@ -171,6 +187,7 @@ impl ServiceContainer {
                     project_root: r.project_root,
                     target,
                     comparison_key,
+                    kind: format!("{:?}", r.kind),
                     engine: format!("{:?}", r.engine),
                     status: format!("{:?}", r.status),
                     started_at: r.started_at.to_rfc3339(),

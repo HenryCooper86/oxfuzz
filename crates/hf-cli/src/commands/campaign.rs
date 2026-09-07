@@ -43,9 +43,19 @@ pub(crate) async fn cmd_health(run: &str) -> anyhow::Result<()> {
 /// Rendering only: every step, outcome, and sentence arrives decided by
 /// `hf-service` (AGENTS.md 2.9).
 #[cfg(feature = "run-closeout")]
-pub(crate) async fn cmd_closeout(run: &str) -> anyhow::Result<()> {
+fn render_closeout_outcome(outcome: &hf_service::StepOutcome) -> (&'static str, String) {
     use hf_service::StepOutcome;
 
+    match outcome {
+        StepOutcome::Completed { detail } => ("completed", detail.clone()),
+        StepOutcome::Skipped { reason } => ("skipped  ", reason.clone()),
+        StepOutcome::Failed { error } => ("failed   ", error.clone()),
+        StepOutcome::Blocked { dependency } => ("blocked  ", format!("blocked by {dependency:?}")),
+    }
+}
+
+#[cfg(feature = "run-closeout")]
+pub(crate) async fn cmd_closeout(run: &str) -> anyhow::Result<()> {
     let run_id = uuid::Uuid::parse_str(run)
         .map_err(|_| anyhow::anyhow!("run id '{run}' is not a valid UUID"))?;
     let container = ServiceContainer::bootstrap().await;
@@ -57,15 +67,28 @@ pub(crate) async fn cmd_closeout(run: &str) -> anyhow::Result<()> {
         println!("Closeout for run {}:", report.run_id);
     }
     for record in &report.steps {
-        let (label, text) = match &record.outcome {
-            StepOutcome::Completed { detail } => ("completed", detail.as_str()),
-            StepOutcome::Skipped { reason } => ("skipped  ", reason.as_str()),
-            StepOutcome::Failed { error } => ("failed   ", error.as_str()),
-        };
+        let (label, text) = render_closeout_outcome(&record.outcome);
         println!("  {label} {:?}", record.step);
         println!("            {text}");
     }
     Ok(())
+}
+
+#[cfg(all(test, feature = "run-closeout"))]
+mod closeout_render_tests {
+    use hf_service::{CloseoutStep, StepOutcome};
+
+    use super::render_closeout_outcome;
+
+    #[test]
+    fn blocked_outcome_names_the_dependency() {
+        let (label, text) = render_closeout_outcome(&StepOutcome::Blocked {
+            dependency: CloseoutStep::Triage,
+        });
+
+        assert_eq!(label, "blocked  ");
+        assert_eq!(text, "blocked by Triage");
+    }
 }
 
 /// Print the campaign trust audit for one run.

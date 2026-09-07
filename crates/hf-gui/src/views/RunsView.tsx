@@ -9,6 +9,7 @@ import { ViewHeader, EmptyState, Button, IconButton, Input } from "../components
 import { Play, Bug, Clock, GitCompare, X, Search, Activity, Zap, TrendingUp, LineChart, AlertTriangle, RotateCcw, Trash2 } from "lucide-react";
 import { DiffView } from "../components/DiffView";
 import { buildRunComparisons } from "../lib/runComparison";
+import { RunCloseoutPanel } from "../components/RunCloseoutPanel";
 
 function fmtDuration(secs: number | null): string {
   if (secs == null) return "—";
@@ -398,6 +399,9 @@ export function RunsView() {
                     ) : (
                       <CoverageCurve samples={data} />
                     )}
+                    <div className="mt-4 border-t border-border pt-3">
+                      <RunCloseoutPanel runId={r.id} runKind={r.kind} runStatus={r.status} />
+                    </div>
                   </div>
                 )}
               </div>

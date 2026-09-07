@@ -28,13 +28,17 @@ fuzzctl groups its gates by subsystem (`core`, `campaign`, `coverage`,
 it establishes. This subsystem groups by claim, because the report exists to
 qualify claims:
 
-- **"A harness exercises the target."** Harness lint is clean of errors; a
-  harness compiled; a smoke run qualified.
-- **"The fuzzer had inputs to work from."** A corpus exists and is non-empty.
+- **"A harness exercises the target."** The run's exact retained source and
+  executable digests have a durable human approval. Mutable current harness
+  status is not historical evidence.
+- **"The fuzzer had inputs to work from."** An exact starting-corpus inventory
+  is retained for the run. The current implementation retains only a digest,
+  not the entry count, so this gate is `Unavailable`.
 - **"The fuzzer ran."** A run record exists and reached a terminal state; the
   engine reported execution progress.
-- **"Coverage was measured."** A coverage measurement exists for this
-  harness-and-corpus signature.
+- **"Coverage was measured."** An exact run-bound durable source-coverage
+  measurement exists. The current implementation does not retain one, so this
+  gate is `Unavailable`.
 - **"Coverage reached target code."** The measurement attributes covered lines
   to project sources rather than only to the generated harness.
 - **"Crashes were triaged."** Every retained crash for the run carries an
@@ -85,7 +89,28 @@ coverage-informed completeness that no measurement supports.
 
 ## 6. Scope
 
-Per target and per run. fuzzctl computes one blob per target against whatever
+Per target and per run. The audit reads retained records only and never creates
+a cache entry, builds a coverage harness, replays a corpus, or calls a provider.
+Current-workspace coverage cannot support a claim about a historical run; until
+run-bound source coverage is persisted, both source-coverage gates remain
+`Unavailable` even when aggregate run edge totals exist.
+
+The run, harness, and target must resolve to the same retained project before
+the audit reads target evidence. Crash reportability is derived through the
+shared finding-review view so completed remediation can lower a finding's
+current disposition. A project corpus or mutable run-local corpus is never used
+as the run's starting inventory.
+
+The crash set is evidence only when ingestion is known to have completed. A
+successful retained triage closeout establishes that fact, as does a retained
+run crash count for runs audited before closeout existed. A failed, blocked, or
+incomplete retained triage makes both crash-triage and reportability claims
+`Unavailable`; an empty crash table must not be interpreted as a successful
+zero-crash campaign after ingestion failed. Closeout rows use the same strict
+decoder as Run Closeout, so unknown durable values fail the audit rather than
+being guessed at.
+
+fuzzctl computes one blob per target against whatever
 run it last found, which silently mixes evidence from different harnesses. A
 trust report names the run it audits, and a target-level view is the ordered
 list of its run reports, not a merge of them.

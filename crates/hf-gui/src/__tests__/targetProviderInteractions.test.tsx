@@ -228,6 +228,7 @@ function configureHarnessTransport() {
       });
     }
     if (command === "harness_review_queue") return Promise.resolve([]);
+    if (command === "work_order_list") return Promise.resolve([]);
     if (command === "system_status_cmd") {
       return Promise.resolve({
         docker: true,
@@ -880,4 +881,80 @@ describe("Harness repair interactions", () => {
       expect(invokedMutatingCommands()).toEqual([]);
     },
   );
+
+  it("replaces a local draft with the exact externally promoted harness", async () => {
+    const order = { id: "order-exact", schema_version: 2, payload: { target: { symbol: "parse_input", language: "c" }, engine: "lib_fuzzer" } };
+    const submission = { id: "submission-exact", work_order_id: order.id, source: "exact promoted source", source_sha256: "a".repeat(64), origin: "human", parent_submission_id: null, lint: [], submitted_at: "now" };
+    const attempt = { id: "attempt-exact", submission_id: submission.id, status: "smoke_passed", current_stage: "smoke", harness_id: "harness-exact", smoke_run_id: "smoke-exact", result: null, failure_code: null, failure_message: null, started_at: "now", updated_at: "now", ended_at: "now" };
+    const review = (id: string, source: string, status: string) => ({
+      harness_id: id,
+      target_id: "candidate-1",
+      project_root: PROJECT,
+      target_symbol: "parse_input",
+      engine: "LibFuzzer",
+      language: "C",
+      status,
+      build_output: "fuzz",
+      smoke_passed: status !== "Draft",
+      smoke_execs_per_sec: 100,
+      needs_review: status !== "Promoted",
+      next_action: "promote",
+      source_preview: source,
+      ai_review: { exercises_target: true, safe_to_execute: true, reasons: [id], reviewed_at: "now" },
+      source_sha256: "a".repeat(64),
+      binary_sha256: "b".repeat(64),
+      lint: [],
+    });
+    transportInvoke.mockImplementation((command: string, args: Record<string, unknown>) => {
+      if (command === "get_fuzzing_settings") return Promise.resolve({ enabled_engines: ["libfuzzer"], default_engine: "libfuzzer", default_duration_secs: 60, sandbox: { max_mem_mb: 2048, max_cpus: 1, max_duration_secs: 7200 } });
+      if (command === "discover") return Promise.resolve({ project_root: args.project, candidates: [{ id: "candidate-1", project_root: args.project, language: "c", symbol: "parse_input", kind: "function", location: { file: "src/parser.c", line: 1, col: 1 }, signature: "int parse_input(void)", input_surface: "buffer", complexity: 1, fit_score: 1, sanitizers: [], rationale: "test fixture" }] });
+      if (command === "harness_review_queue" && args.project === PROJECT_B) return Promise.resolve([
+        { ...review("harness-project-b-wrong", "project B wrong-engine source", "Promoted"), project_root: PROJECT_B, engine: "AFL++" },
+        { ...review("harness-project-b", "project B retained source", "Promoted"), project_root: PROJECT_B },
+      ]);
+      if (command === "harness_review_queue") return Promise.resolve([
+        review("harness-old", "older unpromoted source", "Draft"),
+        review("harness-exact", "exact promoted source", "Promoted"),
+      ]);
+      if (command === "work_order_list") return Promise.resolve(args.project === PROJECT ? [order] : []);
+      if (command === "work_order_submissions") return Promise.resolve([submission]);
+      if (command === "work_order_attempts") return Promise.resolve([attempt]);
+      if (command === "work_order_promote") return Promise.resolve({ id: "harness-exact", status: "Promoted" });
+      if (command === "harness_draft") return Promise.resolve({ source: "local generated draft", target: "parse_input", engine: "libfuzzer", build_cmd: { compiler: "clang", args: [] }, status: "Draft", generator: "heuristic" });
+      if (command === "system_status_cmd") return Promise.resolve({ docker: true, sandbox_image: true, libfuzzer: true, aflplusplus: true, honggfuzz: true, syzkaller: true, defectdojo: false });
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    const view = await mount(<><TargetProbe switchProject={PROJECT_B} /><HarnessView embedded /></>, {
+      initialProject: PROJECT,
+      recentProjects: [PROJECT, PROJECT_B],
+    });
+    mounted.push(view);
+    await flushEffects();
+    await flushEffects();
+    await act(async () => {
+      [...view.container.querySelectorAll("button")].find((item) => item.textContent?.includes("common.generate"))?.click();
+    });
+    await flushEffects();
+    expect(view.container.textContent).toContain("local generated draft");
+    expect(view.container.textContent).toContain("harness-old");
+
+    await act(async () => {
+      [...view.container.querySelectorAll("button")].find((item) => item.textContent === "workOrder.promote")?.click();
+    });
+    await flushEffects();
+    await flushEffects();
+    expect(view.container.textContent).not.toContain("local generated draft");
+    expect(view.container.textContent).not.toContain("harness-old");
+    expect(view.container.textContent).toContain("exact promoted source");
+
+    await act(async () => {
+      [...view.container.querySelectorAll("button")].find((item) => item.textContent === "switch project")?.click();
+    });
+    await flushEffects();
+    await flushEffects();
+    expect(view.container.textContent).toContain("project B retained source");
+    expect(view.container.textContent).not.toContain("exact promoted source");
+    expect(view.container.textContent).not.toContain("project B wrong-engine source");
+  });
 });

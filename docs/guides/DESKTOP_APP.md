@@ -40,6 +40,18 @@ promotion.
 
 ![Harness -- promoted revision and five-step sandbox qualification flow](../screenshots/harness.png)
 
+The Harness screen also supports **External harness work orders**. Exporting a
+packet retains the selected target, source excerpt, build context, rules, seed
+references, and validation steps for an external author or tool. Paste the
+returned source as either a human or named external-tool submission. Source is
+limited to 64 KiB of UTF-8, and an external submission requires a tool name;
+model and response ID are optional. Repair parent, lint results, provenance, and
+source digest stay in history. Importing does not compile or approve anything.
+**Qualify in sandbox** is a separate action. Ranking compares retained attempts
+for the selected immutable submission, and **Promote selected attempt** approves
+only the exact smoke-passed attempt you selected after its independent review
+evidence is available.
+
 **3. Run the fuzzer.** Launch an enabled engine against the promoted harness.
 The Run view shows campaign limits and retained metrics -- executions/sec,
 coverage edges, elapsed time, and findings -- with cooperative cancellation for
@@ -129,6 +141,17 @@ the detail was loaded. The agent can draft a latest-run report for human
 review, and that result can be exported or handed off to DefectDojo.
 
 ![Triage -- deduplicated sanitizer crash and exploitability classification](../screenshots/triage.png)
+
+**Close out a terminal campaign.** Expand a row in **Run History** to read its
+retained seven-step closeout state. Opening the row is read-only. **Analyze /
+Resume** is available only for terminal harness-backed campaign runs and runs
+the pending steps after an explicit click. Failed and dependency-blocked steps
+remain retryable; successful and legitimate skipped steps remain retained.
+Kernel runs without a retained harness scope explain why closeout is
+unavailable. Historical source coverage and blocker evidence are shown as
+unavailable because current workspace files cannot establish what an old run
+covered. The trust report likewise uses exact retained harness approval and
+finding review evidence and never runs coverage or calls a model while reading.
 
 **Prove a fix, do not assert one.** The selected finding carries a Patch to
 Proof panel. Paste a candidate unified diff and a bounded follow-up fuzzing
