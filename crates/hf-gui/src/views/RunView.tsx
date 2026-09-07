@@ -41,7 +41,7 @@ export function RunView({
   } = useTarget();
   // Run output (log/stats/summary/running) lives in a shared, always-mounted
   // context, so a run keeps streaming and is preserved when you navigate away.
-  const { log, stats: liveStats, summary, running, cancelling, runFuzzer, runSyzkaller, cancelRun } = useRunOutput();
+  const { log, stats: liveStats, summary, running, cancelling, lastEngine, selectedRun, requestState, requestError, healthState, healthEvents = [], loadOlderHealthEvents, runFuzzer, runSyzkaller, cancelRun } = useRunOutput();
   const { settings: fuzzingSettings, loaded: fuzzingPolicyLoaded, error: fuzzingPolicyError } = useFuzzingSettings();
   // Embedded in the workflow, the project comes from the workflow's gate.
   const [localProject, setLocalProject] = useState(activeProject);
@@ -90,6 +90,7 @@ export function RunView({
   const [vmCount, setVmCount] = useState("2");
 
   const isSyz = engine === "syzkaller";
+  const hasRunMetrics = liveStats.edges !== null || liveStats.currentExecs !== null || liveStats.meanExecs !== null || liveStats.peakExecs !== null || liveStats.rawCrashSignals !== null;
 
   // Target and engine are sourced directly from the shared validated context,
   // so Harness and Run cannot disagree about a persisted repair state.
@@ -392,20 +393,26 @@ export function RunView({
         </div>
       )}
 
-      {/* Live stats while fuzzing (updates in place from streamed events). */}
-      {running && !isSyz && (
+      {requestState === "pending" && <p role="status" className="text-sm text-text-muted">{t("run.requestPending")}</p>}
+      {requestError && <p role="alert" data-run-request-error className="text-sm" style={{ color: "var(--error)" }}>{requestError}</p>}
+      {selectedRun && <p className="text-xs text-text-muted">{selectedRun.target ?? selectedRun.run_id} · {selectedRun.engine} · {selectedRun.kind} · {selectedRun.status}</p>}
+
+      {/* Service snapshots describe the selected run independently of launch controls. */}
+      {(selectedRun || hasRunMetrics) && lastEngine !== "syzkaller" && (
         <div className="grid grid-cols-3 gap-3" style={{ animation: "slideInUp 0.2s ease" }}>
-          <StatCard icon={<Activity size={16} />} label={t("run.edgesCovered")} value={liveStats.edges} color="var(--success)" />
-          <StatCard icon={<AlertTriangle size={16} />} label={t("run.crashes")} value={liveStats.crashes} color="var(--error)" />
-          <StatCard icon={<Play size={16} />} label={t("run.execsPeak")} value={liveStats.execs} color="var(--accent)" />
+          <StatCard icon={<Activity size={16} />} label={t("run.edgesCovered")} value={liveStats.edges ?? summary?.edges ?? null} color="var(--success)" />
+          <StatCard icon={<AlertTriangle size={16} />} label={t("run.rawCrashSignals")} value={liveStats.rawCrashSignals} color="var(--error)" />
+          <StatCard icon={<Play size={16} />} label={t("run.currentExecs")} value={liveStats.currentExecs} color="var(--accent)" />
+          <StatCard icon={<Play size={16} />} label={t("run.meanExecs")} value={liveStats.meanExecs} color="var(--accent)" />
+          <StatCard icon={<Play size={16} />} label={t("run.execsPeak")} value={liveStats.peakExecs} color="var(--accent)" />
         </div>
       )}
 
-      {summary && !running && (
+      {summary && (
         <div className="grid grid-cols-3 gap-3" style={{ animation: "slideInUp 0.2s ease" }}>
-          <StatCard icon={<Activity size={16} />} label={isSyz ? t("run.coverage") : t("run.edgesCovered")} value={summary.edges} color="var(--success)" />
-          <StatCard icon={<AlertTriangle size={16} />} label={t("run.crashes")} value={summary.crashes} color="var(--error)" />
-          <StatCard icon={<Play size={16} />} label={isSyz ? t("run.executed") : t("run.execsPerSec")} value={summary.execs} color="var(--accent)" />
+          {lastEngine === "syzkaller" && <StatCard icon={<Activity size={16} />} label={t("run.coverage")} value={summary.edges} color="var(--success)" />}
+          <StatCard icon={<AlertTriangle size={16} />} label={t("run.retainedCrashes")} value={summary.crashes} color="var(--error)" />
+          {lastEngine === "syzkaller" && <StatCard icon={<Play size={16} />} label={t("run.executed")} value={summary.execs} color="var(--accent)" />}
         </div>
       )}
 
@@ -478,6 +485,16 @@ export function RunView({
             </div>
           </div>
         </div>
+      )}
+
+      {(selectedRun || healthEvents.length > 0) && (
+        <section className="surface-card flex flex-col gap-2" style={{ padding: "var(--space-md)" }} aria-label={t("run.healthHistory")}>
+          <span className="text-sm font-semibold">{t("run.healthHistory")}</span>
+          {healthState?.loading && <p role="status" className="text-xs">{t("run.healthLoading")}</p>}
+          {healthState?.error && <p role="alert" className="text-xs">{t("run.healthUnavailable")}: {t(healthState.error)}</p>}
+          {healthEvents.map((event) => <div key={event.id} className="text-xs" style={{ color: event.severity === "error" ? "var(--error)" : "var(--warning, #d9a441)" }}>{event.condition}: {event.detail}</div>)}
+          {loadOlderHealthEvents && healthState?.hasOlder && <Button disabled={healthState.loading} variant="ghost" size="sm" onClick={() => void loadOlderHealthEvents()}>{t("run.loadOlderHealth")}</Button>}
+        </section>
       )}
 
       {log.length > 0 && (
@@ -563,7 +580,8 @@ function FileField({
   );
 }
 
-function StatCard({ icon, label, value, color }: { icon: React.ReactNode; label: string; value: number; color: string }) {
+function StatCard({ icon, label, value, color }: { icon: React.ReactNode; label: string; value: number | null; color: string }) {
+  const { t } = useI18n();
   return (
     <div className="surface-card flex items-center gap-3" style={{ padding: "var(--space-md)" }}>
       <div style={{ color }}>{icon}</div>
@@ -572,7 +590,7 @@ function StatCard({ icon, label, value, color }: { icon: React.ReactNode; label:
           {label}
         </span>
         <span className="text-lg font-semibold" style={{ color }}>
-          {value.toLocaleString()}
+        {value === null ? t("run.unknown") : value.toLocaleString()}
         </span>
       </div>
     </div>

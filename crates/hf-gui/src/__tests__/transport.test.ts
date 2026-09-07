@@ -90,6 +90,51 @@ describe("transport", () => {
     }
   });
 
+  it("maps owner-authorized health hydration and summary routes", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      return new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+    try {
+      const transport = createHttpTransport();
+      await transport.invoke("run_owner", { runId: "run/id" });
+      await transport.invoke("campaign_health_report", { runId: "run/id" });
+      await transport.invoke("campaign_telemetry", { runId: "run/id" });
+      await transport.invoke("campaign_health_events", {
+        runId: "run/id",
+        cursor: "event/id",
+        limit: 25,
+      });
+      await transport.invoke("morning_health_summary", { project: "/tmp/project" });
+
+      expect(calls.map((call) => new URL(call.url).pathname)).toEqual([
+        "/runs/run%2Fid/owner",
+        "/runs/run%2Fid/health",
+        "/runs/run%2Fid/telemetry",
+        "/runs/run%2Fid/health/events",
+        "/campaign-health/morning",
+      ]);
+      expect(new URL(calls[3].url).searchParams.get("cursor")).toBe("event/id");
+      expect(new URL(calls[3].url).searchParams.get("limit")).toBe("25");
+      expect(JSON.parse(String(calls[4].init.body))).toEqual({
+        project: "/tmp/project",
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("reports web syzkaller as explicitly unavailable", async () => {
+    await expect(
+      createHttpTransport().invoke("run_syzkaller", {}),
+    ).rejects.toThrow("Syzkaller campaigns are unavailable in web mode");
+  });
+
   it("maps finding review reads with project ownership arguments", async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     const originalFetch = globalThis.fetch;
@@ -161,6 +206,7 @@ describe("transport", () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     const progress: RunProgressEvent[] = [];
     const encoder = new TextEncoder();
+    let eventConnections = 0;
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
       const request = { url: String(url), init: init ?? {} };
@@ -168,21 +214,23 @@ describe("transport", () => {
       const path = new URL(request.url).pathname;
       if (path === "/runs/start") {
         return new Response(
-          JSON.stringify({ run_id: "service-run-1", status: "running" }),
+          JSON.stringify({ run_id: "11111111-1111-4111-8111-111111111111", status: "running" }),
           { status: 202, headers: { "content-type": "application/json" } },
         );
       }
       if (path === "/events") {
+        eventConnections += 1;
         return new Response(
           new ReadableStream<Uint8Array>({
             start(controller) {
               controller.enqueue(
                 encoder.encode(
-                  [
-                    'event: run:progress\ndata: {"type":"RunProgress","data":{"run_id":"other-run","kind":"LogLine","data":"ignore"}}\n\n',
-                    'event: run:progress\ndata: {"type":"RunProgress","data":{"run_id":"service-run-1","kind":"LogLine","data":"owned"}}\n\n',
-                    'event: run:status\ndata: {"type":"RunStatus","data":{"run_id":"service-run-1","status":"done"}}\n\n',
-                  ].join(""),
+                  eventConnections === 1
+                    ? [
+                        'event: run:progress\ndata: {"type":"RunProgress","data":{"run_id":"other-run","kind":"LogLine","data":"ignore"}}\n\n',
+                        'event: run:progress\ndata: {"type":"RunProgress","data":{"run_id":"11111111-1111-4111-8111-111111111111","kind":"LogLine","data":"owned"}}\n\n',
+                      ].join("")
+                    : 'event: run:status\ndata: {"type":"RunStatus","data":{"run_id":"11111111-1111-4111-8111-111111111111","status":"done"}}\n\n',
                 ),
               );
               controller.close();
@@ -191,10 +239,10 @@ describe("transport", () => {
           { status: 200, headers: { "content-type": "text/event-stream" } },
         );
       }
-      if (path === "/runs/service-run-1/status") {
+      if (path === "/runs/11111111-1111-4111-8111-111111111111/status") {
         return new Response(
           JSON.stringify({
-            run_id: "service-run-1",
+            run_id: "11111111-1111-4111-8111-111111111111",
             status: "running",
             active: true,
             started_at: "2026-07-15T00:00:00Z",
@@ -214,7 +262,7 @@ describe("transport", () => {
               execs: 999,
             },
             {
-              id: "service-run-1",
+              id: "11111111-1111-4111-8111-111111111111",
               status: "Done",
               crashes: 2,
               edges: 41,
@@ -241,7 +289,7 @@ describe("transport", () => {
       unlisten();
 
       expect(result).toEqual({
-        run_id: "service-run-1",
+        run_id: "11111111-1111-4111-8111-111111111111",
         edges: 41,
         crashes: 2,
         execs: 123.5,
@@ -251,7 +299,8 @@ describe("transport", () => {
         auto_revert: null,
       });
       expect(progress).toEqual([
-        { run_id: "service-run-1", type: "LogLine", data: "owned" },
+        { run_id: "other-run", type: "LogLine", data: "ignore" },
+        { run_id: "11111111-1111-4111-8111-111111111111", type: "LogLine", data: "owned" },
       ]);
       const start = calls.find((call) => call.url.endsWith("/runs/start"));
       expect(start?.init.method).toBe("POST");
@@ -261,7 +310,7 @@ describe("transport", () => {
         engine: "libfuzzer",
         duration_secs: 60,
       });
-      expect(calls.some((call) => call.url.endsWith("/runs/service-run-1/status"))).toBe(
+      expect(calls.some((call) => call.url.endsWith("/runs/11111111-1111-4111-8111-111111111111/status"))).toBe(
         true,
       );
     } finally {
@@ -269,10 +318,102 @@ describe("transport", () => {
     }
   });
 
+  it("reports the service admission before the HTTP run reaches a terminal state", async () => {
+    const encoder = new TextEncoder();
+    const admitted: string[] = [];
+    let runResolved = false;
+    let statusController: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/runs/start") {
+        return new Response(
+          JSON.stringify({ run_id: "22222222-2222-4222-8222-222222222222", status: "running" }),
+          { status: 202, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (path === "/events") {
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              statusController = controller;
+              controller.enqueue(
+                encoder.encode(
+                  'event: run:status\ndata: {"type":"RunStatus","data":{"run_id":"scheduled-run","status":"running"}}\n\n',
+                ),
+              );
+            },
+          }),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      if (path === "/runs/22222222-2222-4222-8222-222222222222/status") {
+        return new Response(
+          JSON.stringify({
+            run_id: "22222222-2222-4222-8222-222222222222",
+            status: "running",
+            active: true,
+            started_at: "2026-07-15T00:00:00Z",
+            ended_at: null,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (path === "/runs/history") {
+        return new Response(
+          JSON.stringify([
+            {
+              id: "22222222-2222-4222-8222-222222222222",
+              status: "Done",
+              crashes: 0,
+              edges: 1,
+              execs: 2,
+            },
+          ]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      throw new Error(`unexpected request: ${String(url)}`);
+    }) as typeof fetch;
+
+    try {
+      const transport = createHttpTransport();
+      const run = transport.invoke<FuzzerRunResult>(
+        "run_fuzzer",
+        {
+          project: "/tmp/project",
+          target: "parse_entry",
+          engine: "libfuzzer",
+          duration: 60,
+        },
+        { onRunStarted: (runId) => admitted.push(runId) },
+      ).then((result) => {
+        runResolved = true;
+        return result;
+      });
+
+      await expect.poll(() => admitted).toEqual(["22222222-2222-4222-8222-222222222222"]);
+      expect(runResolved).toBe(false);
+      expect(admitted).not.toContain("scheduled-run");
+
+      statusController?.enqueue(
+        encoder.encode(
+          'event: run:status\ndata: {"type":"RunStatus","data":{"run_id":"22222222-2222-4222-8222-222222222222","status":"done"}}\n\n',
+        ),
+      );
+      statusController?.close();
+      await expect(run).resolves.toMatchObject({ run_id: "22222222-2222-4222-8222-222222222222" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("cancels the exact service-owned run id returned by start", async () => {
     const calls: string[] = [];
+    const admitted: string[] = [];
     const encoder = new TextEncoder();
     const originalFetch = globalThis.fetch;
+    let resolveStart: ((response: Response) => void) | undefined;
     let eventController: ReadableStreamDefaultController<Uint8Array> | undefined;
     let eventsReadyResolve: (() => void) | undefined;
     const eventsReady = new Promise<void>((resolve) => {
@@ -284,10 +425,9 @@ describe("transport", () => {
       calls.push(value);
       const path = new URL(value).pathname;
       if (path === "/runs/start") {
-        return new Response(
-          JSON.stringify({ run_id: "server-selected-id", status: "running" }),
-          { status: 202, headers: { "content-type": "application/json" } },
-        );
+        return new Promise<Response>((resolve) => {
+          resolveStart = resolve;
+        });
       }
       if (path === "/events") {
         return new Response(
@@ -300,10 +440,10 @@ describe("transport", () => {
           { status: 200, headers: { "content-type": "text/event-stream" } },
         );
       }
-      if (path === "/runs/server-selected-id/status") {
+      if (path === "/runs/33333333-3333-4333-8333-333333333333/status") {
         return new Response(
           JSON.stringify({
-            run_id: "server-selected-id",
+            run_id: "33333333-3333-4333-8333-333333333333",
             status: cancelled ? "cancelled" : "running",
             active: !cancelled,
             started_at: "2026-07-15T00:00:00Z",
@@ -312,17 +452,17 @@ describe("transport", () => {
           { status: 200, headers: { "content-type": "application/json" } },
         );
       }
-      if (path === "/runs/server-selected-id/cancel") {
+      if (path === "/runs/33333333-3333-4333-8333-333333333333/cancel") {
         expect(init?.method).toBe("POST");
         cancelled = true;
         eventController?.enqueue(
           encoder.encode(
-            'event: run:status\ndata: {"type":"RunStatus","data":{"run_id":"server-selected-id","status":"cancelled"}}\n\n',
+            'event: run:status\ndata: {"type":"RunStatus","data":{"run_id":"33333333-3333-4333-8333-333333333333","status":"cancelled"}}\n\n',
           ),
         );
         eventController?.close();
         return new Response(
-          JSON.stringify({ run_id: "server-selected-id", accepted: true }),
+          JSON.stringify({ run_id: "33333333-3333-4333-8333-333333333333", accepted: true }),
           { status: 202, headers: { "content-type": "application/json" } },
         );
       }
@@ -330,7 +470,7 @@ describe("transport", () => {
         return new Response(
           JSON.stringify([
             {
-              id: "server-selected-id",
+              id: "33333333-3333-4333-8333-333333333333",
               status: "Cancelled",
               crashes: 1,
               edges: 12,
@@ -345,17 +485,32 @@ describe("transport", () => {
 
     try {
       const transport = createHttpTransport();
-      const run = transport.invoke<FuzzerRunResult>("run_fuzzer", {
-        project: "/tmp/project",
-        target: "parse_entry",
-        engine: "libfuzzer",
-        duration: 60,
-      });
+      const run = transport.invoke<FuzzerRunResult>(
+        "run_fuzzer",
+        {
+          project: "/tmp/project",
+          target: "parse_entry",
+          engine: "libfuzzer",
+          duration: 60,
+        },
+        { onRunStarted: (runId) => admitted.push(runId) },
+      );
+      const cancellation = transport.invoke<number>("cancel_run");
+      expect(calls).not.toContain(
+        "http://localhost:8081/runs/33333333-3333-4333-8333-333333333333/cancel",
+      );
+      resolveStart?.(
+        new Response(
+          JSON.stringify({ run_id: "33333333-3333-4333-8333-333333333333", status: "running" }),
+          { status: 202, headers: { "content-type": "application/json" } },
+        ),
+      );
+      await expect.poll(() => admitted).toEqual(["33333333-3333-4333-8333-333333333333"]);
       await eventsReady;
-      expect(await transport.invoke<number>("cancel_run")).toBe(1);
+      expect(await cancellation).toBe(1);
       expect((await run).termination).toBe("cancelled");
       expect(calls).toContain(
-        "http://localhost:8081/runs/server-selected-id/cancel",
+        "http://localhost:8081/runs/33333333-3333-4333-8333-333333333333/cancel",
       );
     } finally {
       globalThis.fetch = originalFetch;
@@ -363,6 +518,7 @@ describe("transport", () => {
   });
 
   it("rejects a run start response without a service-owned id", async () => {
+    const admitted: string[] = [];
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () =>
       new Response(JSON.stringify({ status: "running" }), {
@@ -373,13 +529,40 @@ describe("transport", () => {
     try {
       const transport = createHttpTransport();
       await expect(
-        transport.invoke("run_fuzzer", {
-          project: "/tmp/project",
-          target: "parse_entry",
-          engine: "libfuzzer",
-          duration: 60,
-        }),
+        transport.invoke(
+          "run_fuzzer",
+          {
+            project: "/tmp/project",
+            target: "parse_entry",
+            engine: "libfuzzer",
+            duration: 60,
+          },
+          { onRunStarted: (runId) => admitted.push(runId) },
+        ),
       ).rejects.toThrow("service-owned run id");
+      expect(admitted).toEqual([]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("rejects a malformed service run id before admission, status, or cancellation", async () => {
+    const calls: string[] = [];
+    const admitted: string[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      calls.push(String(url));
+      return new Response(JSON.stringify({ run_id: "not-a-uuid", status: "running" }), {
+        status: 202,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+    try {
+      const transport = createHttpTransport();
+      await expect(transport.invoke("run_fuzzer", { project: "/tmp/project", target: "parse", engine: "libfuzzer", duration: 1 }, { onRunStarted: (id) => admitted.push(id) })).rejects.toThrow("valid UUID");
+      expect(admitted).toEqual([]);
+      expect(calls).toEqual(["http://localhost:8081/runs/start"]);
+      await expect(transport.invoke("cancel_run")).resolves.toBe(0);
     } finally {
       globalThis.fetch = originalFetch;
     }

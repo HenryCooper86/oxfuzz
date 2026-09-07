@@ -53,9 +53,38 @@ only the exact smoke-passed attempt you selected after its independent review
 evidence is available.
 
 **3. Run the fuzzer.** Launch an enabled engine against the promoted harness.
-The Run view shows campaign limits and retained metrics -- executions/sec,
-coverage edges, elapsed time, and findings -- with cooperative cancellation for
-an active sandboxed run.
+The Run view shows campaign limits and retained metrics. Current rate, whole-run
+mean rate, and peak rate are separate values; unknown telemetry remains unknown
+instead of being shown as zero. Raw crash signals and retained crash artifacts
+are also separate: signals are live engine reports, while retained artifacts are
+the durable result. Stop applies only to the exact foreground run UUID, even if
+you select another project while it is running.
+
+Campaign Health is read-only. The Run view keeps a retained alert history and
+can explicitly load older alert pages. Run History shows the service-defined
+morning categories for failed, stalled, interrupted, and unprocessed campaign
+runs; one run may appear in more than one category. Scheduled campaigns have no
+global progress or log stream. Their identity and telemetry are recovered from
+retained run history, ownership, and periodic status/telemetry reads while they
+are selected; no log is fabricated when the service did not publish one.
+
+A health feature error leaves ordinary run history and foreground Stop available.
+Morning-summary run IDs open the exact retained run in Run History. Initial and
+older alert pages are silent; newly delivered error alerts notify once within
+the retained notification cache, while warnings remain in the history.
+
+The desktop display cache keeps at most 64 run records, 64 legacy project
+summaries, 600 log lines per run, and 200 displayed health events per run. Log
+lines and health details are limited to 4,096 characters. Owner, telemetry and
+health-page reads each admit at most eight concurrent requests. Selection,
+foreground execution and cached active runs are protected from ordinary run
+record eviction; when protected records fill the cache, durable Run History
+remains the recovery source. Loading older health pages keeps the newest loaded
+page reachable while trimming earlier displayed pages. Logs stay in memory.
+Legacy summaries have no invented run UUID: old throughput is peak evidence,
+and old callback counts cannot establish raw crash deltas, so those remain
+Unknown. A failed v2 write or unreadable v1 source does not delete recoverable
+legacy storage.
 
 ![Run -- approved target, bounded campaign configuration, and retained metrics](../screenshots/run.png)
 

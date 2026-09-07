@@ -1,104 +1,247 @@
 # Campaign Health
 
-Status: **planned**. Owner: `hf-service`, emitting through the existing session
-event log and scheduler event bridge.
+Status: **active implementation**. Owner: `hf-service`, with durable evidence in
+`hf-storage` and live delivery through the existing scheduler and presentation
+event paths.
 
 ## 1. Goal
 
-A long campaign fails quietly. Workers die, the disk fills, or the fuzzer keeps
-executing at full rate while learning nothing new. This subsystem names those
-conditions from retained run state, once each, with the evidence behind them.
+Campaign Health records enough bounded evidence to explain whether a running or
+recent campaign is progressing, stalled, under disk pressure, or failed. It
+reports conditions and a morning summary. It never stops, restarts, or resizes a
+run.
 
-It reports. It does not stop, restart, or resize a campaign.
+## 2. Ownership and scope
 
-## 2. Feature and Ownership
+The `campaign-health` feature enables service monitoring, assessment, queries,
+and delivery. `hf-service` owns all calculations and lifecycle decisions.
+`hf-storage` owns strict durable records and atomic duplicate admission. REST,
+Tauri, SSE, and React carry or render service results without reassessing them.
 
-Enabled by the `campaign-health` feature in `hf-service`. Conditions are emitted
-into the **existing** session event log and scheduler event bridge. No new
-notification transport is added: a second delivery path would need its own
-secret handling, retry policy, and dedup state, all of which already exist.
+Monitoring applies only to `RunKind::Campaign`. Smoke qualification and
+maintenance runs remain visible in ordinary run history but never acquire a
+campaign monitor or enter morning-summary categories.
 
-## 3. Conditions
+Userspace campaigns and admitted syzkaller campaigns each expose one managed
+invocation: the single awaited call that owns `EngineRunner` or `syz-manager`.
+This is not a process, worker, VM, or Docker liveness probe. Current runtime
+APIs cannot prove those independently.
 
-Each carries a stable code, a severity, cited evidence, and one next action.
+## 3. Retained observation
 
-- **`CoveragePlateau`** -- the retained coverage series for the run shows no
-  increase across the last N measurements while execution continued.
-- **`WorkersMissing`** -- fewer live engine processes than the run record
-  expects.
-- **`WorkerStatsStale`** -- an engine's progress record has not advanced within
-  its expected reporting interval, while the run is still active.
-- **`DiskPressure`** -- free space in the fuzz workspace is below the configured
+`RunTelemetryObservation` identifies the run and records:
+
+- observation time and optional last structured-progress time;
+- a bounded oldest-first deque of edge/throughput samples;
+- current, whole-run arithmetic sample mean, and peak executions per second;
+- the latest edge count;
+- managed invocations expected and alive; and
+- optional available bytes on the configured fuzz-workspace filesystem.
+
+Only finite structured throughput samples contribute to current, mean, and
+peak. A valid structured edge or throughput observation refreshes progress
+time. The mean is `sum(valid reported throughput samples) / count(valid
+reported throughput samples)` over the whole observed run. The accumulator
+remains independent of bounded deque eviction. Log lines and raw crash signals
+do not refresh metric time. Unknown disk or progress evidence is `None`, never
+zero.
+
+On Unix the service reads capacity with safe `rustix::fs::statvfs`, using
+available blocks times fragment size with checked arithmetic. Windows uses a
+safe crate API. Failure is logged and retained as unknown.
+
+## 4. Conditions
+
+Each condition carries a stable code, severity, exact assessment evidence,
+deduplication key, observation time, and one next action.
+
+- **`CoveragePlateau`**: the configured tail of live samples has flat edges
+  while at least one valid positive throughput sample shows continued
+  execution. A steady positive rate is sufficient; the rate need not rise.
+- **`ManagedInvocationMissing`**: explicit service evidence says an awaited
+  managed invocation was expected but its guard is absent. Normal invocation
+  entry and exit update expected/alive together and must not manufacture this
+  state. No independent process-liveness claim is made.
+- **`WorkerStatsStale`**: structured progress has not advanced within the
+  configured interval while the managed invocation is active.
+- **`DiskPressure`**: known available workspace bytes are below the configured
   floor.
-- **`RunFailed`** -- the run reached a terminal failure state.
+- **`RunFailed`**: a campaign reached durable `Failed` status.
 
-`DiskPressure` is assessed but not yet supplied by the service gathering step.
-Reading free space needs a cross-platform call the workspace has no dependency
-for -- `statvfs` on Unix and `GetDiskFreeSpaceExW` on Windows -- and adding
-platform-specific `unsafe` is its own change rather than a rider on this one.
-Until then the gatherer passes no figure, which yields no condition; a caller
-that has the figure gets the condition. Reporting an unknown free-space value as
-"below the floor" would be exactly the unavailable-as-failure substitution this
-subsystem exists to avoid.
+All-zero or unknown throughput alone cannot establish a coverage plateau.
+Missing evidence yields an unavailable assessment with a reason. A completed
+run's stopped metrics are not stale.
 
-## 4. Stalling Is A Coverage Question, Not An Exec-Count Question
+## 5. Configuration
 
-fuzzctl declares a campaign stalled when `execs_done` and `paths_total` are
-unchanged for three intervals. That misses the failure mode that matters: a
-fuzzer executing millions of inputs per second against a harness that rejects
-all of them has a rising exec count, a static corpus, and is learning nothing.
-Its counters move, so fuzzctl calls it healthy.
+The `[campaign_health]` section in both shipped global configuration templates
+defines and validates:
 
-`CoveragePlateau` keys on the retained coverage series (`run_coverage_series`),
-which already records coverage per measurement for a run. Flat coverage under
-continued execution is the condition worth an operator's attention, and it is
-the one the exec counter cannot express.
+- `plateau_window` (at least two samples);
+- `stale_progress_secs` (greater than zero);
+- `disk_floor_bytes` (greater than zero);
+- `assessment_interval_secs` (greater than zero);
+- `max_live_samples` (at least two);
+- `event_retention_days` (greater than zero); and
+- `morning_summary_lookback_hours` (greater than zero).
 
-Execution counters are still evidence: a plateau is only reported while
-execution is progressing. A run whose execs are also flat is not plateaued, it
-is stopped, and `WorkersMissing` or `WorkerStatsStale` names that instead.
+The monitor resolves one validated settings value when the run is admitted.
+Edits apply to later monitors and explicit queries, not unpredictably within an
+existing monitor.
 
-## 5. Deduplication
+`max_live_samples` must be at least `plateau_window`, and a plateau becomes
+evaluable when exactly `plateau_window` valid samples are present. Configuration
+cannot make every live plateau assessment permanently unavailable.
 
-Every condition carries a dedup key derived from the run, the condition code,
-and the specific state that triggered it. A condition already emitted for a key
-is not emitted again. The key includes the triggering state so that a condition
-which worsens -- three workers missing after one was already reported -- emits
-once more rather than being suppressed as a repeat.
+## 6. Durable events and duplicate admission
 
-Dedup state is retained with the run, so a restarted service does not re-emit
-the backlog.
+`run_telemetry` retains the latest bounded observation for each run.
+`campaign_health_events` retains a version 2 envelope containing a service UUID,
+run UUID, condition, severity, detail, deduplication key, observation time, and
+the exact assessment evidence. Unknown or malformed durable versions fail the
+read. The earlier version 1 report was computed on demand and was never stored,
+so this pre-1.0 change updates its wire consumers coherently and adds no
+compatibility decoder for a durable format that did not exist.
 
-## 6. Thresholds Are Configuration
+The read-only current assessment is a candidate view and has `id: null`; it does
+not claim that a GET created a durable alert. Only SQLite-admitted events and
+retained event hydration carry a non-null stable UUID.
 
-The plateau window, the stale-progress interval, and the disk floor are
-validated configuration fields, not constants (AGENTS.md 2.15). A deployment
-fuzzing a slow target and one fuzzing a fast parser do not share a plateau
-window, and a `DEFAULT_*` constant would make that a code change.
+Retained hydration returns `{ events, next_cursor }` in deterministic
+newest-first `(observed_at, id)` order. `limit` must be between 1 and 100. The
+cursor is the last event UUID from the prior page and must belong to the same
+run; missing and foreign-run cursors fail validation. The next page selects
+strictly older keys, so a live event inserted while paging cannot skip an older
+retained event. Clients merge pages and live delivery by event UUID.
 
-## 7. Rejected Alternatives
+SQLite admits an event with `INSERT ... ON CONFLICT(run_id, condition,
+dedup_key) DO NOTHING`.
+Only a newly inserted event is delivered live. The key covers run, condition,
+and triggering state, so identical assessments deduplicate across concurrent
+ticks and service restarts while worsened evidence produces a new event.
 
-- **Exec-counter stall detection** -- section 4.
-- **A dedicated webhook poster** -- duplicates transport, secret handling, and
-  retry policy that the scheduler event bridge already owns.
-- **Auto-restarting missing workers** -- run control has an approval path; a
-  health reporter that restarts things is a supervisor, and a supervisor that
-  silently restarts a crashing harness hides the harness defect.
-- **Emitting an all-clear condition** -- alerting on the absence of a problem
-  trains operators to ignore the channel. Health is queryable; only conditions
-  are emitted.
-- **Severity derived from crash counts** -- crash volume is a triage input, not
-  a health signal; `triage-disposition-design.md` already orders crashes.
+Pruning uses the configured retention period and excludes supplied teardown
+IDs plus every durable `Pending` or `Running` campaign, including campaigns
+owned by another process.
+Active-run telemetry and every key required to suppress its repeated events are
+retained. One bounded telemetry row may remain with a retained run after it
+becomes terminal.
 
-## 8. Verification Criteria
+Telemetry upserts admit only observations newer than the retained row. A
+delayed assessment cannot replace newer accumulators or publish an event as if
+its rejected snapshot were current. Event uniqueness is scoped by run,
+condition, and state key, so one run or condition cannot suppress another.
+The configured live-sample limit is capped at 256, which keeps the complete
+strict sample and event-evidence encodings within the durable 64 KiB limits.
 
-- A run with rising execs and flat coverage across the configured window emits
-  `CoveragePlateau` exactly once.
-- A run with flat execs emits no `CoveragePlateau`.
-- A condition emitted twice for identical state produces one event.
-- A condition whose triggering state worsens produces a second event.
-- Retained dedup state survives a service restart.
-- No condition is emitted for a run with no retained coverage measurement; the
-  plateau check reports unavailable instead.
-- An unknown worker count or free-space figure yields no condition, rather than
-  a condition asserting the worst case.
+## 7. Monitor lifecycle
+
+After a campaign has a durable and cancellable run ID, the service prepares its
+registry entry and starts one immediately ticking periodic monitor. A small
+owner holds the cancellation token and join handle. Normal completion closes
+progress, cancels and awaits the task, assesses already-persisted terminal
+state, then removes registry state. `Drop` closes and removes the entry, cancels,
+and aborts an unfinished task so a cancelled caller cannot detach monitoring or
+allow a late callback to recreate closed state. Drop cannot await and therefore
+does not promise a final assessment; `PersistedRunGuard` repairs durable run
+status asynchronously on abnormal caller cancellation.
+
+`register_invocation` atomically moves expected/alive from `0/0` to `1/1`
+immediately around the runtime await. Its guard atomically returns both to
+`0/0`. Registry locks are never held over storage, filesystem, delivery, or
+runtime awaits.
+
+Userspace and syzkaller ordinary-error paths persist terminal failure and finish
+the monitor explicitly. `PersistedRunGuard` remains the abnormal caller-drop
+repair. Syzkaller becomes durable/cancellable and emits its service-owned UUID
+before scoped progress; pre-admission guidance has no run UUID and remains
+request-scoped.
+
+Desktop launch commands may also receive an optional request-scoped Tauri
+channel. Their existing service `on_started` callback sends the admitted UUID
+through that channel before the command waits for termination. The HTTP
+transport reports the validated UUID from `POST /runs/start` through the same
+local callback interface before its terminal wait. Global UUID-scoped progress
+and status events remain observation streams; they do not identify which
+foreground request admitted a run. A missing channel preserves direct native
+callers, and channel delivery failure does not change successful admission.
+
+## 8. Delivery and authorization
+
+The existing scheduler bridge receives `campaign.health` only after durable
+insertion. The existing SSE stream carries `campaign:health`; reconnect and
+lag recovery hydrate retained events through REST and merge them by event UUID.
+No second transport or delivery acknowledgement is introduced.
+
+Owner-authorized `GET /runs/{id}/telemetry` returns the service snapshot time,
+bounded coverage series, latest edge count, and cumulative throughput
+count/sum/current/mean/peak. A browser joining midway or recovering from SSE
+lag replaces its session subset with this authoritative cumulative snapshot;
+it never labels callback-only arithmetic as a whole-run mean. Structured
+progress received while a telemetry request is in flight marks the run dirty
+and coalesces one refresh after that read settles. The client never replays an
+unsequenced throughput callback into the returned count/sum because the response
+may already include it. Raw logs and crash signals may render immediately;
+whole-run population and mean remain service-owned.
+
+Owner-authorized `GET /runs/{id}/health/events?cursor=<uuid>&limit=<n>` and the
+matching native `campaign_health_events(run_id, cursor, limit)` command expose
+the retained page. Both default to 100 events and preserve validation errors
+from the service.
+
+Every retained read resolves the durable run owner and applies the server's
+approved-project policy. SSE applies the same policy before publishing events,
+including scheduled and unsolicited campaigns. A selected GUI project never
+supplies ownership for an event. Native and HTTP progress carry the service run
+UUID; owner metadata is resolved from the service and run buckets remain
+separate while that lookup is pending.
+
+Raw crash notifications remain signals. The terminal retained artifact count is
+the unique crash total and is labelled separately.
+
+## 9. Morning summary
+
+The configured lookback produces run-ID sets for:
+
+- `failed`: campaign runs durably `Failed` in the window;
+- `stalled`: campaigns with retained plateau, stale-stats, or explicit
+  managed-invocation evidence;
+- `interrupted`: campaign IDs recovered by the run journal; and
+- `unprocessed`: terminal campaigns whose strict closeout view has pending or
+  failed work.
+
+IDs deduplicate within a category and may appear in several categories. The
+pure strict closeout decoder is shared with `campaign-health`; the closeout
+executor is not. Unknown closeout rows remain errors. A standalone
+`campaign-health` build compiles without enabling run-closeout execution.
+
+## 10. Rejected alternatives
+
+- An execution-count-only stall rule misses active fuzzers with flat coverage.
+- Docker/PID/VM inspection would claim worker evidence the runtime API does not
+  provide.
+- A dedicated webhook duplicates the scheduler bridge's routing and secrets.
+- Automatic restart or cancellation changes run control without approval.
+- Detached monitor tasks can write after teardown and retain the container.
+- Assigning callbacks to the currently selected GUI project misattributes
+  scheduled and concurrent runs.
+
+## 11. Verification criteria
+
+- Flat live edges plus steady positive throughput emits a plateau before
+  terminal `runs.samples_json`; all-zero or unknown throughput does not.
+- Samples `100` then `25` report current `25`, whole-run arithmetic mean `62.5`,
+  and peak `100`, even after deque eviction.
+- Identical concurrent and restarted assessments insert and deliver once;
+  worsened evidence inserts again.
+- Unknown/nonfinite evidence remains unavailable and log noise does not refresh
+  metric time.
+- Normal, error, and cancellation paths leave no monitor or registry state
+  after final assessment. Dropped callers close and remove live state while the
+  persisted-run repair records failure asynchronously.
+- Userspace and admitted syzkaller progress uses the exact durable run UUID.
+- Cross-project REST and SSE reads/delivery are denied from the durable owner.
+- Interleaved and scheduled GUI runs retain separate metrics and owner-correct
+  project indexes.
+- Morning summary excludes smoke and maintenance runs and strictly reports
+  malformed closeout evidence.

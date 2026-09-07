@@ -27,7 +27,6 @@ import { ProjectsView } from "./views/ProjectsView";
 import { ArtifactsView } from "./views/ArtifactsView";
 import { ReportsView } from "./views/ReportsView";
 import { ChangesView } from "./views/ChangesView";
-import { AuditView } from "./views/AuditView";
 import { DefectDojoView } from "./views/DefectDojoView";
 import { CommandPalette } from "./components/CommandPalette";
 import { LoadingState } from "./components/ui/Loading";
@@ -46,6 +45,10 @@ import { ProgressPanel } from "./components/ProgressPanel";
 import { isTauriEnvironment, pickFolder } from "./lib";
 import { MessageSquare, Crosshair, Play, Bug, Database, Settings, FileCode, FileText, History, Activity, Gauge, Info, FolderOpen, Boxes, ListChecks, Bot, Puzzle, BookOpen, Zap, LayoutDashboard, ScrollText, ShieldCheck, LifeBuoy, CarFront , GitCompare} from "lucide-react";
 
+const AuditView = lazy(() =>
+  import("./views/AuditView").then(({ AuditView: View }) => ({ default: View })),
+);
+
 const AutomotiveView = lazy(() =>
   import("./views/AutomotiveView").then(({ AutomotiveView: View }) => ({ default: View })),
 );
@@ -59,8 +62,9 @@ const HelpView = lazy(() =>
 // out of the entry chunk. Dashboard is deliberately eager: it is the startup
 // view, and loading it lazily would show a fallback on every launch.
 //
-// The other navigation-only views are imported statically on purpose. Splitting
-// them was measured and made the entry chunk larger: their own code is small
+// Audit now also loads on navigation, including its policy-decision list.
+// Other navigation-only views remain static. Earlier splitting experiments
+// made the entry chunk larger: their own code is small
 // once the shared components they use -- which the entry chunk already carries
 // -- are excluded, so the lazy wrapper cost more than the split saved.
 const ChatView = lazy(() =>
@@ -164,7 +168,6 @@ function AppInner() {
 
   return (
     <TooltipProvider>
-      <ToastProvider>
         <CampaignCrashToaster />
         <div className="app-root flex h-full w-full bg-surface-primary text-text-primary">
         {activeView === "settings" ? (
@@ -268,7 +271,9 @@ function AppInner() {
                 )}
                 {activeView === "audit" && (
                   <ViewCanvas>
-                    <AuditView />
+                    <Suspense fallback={<LoadingState />}>
+                      <AuditView />
+                    </Suspense>
                   </ViewCanvas>
                 )}
                 {activeView === "agents" && (
@@ -332,7 +337,6 @@ function AppInner() {
         )}
         <CommandPalette onNavigate={navigate} />
         </div>
-      </ToastProvider>
     </TooltipProvider>
   );
 }
@@ -353,9 +357,11 @@ function CampaignCrashToaster() {
   const { toast } = useToast();
   const { t } = useI18n();
   useEffect(() => {
+    let active = true;
     let unlisten: (() => void) | undefined;
     getTransport()
       .listen<CampaignCrashNotice>("campaign:crash", (e) => {
+        if (!active) return;
         const p = e.payload;
         const extras = [
           p.report_saved ? t("app.reportSaved") : null,
@@ -370,10 +376,16 @@ function CampaignCrashToaster() {
         });
       })
       .then((u) => {
-        unlisten = u;
+        if (active) unlisten = u;
+        else u();
       })
-      .catch(() => {});
-    return () => unlisten?.();
+      .catch(() => {
+        // An unavailable notification subscription leaves retained run history usable.
+      });
+    return () => {
+      active = false;
+      unlisten?.();
+    };
   }, [toast, t]);
   return null;
 }
@@ -387,11 +399,13 @@ export default function App() {
             <TargetProvider>
             <PipelineProvider>
               <RunStatusProvider>
-                <RunOutputProvider>
-                  <ConfirmProvider>
-                    <AppInner />
-                  </ConfirmProvider>
-                </RunOutputProvider>
+                <ToastProvider>
+                  <RunOutputProvider>
+                    <ConfirmProvider>
+                      <AppInner />
+                    </ConfirmProvider>
+                  </RunOutputProvider>
+                </ToastProvider>
               </RunStatusProvider>
             </PipelineProvider>
             </TargetProvider>

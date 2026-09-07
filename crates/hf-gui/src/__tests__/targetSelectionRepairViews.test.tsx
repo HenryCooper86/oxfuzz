@@ -67,7 +67,7 @@ function renderWithRepair(
             setSandboxArch: () => undefined,
           }}>
             <RunOutputContext.Provider value={{
-              log: [], stats: { execs: 0, edges: 0, crashes: 0 }, summary: null,
+              log: [], stats: { currentExecs: null, meanExecs: null, peakExecs: null, edges: 0, rawCrashSignals: 0 }, summary: null,
               running: false, cancelling: false, lastTarget: "", lastEngine: "",
               runFuzzer, runSyzkaller, cancelRun: async () => undefined, clear: () => undefined,
             }}>

@@ -34,10 +34,13 @@ pub use schedule_occurrence_store::{
 pub use session_store::SqliteSessionStore;
 pub use store::{
     AutoRevertEvent, AutomotiveOperationRecord, AutomotiveOperationStatus,
-    AutomotiveStateCorpusRecord, GuardrailDecisionRecord, HarnessAiReviewRecord,
-    HarnessApprovalKind, HarnessApprovalRecord, ProjectAutoRevert, PromotedHarness, RunKind,
-    RunRecord, RunStatus, SemgrepFindingRecord, SemgrepFindingSeverity, SemgrepPublication,
-    SemgrepRunRecord, SemgrepRunStatus, SemgrepTargetScoreRecord, StorageError, Store,
+    AutomotiveStateCorpusRecord, CampaignHealthEventPageRecord, CampaignHealthEventRecord,
+    CampaignHealthEvidenceRecord, GuardrailDecisionRecord, HarnessAiReviewRecord,
+    HarnessApprovalKind, HarnessApprovalRecord, ProjectAutoRevert, PromotedHarness,
+    RetainedHealthSample, RunKind, RunRecord, RunStatus, RunTelemetryRecord, SemgrepFindingRecord,
+    SemgrepFindingSeverity, SemgrepPublication, SemgrepRunRecord, SemgrepRunStatus,
+    SemgrepTargetScoreRecord, StorageError, Store, MAX_CAMPAIGN_HEALTH_EVENT_PAGE_SIZE,
+    MAX_CAMPAIGN_HEALTH_SAMPLES,
 };
 pub use transcript::JsonlTranscriptStore;
 pub use transcript_display::JsonlDisplayTranscriptStore;

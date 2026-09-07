@@ -259,6 +259,173 @@ impl hf_core::runtime::RuntimeAdapter for BlockingRuntime {
     }
 }
 
+/// A runtime that lets the test observe the monitor's first retained tick,
+/// then fails the admitted sandbox invocation.
+#[cfg(feature = "campaign-health")]
+#[derive(Default)]
+struct FailingStreamingRuntime {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[async_trait::async_trait]
+#[cfg(feature = "campaign-health")]
+impl hf_core::runtime::RuntimeAdapter for FailingStreamingRuntime {
+    async fn resolve_image_reference(
+        &self,
+        _image: &str,
+    ) -> Result<Option<hf_core::runtime::ImmutableImageReference>, hf_core::error::ClassifiedError>
+    {
+        Ok(Some(hf_test_utils::immutable_test_image()?))
+    }
+
+    async fn run_command(
+        &self,
+        _cmd: &[String],
+        cwd: &std::path::Path,
+        _limits: &hf_core::runtime::ResourceLimits,
+    ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
+        Ok(hf_core::runtime::CommandResult {
+            exit_code: 0,
+            stdout: "DONE exec/s: 64".to_owned(),
+            stderr: String::new(),
+            workspace: cwd.to_path_buf(),
+            termination: hf_core::runtime::CommandTermination::Completed,
+        })
+    }
+
+    async fn run_command_streaming(
+        &self,
+        _cmd: &[String],
+        _cwd: &std::path::Path,
+        _limits: &hf_core::runtime::ResourceLimits,
+        _cancel: &tokio_util::sync::CancellationToken,
+        _on_line: &hf_core::runtime::LineSink<'_>,
+    ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        Err(hf_core::error::ClassifiedError::Sandbox(
+            "synthetic admitted runtime failure".to_owned(),
+        ))
+    }
+
+    async fn write_file(
+        &self,
+        _path: &std::path::Path,
+        _content: &str,
+    ) -> Result<(), hf_core::error::ClassifiedError> {
+        Ok(())
+    }
+
+    async fn read_file(
+        &self,
+        _path: &std::path::Path,
+    ) -> Result<String, hf_core::error::ClassifiedError> {
+        Ok(String::new())
+    }
+}
+
+#[tokio::test]
+#[cfg(feature = "campaign-health")]
+async fn admitted_runtime_failure_awaits_final_health_without_replacing_the_error() {
+    use std::fs;
+    isolate_workspace();
+
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("failed_health_proj");
+    fs::create_dir_all(&project).unwrap();
+    let target = "parse_entry";
+    fs::write(
+        project.join("parse.c"),
+        "#include <stddef.h>\nint parse_entry(const unsigned char *data, size_t size) { return size && data[0]; }\n",
+    )
+    .unwrap();
+    let workspace = hf_service::workspace_dir(&project, target);
+    fs::create_dir_all(workspace.join("corpus")).unwrap();
+    fs::write(workspace.join(format!("fuzz_{target}")), b"#!/bin/true").unwrap();
+
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("failed-health.db"))
+            .await
+            .unwrap(),
+    );
+    let runtime = Arc::new(FailingStreamingRuntime::default());
+    let container = Arc::new(
+        ServiceContainer::new(
+            runtime.clone(),
+            Some(hf_test_utils::approving_harness_review_pool()),
+        )
+        .with_store(Arc::clone(&store)),
+    );
+    container
+        .harness_compile(
+            "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }".to_owned(),
+            &project,
+            hf_core::engine::EngineKind::LibFuzzer,
+            target,
+            hf_core::target::TargetLanguage::C,
+        )
+        .await
+        .unwrap();
+    container
+        .harness_smoke(
+            &project,
+            target,
+            hf_core::engine::EngineKind::LibFuzzer,
+            hf_core::target::TargetLanguage::C,
+        )
+        .await
+        .unwrap();
+    container
+        .harness_promote(&project, target, hf_core::engine::EngineKind::LibFuzzer)
+        .await
+        .unwrap();
+
+    let run = {
+        let container = Arc::clone(&container);
+        let project = project.clone();
+        tokio::spawn(async move {
+            container
+                .run_fuzzer(
+                    &project,
+                    target,
+                    hf_core::engine::EngineKind::LibFuzzer,
+                    60,
+                    &|_| {},
+                )
+                .await
+        })
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        runtime.entered.notified(),
+    )
+    .await
+    .expect("runtime entered");
+    let run_id = container.active_run_ids()[0];
+    for _ in 0..100 {
+        if store.run_telemetry(run_id).await.unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    runtime.release.notify_one();
+
+    let error = tokio::time::timeout(std::time::Duration::from_secs(5), run)
+        .await
+        .expect("run returned")
+        .expect("task joined")
+        .expect_err("runtime failure remains visible");
+    assert!(error
+        .to_string()
+        .contains("synthetic admitted runtime failure"));
+    let retained = container.campaign_health_events(run_id).await.unwrap();
+    assert!(retained.iter().any(|event| {
+        event.condition == hf_service::HealthCondition::RunFailed && event.id.is_some()
+    }));
+    assert!(container.live_campaign_telemetry(run_id).is_none());
+}
+
 struct DiscoveryRuntime;
 
 #[async_trait::async_trait]
@@ -412,6 +579,31 @@ async fn cancel_run_stops_an_in_flight_fuzz_run() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     let run_id = run_id.expect("run should register as active");
+    #[cfg(feature = "campaign-health")]
+    {
+        let health = container
+            .live_campaign_telemetry(run_id)
+            .expect("campaign telemetry follows the durable run id");
+        assert_eq!(
+            (
+                health.managed_invocations_expected,
+                health.managed_invocations_alive,
+            ),
+            (1, 1)
+        );
+        let mut retained_health = None;
+        for _ in 0..100 {
+            retained_health = store.run_telemetry(run_id).await.unwrap();
+            if retained_health.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            retained_health.is_some(),
+            "the immediately ticking monitor must retain a snapshot"
+        );
+    }
     assert!(container.cancel_run(run_id), "cancel should find the run");
 
     // The run returns promptly and is recorded as cancelled.
@@ -426,6 +618,17 @@ async fn cancel_run_stops_an_in_flight_fuzz_run() {
         hf_core::runtime::CommandTermination::Cancelled
     );
     assert!(container.active_run_ids().is_empty(), "registry cleaned up");
+    #[cfg(feature = "campaign-health")]
+    {
+        assert!(
+            container.live_campaign_telemetry(run_id).is_none(),
+            "completed run must leave no live telemetry entry"
+        );
+        assert!(
+            store.run_telemetry(run_id).await.unwrap().is_some(),
+            "the final retained snapshot survives live-state removal"
+        );
+    }
 
     let run = store.get_run(run_id).await.unwrap().expect("run persisted");
     assert_eq!(run.status, hf_storage::RunStatus::Cancelled);
@@ -468,6 +671,107 @@ async fn cancel_run_stops_an_in_flight_fuzz_run() {
         .any(|mount| mount.container_path == format!("/work/runs/{run_id}/out")));
 
     let _ = fs::remove_dir_all(&workspace);
+}
+
+#[tokio::test]
+#[cfg(feature = "campaign-health")]
+async fn terminal_status_write_failure_still_awaits_monitor_cleanup() {
+    use std::fs;
+    isolate_workspace();
+
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("status_failure_proj");
+    fs::create_dir_all(&project).unwrap();
+    let target = "parse_entry";
+    fs::write(
+        project.join("parse.c"),
+        "#include <stddef.h>\nint parse_entry(const unsigned char *data, size_t size) { return size && data[0]; }\n",
+    )
+    .unwrap();
+    let workspace = hf_service::workspace_dir(&project, target);
+    fs::create_dir_all(workspace.join("corpus")).unwrap();
+    fs::write(workspace.join(format!("fuzz_{target}")), b"#!/bin/true").unwrap();
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("status-failure.db"))
+            .await
+            .unwrap(),
+    );
+    let container = Arc::new(
+        ServiceContainer::new(
+            Arc::new(BlockingRuntime::default()),
+            Some(hf_test_utils::approving_harness_review_pool()),
+        )
+        .with_store(Arc::clone(&store)),
+    );
+    container
+        .harness_compile(
+            "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }".to_owned(),
+            &project,
+            hf_core::engine::EngineKind::LibFuzzer,
+            target,
+            hf_core::target::TargetLanguage::C,
+        )
+        .await
+        .unwrap();
+    container
+        .harness_smoke(
+            &project,
+            target,
+            hf_core::engine::EngineKind::LibFuzzer,
+            hf_core::target::TargetLanguage::C,
+        )
+        .await
+        .unwrap();
+    container
+        .harness_promote(&project, target, hf_core::engine::EngineKind::LibFuzzer)
+        .await
+        .unwrap();
+    let runner = {
+        let container = Arc::clone(&container);
+        let project = project.clone();
+        tokio::spawn(async move {
+            container
+                .run_fuzzer(
+                    &project,
+                    target,
+                    hf_core::engine::EngineKind::LibFuzzer,
+                    60,
+                    &|_| {},
+                )
+                .await
+        })
+    };
+    let run_id = loop {
+        if let Some(run_id) = container.active_run_ids().into_iter().next() {
+            if store.run_telemetry(run_id).await.unwrap().is_some() {
+                break run_id;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+    sqlx::query(
+        "CREATE TRIGGER reject_terminal_status
+         BEFORE UPDATE OF status ON runs
+         WHEN OLD.status = 'running' AND NEW.status != 'running'
+         BEGIN SELECT RAISE(ABORT, 'controlled terminal status failure'); END",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    assert!(container.cancel_run(run_id));
+
+    let error = tokio::time::timeout(std::time::Duration::from_secs(5), runner)
+        .await
+        .expect("run returned")
+        .expect("task joined")
+        .expect_err("terminal status write must remain visible");
+    assert!(error
+        .to_string()
+        .contains("controlled terminal status failure"));
+    let retained = store.run_telemetry(run_id).await.unwrap().unwrap();
+    assert_eq!(retained.managed_invocations_expected, 0);
+    assert_eq!(retained.managed_invocations_alive, 0);
+    assert!(container.live_campaign_telemetry(run_id).is_none());
 }
 
 /// A runtime whose streamed fuzz command reports progress and is then killed at

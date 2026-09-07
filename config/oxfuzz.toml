@@ -51,6 +51,18 @@ max_mem_mb = 2048
 max_cpus = 1
 max_duration_secs = 7200
 
+# Retained monitoring for active and recent campaign runs. Throughput mean is
+# the arithmetic mean of all valid reported samples for the run; the live
+# coverage deque remains bounded independently.
+[campaign_health]
+plateau_window = 3
+stale_progress_secs = 180
+disk_floor_bytes = 3221225472
+assessment_interval_secs = 30
+max_live_samples = 120
+event_retention_days = 30
+morning_summary_lookback_hours = 24
+
 # Optional Scapy automotive protocol adapter. Compile-time support and this
 # runtime switch must both be enabled. The sidecar executes only in hf-runtime;
 # offline PCAP and isolated vcan are the normal modes.

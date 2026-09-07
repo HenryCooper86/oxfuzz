@@ -821,6 +821,53 @@ authorization audit trail must survive project data cleanup.
 
 Index: `idx_guardrail_decisions_ts(decided_at DESC)`.
 
+### `run_telemetry`
+
+One latest, monotonic Campaign Health snapshot per retained run. It stores a
+strict bounded sample array, cumulative finite throughput count and sum,
+current/mean/peak throughput, latest edges and metric time, managed invocation
+counts, and nullable workspace capacity. Older delayed observations cannot
+replace a newer row.
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `run_id` | `TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE` | campaign UUID |
+| `observed_at` | `TEXT NOT NULL` | RFC 3339 snapshot time |
+| `last_progress_at` | `TEXT` | nullable latest structured metric time |
+| `samples_json` | `TEXT NOT NULL` | strict bounded sample array |
+| `current_execs` | `REAL` | nullable latest executions per second |
+| `mean_execs` | `REAL` | nullable whole-run sample mean |
+| `peak_execs` | `REAL` | nullable peak executions per second |
+| `edges` | `INTEGER` | nullable latest edge count |
+| `throughput_sample_count` | `INTEGER NOT NULL` | whole-run valid sample count |
+| `throughput_sample_sum` | `REAL NOT NULL` | finite sum paired with count |
+| `managed_invocations_expected` | `INTEGER NOT NULL` | explicitly admitted invocations |
+| `managed_invocations_alive` | `INTEGER NOT NULL` | admitted invocations still awaited |
+| `free_disk_bytes` | `INTEGER` | nullable available workspace bytes |
+
+### `campaign_health_events`
+
+Immutable version 2 Campaign Health events. Each row carries a UUID, run UUID,
+condition, severity, bounded detail, strict evidence JSON, and observation
+time. `UNIQUE(run_id, condition, dedup_key)` atomically suppresses only the
+same condition state for the same run. Retention preserves durable `Pending`
+and `Running` campaigns plus supplied teardown run IDs. Retained hydration uses
+newest-first `(observed_at, id)` keyset pagination; the cursor row must belong
+to the requested run, and summary classification queries all distinct retained
+conditions rather than truncating to a display page.
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | lowercase UUID |
+| `schema_version` | `INTEGER NOT NULL` | exactly 2 |
+| `run_id` | `TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE` | campaign UUID |
+| `dedup_key` | `TEXT NOT NULL` | bounded condition-state identity |
+| `condition` | `TEXT NOT NULL` | owned health condition |
+| `severity` | `TEXT NOT NULL` | warning or error |
+| `detail` | `TEXT NOT NULL` | bounded operator explanation |
+| `evidence_json` | `TEXT NOT NULL` | strict version 2 evidence object |
+| `observed_at` | `TEXT NOT NULL` | RFC 3339 assessment time |
+
 ## 6. Migration inventory
 
 | migration | schema effect |
@@ -854,6 +901,7 @@ Index: `idx_guardrail_decisions_ts(decided_at DESC)`.
 | `0027_run_closeout.sql` | records per-run closeout step outcomes so an interrupted chain resumes rather than repeating terminal work |
 | `0028_harness_ai_reviews.sql` | creates source-digest-bound independent pre-execution harness review evidence |
 | `0029_harness_work_orders.sql` | creates immutable work-order packets, submissions, and qualification attempts with bounded durable evidence |
+| `0030_campaign_health.sql` | creates monotonic run telemetry and immutable version 2 campaign-health event evidence with run-scoped deduplication |
 
 ## 7. Read failure contract
 

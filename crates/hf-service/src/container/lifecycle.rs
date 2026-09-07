@@ -105,6 +105,12 @@ impl ServiceContainer {
             #[cfg(feature = "semgrep-enrichment")]
             semgrep: Arc::new(crate::semgrep::SemgrepCoordinator::in_memory()),
             active_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            #[cfg(feature = "campaign-health")]
+            campaign_telemetry: Arc::new(super::health_monitor::RunTelemetryRegistry::new(
+                hf_storage::MAX_CAMPAIGN_HEALTH_SAMPLES,
+            )),
+            #[cfg(feature = "campaign-health")]
+            campaign_health_delivery: Arc::new(std::sync::Mutex::new(None)),
             active_agents: Arc::new(std::sync::Mutex::new(Vec::new())),
             session_turn_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             scheduler_events: Arc::new(std::sync::Mutex::new(None)),
@@ -414,6 +420,12 @@ impl ServiceContainer {
             #[cfg(feature = "semgrep-enrichment")]
             semgrep,
             active_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            #[cfg(feature = "campaign-health")]
+            campaign_telemetry: Arc::new(super::health_monitor::RunTelemetryRegistry::new(
+                hf_storage::MAX_CAMPAIGN_HEALTH_SAMPLES,
+            )),
+            #[cfg(feature = "campaign-health")]
+            campaign_health_delivery: Arc::new(std::sync::Mutex::new(None)),
             active_agents: Arc::new(std::sync::Mutex::new(Vec::new())),
             session_turn_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             scheduler_events: Arc::new(std::sync::Mutex::new(None)),

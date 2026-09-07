@@ -12,12 +12,13 @@ use hf_core::target::{
 };
 use hf_storage::{
     AutoRevertEvent, AutomotiveOperationRecord, AutomotiveOperationStatus,
-    AutomotiveStateCorpusRecord, GuardrailDecisionRecord, HarnessAiReviewRecord,
-    HarnessApprovalKind, HarnessWorkOrderAttemptCompletion, HarnessWorkOrderAttemptRecord,
-    HarnessWorkOrderAttemptStage, HarnessWorkOrderAttemptStatus, HarnessWorkOrderRecord,
-    HarnessWorkOrderSubmissionInsertError, HarnessWorkOrderSubmissionRecord, NewScheduleOccurrence,
-    ProjectAutoRevert, RemediationOperationCompletion, RemediationOperationRecord,
-    RemediationOperationStage, RemediationOperationStatus, RunKind, RunRecord, RunStatus,
+    AutomotiveStateCorpusRecord, CampaignHealthEventRecord, GuardrailDecisionRecord,
+    HarnessAiReviewRecord, HarnessApprovalKind, HarnessWorkOrderAttemptCompletion,
+    HarnessWorkOrderAttemptRecord, HarnessWorkOrderAttemptStage, HarnessWorkOrderAttemptStatus,
+    HarnessWorkOrderRecord, HarnessWorkOrderSubmissionInsertError,
+    HarnessWorkOrderSubmissionRecord, NewScheduleOccurrence, ProjectAutoRevert,
+    RemediationOperationCompletion, RemediationOperationRecord, RemediationOperationStage,
+    RemediationOperationStatus, RunKind, RunRecord, RunStatus, RunTelemetryRecord,
     ScheduleOccurrenceAcknowledgement, ScheduleOccurrenceInspection, ScheduleOccurrenceReservation,
     ScheduleOccurrenceTransition, ScheduleOccurrenceTransitionResult, SemgrepFindingRecord,
     SemgrepFindingSeverity, SemgrepPublication, SemgrepRunRecord, SemgrepRunStatus,
@@ -5227,4 +5228,428 @@ async fn promoted_harnesses_for_project_orders_newest_first() {
         .unwrap();
     let ids: Vec<uuid::Uuid> = rows.iter().map(|row| row.harness.id).collect();
     assert_eq!(ids, vec![newer.id, older.id]);
+}
+
+fn telemetry(run_id: Uuid, observed_at: chrono::DateTime<Utc>) -> RunTelemetryRecord {
+    RunTelemetryRecord {
+        run_id,
+        observed_at,
+        last_progress_at: None,
+        samples_json: "[]".to_owned(),
+        current_execs: None,
+        mean_execs: None,
+        peak_execs: None,
+        edges: None,
+        throughput_sample_count: 0,
+        throughput_sample_sum: 0.0,
+        managed_invocations_expected: 0,
+        managed_invocations_alive: 0,
+        free_disk_bytes: None,
+    }
+}
+
+fn health_event(
+    run_id: Uuid,
+    dedup_key: &str,
+    observed_at: chrono::DateTime<Utc>,
+) -> CampaignHealthEventRecord {
+    health_event_for_condition(run_id, dedup_key, "coverage_plateau", observed_at)
+}
+
+fn health_event_for_condition(
+    run_id: Uuid,
+    dedup_key: &str,
+    condition: &str,
+    observed_at: chrono::DateTime<Utc>,
+) -> CampaignHealthEventRecord {
+    CampaignHealthEventRecord {
+        schema_version: 2,
+        id: Uuid::new_v4(),
+        run_id,
+        dedup_key: dedup_key.to_owned(),
+        condition: condition.to_owned(),
+        severity: "warning".to_owned(),
+        detail: "coverage remained flat while execution continued".to_owned(),
+        evidence_json: serde_json::json!({
+            "schema_version": 2,
+            "run_id": run_id,
+            "condition": condition,
+            "observed_at": observed_at,
+            "run_status": "pending",
+            "plateau_window": 3,
+            "stale_progress_secs": 180,
+            "disk_floor_bytes": 3_221_225_472_u64,
+            "coverage_samples": [{"elapsed_secs": 0.0, "edges": 7, "execs": 50.0}],
+            "last_progress_at": null,
+            "progress_stale_secs": null,
+            "current_execs": 50.0,
+            "mean_execs": 50.0,
+            "peak_execs": 50.0,
+            "throughput_sample_count": 1,
+            "throughput_sample_sum": 50.0,
+            "managed_invocations_expected": 0,
+            "managed_invocations_alive": 0,
+            "free_disk_bytes": null
+        })
+        .to_string(),
+        observed_at,
+    }
+}
+
+#[tokio::test]
+async fn campaign_health_migration_and_nullable_telemetry_round_trip() {
+    let (store, _dir) = temp_store().await;
+    let applied: i64 =
+        sqlx::query_scalar("SELECT version FROM _sqlx_migrations WHERE version = 30")
+            .fetch_one(store.pool())
+            .await
+            .expect("campaign-health migration receipt");
+    assert_eq!(applied, 30);
+
+    let run = RunRecord::new("/projects/health", EngineKind::LibFuzzer, None, Utc::now());
+    store.insert_run(&run).await.unwrap();
+    let mut record = telemetry(run.id, Utc::now().trunc_subsecs(0));
+    record.samples_json = r#"[{"elapsed_secs":0.0,"edges":7,"execs":50.0}]"#.to_owned();
+    record.current_execs = Some(50.0);
+    record.mean_execs = Some(50.0);
+    record.peak_execs = Some(50.0);
+    record.edges = Some(7);
+    record.throughput_sample_count = 1;
+    record.throughput_sample_sum = 50.0;
+
+    store.upsert_run_telemetry(&record).await.unwrap();
+
+    assert_eq!(store.run_telemetry(run.id).await.unwrap(), Some(record));
+}
+
+#[tokio::test]
+async fn campaign_health_telemetry_rejects_delayed_snapshot_overwrite() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("health-order.db");
+    let first = Store::connect(&path).await.unwrap();
+    let second = Store::connect(&path).await.unwrap();
+    let run = RunRecord::new("/projects/health", EngineKind::LibFuzzer, None, Utc::now());
+    first.insert_run(&run).await.unwrap();
+    let mut newer = telemetry(run.id, Utc::now().trunc_subsecs(0));
+    newer.current_execs = Some(40.0);
+    newer.mean_execs = Some(30.0);
+    newer.peak_execs = Some(40.0);
+    newer.throughput_sample_count = 2;
+    newer.throughput_sample_sum = 60.0;
+    let mut older = telemetry(run.id, newer.observed_at - Duration::seconds(1));
+    older.current_execs = Some(10.0);
+    older.mean_execs = Some(10.0);
+    older.peak_execs = Some(10.0);
+    older.throughput_sample_count = 1;
+    older.throughput_sample_sum = 10.0;
+
+    assert!(first.upsert_run_telemetry(&newer).await.unwrap());
+    assert!(!second.upsert_run_telemetry(&older).await.unwrap());
+
+    assert_eq!(first.run_telemetry(run.id).await.unwrap(), Some(newer));
+}
+
+#[tokio::test]
+async fn campaign_health_event_admission_is_atomic_and_survives_reconnect() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("health.db");
+    let first = Store::connect(&path).await.unwrap();
+    let second = Store::connect(&path).await.unwrap();
+    let run = RunRecord::new("/projects/health", EngineKind::LibFuzzer, None, Utc::now());
+    first.insert_run(&run).await.unwrap();
+    let event = health_event(run.id, "run:plateau:7:3", Utc::now().trunc_subsecs(0));
+    let competing = CampaignHealthEventRecord {
+        id: Uuid::new_v4(),
+        ..event.clone()
+    };
+
+    let (left, right) = tokio::join!(
+        first.insert_campaign_health_event(&event),
+        second.insert_campaign_health_event(&competing),
+    );
+    assert_eq!(
+        [left.unwrap(), right.unwrap()]
+            .into_iter()
+            .filter(|inserted| *inserted)
+            .count(),
+        1
+    );
+    drop(first);
+    drop(second);
+
+    let reopened = Store::connect(&path).await.unwrap();
+    let events = reopened
+        .list_campaign_health_events(Some(run.id), 20)
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].dedup_key, event.dedup_key);
+}
+
+#[tokio::test]
+async fn campaign_health_event_deduplication_is_scoped_by_run_and_condition() {
+    let (store, _dir) = temp_store().await;
+    let first_run = RunRecord::new("/projects/a", EngineKind::LibFuzzer, None, Utc::now());
+    let second_run = RunRecord::new("/projects/b", EngineKind::LibFuzzer, None, Utc::now());
+    store.insert_run(&first_run).await.unwrap();
+    store.insert_run(&second_run).await.unwrap();
+    let observed_at = Utc::now().trunc_subsecs(0);
+
+    let first = health_event(first_run.id, "same-state", observed_at);
+    assert!(store.insert_campaign_health_event(&first).await.unwrap());
+    let repeat = CampaignHealthEventRecord {
+        id: Uuid::new_v4(),
+        ..first.clone()
+    };
+    assert!(!store.insert_campaign_health_event(&repeat).await.unwrap());
+
+    let other_run = health_event(second_run.id, "same-state", observed_at);
+    assert!(store
+        .insert_campaign_health_event(&other_run)
+        .await
+        .unwrap());
+    let other_condition = health_event_for_condition(
+        first_run.id,
+        "same-state",
+        "worker_stats_stale",
+        observed_at,
+    );
+    assert!(store
+        .insert_campaign_health_event(&other_condition)
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn campaign_health_event_pages_recover_older_events_and_reject_foreign_cursors() {
+    let (store, _dir) = temp_store().await;
+    let run = RunRecord::new("/projects/health", EngineKind::LibFuzzer, None, Utc::now());
+    let other = RunRecord::new("/projects/other", EngineKind::LibFuzzer, None, Utc::now());
+    store.insert_run(&run).await.unwrap();
+    store.insert_run(&other).await.unwrap();
+    let base = Utc::now().trunc_subsecs(0) - Duration::minutes(10);
+    let plateau = health_event(run.id, "plateau:oldest", base);
+    store.insert_campaign_health_event(&plateau).await.unwrap();
+    for offset in 1..=101 {
+        let event = health_event_for_condition(
+            run.id,
+            &format!("disk:{offset}"),
+            "disk_pressure",
+            base + Duration::seconds(offset),
+        );
+        store.insert_campaign_health_event(&event).await.unwrap();
+    }
+    let foreign = health_event(other.id, "foreign", base + Duration::minutes(20));
+    store.insert_campaign_health_event(&foreign).await.unwrap();
+
+    let first = store
+        .campaign_health_event_page(run.id, None, 100)
+        .await
+        .unwrap();
+    assert_eq!(first.events.len(), 100);
+    let inserted_while_paging = health_event_for_condition(
+        run.id,
+        "newest:while-paging",
+        "disk_pressure",
+        base + chrono::Duration::seconds(1_000),
+    );
+    store
+        .insert_campaign_health_event(&inserted_while_paging)
+        .await
+        .unwrap();
+    let second = store
+        .campaign_health_event_page(run.id, first.next_cursor, 100)
+        .await
+        .unwrap();
+    assert_eq!(second.events.len(), 2);
+    assert!(second.events.iter().any(|event| event.id == plateau.id));
+    assert_eq!(second.next_cursor, None);
+    assert!(!second
+        .events
+        .iter()
+        .any(|event| event.id == inserted_while_paging.id));
+    assert!(store
+        .campaign_health_event_page(run.id, Some(foreign.id), 100)
+        .await
+        .is_err());
+    assert!(store
+        .campaign_health_event_page(run.id, None, 0)
+        .await
+        .is_err());
+    assert!(store
+        .campaign_health_event_page(run.id, None, 101)
+        .await
+        .is_err());
+    assert_eq!(
+        store
+            .campaign_health_event_conditions(run.id)
+            .await
+            .unwrap(),
+        vec!["coverage_plateau".to_owned(), "disk_pressure".to_owned()]
+    );
+}
+
+#[tokio::test]
+async fn campaign_health_schema_rejects_malformed_durable_evidence() {
+    let (store, _dir) = temp_store().await;
+    let run = RunRecord::new("/projects/health", EngineKind::LibFuzzer, None, Utc::now());
+    store.insert_run(&run).await.unwrap();
+
+    assert!(sqlx::query(
+        "INSERT INTO run_telemetry
+            (run_id, observed_at, samples_json, throughput_sample_count,
+             throughput_sample_sum, managed_invocations_expected,
+             managed_invocations_alive)
+         VALUES (?1, '2026-09-07T00:00:00Z', '{bad json', 0, 0.0, 0, 0)",
+    )
+    .bind(run.id.to_string())
+    .execute(store.pool())
+    .await
+    .is_err());
+
+    let event = health_event(run.id, "run:plateau:7:3", Utc::now());
+    let mut invalid = event.clone();
+    invalid.schema_version = 99;
+    assert!(store.insert_campaign_health_event(&invalid).await.is_err());
+
+    sqlx::query(
+        "INSERT INTO run_telemetry
+            (run_id, observed_at, samples_json, throughput_sample_count,
+             throughput_sample_sum, managed_invocations_expected,
+             managed_invocations_alive)
+         VALUES (?1, '2026-09-07T00:00:00Z', '[null]', 0, 0.0, 0, 0)",
+    )
+    .bind(run.id.to_string())
+    .execute(store.pool())
+    .await
+    .unwrap();
+    assert!(store.run_telemetry(run.id).await.is_err());
+
+    let second_run = RunRecord::new("/projects/other", EngineKind::LibFuzzer, None, Utc::now());
+    store.insert_run(&second_run).await.unwrap();
+    let mut empty_evidence = health_event(second_run.id, "empty-evidence", Utc::now());
+    empty_evidence.evidence_json = "{}".to_owned();
+    assert!(store
+        .insert_campaign_health_event(&empty_evidence)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn health_event_pruning_preserves_active_runs_and_removes_old_terminal_events() {
+    let (store, _dir) = temp_store().await;
+    let old = Utc::now() - Duration::days(10);
+    let active = RunRecord::new("/projects/active", EngineKind::LibFuzzer, None, old);
+    let durable_pending_elsewhere = RunRecord::new(
+        "/projects/active-in-another-process",
+        EngineKind::LibFuzzer,
+        None,
+        old,
+    );
+    let mut terminal = RunRecord::new("/projects/terminal", EngineKind::LibFuzzer, None, old);
+    terminal.status = RunStatus::Done;
+    terminal.ended_at = Some(old);
+    store.insert_run(&active).await.unwrap();
+    let mut durable_running_elsewhere = RunRecord::new(
+        "/projects/running-in-another-process",
+        EngineKind::LibFuzzer,
+        None,
+        old,
+    );
+    durable_running_elsewhere.status = RunStatus::Running;
+    store.insert_run(&durable_pending_elsewhere).await.unwrap();
+    store.insert_run(&durable_running_elsewhere).await.unwrap();
+    store.insert_run(&terminal).await.unwrap();
+    store
+        .insert_campaign_health_event(&health_event(active.id, "active:key", old))
+        .await
+        .unwrap();
+    store
+        .insert_campaign_health_event(&health_event(
+            durable_pending_elsewhere.id,
+            "durable-pending:key",
+            old,
+        ))
+        .await
+        .unwrap();
+    store
+        .insert_campaign_health_event(&health_event(
+            durable_running_elsewhere.id,
+            "durable-running:key",
+            old,
+        ))
+        .await
+        .unwrap();
+    store
+        .insert_campaign_health_event(&health_event(terminal.id, "terminal:key", old))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store
+            .prune_campaign_health_events(Utc::now() - Duration::days(1), &[active.id])
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        store
+            .list_campaign_health_events(Some(active.id), 20)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .list_campaign_health_events(Some(durable_pending_elsewhere.id), 20)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "a durable pending campaign may belong to another service process"
+    );
+    assert_eq!(
+        store
+            .list_campaign_health_events(Some(durable_running_elsewhere.id), 20)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "a durable running campaign may belong to another service process"
+    );
+    assert!(store
+        .list_campaign_health_events(Some(terminal.id), 20)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn deleting_a_run_removes_its_health_children_without_foreign_key_pragmas() {
+    let (store, _dir) = temp_store().await;
+    let run = RunRecord::new(
+        "/projects/delete-health",
+        EngineKind::LibFuzzer,
+        None,
+        Utc::now(),
+    );
+    store.insert_run(&run).await.unwrap();
+    store
+        .upsert_run_telemetry(&telemetry(run.id, Utc::now().trunc_subsecs(0)))
+        .await
+        .unwrap();
+    store
+        .insert_campaign_health_event(&health_event(run.id, "delete:key", Utc::now()))
+        .await
+        .unwrap();
+
+    store.delete_run(&run.id.to_string()).await.unwrap();
+
+    assert!(store.run_telemetry(run.id).await.unwrap().is_none());
+    assert!(store
+        .list_campaign_health_events(Some(run.id), 10)
+        .await
+        .unwrap()
+        .is_empty());
 }

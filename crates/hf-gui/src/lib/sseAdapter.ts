@@ -40,6 +40,7 @@ export class SseAdapter {
         throw new Error(`SSE connection failed: ${response.status}`);
       }
       this.reconnectDelay = 1000;
+      this.dispatch("stream:connected", undefined);
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
