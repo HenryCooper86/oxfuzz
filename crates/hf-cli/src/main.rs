@@ -33,8 +33,7 @@ use crate::commands::campaign::{
 };
 use crate::commands::discovery::cmd_discover;
 #[cfg(feature = "unreached-surface")]
-use crate::commands::harness::cmd_attribution;
-use crate::commands::harness::cmd_unreached;
+use crate::commands::harness::{cmd_attribution, cmd_unreached};
 use crate::commands::harness::{cmd_corpus, cmd_harness, cmd_run, cmd_triage};
 use crate::commands::system::{
     cmd_agent, cmd_arm, cmd_doctor, cmd_export, cmd_knowledge, cmd_policy, cmd_providers,
