@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, Check, Minus, Crosshair, FileCode, Play, Bug, Database, FolderOpen } from "lucide-react";
 import { pickFolder } from "../lib";
 import { useProject } from "../providers/project";
@@ -8,7 +8,7 @@ import { DiscoverView } from "./DiscoverView";
 import { HarnessView } from "./HarnessView";
 import { RunView } from "./RunView";
 import { TriageView } from "./TriageView";
-import { CorpusView } from "./CorpusView";
+const CorpusView = lazy(() => import("./CorpusView").then(module => ({ default: module.CorpusView })));
 import { ViewHeader, Button } from "../components/ui";
 import { useI18n } from "../i18nContext";
 
@@ -224,7 +224,7 @@ export function WorkflowView() {
         {!gated && expanded === "corpus" && (
           <div style={{ padding: "0 14px 16px", borderTop: "1px solid var(--border)" }}>
             <div style={{ paddingTop: "14px" }}>
-              <CorpusView embedded />
+              <Suspense fallback={<div role="status">{t("common.loading")}</div>}><CorpusView embedded onNavigate={(view) => { if (!gated) setExpanded(view as SectionId); }} /></Suspense>
             </div>
           </div>
         )}

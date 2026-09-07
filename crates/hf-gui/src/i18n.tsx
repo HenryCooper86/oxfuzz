@@ -7,6 +7,7 @@
 // dictionaries to extend coverage.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { enExperiments, zhExperiments } from "./i18n.experiments";
 import { enExtra, zhExtra } from "./i18n.extra";
 import {
   I18nContext,
@@ -19,6 +20,7 @@ const STORAGE_KEY = "hf_locale";
 type Dict = Record<string, string>;
 
 const en: Dict = {
+  ...enExperiments,
   // Sidebar navigation
   "nav.dashboard": "Dashboard",
   "nav.chat": "AI Assistant",
@@ -179,6 +181,7 @@ const en: Dict = {
 };
 
 const zh: Dict = {
+  ...zhExperiments,
   // Sidebar navigation
   "nav.dashboard": "仪表盘",
   "nav.chat": "AI 助手",

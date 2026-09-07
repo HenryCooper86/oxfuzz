@@ -493,7 +493,7 @@ fn diagnosis_from_row(row: &SqliteRow) -> Result<BuildDiagnosisRecord, StorageEr
     Ok(record)
 }
 
-async fn load_inputs(
+pub(crate) async fn load_inputs(
     connection: &mut SqliteConnection,
     id: Uuid,
 ) -> Result<Option<HarnessBuildInputsRecord>, StorageError> {
@@ -736,7 +736,7 @@ fn validate_dependency_name(name: &str) -> Result<(), StorageError> {
     Ok(())
 }
 
-fn validate_project(path: &str) -> Result<(), StorageError> {
+pub(crate) fn validate_project(path: &str) -> Result<(), StorageError> {
     if path.chars().any(char::is_control) {
         return Err(invalid("project root contains control characters"));
     }
@@ -913,4 +913,47 @@ where
     T: Deserialize<'de>,
 {
     Option::<T>::deserialize(deserializer)
+}
+
+/// Exact Phase 6 schema-1 compact JSON bytes used to identify compilation inputs.
+pub fn harness_build_input_digest_bytes(
+    profile_sha256: Option<&str>,
+    compile_database_sha256: Option<&str>,
+    compile_flags_sha256: &str,
+    sandbox_image_id: &str,
+) -> Result<Vec<u8>, serde_json::Error> {
+    #[derive(Serialize)]
+    struct InputDigest<'a> {
+        schema_version: u32,
+        profile_sha256: Option<&'a str>,
+        compile_database_sha256: Option<&'a str>,
+        compile_flags_sha256: &'a str,
+        sandbox_image_id: &'a str,
+    }
+    serde_json::to_vec(&InputDigest {
+        schema_version: 1,
+        profile_sha256,
+        compile_database_sha256,
+        compile_flags_sha256,
+        sandbox_image_id,
+    })
+}
+
+/// SHA-256 identity of the unchanged Phase 6 schema-1 encoding.
+pub fn harness_build_input_sha256(
+    profile_sha256: Option<&str>,
+    compile_database_sha256: Option<&str>,
+    compile_flags_sha256: &str,
+    sandbox_image_id: &str,
+) -> Result<String, serde_json::Error> {
+    use sha2::{Digest, Sha256};
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(harness_build_input_digest_bytes(
+            profile_sha256,
+            compile_database_sha256,
+            compile_flags_sha256,
+            sandbox_image_id
+        )?)
+    ))
 }

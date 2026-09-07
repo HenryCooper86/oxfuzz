@@ -10,7 +10,6 @@ use hf_core::{
     runtime::ImmutableImageReference, target::TargetLanguage,
 };
 use hf_storage::{BuildDiagnosisStatus, BuildProfileState, HarnessBuildInputsRecord, Store};
-use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 pub(super) struct CapturedBuildInputs {
@@ -55,15 +54,6 @@ fn stale(reason: &str) -> ClassifiedError {
     ClassifiedError::Validation(format!(
         "Stale build inputs: {reason}; harness must be rebuilt and requalified"
     ))
-}
-
-#[derive(Serialize)]
-struct InputDigest<'a> {
-    schema_version: u32,
-    profile_sha256: Option<&'a str>,
-    compile_database_sha256: Option<&'a str>,
-    compile_flags_sha256: &'a str,
-    sandbox_image_id: &'a str,
 }
 
 impl ServiceContainer {
@@ -213,13 +203,12 @@ impl ServiceContainer {
             &serde_json::to_vec(&flags)
                 .map_err(|e| ClassifiedError::Internal(format!("serialize compile flags: {e}")))?,
         );
-        let serialized = serde_json::to_vec(&InputDigest {
-            schema_version: 1,
-            profile_sha256: profile_sha256.as_deref(),
-            compile_database_sha256: compile_database_sha256.as_deref(),
-            compile_flags_sha256: &compile_flags_sha256,
-            sandbox_image_id: image.reference(),
-        })
+        let build_input_sha256 = hf_storage::harness_build_input_sha256(
+            profile_sha256.as_deref(),
+            compile_database_sha256.as_deref(),
+            &compile_flags_sha256,
+            image.reference(),
+        )
         .map_err(|e| ClassifiedError::Internal(format!("serialize build inputs: {e}")))?;
         Ok(CapturedBuildInputs {
             record: HarnessBuildInputsRecord {
@@ -229,7 +218,7 @@ impl ServiceContainer {
                 compile_database_sha256,
                 compile_flags_sha256,
                 sandbox_image_id: image.reference().to_owned(),
-                build_input_sha256: super::harness::sha256_hex(&serialized),
+                build_input_sha256,
                 created_at: Utc::now(),
             },
             flags,

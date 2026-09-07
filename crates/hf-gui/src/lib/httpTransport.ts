@@ -119,6 +119,11 @@ const COMMAND_MAP: Record<string, CommandEndpoint> = {
   build_profile_clear: { method: "DELETE", path: "/build/profile" },
   build_history: { method: "GET", path: "/build/history" },
   harness_tournament: { method: "POST", path: "/harness/tournament" },
+  coverage_experiment_create: { method: "POST", path: "/coverage/experiments" },
+  coverage_experiment_get: { method: "GET", path: "/coverage/experiments/{id}" },
+  coverage_experiment_list: { method: "GET", path: "/coverage/experiments" },
+  coverage_experiment_complete: { method: "POST", path: "/coverage/experiments/{id}/complete" },
+  coverage_experiment_cancel: { method: "POST", path: "/coverage/experiments/{id}/cancel" },
   coverage_blockers: { method: "POST", path: "/coverage/blockers" },
   automotive_lab_coverage: { method: "POST", path: "/automotive/lab/coverage" },
   automotive_lab_plan: { method: "POST", path: "/automotive/lab/plan" },
@@ -380,9 +385,11 @@ export function createHttpTransport(options: HttpTransportOptions = {}): Transpo
       signal: options?.signal,
     });
     if (!response.ok) {
+      let structured: Record<string, unknown> = {};
       let detail = `${endpoint.method} ${endpoint.path}: ${response.status}`;
       try {
-        const error = await response.json() as { code?: unknown; error?: unknown };
+        const error = await response.json() as Record<string, unknown>;
+        structured = error;
         if (typeof error.error === "string") {
           detail = typeof error.code === "string"
             ? `${error.code}: ${error.error}`
@@ -391,7 +398,7 @@ export function createHttpTransport(options: HttpTransportOptions = {}): Transpo
       } catch {
         // A non-JSON error has no stable service detail to preserve.
       }
-      throw new Error(detail);
+      throw Object.assign(new Error(detail), structured, { status: response.status });
     }
     return response.json() as Promise<T>;
   }
@@ -577,6 +584,13 @@ export function createHttpTransport(options: HttpTransportOptions = {}): Transpo
         // Fail loudly for commands without an HTTP equivalent so callers can
         // present an accurate unsupported/offline state.
         throw new Error(`Unsupported command in web mode: ${command}`);
+      }
+      if (command === "coverage_experiment_get") return request<T>(endpoint, { id: args?.id, ...args?.scope as Record<string, unknown> }, options);
+      if (command === "coverage_experiment_complete" || command === "coverage_experiment_cancel") return request<T>(endpoint, { id: args?.id, ...args?.request as Record<string, unknown> }, options);
+      if (command === "coverage_experiment_list") {
+        const { before, ...rest } = args ?? {};
+        const cursor = before as { created_at: string; id: string } | null;
+        return request<T>(endpoint, { ...rest, before_created_at: cursor?.created_at, before_id: cursor?.id }, options);
       }
       const requestArgs = command === "patch_defectdojo_config" || command === "patch_issue_tracker_config"
         ? typedPatchBody(args)

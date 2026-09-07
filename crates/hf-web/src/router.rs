@@ -88,7 +88,6 @@ impl AppState {
         self
     }
 
-    #[cfg(feature = "harness-work-order")]
     pub(crate) fn approve_project(
         &self,
         requested: &std::path::Path,
@@ -457,6 +456,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .merge(build_doctor_routes())
         .merge(harness_tournament_routes())
         .merge(coverage_blocker_routes())
+        .merge(crate::coverage_experiment_routes::routes())
         .merge(campaign_trust_routes())
         .merge(unreached_surface_routes())
         .merge(concolic_routes())
@@ -2807,21 +2807,23 @@ async fn clear_all_artifacts(State(state): State<AppState>) -> ApiResult<bool> {
 async fn delete_run(
     State(state): State<AppState>,
     Json(req): Json<RunIdRequest>,
-) -> ApiResult<bool> {
+) -> Result<Json<bool>, (StatusCode, Json<RunHistoryErrorResponse>)> {
     state
         .container
         .delete_run(&req.run_id)
         .await
-        .map_err(classified_api_error)?;
+        .map_err(run_history_api_error)?;
     Ok(Json(true))
 }
 
-async fn clear_all_runs(State(state): State<AppState>) -> ApiResult<bool> {
+async fn clear_all_runs(
+    State(state): State<AppState>,
+) -> Result<Json<bool>, (StatusCode, Json<RunHistoryErrorResponse>)> {
     state
         .container
         .clear_all_runs()
         .await
-        .map_err(classified_api_error)?;
+        .map_err(run_history_api_error)?;
     Ok(Json(true))
 }
 
@@ -4205,6 +4207,37 @@ fn parse_engine(s: &str) -> Result<EngineKind, String> {
     s.parse()
 }
 
+#[derive(Serialize)]
+#[serde(untagged)]
+enum RunHistoryErrorResponse {
+    Retained(hf_service::coverage_experiments::CoverageExperimentError),
+    Existing(ErrorResponse),
+}
+fn run_history_api_error(
+    error: hf_service::RunHistoryError,
+) -> (StatusCode, Json<RunHistoryErrorResponse>) {
+    match error {
+        hf_service::RunHistoryError::Classified(error) => {
+            let (status, Json(body)) = classified_api_error(error);
+            (status, Json(RunHistoryErrorResponse::Existing(body)))
+        }
+        hf_service::RunHistoryError::RunRetainedByExperiment {
+            run_id,
+            experiment_id,
+            role,
+        } => {
+            let public=hf_service::coverage_experiments::CoverageExperimentError{
+                run_id:Some(run_id),experiment_id:Some(experiment_id),role:Some(role),
+                ..hf_service::coverage_experiments::CoverageExperimentError::new(hf_service::coverage_experiments::CoverageExperimentErrorCode::RunRetainedByExperiment)
+            };
+            (
+                StatusCode::CONFLICT,
+                Json(RunHistoryErrorResponse::Retained(public)),
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod request_tests {
     use axum::http::StatusCode;
@@ -4318,5 +4351,34 @@ Authorization = "Bearer synthetic-header"
         for (error, expected) in cases {
             assert_eq!(classified_api_error(error).0, expected);
         }
+    }
+}
+
+#[cfg(test)]
+mod run_history_error_tests {
+    use super::*;
+    #[test]
+    fn retention_translation_preserves_ids_and_nonretention_status() {
+        let run_id = uuid::Uuid::new_v4();
+        let experiment_id = uuid::Uuid::new_v4();
+        let (status, Json(body)) =
+            run_history_api_error(hf_service::RunHistoryError::RunRetainedByExperiment {
+                run_id,
+                experiment_id,
+                role: hf_service::coverage_experiments::CoverageExperimentRunRole::Result,
+            });
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            serde_json::to_value(body).unwrap(),
+            serde_json::json!({"code":"run_retained_by_experiment","error":"run_retained_by_experiment","run_id":run_id,"experiment_id":experiment_id,"role":"result"})
+        );
+        let (status, Json(body)) = run_history_api_error(hf_service::RunHistoryError::Classified(
+            ClassifiedError::Validation("active".into()),
+        ));
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            serde_json::to_value(body).unwrap(),
+            serde_json::json!({"error":"validation error: active"})
+        );
     }
 }

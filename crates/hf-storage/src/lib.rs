@@ -6,6 +6,8 @@
 //! runs, targets, harnesses, crashes, and corpus entries.
 
 mod build_profile_store;
+mod coverage_experiment_store;
+pub use coverage_experiment_store::*;
 mod store;
 mod work_order_store;
 
@@ -18,10 +20,11 @@ pub mod transcript;
 pub mod transcript_display;
 
 pub use build_profile_store::{
-    BuildDependency, BuildDependencyKind, BuildDependencyStatus, BuildDiagnosisEvidence,
-    BuildDiagnosisOperation, BuildDiagnosisRecord, BuildDiagnosisStatus, BuildPlanEvidence,
-    BuildPlanStepEvidence, BuildProfileState, BuildSystemEvidence, BuildTerminalEvidence,
-    BuildTerminalStatus, DetectedBuildStatus, DetectedBuildSystem, ExpectedHarnessBuildIdentity,
+    harness_build_input_digest_bytes, harness_build_input_sha256, BuildDependency,
+    BuildDependencyKind, BuildDependencyStatus, BuildDiagnosisEvidence, BuildDiagnosisOperation,
+    BuildDiagnosisRecord, BuildDiagnosisStatus, BuildPlanEvidence, BuildPlanStepEvidence,
+    BuildProfileState, BuildSystemEvidence, BuildTerminalEvidence, BuildTerminalStatus,
+    DetectedBuildStatus, DetectedBuildSystem, ExpectedHarnessBuildIdentity,
     HarnessBuildContextEvidence, HarnessBuildContextRecord, HarnessBuildInputsRecord,
     ProfileBuildSystem, ProjectBuildProfileRecord, MAX_BUILD_DIAGNOSIS_HISTORY,
     MAX_BUILD_JSON_BYTES,

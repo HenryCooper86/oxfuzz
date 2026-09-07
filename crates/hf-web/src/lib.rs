@@ -1,5 +1,6 @@
 //! hf-web: REST API + SSE streaming for `oxfuzz`.
 
+mod coverage_experiment_routes;
 pub mod router;
 mod security;
 #[cfg(feature = "harness-work-order")]

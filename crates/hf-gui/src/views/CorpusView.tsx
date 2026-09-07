@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Database, FolderOpen, Plus, Scissors, Sparkles, Sprout } from "lucide-react";
+import { CoverageExperimentPanel } from "../components/CoverageExperimentPanel";
+import type { ExperimentAdvice } from "../types/coverageExperiments";
 import { CoverageBlockerPanel } from "../components/CoverageBlockerPanel";
 import { PathActions } from "../components/PathActions";
 import { Button, ViewHeader } from "../components/ui";
@@ -8,7 +10,7 @@ import { getTransport, isTauriEnvironment, onDataChanged, pickFolder } from "../
 import { useConfirm } from "../providers/confirm";
 import { useProject } from "../providers/project";
 import { useTarget } from "../providers/target";
-import type { CorpusEntry } from "../types";
+import type { CorpusEntry, ViewType } from "../types";
 
 interface CorpusCapability { available: boolean; reason_code: string | null; reason: string | null }
 interface CorpusCapabilities { seed_survival: CorpusCapability; coverage_prune: CorpusCapability; minimize: CorpusCapability }
@@ -17,15 +19,16 @@ interface CorpusImportOutcome { inspected: number; eligible: number; duplicates:
 interface ReductionOutcome { before: number; after: number; before_bytes: number; after_bytes: number }
 interface SurvivalReport { total: number; survives: number; dies_at_entry: number; not_measured: number; survival_ratio: number | null }
 
-export function CorpusView({ embedded = false }: { embedded?: boolean }) {
+export function CorpusView({ embedded = false, onNavigate }: { embedded?: boolean; onNavigate?: (view: ViewType) => void }) {
   const { activeProject } = useProject();
   const { target, lang } = useTarget();
   const project = activeProject || ".";
-  return <CorpusWorkspace key={`${project}\u0000${target}`} project={project} target={target} lang={lang || "c"} embedded={embedded} />;
+  return <CorpusWorkspace key={`${project}\u0000${target}`} project={project} target={target} lang={lang || "c"} embedded={embedded} onNavigate={onNavigate} />;
 }
 
-function CorpusWorkspace({ project, target, lang, embedded }: { project: string; target: string; lang: string; embedded: boolean }) {
+function CorpusWorkspace({ project, target, lang, embedded, onNavigate }: { project: string; target: string; lang: string; embedded: boolean; onNavigate?: (view: ViewType) => void }) {
   const { t } = useI18n();
+  const [experimentAdvice, setExperimentAdvice] = useState<ExperimentAdvice | null>(null);
   const confirm = useConfirm();
   const desktop = isTauriEnvironment();
   const [entries, setEntries] = useState<CorpusEntry[]>([]);
@@ -215,7 +218,8 @@ function CorpusWorkspace({ project, target, lang, embedded }: { project: string;
 
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
-      {target && <CoverageBlockerPanel key={`${project}:${target}`} project={project} target={target} lang={lang} />}
+      {target && <CoverageBlockerPanel key={`${project}:${target}`} project={project} target={target} lang={lang} onExperimentAdvice={setExperimentAdvice} />}
+      {target && <CoverageExperimentPanel project={project} target={target} advice={experimentAdvice} onNavigate={onNavigate} />}
       <div className="flex items-center justify-between gap-3">
         {embedded ? <span /> : <ViewHeader title={t("corpus.title")} description={t("corpus.description")} />}
         <div className="flex flex-wrap justify-end gap-2">

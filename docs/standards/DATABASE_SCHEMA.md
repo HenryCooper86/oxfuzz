@@ -1,8 +1,8 @@
 # Database Schema
 
-Status: **implemented through migration 0030**; Phase 6 tables in section 5.1
-are **planned for migration 0031**, not shipped. Scope: `hf-storage` and
-`hf-diagnostics`.
+Status: **implemented through migration 0033**. Coverage experiment storage and
+run-reference protection are implemented; service policy and presentation remain
+planned. Scope: `hf-storage` and `hf-diagnostics`.
 
 ## 1. Storage and migration ownership
 
@@ -365,6 +365,163 @@ affected row.
 Indexes:
 `idx_remediation_finding(finding_id, created_at DESC)` and
 `idx_remediation_status(status, updated_at)`.
+
+### `coverage_experiments`
+
+Implemented migration **0033_coverage_experiments.sql**, following delivered 0031
+and 0032. [Coverage Experiments](../design/coverage-experiments-design.md) owns
+service eligibility, comparison, APIs, and presentation. This table, its Store
+module, and run-reference protection are unconditional, including builds with
+`coverage-experiments` disabled. It records no execution or provider operation.
+
+| column | SQLite declaration | exact meaning / limits |
+| --- | --- | --- |
+| `id` | `TEXT NOT NULL PRIMARY KEY` | canonical non-nil v4 UUID, service-assigned |
+| `schema_version` | `INTEGER NOT NULL CHECK (schema_version = 1)` | exact record version |
+| `project_root` | `TEXT NOT NULL` | canonical absolute owner, 1–4,096 UTF-8 bytes |
+| `target_id` | `TEXT NOT NULL` | canonical non-nil UUID; logical reference to persisted target |
+| `target_symbol` | `TEXT NOT NULL` | captured label, 1–1,024 bytes |
+| `baseline_run_id` | `TEXT NOT NULL REFERENCES runs(id) ON DELETE RESTRICT` | retained terminal Campaign baseline |
+| `kind` | `TEXT NOT NULL CHECK (kind IN ('grow_corpus','refine_harness'))` | reviewed intervention |
+| `goal_function` | `TEXT NOT NULL` | operator-reviewed function text, 1–1,024 bytes |
+| `hypothesis` | `TEXT NOT NULL` | operator-written text, 1–4,096 bytes |
+| `duration_secs` | `INTEGER NOT NULL CHECK (duration_secs BETWEEN 1 AND 604800)` | explicit integral requested seconds |
+| `baseline_evidence_json` | `TEXT NOT NULL` | exact `CoverageExperimentRunEvidenceV1`, at most 65,536 bytes |
+| `status` | `TEXT NOT NULL CHECK (status IN ('prepared','completed','cancelled'))` | experiment lifecycle, independent of run status |
+| `result_run_id` | `TEXT REFERENCES runs(id) ON DELETE RESTRICT` | nullable, distinct from baseline |
+| `result_evidence_json` | `TEXT` | nullable exact `CoverageExperimentResultEvidenceV1`, at most 65,536 bytes |
+| `cancellation_reason` | `TEXT` | nullable operator text, 1–4,096 bytes when present |
+| `created_at` | `TEXT NOT NULL` | canonical UTC creation time |
+| `updated_at` | `TEXT NOT NULL` | creation time or first terminal time |
+| `ended_at` | `TEXT` | nullable first terminal time |
+
+No SQL defaults fill proposal, JSON, duration, status, or timestamp values.
+There is no result uniqueness constraint across experiments: separate reviewed
+hypotheses may attach the same later campaign. Baseline/result references are
+protected even for cancelled experiments. Target/harness IDs in snapshots are
+logical provenance; direct deletion of a harness cannot delete a snapshot.
+
+All scalar SQL checks include `typeof` for required values (and the equivalent
+`IS NULL OR (...)` clause for optional values). UUID checks require 36 lowercase
+hex/hyphen characters, hyphens at positions 9/14/19/24, exactly 32 hex digits
+when hyphens are removed, and non-nil text. The experiment ID also requires
+version nibble 4 and variant nibble in `8,9,a,b`. Text byte limits use
+`length(CAST(value AS BLOB))`; never SQLite character count. SQL rejects NUL in
+text, whitespace-only goal/symbol/hypothesis/reason, and invalid enum values.
+Typed durable validation additionally enforces Unicode trimming/control rules
+and normalized cross-platform project path syntax from the design, without
+filesystem access. It never canonicalizes a historical owner against today's
+filesystem.
+
+Timestamps use exact `YYYY-MM-DDTHH:MM:SS.nnnnnnnnnZ` text (30 bytes), valid
+calendar values in years 0001–9999, UTC, no leap-second spelling. SQL checks
+length, separators, numeric positions, and nondecreasing ordering; typed reads
+and writes parse and require an exact canonical round-trip. SQL equality/order
+thus agrees with typed chronology. Do not accept a noncanonical timestamp
+because SQLite or chrono can parse it.
+
+SQL JSON checks require TEXT, `json_valid`, top-level object, integer
+`schema_version = 1`, and 1–65,536 UTF-8 bytes. Use explicit non-null JSON-type
+checks so a missing key cannot pass CHECK via SQL NULL. Required relational
+fields in baseline JSON (`run_id`, `project_root`, `target_id`, `target_symbol`,
+`duration_secs`) equal the corresponding columns. In result JSON, `run.run_id`,
+`run.project_root`, and `run.target_id` equal the result/owner columns; nested
+`run.schema_version` is 1. First-level result fields `run`, `input_change`,
+`build_comparison`, `edge_comparison`, `target_entry`, and `limitations` are
+required with their documented JSON types. Full nested validation belongs to
+the strict typed reader/writer, rejecting unknown fields, duplicate object keys,
+missing explicit nullable keys, invalid digests/images, bounds, and internal
+state inconsistencies. No malformed read becomes `None` or an empty page.
+
+SQL state check (in addition to `updated_at >= created_at`):
+
+```sql
+CHECK (
+  (status = 'prepared'
+   AND result_run_id IS NULL AND result_evidence_json IS NULL
+   AND cancellation_reason IS NULL AND ended_at IS NULL
+   AND updated_at = created_at)
+  OR
+  (status = 'completed'
+   AND result_run_id IS NOT NULL AND result_run_id <> baseline_run_id
+   AND result_evidence_json IS NOT NULL AND cancellation_reason IS NULL
+   AND ended_at IS NOT NULL AND updated_at = ended_at)
+  OR
+  (status = 'cancelled'
+   AND result_run_id IS NULL AND result_evidence_json IS NULL
+   AND cancellation_reason IS NOT NULL
+   AND ended_at IS NOT NULL AND updated_at = ended_at)
+)
+```
+
+Indexes:
+
+```sql
+CREATE INDEX idx_coverage_experiments_project
+ON coverage_experiments(project_root, created_at DESC, id DESC);
+CREATE INDEX idx_coverage_experiments_target
+ON coverage_experiments(project_root, target_id, created_at DESC, id DESC);
+CREATE INDEX idx_coverage_experiments_baseline
+ON coverage_experiments(baseline_run_id);
+CREATE INDEX idx_coverage_experiments_result
+ON coverage_experiments(result_run_id) WHERE result_run_id IS NOT NULL;
+```
+
+Three triggers are required: `coverage_experiments_no_replace` rejects every
+INSERT with an existing ID (including REPLACE/UPSERT);
+`coverage_experiments_immutable_proposal` rejects a change to any column from
+`id` through `baseline_evidence_json` plus `created_at`, using NULL-safe `IS NOT`
+comparisons; `coverage_experiments_terminal_immutable` rejects every UPDATE when
+old status is completed/cancelled, and any UPDATE whose old status is prepared
+but new status is not completed/cancelled. Exact Store retries return the
+existing row without issuing SQL UPDATE. Explicit DELETE remains permitted for
+project and knowledge cleanup. An experiment is never individually updated back
+to prepared or overwritten on a conflicting retry.
+
+`insert_coverage_experiment` validates and inserts only a prepared row. In a
+writer-reserved transaction it verifies referenced baseline/config, existing
+harness/target ownership, exact snapshot identity, and optional build-input row.
+The baseline must be Done/Failed/Cancelled Campaign with end at or before
+creation. Snapshot build-input capture must precede its run start. A missing
+build-input row is an explicit legacy snapshot, never a current-profile lookup.
+`complete_coverage_experiment` verifies the result matches current persisted
+source evidence in the same transaction, including exact config/component
+fields and build inputs. It requires a distinct terminal Campaign of the same
+owner/target with `result.started_at > created_at`, run end at or after run
+start, and attachment end at or after run end. Snapshot-derived comparison
+metadata must be structurally consistent; service computes comparison/limits.
+No Store method silently supplies missing setup fields.
+
+All writes and cleanup operations reserve the SQLite writer **before** reads
+(`BEGIN IMMEDIATE`), with source reads on that transaction's connection.
+Complete/cancel update only `WHERE id = ? AND status = 'prepared'`; a zero-row
+update reloads and accepts only the exact terminal retry. Complete retry
+compares result UUID and all retained result evidence. Cancel retry compares the
+exact reason. Retry candidate timestamps never replace the original terminal
+time. Differing terminal input returns conflict, preserving every field.
+Prepared and terminal reads validate column/JSON agreement and chronology using
+the immutable snapshots; they do not depend on later workspace state. List
+requires limit 1–100 and uses `(created_at DESC, id DESC)` keyset pagination.
+A supplied cursor must identify a record in the requested project/target scope;
+invalid/foreign cursors fail. Fetch at most limit + 1 rows to determine the next
+cursor; SQL/deserialization failure aborts the whole page.
+
+`coverage_experiment_run_reference` owns baseline/result reference meaning and
+returns the deterministic first experiment UUID/role for a run. Direct
+`Store::delete_run` and `clear_all_runs` use its transaction-capable query before
+any crash/run deletion and return a precise retained-run refusal. Service uses
+the same query before filesystem removal and translates a raced Store refusal
+identically. FKs remain final SQL protection. Every failed delete/clear rolls
+back all rows; `clear_all_runs` never deletes experiments itself. These checks
+are unconditional when optional features are disabled.
+
+Explicit `delete_project` deletes only that project's experiments first, before
+harness inputs, harnesses, crashes, runs, and targets in its existing ordered
+transaction, even if the project has no targets left. Any unexpected foreign
+project run reference causes rollback rather than cross-project deletion.
+`clear_knowledge` deletes experiments before its existing learned-data sequence;
+it continues preserving build profiles and project settings as configuration.
+No SQL error may be swallowed. Experiments own no filesystem artifacts.
 
 ### `harness_work_orders`
 
@@ -870,7 +1027,7 @@ conditions rather than truncating to a display page.
 | `evidence_json` | `TEXT NOT NULL` | strict version 2 evidence object |
 | `observed_at` | `TEXT NOT NULL` | RFC 3339 assessment time |
 
-## 5.1 Build profile and input tables (planned Phase 6)
+## 5.1 Build profile and input tables (delivered Phase 6)
 
 Migration `0031_build_profiles.sql` adds the following three tables after
 Phase 5 migration `0030_campaign_health.sql`, without changing Phase 5 declarations.
@@ -1057,6 +1214,7 @@ bounded deterministic history, and both cleanup operations.
 | `0030_campaign_health.sql` | creates monotonic run telemetry and immutable version 2 campaign-health event evidence with run-scoped deduplication |
 | `0031_build_profiles.sql` | creates optional project build profiles, strict retained diagnosis evidence, and immutable harness build inputs |
 | `0032_harness_build_contexts.sql` | retains immutable configured BuildContext provider inputs |
+| `0033_coverage_experiments.sql` | immutable coverage-experiment proposal/evidence, prepared-to-terminal CAS, RESTRICT baseline/result run references |
 
 ## 7. Read failure contract
 

@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Route } from "lucide-react";
 import { Badge, Button } from "./ui";
 import { getTransport } from "../lib";
 import { useI18n } from "../i18nContext";
+import type { ExperimentAdvice } from "../types/coverageExperiments";
 import type { CoverageBlockerView, NextExperimentKind } from "../types";
 
 /// Service proposals mapped to a badge tone. The panel renders what the service
@@ -17,12 +18,16 @@ export function CoverageBlockerPanel({
   project,
   target,
   lang,
+  onExperimentAdvice,
 }: {
   project: string;
   target: string;
   lang: string;
+  onExperimentAdvice?: (advice: ExperimentAdvice) => void;
 }) {
   const { t } = useI18n();
+  const active = useRef(true);
+  useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
   const [view, setView] = useState<CoverageBlockerView | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -36,12 +41,13 @@ export function CoverageBlockerPanel({
         target,
         lang,
       });
-      setView(result);
+      if (active.current) setView(result);
     } catch (e) {
+      if (!active.current) return;
       setView(null);
       setError(String(e));
     } finally {
-      setBusy(false);
+      if (active.current) setBusy(false);
     }
   }
 
@@ -96,6 +102,7 @@ export function CoverageBlockerPanel({
             <p className="text-xs text-text-muted mt-1">
               {t(`coverageBlockers.experimentReason.${view.experiment.reason_code}`)}
             </p>
+            {onExperimentAdvice && view.experiment.kind !== "no_experiment_available" && <Button onClick={() => { if (view.experiment.kind !== "no_experiment_available") onExperimentAdvice({ kind: view.experiment.kind, goal: view.experiment.target_function ?? "" }); }}>{t("experiments.advice")}</Button>}
             {view.experiment.target_function && (
               <p className="text-xs font-mono text-text-secondary mt-1">
                 {t("coverageBlockers.aimAt")}: {view.experiment.target_function}

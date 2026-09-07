@@ -10,6 +10,9 @@ export function createTauriTransport(): Transport {
       options?: InvokeOptions,
     ): Promise<T> {
       const { Channel, invoke } = await import("@tauri-apps/api/core");
+      if (["coverage_experiment_create", "coverage_experiment_get", "coverage_experiment_list", "coverage_experiment_complete", "coverage_experiment_cancel"].includes(command)) {
+        return invoke<T>(command, new TextEncoder().encode(JSON.stringify(args)));
+      }
       const isRunLaunch = command === "run_fuzzer" || command === "run_syzkaller";
       const invokeArgs = isRunLaunch && options?.onRunStarted
         ? {

@@ -6,6 +6,7 @@
 
 mod closeout_commands;
 mod commands;
+mod coverage_experiment_commands;
 mod state;
 mod work_order_commands;
 
@@ -205,6 +206,11 @@ pub fn run() {
             build_history,
             harness_tournament,
             coverage_blockers,
+            coverage_experiment_commands::coverage_experiment_create,
+            coverage_experiment_commands::coverage_experiment_get,
+            coverage_experiment_commands::coverage_experiment_list,
+            coverage_experiment_commands::coverage_experiment_complete,
+            coverage_experiment_commands::coverage_experiment_cancel,
             oracle_scaffold,
             oracle_violation,
             build_run,

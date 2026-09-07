@@ -1,5 +1,8 @@
 //! Feature-gated fixtures for presentation-layer integration tests.
 
+pub mod coverage_experiments;
+mod retained_campaign;
+
 use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

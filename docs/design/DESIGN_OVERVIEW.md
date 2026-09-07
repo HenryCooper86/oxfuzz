@@ -51,7 +51,8 @@ all under human-in-the-loop supervision.
 | Change-aware comparison | hf-service | parsed diff, affected targets, base/head comparison | change-aware-pr-fuzzing-design.md |
 | Build diagnosis and optional profiles | hf-service + hf-storage | `ProjectBuildDiagnosis`, `SaveBuildProfileRequest`, reviewed CMake/Make plan and retained output | build-doctor-design.md |
 | Harness build inputs | hf-service + hf-storage | immutable per-attempt input capture, atomic harness/input persistence, shared executor checks | harness-generation-design.md + ../standards/DATABASE_SCHEMA.md |
-| Coverage blockers | hf-service | ranked uncovered blockers, next experiment | coverage-blocker-design.md |
+| Coverage blockers | hf-service | ranked uncovered blockers, advisory next experiment | coverage-blocker-design.md |
+| Coverage experiments (planned Phase 7) | hf-service + hf-storage | immutable reviewed proposal, bounded evidence, manual result attachment, CAS lifecycle, retained run references | [coverage-experiments-design.md](coverage-experiments-design.md) |
 | Non-crash oracles | hf-service | typed oracle specification, scaffold, violation | oracle-studio-design.md |
 | Crash disposition | hf-service | ordered disposition, next action, claim ceiling | triage-disposition-design.md |
 | Campaign trust | hf-service | per-run claim gates and overall determination | campaign-trust-report-design.md |
@@ -125,10 +126,25 @@ matching retained diagnosis without runtime/image/provider calls and names
 unavailable evidence. CLI, REST, Tauri, and GUI use the same service API, show
 proactive diagnosis, optional Save/Clear, exact reviewed argv/image before Run,
 and bilingual retained history. See [Build Doctor](build-doctor-design.md) and
-[Harness Generation](harness-generation-design.md). Planned migration 0031 adds
-profile/diagnosis/input records after delivered Phase 5 migration 0030;
+[Harness Generation](harness-generation-design.md). Delivered Phase 6 migrations
+0031 and 0032 add profile/diagnosis/input records and immutable configured provider
+contexts;
 `clear_knowledge` preserves profiles as configuration and clears their operation
-evidence, while explicit project deletion clears all three record families.
+evidence, while explicit project deletion clears all build record families.
+
+Planned `coverage-experiments` records a reviewed investigation against a retained
+terminal campaign, then accepts one explicitly selected later terminal campaign
+or an explicit cancellation. Create/read/list/attach/cancel execute no discovery,
+provider, runtime, coverage calculation, or promotion. Setup comparison uses
+retained run settings/content identities plus immutable Phase 6 build inputs;
+legacy absence stays unavailable. No-op, failed, cancelled, and missing-edge
+attempts remain visible; aggregate edges never prove goal-function entry. The
+feature is standalone in service and forwarded by CLI/web/Tauri; storage
+migration 0033 and run retention are unconditional. REST uses configured roots
+and ID-owner authorization; trusted-local Tauri validates selected project/target
+scope against persisted owners. Explicit project/knowledge cleanup removes
+experiments before referenced runs. See
+[Coverage Experiments](coverage-experiments-design.md).
 
 Automotive protocol support follows the same split. Product crates enable the
 feature by default so the workspace is always present, while a
