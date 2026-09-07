@@ -36,6 +36,10 @@ fn skipped(step: CloseoutStep) -> (CloseoutStep, StepOutcome) {
     )
 }
 
+fn blocked(step: CloseoutStep, dependency: CloseoutStep) -> (CloseoutStep, StepOutcome) {
+    (step, StepOutcome::Blocked { dependency })
+}
+
 #[test]
 fn the_ladder_is_ordered_by_data_dependency() {
     let ladder = closeout_ladder();
@@ -116,6 +120,28 @@ fn a_failed_step_is_retried_by_a_later_closeout() {
 }
 
 #[test]
+fn a_blocked_step_is_retried_after_its_dependency_changes() {
+    let done = [
+        failed(CloseoutStep::Triage),
+        blocked(CloseoutStep::Minimize, CloseoutStep::Triage),
+    ];
+
+    assert!(pending_steps(&done).contains(&CloseoutStep::Minimize));
+}
+
+#[test]
+fn the_latest_outcome_for_a_step_controls_resume_and_dependencies() {
+    let recorded = [
+        failed(CloseoutStep::Triage),
+        completed(CloseoutStep::Triage),
+        blocked(CloseoutStep::Minimize, CloseoutStep::Triage),
+    ];
+
+    assert!(!pending_steps(&recorded).contains(&CloseoutStep::Triage));
+    assert_eq!(blocked_by(CloseoutStep::Minimize, &recorded), None);
+}
+
+#[test]
 fn a_fully_terminal_closeout_has_nothing_pending() {
     let done: Vec<_> = closeout_ladder().into_iter().map(completed).collect();
 
@@ -163,4 +189,17 @@ fn the_trust_report_runs_even_when_earlier_steps_failed() {
 fn a_step_whose_dependency_never_ran_is_not_reported_as_blocked() {
     // Nothing has run yet: the chain is about to start, not obstructed.
     assert_eq!(blocked_by(CloseoutStep::Blockers, &[]), None);
+}
+
+#[test]
+fn blocked_dependency_propagates_to_its_consumers() {
+    let recorded = [
+        failed(CloseoutStep::Triage),
+        blocked(CloseoutStep::CorpusAbsorb, CloseoutStep::Triage),
+    ];
+
+    assert_eq!(
+        blocked_by(CloseoutStep::Coverage, &recorded),
+        Some(CloseoutStep::CorpusAbsorb)
+    );
 }

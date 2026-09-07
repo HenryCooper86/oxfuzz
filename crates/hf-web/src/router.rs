@@ -724,7 +724,10 @@ fn harness_work_order_routes() -> Router<AppState> {
 
 #[cfg(feature = "run-closeout")]
 fn run_closeout_routes() -> Router<AppState> {
-    Router::new().route("/runs/{id}/closeout", post(run_closeout))
+    Router::new().route(
+        "/runs/{id}/closeout",
+        get(run_closeout_read).post(run_closeout),
+    )
 }
 
 #[cfg(not(feature = "run-closeout"))]
@@ -1322,10 +1325,37 @@ async fn remediation_operation_get(
 async fn run_closeout(
     State(state): State<AppState>,
     Path(id): Path<uuid::Uuid>,
+    request: axum::extract::Request,
 ) -> ApiResult<serde_json::Value> {
+    require_empty_request_body(request).await?;
+    let owner = state
+        .container
+        .run_project(id)
+        .await
+        .map_err(classified_api_error)?;
+    let _approved_owner = approved_project(&state, &owner)?;
     let report = state
         .container
         .close_out_run(id)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(report)))
+}
+
+#[cfg(feature = "run-closeout")]
+async fn run_closeout_read(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> ApiResult<serde_json::Value> {
+    let owner = state
+        .container
+        .run_project(id)
+        .await
+        .map_err(classified_api_error)?;
+    let _approved_owner = approved_project(&state, &owner)?;
+    let report = state
+        .container
+        .retained_run_closeout(id)
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(report)))
@@ -1390,12 +1420,35 @@ async fn campaign_trust_report(
     State(state): State<AppState>,
     Path(id): Path<uuid::Uuid>,
 ) -> ApiResult<serde_json::Value> {
+    let owner = state
+        .container
+        .run_project(id)
+        .await
+        .map_err(classified_api_error)?;
+    let _approved_owner = approved_project(&state, &owner)?;
     let report = state
         .container
         .campaign_trust_report(id)
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(report)))
+}
+
+#[cfg(feature = "run-closeout")]
+async fn require_empty_request_body(request: axum::extract::Request) -> Result<(), ApiError> {
+    let bytes = axum::body::to_bytes(request.into_body(), 1)
+        .await
+        .map_err(map_err(StatusCode::BAD_REQUEST))?;
+    if bytes.is_empty() {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "request body must be empty".to_owned(),
+            }),
+        ))
+    }
 }
 
 #[cfg(feature = "patch-to-proof")]

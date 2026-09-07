@@ -369,6 +369,7 @@ async fn run_history_exposes_service_owned_comparison_groups() {
         .iter()
         .all(|run| run.target.as_deref() == Some("parse_packet")));
     assert!(history.iter().all(|run| run.comparison_key.is_some()));
+    assert!(history.iter().all(|run| run.kind == "Campaign"));
     assert_eq!(history[0].comparison_key, history[1].comparison_key);
 }
 

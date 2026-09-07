@@ -16,7 +16,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::finding_proof::{FindingEvidenceKind, FindingEvidenceReference};
-use hf_storage::RunStatus;
+use hf_storage::{HarnessApprovalKind, RunStatus};
 
 /// Current serialized Campaign Trust Report schema.
 pub const CAMPAIGN_TRUST_SCHEMA_VERSION: u32 = 1;
@@ -102,6 +102,8 @@ pub enum HarnessEvidence {
         smoke_passed: bool,
         /// Lint findings at error severity, which block compilation.
         blocking_lint_findings: usize,
+        /// The exact human decision retained for these source/binary digests.
+        approval_kind: HarnessApprovalKind,
     },
 }
 
@@ -156,13 +158,21 @@ pub enum CoverageEvidence {
 /// Scoped by the run record: the claim is about *this run's* crashes, so the
 /// run is what establishes the set, including when the set is empty.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TriageEvidence {
-    /// Crashes retained for the run.
-    pub crashes: usize,
-    /// Of those, the ones whose fault origin is attributed.
-    pub attributed: usize,
-    /// Of those, the ones whose disposition has reached a reportable tier.
-    pub reportable: usize,
+pub enum TriageEvidence {
+    /// Crash ingestion did not establish a complete run-scoped crash set.
+    Unavailable {
+        /// Why the crash set cannot support an audit claim.
+        reason: String,
+    },
+    /// Crash ingestion completed and these counts come from its retained set.
+    Retained {
+        /// Crashes retained for the run.
+        crashes: usize,
+        /// Of those, the ones whose fault origin is attributed.
+        attributed: usize,
+        /// Of those, the ones whose disposition has reached a reportable tier.
+        reportable: usize,
+    },
 }
 
 /// Everything the audit reads. Gathered by the container; the assessment
@@ -287,6 +297,7 @@ fn harness_gate(evidence: &HarnessEvidence) -> TrustGate {
         compiled,
         smoke_passed,
         blocking_lint_findings,
+        approval_kind,
     } = evidence
     else {
         return unavailable(claim, "No harness record is retained for this run.");
@@ -319,7 +330,14 @@ fn harness_gate(evidence: &HarnessEvidence) -> TrustGate {
     gate(
         claim,
         GateVerdict::Supported,
-        "The harness compiled and passed smoke qualification.",
+        match approval_kind {
+            HarnessApprovalKind::CleanSmoke => {
+                "The exact harness and binary passed clean smoke and were approved."
+            }
+            HarnessApprovalKind::KnownFindings => {
+                "The exact harness and binary were approved with known findings."
+            }
+        },
         cited,
     )
 }
@@ -458,7 +476,15 @@ fn crashes_triaged_gate(run: &RunEvidence, triage: &TriageEvidence) -> TrustGate
         );
     };
     let cited = reference(FindingEvidenceKind::RunRecord, *record_id);
-    if triage.attributed < triage.crashes {
+    let (crashes, attributed) = match triage {
+        TriageEvidence::Unavailable { reason } => return unavailable(claim, reason),
+        TriageEvidence::Retained {
+            crashes,
+            attributed,
+            ..
+        } => (crashes, attributed),
+    };
+    if attributed < crashes {
         return gate(
             claim,
             GateVerdict::Unsupported,
@@ -469,7 +495,7 @@ fn crashes_triaged_gate(run: &RunEvidence, triage: &TriageEvidence) -> TrustGate
     gate(
         claim,
         GateVerdict::Supported,
-        if triage.crashes == 0 {
+        if *crashes == 0 {
             "The run retained no crashes, so none is left untriaged."
         } else {
             "Every retained crash carries an attributed fault origin."
@@ -487,11 +513,19 @@ fn findings_gate(run: &RunEvidence, triage: &TriageEvidence) -> TrustGate {
         );
     };
     let cited = reference(FindingEvidenceKind::RunRecord, *record_id);
-    if triage.reportable == 0 {
+    let (crashes, reportable) = match triage {
+        TriageEvidence::Unavailable { reason } => return unavailable(claim, reason),
+        TriageEvidence::Retained {
+            crashes,
+            reportable,
+            ..
+        } => (crashes, reportable),
+    };
+    if *reportable == 0 {
         return gate(
             claim,
             GateVerdict::Unsupported,
-            if triage.crashes == 0 {
+            if *crashes == 0 {
                 "The run produced no crashes, so there is nothing to report."
             } else {
                 "No retained crash has reached a reportable disposition."

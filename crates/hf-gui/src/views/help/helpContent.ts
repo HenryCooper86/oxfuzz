@@ -295,6 +295,16 @@ Rust). syzkaller is for kernel targets rather than generated function harnesses.
 -- you must approve again, because the source the engine will run has changed. If
 a harness was already built earlier, this screen hydrates it and shows an
 "Existing harness" banner.
+
+**External harness work orders:** export a retained evidence packet, copy or
+download its JSON, and paste a human or external-tool submission. External
+provenance requires a tool name and can include a model, response ID, and repair
+parent. Source is limited to 64 KiB of UTF-8. Import is read-only with respect
+to execution. **Qualify in sandbox** is a separate action; all attempt results
+and failures stay visible for deterministic ranking.
+Ranking compares attempts for the selected immutable submission. The selected
+attempt shows its independent review, digests, lint, and smoke result before
+you explicitly promote an exact smoke-passed attempt.
 `;
 
 const SCREEN_RUN = `
@@ -447,6 +457,14 @@ crashes, duration).
 **Gotcha:** the regression comparison only fires between runs with comparable
 conditions (same target, engine, duration, resources, sanitizer, corpus, and
 environment).
+
+Expand a run to read its retained **Run closeout** ladder. Opening a row never
+starts analysis. **Analyze / Resume** is explicit and is available only for a
+terminal harness-backed campaign. Retryable failures and blocked dependencies
+remain pending. Runs without exact retained scope explain why the action is
+unavailable. Historical source coverage and blocker evidence remain unavailable
+instead of reading today's workspace, and trust reads never call a provider.
+Analyze may sandbox triage and absorb retained crash inputs into the corpus.
 `;
 
 const SCREEN_AUDIT = `

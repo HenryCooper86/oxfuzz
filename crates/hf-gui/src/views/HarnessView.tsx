@@ -21,6 +21,8 @@ import { enabledEngineOptions, fuzzingActionsEnabled } from "../lib/fuzzingSetti
 import { FuzzingPolicyNotice } from "../components/FuzzingPolicyNotice";
 import { TargetSelectionRepairNotice } from "../components/TargetSelectionRepairNotice";
 import { projectStorageKey } from "../lib/projectState";
+import { WorkOrderPanel } from "../components/WorkOrderPanel";
+import { harnessReviewMatchesScope } from "../lib/harnessScope";
 
 /** Which generator wrote a draft. Under `auto` a provider outage substitutes
  *  the template, and the two harnesses are materially different. */
@@ -64,6 +66,14 @@ interface PromotionResult {
   status: string;
   harness_id: string;
   message: string;
+}
+
+interface ExternalPromotionSelection {
+  harnessId: string;
+  project: string;
+  target: string;
+  language: string;
+  engine: string;
 }
 
 interface SeedResult {
@@ -127,6 +137,8 @@ export function HarnessView({
   // Fuzzing Workflow). Hydrated from the store so this view reflects work done
   // elsewhere, not just what was generated in this component instance.
   const [existing, setExisting] = useState<HarnessReviewItem | null>(null);
+  const [reviewRefresh, setReviewRefresh] = useState(0);
+  const [externalPromotion, setExternalPromotion] = useState<ExternalPromotionSelection | null>(null);
   const [discoverError, setDiscoverError] = useState<string | null>(null);
 
   const [harnessStatus, setHarnessStatus] = useState<StepStatus>("idle");
@@ -181,7 +193,22 @@ export function HarnessView({
           target: selectedTarget,
         });
         if (cancelled) return;
-        const match = items.find((h) => h.target_symbol === selectedTarget) ?? null;
+        const promotedId = externalPromotion
+          && externalPromotion.project === project
+          && externalPromotion.target === selectedTarget
+          && externalPromotion.language === lang
+          && externalPromotion.engine === engine
+          ? externalPromotion.harnessId
+          : null;
+        const scoped = items.filter((item) => harnessReviewMatchesScope(
+          item,
+          selectedTarget,
+          lang,
+          engine,
+        ));
+        const match = promotedId
+          ? scoped.find((item) => item.harness_id === promotedId) ?? null
+          : scoped[0] ?? null;
         setExisting(match);
         if (!harness) {
           const promoted = match?.status === "Promoted";
@@ -202,7 +229,7 @@ export function HarnessView({
       }
     })();
     return () => { cancelled = true; };
-  }, [project, selectedTarget, harness, selectionBlocked, setCompiled, markDone]);
+  }, [project, selectedTarget, lang, engine, harness, selectionBlocked, setCompiled, markDone, reviewRefresh, externalPromotion]);
 
   async function generateHarness(target: string): Promise<HarnessResult | null> {
     if (!fuzzingSettings || selectionBlocked) return null;
@@ -460,6 +487,7 @@ export function HarnessView({
               value={selectedTarget}
               onChange={(v) => {
                 setSelectedTarget(v);
+                setExternalPromotion(null);
                 setHarness(null);
                 setCompileResult(null);
                 setSmokeResult(null);
@@ -530,6 +558,35 @@ export function HarnessView({
             {t("harness.buildSmokeTest")}
           </Button>
         </div>
+      )}
+
+      {project && selectedTarget && !selectionBlocked && (
+        <WorkOrderPanel
+          project={project}
+          target={selectedTarget}
+          language={lang}
+          engine={engine}
+          onPromoted={(harnessId) => {
+            setExternalPromotion({ harnessId, project, target: selectedTarget, language: lang, engine });
+            setHarness(null);
+            setPrevSource(null);
+            setShowDiff(false);
+            setCompileResult(null);
+            setSmokeResult(null);
+            setPromotionResult({
+              status: "Promoted",
+              harness_id: harnessId,
+              message: t("harness.externalPromotionComplete"),
+            });
+            setHarnessStatus("idle");
+            setCompileStatus("done");
+            setSmokeStatus("done");
+            setPromotionStatus("done");
+            setReviewRefresh((value) => value + 1);
+            setCompiled(true);
+            markDone("approve");
+          }}
+        />
       )}
 
       {/* Step pipeline */}

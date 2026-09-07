@@ -9,7 +9,7 @@ use hf_service::campaign_trust::{
     assess_campaign_trust, CampaignTrustInput, CorpusEvidence, CoverageEvidence, GateVerdict,
     HarnessEvidence, RunEvidence, TriageEvidence, TrustClaim, TrustDetermination,
 };
-use hf_storage::RunStatus;
+use hf_storage::{HarnessApprovalKind, RunStatus};
 use uuid::Uuid;
 
 fn healthy() -> CampaignTrustInput {
@@ -21,6 +21,7 @@ fn healthy() -> CampaignTrustInput {
             compiled: true,
             smoke_passed: true,
             blocking_lint_findings: 0,
+            approval_kind: HarnessApprovalKind::CleanSmoke,
         },
         corpus: CorpusEvidence::Retained { entries: 12 },
         run: RunEvidence::Retained {
@@ -33,7 +34,7 @@ fn healthy() -> CampaignTrustInput {
             covered_functions: 40,
             target_attributed_functions: 37,
         },
-        triage: TriageEvidence {
+        triage: TriageEvidence::Retained {
             crashes: 2,
             attributed: 2,
             reportable: 1,
@@ -126,6 +127,7 @@ fn a_harness_that_did_not_compile_makes_the_whole_campaign_untrustworthy() {
         compiled: false,
         smoke_passed: false,
         blocking_lint_findings: 0,
+        approval_kind: HarnessApprovalKind::CleanSmoke,
     };
 
     let report = assess_campaign_trust(&input);
@@ -145,6 +147,7 @@ fn a_blocking_lint_finding_refutes_the_harness_claim() {
         compiled: true,
         smoke_passed: true,
         blocking_lint_findings: 1,
+        approval_kind: HarnessApprovalKind::CleanSmoke,
     };
 
     let report = assess_campaign_trust(&input);
@@ -153,6 +156,29 @@ fn a_blocking_lint_finding_refutes_the_harness_claim() {
         verdict(&report, TrustClaim::HarnessExercisesTarget),
         GateVerdict::Refuted
     );
+}
+
+#[test]
+fn known_findings_approval_is_named_without_calling_the_smoke_clean() {
+    let mut input = healthy();
+    input.harness = HarnessEvidence::Retained {
+        record_id: Uuid::from_u128(3),
+        compiled: true,
+        smoke_passed: true,
+        blocking_lint_findings: 0,
+        approval_kind: HarnessApprovalKind::KnownFindings,
+    };
+
+    let report = assess_campaign_trust(&input);
+    let gate = report
+        .gates
+        .iter()
+        .find(|gate| gate.claim == TrustClaim::HarnessExercisesTarget)
+        .unwrap();
+
+    assert_eq!(gate.verdict, GateVerdict::Supported);
+    assert!(gate.detail.contains("known findings"));
+    assert!(!gate.detail.contains("clean smoke"));
 }
 
 #[test]
@@ -210,7 +236,7 @@ fn an_unmeasured_gate_outranks_a_refuted_one_in_the_determination() {
 #[test]
 fn an_unattributed_crash_leaves_the_triage_claim_unsupported() {
     let mut input = healthy();
-    input.triage = TriageEvidence {
+    input.triage = TriageEvidence::Retained {
         crashes: 3,
         attributed: 2,
         reportable: 1,
@@ -227,7 +253,7 @@ fn an_unattributed_crash_leaves_the_triage_claim_unsupported() {
 #[test]
 fn a_run_with_no_crashes_has_nothing_untriaged_and_nothing_to_report() {
     let mut input = healthy();
-    input.triage = TriageEvidence {
+    input.triage = TriageEvidence::Retained {
         crashes: 0,
         attributed: 0,
         reportable: 0,
@@ -280,7 +306,7 @@ fn every_gate_below_supported_is_named_as_an_unlicensed_claim() {
         covered_functions: 6,
         target_attributed_functions: 0,
     };
-    input.triage = TriageEvidence {
+    input.triage = TriageEvidence::Retained {
         crashes: 1,
         attributed: 0,
         reportable: 0,

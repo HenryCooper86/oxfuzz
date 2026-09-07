@@ -40,6 +40,13 @@ The feature is exposed through service-owned operations, thin CLI commands, and
 REST resources. Presentation layers parse and render I/O but do not reproduce
 qualification, ranking, or promotion policy.
 
+The desktop Harness view exposes the same retained workflow: export/copy a
+packet, edit exact UTF-8 source with authoring provenance, import an immutable
+submission, explicitly qualify it, compare retained attempts, and explicitly
+promote one exact attempt. Import and view mounting never start qualification or
+promotion. The selected attempt reuses the existing harness approval evidence;
+missing review or smoke evidence stays visibly missing.
+
 ## 3. Safety and Recovery
 
 Work orders, submissions, and terminal attempts are immutable durable evidence.

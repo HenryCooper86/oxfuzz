@@ -64,7 +64,7 @@ pub mod report;
 pub mod report_export;
 pub mod report_store;
 pub mod repro;
-#[cfg(feature = "run-closeout")]
+#[cfg(any(feature = "campaign-trust", feature = "run-closeout"))]
 pub mod run_closeout;
 pub mod sarif;
 mod schedule_retirement;
@@ -218,8 +218,8 @@ pub use report::ReportLanguage;
 pub use report_store::ReportDraft;
 #[cfg(feature = "run-closeout")]
 pub use run_closeout::{
-    blocked_by, closeout_ladder, consumes, pending_steps, CloseoutReport, CloseoutStep,
-    CloseoutStepRecord, StepOutcome, RUN_CLOSEOUT_SCHEMA_VERSION,
+    blocked_by, closeout_ladder, consumes, pending_steps, CloseoutAvailability, CloseoutReport,
+    CloseoutStep, CloseoutStepRecord, StepOutcome, RUN_CLOSEOUT_SCHEMA_VERSION,
 };
 #[cfg(feature = "semgrep-enrichment")]
 pub use semgrep::{

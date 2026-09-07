@@ -56,7 +56,11 @@ pub use workspace::{
 
 use std::fmt::Write;
 use std::fs::File;
-#[cfg(any(feature = "harness-work-order", feature = "semgrep-enrichment"))]
+#[cfg(any(
+    feature = "harness-work-order",
+    feature = "run-closeout",
+    feature = "semgrep-enrichment"
+))]
 use std::fs::TryLockError;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -132,6 +136,11 @@ pub(crate) struct TargetRevisionLease {
 
 #[cfg(feature = "harness-work-order")]
 pub(crate) struct HarnessWorkOrderAttemptLease {
+    _system_guard: File,
+}
+
+#[cfg(feature = "run-closeout")]
+pub(crate) struct RunCloseoutLease {
     _system_guard: File,
 }
 
@@ -220,6 +229,35 @@ pub(crate) fn acquire_harness_work_order_attempt_lease(
         ClassifiedError::Internal(
             "harness work order attempt identifier is already owned".to_owned(),
         )
+    })
+}
+
+#[cfg(feature = "run-closeout")]
+pub(crate) fn acquire_run_closeout_lease(
+    run_id: Uuid,
+) -> Result<RunCloseoutLease, ClassifiedError> {
+    let lock_dir = crate::init::user_app_dir().join("locks");
+    std::fs::create_dir_all(&lock_dir).map_err(|error| {
+        ClassifiedError::Internal(format!("create run closeout lease directory: {error}"))
+    })?;
+    let lock_path = lock_dir.join(format!("run-closeout-{run_id}.lock"));
+    let system_guard = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)
+        .map_err(|error| ClassifiedError::Internal(format!("open run closeout lease: {error}")))?;
+    system_guard.try_lock().map_err(|error| match error {
+        TryLockError::WouldBlock => {
+            ClassifiedError::Validation(format!("run '{run_id}' closeout is already active"))
+        }
+        TryLockError::Error(error) => {
+            ClassifiedError::Internal(format!("acquire run closeout lease: {error}"))
+        }
+    })?;
+    Ok(RunCloseoutLease {
+        _system_guard: system_guard,
     })
 }
 
@@ -1683,6 +1721,8 @@ pub struct RunHistoryItem {
     pub target: Option<String>,
     /// Opaque grouping key shared only by directly comparable successful runs.
     pub comparison_key: Option<String>,
+    /// Persisted purpose of the run (`Campaign` or `Smoke`).
+    pub kind: String,
     pub engine: String,
     pub status: String,
     pub started_at: String,

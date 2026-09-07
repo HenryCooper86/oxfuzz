@@ -22,7 +22,13 @@ interface HttpTransportOptions {
   token?: string;
 }
 
-const COMMAND_MAP: Record<string, { method: string; path: string }> = {
+interface CommandEndpoint {
+  method: string;
+  path: string;
+  emptyBody?: boolean;
+}
+
+const COMMAND_MAP: Record<string, CommandEndpoint> = {
   discover: { method: "POST", path: "/discover" },
   semgrep_available: { method: "GET", path: "/semgrep/available" },
   semgrep_enrich: { method: "POST", path: "/semgrep/enrich" },
@@ -35,6 +41,36 @@ const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   harness_compile: { method: "POST", path: "/harness/compile" },
   harness_smoke: { method: "POST", path: "/harness/smoke" },
   harness_promote: { method: "POST", path: "/harness/promote" },
+  work_order_export: { method: "POST", path: "/harness/work-orders" },
+  work_order_list: { method: "GET", path: "/harness/work-orders" },
+  work_order_get: { method: "GET", path: "/harness/work-orders/{work_order_id}" },
+  work_order_import: {
+    method: "POST",
+    path: "/harness/work-orders/{work_order_id}/submissions",
+  },
+  work_order_submissions: {
+    method: "GET",
+    path: "/harness/work-orders/{work_order_id}/submissions",
+  },
+  work_order_qualify: {
+    method: "POST",
+    path: "/harness/work-order-submissions/{submission_id}/qualifications",
+    emptyBody: true,
+  },
+  work_order_attempts: {
+    method: "GET",
+    path: "/harness/work-order-submissions/{submission_id}/qualifications",
+  },
+  work_order_attempt: {
+    method: "GET",
+    path: "/harness/work-order-attempts/{attempt_id}",
+  },
+  work_order_rank: { method: "POST", path: "/harness/work-order-attempts/rank" },
+  work_order_promote: {
+    method: "POST",
+    path: "/harness/work-order-attempts/{attempt_id}/promotion",
+    emptyBody: true,
+  },
   artifact_summary: { method: "POST", path: "/artifacts/summary" },
   report_formats: { method: "GET", path: "/report/formats" },
   all_crashes: { method: "GET", path: "/crashes/all" },
@@ -45,6 +81,12 @@ const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   revert_harness_from_run: { method: "POST", path: "/runs/revert-harness" },
   run_fuzzer: { method: "POST", path: "/runs/start" },
   run_status: { method: "GET", path: "/runs/{run_id}/status" },
+  run_closeout_report: { method: "GET", path: "/runs/{run_id}/closeout" },
+  run_closeout: {
+    method: "POST",
+    path: "/runs/{run_id}/closeout",
+    emptyBody: true,
+  },
   cancel_run_by_id: { method: "POST", path: "/runs/{run_id}/cancel" },
   campaign_advice: { method: "POST", path: "/campaign/advice" },
   campaign_evidence: { method: "POST", path: "/campaign/evidence" },
@@ -229,7 +271,7 @@ function typedPatchBody(args?: Record<string, unknown>): Record<string, unknown>
  */
 function buildRequest(
   baseUrl: string,
-  endpoint: { method: string; path: string },
+  endpoint: CommandEndpoint,
   args?: Record<string, unknown>,
 ): { url: string; body: Record<string, unknown> } {
   const rest: Record<string, unknown> = { ...(toWebArgs(args) ?? {}) };
@@ -309,22 +351,37 @@ export function createHttpTransport(options: HttpTransportOptions = {}): Transpo
   let pendingRunStart: Promise<RunStartResponse> | null = null;
 
   async function request<T>(
-    endpoint: { method: string; path: string },
+    endpoint: CommandEndpoint,
     args?: Record<string, unknown>,
     options?: InvokeOptions,
   ): Promise<T> {
     const { url, body } = buildRequest(baseUrl, endpoint, args);
     const headers: Record<string, string> = {};
-    if (endpoint.method !== "GET") headers["content-type"] = "application/json";
+    if (endpoint.method !== "GET" && !endpoint.emptyBody) {
+      headers["content-type"] = "application/json";
+    }
     if (token) headers.authorization = `Bearer ${token}`;
     const response = await fetch(url, {
       method: endpoint.method,
       headers,
-      body: endpoint.method === "GET" ? undefined : JSON.stringify(body),
+      body: endpoint.method === "GET" || endpoint.emptyBody
+        ? undefined
+        : JSON.stringify(body),
       signal: options?.signal,
     });
     if (!response.ok) {
-      throw new Error(`${endpoint.method} ${endpoint.path}: ${response.status}`);
+      let detail = `${endpoint.method} ${endpoint.path}: ${response.status}`;
+      try {
+        const error = await response.json() as { code?: unknown; error?: unknown };
+        if (typeof error.error === "string") {
+          detail = typeof error.code === "string"
+            ? `${error.code}: ${error.error}`
+            : error.error;
+        }
+      } catch {
+        // A non-JSON error has no stable service detail to preserve.
+      }
+      throw new Error(detail);
     }
     return response.json() as Promise<T>;
   }
