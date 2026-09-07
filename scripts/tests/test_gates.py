@@ -80,6 +80,20 @@ class GateDispatcherTests(unittest.TestCase):
             result = self.run_gates(["deny"], stub_dir)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_coverage_gate_passes_the_required_subcommand_and_domain_crates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            stub_dir = pathlib.Path(directory)
+            self.make_stub(
+                stub_dir,
+                "cargo-llvm-cov",
+                'expected="llvm-cov --summary-only -p hf-discovery -p hf-harness '
+                '-p hf-engine -p hf-crash"\n'
+                'if [ "$*" = "$expected" ]; then exit 0; fi\n'
+                'echo "unexpected coverage argv: $*" >&2\nexit 64',
+            )
+            result = self.run_gates(["coverage"], stub_dir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_unknown_gate_name_is_rejected_with_the_valid_list(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             stub_dir = pathlib.Path(directory)
