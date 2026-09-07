@@ -331,8 +331,8 @@ impl ChangeAwareTestFixture {
         self.base_run
     }
 
-    /// Returns the retained head run, which regressed coverage and introduced
-    /// one finding relative to the base.
+    /// Returns the retained head run, which has lower measured coverage and one
+    /// finding not observed in the base run.
     #[must_use]
     pub fn head_run(&self) -> uuid::Uuid {
         self.head_run
@@ -352,9 +352,9 @@ impl ChangeAwareTestFixture {
 }
 
 /// Builds a store-backed fixture with one discovered target and two comparable
-/// retained runs: a base, and a head that introduced a finding and lost
-/// coverage. Presentation layers can exercise the comparison without running a
-/// campaign.
+/// retained runs: a base, and a head with a head-only finding observation and a
+/// lower measured coverage value. Presentation layers can exercise the
+/// comparison without running a campaign.
 ///
 /// # Errors
 /// Returns an error when the temporary store or its records cannot be created.

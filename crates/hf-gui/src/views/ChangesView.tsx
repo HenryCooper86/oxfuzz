@@ -25,10 +25,9 @@ const IMPACT_TONE: Record<TargetImpact, "accent" | "warning" | "default"> = {
 };
 
 const FINDING_TONE: Record<FindingChange, "error" | "warning" | "success" | "default"> = {
-  introduced: "error",
-  carried_over: "warning",
-  resolved: "success",
-  unknown: "default",
+  observed_only_in_head: "error",
+  observed_in_both: "warning",
+  observed_only_in_base: "default",
 };
 
 export function ChangesView() {

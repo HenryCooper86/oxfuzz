@@ -2,14 +2,16 @@
 //!
 //! Parses a unified diff, maps it to the discovered targets it affects, decides
 //! whether two retained runs may be compared at all, classifies findings across
-//! them, and computes coverage regression. Everything here is a pure function
+//! them, and computes a measured coverage delta. Everything here is a pure function
 //! over retained evidence: no filesystem, no storage, no execution.
 //!
 //! See `docs/design/change-aware-pr-fuzzing-design.md`.
 
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::time::Duration;
 
+use hf_core::target::Sanitizer;
 use hf_core::target::TargetCandidate;
 use serde::Serialize;
 use uuid::Uuid;
@@ -96,13 +98,22 @@ pub struct AffectedTarget {
 /// The retained facts a run contributes to a comparison.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunComparisonInput {
-    pub target_id: Uuid,
+    pub target_id: Option<Uuid>,
     pub engine: String,
     /// Whether the run reached a terminal `Done` campaign state.
     pub terminal: bool,
     pub source_rev: Option<String>,
     pub corpus_rev: Option<String>,
     pub sandbox_rev: Option<String>,
+    /// Digest of the approved harness source used by the run.
+    pub harness_source_rev: Option<String>,
+    pub sanitizer: Option<Sanitizer>,
+    pub duration: Option<Duration>,
+    pub max_mem_mb: Option<u64>,
+    pub max_cpus: Option<u32>,
+    pub engine_env: Option<Vec<(String, String)>>,
+    pub engine_args: Option<Vec<String>>,
+    pub random_seed: Option<u64>,
     pub edges: Option<u64>,
 }
 
@@ -118,6 +129,17 @@ pub enum ComparabilityRefusal {
     DifferentEngine,
     DifferentCorpus,
     DifferentSandbox,
+    MissingHarness,
+    MissingHarnessSource,
+    DifferentHarnessSource,
+    MissingRunSettings,
+    DifferentSanitizer,
+    DifferentDuration,
+    DifferentMemoryLimit,
+    DifferentCpuLimit,
+    DifferentEngineEnvironment,
+    DifferentEngineArguments,
+    DifferentRandomSeed,
     /// The source revisions match, so the pair measures no change.
     SameSourceRevision,
 }
@@ -126,11 +148,9 @@ pub enum ComparabilityRefusal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FindingChange {
-    Introduced,
-    CarriedOver,
-    Resolved,
-    /// The base run retains no crash evidence, so it cannot establish absence.
-    Unknown,
+    ObservedOnlyInBase,
+    ObservedOnlyInHead,
+    ObservedInBoth,
 }
 
 /// One finding classified across the two runs.
@@ -343,7 +363,10 @@ pub fn check_comparability(
     {
         return Err(ComparabilityRefusal::SandboxNotExact);
     }
-    if base.target_id != head.target_id {
+    let (Some(base_target), Some(head_target)) = (base.target_id, head.target_id) else {
+        return Err(ComparabilityRefusal::MissingHarness);
+    };
+    if base_target != head_target {
         return Err(ComparabilityRefusal::DifferentTarget);
     }
     if base.engine != head.engine {
@@ -355,6 +378,69 @@ pub fn check_comparability(
     if base_sandbox != head_sandbox {
         return Err(ComparabilityRefusal::DifferentSandbox);
     }
+    let (Some(base_harness), Some(head_harness)) =
+        (&base.harness_source_rev, &head.harness_source_rev)
+    else {
+        return Err(ComparabilityRefusal::MissingHarnessSource);
+    };
+    if base_harness != head_harness {
+        return Err(ComparabilityRefusal::DifferentHarnessSource);
+    }
+    let (
+        Some(base_sanitizer),
+        Some(head_sanitizer),
+        Some(base_duration),
+        Some(head_duration),
+        Some(base_memory),
+        Some(head_memory),
+        Some(base_cpus),
+        Some(head_cpus),
+        Some(base_env),
+        Some(head_env),
+        Some(base_args),
+        Some(head_args),
+        Some(base_seed),
+        Some(head_seed),
+    ) = (
+        base.sanitizer,
+        head.sanitizer,
+        base.duration,
+        head.duration,
+        base.max_mem_mb,
+        head.max_mem_mb,
+        base.max_cpus,
+        head.max_cpus,
+        &base.engine_env,
+        &head.engine_env,
+        &base.engine_args,
+        &head.engine_args,
+        base.random_seed,
+        head.random_seed,
+    )
+    else {
+        return Err(ComparabilityRefusal::MissingRunSettings);
+    };
+    if base_sanitizer != head_sanitizer {
+        return Err(ComparabilityRefusal::DifferentSanitizer);
+    }
+    if base_duration != head_duration {
+        return Err(ComparabilityRefusal::DifferentDuration);
+    }
+    if base_memory != head_memory {
+        return Err(ComparabilityRefusal::DifferentMemoryLimit);
+    }
+    if base_cpus != head_cpus {
+        return Err(ComparabilityRefusal::DifferentCpuLimit);
+    }
+    if base_env != head_env {
+        return Err(ComparabilityRefusal::DifferentEngineEnvironment);
+    }
+    if base_args != head_args {
+        return Err(ComparabilityRefusal::DifferentEngineArguments);
+    }
+    if base_seed != head_seed {
+        return Err(ComparabilityRefusal::DifferentRandomSeed);
+    }
     if base_source == head_source {
         return Err(ComparabilityRefusal::SameSourceRevision);
     }
@@ -363,19 +449,10 @@ pub fn check_comparability(
 
 /// Classify findings across two runs by retained stack signature.
 ///
-/// A base run with no retained crash evidence cannot establish absence, so its
-/// head findings are `Unknown` rather than `Introduced`.
+/// Values describe retained observations only; they do not attribute causality
+/// to the source change.
 #[must_use]
 pub fn classify_findings(base: &[String], head: &[String]) -> Vec<ClassifiedFinding> {
-    if base.is_empty() {
-        return head
-            .iter()
-            .map(|signature| ClassifiedFinding {
-                stack_signature: signature.clone(),
-                change: FindingChange::Unknown,
-            })
-            .collect();
-    }
     let base_set: BTreeSet<&str> = base.iter().map(String::as_str).collect();
     let head_set: BTreeSet<&str> = head.iter().map(String::as_str).collect();
     let mut classified: Vec<ClassifiedFinding> = head
@@ -383,9 +460,9 @@ pub fn classify_findings(base: &[String], head: &[String]) -> Vec<ClassifiedFind
         .map(|signature| ClassifiedFinding {
             stack_signature: signature.clone(),
             change: if base_set.contains(signature.as_str()) {
-                FindingChange::CarriedOver
+                FindingChange::ObservedInBoth
             } else {
-                FindingChange::Introduced
+                FindingChange::ObservedOnlyInHead
             },
         })
         .collect();
@@ -394,7 +471,7 @@ pub fn classify_findings(base: &[String], head: &[String]) -> Vec<ClassifiedFind
             .filter(|signature| !head_set.contains(signature.as_str()))
             .map(|signature| ClassifiedFinding {
                 stack_signature: signature.clone(),
-                change: FindingChange::Resolved,
+                change: FindingChange::ObservedOnlyInBase,
             }),
     );
     classified

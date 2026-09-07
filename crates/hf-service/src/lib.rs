@@ -138,9 +138,9 @@ pub use campaign_trust::{
 };
 #[cfg(feature = "change-aware")]
 pub use change_comparison::{
-    ChangeAwarePlanEntry, ChangeImpactRequest, ChangeImpactView, PublishComparisonRequest,
-    PublishDestination, PublishedComparison, RevisionComparisonRequest, RevisionComparisonView,
-    RevisionRange, CHANGE_AWARE_SCHEMA_VERSION,
+    change_comparison_defectdojo_document, ChangeAwarePlanEntry, ChangeImpactRequest,
+    ChangeImpactView, PublishComparisonRequest, PublishDestination, PublishedComparison,
+    RevisionComparisonRequest, RevisionComparisonView, RevisionRange, CHANGE_AWARE_SCHEMA_VERSION,
 };
 #[cfg(feature = "concolic-enrichment")]
 pub use concolic::{

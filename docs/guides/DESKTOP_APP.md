@@ -136,24 +136,24 @@ inconclusive and can be attempted again. The finding's proof card reflects that
 same service-owned result; a draft, a model response, or a clean patched replay
 on its own never marks a finding fixed.
 
-**Review a proposed change.** The Change Review view answers one question about
-a pull request from retained evidence: does this change introduce a finding or
-lose coverage that the base revision did not have? Give it a base and head
-revision, or paste a unified diff, and it maps the change onto the discovered
-targets. A target whose definition overlaps a changed line is reported as
+**Review a proposed change.** The Change Review view describes what retained
+base and head runs observed. It does not claim the source change introduced or
+remediated a finding. Give it a base and head revision, or paste a unified diff,
+and it maps the change onto the discovered targets. A target whose definition
+overlaps a changed line is reported as
 changed; a target that only reaches the change through the call graph is
 reported as approximate. Nothing is ever reported as unaffected, because the
 retained call graph is bounded and syntactic.
 
-Comparing two retained runs requires them to be genuinely comparable: same
-target, engine, starting corpus, and sandbox image, with a differing source
-revision. An incomparable pair is reported as such, naming the condition that
-failed, rather than producing a coverage number that would not mean anything.
-For a comparable pair oxfuzz reports which findings the head revision
-introduced, which it carried over, and which it resolved, alongside the edge
-coverage delta. Publishing the comparison to the configured issue tracker or
-DefectDojo is a separate step that you approve explicitly; the comparison never
-publishes itself.
+Comparing two retained runs requires the same target, engine, approved harness
+source, sanitizer, duration, resource limits, ordered engine arguments and
+environment, random seed, starting corpus, and sandbox image, with differing
+source revisions. An incomparable pair names the first mismatch. For a
+comparable pair oxfuzz reports findings observed only in the base, only in the
+head, or in both runs. The edge coverage delta is descriptive under those
+matched settings and does not identify a lost source path. Cross-revision replay
+or the Patch to Proof workflow is required for stronger causal or remediation
+claims. Publishing is a separate step that you approve explicitly.
 
 **When coverage stops climbing.** "62% of lines" does not say what to do next.
 The Corpus view offers a blocker exploration: it names the uncovered functions

@@ -18,7 +18,10 @@ use hf_core::target::{
 use hf_service::change_impact::{
     ComparabilityRefusal, CoverageComparison, FindingChange, TargetImpact,
 };
-use hf_service::{ChangeImpactRequest, RevisionComparisonRequest, ServiceContainer};
+use hf_service::{
+    change_comparison_defectdojo_document, ChangeImpactRequest, RevisionComparisonRequest,
+    RevisionComparisonView, ServiceContainer,
+};
 use hf_storage::{HarnessApprovalKind, RunRecord, RunStatus, Store};
 use uuid::Uuid;
 
@@ -38,6 +41,7 @@ struct Fixture {
     base_run: Uuid,
     head_run: Uuid,
     incomparable_run: Uuid,
+    settings_mismatches: Vec<(Uuid, ComparabilityRefusal)>,
 }
 
 async fn fixture() -> Fixture {
@@ -151,10 +155,57 @@ async fn fixture() -> Fixture {
     };
 
     let base = insert(&"1".repeat(64), &"2".repeat(64), &image, 1000);
-    let head = insert(&"3".repeat(64), &"2".repeat(64), &image, 900);
+    let mut head = insert(&"3".repeat(64), &"2".repeat(64), &image, 900);
+    head.binary_rev = Some("e".repeat(64));
     // Same source as base: a pair that measures no change at all.
     let incomparable = insert(&"1".repeat(64), &"2".repeat(64), &image, 950);
+    let mut settings_mismatches = Vec::new();
+    let mut variants = Vec::new();
+    let mut add_variant = |mut run: RunRecord, refusal| {
+        run.id = Uuid::new_v4();
+        settings_mismatches.push((run.id, refusal));
+        variants.push(run);
+    };
+
+    let mut changed = head.clone();
+    changed.harness_rev = None;
+    add_variant(changed, ComparabilityRefusal::MissingHarnessSource);
+    let mut changed = head.clone();
+    changed.harness_rev = Some("d".repeat(64));
+    add_variant(changed, ComparabilityRefusal::DifferentHarnessSource);
+    let mut changed = head.clone();
+    changed.config.as_mut().unwrap().sanitizer = Sanitizer::Memory;
+    add_variant(changed, ComparabilityRefusal::DifferentSanitizer);
+    let mut changed = head.clone();
+    changed.config.as_mut().unwrap().duration =
+        Some(std::time::Duration::from_secs(60) + std::time::Duration::from_nanos(1));
+    add_variant(changed, ComparabilityRefusal::DifferentDuration);
+    let mut changed = head.clone();
+    changed.config.as_mut().unwrap().max_mem_mb = 4096;
+    add_variant(changed, ComparabilityRefusal::DifferentMemoryLimit);
+    let mut changed = head.clone();
+    changed.config.as_mut().unwrap().max_cpus = 2;
+    add_variant(changed, ComparabilityRefusal::DifferentCpuLimit);
+    let mut changed = head.clone();
+    changed.config.as_mut().unwrap().extra_args = vec!["-runs=1".to_owned()];
+    add_variant(changed, ComparabilityRefusal::DifferentEngineArguments);
+    let mut changed = head.clone();
+    changed.config.as_mut().unwrap().env = vec![("MODE".to_owned(), "strict".to_owned())];
+    add_variant(changed, ComparabilityRefusal::DifferentEngineEnvironment);
+    let mut changed = head.clone();
+    changed.config.as_mut().unwrap().seed = Some(8);
+    add_variant(changed, ComparabilityRefusal::DifferentRandomSeed);
+    let mut changed = head.clone();
+    changed.config.as_mut().unwrap().duration = None;
+    add_variant(changed, ComparabilityRefusal::MissingRunSettings);
+    let mut changed = head.clone();
+    changed.config.as_mut().unwrap().harness_id = Uuid::new_v4();
+    add_variant(changed, ComparabilityRefusal::MissingHarness);
+
     for run in [&base, &head, &incomparable] {
+        store.insert_run(run).await.unwrap();
+    }
+    for run in &variants {
         store.insert_run(run).await.unwrap();
     }
 
@@ -184,6 +235,7 @@ async fn fixture() -> Fixture {
         base_run: base.id,
         head_run: head.id,
         incomparable_run: incomparable.id,
+        settings_mismatches,
         project,
     }
 }
@@ -244,14 +296,76 @@ async fn comparable_runs_classify_findings_and_report_the_coverage_drop() {
             .map(|entry| entry.change)
             .expect("signature is classified")
     };
-    assert_eq!(change("fresh"), FindingChange::Introduced);
-    assert_eq!(change("shared"), FindingChange::CarriedOver);
-    assert_eq!(change("gone"), FindingChange::Resolved);
+    assert_eq!(change("fresh"), FindingChange::ObservedOnlyInHead);
+    assert_eq!(change("shared"), FindingChange::ObservedInBoth);
+    assert_eq!(change("gone"), FindingChange::ObservedOnlyInBase);
 
     assert_eq!(
         view.coverage,
         CoverageComparison::Regressed { delta_pct: -10.0 }
     );
+}
+
+#[tokio::test]
+async fn retained_harness_source_and_run_settings_must_match() {
+    let fixture = fixture().await;
+    for (head_run_id, expected) in fixture.settings_mismatches {
+        let view = fixture
+            .container
+            .compare_revisions(RevisionComparisonRequest {
+                base_run_id: fixture.base_run,
+                head_run_id,
+                regression_threshold_pct: 5.0,
+            })
+            .await
+            .expect("an evidence mismatch is a comparison refusal");
+        assert!(!view.comparable);
+        assert_eq!(view.refusal, Some(expected));
+    }
+}
+
+#[test]
+fn defectdojo_document_qualifies_head_only_observations_with_comparison_evidence() {
+    let base_run_id = Uuid::new_v4();
+    let head_run_id = Uuid::new_v4();
+    let comparison = RevisionComparisonView {
+        schema_version: 2,
+        base_run_id,
+        head_run_id,
+        comparable: true,
+        refusal: None,
+        findings: Vec::new(),
+        coverage: CoverageComparison::Regressed { delta_pct: -10.0 },
+    };
+    let crash_id = Uuid::new_v4();
+    let crash = Crash {
+        id: crash_id,
+        run_id: head_run_id,
+        target_id: Uuid::new_v4(),
+        input_path: PathBuf::from("runs/input/crash"),
+        stack_signature: "head-only".to_owned(),
+        kind: CrashKind::Asan,
+        summary: "overflow".to_owned(),
+        minimized: true,
+        bug_report: None,
+        casr: None,
+        origin: CrashOrigin::Target,
+    };
+
+    let document = change_comparison_defectdojo_document(&comparison, &[crash]);
+    let finding = &document["findings"][0];
+    assert_eq!(finding["unique_id_from_tool"], "head-only");
+    assert_eq!(finding["vuln_id_from_tool"], crash_id.to_string());
+    assert!(finding["title"]
+        .as_str()
+        .unwrap()
+        .contains("observed only in head"));
+    let description = finding["description"].as_str().unwrap();
+    assert!(description.contains("overflow"));
+    assert!(description.contains(&base_run_id.to_string()));
+    assert!(description.contains(&head_run_id.to_string()));
+    assert!(description.contains("measured coverage drop of 10.00%"));
+    assert!(description.contains("does not establish that the source change introduced"));
 }
 
 #[tokio::test]
