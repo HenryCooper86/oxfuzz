@@ -789,6 +789,63 @@ pub async fn harness_review_queue(
         .map_err(|error| error.to_string())
 }
 
+/// Read the retained finding queue without starting triage or sandbox work.
+#[cfg(feature = "triage-disposition")]
+#[tauri::command]
+pub async fn finding_review_queue(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    filter: hf_service::FindingReviewFilter,
+) -> Result<serde_json::Value, String> {
+    let items = state
+        .container
+        .finding_review_queue(std::path::Path::new(&project), filter)
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(items).map_err(|error| error.to_string())
+}
+
+/// Explain that finding review was excluded from this build.
+#[cfg(not(feature = "triage-disposition"))]
+#[tauri::command]
+pub async fn finding_review_queue(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    filter: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let _ = (state, project, filter);
+    Err("triage-disposition finding review is not included in this application build".to_owned())
+}
+
+/// Read one exact retained finding by persisted identity.
+#[cfg(feature = "triage-disposition")]
+#[tauri::command]
+pub async fn finding_review(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    finding_id: String,
+) -> Result<serde_json::Value, String> {
+    let finding_id = uuid::Uuid::parse_str(&finding_id).map_err(|error| error.to_string())?;
+    let item = state
+        .container
+        .finding_review_for_project(std::path::Path::new(&project), finding_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(item).map_err(|error| error.to_string())
+}
+
+/// Explain that finding review was excluded from this build.
+#[cfg(not(feature = "triage-disposition"))]
+#[tauri::command]
+pub async fn finding_review(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    finding_id: String,
+) -> Result<serde_json::Value, String> {
+    let _ = (state, project, finding_id);
+    Err("triage-disposition finding review is not included in this application build".to_owned())
+}
+
 /// Build an issue draft/prefilled URL for a triaged crash, targeting the fuzzed
 /// project's configured GitHub/GitLab repository.
 #[tauri::command]
@@ -894,10 +951,18 @@ pub async fn push_to_defectdojo(
     state: tauri::State<'_, crate::state::AppState>,
     project: String,
     target: Option<String>,
+    expected_run_id: Option<String>,
 ) -> Result<hf_service::PushOutcome, String> {
+    let expected_run_id = expected_run_id
+        .map(|id| uuid::Uuid::parse_str(&id).map_err(|error| error.to_string()))
+        .transpose()?;
     state
         .container
-        .push_to_defectdojo(std::path::Path::new(&project), target.as_deref())
+        .push_to_defectdojo_for_run(
+            std::path::Path::new(&project),
+            target.as_deref(),
+            expected_run_id,
+        )
         .await
         .map_err(|e| e.to_string())
 }
@@ -1828,6 +1893,7 @@ pub async fn generate_report(
     project: String,
     target: String,
     language: Option<String>,
+    expected_run_id: Option<String>,
 ) -> Result<String, String> {
     let language = match language {
         Some(value) => value
@@ -1837,7 +1903,14 @@ pub async fn generate_report(
     };
     state
         .container
-        .generate_report(std::path::Path::new(&project), &target, language)
+        .generate_report_for_run(
+            std::path::Path::new(&project),
+            &target,
+            language,
+            expected_run_id
+                .map(|id| uuid::Uuid::parse_str(&id).map_err(|error| error.to_string()))
+                .transpose()?,
+        )
         .await
         .map_err(|e| e.to_string())
 }
@@ -2223,6 +2296,7 @@ pub async fn export_report(
     target: String,
     format: String,
     language: Option<String>,
+    expected_run_id: Option<String>,
 ) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
 
@@ -2257,12 +2331,15 @@ pub async fn export_report(
         .map_err(|e| format!("invalid save path: {e}"))?;
     state
         .container
-        .export_report(
+        .export_report_for_run(
             std::path::Path::new(&project),
             &target,
             ext,
             &path,
             language,
+            expected_run_id
+                .map(|id| uuid::Uuid::parse_str(&id).map_err(|error| error.to_string()))
+                .transpose()?,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -3141,12 +3218,13 @@ pub async fn remediation_operation(
 #[tauri::command]
 pub async fn finding_proof_card_for_crash(
     state: tauri::State<'_, crate::state::AppState>,
+    project: String,
     finding_id: String,
 ) -> Result<serde_json::Value, String> {
     let finding_id = uuid::Uuid::parse_str(&finding_id).map_err(|error| error.to_string())?;
     let card = state
         .container
-        .finding_proof_card_for_crash(finding_id)
+        .finding_proof_card_for_crash(std::path::Path::new(&project), finding_id)
         .await
         .map_err(|error| error.to_string())?;
     serde_json::to_value(card).map_err(|error| error.to_string())
@@ -3157,9 +3235,10 @@ pub async fn finding_proof_card_for_crash(
 #[tauri::command]
 pub async fn finding_proof_card_for_crash(
     state: tauri::State<'_, crate::state::AppState>,
+    project: String,
     finding_id: String,
 ) -> Result<serde_json::Value, String> {
-    let _ = (state, finding_id);
+    let _ = (state, project, finding_id);
     Err(patch_to_proof_feature_unavailable())
 }
 

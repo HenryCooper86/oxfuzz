@@ -54,7 +54,17 @@ async fn rest_transports_the_service_workflow_and_cannot_claim_verification() {
     let fixture = hf_service::test_support::patch_to_proof_fixture()
         .await
         .expect("patch-to-proof fixture");
-    let app = hf_web::router::build_with_state(hf_web::router::AppState::new(fixture.container()));
+    let security = hf_web::WebSecurityConfig::new(
+        None,
+        true,
+        Vec::new(),
+        vec![fixture.directory_path().to_path_buf()],
+    )
+    .unwrap();
+    let app = hf_web::router::build_with_state_and_security(
+        hf_web::router::AppState::new(fixture.container()),
+        security,
+    );
     let operation = fixture.operation_id();
 
     // The persisted draft is readable through the transport and carries the
@@ -134,7 +144,11 @@ async fn rest_transports_the_service_workflow_and_cannot_claim_verification() {
     let (status, card) = send(
         &app,
         "GET",
-        &format!("/findings/{}/proof-card", fixture.finding_id()),
+        &format!(
+            "/findings/{}/proof-card?project={}",
+            fixture.finding_id(),
+            fixture.directory_path().display()
+        ),
         None,
     )
     .await;

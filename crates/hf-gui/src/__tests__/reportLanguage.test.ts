@@ -32,17 +32,9 @@ describe("report language reaches every desktop report call", () => {
     expect(dashboard).toContain("const { t, locale } = useI18n();");
   });
 
-  it("passes the locale from the triage compose helper", () => {
-    // TriageView composes through a reportArgs() helper, so the field has to
-    // live inside the helper's object literal, not at the call site.
-    expect(triage).toMatch(
-      /const reportArgs = useCallback\(\s*\(\) => \(\{[^}]*language: locale[^}]*\}\)/,
-    );
-  });
-
   it("passes the locale from the triage export call", () => {
-    // export_report builds its own argument object and does not reuse
-    // reportArgs(), so the previous assertion cannot cover this site.
+    // The rendered compose test covers generation and draft saving; native
+    // export has a separate transport call.
     expect(triage).toMatch(/invoke<string \| null>\("export_report", \{[^}]*language: locale[^}]*\}/);
   });
 
@@ -77,12 +69,6 @@ describe("report draft titles follow the interface language", () => {
     expect(emptyEditor).toContain('t("reports.untitledDraftTitle")');
     // emptyEditor is module scope with no hook, so `t` has to be a parameter.
     expect(emptyEditor).toMatch(/function emptyEditor\([^)]*\bt: TFn\b/);
-  });
-
-  it("titles the triage draft from the dictionary", () => {
-    expect(triage).toContain(
-      'title: t("reports.triageDraftTitle", { target: lastTarget || t("reports.unknownTarget") })',
-    );
   });
 
   it("leaves no English report-title literal in either view", () => {

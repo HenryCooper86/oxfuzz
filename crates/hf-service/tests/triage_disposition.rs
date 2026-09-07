@@ -132,7 +132,7 @@ fn demonstrated_reachability_is_what_makes_a_finding_report_ready() {
 }
 
 #[test]
-fn a_verified_remediation_resolves_a_crash_and_outranks_every_open_one() {
+fn a_verified_remediation_resolves_a_crash_and_sorts_after_open_work() {
     let crash = crash(CrashOrigin::Target, true);
     let card = card_with_fix(&crash, FixVerificationDetermination::Verified);
 
@@ -141,7 +141,7 @@ fn a_verified_remediation_resolves_a_crash_and_outranks_every_open_one() {
     assert_eq!(view.disposition, Disposition::Resolved);
     assert_eq!(view.action, DispositionAction::NoAction);
     assert_eq!(view.claim_ceiling, ClaimCeiling::RemediationVerified);
-    assert!(Disposition::Resolved < Disposition::ReportReady);
+    assert!(Disposition::Resolved > Disposition::HarnessDefect);
 }
 
 #[test]

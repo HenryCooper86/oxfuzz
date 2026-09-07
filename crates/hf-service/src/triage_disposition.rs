@@ -15,7 +15,7 @@
 //! reads the card it came from (AGENTS.md 2.18).
 
 use hf_core::crash::{Crash, CrashOrigin};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::finding_proof::{
@@ -30,12 +30,9 @@ pub const TRIAGE_DISPOSITION_SCHEMA_VERSION: u32 = 1;
 ///
 /// The derived ordering is the queue order: variants are declared most-urgent
 /// first, so a smaller value is opened first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Disposition {
-    /// A sandbox verification workflow confirmed a patch removes the fault. No
-    /// triage work remains.
-    Resolved,
     /// An attributed, minimized target fault whose reachability from an
     /// external input is demonstrated.
     ///
@@ -61,6 +58,9 @@ pub enum Disposition {
     /// A fault in code oxfuzz generated. It blocks the campaign and must be
     /// fixed, but it is never a finding about the target.
     HarnessDefect,
+    /// A sandbox verification workflow confirmed a patch removes the fault. No
+    /// triage work remains, so this sorts after every open disposition.
+    Resolved,
 }
 
 /// The single next step a disposition calls for.

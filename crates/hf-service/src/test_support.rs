@@ -214,6 +214,9 @@ pub async fn patch_to_proof_fixture(
 ) -> Result<PatchToProofTestFixture, Box<dyn Error + Send + Sync>> {
     use hf_core::crash::{Crash, CrashKind, CrashOrigin};
     use hf_core::engine::EngineKind;
+    use hf_core::target::{
+        InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
+    };
     use hf_crash::remediation::{RemediationBinding, RemediationVerificationSpec};
     use hf_storage::{
         RemediationOperationRecord, RemediationOperationStage, RemediationOperationStatus,
@@ -230,12 +233,35 @@ pub async fn patch_to_proof_fixture(
         chrono::Utc::now(),
     );
     store.insert_run(&run).await?;
+    let target = TargetCandidate {
+        id: uuid::Uuid::new_v4(),
+        project_root: directory.path().to_path_buf(),
+        language: TargetLanguage::C,
+        symbol: "parse_packet".to_owned(),
+        kind: TargetKind::Parser,
+        location: SourceLocation {
+            file: directory.path().join("parser.c"),
+            line: 1,
+            col: 1,
+            end_line: None,
+            end_col: None,
+        },
+        signature: None,
+        input_surface: InputSurface::Bytes,
+        complexity: 1,
+        fit_score: 1.0,
+        sanitizers: vec![Sanitizer::Address],
+        rationale: "presentation fixture".to_owned(),
+        reachable_functions: Vec::new(),
+        accumulated_complexity: 0,
+    };
+    store.upsert_target(&target, chrono::Utc::now()).await?;
     let finding_id = uuid::Uuid::new_v4();
     store
         .upsert_crash(&Crash {
             id: finding_id,
             run_id: run.id,
-            target_id: uuid::Uuid::new_v4(),
+            target_id: target.id,
             input_path: directory.path().join("crash-input"),
             stack_signature: "parse_packet".to_owned(),
             kind: CrashKind::Asan,

@@ -308,16 +308,14 @@ impl ServiceContainer {
     /// evidence before it is trusted (fail-closed to inconclusive).
     pub async fn finding_proof_card_for_crash(
         &self,
+        project: &std::path::Path,
         crash_id: Uuid,
     ) -> Result<crate::finding_proof::FindingProofCard, ClassifiedError> {
         let store = self.store().ok_or_else(|| {
             ClassifiedError::Storage("finding proof card requires persistent storage".to_owned())
         })?;
-        let crash = store
-            .get_crash(crash_id)
-            .await
-            .map_err(|error| ClassifiedError::Storage(error.to_string()))?
-            .ok_or_else(|| ClassifiedError::Validation(format!("finding {crash_id} not found")))?;
+        let owner = self.crash_owner_for_project(project, crash_id).await?;
+        let crash = owner.crash;
         let mut card = crate::finding_proof::finding_proof_card(&crash);
         if let Ok(Some(record)) = store.latest_remediation_for_finding(crash_id).await {
             card = crate::finding_proof::enrich_fix_verification(card, Some(&record));

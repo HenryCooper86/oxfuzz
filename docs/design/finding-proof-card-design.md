@@ -22,9 +22,10 @@ a model nor runs a target, harness, reproducer, patch, or fuzzer.
 ## 2. Ownership and Serialization
 
 `hf-service` owns a versioned `FindingProofCard` attached to every
-`CrashReviewItem`. The Dashboard consumes it directly. Triage reloads the same
-workbench projection after persisting a triage result and joins only by crash
-id; React does not derive a determination from raw crash fields. REST and Tauri
+`CrashReviewItem`. The Dashboard consumes it directly. Triage reads a dedicated
+service queue and exact finding detail by persisted crash id. Both service paths
+reuse the same proof enrichment and disposition ordering as the workbench;
+React does not derive a determination from raw crash fields. REST and Tauri
 serialize the same DTO without changing its values.
 
 The initial schema version is 1. Each claim contains:

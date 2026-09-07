@@ -34,6 +34,7 @@ import {
   isDashboardActionInteractive,
 } from "../lib/dashboardActions";
 import { useProject } from "../providers/project";
+import { useFindingSelection } from "../providers/findingSelection";
 import { useTarget } from "../providers/target";
 import { useI18n, type TParams } from "../i18nContext";
 import type {
@@ -152,6 +153,7 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
   const confirm = useConfirm();
   const { t, locale } = useI18n();
   const { configured: defectDojoOn } = useDefectDojo();
+  const { selectFinding } = useFindingSelection();
   const [tab, setTab] = useState<WorkbenchTab>("overview");
   const [dashboard, setDashboard] = useState<WorkbenchDashboard>(() => emptyDashboard(activeProject, target));
   const [reports, setReports] = useState<ReportDraft[]>([]);
@@ -372,6 +374,11 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
     }
   }
 
+  function openCrash(crash: CrashReviewItem) {
+    selectFinding(crash.crash_id, crash.run_id);
+    onNavigate?.("triage");
+  }
+
   const tabs = workbenchTabs(dashboard, t);
 
   return (
@@ -479,6 +486,7 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
               dashboard={dashboard}
               onReport={() => void generateActiveReport()}
               onExport={exportCrash}
+              onOpenCrash={openCrash}
               onNavigate={onNavigate}
             />
           )}
@@ -498,7 +506,6 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
             <ReproCenter
               project={activeProject}
               crashes={dashboard.crash_reviews}
-              harnesses={dashboard.harness_reviews}
             />
           )}
           {tab === "team" && (
@@ -511,7 +518,7 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
                 setTab("reports");
               }}
               onOpenHarnesses={() => onNavigate?.("harness")}
-              onOpenCrashes={() => onNavigate?.("artifacts")}
+              onOpenCrash={openCrash}
             />
           )}
           {tab === "gitlab" && (
@@ -547,11 +554,13 @@ function OverviewTab({
   dashboard,
   onReport,
   onExport,
+  onOpenCrash,
   onNavigate,
 }: {
   dashboard: WorkbenchDashboard;
   onReport: () => void;
   onExport: (crash: CrashReviewItem) => void;
+  onOpenCrash: (crash: CrashReviewItem) => void;
   onNavigate?: (view: ViewType) => void;
 }) {
   return (
@@ -573,7 +582,7 @@ function OverviewTab({
         </section>
         <section className="flex flex-col gap-4 min-w-0">
           <TopTargets targets={dashboard.top_targets} onOpen={onNavigate && (() => onNavigate("discover"))} />
-          <CrashQueue items={dashboard.crash_reviews} onExport={onExport} onOpen={onNavigate && (() => onNavigate("artifacts"))} />
+          <CrashQueue items={dashboard.crash_reviews} onExport={onExport} onOpenCrash={onOpenCrash} onOpen={onNavigate && (() => onNavigate("triage"))} />
         </section>
       </div>
     </div>
@@ -756,7 +765,7 @@ function ReportStudio({
   );
 }
 
-function CrashCard({ crash, onExport }: { crash: CrashReviewItem; onExport: () => void }) {
+function CrashCard({ crash, onExport, onOpen }: { crash: CrashReviewItem; onExport: () => void; onOpen: () => void }) {
   const { t } = useI18n();
   return (
     <div className="rounded-md border border-border" style={{ padding: "var(--space-md)", background: "var(--surface-secondary)" }}>
@@ -778,10 +787,10 @@ function CrashCard({ crash, onExport }: { crash: CrashReviewItem; onExport: () =
       </div>
       <div className="flex flex-wrap items-center justify-between gap-2 mt-3">
         <span className="text-xs text-text-muted font-mono">{shortId(crash.crash_id)}</span>
-        <Button variant="outline" size="sm" onClick={onExport}>
-          <GitPullRequest size={13} />
-          {t("dashboard.gitlabDraft")}
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="ghost" size="sm" onClick={onOpen}><ChevronRight size={13} />{t("dashboard.openFinding")}</Button>
+          <Button variant="outline" size="sm" onClick={onExport}><GitPullRequest size={13} />{t("dashboard.gitlabDraft")}</Button>
+        </div>
       </div>
     </div>
   );
@@ -791,14 +800,11 @@ function CrashCard({ crash, onExport }: { crash: CrashReviewItem; onExport: () =
 function ReproCenter({
   project,
   crashes,
-  harnesses,
 }: {
   project: string;
   crashes: CrashReviewItem[];
-  harnesses: HarnessReviewItem[];
 }) {
   const { t } = useI18n();
-  const firstHarness = harnesses[0];
   return (
     <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
       <SectionHeader icon={<Play size={15} />} title={t("dashboard.reproCenter")} count={crashes.length} />
@@ -808,7 +814,7 @@ function ReproCenter({
       ) : (
         <div className="flex flex-col gap-3">
           {crashes.map((crash) => {
-            const target = firstHarness?.target_symbol || crash.target_symbol;
+            const target = crash.target_symbol;
             const command = project
               ? `oxfuzz regress ${shellQuote(project)} --target ${shellQuote(target)}`
               : t("dashboard.selectProjectForCommand");
@@ -842,14 +848,14 @@ function TeamReview({
   harnesses,
   onOpenReport,
   onOpenHarnesses,
-  onOpenCrashes,
+  onOpenCrash,
 }: {
   reports: ReportDraft[];
   crashes: CrashReviewItem[];
   harnesses: HarnessReviewItem[];
   onOpenReport: (report: ReportDraft) => void;
   onOpenHarnesses: () => void;
-  onOpenCrashes: () => void;
+  onOpenCrash: (crash: CrashReviewItem) => void;
 }) {
   const { t } = useI18n();
   const reportNeedsReview = reports.filter((report) => report.status === "Needs Review");
@@ -872,7 +878,7 @@ function TeamReview({
         <ReviewLane
           title={t("dashboard.crashesNeedingReports")}
           count={crashNeedsReport.length}
-          items={crashNeedsReport.map((c) => ({ label: c.target_symbol, onClick: onOpenCrashes }))}
+          items={crashNeedsReport.map((c) => ({ label: c.target_symbol, onClick: () => onOpenCrash(c) }))}
         />
       </div>
     </section>
@@ -1352,7 +1358,7 @@ function TopTargets({ targets, onOpen }: { targets: WorkbenchTarget[]; onOpen?: 
   );
 }
 
-function CrashQueue({ items, onExport, onOpen }: { items: CrashReviewItem[]; onExport: (crash: CrashReviewItem) => void; onOpen?: () => void }) {
+function CrashQueue({ items, onExport, onOpenCrash, onOpen }: { items: CrashReviewItem[]; onExport: (crash: CrashReviewItem) => void; onOpenCrash: (crash: CrashReviewItem) => void; onOpen?: () => void }) {
   const { t } = useI18n();
   return (
     <section className="surface-card" style={{ padding: "var(--space-md)" }}>
@@ -1362,7 +1368,7 @@ function CrashQueue({ items, onExport, onOpen }: { items: CrashReviewItem[]; onE
       ) : (
         <div className="flex flex-col gap-2 mt-3">
           {items.slice(0, 5).map((crash) => (
-            <CrashCard key={crash.crash_id} crash={crash} onExport={() => onExport(crash)} />
+            <CrashCard key={crash.crash_id} crash={crash} onExport={() => onExport(crash)} onOpen={() => onOpenCrash(crash)} />
           ))}
         </div>
       )}
