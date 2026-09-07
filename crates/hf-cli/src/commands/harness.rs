@@ -293,8 +293,11 @@ pub(crate) async fn cmd_corpus(
             println!("Corpus now has {n} entries.");
         }
         "prune" => {
-            let n = container.corpus_prune(&project, target).await?;
-            println!("Pruned to {n} entries.");
+            let outcome = container.corpus_prune(&project, target).await?;
+            println!(
+                "Removed byte duplicates: {} -> {} entries ({} -> {} bytes).",
+                outcome.before, outcome.after, outcome.before_bytes, outcome.after_bytes
+            );
         }
         "cprune" => {
             let outcome = container.corpus_prune_coverage(&project, target).await?;
@@ -331,12 +334,18 @@ pub(crate) async fn cmd_corpus(
         "import" => {
             let source =
                 from.ok_or_else(|| anyhow::anyhow!("corpus import requires --from <directory>"))?;
-            let added = container.corpus_import(&project, target, source).await?;
-            if added == 0 {
-                println!("Import added nothing -- every input was already retained.");
-            } else {
-                println!("Imported {added} new input(s).");
-            }
+            let outcome = container.corpus_import(&project, target, source).await?;
+            println!(
+                "Imported {} input(s) / {} bytes; {} duplicate(s), {} skipped; corpus {} -> {} inputs ({} -> {} bytes).",
+                outcome.added,
+                outcome.added_bytes,
+                outcome.duplicates,
+                outcome.skipped,
+                outcome.before.inputs,
+                outcome.after.inputs,
+                outcome.before.bytes,
+                outcome.after.bytes
+            );
         }
         "minimize" | "cmin" => {
             let outcome = container.corpus_minimize(&project, target).await?;

@@ -406,6 +406,11 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .route("/artifacts/summary", post(artifact_summary))
         .route("/seeds/generate", post(generate_seeds))
         .route("/seeds/generate-llm", post(generate_seeds_llm))
+        .route("/corpus/import", post(corpus_import))
+        .route("/corpus/survival", post(corpus_survival))
+        .route("/corpus/prune-coverage", post(corpus_prune_coverage))
+        .route("/corpus/minimize", post(corpus_minimize))
+        .route("/corpus/capabilities", post(corpus_capabilities))
         .route("/corpus/{op}", post(corpus))
         .route("/triage", post(triage))
         .route("/crash/verify", post(verify_crash))
@@ -2049,6 +2054,79 @@ struct CorpusRequest {
     target: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct CorpusImportRequest {
+    project: String,
+    target: String,
+    source: String,
+}
+
+async fn corpus_import(
+    State(state): State<AppState>,
+    Json(req): Json<CorpusImportRequest>,
+) -> ApiResult<serde_json::Value> {
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
+    let source = approved_project(&state, std::path::Path::new(&req.source))?;
+    let outcome = state
+        .container
+        .corpus_import(&project, &req.target, &source)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(outcome)))
+}
+
+async fn corpus_survival(
+    State(state): State<AppState>,
+    Json(req): Json<CorpusRequest>,
+) -> ApiResult<serde_json::Value> {
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
+    let outcome = state
+        .container
+        .seed_survival(&project, &req.target)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(outcome)))
+}
+
+async fn corpus_prune_coverage(
+    State(state): State<AppState>,
+    Json(req): Json<CorpusRequest>,
+) -> ApiResult<serde_json::Value> {
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
+    let outcome = state
+        .container
+        .corpus_prune_coverage(&project, &req.target)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(outcome)))
+}
+
+async fn corpus_minimize(
+    State(state): State<AppState>,
+    Json(req): Json<CorpusRequest>,
+) -> ApiResult<serde_json::Value> {
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
+    let outcome = state
+        .container
+        .corpus_minimize(&project, &req.target)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(outcome)))
+}
+
+async fn corpus_capabilities(
+    State(state): State<AppState>,
+    Json(req): Json<CorpusRequest>,
+) -> ApiResult<serde_json::Value> {
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
+    let capabilities = state
+        .container
+        .corpus_capabilities(&project, &req.target)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(capabilities)))
+}
+
 async fn corpus(
     State(state): State<AppState>,
     Path(op): Path<String>,
@@ -2080,12 +2158,12 @@ async fn corpus(
             Ok(Json(serde_json::json!({"entries": n})))
         }
         "prune" => {
-            let n = state
+            let outcome = state
                 .container
                 .corpus_prune(&project, &req.target)
                 .await
                 .map_err(classified_api_error)?;
-            Ok(Json(serde_json::json!({"entries": n})))
+            Ok(Json(public_value(outcome)))
         }
         other => Err((
             StatusCode::BAD_REQUEST,

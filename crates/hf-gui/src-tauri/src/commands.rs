@@ -234,12 +234,15 @@ pub async fn semgrep_cancel(
 }
 
 #[tauri::command]
-pub async fn open_folder_dialog(app: tauri::AppHandle) -> Result<Option<String>, String> {
+pub async fn open_folder_dialog(
+    app: tauri::AppHandle,
+    title: Option<String>,
+) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
     let result = app
         .dialog()
         .file()
-        .set_title("Select a project folder")
+        .set_title(title.as_deref().unwrap_or("Select a project folder"))
         .blocking_pick_folder();
     Ok(result.map(|f| f.to_string()))
 }
@@ -526,12 +529,87 @@ pub async fn corpus_prune(
     project: String,
     target: String,
 ) -> Result<serde_json::Value, String> {
-    let n = state
+    let outcome = state
         .container
         .corpus_prune(std::path::Path::new(&project), &target)
         .await
         .map_err(|e| e.to_string())?;
-    Ok(serde_json::json!({"entries": n}))
+    serde_json::to_value(outcome).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn corpus_import(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    target: String,
+    source: String,
+) -> Result<serde_json::Value, String> {
+    let outcome = state
+        .container
+        .corpus_import(
+            std::path::Path::new(&project),
+            &target,
+            std::path::Path::new(&source),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(outcome).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn seed_survival(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    target: String,
+) -> Result<serde_json::Value, String> {
+    let report = state
+        .container
+        .seed_survival(std::path::Path::new(&project), &target)
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(report).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn corpus_prune_coverage(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    target: String,
+) -> Result<serde_json::Value, String> {
+    let outcome = state
+        .container
+        .corpus_prune_coverage(std::path::Path::new(&project), &target)
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(outcome).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn corpus_minimize(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    target: String,
+) -> Result<serde_json::Value, String> {
+    let outcome = state
+        .container
+        .corpus_minimize(std::path::Path::new(&project), &target)
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(outcome).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn corpus_capabilities(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    target: String,
+) -> Result<serde_json::Value, String> {
+    let capabilities = state
+        .container
+        .corpus_capabilities(std::path::Path::new(&project), &target)
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(capabilities).map_err(|error| error.to_string())
 }
 
 /// Ingest and deduplicate crash artifacts.

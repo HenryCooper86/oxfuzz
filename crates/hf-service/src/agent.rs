@@ -411,8 +411,8 @@ impl ServiceContainer {
                         self.corpus_grow(project, target).await?
                     ),
                     "prune" => format!(
-                        "pruned to {} entries",
-                        self.corpus_prune(project, target).await?
+                        "removed byte duplicates: {} entries remain",
+                        self.corpus_prune(project, target).await?.after
                     ),
                     "list" => format!(
                         "{} entries",

@@ -191,6 +191,21 @@ or the Patch to Proof workflow is required for stronger causal or remediation
 claims. Publishing is a separate step that you approve explicitly.
 
 **When coverage stops climbing.** "62% of lines" does not say what to do next.
+The Corpus view shows the selected target's exact retained input and byte totals.
+You can import nonempty regular files from a desktop-selected folder; in the web
+app, the source must be a server directory inside an approved root. Import
+results report added inputs and bytes, duplicates, and skipped entries.
+
+The basic reduction removes byte-identical inputs and makes no coverage claim.
+The AFL++ survival and whole-showmap reduction actions, and libFuzzer's canonical
+merge, require the exact active, promoted, smoke-qualified harness revision.
+They execute in the sandbox, and destructive reductions require confirmation.
+Survival compares each input's edge tuples with empty-input coverage; this is a
+heuristic rather than proof of parser progress. Showmap reduction uses byte
+deduplication for unmeasured inputs. The screen explains unavailable capabilities
+without starting discovery or an engine. An unknown survival measurement means
+the input was not measured.
+
 The Corpus view offers a blocker exploration: it names the uncovered functions
 that would unlock the most still-unreached code, shows how far each sits from
 where the fuzzer actually got to, and gives the call path from that frontier to

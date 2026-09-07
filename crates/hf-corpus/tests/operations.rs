@@ -2,9 +2,9 @@
 
 use hf_core::corpus::CorpusSource;
 use hf_corpus::{
-    absorb, grow, list, list_with_limits, merge, merge_snapshot, merge_snapshot_with_limits,
-    minimize, prune, seed, seed_with_limits, snapshot, snapshot_with_limits, CorpusLimits,
-    DEFAULT_CORPUS_LIMITS,
+    absorb, grow, import_with_limits, list, list_with_limits, merge, merge_snapshot,
+    merge_snapshot_with_limits, minimize, prune, seed, seed_with_limits, snapshot,
+    snapshot_with_limits, CorpusLimits, DEFAULT_CORPUS_LIMITS,
 };
 use std::fs::{self, File};
 use tempfile::TempDir;
@@ -919,9 +919,17 @@ async fn import_copies_new_content_and_skips_duplicates() {
     // OSS-Fuzz corpus seeds are never empty, and neither is an import.
     fs::write(external.join("empty"), b"").unwrap();
 
-    let (corpus, added) = hf_corpus::import(&corpus_root, &external).unwrap();
+    fs::create_dir(external.join("nested")).unwrap();
 
-    assert_eq!(added, 1, "only genuinely new content is added");
+    let outcome = import_with_limits(&corpus_root, &external, DEFAULT_CORPUS_LIMITS).unwrap();
+    let corpus = &outcome.corpus;
+
+    assert_eq!(outcome.inspected, 5);
+    assert_eq!(outcome.eligible, 3);
+    assert_eq!(outcome.duplicates, 2);
+    assert_eq!(outcome.skipped, 2);
+    assert_eq!(outcome.added, 1, "only genuinely new content is added");
+    assert_eq!(outcome.added_bytes, b"from oss-fuzz".len() as u64);
     let names: Vec<String> = corpus
         .entries
         .iter()
@@ -952,6 +960,160 @@ async fn import_copies_new_content_and_skips_duplicates() {
     assert!(corpus_root
         .join(imported.path.file_name().unwrap())
         .exists());
+}
+
+#[test]
+fn import_validates_every_candidate_before_writing() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    let external = dir.path().join("external");
+    fs::create_dir_all(&corpus_root).unwrap();
+    fs::create_dir_all(&external).unwrap();
+    fs::write(corpus_root.join("retained"), b"old").unwrap();
+    fs::write(external.join("a-valid"), b"new").unwrap();
+    fs::write(external.join("z-oversized"), b"too large").unwrap();
+    let limits = CorpusLimits {
+        max_input_bytes: 4,
+        max_total_bytes: 32,
+        ..DEFAULT_CORPUS_LIMITS
+    };
+
+    let error = import_with_limits(&corpus_root, &external, limits)
+        .expect_err("a later invalid candidate must reject the whole validation phase");
+
+    assert!(error.to_string().contains("z-oversized"), "{error}");
+    assert_eq!(
+        fs::read_dir(&corpus_root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>(),
+        ["retained"],
+        "validation failure must occur before the first destination write"
+    );
+    assert_eq!(fs::read(corpus_root.join("retained")).unwrap(), b"old");
+}
+
+#[test]
+fn import_counts_retained_and_prepared_inputs_against_the_entry_limit() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    let external = dir.path().join("external");
+    fs::create_dir_all(&corpus_root).unwrap();
+    fs::create_dir_all(&external).unwrap();
+    fs::write(corpus_root.join("retained"), b"old").unwrap();
+    fs::write(external.join("a-new"), b"new-a").unwrap();
+    fs::write(external.join("b-new"), b"new-b").unwrap();
+    let limits = CorpusLimits {
+        max_entries: 2,
+        ..DEFAULT_CORPUS_LIMITS
+    };
+
+    let error = import_with_limits(&corpus_root, &external, limits)
+        .expect_err("the retained and prepared inputs exceed the combined limit");
+
+    assert!(error.to_string().contains("entry limit"), "{error}");
+    assert_eq!(
+        fs::read_dir(&corpus_root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>(),
+        ["retained"],
+        "entry-limit validation must finish before any import write"
+    );
+}
+
+#[test]
+fn import_counts_nonregular_retained_members_against_the_entry_limit() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    let external = dir.path().join("external");
+    fs::create_dir_all(corpus_root.join("retained-directory")).unwrap();
+    fs::create_dir_all(&external).unwrap();
+    fs::write(corpus_root.join("retained"), b"old").unwrap();
+    fs::write(external.join("new"), b"new").unwrap();
+    let limits = CorpusLimits {
+        max_entries: 2,
+        ..DEFAULT_CORPUS_LIMITS
+    };
+
+    let error = import_with_limits(&corpus_root, &external, limits)
+        .expect_err("every occupied destination member counts against the limit");
+
+    assert!(error.to_string().contains("entry limit"), "{error}");
+    assert_eq!(fs::read(corpus_root.join("retained")).unwrap(), b"old");
+    assert!(corpus_root.join("retained-directory").is_dir());
+    assert!(!corpus_root.join("new").exists());
+}
+
+#[test]
+fn import_preserves_a_retained_input_that_occupies_the_hash_derived_name() {
+    use sha2::Digest as _;
+
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    let external = dir.path().join("external");
+    fs::create_dir_all(&corpus_root).unwrap();
+    fs::create_dir_all(&external).unwrap();
+    let incoming = b"new imported content";
+    let incoming_hash = format!("{:x}", sha2::Sha256::digest(incoming));
+    let occupied_name = format!("imported_{}", &incoming_hash[..16]);
+    fs::write(
+        corpus_root.join(&occupied_name),
+        b"unrelated retained bytes",
+    )
+    .unwrap();
+    fs::write(external.join("incoming"), incoming).unwrap();
+
+    let outcome =
+        hf_corpus::import(&corpus_root, &external).expect("import should choose a free name");
+
+    assert_eq!(outcome.added, 1);
+    assert_eq!(
+        fs::read(corpus_root.join(&occupied_name)).unwrap(),
+        b"unrelated retained bytes",
+        "a hash-derived filename must never replace retained content"
+    );
+    assert_eq!(outcome.corpus.entries.len(), 2);
+    assert!(outcome
+        .corpus
+        .entries
+        .iter()
+        .any(|entry| fs::read(&entry.path).unwrap() == incoming));
+}
+
+#[test]
+fn import_preserves_a_case_aliased_hash_derived_destination() {
+    use sha2::Digest as _;
+
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    let external = dir.path().join("external");
+    fs::create_dir_all(&corpus_root).unwrap();
+    fs::create_dir_all(&external).unwrap();
+    let incoming = b"case alias incoming";
+    let incoming_hash = format!("{:x}", sha2::Sha256::digest(incoming));
+    let occupied_name = format!("IMPORTED_{}", &incoming_hash[..16].to_uppercase());
+    fs::write(
+        corpus_root.join(&occupied_name),
+        b"case aliased retained bytes",
+    )
+    .unwrap();
+    fs::write(external.join("incoming"), incoming).unwrap();
+
+    let outcome = hf_corpus::import(&corpus_root, &external)
+        .expect("import should use an actually free destination");
+
+    assert_eq!(outcome.added, 1);
+    assert_eq!(
+        fs::read(corpus_root.join(&occupied_name)).unwrap(),
+        b"case aliased retained bytes"
+    );
+    assert_eq!(outcome.corpus.entries.len(), 2);
+    assert!(outcome
+        .corpus
+        .entries
+        .iter()
+        .any(|entry| fs::read(&entry.path).unwrap() == incoming));
 }
 
 #[test]

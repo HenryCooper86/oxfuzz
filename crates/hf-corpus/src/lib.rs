@@ -45,6 +45,25 @@ struct PreparedInput {
     sha256: String,
 }
 
+/// Exact accounting for one external flat-directory import.
+#[derive(Debug)]
+pub struct ImportOutcome {
+    /// Corpus inventory after the accepted writes.
+    pub corpus: Corpus,
+    /// Source directory entries inspected, including skipped entries.
+    pub inspected: usize,
+    /// Nonempty regular source inputs that were eligible for deduplication.
+    pub eligible: usize,
+    /// Eligible inputs whose content was already retained or repeated in-source.
+    pub duplicates: usize,
+    /// Empty, nonregular, vanished, or uninspectable source entries skipped.
+    pub skipped: usize,
+    /// New inputs committed to the retained corpus.
+    pub added: usize,
+    /// Bytes in the newly committed inputs.
+    pub added_bytes: u64,
+}
+
 /// Seed a corpus with initial inputs.
 ///
 /// Each input is written to `corpus_root/<name>` with `CorpusSource::Seed`.
@@ -516,8 +535,6 @@ fn atomic_write(path: &Path, data: &[u8]) -> Result<(), ClassifiedError> {
     Ok(())
 }
 
-/// Destination path for a pulled input: keep the source filename, falling back
-/// to a content-hash suffix if a different file already occupies that name.
 /// Import an external corpus directory (for example an OSS-Fuzz corpus
 /// checkout) into a corpus root: bounded listing, content-addressed
 /// destination names, hash-deduplicated against the retained corpus and
@@ -530,16 +547,32 @@ fn atomic_write(path: &Path, data: &[u8]) -> Result<(), ClassifiedError> {
 /// source must be a regular directory: an import from a mistyped path
 /// silently importing nothing would be a swallowed misconfiguration.
 ///
-/// Returns the whole corpus and how many entries the import added. Re-importing
-/// the same directory adds nothing: names derive from content, so the second
-/// pass finds every hash already retained.
+/// Returns exact import accounting and the resulting corpus. Re-importing the
+/// same directory adds nothing because the second pass finds every content
+/// hash already retained.
 ///
 /// # Errors
 /// Returns `ClassifiedError` when either root is not a regular directory, a
 /// limit is exceeded, or a payload cannot be read or written safely.
-pub fn import(corpus_root: &Path, source: &Path) -> Result<(Corpus, usize), ClassifiedError> {
-    let limits = DEFAULT_CORPUS_LIMITS;
-    ensure_regular_directory(corpus_root)?;
+pub fn import(corpus_root: &Path, source: &Path) -> Result<ImportOutcome, ClassifiedError> {
+    import_with_limits(corpus_root, source, DEFAULT_CORPUS_LIMITS)
+}
+
+/// Import an external flat corpus under an explicit I/O budget.
+///
+/// Every source candidate and the final retained entry/byte totals are
+/// validated before the first destination payload is written. Individual
+/// destination writes are atomic, but a later I/O failure is not rolled back.
+///
+/// # Errors
+/// Returns `ClassifiedError` when either root is unsafe, a limit is exceeded,
+/// or a payload cannot be read or written safely.
+pub fn import_with_limits(
+    corpus_root: &Path,
+    source: &Path,
+    limits: CorpusLimits,
+) -> Result<ImportOutcome, ClassifiedError> {
+    validate_limits(limits)?;
     if !is_regular_directory(source) {
         return Err(ClassifiedError::Validation(format!(
             "import source is not a regular directory: {}",
@@ -547,49 +580,89 @@ pub fn import(corpus_root: &Path, source: &Path) -> Result<(Corpus, usize), Clas
         )));
     }
     let existing = list_with_limits(corpus_root, limits)?;
+    let occupied_entries = if corpus_root.exists() {
+        let mut inspected = 0_usize;
+        sorted_directory_entries(corpus_root, &mut inspected, limits)?
+    } else {
+        Vec::new()
+    };
+    let occupied_count = occupied_entries.len();
     let mut seen: HashSet<String> = existing.entries.iter().map(|e| e.sha256.clone()).collect();
     let mut entries = existing.entries;
+    let mut reserved_names: HashSet<OsString> =
+        occupied_entries.iter().map(DirEntry::file_name).collect();
     let mut total_bytes = corpus_size(&entries, limits)?;
     let mut inspected = 0_usize;
-    let mut added = 0usize;
+    let mut eligible = 0_usize;
+    let mut duplicates = 0_usize;
+    let mut skipped = 0_usize;
+    let mut prepared = Vec::new();
+    let mut added_bytes = 0_u64;
     for entry in sorted_directory_entries(source, &mut inspected, limits)? {
         // Swallowed: an entry whose type cannot be inspected is skipped --
         // the bounded budget still counted it, and one unreadable member
         // must not cost the rest of the import.
         let Ok(file_type) = entry.file_type() else {
+            skipped = skipped.saturating_add(1);
             continue;
         };
         if !file_type.is_file() {
+            skipped = skipped.saturating_add(1);
             continue;
         }
         let Some(data) = read_regular_file_bounded(&entry.path(), limits)? else {
+            skipped = skipped.saturating_add(1);
             continue;
         };
         if data.is_empty() {
+            skipped = skipped.saturating_add(1);
             continue;
         }
+        eligible = eligible.saturating_add(1);
         let hash = sha256_hex(&data);
         if !seen.insert(hash.clone()) {
+            duplicates = duplicates.saturating_add(1);
             continue;
         }
-        enforce_entry_limit(entries.len().saturating_add(1), limits)?;
-        total_bytes = checked_total(total_bytes, data_len_u64(&data)?, limits)?;
-        // Content-addressed names: two imports of the same corpus are
-        // idempotent, and different content never collides.
-        let dest = corpus_root.join(format!("imported_{}", &hash[..16.min(hash.len())]));
-        atomic_write(&dest, &data)?;
-        entries.push(make_entry(&dest, &data, CorpusSource::Fuzzer));
-        added += 1;
+        enforce_entry_limit(
+            occupied_count
+                .saturating_add(prepared.len())
+                .saturating_add(1),
+            limits,
+        )?;
+        let size = data_len_u64(&data)?;
+        total_bytes = checked_total(total_bytes, size, limits)?;
+        added_bytes = added_bytes.checked_add(size).ok_or_else(|| {
+            ClassifiedError::Validation("imported corpus byte count overflow".to_owned())
+        })?;
+        let preferred = OsString::from(format!("imported_{}", &hash[..16.min(hash.len())]));
+        prepared.push(PreparedInput {
+            name: unique_import_name(corpus_root, &preferred, &hash, &mut reserved_names)?,
+            data,
+            sha256: hash,
+        });
     }
-    Ok((
-        Corpus {
+
+    ensure_regular_directory(corpus_root)?;
+    for input in &prepared {
+        let dest = corpus_root.join(&input.name);
+        atomic_write(&dest, &input.data)?;
+        entries.push(make_entry(&dest, &input.data, CorpusSource::Fuzzer));
+    }
+    Ok(ImportOutcome {
+        corpus: Corpus {
             id: Uuid::new_v4(),
             target_id: Uuid::nil(),
             root: corpus_root.to_path_buf(),
             entries,
         },
-        added,
-    ))
+        inspected,
+        eligible,
+        duplicates,
+        skipped,
+        added: prepared.len(),
+        added_bytes,
+    })
 }
 
 fn grow_dest_path(corpus_root: &Path, src: &Path, hash: &str) -> std::path::PathBuf {
@@ -1039,6 +1112,43 @@ fn unique_input_name(
             return candidate;
         }
         suffix = suffix.saturating_add(1);
+    }
+}
+
+fn unique_import_name(
+    corpus_root: &Path,
+    preferred: &std::ffi::OsStr,
+    sha256: &str,
+    names: &mut HashSet<OsString>,
+) -> Result<OsString, ClassifiedError> {
+    let mut suffix: Option<u64> = None;
+    loop {
+        let candidate = match suffix {
+            None => preferred.to_owned(),
+            Some(0) => OsString::from(format!("hf-{sha256}")),
+            Some(value) => OsString::from(format!("hf-{sha256}-{value}")),
+        };
+        if !names.contains(&candidate) {
+            match std::fs::symlink_metadata(corpus_root.join(&candidate)) {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    names.insert(candidate.clone());
+                    return Ok(candidate);
+                }
+                Err(error) => {
+                    return Err(ClassifiedError::Internal(format!(
+                        "inspect corpus import destination {}: {error}",
+                        corpus_root.join(&candidate).display()
+                    )));
+                }
+            }
+        }
+        suffix = Some(match suffix {
+            None => 0,
+            Some(value) => value.checked_add(1).ok_or_else(|| {
+                ClassifiedError::Validation("corpus import name suffix overflow".to_owned())
+            })?,
+        });
     }
 }
 

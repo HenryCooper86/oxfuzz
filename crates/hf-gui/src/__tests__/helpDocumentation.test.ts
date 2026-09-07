@@ -47,6 +47,24 @@ describe("in-app documentation", () => {
     expect(chineseWelcome?.body).toContain("绝不会在主机上执行");
   });
 
+  it("documents corpus import, exact readiness, and reduction meanings in both languages", () => {
+    const englishCorpus = HELP_SECTIONS.find((section) => section.id === "corpus");
+    const chineseCorpus = HELP_SECTIONS_ZH.find((section) => section.id === "corpus");
+
+    expect(englishCorpus?.body).toContain("approved root");
+    expect(englishCorpus?.body).toContain("byte-identical");
+    expect(englishCorpus?.body).toContain("exact promoted");
+    expect(englishCorpus?.body).toContain("empty input");
+    expect(englishCorpus?.body).toContain("byte deduplication");
+    expect(englishCorpus?.body).toContain("Unknown");
+    expect(chineseCorpus?.body).toContain("批准根目录");
+    expect(chineseCorpus?.body).toContain("字节相同");
+    expect(chineseCorpus?.body).toContain("准确的已提升");
+    expect(chineseCorpus?.body).toContain("空输入");
+    expect(chineseCorpus?.body).toContain("字节去重");
+    expect(chineseCorpus?.body).toContain("未知");
+  });
+
   it("links shipped documentation surfaces to the public GitHub project", () => {
     const helpView = source("../views/HelpView.tsx");
     const aboutTab = source("../components/settings/AboutTab.tsx");

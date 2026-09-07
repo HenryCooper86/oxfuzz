@@ -2264,6 +2264,7 @@ mod exact_qualification_tests {
         )
         .with_store(Arc::clone(&store));
         let id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
         let workspace = workspace_dir(project.path(), TARGET);
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::write(workspace.join("harness.source"), SOURCE).unwrap();
@@ -2276,7 +2277,7 @@ mod exact_qualification_tests {
         store
             .upsert_harness(&Harness {
                 id,
-                target_id: Uuid::new_v4(),
+                target_id,
                 engine: EngineKind::LibFuzzer,
                 source: SOURCE.to_owned(),
                 language: TargetLanguage::C,
@@ -2289,6 +2290,34 @@ mod exact_qualification_tests {
                 status: HarnessStatus::Compiled,
                 smoke_run: None,
             })
+            .await
+            .unwrap();
+        store
+            .upsert_target(
+                &TargetCandidate {
+                    id: target_id,
+                    project_root: project.path().to_path_buf(),
+                    language: TargetLanguage::C,
+                    symbol: TARGET.to_owned(),
+                    kind: TargetKind::Parser,
+                    location: SourceLocation {
+                        file: project.path().join("parse.c"),
+                        line: 1,
+                        col: 1,
+                        end_line: None,
+                        end_col: None,
+                    },
+                    signature: None,
+                    input_surface: InputSurface::Bytes,
+                    complexity: 1,
+                    fit_score: 1.0,
+                    sanitizers: vec![Sanitizer::Address],
+                    rationale: "exact qualification fixture".to_owned(),
+                    reachable_functions: Vec::new(),
+                    accumulated_complexity: 1,
+                },
+                chrono::Utc::now(),
+            )
             .await
             .unwrap();
         (project, store, container, runtime, id)
