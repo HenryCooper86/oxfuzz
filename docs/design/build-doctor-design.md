@@ -238,6 +238,10 @@ exit without a database is `artifact_missing`. Read the expected bounded
 regular database at `staging/compile_database_path`, parse it, rewrite only
 staging-root and `/work` prefixes to canonical project paths, then require a nonempty parsed entry list and validate replayed flags with the
 existing allowlist. Empty argument vectors and empty compiler tokens are invalid.
+Mapped path suffixes must be relative: reject an additional slash/backslash root,
+UNC/verbatim prefix, or Windows drive designator after the execution prefix.
+Ordinary relative suffixes are joined using native host path separators. A rejected
+suffix makes the artifact invalid and preserves any previously published database.
 The shared parser decodes command-form quotes and escapes without executing or
 expanding shell content, following the [JSON Compilation Database format](https://clang.llvm.org/docs/JSONCompilationDatabase.html).
 Publication converts those decoded tokens into an `arguments` array and removes

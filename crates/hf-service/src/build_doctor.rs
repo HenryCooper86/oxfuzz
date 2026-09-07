@@ -210,24 +210,39 @@ fn stage_project_snapshot(
     Ok(())
 }
 
-fn rewrite_path_prefix(text: &str, staging: &Path, project: &Path) -> String {
+fn rewrite_path_prefix(
+    text: &str,
+    staging: &Path,
+    project: &Path,
+) -> Result<String, ClassifiedError> {
     for prefix in [staging.to_string_lossy().as_ref(), "/work"] {
         if text == prefix {
-            return project.to_string_lossy().into_owned();
+            return Ok(project.to_string_lossy().into_owned());
         }
         if let Some(relative) = text
             .strip_prefix(prefix)
             .and_then(|rest| rest.strip_prefix('/'))
         {
-            return format!("{}/{relative}", project.display());
+            if relative.starts_with('/')
+                || relative.starts_with('\\')
+                || matches!(relative.as_bytes(), [drive, b':', ..] if drive.is_ascii_alphabetic())
+            {
+                return Err(ClassifiedError::Validation(
+                    "compile database execution path requires a relative path suffix".into(),
+                ));
+            }
+            return Ok(project.join(relative).to_string_lossy().into_owned());
         }
     }
-    text.to_owned()
+    Ok(text.to_owned())
 }
 
-fn rewrite_argument(text: &str, staging: &Path, project: &Path) -> String {
+fn rewrite_argument(text: &str, staging: &Path, project: &Path) -> Result<String, ClassifiedError> {
     if let Some(path) = text.strip_prefix("-I") {
-        format!("-I{}", rewrite_path_prefix(path, staging, project))
+        Ok(format!(
+            "-I{}",
+            rewrite_path_prefix(path, staging, project)?
+        ))
     } else {
         rewrite_path_prefix(text, staging, project)
     }
@@ -238,26 +253,29 @@ fn rewrite_execution_paths(
     parsed: &[hf_core::build::CompileEntry],
     staging: &Path,
     project: &Path,
-) {
+) -> Result<(), ClassifiedError> {
     let Some(entries) = value.as_array_mut() else {
-        return;
+        return Ok(());
     };
     for (entry, parsed) in entries.iter_mut().zip(parsed) {
         for key in ["directory", "file", "output"] {
             if let Some(serde_json::Value::String(text)) = entry.get_mut(key) {
-                *text = rewrite_path_prefix(text, staging, project);
+                *text = rewrite_path_prefix(text, staging, project)?;
             }
         }
         if let Some(object) = entry.as_object_mut() {
             let arguments = parsed
                 .arguments
                 .iter()
-                .map(|token| serde_json::Value::String(rewrite_argument(token, staging, project)))
-                .collect();
+                .map(|token| {
+                    rewrite_argument(token, staging, project).map(serde_json::Value::String)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             object.insert("arguments".into(), serde_json::Value::Array(arguments));
             object.remove("command");
         }
     }
+    Ok(())
 }
 
 /// Reject oversized normalized JSON while it is being serialized.
@@ -296,7 +314,7 @@ fn normalize_compile_database(
     })?;
     let parsed = hf_discovery::build_context::parse_compile_database(&raw)
         .map_err(|error| ClassifiedError::Validation(error.to_string()))?;
-    rewrite_execution_paths(&mut value, &parsed, staging, project);
+    rewrite_execution_paths(&mut value, &parsed, staging, project)?;
     let mut writer = CompileDatabaseWriter::default();
     serde_json::to_writer_pretty(&mut writer, &value).map_err(|error| {
         ClassifiedError::Validation(format!("serialize normalized compile database: {error}"))
