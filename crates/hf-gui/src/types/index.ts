@@ -619,31 +619,73 @@ export interface BuildPlanStep {
 
 export interface BuildPlan {
   steps: BuildPlanStep[];
+  component_root: string;
   expected_artifact: string;
+  profile_sha256: string;
+  sandbox_image_tag: string;
+  sandbox_image_id: string;
 }
-
+export type BuildProfileState = "unconfigured" | "needs_build" | "ready" | "stale" | "invalid";
+export type ProfileBuildSystem = "cmake" | "make";
+export interface BuildDependency { kind: "command" | "pkg_config"; name: string }
+export interface BuildProfileView {
+  project_root: string;
+  component_root: string;
+  build_system: ProfileBuildSystem;
+  compile_database_path: string;
+  cmake_definitions: Record<string, string>;
+  dependencies: BuildDependency[];
+  sandbox_image_tag: string;
+  sandbox_image_id: string;
+  marker_path: string;
+  marker_sha256: string;
+  profile_sha256: string;
+  created_at: string;
+  updated_at: string;
+}
 export interface BuildSystemDiagnosis {
   build_system: BuildSystem;
   status: BuildSystemStatus;
   markers: string[];
   missing_tool: string | null;
+}
+export type BuildPlanRunStatus = "succeeded" | "step_failed" | "timed_out" | "cancelled" | "artifact_missing" | "artifact_invalid" | "runtime_failed" | "denied" | "profile_changed";
+export interface BuildTerminalEvidence {
+  status: BuildPlanRunStatus;
+  step_index: number | null;
+  exit_code: number | null;
+  stdout: string;
+  stderr: string;
+  output_truncated: boolean;
+  failure_code: string | null;
+  failure_message: string | null;
+}
+export interface ProjectBuildDiagnosis {
+  schema_version: number;
+  operation: "diagnose" | "build";
+  profile: BuildProfileView | null;
+  detected: BuildSystemDiagnosis[];
+  profile_state: BuildProfileState;
+  dependency_statuses: { dependency: BuildDependency; available: boolean }[];
+  reasons: string[];
   plan: BuildPlan | null;
+  legacy_build_context_available: boolean;
+  terminal: BuildTerminalEvidence | null;
 }
-
-export type BuildPlanRunStatus = "succeeded" | "step_failed" | "artifact_missing";
-
-export interface FailedBuildStep {
-  index: number;
-  exit_code: number;
-  output: string;
+export interface BuildDiagnosisRecord {
+  id: string;
+  project_root: string;
+  profile_sha256: string | null;
+  status: "succeeded" | "failed" | "cancelled";
+  diagnosis: ProjectBuildDiagnosis;
+  created_at: string;
 }
-
 export interface BuildPlanRunOutcome {
   status: BuildPlanRunStatus;
-  build_system: BuildSystem;
+  build_system: ProfileBuildSystem;
   steps_run: number;
-  failed_step: FailedBuildStep | null;
   build_context: unknown | null;
+  diagnosis: ProjectBuildDiagnosis;
 }
 
 /// Harness Tournament, owned by hf-service. The presentation layer renders the

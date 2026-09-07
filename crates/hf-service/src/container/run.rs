@@ -670,6 +670,8 @@ impl ServiceContainer {
         }
         record.config = Some(config.clone());
         let sandbox_image = resolve_run_sandbox_image(self.runtime.as_ref()).await?;
+        self.verify_harness_dispatch_image(project, qualified, Some(sandbox_image.reference()))
+            .await?;
         let context = run_context_digests(workspace, sandbox_image.sha256())?;
         retain_run_context(&mut record, context);
         let artifacts = stage_run_artifacts(
@@ -890,20 +892,25 @@ impl ServiceContainer {
         ));
         // Stream progress live: `on_progress` fires for each output line and
         // stat as the fuzzer runs, not post-hoc.
-        let run_result = runner
-            .run_streaming_opts(
-                engine,
-                &run_cfg,
-                &artifacts.binary_container,
-                &artifacts.corpus_container,
-                &artifacts.output_container,
-                self.runtime.as_ref(),
-                &workspace,
-                &sandbox,
-                &cancel,
-                &watched,
-            )
-            .await;
+        let run_result = async {
+            self.verify_harness_dispatch_image(project, &qualified, sandbox.image.as_deref())
+                .await?;
+            runner
+                .run_streaming_opts(
+                    engine,
+                    &run_cfg,
+                    &artifacts.binary_container,
+                    &artifacts.corpus_container,
+                    &artifacts.output_container,
+                    self.runtime.as_ref(),
+                    &workspace,
+                    &sandbox,
+                    &cancel,
+                    &watched,
+                )
+                .await
+        }
+        .await;
         #[cfg(feature = "campaign-health")]
         managed_invocation.finish();
         output_monitor_stop.cancel();
@@ -1141,7 +1148,10 @@ impl ServiceContainer {
                 "campaign target '{target}' needs a smoke-qualified, explicitly promoted {lang:?} harness"
             )));
         }
-        let _ = self.generate_seeds_llm(project, &target, lang, 12).await;
+        self.verify_harness_build_inputs(project, &harness, true)
+            .await?;
+        self.generate_seeds_llm_with_campaign_harness(project, &target, lang, 12, Some(&harness))
+            .await?;
 
         // 3. Run -> triage loop, stopping on the first crash or the iteration cap.
         let noop = |_: FuzzProgress| {};

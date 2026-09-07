@@ -241,6 +241,15 @@ RUN chmod 0755 /usr/local/bin/oxfuzz-semgrep-scan /opt/oxfuzz/semgrep-tree-diges
     && test "$(python3 /opt/oxfuzz/semgrep-tree-digest.py /opt/oxfuzz/semgrep-rules/rules/c)" = \
        "$(cat /opt/oxfuzz/semgrep-rules/RULES_SHA256)"
 
+# Build Doctor observes plain Make through Bear. Install this late so adding
+# the observer does not rebuild the pinned compiler and engine toolchains.
+RUN apt-get update && apt-get install -y --no-install-recommends bear \
+    && rm -rf /var/lib/apt/lists/* \
+    && bear --version \
+    && cmake --version \
+    && make --version \
+    && pkg-config --version
+
 WORKDIR /work
 
 CMD ["true"]

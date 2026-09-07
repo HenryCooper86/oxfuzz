@@ -200,6 +200,9 @@ function invokedMutatingCommands() {
 
 function configureHarnessTransport() {
   transportInvoke.mockImplementation((command: string) => {
+    if (command === "build_diagnose") return Promise.resolve({ schema_version: 1, operation: "diagnose", profile: null, detected: [], profile_state: "unconfigured", dependency_statuses: [], reasons: [], plan: null, legacy_build_context_available: false, terminal: null });
+    if (command === "build_profile") return Promise.resolve(null);
+    if (command === "build_history") return Promise.resolve([]);
     if (command === "get_fuzzing_settings") {
       return Promise.resolve({
         enabled_engines: ["libfuzzer", "afl++", "honggfuzz", "syzkaller"],
@@ -906,7 +909,10 @@ describe("Harness repair interactions", () => {
       lint: [],
     });
     transportInvoke.mockImplementation((command: string, args: Record<string, unknown>) => {
-      if (command === "get_fuzzing_settings") return Promise.resolve({ enabled_engines: ["libfuzzer"], default_engine: "libfuzzer", default_duration_secs: 60, sandbox: { max_mem_mb: 2048, max_cpus: 1, max_duration_secs: 7200 } });
+      if (command === "build_diagnose") return Promise.resolve({ schema_version: 1, operation: "diagnose", profile: null, detected: [], profile_state: "unconfigured", dependency_statuses: [], reasons: [], plan: null, legacy_build_context_available: false, terminal: null });
+    if (command === "build_profile") return Promise.resolve(null);
+    if (command === "build_history") return Promise.resolve([]);
+    if (command === "get_fuzzing_settings") return Promise.resolve({ enabled_engines: ["libfuzzer"], default_engine: "libfuzzer", default_duration_secs: 60, sandbox: { max_mem_mb: 2048, max_cpus: 1, max_duration_secs: 7200 } });
       if (command === "discover") return Promise.resolve({ project_root: args.project, candidates: [{ id: "candidate-1", project_root: args.project, language: "c", symbol: "parse_input", kind: "function", location: { file: "src/parser.c", line: 1, col: 1 }, signature: "int parse_input(void)", input_surface: "buffer", complexity: 1, fit_score: 1, sanitizers: [], rationale: "test fixture" }] });
       if (command === "harness_review_queue" && args.project === PROJECT_B) return Promise.resolve([
         { ...review("harness-project-b-wrong", "project B wrong-engine source", "Promoted"), project_root: PROJECT_B, engine: "AFL++" },

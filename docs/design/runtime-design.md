@@ -65,7 +65,17 @@ but is not the lifecycle lock. An absent root is a successful no-op.
 ## 3. Execution Profiles
 
 - Harness build: network disabled, capabilities dropped, no new privileges,
-  bounded memory/CPU/processes/time, approved workspace mounted.
+  bounded memory/CPU/processes/time, approved workspace mounted. The shared
+  service compile path captures its exact input set and passes the resolved
+  immutable image reference through `SandboxOptions.image` before every attempt.
+- Project build: the same hardened limits, fixed CMake or Make/Bear argv, and
+  explicit `RunProjectBuild` human authorization. Stage the complete bounded
+  project; mount the staging root at `/work` and select the configured component
+  with the existing `SandboxOptions.workdir`.
+- Build dependency diagnosis: fixed non-project probes in a unique empty
+  managed workspace with disabled networking and the captured immutable image.
+  No project is mounted, no project command or installer executes, and no
+  provider is called.
 - Fuzzer run: the same hardened profile with cooperative cancellation and a
   unique container name for reliable teardown.
 - Crash triage: the hardened profile plus the minimum ptrace capability needed
@@ -159,6 +169,54 @@ Timeout, cancellation, non-zero exit, missing or oversized output, and forced
 teardown are explicit non-success outcomes. `hf-service` validates the bounded
 output before any result is published.
 
+### 3.3 Optional Project Build Profiles
+
+[Build Doctor](build-doctor-design.md) owns the Phase 6 profile specification.
+Profiles are optional; runtime does not require one for ordinary legacy C/C++
+or Rust execution. When configured, the service validates exact component,
+database, options, dependencies, marker digest, image tag, and immutable image
+ID before generation/build. Missing generated output is `NeedsBuild`, which
+permits the reviewed project-build plan while stopping harness generation.
+Changed marker/image assumptions require explicit profile review/save.
+Provider-bearing generation/review admission resolves configured image freshness
+live before any provider access; matching retained/filesystem evidence cannot
+admit a moved tag. Final executors repeat the live check before dispatch. The
+zero-runtime/image rule applies only to read-only corpus availability.
+
+For project builds, runtime `cwd` is the complete staging root, and
+`SandboxOptions.workdir` is `/work/<component_root>`. Do not pass only the
+component as runtime `cwd`, because that would hide safe sibling includes and
+change database path interpretation. The service derives the CMake `-B`
+directory and Bear `--output` from the configured project-relative database
+path relative to the component workdir. Make uses fixed `mkdir -p -- <parent>`
+then `bear --output <database> -- make -B`. No arbitrary shell build steps or
+host execution are introduced. The existing workdir option suffices; no second
+working-directory mechanism is needed.
+
+Phase 6 adds Bear beside existing CMake, Make, Ninja, and pkg-config in the
+pinned image. Image verification must include `bear --version`,
+`cmake --version`, `make --version`, and `pkg-config --version`. Autotools,
+Meson, and Bazel plans remain outside supported Phase 6 execution.
+
+Save/diagnosis resolves the configured tag to an immutable ID. Executing build,
+probe, and compile steps passes that captured ID, never merely records it while
+dispatching the tag. Command dependency lookup uses the service's fixed
+nonexecuting lookup script with a validated positional argument; pkg-config
+lookup uses `pkg-config --exists <module>`. Both operate in the empty managed
+workspace. Absent dependencies are named diagnosis results; runtime failures
+are errors. Read-only corpus capabilities do not invoke this probe profile or
+image resolution; they use retained diagnosis evidence and report unavailable
+when matching evidence is absent.
+
+The service owns a shared workspace lease, bounded snapshot, bounded output,
+compile-database normalization and allowlist parsing. Immediately before atomic
+publication to the exact configured project-relative destination, it rechecks
+the reviewed profile digest and destination containment. A concurrent profile
+save/clear rejects publication. Terminal success/failure stays attributed to the
+captured profile. No other untrusted build output leaves disposable staging for
+the project. See [Build Doctor](build-doctor-design.md) for snapshot and JSON
+limits and [Database Schema](../standards/DATABASE_SCHEMA.md) for retained rows.
+
 ## 4. Artifact Integrity
 
 The promoted harness source and binary identify the exact revision approved by
@@ -167,7 +225,14 @@ Each smoke or full campaign owns a unique run directory. Its output, logs, and
 other evidence are written below that directory rather than a target-wide
 shared `out` path. The run record persists the approved source and binary
 digests; the service recomputes both immediately before launch and fails closed
-on a mismatch.
+on a mismatch. For configured projects it also requires matching immutable
+`harness_build_inputs`, whose profile, database-byte, staged-flags, and image
+digests were captured before the successful compile. Harness and input evidence
+commit atomically before the active marker. The shared service checks run before
+review, smoke, promotion/final reload, campaign seed generation, and final
+fuzzer/corpus dispatch; feature-disabled Build Doctor surfaces do not disable
+these checks. Historical unconfigured harnesses without an input row retain
+existing exact source/binary approval behavior.
 
 The primary workspace mount is read-only for fuzzer execution. Only explicit,
 service-created disposable corpus snapshots and run-output directories are
@@ -224,3 +289,12 @@ line is bounded as well, so malformed output cannot bypass the cap.
 - Automotive runtime tests use fake JSONL transcripts and prove offline,
   virtual, and bench profiles cannot gain host Python, undeclared interfaces,
   raw device mounts, network access, or output beyond their explicit limits.
+- Project-build fixtures cover nested component cwd with complete project mount,
+  sibling includes/output, fixed CMake/Make/Bear argv, and validated publication
+  only at the saved database path after the final profile check.
+- Dependency and compile fixtures inspect actual `SandboxOptions.image`, not
+  only recorded hashes: probes mount no project and compiles dispatch the
+  captured immutable ID despite concurrent tag/profile changes.
+- Read-only readiness fixtures assert zero runtime/image/provider calls;
+  configured-input denial is separately tested through final executors,
+  including builds without the optional `build-doctor` surface.

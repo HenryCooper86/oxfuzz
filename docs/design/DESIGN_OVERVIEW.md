@@ -29,7 +29,7 @@ all under human-in-the-loop supervision.
 | LLM provider pool | hf-provider | `LlmProvider`, `ProviderPool` | (none; ported from the retired y-agent prototype, documented in crate docs) |
 | Target discovery | hf-discovery | `TargetCandidate`, `TargetInventory` | target-discovery-design.md |
 | Semgrep target enrichment | hf-discovery + hf-service | `SemgrepFinding`, `SemgrepTargetScore`, `SemgrepInventoryView` | target-discovery-design.md + service-orchestration-design.md |
-| Project build context | hf-discovery + hf-core | `BuildContext`, `CompileEntry` | harness-generation-design.md |
+| Project build context | hf-service + hf-discovery + hf-core | optional legacy context; authoritative configured input resolution, `BuildContext`, `CompileEntry` | harness-generation-design.md |
 | Harness generation | hf-harness | `Harness`, `HarnessDraft` | harness-generation-design.md |
 | Engine integration | hf-engine | `EngineAdapter`, `FuzzRunConfig`, `FuzzProgress` | engine-integration-design.md |
 | Automotive protocol contracts | hf-automotive | versioned DTO + `Validate` contract | automotive-protocol-fuzzing-design.md |
@@ -49,7 +49,8 @@ all under human-in-the-loop supervision.
 | Remediation handoff | hf-crash + hf-service | versioned remediation DTO | proof-carrying-campaign-intelligence.md |
 | Patch verification | hf-service + hf-crash + hf-storage | durable remediation operation and exact sandbox evidence | patch-to-proof-design.md |
 | Change-aware comparison | hf-service | parsed diff, affected targets, base/head comparison | change-aware-pr-fuzzing-design.md |
-| Build diagnosis | hf-service | detected build system, sandbox build plan | build-doctor-design.md |
+| Build diagnosis and optional profiles | hf-service + hf-storage | `ProjectBuildDiagnosis`, `SaveBuildProfileRequest`, reviewed CMake/Make plan and retained output | build-doctor-design.md |
+| Harness build inputs | hf-service + hf-storage | immutable per-attempt input capture, atomic harness/input persistence, shared executor checks | harness-generation-design.md + ../standards/DATABASE_SCHEMA.md |
 | Coverage blockers | hf-service | ranked uncovered blockers, next experiment | coverage-blocker-design.md |
 | Non-crash oracles | hf-service | typed oracle specification, scaffold, violation | oracle-studio-design.md |
 | Crash disposition | hf-service | ordered disposition, next action, claim ceiling | triage-disposition-design.md |
@@ -96,6 +97,38 @@ harnesses still require smoke evidence and explicit human promotion, all builds
 and runs still use `hf-runtime`, and fuzzer network access remains disabled.
 Presentation layers may display those guarantees but must not expose switches
 that imply they can be weakened.
+
+Project build profiles are optional service-owned configuration. `Unconfigured`
+projects retain existing four-location compile-database resolution and C/C++/Rust
+workflows. Configured projects use only their saved normalized component,
+database, validated CMake definitions, dependencies, selected marker, and exact
+image assumptions. Pre-draft diagnosis stops `NeedsBuild`, `Stale`, and
+`Invalid` before a provider call; a valid cold-start `NeedsBuild` profile keeps
+its reviewed CMake or plain Make/Bear project-build plan. Marker/image changes
+require explicit review/save. Provider-bearing generation/review admission
+resolves configured image freshness live before provider access; retained
+image evidence alone cannot admit those calls. Final executors repeat the live
+check. Plans stage the whole project, select component
+workdir, and publish only a validated normalized database at the configured path
+after rechecking the reviewed profile digest.
+
+Every successful shared compile captures database bytes, actual emitted staged
+flags, optional profile digest, and the immutable image dispatched. The new
+harness revision and immutable input row commit atomically before the active
+marker. Configured mismatches require rebuild/requalification at shared review,
+smoke, both promotion modes/final reload, campaign admission before seed-provider
+use, and final fuzzer/corpus executors. Existing core harness/approval types and
+Work Order v2 wire fields stay unchanged. Build Doctor's existing feature gates
+diagnosis/mutation/build-plan surfaces; durable records and configured-input
+checks remain available when disabled. Read-only corpus availability uses
+matching retained diagnosis without runtime/image/provider calls and names
+unavailable evidence. CLI, REST, Tauri, and GUI use the same service API, show
+proactive diagnosis, optional Save/Clear, exact reviewed argv/image before Run,
+and bilingual retained history. See [Build Doctor](build-doctor-design.md) and
+[Harness Generation](harness-generation-design.md). Planned migration 0031 adds
+profile/diagnosis/input records after delivered Phase 5 migration 0030;
+`clear_knowledge` preserves profiles as configuration and clears their operation
+evidence, while explicit project deletion clears all three record families.
 
 Automotive protocol support follows the same split. Product crates enable the
 feature by default so the workspace is always present, while a

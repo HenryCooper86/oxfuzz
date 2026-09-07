@@ -40,17 +40,18 @@ fn owned(arguments: &[&str]) -> Vec<String> {
     arguments.iter().map(|value| (*value).to_owned()).collect()
 }
 
-#[test]
-fn a_project_without_a_compile_database_resolves_to_none() {
+#[tokio::test]
+async fn a_project_without_a_compile_database_resolves_to_none() {
     let project = tempfile::tempdir().unwrap();
     assert!(test_container()
         .resolve_build_context(project.path())
+        .await
         .unwrap()
         .is_none());
 }
 
-#[test]
-fn a_compile_database_yields_include_dirs_and_defines() {
+#[tokio::test]
+async fn a_compile_database_yields_include_dirs_and_defines() {
     let project = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(project.path().join("include")).unwrap();
     std::fs::write(project.path().join("a.c"), "int a(void){return 0;}").unwrap();
@@ -61,6 +62,7 @@ fn a_compile_database_yields_include_dirs_and_defines() {
 
     let ctx = test_container()
         .resolve_build_context(project.path())
+        .await
         .unwrap()
         .unwrap();
 
@@ -69,8 +71,8 @@ fn a_compile_database_yields_include_dirs_and_defines() {
     assert_eq!(ctx.std_flag.as_deref(), Some("-std=c11"));
 }
 
-#[test]
-fn a_database_in_the_build_subdirectory_is_found() {
+#[tokio::test]
+async fn a_database_in_the_build_subdirectory_is_found() {
     // CMake writes the database into its build tree, not the project root.
     let project = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(project.path().join("build")).unwrap();
@@ -86,25 +88,27 @@ fn a_database_in_the_build_subdirectory_is_found() {
 
     let ctx = test_container()
         .resolve_build_context(project.path())
+        .await
         .unwrap()
         .unwrap();
 
     assert_eq!(ctx.include_dirs, vec![project.path().join("include")]);
 }
 
-#[test]
-fn a_malformed_compile_database_is_an_error() {
+#[tokio::test]
+async fn a_malformed_compile_database_is_an_error() {
     // A present-but-broken database is a configuration fault the operator must
     // see, not something to silently treat as absent.
     let project = tempfile::tempdir().unwrap();
     std::fs::write(project.path().join("compile_commands.json"), "{not json").unwrap();
     assert!(test_container()
         .resolve_build_context(project.path())
+        .await
         .is_err());
 }
 
-#[test]
-fn a_database_yielding_nothing_usable_resolves_to_none() {
+#[tokio::test]
+async fn a_database_yielding_nothing_usable_resolves_to_none() {
     // Parsed cleanly but every argument was rejected or irrelevant: there is
     // nothing for the compiler or the prompt to use, so callers see the same
     // thing they would for a project with no database.
@@ -112,6 +116,7 @@ fn a_database_yielding_nothing_usable_resolves_to_none() {
     write_database(project.path(), &owned(&["cc", "-Wall", "-O2", "-c", "a.c"]));
     assert!(test_container()
         .resolve_build_context(project.path())
+        .await
         .unwrap()
         .is_none());
 }
@@ -120,8 +125,8 @@ fn a_database_yielding_nothing_usable_resolves_to_none() {
 // where the test cannot create one. Gating the whole test rather than the setup
 // keeps it from passing vacuously on Windows.
 #[cfg(unix)]
-#[test]
-fn a_symlinked_compile_database_is_refused() {
+#[tokio::test]
+async fn a_symlinked_compile_database_is_refused() {
     // The database is read from inside an untrusted project; a symlink there
     // must not be able to redirect the read at an arbitrary host file.
     let project = tempfile::tempdir().unwrap();
@@ -132,5 +137,40 @@ fn a_symlinked_compile_database_is_refused() {
 
     assert!(test_container()
         .resolve_build_context(project.path())
+        .await
         .is_err());
+}
+
+#[tokio::test]
+async fn legacy_search_keeps_all_four_locations_in_order() {
+    let project = tempfile::tempdir().unwrap();
+    for (index, relative) in [
+        "compile_commands.json",
+        "build/compile_commands.json",
+        "out/compile_commands.json",
+        ".oxfuzz-build/compile_commands.json",
+    ]
+    .iter()
+    .enumerate()
+    .rev()
+    {
+        let path = project.path().join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        write_database_at(
+            &path,
+            project.path(),
+            &[
+                "cc".into(),
+                format!("-DLOCATION={index}"),
+                "-c".into(),
+                "a.c".into(),
+            ],
+        );
+        let context = test_container()
+            .resolve_build_context(project.path())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(context.defines, [format!("-DLOCATION={index}")]);
+    }
 }

@@ -4,14 +4,7 @@
 //! via a `tokio::sync::broadcast` channel, and the router matches the
 //! `httpTransport.ts` `COMMAND_MAP` used by the web-mode frontend.
 
-#[cfg(any(
-    feature = "automotive-scapy",
-    feature = "campaign-health",
-    feature = "patch-to-proof",
-    feature = "triage-disposition"
-))]
-use axum::extract::Query;
-use axum::extract::{Json, Path, State};
+use axum::extract::{Json, Path, Query, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -729,11 +722,64 @@ fn build_doctor_routes() -> Router<AppState> {
     Router::new()
         .route("/build/diagnose", post(build_diagnose))
         .route("/build/run", post(build_run))
+        .route(
+            "/build/profile",
+            get(build_profile)
+                .put(build_profile_set)
+                .delete(build_profile_clear),
+        )
+        .route("/build/history", get(build_history))
 }
 
 #[cfg(not(feature = "build-doctor"))]
 fn build_doctor_routes() -> Router<AppState> {
     Router::new()
+        .route(
+            "/build/profile",
+            get(build_profile)
+                .put(build_doctor_unavailable_json)
+                .delete(build_doctor_unavailable_json),
+        )
+        .route("/build/diagnose", post(build_doctor_unavailable_json))
+        .route("/build/run", post(build_doctor_unavailable_json))
+        .route("/build/history", get(build_doctor_unavailable_query))
+}
+
+#[cfg(not(feature = "build-doctor"))]
+#[derive(Deserialize)]
+struct UnavailableBuildRequest {
+    project: String,
+}
+
+#[cfg(not(feature = "build-doctor"))]
+fn build_doctor_unavailable(
+    state: &AppState,
+    project: &str,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let _project = approved_project(state, std::path::Path::new(project))?;
+    Ok((
+        StatusCode::NOT_IMPLEMENTED,
+        Json(serde_json::json!({
+            "code": "build_doctor_unavailable",
+            "error": "build diagnosis is not included in this application build",
+        })),
+    ))
+}
+
+#[cfg(not(feature = "build-doctor"))]
+async fn build_doctor_unavailable_json(
+    State(state): State<AppState>,
+    Json(request): Json<UnavailableBuildRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    build_doctor_unavailable(&state, &request.project)
+}
+
+#[cfg(not(feature = "build-doctor"))]
+async fn build_doctor_unavailable_query(
+    State(state): State<AppState>,
+    Query(request): Query<UnavailableBuildRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    build_doctor_unavailable(&state, &request.project)
 }
 
 #[cfg(feature = "harness-tournament")]
@@ -1228,8 +1274,8 @@ async fn harness_tournament(
     Ok(Json(public_value(result)))
 }
 
-#[cfg(feature = "build-doctor")]
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BuildDiagnoseRequest {
     project: String,
 }
@@ -1239,9 +1285,11 @@ async fn build_diagnose(
     State(state): State<AppState>,
     Json(request): Json<BuildDiagnoseRequest>,
 ) -> ApiResult<serde_json::Value> {
+    let project = approved_project(&state, std::path::Path::new(&request.project))?;
     let diagnosis = state
         .container
-        .diagnose_build(std::path::Path::new(&request.project))
+        .diagnose_build(&project)
+        .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(diagnosis)))
 }
@@ -1251,12 +1299,76 @@ async fn build_run(
     State(state): State<AppState>,
     Json(request): Json<hf_service::RunBuildPlanRequest>,
 ) -> ApiResult<serde_json::Value> {
+    let _project = approved_project(&state, std::path::Path::new(&request.project))?;
     let outcome = state
         .container
         .run_build_plan(request)
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(outcome)))
+}
+
+async fn build_profile(
+    State(state): State<AppState>,
+    Query(request): Query<BuildDiagnoseRequest>,
+) -> ApiResult<serde_json::Value> {
+    let project = approved_project(&state, std::path::Path::new(&request.project))?;
+    let view = state
+        .container
+        .build_profile(&project)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(view)))
+}
+
+#[cfg(feature = "build-doctor")]
+async fn build_profile_set(
+    State(state): State<AppState>,
+    Json(request): Json<hf_service::SaveBuildProfileRequest>,
+) -> ApiResult<serde_json::Value> {
+    let _project = approved_project(&state, std::path::Path::new(&request.project))?;
+    let view = state
+        .container
+        .save_build_profile(request)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(view)))
+}
+
+#[cfg(feature = "build-doctor")]
+async fn build_profile_clear(
+    State(state): State<AppState>,
+    Json(request): Json<BuildDiagnoseRequest>,
+) -> ApiResult<serde_json::Value> {
+    let project = approved_project(&state, std::path::Path::new(&request.project))?;
+    state
+        .container
+        .clear_build_profile(&project)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(serde_json::Value::Null))
+}
+
+#[cfg(feature = "build-doctor")]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BuildHistoryRequest {
+    project: String,
+    limit: usize,
+}
+
+#[cfg(feature = "build-doctor")]
+async fn build_history(
+    State(state): State<AppState>,
+    Query(request): Query<BuildHistoryRequest>,
+) -> ApiResult<serde_json::Value> {
+    let project = approved_project(&state, std::path::Path::new(&request.project))?;
+    let history = state
+        .container
+        .build_diagnosis_history(&project, request.limit)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(history)))
 }
 
 #[cfg(feature = "change-aware")]

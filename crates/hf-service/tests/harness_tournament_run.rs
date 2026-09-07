@@ -151,7 +151,12 @@ async fn every_candidate_is_evaluated_and_its_evidence_retained() {
     isolate_workspace();
     let project = write_sample_project();
     let runtime = FixedRuntime::new(0);
-    let container = ServiceContainer::new(runtime.clone(), Some(Arc::new(CodeBlockPool)));
+    let container = ServiceContainer::new(runtime.clone(), Some(Arc::new(CodeBlockPool)))
+        .with_store(Arc::new(
+            hf_storage::Store::connect(project.path().join("state.db"))
+                .await
+                .unwrap(),
+        ));
 
     let result = container
         .run_harness_tournament(request(project.path(), 3))
@@ -187,7 +192,12 @@ async fn a_tournament_with_no_compiling_candidate_is_a_result_with_diagnostics()
     isolate_workspace();
     let project = write_sample_project();
     let runtime = FixedRuntime::new(1);
-    let container = ServiceContainer::new(runtime.clone(), Some(Arc::new(CodeBlockPool)));
+    let container = ServiceContainer::new(runtime.clone(), Some(Arc::new(CodeBlockPool)))
+        .with_store(Arc::new(
+            hf_storage::Store::connect(project.path().join("state.db"))
+                .await
+                .unwrap(),
+        ));
 
     let result = container
         .run_harness_tournament(request(project.path(), 2))
@@ -212,7 +222,12 @@ async fn the_candidate_count_is_validated_before_any_model_call_or_sandbox_run()
     isolate_workspace();
     let project = write_sample_project();
     let runtime = FixedRuntime::new(0);
-    let container = ServiceContainer::new(runtime.clone(), Some(Arc::new(CodeBlockPool)));
+    let container = ServiceContainer::new(runtime.clone(), Some(Arc::new(CodeBlockPool)))
+        .with_store(Arc::new(
+            hf_storage::Store::connect(project.path().join("state.db"))
+                .await
+                .unwrap(),
+        ));
 
     for count in [0, MAX_CANDIDATES + 1] {
         let error = container

@@ -19,6 +19,7 @@ fn isolate_workspace() {
 struct FlakyCompileRuntime {
     fail_first: usize,
     calls: AtomicUsize,
+    replace_database: Option<std::path::PathBuf>,
 }
 
 #[async_trait::async_trait]
@@ -39,6 +40,11 @@ impl hf_core::runtime::RuntimeAdapter for FlakyCompileRuntime {
     ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
         let exit_code = i32::from(n < self.fail_first);
+        if n == 0 {
+            if let Some(project) = &self.replace_database {
+                std::fs::write(project.join("compile_commands.json"),serde_json::to_vec(&serde_json::json!([{"directory":project,"file":"parse.c","arguments":["cc","-DREPAIRED=1","-c","parse.c"]}])).unwrap()).unwrap();
+            }
+        }
         Ok(hf_core::runtime::CommandResult {
             exit_code,
             stdout: String::new(),
@@ -131,8 +137,14 @@ async fn harness_generate_repairs_a_failing_compile() {
     let runtime = Arc::new(FlakyCompileRuntime {
         fail_first: 1,
         calls: AtomicUsize::new(0),
+        replace_database: None,
     });
-    let container = ServiceContainer::new(runtime, Some(Arc::new(CodeBlockPool)));
+    let container =
+        ServiceContainer::new(runtime, Some(Arc::new(CodeBlockPool))).with_store(Arc::new(
+            hf_storage::Store::connect(project.path().join("state.db"))
+                .await
+                .unwrap(),
+        ));
 
     let outcome = container
         .harness_generate(
@@ -160,8 +172,14 @@ async fn harness_generate_gives_up_after_max_repairs() {
     let runtime = Arc::new(FlakyCompileRuntime {
         fail_first: usize::MAX,
         calls: AtomicUsize::new(0),
+        replace_database: None,
     });
-    let container = ServiceContainer::new(runtime.clone(), Some(Arc::new(CodeBlockPool)));
+    let container = ServiceContainer::new(runtime.clone(), Some(Arc::new(CodeBlockPool)))
+        .with_store(Arc::new(
+            hf_storage::Store::connect(project.path().join("state.db"))
+                .await
+                .unwrap(),
+        ));
 
     let err = container
         .harness_generate(
@@ -175,6 +193,18 @@ async fn harness_generate_gives_up_after_max_repairs() {
     assert!(err.is_err(), "should fail after exhausting repairs");
     // 1 initial + 1 repair attempt = 2 compile invocations.
     assert_eq!(runtime.calls.load(Ordering::SeqCst), 2);
+    assert!(container
+        .store()
+        .unwrap()
+        .list_all_harnesses()
+        .await
+        .unwrap()
+        .is_empty());
+    let inputs: i64 = sqlx::query_scalar("SELECT count(*) FROM harness_build_inputs")
+        .fetch_one(container.store().unwrap().pool())
+        .await
+        .unwrap();
+    assert_eq!(inputs, 0);
 }
 
 #[tokio::test]
@@ -188,8 +218,13 @@ async fn failed_compile_does_not_replace_the_active_harness_revision() {
     let runtime = Arc::new(FlakyCompileRuntime {
         fail_first: usize::MAX,
         calls: AtomicUsize::new(0),
+        replace_database: None,
     });
-    let container = ServiceContainer::new(runtime, None);
+    let container = ServiceContainer::new(runtime, None).with_store(Arc::new(
+        hf_storage::Store::connect(project.path().join("state.db"))
+            .await
+            .unwrap(),
+    ));
 
     let result = container
         .harness_compile(
@@ -215,8 +250,13 @@ async fn successful_compile_commits_the_active_harness_revision() {
     let runtime = Arc::new(FlakyCompileRuntime {
         fail_first: 0,
         calls: AtomicUsize::new(0),
+        replace_database: None,
     });
-    let container = ServiceContainer::new(runtime, None);
+    let container = ServiceContainer::new(runtime, None).with_store(Arc::new(
+        hf_storage::Store::connect(project.path().join("state.db"))
+            .await
+            .unwrap(),
+    ));
 
     container
         .harness_compile(
@@ -234,4 +274,97 @@ async fn successful_compile_commits_the_active_harness_revision() {
         std::fs::read_to_string(workspace.join("harness.source")).unwrap(),
         "new active source"
     );
+}
+
+#[tokio::test]
+async fn new_compilation_requires_store_before_runtime_or_provider() {
+    isolate_workspace();
+    let project = write_sample_project();
+    let runtime = Arc::new(FlakyCompileRuntime {
+        fail_first: 0,
+        calls: AtomicUsize::new(0),
+        replace_database: None,
+    });
+    let container = ServiceContainer::new(runtime.clone(), Some(Arc::new(CodeBlockPool)));
+    let compile = container
+        .harness_compile(
+            "new source".into(),
+            project.path(),
+            EngineKind::LibFuzzer,
+            "parse_entry",
+            TargetLanguage::C,
+        )
+        .await;
+    assert!(compile
+        .unwrap_err()
+        .to_string()
+        .contains("persistent service store"));
+    let generated = container
+        .harness_generate(
+            project.path(),
+            "parse_entry",
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+            0,
+        )
+        .await;
+    assert!(generated
+        .unwrap_err()
+        .to_string()
+        .contains("persistent service store"));
+    assert_eq!(runtime.calls.load(Ordering::SeqCst), 0);
+}
+
+#[cfg(feature = "build-context")]
+#[tokio::test]
+async fn repair_success_records_only_the_successful_attempts_fresh_database_flags() {
+    use sha2::Digest;
+    isolate_workspace();
+    let project = write_sample_project();
+    std::fs::write(project.path().join("compile_commands.json"),serde_json::to_vec(&serde_json::json!([{"directory":project.path(),"file":"parse.c","arguments":["cc","-DORIGINAL=1","-c","parse.c"]}])).unwrap()).unwrap();
+    let runtime = Arc::new(FlakyCompileRuntime {
+        fail_first: 1,
+        calls: AtomicUsize::new(0),
+        replace_database: Some(project.path().to_path_buf()),
+    });
+    let store = Arc::new(
+        hf_storage::Store::connect(project.path().join("state.db"))
+            .await
+            .unwrap(),
+    );
+    let container = ServiceContainer::new(runtime.clone(), Some(Arc::new(CodeBlockPool)))
+        .with_store(store.clone());
+    let outcome = container
+        .harness_generate(
+            project.path(),
+            "parse_entry",
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome.repairs_used, 1);
+    assert_eq!(runtime.calls.load(Ordering::SeqCst), 2);
+    let harnesses = store.list_all_harnesses().await.unwrap();
+    assert_eq!(harnesses.len(), 1);
+    let inputs = store
+        .harness_build_inputs(harnesses[0].id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        inputs.compile_flags_sha256,
+        format!("{:x}", sha2::Sha256::digest(br#"["-DREPAIRED=1"]"#))
+    );
+    assert_eq!(
+        inputs.compile_database_sha256,
+        Some(format!(
+            "{:x}",
+            sha2::Sha256::digest(
+                std::fs::read(project.path().join("compile_commands.json")).unwrap()
+            )
+        ))
+    );
+    assert_eq!(harnesses[0].build_cmd.extra_flags, vec!["-DREPAIRED=1"]);
 }

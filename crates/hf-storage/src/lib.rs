@@ -5,6 +5,7 @@
 //! forward-only migrations on connect, and exposes typed repository methods for
 //! runs, targets, harnesses, crashes, and corpus entries.
 
+mod build_profile_store;
 mod store;
 mod work_order_store;
 
@@ -16,6 +17,15 @@ pub mod session_store;
 pub mod transcript;
 pub mod transcript_display;
 
+pub use build_profile_store::{
+    BuildDependency, BuildDependencyKind, BuildDependencyStatus, BuildDiagnosisEvidence,
+    BuildDiagnosisOperation, BuildDiagnosisRecord, BuildDiagnosisStatus, BuildPlanEvidence,
+    BuildPlanStepEvidence, BuildProfileState, BuildSystemEvidence, BuildTerminalEvidence,
+    BuildTerminalStatus, DetectedBuildStatus, DetectedBuildSystem, ExpectedHarnessBuildIdentity,
+    HarnessBuildContextEvidence, HarnessBuildContextRecord, HarnessBuildInputsRecord,
+    ProfileBuildSystem, ProjectBuildProfileRecord, MAX_BUILD_DIAGNOSIS_HISTORY,
+    MAX_BUILD_JSON_BYTES,
+};
 pub use checkpoint_store::SqliteChatCheckpointStore;
 pub use remediation_store::{
     RemediationOperationCompletion, RemediationOperationRecord, RemediationOperationStage,

@@ -5653,3 +5653,1183 @@ async fn deleting_a_run_removes_its_health_children_without_foreign_key_pragmas(
         .unwrap()
         .is_empty());
 }
+
+fn build_profile(project: &str) -> hf_storage::ProjectBuildProfileRecord {
+    hf_storage::ProjectBuildProfileRecord {
+        project_root: project.into(),
+        component_root: "components/parser".into(),
+        build_system: hf_storage::ProfileBuildSystem::CMake,
+        compile_database_path: "build/parser/compile_commands.json".into(),
+        cmake_definitions: [("BUILD_TESTING".into(), "OFF".into())].into(),
+        dependencies: vec![hf_storage::BuildDependency {
+            kind: hf_storage::BuildDependencyKind::Command,
+            name: "cmake".into(),
+        }],
+        sandbox_image_tag: "oxfuzz:latest".into(),
+        sandbox_image_id: format!("sha256:{}", "a".repeat(64)),
+        marker_path: "components/parser/CMakeLists.txt".into(),
+        marker_sha256: "b".repeat(64),
+        profile_sha256: "c".repeat(64),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    }
+}
+
+fn build_diagnosis(
+    profile: &hf_storage::ProjectBuildProfileRecord,
+) -> hf_storage::BuildDiagnosisRecord {
+    hf_storage::BuildDiagnosisRecord {
+        id: Uuid::new_v4(),
+        project_root: profile.project_root.clone(),
+        profile_sha256: Some(profile.profile_sha256.clone()),
+        status: hf_storage::BuildDiagnosisStatus::Succeeded,
+        diagnosis: hf_storage::BuildDiagnosisEvidence {
+            schema_version: 1,
+            operation: hf_storage::BuildDiagnosisOperation::Diagnose,
+            profile: Some(profile.clone()),
+            detected: vec![hf_storage::BuildSystemEvidence {
+                build_system: hf_storage::DetectedBuildSystem::CMake,
+                status: hf_storage::DetectedBuildStatus::Supported,
+                markers: vec![profile.marker_path.clone()],
+                missing_tool: None,
+            }],
+            profile_state: hf_storage::BuildProfileState::NeedsBuild,
+            dependency_statuses: vec![hf_storage::BuildDependencyStatus {
+                dependency: profile.dependencies[0].clone(),
+                available: true,
+            }],
+            reasons: vec!["configured database is absent".into()],
+            plan: Some(hf_storage::BuildPlanEvidence {
+                steps: vec![hf_storage::BuildPlanStepEvidence {
+                    argv: vec![
+                        "cmake".into(),
+                        "-S".into(),
+                        ".".into(),
+                        "-B".into(),
+                        "../../build/parser".into(),
+                    ],
+                    working_dir: profile.component_root.clone(),
+                    purpose: "configure parser".into(),
+                }],
+                component_root: profile.component_root.clone(),
+                expected_artifact: profile.compile_database_path.clone(),
+                profile_sha256: profile.profile_sha256.clone(),
+                sandbox_image_tag: profile.sandbox_image_tag.clone(),
+                sandbox_image_id: profile.sandbox_image_id.clone(),
+            }),
+            legacy_build_context_available: false,
+            terminal: None,
+        },
+        created_at: Utc::now(),
+    }
+}
+
+fn build_inputs(
+    harness: &Harness,
+    profile: &hf_storage::ProjectBuildProfileRecord,
+) -> hf_storage::HarnessBuildInputsRecord {
+    hf_storage::HarnessBuildInputsRecord {
+        harness_id: harness.id,
+        project_root: profile.project_root.clone(),
+        profile_sha256: Some(profile.profile_sha256.clone()),
+        compile_database_sha256: Some("d".repeat(64)),
+        compile_flags_sha256: "e".repeat(64),
+        sandbox_image_id: profile.sandbox_image_id.clone(),
+        build_input_sha256: "f".repeat(64),
+        created_at: Utc::now(),
+    }
+}
+
+#[tokio::test]
+async fn build_profile_upsert_preserves_creation_and_clear_retains_history() {
+    let (store, _dir) = temp_store().await;
+    assert!(store
+        .project_build_profile("/proj")
+        .await
+        .unwrap()
+        .is_none());
+    let mut profile = build_profile("/proj");
+    store.set_project_build_profile(&profile).await.unwrap();
+    assert_eq!(
+        store.project_build_profile("/proj").await.unwrap(),
+        Some(profile.clone())
+    );
+    let diagnosis = build_diagnosis(&profile);
+    store.append_build_diagnosis(&diagnosis).await.unwrap();
+    store.set_project_build_profile(&profile).await.unwrap();
+    let created = profile.created_at;
+    profile.created_at += Duration::seconds(1);
+    profile.updated_at += Duration::seconds(2);
+    profile.profile_sha256 = "d".repeat(64);
+    store.set_project_build_profile(&profile).await.unwrap();
+    profile.created_at = created;
+    assert_eq!(
+        store.project_build_profile("/proj").await.unwrap(),
+        Some(profile)
+    );
+    store.clear_project_build_profile("/proj").await.unwrap();
+    assert!(store
+        .project_build_profile("/proj")
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        store.build_diagnosis_history("/proj", 1).await.unwrap(),
+        vec![diagnosis]
+    );
+}
+
+#[tokio::test]
+async fn build_profile_rejects_malformed_durable_configuration() {
+    let (store, _dir) = temp_store().await;
+    let profile = build_profile("/proj");
+    for (column, value) in [
+        ("cmake_definitions_json", "[]"),
+        ("cmake_definitions_json", r#"{"bad_option":"ON"}"#),
+        ("cmake_definitions_json", r#"{"BUILD_TESTING":"-bad"}"#),
+        ("dependencies_json", r#"[{"kind":"shell","name":"make"}]"#),
+        (
+            "dependencies_json",
+            r#"[{"kind":"command","name":"../make"}]"#,
+        ),
+        (
+            "dependencies_json",
+            r#"[{"kind":"command","name":"make","extra":true}]"#,
+        ),
+        (
+            "dependencies_json",
+            r#"[{"kind":"command","name":"z"},{"kind":"command","name":"a"}]"#,
+        ),
+        (
+            "dependencies_json",
+            r#"[{"kind":"command","name":"a"},{"kind":"command","name":"a"}]"#,
+        ),
+        ("profile_sha256", "BAD"),
+        ("marker_sha256", "BAD"),
+        ("sandbox_image_id", "mutable:tag"),
+        ("created_at", "yesterday"),
+        ("updated_at", "yesterday"),
+        ("component_root", "./parser"),
+        ("component_root", "../escape"),
+        ("component_root", "/absolute"),
+        ("component_root", "parser//nested"),
+        ("component_root", "C:\\parser"),
+        ("compile_database_path", "build/database.json"),
+        ("marker_path", "a/../Makefile"),
+    ] {
+        store.clear_project_build_profile("/proj").await.unwrap();
+        store.set_project_build_profile(&profile).await.unwrap();
+        sqlx::query(&format!("UPDATE project_build_profiles SET {column} = ?1"))
+            .bind(value)
+            .execute(store.pool())
+            .await
+            .unwrap();
+        assert!(
+            store.project_build_profile("/proj").await.is_err(),
+            "accepted {column}: {value}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn build_diagnosis_history_is_bounded_ordered_and_immutable() {
+    let (store, _dir) = temp_store().await;
+    let mut first = build_diagnosis(&build_profile("/proj"));
+    first.id = Uuid::from_u128(1);
+    let mut second = first.clone();
+    second.id = Uuid::from_u128(2);
+    let mut newest = first.clone();
+    newest.id = Uuid::from_u128(3);
+    newest.created_at += Duration::seconds(1);
+    for record in [&newest, &first, &second] {
+        store.append_build_diagnosis(record).await.unwrap();
+    }
+    store.append_build_diagnosis(&first).await.unwrap();
+    assert_eq!(
+        store.build_diagnosis_history("/proj", 2).await.unwrap(),
+        vec![newest, second]
+    );
+    assert!(store.build_diagnosis_history("/proj", 0).await.is_err());
+    assert!(store.build_diagnosis_history("/proj", 101).await.is_err());
+    assert!(store
+        .build_diagnosis_history("/other", 100)
+        .await
+        .unwrap()
+        .is_empty());
+    first.diagnosis.reasons.push("different evidence".into());
+    assert!(store.append_build_diagnosis(&first).await.is_err());
+    let mut huge = first.clone();
+    huge.id = Uuid::new_v4();
+    huge.diagnosis.reasons = vec!["x".repeat(65_536)];
+    assert!(store.append_build_diagnosis(&huge).await.is_err());
+}
+
+#[tokio::test]
+async fn build_diagnosis_rejects_malformed_nested_durable_evidence() {
+    let (store, _dir) = temp_store().await;
+    // Simulate damaged durable data after bypassing the ordinary immutable-write guard.
+    sqlx::query("DROP TRIGGER build_diagnosis_runs_immutable")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let record = build_diagnosis(&build_profile("/proj"));
+    store.append_build_diagnosis(&record).await.unwrap();
+    let valid = serde_json::to_value(&record.diagnosis).unwrap();
+    for (pointer, value) in [
+        ("/schema_version", serde_json::json!(99)),
+        ("/operation", serde_json::json!("invented")),
+        ("/profile_state", serde_json::json!("invented")),
+        ("/detected/0/build_system", serde_json::json!("invented")),
+        (
+            "/dependency_statuses/0/available",
+            serde_json::json!("true"),
+        ),
+        ("/profile/profile_sha256", serde_json::json!("bad")),
+        ("/plan/steps/0/working_dir", serde_json::json!("../escape")),
+        ("/plan/sandbox_image_id", serde_json::json!("mutable:tag")),
+        ("/plan/profile_sha256", serde_json::json!("a".repeat(64))),
+    ] {
+        let mut malformed = valid.clone();
+        *malformed.pointer_mut(pointer).unwrap() = value;
+        sqlx::query("UPDATE build_diagnosis_runs SET diagnosis_json = ?1")
+            .bind(malformed.to_string())
+            .execute(store.pool())
+            .await
+            .unwrap();
+        assert!(
+            store.build_diagnosis_history("/proj", 1).await.is_err(),
+            "accepted {pointer}"
+        );
+    }
+    for malformed in ["{}".to_string(), {
+        let mut value = valid.clone();
+        value["plan"]["extra"] = serde_json::json!(true);
+        value.to_string()
+    }] {
+        sqlx::query("UPDATE build_diagnosis_runs SET diagnosis_json = ?1")
+            .bind(malformed)
+            .execute(store.pool())
+            .await
+            .unwrap();
+        assert!(store.build_diagnosis_history("/proj", 1).await.is_err());
+    }
+}
+
+#[tokio::test]
+async fn build_inputs_atomic_retry_rolls_back_harness_changes_and_checks_ownership() {
+    let (store, _dir) = temp_store().await;
+    let target = sample_target("/proj");
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    let harness = sample_harness(target.id);
+    let profile = build_profile("/proj");
+    let inputs = build_inputs(&harness, &profile);
+    store
+        .upsert_harness_with_build_inputs(&harness, &inputs)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.harness_build_inputs(harness.id).await.unwrap(),
+        Some(inputs.clone())
+    );
+    store
+        .upsert_harness_with_build_inputs(&harness, &inputs)
+        .await
+        .unwrap();
+    store.set_harness_build_inputs(&inputs).await.unwrap();
+    let mut changed = inputs.clone();
+    changed.created_at += Duration::seconds(1);
+    let mut advanced = harness.clone();
+    advanced.status = HarnessStatus::Compiled;
+    assert!(store
+        .upsert_harness_with_build_inputs(&advanced, &changed)
+        .await
+        .is_err());
+    assert_eq!(
+        store.get_harness(harness.id).await.unwrap().unwrap().status,
+        harness.status
+    );
+    changed = inputs.clone();
+    changed.compile_flags_sha256 = "a".repeat(64);
+    assert!(store.set_harness_build_inputs(&changed).await.is_err());
+    assert_eq!(
+        store.harness_build_inputs(harness.id).await.unwrap(),
+        Some(inputs)
+    );
+    let other = sample_harness(target.id);
+    let wrong_project = build_inputs(&other, &build_profile("/other"));
+    assert!(store
+        .upsert_harness_with_build_inputs(&other, &wrong_project)
+        .await
+        .is_err());
+    assert!(store.get_harness(other.id).await.unwrap().is_none());
+    let mut wrong_id = build_inputs(&other, &profile);
+    wrong_id.harness_id = Uuid::new_v4();
+    assert!(store
+        .upsert_harness_with_build_inputs(&other, &wrong_id)
+        .await
+        .is_err());
+    assert!(store.get_harness(other.id).await.unwrap().is_none());
+    let missing_target = sample_harness(Uuid::new_v4());
+    assert!(store
+        .upsert_harness_with_build_inputs(&missing_target, &build_inputs(&missing_target, &profile))
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn build_inputs_insert_failure_rolls_back_pair_and_legacy_null_roundtrips() {
+    let (store, _dir) = temp_store().await;
+    let target = sample_target("/proj");
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    let harness = sample_harness(target.id);
+    let mut inputs = build_inputs(&harness, &build_profile("/proj"));
+    inputs.profile_sha256 = None;
+    inputs.compile_database_sha256 = None;
+    sqlx::query("CREATE TRIGGER reject_build_inputs BEFORE INSERT ON harness_build_inputs BEGIN SELECT RAISE(ABORT, 'reject inputs'); END")
+        .execute(store.pool()).await.unwrap();
+    assert!(store
+        .upsert_harness_with_build_inputs(&harness, &inputs)
+        .await
+        .is_err());
+    assert!(store.get_harness(harness.id).await.unwrap().is_none());
+    sqlx::query("DROP TRIGGER reject_build_inputs")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    store
+        .upsert_harness_with_build_inputs(&harness, &inputs)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.harness_build_inputs(harness.id).await.unwrap(),
+        Some(inputs)
+    );
+    // Simulate damaged durable data after bypassing the ordinary immutable-write guard.
+    sqlx::query("DROP TRIGGER harness_build_inputs_immutable")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE harness_build_inputs SET compile_flags_sha256 = 'bad'")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    assert!(store.harness_build_inputs(harness.id).await.is_err());
+}
+
+#[tokio::test]
+async fn build_profile_cleanup_preserves_configuration_and_other_projects() {
+    let (store, _dir) = temp_store().await;
+    let mut harness_ids = Vec::new();
+    for project in ["/proj", "/other"] {
+        let profile = build_profile(project);
+        store.set_project_build_profile(&profile).await.unwrap();
+        store
+            .append_build_diagnosis(&build_diagnosis(&profile))
+            .await
+            .unwrap();
+        let target = sample_target(project);
+        store.upsert_target(&target, Utc::now()).await.unwrap();
+        let harness = sample_harness(target.id);
+        store
+            .upsert_harness_with_build_inputs(&harness, &build_inputs(&harness, &profile))
+            .await
+            .unwrap();
+        harness_ids.push(harness.id);
+    }
+    store.delete_project("/proj").await.unwrap();
+    assert!(store
+        .project_build_profile("/proj")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store
+        .build_diagnosis_history("/proj", 1)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .harness_build_inputs(harness_ids[0])
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store
+        .project_build_profile("/other")
+        .await
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        store
+            .build_diagnosis_history("/other", 1)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(store
+        .harness_build_inputs(harness_ids[1])
+        .await
+        .unwrap()
+        .is_some());
+    store.clear_knowledge().await.unwrap();
+    assert!(store
+        .project_build_profile("/other")
+        .await
+        .unwrap()
+        .is_some());
+    assert!(store
+        .build_diagnosis_history("/other", 1)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .harness_build_inputs(harness_ids[1])
+        .await
+        .unwrap()
+        .is_none());
+    store.delete_project("/other").await.unwrap();
+    assert!(store
+        .project_build_profile("/other")
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn build_profile_guarded_promotion_rejects_stale_profile_and_input() {
+    let (store, _dir) = temp_store().await;
+    let profile = build_profile("/proj");
+    let target = sample_target("/proj");
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    store.set_project_build_profile(&profile).await.unwrap();
+    let mut harness = smoke_passed_harness(target.id);
+    let inputs = build_inputs(&harness, &profile);
+    store
+        .upsert_harness_with_build_inputs(&harness, &inputs)
+        .await
+        .unwrap();
+    harness.status = HarnessStatus::Promoted;
+    for (profile_hash, input_hash) in [
+        ("a".repeat(64), inputs.build_input_sha256.clone()),
+        (profile.profile_sha256.clone(), "a".repeat(64)),
+    ] {
+        let expected = hf_storage::ExpectedHarnessBuildIdentity {
+            project_root: "/proj",
+            profile_sha256: Some(&profile_hash),
+            build_input_sha256: Some(&input_hash),
+        };
+        assert!(store
+            .promote_harness_with_approval_and_build_identity(
+                &harness,
+                HarnessApprovalKind::CleanSmoke,
+                &"a".repeat(64),
+                &"b".repeat(64),
+                Utc::now(),
+                &expected
+            )
+            .await
+            .is_err());
+        assert_eq!(
+            store.get_harness(harness.id).await.unwrap().unwrap().status,
+            HarnessStatus::SmokePassed
+        );
+        assert!(store
+            .harness_approval(harness.id, &"a".repeat(64), &"b".repeat(64))
+            .await
+            .unwrap()
+            .is_none());
+    }
+    let expected = hf_storage::ExpectedHarnessBuildIdentity {
+        project_root: "/proj",
+        profile_sha256: Some(&profile.profile_sha256),
+        build_input_sha256: Some(&inputs.build_input_sha256),
+    };
+    store
+        .promote_harness_with_approval_and_build_identity(
+            &harness,
+            HarnessApprovalKind::CleanSmoke,
+            &"a".repeat(64),
+            &"b".repeat(64),
+            Utc::now(),
+            &expected,
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn build_inputs_writers_wait_before_reading_harness_revision() {
+    let (store, dir) = temp_store().await;
+    let other = Store::connect(dir.path().join("test.db")).await.unwrap();
+    let target = sample_target("/proj");
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    let mut harness = sample_harness(target.id);
+    store.upsert_harness(&harness).await.unwrap();
+    harness.status = HarnessStatus::Compiled;
+    let profile = build_profile("/proj");
+    let inputs = build_inputs(&harness, &profile);
+    for atomic in [false, true] {
+        let writer = store.pool().begin_with("BEGIN IMMEDIATE").await.unwrap();
+        let operation = async {
+            if atomic {
+                other
+                    .upsert_harness_with_build_inputs(&harness, &inputs)
+                    .await
+            } else {
+                other.upsert_harness(&harness).await
+            }
+        };
+        tokio::pin!(operation);
+        assert!(
+            tokio::time::timeout(StdDuration::from_millis(100), &mut operation)
+                .await
+                .is_err(),
+            "a competing writer must wait before reading, not fail upgrading a snapshot"
+        );
+        writer.commit().await.unwrap();
+        operation.await.unwrap();
+    }
+    assert_eq!(
+        store.get_harness(harness.id).await.unwrap().unwrap().status,
+        HarnessStatus::Compiled
+    );
+    assert_eq!(
+        store.harness_build_inputs(harness.id).await.unwrap(),
+        Some(inputs)
+    );
+}
+
+#[tokio::test]
+async fn build_profile_save_orders_before_guarded_promotion_on_another_connection() {
+    let (store, dir) = temp_store().await;
+    let other = Store::connect(dir.path().join("test.db")).await.unwrap();
+    let profile = build_profile("/proj");
+    let target = sample_target("/proj");
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    store.set_project_build_profile(&profile).await.unwrap();
+    let mut harness = smoke_passed_harness(target.id);
+    let inputs = build_inputs(&harness, &profile);
+    store
+        .upsert_harness_with_build_inputs(&harness, &inputs)
+        .await
+        .unwrap();
+    harness.status = HarnessStatus::Promoted;
+    let expected = hf_storage::ExpectedHarnessBuildIdentity {
+        project_root: "/proj",
+        profile_sha256: Some(&profile.profile_sha256),
+        build_input_sha256: Some(&inputs.build_input_sha256),
+    };
+    let mut writer = store.pool().begin_with("BEGIN IMMEDIATE").await.unwrap();
+    sqlx::query(
+        "UPDATE project_build_profiles SET profile_sha256 = ?1 WHERE project_root = '/proj'",
+    )
+    .bind("d".repeat(64))
+    .execute(&mut *writer)
+    .await
+    .unwrap();
+    let source = "a".repeat(64);
+    let binary = "b".repeat(64);
+    let operation = other.promote_harness_with_approval_and_build_identity(
+        &harness,
+        HarnessApprovalKind::CleanSmoke,
+        &source,
+        &binary,
+        Utc::now(),
+        &expected,
+    );
+    tokio::pin!(operation);
+    assert!(
+        tokio::time::timeout(StdDuration::from_millis(100), &mut operation)
+            .await
+            .is_err()
+    );
+    writer.commit().await.unwrap();
+    assert!(matches!(operation.await, Err(StorageError::InvalidData(_))));
+    assert_eq!(
+        store.get_harness(harness.id).await.unwrap().unwrap().status,
+        HarnessStatus::SmokePassed
+    );
+    assert!(store
+        .harness_approval(harness.id, &source, &binary)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn build_evidence_sql_update_and_replace_cannot_rewrite_retained_rows() {
+    let (store, _dir) = temp_store().await;
+    let target = sample_target("/proj");
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    let harness = sample_harness(target.id);
+    let profile = build_profile("/proj");
+    let inputs = build_inputs(&harness, &profile);
+    store
+        .upsert_harness_with_build_inputs(&harness, &inputs)
+        .await
+        .unwrap();
+    let diagnosis = build_diagnosis(&profile);
+    store.append_build_diagnosis(&diagnosis).await.unwrap();
+    for statement in [
+        "UPDATE harness_build_inputs SET project_root = '/other'",
+        "INSERT OR REPLACE INTO harness_build_inputs SELECT harness_id, '/other', profile_sha256, compile_database_sha256, compile_flags_sha256, sandbox_image_id, build_input_sha256, created_at FROM harness_build_inputs",
+        "UPDATE build_diagnosis_runs SET project_root = '/other'",
+        "INSERT OR REPLACE INTO build_diagnosis_runs SELECT id, '/other', profile_sha256, status, diagnosis_json, created_at FROM build_diagnosis_runs",
+    ] {
+        assert!(sqlx::query(statement).execute(store.pool()).await.is_err(), "accepted {statement}");
+    }
+    assert_eq!(
+        store.harness_build_inputs(harness.id).await.unwrap(),
+        Some(inputs)
+    );
+    assert_eq!(
+        store.build_diagnosis_history("/proj", 1).await.unwrap(),
+        vec![diagnosis]
+    );
+    sqlx::query("DELETE FROM harnesses WHERE id = ?1")
+        .bind(harness.id.to_string())
+        .execute(store.pool())
+        .await
+        .unwrap();
+    assert!(store
+        .harness_build_inputs(harness.id)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn build_diagnosis_requires_complete_coherent_terminal_evidence() {
+    let (store, _dir) = temp_store().await;
+    let mut record = build_diagnosis(&build_profile("/proj"));
+    record.diagnosis.operation = hf_storage::BuildDiagnosisOperation::Build;
+    assert!(
+        store.append_build_diagnosis(&record).await.is_err(),
+        "build without terminal evidence"
+    );
+    record.diagnosis.terminal = Some(hf_storage::BuildTerminalEvidence {
+        status: hf_storage::BuildTerminalStatus::Succeeded,
+        step_index: Some(0),
+        exit_code: Some(0),
+        stdout: "configured".into(),
+        stderr: String::new(),
+        output_truncated: false,
+        failure_code: None,
+        failure_message: None,
+    });
+    store.append_build_diagnosis(&record).await.unwrap();
+    let mut malformed = serde_json::to_value(&record.diagnosis).unwrap();
+    malformed["terminal"]
+        .as_object_mut()
+        .unwrap()
+        .remove("exit_code");
+    assert!(
+        serde_json::from_value::<hf_storage::BuildDiagnosisEvidence>(malformed).is_err(),
+        "missing nullable field accepted"
+    );
+    record.id = Uuid::new_v4();
+    record.status = hf_storage::BuildDiagnosisStatus::Failed;
+    assert!(
+        store.append_build_diagnosis(&record).await.is_err(),
+        "terminal disagrees with row outcome"
+    );
+}
+
+#[tokio::test]
+async fn build_diagnosis_json_limit_counts_utf8_bytes_without_truncating_json() {
+    let (store, _dir) = temp_store().await;
+    let mut record = build_diagnosis(&build_profile("/proj"));
+    record.diagnosis.reasons.clear();
+    record.diagnosis.reasons.push(String::new());
+    let overhead = serde_json::to_string(&record.diagnosis).unwrap().len();
+    record.diagnosis.reasons[0] = "x".repeat(65_536 - overhead - 2) + "é";
+    assert_eq!(
+        serde_json::to_string(&record.diagnosis).unwrap().len(),
+        65_536
+    );
+    store.append_build_diagnosis(&record).await.unwrap();
+    assert_eq!(
+        store.build_diagnosis_history("/proj", 1).await.unwrap(),
+        vec![record.clone()]
+    );
+    record.id = Uuid::new_v4();
+    record.diagnosis.reasons[0].push('x');
+    assert!(store.append_build_diagnosis(&record).await.is_err());
+    for invalid_json in [
+        "not json".to_owned(),
+        serde_json::to_string(&record.diagnosis).unwrap(),
+    ] {
+        assert!(sqlx::query("INSERT INTO build_diagnosis_runs VALUES (?1, '/proj', NULL, 'failed', ?2, '2026-09-08T00:00:00.000000000Z')")
+            .bind(Uuid::new_v4().to_string()).bind(invalid_json).execute(store.pool()).await.is_err());
+    }
+}
+
+#[tokio::test]
+async fn build_profile_old_compile_capture_survives_save_but_cannot_promote() {
+    let (store, _dir) = temp_store().await;
+    let mut profile = build_profile("/proj");
+    let target = sample_target("/proj");
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    let mut harness = smoke_passed_harness(target.id);
+    let captured = build_inputs(&harness, &profile);
+    profile.profile_sha256 = "d".repeat(64);
+    store.set_project_build_profile(&profile).await.unwrap();
+    store
+        .upsert_harness_with_build_inputs(&harness, &captured)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.harness_build_inputs(harness.id).await.unwrap(),
+        Some(captured.clone())
+    );
+    harness.status = HarnessStatus::Promoted;
+    let expected = hf_storage::ExpectedHarnessBuildIdentity {
+        project_root: "/proj",
+        profile_sha256: Some(&profile.profile_sha256),
+        build_input_sha256: Some(&captured.build_input_sha256),
+    };
+    assert!(store
+        .promote_harness_with_approval_and_build_identity(
+            &harness,
+            HarnessApprovalKind::CleanSmoke,
+            &"a".repeat(64),
+            &"b".repeat(64),
+            Utc::now(),
+            &expected
+        )
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn build_profile_cleanup_rolls_back_all_evidence_on_delete_failure() {
+    let (store, _dir) = temp_store().await;
+    let profile = build_profile("/proj");
+    let diagnosis = build_diagnosis(&profile);
+    store.set_project_build_profile(&profile).await.unwrap();
+    store.append_build_diagnosis(&diagnosis).await.unwrap();
+    let target = sample_target("/proj");
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    let harness = sample_harness(target.id);
+    let inputs = build_inputs(&harness, &profile);
+    store
+        .upsert_harness_with_build_inputs(&harness, &inputs)
+        .await
+        .unwrap();
+    sqlx::query("CREATE TRIGGER reject_diagnosis_delete BEFORE DELETE ON build_diagnosis_runs BEGIN SELECT RAISE(ABORT, 'reject delete'); END")
+        .execute(store.pool()).await.unwrap();
+    for delete_project in [true, false] {
+        let result = if delete_project {
+            store.delete_project("/proj").await
+        } else {
+            store.clear_knowledge().await
+        };
+        assert!(result.is_err());
+        assert_eq!(
+            store.harness_build_inputs(harness.id).await.unwrap(),
+            Some(inputs.clone())
+        );
+        assert!(store.get_harness(harness.id).await.unwrap().is_some());
+        assert_eq!(
+            store.project_build_profile("/proj").await.unwrap(),
+            Some(profile.clone())
+        );
+        assert_eq!(
+            store.build_diagnosis_history("/proj", 1).await.unwrap(),
+            vec![diagnosis.clone()]
+        );
+    }
+    sqlx::query("DROP TRIGGER reject_diagnosis_delete")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    store.delete_project("/proj").await.unwrap();
+    assert!(store
+        .project_build_profile("/proj")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store
+        .build_diagnosis_history("/proj", 1)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn build_profile_roundtrips_canonical_project_roots_on_supported_platforms() {
+    let (store, dir) = temp_store().await;
+    let canonical = dir.path().canonicalize().unwrap();
+    for project in [
+        canonical.to_str().unwrap(),
+        "/",
+        "/projects/parser:v2",
+        r"C:\projects\parser",
+        r"C:\",
+        r"\\?\C:\projects\parser",
+        r"\\server\share\parser",
+        r"\\?\UNC\server\share\parser",
+    ] {
+        let profile = build_profile(project);
+        store.set_project_build_profile(&profile).await.unwrap();
+        assert_eq!(
+            store.project_build_profile(project).await.unwrap(),
+            Some(profile),
+            "{project}"
+        );
+    }
+    for project in [
+        "relative/project",
+        "C:relative",
+        r"C:\projects\..\other",
+        r"C:\projects/../other",
+        r"\\?\C:\projects\.\parser",
+        r"\\server",
+        r"\\?\UNC\server",
+        r"UNC\server\share",
+        "/projects/../other",
+        "/projects//parser",
+    ] {
+        let profile = build_profile(project);
+        assert!(
+            store.set_project_build_profile(&profile).await.is_err(),
+            "accepted {project}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn build_inputs_reject_every_changed_immutable_field_on_retry() {
+    let (store, _dir) = temp_store().await;
+    let target = sample_target("/proj");
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    let harness = sample_harness(target.id);
+    let inputs = build_inputs(&harness, &build_profile("/proj"));
+    store
+        .upsert_harness_with_build_inputs(&harness, &inputs)
+        .await
+        .unwrap();
+    let mut retries = Vec::new();
+    let mut changed = inputs.clone();
+    changed.project_root = "/other".into();
+    retries.push(changed);
+    let mut changed = inputs.clone();
+    changed.profile_sha256 = None;
+    retries.push(changed);
+    let mut changed = inputs.clone();
+    changed.compile_database_sha256 = Some("a".repeat(64));
+    retries.push(changed);
+    let mut changed = inputs.clone();
+    changed.compile_flags_sha256 = "a".repeat(64);
+    retries.push(changed);
+    let mut changed = inputs.clone();
+    changed.sandbox_image_id = format!("sha256:{}", "b".repeat(64));
+    retries.push(changed);
+    let mut changed = inputs.clone();
+    changed.build_input_sha256 = "a".repeat(64);
+    retries.push(changed);
+    let mut changed = inputs.clone();
+    changed.created_at += Duration::nanoseconds(1);
+    retries.push(changed);
+    for changed in retries {
+        assert!(store.set_harness_build_inputs(&changed).await.is_err());
+    }
+    assert_eq!(
+        store.harness_build_inputs(harness.id).await.unwrap(),
+        Some(inputs)
+    );
+}
+
+#[tokio::test]
+async fn build_records_reject_corrupted_durable_digests_timestamps_enums_and_projects() {
+    let (store, _dir) = temp_store().await;
+    let target = sample_target("/proj");
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    let harness = sample_harness(target.id);
+    let profile = build_profile("/proj");
+    let inputs = build_inputs(&harness, &profile);
+    let diagnosis = build_diagnosis(&profile);
+    store
+        .upsert_harness_with_build_inputs(&harness, &inputs)
+        .await
+        .unwrap();
+    store.append_build_diagnosis(&diagnosis).await.unwrap();
+    // These fixtures bypass write guards to exercise decoding of damaged durable files.
+    sqlx::query("DROP TRIGGER harness_build_inputs_immutable")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::query("DROP TRIGGER build_diagnosis_runs_immutable")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    for (column, value) in [
+        ("profile_sha256", "BAD"),
+        ("compile_database_sha256", "BAD"),
+        ("compile_flags_sha256", "BAD"),
+        ("build_input_sha256", "BAD"),
+        ("sandbox_image_id", "mutable:tag"),
+        ("created_at", "yesterday"),
+        ("project_root", "/other"),
+    ] {
+        let mut tx = store.pool().begin().await.unwrap();
+        sqlx::query(&format!("UPDATE harness_build_inputs SET {column} = ?1"))
+            .bind(value)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert!(
+            store.harness_build_inputs(harness.id).await.is_err(),
+            "accepted input {column}"
+        );
+        sqlx::query("DELETE FROM harness_build_inputs")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        store.set_harness_build_inputs(&inputs).await.unwrap();
+    }
+    for (column, value) in [
+        ("id", "not-a-uuid"),
+        ("created_at", "yesterday"),
+        ("profile_sha256", "BAD"),
+        ("project_root", "relative"),
+    ] {
+        sqlx::query(&format!("UPDATE build_diagnosis_runs SET {column} = ?1"))
+            .bind(value)
+            .execute(store.pool())
+            .await
+            .unwrap();
+        let project = if column == "project_root" {
+            value
+        } else {
+            "/proj"
+        };
+        assert!(
+            store.build_diagnosis_history(project, 1).await.is_err(),
+            "accepted diagnosis {column}"
+        );
+        sqlx::query("DELETE FROM build_diagnosis_runs")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        store.append_build_diagnosis(&diagnosis).await.unwrap();
+    }
+    let mut connection = store.pool().acquire().await.unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = ON")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE build_diagnosis_runs SET status = 'invented'")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = OFF")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    drop(connection);
+    assert!(store.build_diagnosis_history("/proj", 1).await.is_err());
+}
+
+#[tokio::test]
+async fn build_inputs_configured_capture_requires_database_evidence_in_sql_and_store() {
+    let (store, _dir) = temp_store().await;
+    let target = sample_target("/proj");
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    let harness = sample_harness(target.id);
+    let mut inputs = build_inputs(&harness, &build_profile("/proj"));
+    inputs.compile_database_sha256 = None;
+    assert!(store
+        .upsert_harness_with_build_inputs(&harness, &inputs)
+        .await
+        .is_err());
+    assert!(store.get_harness(harness.id).await.unwrap().is_none());
+    store.upsert_harness(&harness).await.unwrap();
+    assert!(sqlx::query(
+        "INSERT INTO harness_build_inputs VALUES (?1, '/proj', ?2, NULL, ?3, ?4, ?5, ?6)"
+    )
+    .bind(harness.id.to_string())
+    .bind(&inputs.profile_sha256)
+    .bind(&inputs.compile_flags_sha256)
+    .bind(&inputs.sandbox_image_id)
+    .bind(&inputs.build_input_sha256)
+    .bind(inputs.created_at.to_rfc3339())
+    .execute(store.pool())
+    .await
+    .is_err());
+}
+
+#[tokio::test]
+async fn build_inputs_legacy_promotion_waits_for_an_existing_writer() {
+    let (store, dir) = temp_store().await;
+    let other = Store::connect(dir.path().join("test.db")).await.unwrap();
+    let mut harness = smoke_passed_harness(Uuid::new_v4());
+    store.upsert_harness(&harness).await.unwrap();
+    harness.status = HarnessStatus::Promoted;
+    let writer = store.pool().begin_with("BEGIN IMMEDIATE").await.unwrap();
+    let source = "a".repeat(64);
+    let binary = "b".repeat(64);
+    let operation = other.promote_harness_with_approval(
+        &harness,
+        HarnessApprovalKind::CleanSmoke,
+        &source,
+        &binary,
+        Utc::now(),
+    );
+    tokio::pin!(operation);
+    assert!(
+        tokio::time::timeout(StdDuration::from_millis(100), &mut operation)
+            .await
+            .is_err()
+    );
+    writer.commit().await.unwrap();
+    operation.await.unwrap();
+    assert_eq!(
+        store.get_harness(harness.id).await.unwrap().unwrap().status,
+        HarnessStatus::Promoted
+    );
+}
+
+#[tokio::test]
+async fn build_diagnosis_rejects_noncanonical_ordering_keys() {
+    let (store, _dir) = temp_store().await;
+    let diagnosis = build_diagnosis(&build_profile("/proj"));
+    store.append_build_diagnosis(&diagnosis).await.unwrap();
+    // Noncanonical external encodings must not silently change SQL history ordering.
+    sqlx::query("DROP TRIGGER build_diagnosis_runs_immutable")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    for (column, value) in [
+        ("created_at", "2026-09-08T00:00:00+08:00"),
+        ("id", "urn:uuid:00000000-0000-0000-0000-000000000001"),
+    ] {
+        sqlx::query(&format!("UPDATE build_diagnosis_runs SET {column} = ?1"))
+            .bind(value)
+            .execute(store.pool())
+            .await
+            .unwrap();
+        assert!(
+            store.build_diagnosis_history("/proj", 100).await.is_err(),
+            "accepted noncanonical {column}"
+        );
+        sqlx::query("DELETE FROM build_diagnosis_runs")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        store.append_build_diagnosis(&diagnosis).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn build_profile_update_cannot_predate_retained_creation() {
+    let (store, _dir) = temp_store().await;
+    let original = build_profile("/proj");
+    store.set_project_build_profile(&original).await.unwrap();
+    let mut replacement = original.clone();
+    replacement.created_at = original.created_at - Duration::days(7);
+    replacement.updated_at = original.created_at - Duration::days(6);
+    replacement
+        .cmake_definitions
+        .insert("BUILD_TESTING".into(), "ON".into());
+    replacement.profile_sha256 = "d".repeat(64);
+    assert!(matches!(
+        store.set_project_build_profile(&replacement).await,
+        Err(StorageError::InvalidData(_))
+    ));
+    assert_eq!(
+        store.project_build_profile("/proj").await.unwrap(),
+        Some(original)
+    );
+}
+
+#[tokio::test]
+async fn build_profile_read_rejects_relative_unc_durable_project_root() {
+    let (store, _dir) = temp_store().await;
+    store
+        .set_project_build_profile(&build_profile("/proj"))
+        .await
+        .unwrap();
+    let relative = r"UNC\server\share";
+    sqlx::query("UPDATE project_build_profiles SET project_root = ?1")
+        .bind(relative)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    assert!(matches!(
+        store.project_build_profile(relative).await,
+        Err(StorageError::InvalidData(_))
+    ));
+}
+
+#[tokio::test]
+async fn configured_harness_context_migration_retains_immutable_evidence_and_cleans_projects() {
+    let (store, _dir) = temp_store().await;
+    let id = Uuid::new_v4().to_string();
+    let inserted=sqlx::query("INSERT INTO harness_build_contexts (id,project_root,profile_sha256,compile_database_sha256,context_json,created_at) VALUES (?1,'/project',?2,?2,'{\"schema_version\":1}', '2026-09-08T00:00:00.000000000Z')").bind(&id).bind("a".repeat(64)).execute(store.pool()).await;
+    assert!(inserted.is_ok(), "{inserted:?}");
+    assert!(
+        sqlx::query("UPDATE harness_build_contexts SET context_json='{}' WHERE id=?1")
+            .bind(&id)
+            .execute(store.pool())
+            .await
+            .is_err()
+    );
+    store.delete_project("/project").await.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM harness_build_contexts")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn configured_harness_context_roundtrip_retry_strict_decode_and_clear() {
+    let (store, _dir) = temp_store().await;
+    let record = hf_storage::HarnessBuildContextRecord {
+        id: Uuid::new_v4(),
+        project_root: "/project".into(),
+        profile_sha256: "a".repeat(64),
+        compile_database_sha256: "b".repeat(64),
+        evidence: hf_storage::HarnessBuildContextEvidence {
+            schema_version: 1,
+            context: hf_core::build::BuildContext {
+                defines: vec!["-DFOO=1".into()],
+                entry_count: 1,
+                ..Default::default()
+            },
+        },
+        created_at: Utc::now(),
+    };
+    store.append_harness_build_context(&record).await.unwrap();
+    store.append_harness_build_context(&record).await.unwrap();
+    assert_eq!(
+        store.harness_build_context(record.id).await.unwrap(),
+        Some(record.clone())
+    );
+    let mut changed = record.clone();
+    changed.evidence.context.defines.push("-DBAR=1".into());
+    assert!(store.append_harness_build_context(&changed).await.is_err());
+    changed.id = Uuid::new_v4();
+    changed.evidence.context.defines = vec!["x".repeat(65536)];
+    assert!(store.append_harness_build_context(&changed).await.is_err());
+    sqlx::query("DROP TRIGGER harness_build_contexts_immutable")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let mut json = serde_json::to_value(&record.evidence).unwrap();
+    json["context"]["unknown"] = true.into();
+    sqlx::query("UPDATE harness_build_contexts SET context_json=?1 WHERE id=?2")
+        .bind(json.to_string())
+        .bind(record.id.to_string())
+        .execute(store.pool())
+        .await
+        .unwrap();
+    assert!(store.harness_build_context(record.id).await.is_err());
+    store.clear_knowledge().await.unwrap();
+    assert!(store
+        .harness_build_context(record.id)
+        .await
+        .unwrap()
+        .is_none());
+}

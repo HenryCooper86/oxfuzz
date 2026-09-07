@@ -34,7 +34,7 @@ test-support = []
 hf-core = { workspace = true }
 hf-agent = { workspace = true }
 hf-skills = { workspace = true }
-hf-discovery = { workspace = true }
+hf-discovery = { workspace = true, features = ["build-context"] }
 hf-harness = { workspace = true }
 hf-engine = { workspace = true }
 hf-crash = { workspace = true }

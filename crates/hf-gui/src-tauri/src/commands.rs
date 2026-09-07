@@ -3074,7 +3074,7 @@ pub async fn harness_tournament(
     Err(harness_tournament_feature_unavailable())
 }
 
-/// Diagnose the project's build systems. Executes nothing.
+/// Diagnose build inputs and probe dependencies in an isolated sandbox.
 #[cfg(feature = "build-doctor")]
 #[tauri::command]
 pub async fn build_diagnose(
@@ -3084,6 +3084,7 @@ pub async fn build_diagnose(
     let diagnosis = state
         .container
         .diagnose_build(std::path::Path::new(&project))
+        .await
         .map_err(|error| error.to_string())?;
     serde_json::to_value(diagnosis).map_err(|error| error.to_string())
 }
@@ -3099,22 +3100,120 @@ pub async fn build_diagnose(
     Err(build_doctor_feature_unavailable())
 }
 
+/// Read the current build profile, including when build execution is disabled.
+#[tauri::command]
+pub async fn build_profile(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+) -> Result<serde_json::Value, String> {
+    let view = state
+        .container
+        .build_profile(std::path::Path::new(&project))
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(view).map_err(|error| error.to_string())
+}
+
+/// Validate and explicitly save an optional build profile.
+#[tauri::command]
+pub async fn build_profile_set(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    component_root: String,
+    build_system: hf_service::ProfileBuildSystem,
+    compile_database_path: String,
+    cmake_definitions: std::collections::BTreeMap<String, String>,
+    dependencies: Vec<hf_service::BuildDependency>,
+) -> Result<serde_json::Value, String> {
+    #[cfg(feature = "build-doctor")]
+    {
+        let view = state
+            .container
+            .save_build_profile(hf_service::SaveBuildProfileRequest {
+                project,
+                component_root,
+                build_system,
+                compile_database_path,
+                cmake_definitions,
+                dependencies,
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        serde_json::to_value(view).map_err(|error| error.to_string())
+    }
+    #[cfg(not(feature = "build-doctor"))]
+    {
+        let _ = (
+            state,
+            project,
+            component_root,
+            build_system,
+            compile_database_path,
+            cmake_definitions,
+            dependencies,
+        );
+        Err(build_doctor_feature_unavailable())
+    }
+}
+
+/// Clear current configuration while preserving retained operation evidence.
+#[tauri::command]
+pub async fn build_profile_clear(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+) -> Result<serde_json::Value, String> {
+    #[cfg(feature = "build-doctor")]
+    {
+        state
+            .container
+            .clear_build_profile(std::path::Path::new(&project))
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(serde_json::Value::Null)
+    }
+    #[cfg(not(feature = "build-doctor"))]
+    {
+        let _ = (state, project);
+        Err(build_doctor_feature_unavailable())
+    }
+}
+
+/// Read bounded immutable build and diagnosis history.
+#[tauri::command]
+pub async fn build_history(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    limit: usize,
+) -> Result<serde_json::Value, String> {
+    #[cfg(feature = "build-doctor")]
+    {
+        let history = state
+            .container
+            .build_diagnosis_history(std::path::Path::new(&project), limit)
+            .await
+            .map_err(|error| error.to_string())?;
+        serde_json::to_value(history).map_err(|error| error.to_string())
+    }
+    #[cfg(not(feature = "build-doctor"))]
+    {
+        let _ = (state, project, limit);
+        Err(build_doctor_feature_unavailable())
+    }
+}
+
 /// Run an approved build plan through the sandbox.
 #[cfg(feature = "build-doctor")]
 #[tauri::command]
 pub async fn build_run(
     state: tauri::State<'_, crate::state::AppState>,
     project: String,
-    build_system: String,
+    expected_profile_sha256: String,
 ) -> Result<serde_json::Value, String> {
-    let build_system: hf_service::BuildSystem =
-        serde_json::from_value(serde_json::Value::String(build_system))
-            .map_err(|error| format!("unknown build system: {error}"))?;
     let outcome = state
         .container
         .run_build_plan(hf_service::RunBuildPlanRequest {
             project,
-            build_system,
+            expected_profile_sha256,
         })
         .await
         .map_err(|error| error.to_string())?;
@@ -3127,9 +3226,9 @@ pub async fn build_run(
 pub async fn build_run(
     state: tauri::State<'_, crate::state::AppState>,
     project: String,
-    build_system: String,
+    expected_profile_sha256: String,
 ) -> Result<serde_json::Value, String> {
-    let _ = (state, project, build_system);
+    let _ = (state, project, expected_profile_sha256);
     Err(build_doctor_feature_unavailable())
 }
 
@@ -4405,5 +4504,189 @@ mod run_progress_payload_tests {
             json,
             &serde_json::to_string(&run_id.to_string()).expect("serialize run id")
         );
+    }
+}
+
+#[cfg(test)]
+mod build_operator_tests {
+    use std::sync::Arc;
+
+    struct ImageOnly;
+    #[async_trait::async_trait]
+    impl hf_service::RuntimeAdapter for ImageOnly {
+        async fn resolve_image_reference(
+            &self,
+            _: &str,
+        ) -> Result<Option<hf_service::ImmutableImageReference>, hf_service::ClassifiedError>
+        {
+            Ok(Some(hf_service::ImmutableImageReference::from_sha256_id(
+                format!("sha256:{}", "a".repeat(64)),
+            )?))
+        }
+        async fn run_command(
+            &self,
+            _: &[String],
+            _: &std::path::Path,
+            _: &hf_service::ResourceLimits,
+        ) -> Result<hf_service::CommandResult, hf_service::ClassifiedError> {
+            panic!("native test must not execute a build")
+        }
+        async fn write_file(
+            &self,
+            _: &std::path::Path,
+            _: &str,
+        ) -> Result<(), hf_service::ClassifiedError> {
+            panic!("no runtime write")
+        }
+        async fn read_file(
+            &self,
+            _: &std::path::Path,
+        ) -> Result<String, hf_service::ClassifiedError> {
+            panic!("no runtime read")
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn native_build_profile_commands_serialize_service_results() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = hf_service::ServiceContainer::new(Arc::new(ImageOnly), None)
+            .with_store_path(directory.path().join("state.db"))
+            .await
+            .unwrap();
+        let scheduler = Arc::new(
+            hf_service::scheduler::CampaignScheduler::try_start(
+                service.clone(),
+                directory.path().join("schedules.json"),
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+        let app = tauri::test::mock_builder()
+            .manage(crate::state::AppState::new(service, Arc::clone(&scheduler)))
+            .invoke_handler(tauri::generate_handler![
+                super::build_diagnose,
+                super::build_run,
+                super::build_profile,
+                super::build_profile_set,
+                super::build_profile_clear,
+                super::build_history
+            ])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let window = tauri::WebviewWindowBuilder::new(&app, "main", tauri::WebviewUrl::default())
+            .build()
+            .unwrap();
+        let invoke = |command: &str, body: serde_json::Value| {
+            tauri::test::get_ipc_response(
+                &window,
+                tauri::webview::InvokeRequest {
+                    cmd: command.to_owned(),
+                    callback: tauri::ipc::CallbackFn(0),
+                    error: tauri::ipc::CallbackFn(1),
+                    url: "tauri://localhost".parse().unwrap(),
+                    body: tauri::ipc::InvokeBody::Json(body),
+                    headers: tauri::http::HeaderMap::new(),
+                    invoke_key: tauri::test::INVOKE_KEY.to_owned(),
+                },
+            )
+            .map(|body| body.deserialize::<serde_json::Value>().unwrap())
+        };
+        let project = directory.path().to_str().unwrap();
+        #[cfg(feature = "build-doctor")]
+        {
+            assert_eq!(
+                invoke("build_profile", serde_json::json!({"project":project})).unwrap(),
+                serde_json::Value::Null
+            );
+            let diagnosis =
+                invoke("build_diagnose", serde_json::json!({"project":project})).unwrap();
+            assert_eq!(diagnosis["profile_state"], "unconfigured");
+            let history = invoke(
+                "build_history",
+                serde_json::json!({"project":project,"limit":10}),
+            )
+            .unwrap();
+            assert_eq!(history[0]["diagnosis"], diagnosis);
+            assert!(invoke(
+                "build_history",
+                serde_json::json!({"project":project,"limit":0})
+            )
+            .unwrap_err()
+            .as_str()
+            .unwrap()
+            .contains("limit"));
+            assert_eq!(
+                invoke(
+                    "build_profile_clear",
+                    serde_json::json!({"project":project})
+                )
+                .unwrap(),
+                serde_json::Value::Null
+            );
+            let invalid = invoke("build_profile_set", serde_json::json!({"project":project,"componentRoot":"../escape","buildSystem":"cmake","compileDatabasePath":"build/compile_commands.json","cmakeDefinitions":{},"dependencies":[]})).unwrap_err();
+            assert!(invalid.as_str().unwrap().contains("relative"), "{invalid}");
+            std::fs::write(directory.path().join("CMakeLists.txt"), "project(p)\n").unwrap();
+            let saved = invoke("build_profile_set", serde_json::json!({"project":project,"componentRoot":".","buildSystem":"cmake","compileDatabasePath":"out/compile_commands.json","cmakeDefinitions":{"BUILD_TESTING":"OFF"},"dependencies":[{"kind":"pkg_config","name":"zlib"}]})).unwrap();
+            assert_eq!(saved["cmake_definitions"]["BUILD_TESTING"], "OFF");
+            assert_eq!(saved["dependencies"][0]["name"], "zlib");
+            assert_eq!(
+                invoke("build_profile", serde_json::json!({"project":project})).unwrap(),
+                saved
+            );
+            assert!(invoke(
+                "build_run",
+                serde_json::json!({"project":project,"expectedProfileSha256":"a".repeat(64)})
+            )
+            .unwrap_err()
+            .as_str()
+            .unwrap()
+            .contains("digest does not match"));
+            invoke(
+                "build_profile_clear",
+                serde_json::json!({"project":project}),
+            )
+            .unwrap();
+            assert_eq!(
+                invoke("build_profile", serde_json::json!({"project":project})).unwrap(),
+                serde_json::Value::Null
+            );
+        }
+        #[cfg(not(feature = "build-doctor"))]
+        {
+            assert_eq!(
+                invoke("build_profile", serde_json::json!({"project":project})).unwrap(),
+                serde_json::Value::Null
+            );
+            for (command, body) in [
+                ("build_diagnose", serde_json::json!({"project":project})),
+                (
+                    "build_history",
+                    serde_json::json!({"project":project,"limit":10}),
+                ),
+                (
+                    "build_profile_clear",
+                    serde_json::json!({"project":project}),
+                ),
+                (
+                    "build_profile_set",
+                    serde_json::json!({"project":project,"componentRoot":".","buildSystem":"cmake","compileDatabasePath":"build/compile_commands.json","cmakeDefinitions":{},"dependencies":[]}),
+                ),
+                (
+                    "build_run",
+                    serde_json::json!({"project":project,"expectedProfileSha256":"a".repeat(64)}),
+                ),
+            ] {
+                assert!(
+                    invoke(command, body)
+                        .unwrap_err()
+                        .as_str()
+                        .unwrap()
+                        .contains("not included"),
+                    "{command}"
+                );
+            }
+        }
+        scheduler.stop().await;
     }
 }

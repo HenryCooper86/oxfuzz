@@ -13,9 +13,9 @@ pub use lint::{
 };
 
 pub use generator::{
-    build_command, compile, draft, draft_with_context, draft_with_examples, generate_seeds,
-    list_c_files, refine, repair, smoke_fuzz, smoke_fuzz_in, smoke_fuzz_in_paths,
+    build_command, compile, compile_with_options, draft, draft_with_context, draft_with_examples,
+    generate_seeds, list_c_files, refine, repair, smoke_fuzz, smoke_fuzz_in, smoke_fuzz_in_paths,
     smoke_fuzz_in_paths_with_config, smoke_fuzz_in_paths_with_config_and_sandbox_image,
-    summarize_diagnostics, try_compile, CompileFailure, CompileResult,
+    summarize_diagnostics, try_compile, try_compile_with_options, CompileFailure, CompileResult,
     MAX_DISTINCT_DIAGNOSTIC_LINES, MAX_REPAIR_DIAGNOSTICS_CHARS,
 };

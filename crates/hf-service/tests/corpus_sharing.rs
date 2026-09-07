@@ -88,11 +88,14 @@ impl RuntimeAdapter for SharingRuntime {
 
     async fn run_command_opts(
         &self,
-        _cmd: &[String],
+        cmd: &[String],
         cwd: &Path,
-        _limits: &ResourceLimits,
+        limits: &ResourceLimits,
         _opts: &SandboxOptions,
     ) -> Result<CommandResult, ClassifiedError> {
+        if cmd.iter().any(|argument| argument.contains(" -o ")) {
+            return self.run_command(cmd, cwd, limits).await;
+        }
         // Smoke qualification: a clean, measured pass.
         Ok(completed(
             0,

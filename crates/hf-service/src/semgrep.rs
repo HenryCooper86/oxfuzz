@@ -6168,8 +6168,23 @@ mod lifecycle_tests {
         let (service, store) = persistent_service(root.path(), runtime.clone()).await;
         save_inventory(&store, &project, true).await;
         let workspace = crate::initialize_workspace_root().unwrap();
-        let cleanup_lease =
-            ServiceContainer::semgrep_test_workspace_cleanup_lease(&workspace).unwrap();
+        // Acquire the setup precondition after unrelated parallel modules release
+        // normal workspace operations. The admission behavior below is not retried.
+        let cleanup_lease = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match ServiceContainer::semgrep_test_workspace_cleanup_lease(&workspace) {
+                    Ok(lease) => break lease,
+                    Err(ClassifiedError::Validation(message))
+                        if message == crate::container::WORKSPACE_CLEANUP_BUSY_MESSAGE =>
+                    {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                    Err(error) => panic!("cannot acquire cleanup setup lease: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("parallel workspace operations must release the setup lease within 10 seconds");
         let (reached, release) = service
             .semgrep
             .install_completion_pause(CompletionPausePoint::AfterBegin);
