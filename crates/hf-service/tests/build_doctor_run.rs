@@ -312,7 +312,22 @@ async fn cmake_uses_exact_options_whole_snapshot_component_workdir_and_selected_
     let path = f.project.join("build/parser/compile_commands.json");
     let raw = std::fs::read_to_string(path).unwrap();
     assert!(!raw.contains("/work"));
-    assert!(raw.contains(f.profile.project_root.as_str()));
+    let entries = hf_discovery::build_context::parse_compile_database(&raw).unwrap();
+    assert_eq!(entries.len(), 1);
+    let root = Path::new(&f.profile.project_root);
+    assert_eq!(entries[0].directory, root.join("components/parser"));
+    assert_eq!(entries[0].file, root.join("components/parser/a.c"));
+    assert_eq!(
+        entries[0].arguments,
+        [
+            "cc".to_owned(),
+            format!("-I{}/include", root.display()),
+            "-DSELECTED=1".to_owned(),
+            "-std=c11".to_owned(),
+            "-c".to_owned(),
+            "a.c".to_owned(),
+        ]
+    );
     assert!(!f.project.join(".oxfuzz-build").exists());
     assert_eq!(
         f.history().await[0]
