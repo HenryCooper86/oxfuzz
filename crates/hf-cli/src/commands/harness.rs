@@ -116,6 +116,10 @@ fn print_lint_findings(findings: &[hf_service::LintFinding]) {
     }
 }
 
+fn promotion_required_message() -> &'static str {
+    "promotion required: review this harness before a full campaign; rerunning `oxfuzz harness` creates a new draft. To approve a retained source after separate review, use the Work Order import/qualify flow and `oxfuzz work-order promote --attempt <attempt UUID>`"
+}
+
 async fn qualify_harness(
     container: &ServiceContainer,
     project: &std::path::Path,
@@ -148,9 +152,7 @@ async fn qualify_harness(
         let harness = container.harness_promote(project, target, engine).await?;
         println!("promotion: {:?} ({})", harness.status, harness.id);
     } else {
-        println!(
-            "promotion required: review the harness and rerun this command with --promote before a full campaign"
-        );
+        println!("{}", promotion_required_message());
     }
     Ok(())
 }
@@ -472,4 +474,18 @@ pub(crate) async fn cmd_attribution(project: PathBuf, lang: &str) -> anyhow::Res
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod promotion_guidance_tests {
+    use super::promotion_required_message;
+
+    #[test]
+    fn non_promoting_harness_run_explains_that_rerunning_creates_a_new_draft() {
+        let message = promotion_required_message();
+
+        assert!(message.contains("rerunning `oxfuzz harness` creates a new draft"));
+        assert!(message.contains("work-order promote --attempt"));
+        assert!(!message.contains("rerun this command with --promote"));
+    }
 }

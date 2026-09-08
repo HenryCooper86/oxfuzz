@@ -37,6 +37,7 @@ export interface RunHistoryItem {
   kind: string;
   project_root: string;
   target: string | null;
+  target_selector: string | null;
   /** Service-owned key for runs with comparable coverage conditions. */
   comparison_key: string | null;
   engine: string;
@@ -347,6 +348,7 @@ export interface HarnessReviewItem {
   target_id: string;
   project_root: string;
   target_symbol: string;
+  target_selector: string | null;
   engine: string;
   language: string;
   status: string;
@@ -944,6 +946,7 @@ export interface FindingReviewItem {
   project_root: string;
   target_id: string;
   target_symbol: string;
+  target_selector: string;
   target_language: string;
   engine: string;
   proof: FindingProofCard;

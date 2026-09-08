@@ -14,6 +14,7 @@ import { useFuzzingSettings } from "../hooks/useFuzzingSettings";
 import { enabledEngineOptions } from "../lib/fuzzingSettings";
 import { FuzzingPolicyNotice } from "../components/FuzzingPolicyNotice";
 import { TargetSelectionRepairNotice } from "../components/TargetSelectionRepairNotice";
+import { matchesTargetSelection } from "../lib/harnessScope";
 import { projectStorageKey } from "../lib/projectState";
 
 export function RunView({
@@ -120,7 +121,7 @@ export function RunView({
         if (!cancelled) {
           setHarnessBuilt(Boolean(artifacts.harness_built));
           setHarnessApproved(harnesses.some((item) =>
-            item.target_symbol === target
+            matchesTargetSelection(item.target_symbol, item.target_selector, target)
             && item.status === "Promoted"
             && normalizeEngine(item.engine) === normalizeEngine(engine),
           ));
@@ -399,7 +400,10 @@ export function RunView({
 
       {/* Service snapshots describe the selected run independently of launch controls. */}
       {(selectedRun || hasRunMetrics) && lastEngine !== "syzkaller" && (
-        <div className="grid grid-cols-3 gap-3" style={{ animation: "slideInUp 0.2s ease" }}>
+        <div
+          className="grid gap-3"
+          style={{ animation: "slideInUp 0.2s ease", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))" }}
+        >
           <StatCard icon={<Activity size={16} />} label={t("run.edgesCovered")} value={liveStats.edges ?? summary?.edges ?? null} color="var(--success)" />
           <StatCard icon={<AlertTriangle size={16} />} label={t("run.rawCrashSignals")} value={liveStats.rawCrashSignals} color="var(--error)" />
           <StatCard icon={<Play size={16} />} label={t("run.currentExecs")} value={liveStats.currentExecs} color="var(--accent)" />
@@ -409,7 +413,10 @@ export function RunView({
       )}
 
       {summary && (
-        <div className="grid grid-cols-3 gap-3" style={{ animation: "slideInUp 0.2s ease" }}>
+        <div
+          className="grid gap-3"
+          style={{ animation: "slideInUp 0.2s ease", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))" }}
+        >
           {lastEngine === "syzkaller" && <StatCard icon={<Activity size={16} />} label={t("run.coverage")} value={summary.edges} color="var(--success)" />}
           <StatCard icon={<AlertTriangle size={16} />} label={t("run.retainedCrashes")} value={summary.crashes} color="var(--error)" />
           {lastEngine === "syzkaller" && <StatCard icon={<Play size={16} />} label={t("run.executed")} value={summary.execs} color="var(--accent)" />}

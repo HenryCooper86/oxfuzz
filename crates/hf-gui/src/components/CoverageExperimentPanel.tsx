@@ -5,6 +5,7 @@ import { useI18n } from "../i18nContext";
 import type { RunHistoryItem, ViewType } from "../types";
 import type { CoverageExperiment, ExperimentAdvice, ExperimentCursor, ExperimentKind, ExperimentPage, ExperimentRun } from "../types/coverageExperiments";
 import { Button } from "./ui";
+import { matchesTargetSelection } from "../lib/harnessScope";
 
 function codeOf(error: unknown): string | null {
   if (error !== null && typeof error === "object" && "code" in error && typeof error.code === "string") return error.code;
@@ -22,7 +23,10 @@ function Inventory({ project, target, advice, onNavigate }: { project: string; t
   useEffect(() => {
     let active = true;
     getTransport().invoke<RunHistoryItem[]>("run_history", { project }).then(value => {
-      if (active) setRuns(value.filter(run => run.target === target && run.target_id && run.kind.toLowerCase() === "campaign" && ["done", "failed", "cancelled"].includes(run.status.toLowerCase()) && run.ended_at));
+      if (active) {
+        setRuns(value.filter(run => matchesTargetSelection(run.target, run.target_selector, target) && run.target_id && run.kind.toLowerCase() === "campaign" && ["done", "failed", "cancelled"].includes(run.status.toLowerCase()) && run.ended_at));
+        setError(null);
+      }
     }).catch(error => { if (active) setError(error); });
     return () => { active = false; };
   }, [project, target, revision]);
@@ -130,7 +134,12 @@ function ExperimentWorkspace({ project, targetId, runs, advice, onNavigate, inve
       <p>{t(`experiments.fact.${selected.kind}`)} · {selected.goal_function}</p><p>{selected.hypothesis}</p><p>{t("experiments.budget")}: {selected.duration_secs}</p>
       <RunEvidence run={selected.baseline} label={t("experiments.baselineStatus")} />
       {selected.status === "prepared" && <>
-        <div className="flex gap-2"><Button disabled={!onNavigate} onClick={() => onNavigate?.(selected.kind === "grow_corpus" ? "corpus" : "harness")}>{t(selected.kind === "grow_corpus" ? "experiments.openCorpus" : "experiments.openHarness")}</Button><Button disabled={!onNavigate} onClick={() => onNavigate?.("run")}>{t("experiments.openRun")}</Button></div>
+        <div className="flex gap-2"><Button disabled={!onNavigate} onClick={() => onNavigate?.(selected.kind === "grow_corpus" ? "corpus" : "harness")}>{t(selected.kind === "grow_corpus" ? "experiments.openCorpus" : "experiments.openHarness")}</Button></div>
+        {selected.baseline.seed === null ? <p className="text-xs">{t("experiments.replaySeedMissing")}</p> : <div className="text-xs">
+          <p>{t("experiments.replayGuidance")}</p>
+          <code className="break-all">{`oxfuzz run . --replay ${selected.baseline_run_id}`}</code>
+          <p>{t("experiments.replaySettings")}</p>
+        </div>}
         <p className="text-xs">{t("experiments.error.invalid_chronology")}</p>
         <label>{t("experiments.result")}<select aria-label={t("experiments.result")} value={result} disabled={disabled} onChange={event => setResult(event.target.value)}><option value="">{t("experiments.choose")}</option>{laterRuns.map(run => <option key={run.id} value={run.id}>{run.id} · {run.started_at} · {t(`experiments.status.${run.status.toLowerCase() === "cancelled" ? "cancelledRun" : run.status.toLowerCase()}`)}</option>)}</select></label>
         <Button disabled={disabled || !result} onClick={() => void write("coverage_experiment_complete", { id: selected.id, request: { scope, result_run_id: result } })}>{t("experiments.attach")}</Button>

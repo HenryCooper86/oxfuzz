@@ -1,6 +1,6 @@
 # Harness Work Order v2
 
-Status: **active**. Owner: `hf-service`. The approved implementation details,
+Status: **implemented**. Owner: `hf-service`. The implementation details,
 limits, durable records, stable errors, and REST resources are defined in the
 [Harness Work Order v2 specification](../superpowers/specs/2026-08-30-harness-work-order-v2-design.md).
 
@@ -46,6 +46,13 @@ submission, explicitly qualify it, compare retained attempts, and explicitly
 promote one exact attempt. Import and view mounting never start qualification or
 promotion. The selected attempt reuses the existing harness approval evidence;
 missing review or smoke evidence stays visibly missing.
+After exact promotion, the desktop selects the service-returned file-qualified
+target selector from its reviewed harness. Harness and Run approval hydration
+accept that exact selector; discovery preserves a still-valid restored selection
+and never replaces a newer selection with a late response. Work Order lists
+match the complete retained relative-source and symbol spelling, including
+namespaced symbols. Navigation does not execute the selected harness.
+
 
 ## 3. Safety and Recovery
 
@@ -79,3 +86,5 @@ link-like path components. Common service code classifies, size-checks, and
 reads the returned handle without reopening its path. The Windows
 implementation and its release verification are specified in
 [Windows-Confined Harness Work-Order Reads](../superpowers/specs/2026-08-31-windows-confined-work-order-read-design.md).
+
+Discovery restores a selection only when it identifies exactly one candidate. An ambiguous legacy bare symbol falls back to the highest-ranked candidate with its complete file-qualified selector, keeping the selected value visible and executable without choosing between same-symbol targets implicitly at run time.

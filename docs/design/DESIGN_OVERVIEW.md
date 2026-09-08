@@ -52,7 +52,7 @@ all under human-in-the-loop supervision.
 | Build diagnosis and optional profiles | hf-service + hf-storage | `ProjectBuildDiagnosis`, `SaveBuildProfileRequest`, reviewed CMake/Make plan and retained output | build-doctor-design.md |
 | Harness build inputs | hf-service + hf-storage | immutable per-attempt input capture, atomic harness/input persistence, shared executor checks | harness-generation-design.md + ../standards/DATABASE_SCHEMA.md |
 | Coverage blockers | hf-service | ranked uncovered blockers, advisory next experiment | coverage-blocker-design.md |
-| Coverage experiments (planned Phase 7) | hf-service + hf-storage | immutable reviewed proposal, bounded evidence, manual result attachment, CAS lifecycle, retained run references | [coverage-experiments-design.md](coverage-experiments-design.md) |
+| Coverage experiments | hf-service + hf-storage | immutable reviewed proposal, bounded evidence, manual result attachment, CAS lifecycle, retained run references | [coverage-experiments-design.md](coverage-experiments-design.md) |
 | Non-crash oracles | hf-service | typed oracle specification, scaffold, violation | oracle-studio-design.md |
 | Crash disposition | hf-service | ordered disposition, next action, claim ceiling | triage-disposition-design.md |
 | Campaign trust | hf-service | per-run claim gates and overall determination | campaign-trust-report-design.md |
@@ -132,7 +132,7 @@ contexts;
 `clear_knowledge` preserves profiles as configuration and clears their operation
 evidence, while explicit project deletion clears all build record families.
 
-Planned `coverage-experiments` records a reviewed investigation against a retained
+The implemented `coverage-experiments` feature records a reviewed investigation against a retained
 terminal campaign, then accepts one explicitly selected later terminal campaign
 or an explicit cancellation. Create/read/list/attach/cancel execute no discovery,
 provider, runtime, coverage calculation, or promotion. Setup comparison uses

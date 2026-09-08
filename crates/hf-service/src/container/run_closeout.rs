@@ -175,9 +175,10 @@ impl ServiceContainer {
                 "run '{run_id}' target project does not match its retained project"
             )));
         }
+        let selector = super::project_identity::retained_run_target_selector(&run, &target)?;
         Ok(RunScope {
             project: PathBuf::from(run.project_root),
-            target: target.symbol,
+            target: selector,
         })
     }
 

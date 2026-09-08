@@ -15,7 +15,7 @@ vi.mock("../lib",async()=>({...await vi.importActual("../lib"),getTransport:()=>
 let host:HTMLDivElement,root:Root,records:Record<string,unknown>[],calls:string[],rejectAttach:boolean;
 const baseline="10000000-0000-4000-8000-000000000001",later="10000000-0000-4000-8000-000000000002",targetId="20000000-0000-4000-8000-000000000001",experimentId="30000000-0000-4000-8000-000000000001";
 const navigate=vi.fn();
-const run=(id:string)=>({id,project_root:"/project-a",target:"parse",target_id:targetId,requested_duration_secs:60,kind:"Campaign",status:id===later?"Failed":"Done",started_at:id===later?"2026-09-08T04:00:00.000000000Z":"2026-09-08T01:00:00.000000000Z",ended_at:"2026-09-08T05:00:00.000000000Z",duration_secs:2});
+const run=(id:string)=>({id,project_root:"/project-a",target:"parse",target_selector:"src/parser.c::parse",target_id:targetId,requested_duration_secs:60,kind:"Campaign",status:id===later?"Failed":"Done",started_at:id===later?"2026-09-08T04:00:00.000000000Z":"2026-09-08T01:00:00.000000000Z",ended_at:"2026-09-08T05:00:00.000000000Z",duration_secs:2});
 const evidence=(id:string)=>({run_id:id,status:id===later?"failed":"done",duration_secs:60,seed:"18446744073709551615",max_mem_mb:"9223372036854775807",edges:"9007199254740993",build_inputs:null});
 function Controls(){const {setActiveProject}=useProject();const {setTarget}=useTarget();return <><button onClick={()=>setActiveProject("/project-b")}>Switch project</button><button onClick={()=>setTarget("other")}>Switch target</button><CorpusView onNavigate={navigate}/></>;}
 async function flush(){await act(async()=>{await new Promise(r=>setTimeout(r,10));});}
@@ -38,7 +38,7 @@ function fetchRequest(input:RequestInfo|URL,init?:RequestInit):Promise<Response>
 beforeEach(()=>{vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT",true);localStorage.clear();localStorage.setItem("hf_locale","en");localStorage.setItem("hf_recent_projects",JSON.stringify(["/project-a","/project-b"]));localStorage.setItem("hf_active_project","/project-a");localStorage.setItem("hf_target_selection_v1",JSON.stringify({"/project-a":{target:"parse",engine:"libfuzzer",lang:"c",compiled:false},"/project-b":{target:"parse",engine:"libfuzzer",lang:"c",compiled:false}}));host=document.createElement("div");document.body.append(host);root=createRoot(host);records=[];calls=[];rejectAttach=false;navigate.mockReset();state.transport=createHttpTransport();vi.stubGlobal("fetch",vi.fn(fetchRequest));});
 afterEach(async()=>{await act(async()=>root.unmount());host.remove();vi.unstubAllGlobals();});
 async function prepare(){await field("Baseline campaign",baseline);await field("Goal function","parse_deep");await field("Operator hypothesis","More inputs may reach the goal");await click("Prepare experiment");}
-it("persists before explicit navigation, reopens, retains a refused attachment, then attaches the exact failed later campaign",async()=>{await mount();await prepare();expect(records[0].baseline_run_id).toBe(baseline);expect(records[0].target_id).toBe(targetId);expect(records[0].duration_secs).toBe(60);expect(navigate).not.toHaveBeenCalled();await click("Open Corpus");expect(navigate).toHaveBeenCalledWith("corpus");await click("Open Run");expect(navigate).toHaveBeenLastCalledWith("run");await click("New experiment");await field("Experiment history",experimentId);expect(host.textContent).toContain("More inputs may reach the goal");rejectAttach=true;await field("Result campaign",later);await click("Attach result");expect(host.textContent).toContain("Build inputs differ");expect(records[0].status).toBe("prepared");rejectAttach=false;await click("Attach result");expect(host.textContent).toContain("Result campaign failed");expect(host.textContent).toContain("No observed input change");expect(host.textContent).toContain("Exact run-scoped function coverage is unavailable");expect(host.textContent).toContain("18446744073709551615");expect(calls.some(c=>/start|refine|promot|seed|discover|grow/.test(c))).toBe(false);});
+it("persists before explicit navigation, reopens, retains a refused attachment, then attaches the exact failed later campaign",async()=>{await mount();await prepare();expect(records[0].baseline_run_id).toBe(baseline);expect(records[0].target_id).toBe(targetId);expect(records[0].duration_secs).toBe(60);expect(navigate).not.toHaveBeenCalled();await click("Open Corpus");expect(navigate).toHaveBeenCalledWith("corpus");expect(host.textContent).toContain(`oxfuzz run . --replay ${baseline}`);await click("New experiment");await field("Experiment history",experimentId);expect(host.textContent).toContain("More inputs may reach the goal");rejectAttach=true;await field("Result campaign",later);await click("Attach result");expect(host.textContent).toContain("Build inputs differ");expect(records[0].status).toBe("prepared");rejectAttach=false;await click("Attach result");expect(host.textContent).toContain("Result campaign failed");expect(host.textContent).toContain("No observed input change");expect(host.textContent).toContain("Exact run-scoped function coverage is unavailable");expect(host.textContent).toContain("18446744073709551615");expect(calls.some(c=>/start|refine|promot|seed|discover|grow/.test(c))).toBe(false);});
 it("cancels explicitly and displays retained reason",async()=>{await mount();await prepare();await field("Cancellation reason","Different approach needed");await click("Cancel experiment");expect(host.textContent).toContain("Different approach needed");expect(records[0].status).toBe("cancelled");});
 it.each(["Switch project","Switch target"])("isolates late create success after %s",async(label)=>{let release:(value:Response)=>void=()=>{};vi.stubGlobal("fetch",vi.fn((url,init)=>init?.method==="POST"&&new URL(String(url)).pathname==="/coverage/experiments"?new Promise<Response>(r=>{release=r;}):fetchRequest(url,init)));await mount();await field("Baseline campaign",baseline);await field("Goal function","old goal");await field("Operator hypothesis","old hypothesis");await click("Prepare experiment");await click(label);await act(async()=>release(json({id:experimentId,status:"prepared",goal_function:"old goal",baseline:evidence(baseline)})));await flush();expect(host.textContent).not.toContain("old goal");expect(navigate).not.toHaveBeenCalled();});
 it.each([501,403,404,500])("renders HTTP %s accurately",async(status)=>{vi.stubGlobal("fetch",vi.fn((url,init)=>new URL(String(url)).pathname==="/coverage/experiments"?Promise.resolve(json({code:status===501?"feature_unavailable":status===403?"project_not_authorized":status===404?"not_found":"storage_error",error:"failure"},status)):fetchRequest(url,init)));await mount();expect(host.textContent).toContain(status===501?"Coverage experiments are not included in this application build":status===403?"Project is not authorized":status===404?"Experiment was not found":"Experiment storage failed");if(status===501)expect(button("Prepare experiment").disabled).toBe(true);});
@@ -62,6 +62,23 @@ it("ignores late history absence after project switch",async()=>{
 });
 it("recovers an uncertain create from history without resubmitting",async()=>{
  await mount();const fetch=vi.fn((url,init)=>{const response=fetchRequest(url,init);return new URL(String(url)).pathname==="/coverage/experiments"&&init?.method==="POST"?Promise.reject(new TypeError("connection lost")):response;});vi.stubGlobal("fetch",fetch);await prepare();expect(host.textContent).toContain("The preparation response is uncertain");expect(button("Prepare experiment").disabled).toBe(true);await click("Refresh experiment history");await field("Experiment history",experimentId);expect(host.textContent).toContain("More inputs may reach the goal");expect(fetch.mock.calls.filter(([url,init])=>new URL(String(url)).pathname==="/coverage/experiments"&&init?.method==="POST")).toHaveLength(1);
+});
+
+it("clears a failed inventory error after an accepted successful refresh", async () => {
+ let inventoryFails = true;
+ vi.stubGlobal("fetch", vi.fn((url: RequestInfo | URL, init?: RequestInit) => {
+  if (new URL(String(url)).pathname === "/runs/history" && inventoryFails) {
+   return Promise.reject(new Error("inventory unavailable"));
+  }
+  return fetchRequest(url, init);
+ }));
+ await mount();
+ expect(host.textContent).toContain("inventory unavailable");
+ expect(host.querySelector('[aria-label="Baseline campaign"]')).toBeNull();
+ inventoryFails = false;
+ await click("Refresh experiment history");
+ expect(host.textContent).not.toContain("inventory unavailable");
+ expect(host.querySelector('[aria-label="Baseline campaign"]')).not.toBeNull();
 });
 
 it.each(["initial", "pending create"])("keeps uncertain preparation locked after a stale %s history response", async (timing) => {
@@ -126,4 +143,24 @@ it("renders Chinese preparation and terminal limitation labels",async()=>{
 });
 it("renders safe integer strings and independent observed edge facts without causal percentages",async()=>{
  await mount();await prepare();vi.stubGlobal("fetch",vi.fn((url,init)=>new URL(String(url)).pathname.endsWith("/complete")?Promise.resolve(json({...records[0],status:"completed",result:{run:evidence(later),input_change:"harness_source_changed",build_comparison:"matched",edge_comparison:{status:"observed",baseline_edges:"9007199254740993",result_edges:"9007199254740994",delta:"1"},target_entry:{status:"unavailable",reason_code:"no_exact_run_scoped_function_coverage"},limitations:["aggregate_edges_not_function_entry","result_failed","harness_instrumentation_may_differ"]}})):fetchRequest(url,init)));await field("Result campaign",later);await click("Attach result");expect(host.textContent).toContain("9007199254740993 → 9007199254740994 (1)");expect(host.textContent).toContain("Harness instrumentation may differ");expect(host.textContent).toContain("Result campaign failed");expect(host.textContent).not.toContain("%");
+});
+
+it("hands the exact retained seed to existing CLI replay without navigating or executing", async () => {
+ await mount(); await prepare();
+ expect(host.textContent).toContain(`oxfuzz run . --replay ${baseline}`);
+ expect(host.textContent).toContain("same oxfuzz configuration and database");
+ expect(host.textContent).toContain("current promoted harness and corpus");
+ expect([...host.querySelectorAll("button")].some(item => item.textContent === "Open Run")).toBe(false);
+ await click("Open Corpus");
+ expect(navigate).toHaveBeenCalledTimes(1);
+ expect(navigate).toHaveBeenCalledWith("corpus");
+ expect(calls.some(call => /start|replay|refine|promot/.test(call))).toBe(false);
+});
+it("does not offer attachable replay for a baseline without a retained seed", async () => {
+ await mount(); await prepare();
+ records[0] = { ...records[0], baseline: { ...evidence(baseline), seed: null } };
+ await click("New experiment"); await field("Experiment history", experimentId);
+ expect(host.textContent).toContain("Start a new campaign and use its recorded seed as a new baseline");
+ expect(host.textContent).not.toContain("oxfuzz run . --replay");
+ expect(calls.some(call => /start|replay/.test(call))).toBe(false);
 });

@@ -650,3 +650,16 @@ async fn cancelling_a_closeout_releases_its_lease() {
     .expect("retry remained blocked after cancellation")
     .unwrap();
 }
+
+#[tokio::test]
+async fn closeout_refuses_a_retained_corpus_path_outside_known_target_workspaces() {
+    let (container, _dir) = container().await;
+    let id = seeded_run(&container).await;
+    let store = container.store().unwrap();
+    sqlx::query("UPDATE runs SET config_json = json_set(config_json, '$.seed_corpus', '/foreign/corpus') WHERE id = ?")
+        .bind(id.to_string()).execute(store.pool()).await.unwrap();
+    let error = container.close_out_run(id).await.unwrap_err().to_string();
+    assert!(error.contains("retained corpus path"));
+    assert!(error.contains(&id.to_string()));
+    assert!(store.closeout_steps(id).await.unwrap().is_empty());
+}

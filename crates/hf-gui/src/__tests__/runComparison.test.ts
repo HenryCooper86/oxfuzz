@@ -11,6 +11,7 @@ function run(
   return {
     id,
     target_id: null,
+    target_selector: null,
     requested_duration_secs: 60,
     kind: "Campaign",
     project_root: "/project",

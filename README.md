@@ -73,10 +73,22 @@ oxfuzz init                           # scaffold config/*.toml + .env
 # then configure at least one LLM provider: config/providers.toml + HF_PROVIDER_API_KEY
 
 oxfuzz discover <project> --lang c --rank
-oxfuzz harness  <project> --target <symbol> --engine libfuzzer
-oxfuzz run      <project> --target <symbol> --engine libfuzzer --duration 60m
-oxfuzz triage   <project> --target <symbol>
+oxfuzz work-order export <project> --target <symbol> --lang c \
+  --engine libfuzzer --out work-order.md
+# Author harness.c from the packet, then retain the IDs printed by each command:
+oxfuzz work-order import --work-order <work-order SHA-256> \
+  --source harness.c --origin human
+oxfuzz work-order qualify --submission <submission UUID>
+# Stop here. Review the exact source, lint, independent review, and smoke evidence.
+oxfuzz work-order promote --attempt <attempt UUID>
+oxfuzz run <project> --target <relative-file>::<symbol> \
+  --engine libfuzzer --duration 60m
+oxfuzz triage <project> --target <relative-file>::<symbol>
 ```
+
+Import and qualification do not approve a harness. Promotion names the retained
+qualification attempt you reviewed; rerunning `oxfuzz harness` would generate a
+new draft rather than approve the previous source.
 
 Docker must be installed and running, and at least one LLM provider configured.
 See **[Install & Build](docs/guides/INSTALL.md)** and

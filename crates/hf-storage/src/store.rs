@@ -874,7 +874,7 @@ impl Store {
         publication: &SemgrepPublication,
     ) -> Result<(), StorageError> {
         validate_semgrep_publication(publication)?;
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let persisted_row = sqlx::query(SEMGREP_RUN_SELECT)
             .bind(publication.run.id.to_string())
             .fetch_optional(&mut *tx)
@@ -1277,7 +1277,7 @@ impl Store {
             }
         }
 
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let source = sqlx::query(
             "SELECT project_root, protocol, status
              FROM automotive_operations WHERE id = ?1",
@@ -2199,7 +2199,7 @@ impl Store {
         // a distinct id; the unique index on (project_root, symbol, file) is the
         // backstop that rejects a duplicate even if the ordering ever slips.
         let file = t.relative_file();
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let stable_id: Option<String> = sqlx::query_scalar(
             "SELECT id FROM targets WHERE project_root = ?1 AND symbol = ?2 AND file = ?3 LIMIT 1",
         )
@@ -4002,7 +4002,7 @@ async fn terminate_semgrep_run(
     ended_at: DateTime<Utc>,
     require_done: bool,
 ) -> Result<(), StorageError> {
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let row = sqlx::query("SELECT status, started_at FROM semgrep_enrichment_runs WHERE id = ?1")
         .bind(id.to_string())
         .fetch_optional(&mut *tx)

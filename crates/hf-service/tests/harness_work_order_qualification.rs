@@ -2207,3 +2207,11 @@ impl ProviderPool for DatabaseChangingReview {
         Ok(())
     }
 }
+
+#[cfg(all(
+    feature = "campaign-health",
+    feature = "run-closeout",
+    feature = "coverage-experiments"
+))]
+#[path = "harness_work_order_qualification/acceptance.rs"]
+mod acceptance;

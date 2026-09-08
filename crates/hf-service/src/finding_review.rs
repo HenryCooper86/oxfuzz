@@ -40,6 +40,8 @@ pub struct FindingReviewItem {
     pub project_root: String,
     pub target_id: Uuid,
     pub target_symbol: String,
+    /// Workspace selector recovered from this finding's exact retained run.
+    pub target_selector: String,
     pub target_language: TargetLanguage,
     pub engine: EngineKind,
     pub proof: FindingProofCard,

@@ -16,10 +16,11 @@ import { DashboardView } from "../views/DashboardView";
 import type { FindingReviewItem } from "../types";
 
 const invoke = vi.hoisted(() => vi.fn());
+const environment = vi.hoisted(() => ({ tauri: false }));
 vi.mock("../lib", async () => ({
   ...(await vi.importActual<typeof import("../lib")>("../lib")),
   getTransport: () => ({ invoke }),
-  isTauriEnvironment: () => false,
+  isTauriEnvironment: () => environment.tauri,
 }));
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -53,6 +54,7 @@ function finding(id: string, runId: string, project: string, input: string): Fin
     project_root: project,
     target_id: `${project}-target`,
     target_symbol: "parse_packet",
+    target_selector: "src/parser.c::parse_packet",
     target_language: "C",
     engine: "LibFuzzer",
     proof: {
@@ -144,6 +146,7 @@ describe("retained finding navigation", () => {
 
   beforeEach(() => {
     invoke.mockReset();
+    environment.tauri = false;
     localStorage.clear();
     localStorage.setItem(FINDING_SELECTION_STORAGE_KEY, JSON.stringify({
       [PROJECT_A]: { findingId: older.crash.id, runId: older.crash.run_id },
@@ -390,17 +393,22 @@ describe("retained finding navigation", () => {
     const selected = {
       ...newer,
       target_symbol: "selected_target",
+      target_selector: "src/selected.c::selected_target",
       latest_scoped_actions_allowed: true,
       latest_scoped_action_reason: null,
     };
+    environment.tauri = true;
     localStorage.setItem(FINDING_SELECTION_STORAGE_KEY, JSON.stringify({
       [PROJECT_A]: { findingId: selected.crash.id, runId: selected.crash.run_id },
     }));
     invoke.mockImplementation((command: string) => {
       if (command === "finding_review_queue") return Promise.resolve([selected]);
       if (command === "finding_review") return Promise.resolve(selected);
+      if (command === "report_formats") return Promise.resolve(["md"]);
       if (command === "generate_report") return Promise.resolve("# 中文分类报告");
       if (command === "save_report_draft") return Promise.resolve({ id: "draft-id" });
+      if (command === "export_repro") return Promise.resolve("/tmp/reproduction");
+      if (command === "push_to_defectdojo") return Promise.resolve({ findings_pushed: 1 });
       throw new Error(`unexpected command ${command}`);
     });
     const translate = (key: string, params?: Record<string, string | number>) => (
@@ -415,17 +423,37 @@ describe("retained finding navigation", () => {
       .find((button) => button.textContent?.includes("triage.composeReport"));
     await act(async () => compose?.click());
     await flush();
+    const reproduction = [...container.querySelectorAll("button")]
+      .find((button) => button.textContent?.includes("triage.downloadRepro"));
+    await act(async () => reproduction?.click());
+    await flush();
+    const publish = [...container.querySelectorAll("button")]
+      .find((button) => button.textContent?.includes("triage.pushToDefectDojo"));
+    await act(async () => publish?.click());
+    await flush();
 
     expect(invoke.mock.calls.find(([command]) => command === "generate_report")?.[1]).toEqual({
       project: PROJECT_A,
-      target: "selected_target",
+      target: "src/selected.c::selected_target",
       language: "zh",
+      expectedRunId: "newer-run",
+    });
+    expect(invoke.mock.calls.find(([command]) => command === "export_repro")?.[1]).toEqual({
+      project: PROJECT_A,
+      target: "src/selected.c::selected_target",
+      engine: "LibFuzzer",
+      lang: "C",
+      crash: "newer-crash",
+    });
+    expect(invoke.mock.calls.find(([command]) => command === "push_to_defectdojo")?.[1]).toEqual({
+      project: PROJECT_A,
+      target: "src/selected.c::selected_target",
       expectedRunId: "newer-run",
     });
     expect(invoke.mock.calls.find(([command]) => command === "save_report_draft")?.[1]).toMatchObject({
       title: "分类定级报告 — selected_target",
       project: PROJECT_A,
-      target: "selected_target",
+      target: "src/selected.c::selected_target",
       status: "Draft",
       content: "# 中文分类报告",
     });

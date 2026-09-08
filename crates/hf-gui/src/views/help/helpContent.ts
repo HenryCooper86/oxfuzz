@@ -304,7 +304,17 @@ to execution. **Qualify in sandbox** is a separate action; all attempt results
 and failures stay visible for deterministic ranking.
 Ranking compares attempts for the selected immutable submission. The selected
 attempt shows its independent review, digests, lint, and smoke result before
-you explicitly promote an exact smoke-passed attempt.
+you explicitly promote an exact smoke-passed attempt. Keep the retained
+submission ID and retained attempt ID: promotion names the attempt ID, not a
+fresh draft. For duplicate file-local symbols, the service-returned
+file-qualified target selector identifies the reviewed target; the displayed
+symbol alone is insufficient.
+
+If a project needs an explicit build setup, **Build Doctor** can save a CMake or
+plain Make profile. Review the component, compile-database path, dependencies,
+exact command arguments, immutable sandbox image, and profile SHA-256 before
+running the plan. A saved profile is configuration; diagnosis and build history
+remain separate evidence, and clearing the profile retains that history.
 `;
 
 const SCREEN_RUN = `
@@ -332,8 +342,13 @@ rootfs, SSH key, manager.cfg).
 transport, including exact-run progress, status, and cancellation. Syzkaller is
 desktop-only because it launches local kernel/VM artifacts and may use KVM.
 
-**What it shows:** live stat cards (edges covered, crashes, execs/sec), a
-post-run summary, coverage-stall / auto-revert notices, and a streaming log.
+**What it shows:** live stat cards (edges covered, retained crash artifacts,
+and executions per second), a post-run summary, coverage-stall / auto-revert
+notices, and a streaming log. Executions per second separates the current
+sample, service-owned whole-run mean, and peak; unavailable telemetry stays
+unknown. Campaign Health is read-only: it records retained conditions and next
+actions but never stops, restarts, or resizes a run. Raw crash notifications are
+signals and can differ from the retained artifact count.
 `;
 
 const SCREEN_TRIAGE = `
@@ -398,6 +413,19 @@ The screen reports why an action is unavailable. Opening or refreshing this
 screen checks retained state only; it does not discover targets or run engines.
 
 **What it shows:** a table of File, SHA256 (truncated), Source, and Size.
+
+**Coverage experiments:** prepare a reviewed “Grow corpus” or “Refine harness”
+proposal against one retained terminal campaign, then perform the work through
+the existing controls. Preparation, navigation, history reads, and attachment
+do not run a provider, harness, or fuzzer. To reproduce a seeded baseline, use
+\`oxfuzz run . --replay <baseline UUID>\` with the same configuration and database
+as the app, the retained original project, the current promoted harness and
+corpus, and every other compared setting unchanged. Ordinary Run chooses a new
+seed. A legacy baseline without a retained seed needs a new seeded baseline.
+After a later terminal run exists, refresh and explicitly attach it; the
+service rejects incomparable setup and leaves the prepared record unchanged.
+You may instead cancel with a retained reason. Edge deltas are descriptive and
+do not prove that the named goal function was entered.
 `;
 
 // --------------------------------------------------------------------------
@@ -473,7 +501,7 @@ crashes, duration).
 conditions (same target, engine, duration, resources, sanitizer, corpus, and
 environment).
 
-Expand a run to read its retained **Run closeout** ladder. Opening a row never
+Expand a run to read its retained **seven-step Run closeout** ladder. Opening a row never
 starts analysis. **Analyze / Resume** is explicit and is available only for a
 terminal harness-backed campaign. Retryable failures and blocked dependencies
 remain pending. Runs without exact retained scope explain why the action is

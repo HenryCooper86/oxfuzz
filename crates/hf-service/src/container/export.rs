@@ -13,7 +13,9 @@ use uuid::Uuid;
 
 use super::crash_inputs::is_regular_file;
 use super::harness_workspace::read_current_harness_source;
-use super::project_identity::{canonical_project_root, defectdojo_project_name};
+use super::project_identity::{
+    canonical_project_root, defectdojo_project_name, retained_run_target_selector,
+};
 use super::workspace::workspace_dir;
 
 /// How many project translation units one reproduction bundle carries.
@@ -246,7 +248,7 @@ impl ServiceContainer {
     /// Returns a validation error if the harness or crash input is missing (or
     /// the input is not a regular file -- symlinks are refused, never followed),
     /// or an internal error if the bundle cannot be written.
-    pub async fn export_repro_bundle(
+    async fn export_repro_bundle(
         &self,
         project: &Path,
         target: &str,
@@ -360,7 +362,21 @@ impl ServiceContainer {
                 ))
             })?,
         };
-        self.export_repro_bundle(project, target, engine, lang, crash, dest)
+        let run = self.run_record(crash.run_id).await?;
+        let candidate = self
+            .resolve_target_candidate_any_language(project, target)
+            .await?
+            .ok_or_else(|| {
+                ClassifiedError::Validation(format!("target '{target}' was not found"))
+            })?;
+        if candidate.id != crash.target_id {
+            return Err(ClassifiedError::Validation(format!(
+                "crash {} does not belong to target {}",
+                crash.id, candidate.id
+            )));
+        }
+        let retained_selector = retained_run_target_selector(&run, &candidate)?;
+        self.export_repro_bundle(project, &retained_selector, engine, lang, crash, dest)
             .await
     }
 

@@ -60,9 +60,17 @@ oxfuzz init                           # 生成 config/*.toml + .env
 # 然后至少配置一个 LLM 提供方：config/providers.toml + HF_PROVIDER_API_KEY
 
 oxfuzz discover <project> --lang c --rank
-oxfuzz harness  <project> --target <symbol> --engine libfuzzer
-oxfuzz run      <project> --target <symbol> --engine libfuzzer --duration 60m
-oxfuzz triage   <project> --target <symbol>
+oxfuzz work-order export <project> --target <symbol> --lang c \
+  --engine libfuzzer --out work-order.md
+# Author harness.c from the packet, then retain the IDs printed by each command:
+oxfuzz work-order import --work-order <work-order SHA-256> \
+  --source harness.c --origin human
+oxfuzz work-order qualify --submission <submission UUID>
+# Stop here. Review the exact source, lint, independent review, and smoke evidence.
+oxfuzz work-order promote --attempt <attempt UUID>
+oxfuzz run <project> --target <relative-file>::<symbol> \
+  --engine libfuzzer --duration 60m
+oxfuzz triage <project> --target <relative-file>::<symbol>
 ```
 
 Docker 必须已安装并正在运行，且至少配置一个 LLM 提供方。完整搭建见

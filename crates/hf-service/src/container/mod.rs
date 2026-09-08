@@ -82,7 +82,9 @@ use hf_core::target::{TargetCandidate, TargetLanguage};
 use hf_guardrails::{Action, Decision, Guardrails};
 use hf_runtime::{RuntimeConfig, SANDBOX_IMAGE};
 use hf_storage::{GuardrailDecisionRecord, RunRecord, RunStatus, Store};
-pub(crate) use project_identity::canonical_project_root;
+#[cfg(feature = "harness-work-order")]
+pub(crate) use project_identity::file_qualified_target_selector;
+pub(crate) use project_identity::{canonical_project_root, qualified_target_selector};
 use project_identity::{
     project_lookup_identity, project_slug, select_target_candidate, stored_project_matches,
 };
@@ -1322,19 +1324,41 @@ impl ServiceContainer {
         let Some(store) = self.store.as_ref() else {
             return Ok(None);
         };
+        let runs = store.list_runs(None).await?;
+        Ok(self
+            .latest_run_records_for_targets(project, [target_id].into_iter().collect(), &runs)
+            .await?
+            .remove(&target_id))
+    }
+
+    /// Resolve requested targets together, stopping before unrelated older evidence.
+    async fn latest_run_records_for_targets(
+        &self,
+        project: &Path,
+        mut remaining: std::collections::HashSet<Uuid>,
+        newest_first_runs: &[RunRecord],
+    ) -> Result<std::collections::HashMap<Uuid, RunRecord>, ClassifiedError> {
+        let mut latest = std::collections::HashMap::new();
+        let Some(store) = self.store.as_ref() else {
+            return Ok(latest);
+        };
         let project = project_lookup_identity(project);
-        for run in store.list_runs(None).await? {
-            if !stored_project_matches(Path::new(&run.project_root), &project) {
+        for run in newest_first_runs {
+            if remaining.is_empty() {
+                break;
+            }
+            if !stored_project_matches(Path::new(&run.project_root), &project)
+                || !run_has_crash_evidence(run.status)
+            {
                 continue;
             }
-            if !run_has_crash_evidence(run.status) {
-                continue;
-            }
-            if self.run_target_id(store, &run).await? == Some(target_id) {
-                return Ok(Some(run));
+            if let Some(target_id) = self.run_target_id(store, run).await? {
+                if remaining.remove(&target_id) {
+                    latest.insert(target_id, run.clone());
+                }
             }
         }
-        Ok(None)
+        Ok(latest)
     }
 
     // -- Corpus -----------------------------------------------------------
@@ -1809,6 +1833,8 @@ pub struct RunHistoryItem {
     pub project_root: String,
     /// Target symbol resolved through the run's persisted harness.
     pub target: Option<String>,
+    /// Complete file-qualified identity resolved from the retained target.
+    pub target_selector: Option<String>,
     /// Opaque grouping key shared only by directly comparable successful runs.
     pub comparison_key: Option<String>,
     /// Persisted purpose of the run (`Campaign` or `Smoke`).

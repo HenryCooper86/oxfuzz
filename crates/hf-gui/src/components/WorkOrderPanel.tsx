@@ -12,7 +12,7 @@ import type {
 import { Button, Input, Textarea } from "./ui";
 import { HarnessApprovalEvidence } from "./HarnessApprovalEvidence";
 import { useI18n } from "../i18nContext";
-import { canonicalHarnessEngine, canonicalHarnessLanguage } from "../lib/harnessScope";
+import { canonicalHarnessEngine, canonicalHarnessLanguage, qualifiedTargetSelector, matchesTargetSelection } from "../lib/harnessScope";
 
 function short(value: string | null | undefined) {
   return value ? `${value.slice(0, 16)}...` : "--";
@@ -23,12 +23,13 @@ interface WorkOrderPanelProps {
   target: string;
   language: string;
   engine: string;
-  onPromoted?: (harnessId: string) => void;
+  onPromoted?: (harnessId: string, targetSelector: string) => void;
 }
 
 function belongsToScope(order: HarnessWorkOrder, target: string, language: string, engine: string) {
   const evidence = order.payload.target as Record<string, unknown> | undefined;
-  return evidence?.symbol === target
+  return typeof evidence?.symbol === "string"
+    && matchesTargetSelection(evidence.symbol, typeof evidence.relative_source === "string" ? qualifiedTargetSelector(evidence.relative_source, evidence.symbol) : null, target)
     && canonicalHarnessLanguage(evidence.language) === canonicalHarnessLanguage(language)
     && canonicalHarnessEngine(order.payload.engine) === canonicalHarnessEngine(engine);
 }
@@ -266,7 +267,7 @@ function WorkOrderPanelSession({
       attemptId: selectedAttempt,
     }));
     if (!promoted) return;
-    onPromoted?.(promoted.id);
+    if (approvalEvidence?.target_selector) onPromoted?.(promoted.id, approvalEvidence.target_selector);
   }
 
   async function copyPacket() {

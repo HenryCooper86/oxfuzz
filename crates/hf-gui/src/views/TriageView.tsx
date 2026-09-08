@@ -193,7 +193,8 @@ function ScopedTriageView({ embedded }: { embedded: boolean }) {
     }
   }, [activeProject, lastTarget, markDone, markSkipped, selectFinding, t]);
 
-  const actionTarget = selection ? activeFinding?.target_symbol ?? "" : lastTarget;
+  const actionTarget = selection ? activeFinding?.target_selector ?? "" : lastTarget;
+  const actionDisplayTarget = selection ? activeFinding?.target_symbol ?? "" : lastTarget;
   const latestActionsAllowed = selection
     ? activeFinding?.latest_scoped_actions_allowed === true
     : Boolean(lastTarget);
@@ -209,7 +210,7 @@ function ScopedTriageView({ embedded }: { embedded: boolean }) {
       const markdown = await getTransport().invoke<string>("generate_report", { project: activeProject || ".", target: actionTarget, language: locale, expectedRunId: activeFinding?.crash.run_id });
       if (request !== actionRequest.current || !mounted.current) return;
       setReportMd(markdown);
-      await getTransport().invoke("save_report_draft", { title: t("reports.triageDraftTitle", { target: actionTarget }), project: activeProject || ".", target: actionTarget, status: "Draft", content: markdown });
+      await getTransport().invoke("save_report_draft", { title: t("reports.triageDraftTitle", { target: actionDisplayTarget }), project: activeProject || ".", target: actionTarget, status: "Draft", content: markdown });
       if (request !== actionRequest.current || !mounted.current) return;
       emitDataChanged();
       setMessage(t("triage.reportComposed"));
@@ -218,7 +219,7 @@ function ScopedTriageView({ embedded }: { embedded: boolean }) {
     } finally {
       if (request === actionRequest.current && mounted.current) setReporting(false);
     }
-  }, [actionTarget, activeFinding, activeProject, latestActionsAllowed, locale, t]);
+  }, [actionDisplayTarget, actionTarget, activeFinding, activeProject, latestActionsAllowed, locale, t]);
 
   const exportReport = useCallback(async (format: string) => {
     if (!actionTarget || !latestActionsAllowed) return;
@@ -245,7 +246,7 @@ function ScopedTriageView({ embedded }: { embedded: boolean }) {
     try {
       const saved = await getTransport().invoke<string | null>("export_repro", {
         project: activeProject || ".",
-        target: activeFinding.target_symbol,
+        target: activeFinding.target_selector,
         engine: activeFinding.engine,
         lang: activeFinding.target_language,
         crash: activeFinding.crash.id,
@@ -261,7 +262,7 @@ function ScopedTriageView({ embedded }: { embedded: boolean }) {
     const request = ++actionRequest.current;
     setPushing(true);
     try {
-      const outcome = await getTransport().invoke<{ findings_pushed: number }>("push_to_defectdojo", { project: activeProject || ".", target: activeFinding.target_symbol, expectedRunId: activeFinding.crash.run_id });
+      const outcome = await getTransport().invoke<{ findings_pushed: number }>("push_to_defectdojo", { project: activeProject || ".", target: activeFinding.target_selector, expectedRunId: activeFinding.crash.run_id });
       if (request === actionRequest.current && mounted.current) setMessage(t("triage.pushed", { n: outcome.findings_pushed, reimport: "", where: "" }));
     } catch (error) {
       if (request === actionRequest.current && mounted.current) setMessage(t("triage.pushFailed", { error: String(error) }));
