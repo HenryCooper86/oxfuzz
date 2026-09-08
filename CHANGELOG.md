@@ -9,8 +9,21 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ## Unreleased
 
+## 0.4.0 - 2026-09-08
+
 ### Added
 
+- **Retained daily-work workflows.** The desktop app now connects external
+  Harness Work Orders, exact-attempt qualification and human approval, resumable
+  run closeout, historical findings, and retained coverage experiments.
+- **Actionable historical findings.** The finding queue preserves exact run and
+  crash selection for review, reproduction, reports, and publication.
+- **Campaign Health and build readiness.** Retained cumulative telemetry,
+  request-scoped run admission, isolated run output, configurable CMake/plain-Make
+  profiles, and immutable build inputs support repeatable operator workflows.
+- **Qualified corpus and experiment tools.** Desktop corpus import reports exact
+  accounting; survival and reduction use the selected target; experiments retain
+  proposals, matched settings, run references, and descriptive comparison results.
 - **The approval gate now shows its evidence.** Every harness review item
   carries the qualification evidence an approval attests to: the independent
   LLM review verdict and reasons bound to the exact source and binary, the
@@ -77,6 +90,15 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ### Changed
 
+- Cross-revision findings and coverage comparisons now explicitly distinguish
+  observations from causal claims and require matched retained settings.
+- Finding queues resolve latest-run evidence in batches. File-qualified target
+  identity is preserved through Work Orders, campaigns, findings, reproduction
+  bundles, corpus actions, and evidence deletion.
+- Selected SQLite writes acquire immediate write intent to avoid deferred
+  transaction upgrade failures under contention.
+- Windows Work Order export binds reads to the selected project root; native
+  manifest and build-path handling corrections are included.
 - Corrected stale documentation references: the repository layout no longer
   lists nonexistent `config/agents/` and `skills/` directories, the harness
   prompt template location now names the real renderer, and the design
