@@ -1119,9 +1119,9 @@ fn command_for_step(work_order: &HarnessWorkOrder, step: WorkOrderStep) -> WorkO
 }
 
 fn work_order_target_selector(work_order: &HarnessWorkOrder) -> String {
-    format!(
-        "{}::{}",
-        work_order.payload.target.relative_source, work_order.payload.target.symbol
+    crate::container::file_qualified_target_selector(
+        &work_order.payload.target.relative_source,
+        &work_order.payload.target.symbol,
     )
 }
 

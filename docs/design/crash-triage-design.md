@@ -80,6 +80,18 @@ scheduled callers because they all use the same service operation. A report
 with no target findings still includes the section and explicitly states that
 there is no crash to classify.
 
+The finding review DTO carries both the display symbol and an actionable target
+selector derived by `hf-service` from the finding's exact retained run, harness,
+and target. Latest report and `DefectDojo` actions submit that selector together
+with the retained run identifier. Reproduction submits the selector and exact
+crash identifier; the service recovers the crash's retained run and requires it
+to be the latest selected-target run before reading the retained workspace. The
+executing service operation still resolves the target and refuses stale action
+selection. Legacy runs without retained corpus provenance use their bare-symbol
+workspace; qualified Work Order runs keep the complete relative-file-qualified
+selector. Presentation code never converts every finding to qualified form or
+reconstructs this decision from the display symbol.
+
 An optional remediation handoff may bind the reviewed finding, patch candidate,
 minimized reproducer, exact run evidence manifest, and a later sandbox
 verification result. A draft is explicitly unverified. The state can become

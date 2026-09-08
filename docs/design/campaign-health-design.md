@@ -1,6 +1,6 @@
 # Campaign Health
 
-Status: **active implementation**. Owner: `hf-service`, with durable evidence in
+Status: **implemented with stated evidence limits**. Owner: `hf-service`, with durable evidence in
 `hf-storage` and live delivery through the existing scheduler and presentation
 event paths.
 

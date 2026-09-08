@@ -50,6 +50,16 @@ pub(super) fn project_lookup_identity(project: &Path) -> PathBuf {
     std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf())
 }
 
+/// Complete retained file-qualified spelling, preserving native path text and namespaced symbols.
+pub(crate) fn qualified_target_selector(target: &TargetCandidate) -> String {
+    file_qualified_target_selector(&target.relative_file(), &target.symbol)
+}
+
+/// Compose retained source text and a whole symbol without reparsing namespace separators.
+pub(crate) fn file_qualified_target_selector(relative_file: &str, symbol: &str) -> String {
+    format!("{relative_file}::{symbol}")
+}
+
 /// Select the candidate referenced by `target` from `candidates`.
 ///
 /// `target` is either a plain symbol or a file-qualified `file::symbol` (the
@@ -71,7 +81,7 @@ pub(super) fn select_target_candidate<'c>(
             let mut qualified: Vec<String> = candidates
                 .iter()
                 .filter(|c| c.symbol == target)
-                .map(|c| format!("{}::{}", c.relative_file(), c.symbol))
+                .map(qualified_target_selector)
                 .collect();
             qualified.sort();
             qualified.dedup();
@@ -82,13 +92,9 @@ pub(super) fn select_target_candidate<'c>(
         }
         return Ok(Some(first));
     }
-    Ok(candidates.iter().find(|candidate| {
-        let relative_file = candidate.relative_file();
-        target
-            .strip_prefix(relative_file.as_str())
-            .and_then(|suffix| suffix.strip_prefix("::"))
-            .is_some_and(|symbol| symbol == candidate.symbol)
-    }))
+    Ok(candidates
+        .iter()
+        .find(|candidate| qualified_target_selector(candidate) == target))
 }
 
 /// A per-project workspace directory name: the human-readable basename plus a
@@ -109,6 +115,32 @@ pub(super) fn project_slug(project: &Path) -> String {
     hasher.update(identity.to_string_lossy().as_bytes());
     let digest = format!("{:x}", hasher.finalize());
     format!("{name}-{}", &digest[..8])
+}
+
+/// Recover only a known workspace selector; retained paths never become execution roots.
+pub(super) fn retained_run_target_selector(
+    run: &hf_storage::RunRecord,
+    target: &TargetCandidate,
+) -> Result<String, ClassifiedError> {
+    let Some(corpus) = run
+        .config
+        .as_ref()
+        .and_then(|config| config.seed_corpus.as_ref())
+    else {
+        // Legacy records without corpus provenance retain bare-symbol selection.
+        return Ok(target.symbol.clone());
+    };
+    let project = Path::new(&run.project_root);
+    let qualified = qualified_target_selector(target);
+    for selector in [&target.symbol, &qualified] {
+        if *corpus == super::workspace_dir(project, selector).join("corpus") {
+            return Ok(selector.clone());
+        }
+    }
+    Err(ClassifiedError::Validation(format!(
+        "run {} retained corpus path does not identify a workspace for target {}",
+        run.id, target.id
+    )))
 }
 
 #[cfg(test)]
@@ -143,6 +175,23 @@ mod target_resolution_tests {
             reachable_functions: Vec::new(),
             accumulated_complexity: 0,
         }
+    }
+
+    #[test]
+    fn native_path_selector_preserves_whole_namespaced_symbol() {
+        let root = std::env::temp_dir().join("selector-project");
+        let relative = PathBuf::from("src").join("nested").join("parser.cpp");
+        let mut target = candidate("unused", "ns::parser::parse");
+        target.project_root = root.clone();
+        target.location.file = root.join(&relative);
+        let expected = format!("{}::ns::parser::parse", relative.display());
+        assert_eq!(super::qualified_target_selector(&target), expected);
+        assert_eq!(
+            select_target_candidate(std::slice::from_ref(&target), &expected)
+                .unwrap()
+                .map(|found| found.id),
+            Some(target.id)
+        );
     }
 
     #[test]
@@ -219,7 +268,7 @@ mod target_resolution_tests {
     #[test]
     fn symbol_containing_colons_prefers_the_plain_match() {
         // A symbol that itself contains `::` (C++-style) still resolves as a
-        // plain symbol; the qualifier split is only a fallback.
+        // plain symbol before the complete file-qualified match is considered.
         let candidates = vec![candidate("/proj/src/ns.c", "ns::func")];
         let found = select_target_candidate(&candidates, "ns::func").unwrap();
         assert_eq!(found.map(|c| c.id), Some(candidates[0].id));

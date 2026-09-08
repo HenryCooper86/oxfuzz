@@ -33,21 +33,50 @@ api_key_env = "OPENAI_API_KEY"
 you keep local values in `.env`, export them before launching the process (for
 example, `set -a; source .env; set +a` in a POSIX shell).
 
-### 3. Run a campaign
+### 3. Qualify and review a retained harness
 
 ```bash
 # Discover and rank targets in a project
 oxfuzz discover /path/to/project --lang c --rank
 
-# Generate a harness for a specific target
-oxfuzz harness /path/to/project --target parse_value --engine afl++ --promote
+# Export an immutable authoring packet. The packet carries its work-order SHA-256.
+oxfuzz work-order export /path/to/project --target parse_value --lang c \
+  --engine afl++ --out work-order.md
 
-# Run the fuzzer
-oxfuzz run /path/to/project --target parse_value --engine afl++ --duration 60m
+# Author harness.c from that packet, then retain the submission UUID in the JSON.
+oxfuzz work-order import --work-order <work-order SHA-256> \
+  --source harness.c --origin human
+
+# Compile, independently review, and smoke-test that immutable submission.
+# Retain the attempt UUID returned in the JSON.
+oxfuzz work-order qualify --submission <submission UUID>
+
+# Stop and review the exact source, lint, review, binary digest, and smoke result.
+# Promotion is a separate human action bound to that retained attempt.
+oxfuzz work-order promote --attempt <attempt UUID>
+```
+
+### 4. Run and inspect the campaign
+
+```bash
+# Work Order runs always use the complete selector returned by the retained order.
+oxfuzz run /path/to/project --target src/parser.c::parse_value \
+  --engine afl++ --duration 60m
+
+# Read retained health without changing the run.
+oxfuzz health --run <run UUID>
 
 # Triage the crashes it found
-oxfuzz triage /path/to/project --target parse_value
+oxfuzz triage /path/to/project --target src/parser.c::parse_value
+
+# Explicitly run or resume the retained seven-step terminal closeout.
+oxfuzz closeout --run <run UUID>
 ```
+
+`work-order import` and `work-order qualify` never promote. Rerunning
+`oxfuzz harness` generates a new draft, so it is not an approval operation for
+the source you just reviewed. A full campaign requires the exact promoted
+harness revision and still executes only through the mandatory sandbox.
 
 ### Optional Semgrep target enrichment
 
@@ -86,11 +115,19 @@ Binary Tool integration is outside this release's scope.
 | `init` | Scaffold config from templates and create/migrate the database. |
 | `doctor [--json]` | Probe the mandatory Docker sandbox and its bundled engines; exit non-zero when fuzzing is not ready. |
 | `discover <project> --lang c [--rank] [--semgrep]` | Scan a project and produce a ranked Target Inventory; `--semgrep` explicitly adds advisory C/C++ enrichment. |
-| `harness <project> --target <sym> --engine <e> [--draft-only] [--repair N] [--refine] [--promote]` | Write, compile (optionally auto-repair or coverage-refine), and smoke-qualify a harness; `--promote` is the explicit approval step. |
-| `run <project> --target <sym> --engine <e> --duration 60m` | Run a sandboxed campaign with the active promoted harness (Ctrl-C cancels cooperatively). |
+| `harness <project> --target <sym> --engine <e> [--draft-only] [--repair N] [--refine] [--promote]` | Write, compile (optionally auto-repair or coverage-refine), and smoke-qualify a newly generated harness. Without `--promote`, review the output; rerunning creates another draft. Use the retained Work Order flow below when approval must name a previously reviewed source. |
+| `work-order export\|import\|list\|submissions\|qualify\|rank\|promote ...` | Manage immutable external harness packets, submissions, qualification attempts, deterministic ranking, and exact-attempt promotion. |
+| `run <project> --target <sym> --engine <e> --duration 60m` | Run a sandboxed campaign with the active promoted harness (Ctrl-C cancels cooperatively). A file-qualified selector is `<relative-file>::<complete-symbol>`; a retained Work Order run always uses that complete selector. |
+| `run . --replay <run UUID>` | Replay a retained run with its recorded engine, duration, and deterministic seed under current policy. The positional `.` is ignored in replay mode; the retained run resolves its original project. |
 | `campaign <project> --target <sym> --engine <e>` | Run and triage a bounded campaign using an already smoke-qualified, human-promoted harness. |
+| `health --run <run UUID>` | Assess retained campaign health. This read-only command never stops, restarts, or resizes the run. |
+| `closeout --run <run UUID>` | Explicitly run or resume the seven retained terminal closeout steps. Successful/skipped steps remain retained; failed or dependency-blocked work can be retried. |
 | `triage <project> --target <sym>` | Ingest, dedup, classify (CASR), and draft reports for crashes. |
-| `corpus <project> --target <sym> --op seed\|llmseed\|grow\|prune\|cprune\|survival\|minimize\|absorb\|import\|list [--from <dir>]` | Manage the corpus. `prune` removes byte duplicates; `cprune` and `minimize` run the qualified harness in the sandbox; `import` reports exact added-byte, duplicate, and skipped counts and requires `--from`. |
+| `corpus <project> --target <sym> --op seed\|llmseed\|grow\|prune\|cprune\|survival\|regen\|minimize\|absorb\|concolic\|import\|list [--from <dir>]` | Manage the corpus. `prune` removes byte duplicates; `cprune`, `survival`, `regen`, `minimize`, and optional `concolic` have the distinct execution/provider requirements below; `import` requires `--from`. |
+| `build diagnose <project> [--json]` | Read current build prerequisites and the exact available plan without building. |
+| `build profile show\|set\|clear ...` | Read or explicitly change the optional CMake/plain-Make project build profile. `show` remains available in builds without Build Doctor. |
+| `build history <project> [--limit N] [--json]` | Read retained diagnosis and build output. |
+| `build run <project> --expected-profile-sha256 <digest> [--json]` | Execute the exact reviewed profile in the sandbox and reject a stale profile digest. |
 | `coverage <project> --target <sym>` | Summarize line/region/function coverage. |
 | `regress <project> --target <sym>` | Re-run the known crash reproducers to verify they still (or no longer) crash. |
 | `ci <project> --target <sym> --engine <e> [--sarif out.sarif]` | CI gate: seed, run, triage, and export SARIF; exits non-zero when crashes are found. |
@@ -107,6 +144,116 @@ Binary Tool integration is outside this release's scope.
 | `tui <project>` | Browse the target inventory and copy accurate next-step commands. |
 
 Engines: `afl++`, `honggfuzz`, `libfuzzer`, `syzkaller`.
+
+### Harness Work Order commands
+
+The Work Order feature exposes exactly seven CLI operations:
+
+```bash
+oxfuzz work-order export <project> --target <symbol> --lang c \
+  --engine libfuzzer [--out packet.md]
+oxfuzz work-order import --work-order <work-order SHA-256> \
+  --source harness.c --origin human [--parent <submission UUID>]
+oxfuzz work-order import --work-order <work-order SHA-256> \
+  --source harness.c --origin external-tool --tool <name> \
+  [--model <label>] [--response-id <id>] [--parent <submission UUID>]
+oxfuzz work-order list [--project <project>]
+oxfuzz work-order submissions --work-order <work-order SHA-256>
+oxfuzz work-order qualify --submission <submission UUID>
+oxfuzz work-order rank --attempt <attempt UUID> [--attempt <attempt UUID> ...]
+oxfuzz work-order promote --attempt <attempt UUID>
+```
+
+Export returns a content-addressed work-order ID. Import returns an immutable
+submission UUID and records provenance; source must be a nonempty regular,
+non-symlink UTF-8 file of at most 65,536 bytes. Qualification returns a new
+attempt UUID and is the only operation above that compiles, reviews, and smoke
+tests. Rank reads retained attempts. Before promote, inspect the source and the
+retained lint, independent review, source/binary digests, verdict, crashes, and
+throughput for the selected attempt. Promote accepts only that exact attempt ID
+and does not redraft or requalify it. A `Suspect` attempt can technically be
+promoted explicitly, but refinement and a new smoke qualification are the
+recommended response. A crash-bearing failed attempt is ineligible.
+
+The work order retains the complete `relative-file::symbol` selector. Use it
+for every run, coverage, and corpus command that follows the Work Order flow,
+including when the display symbol is currently unique. A symbol label by itself
+does not preserve the reviewed Work Order workspace identity.
+
+### Campaign health and closeout
+
+`oxfuzz health --run <UUID>` evaluates retained evidence for coverage plateau,
+stale worker statistics, missing managed invocation, disk pressure, and terminal
+failure. Missing evidence is reported as unavailable. Health is observational;
+it does not control the campaign and does not prove a Docker process, worker, or
+VM is alive.
+
+`oxfuzz closeout --run <UUID>` operates only on a terminal, harness-backed
+campaign and resumes at unfinished work. The retained steps are triage,
+minimize, corpus absorb, coverage, blockers, disposition, and trust report.
+Opening Run History in the desktop app is read-only; the CLI command itself is
+the explicit execution request. Historical source coverage and blocker results
+remain unavailable when current workspace files cannot establish them.
+
+### Build profiles
+
+Build profiles support only `cmake` and `make`. A set operation is explicit:
+
+```bash
+oxfuzz build profile set /path/to/project \
+  --component-root . --build-system cmake \
+  --compile-database-path build/compile_commands.json \
+  --define BUILD_TESTING=OFF --dependency command:cmake
+oxfuzz build diagnose /path/to/project --json
+oxfuzz build run /path/to/project \
+  --expected-profile-sha256 <reviewed profile SHA-256> --json
+oxfuzz build history /path/to/project --limit 20 --json
+oxfuzz build profile clear /path/to/project --json
+```
+
+Review the normalized component, expected compile database, dependencies,
+exact argv, immutable image, and profile digest returned by diagnose. `build
+run` writes the oxfuzz-owned build area inside the selected project and runs
+only through the sandbox. Clearing a profile keeps diagnosis/build history.
+
+### Corpus operation meanings
+
+`seed`, `grow`, `prune`, `absorb`, `import`, and `list` use deterministic corpus
+operations. `llmseed` contacts the configured provider. `survival`, `cprune`,
+and `regen` require an exact promoted, smoke-qualified AFL++ harness; `regen`
+also asks the provider for bounded replacement seeds. `minimize` (also accepted
+as `cmin`) requires an exact promoted, smoke-qualified libFuzzer harness.
+`concolic` is available only with its feature and performs sandboxed symbolic
+enrichment. Engine-backed actions repeat qualification and current policy checks
+at execution time. `prune` claims byte deduplication only; `cprune` retains one
+input per whole-map fingerprint and is not a global minimum covering set.
+
+### Coverage experiments and replay
+
+There is no coverage-experiment lifecycle subcommand in the current CLI. The
+desktop Corpus view, REST resources under `/coverage/experiments`, and trusted
+local native commands create, list, read, complete, or cancel retained
+experiments. These operations retain evidence and perform no discovery,
+provider call, coverage calculation, promotion, harness execution, or fuzzer
+execution.
+
+For a prepared experiment whose baseline has a retained seed, the existing CLI
+handoff is:
+
+```bash
+# Run this with the same oxfuzz configuration/database used by the application.
+oxfuzz run . --replay <baseline UUID>
+```
+
+Replay resolves the original project from the retained baseline, which must
+still be available. It pins the recorded seed, engine, and duration, while using
+the current promoted harness and current corpus under current policy. Keep every
+other compared setting unchanged. Ordinary `oxfuzz run` derives a new seed and
+will not produce an attachable match. A legacy baseline with a null seed cannot
+be reproduced for comparison by replay; run a new seeded baseline and prepare a
+new experiment. After the later run terminates, refresh the experiment and
+explicitly attach its run UUID. Failed/cancelled/no-op outcomes remain visible;
+an edge delta is descriptive and does not prove entry into the goal function.
 
 The REST API exposes discovery, harness, user-space run start/status/cancel,
 corpus, triage, reporting, and management endpoints. Syzkaller remains a

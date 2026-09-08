@@ -6833,3 +6833,196 @@ async fn configured_harness_context_roundtrip_retry_strict_decode_and_clear() {
         .unwrap()
         .is_none());
 }
+
+async fn with_unrelated_wal_writer<T: std::fmt::Debug>(
+    store: &Store,
+    operation: impl std::future::Future<Output = Result<T, StorageError>>,
+) -> T {
+    let run = RunRecord::new(
+        "/projects/wal-writer",
+        EngineKind::LibFuzzer,
+        None,
+        Utc::now(),
+    );
+    store.insert_run(&run).await.unwrap();
+    let mut writer = store.pool().begin_with("BEGIN IMMEDIATE").await.unwrap();
+    sqlx::query("UPDATE runs SET edges = 17 WHERE id = ?1")
+        .bind(run.id.to_string())
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    tokio::pin!(operation);
+    let early = tokio::time::timeout(StdDuration::from_millis(100), &mut operation).await;
+    writer.commit().await.unwrap();
+    assert!(
+        early.is_err(),
+        "operation must wait for the WAL writer before reading; returned {early:?}"
+    );
+    let result = tokio::time::timeout(StdDuration::from_secs(5), &mut operation)
+        .await
+        .expect("operation must finish after the unrelated writer commits")
+        .expect("valid operation must succeed after write contention");
+    let edges: i64 = sqlx::query_scalar("SELECT edges FROM runs WHERE id = ?1")
+        .bind(run.id.to_string())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(edges, 17);
+    result
+}
+
+#[tokio::test]
+async fn semgrep_publication_waits_for_unrelated_wal_writer() {
+    let (store, dir) = temp_store().await;
+    let other = Store::connect(dir.path().join("test.db")).await.unwrap();
+    let mut run = semgrep_staging_run("/projects/parser", Utc::now());
+    advance_semgrep_to_persisting(&store, &mut run).await;
+    let publication = semgrep_publication(run, 2, 1);
+
+    with_unrelated_wal_writer(&store, other.publish_semgrep_run(&publication)).await;
+
+    assert_eq!(
+        store.semgrep_publication(publication.run.id).await.unwrap(),
+        Some(publication)
+    );
+}
+
+#[tokio::test]
+async fn semgrep_failure_waits_for_unrelated_wal_writer() {
+    let (store, dir) = temp_store().await;
+    let other = Store::connect(dir.path().join("test.db")).await.unwrap();
+    let mut run = semgrep_staging_run("/projects/parser", Utc::now());
+    advance_semgrep_to_persisting(&store, &mut run).await;
+
+    with_unrelated_wal_writer(
+        &store,
+        other.fail_semgrep_run(
+            run.id,
+            SemgrepRunStatus::Cancelled,
+            "operator",
+            "operation cancelled",
+            Utc::now(),
+        ),
+    )
+    .await;
+
+    let terminal = store.semgrep_publication(run.id).await.unwrap().unwrap();
+    assert_eq!(terminal.run.status, SemgrepRunStatus::Cancelled);
+    assert_eq!(terminal.run.failure_code.as_deref(), Some("operator"));
+    assert!(terminal.findings.is_empty());
+    assert!(terminal.scores.is_empty());
+}
+
+#[tokio::test]
+async fn semgrep_compensation_waits_for_unrelated_wal_writer() {
+    let (store, dir) = temp_store().await;
+    let other = Store::connect(dir.path().join("test.db")).await.unwrap();
+    let mut run = semgrep_staging_run("/projects/parser", Utc::now());
+    advance_semgrep_to_persisting(&store, &mut run).await;
+    let publication = semgrep_publication(run, 2, 1);
+    store.publish_semgrep_run(&publication).await.unwrap();
+
+    with_unrelated_wal_writer(
+        &store,
+        other.compensate_semgrep_publication(
+            publication.run.id,
+            "journal_commit",
+            "journal commit failed",
+            publication.run.ended_at.unwrap(),
+        ),
+    )
+    .await;
+
+    let terminal = store
+        .semgrep_publication(publication.run.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(terminal.run.status, SemgrepRunStatus::Failed);
+    assert_eq!(terminal.run.failure_code.as_deref(), Some("journal_commit"));
+    assert!(terminal.findings.is_empty());
+    assert!(terminal.scores.is_empty());
+}
+
+#[tokio::test]
+async fn automotive_state_corpus_waits_for_unrelated_wal_writer() {
+    let (store, dir) = temp_store().await;
+    let other = Store::connect(dir.path().join("test.db")).await.unwrap();
+    let source_operation_id = Uuid::new_v4();
+    store
+        .insert_automotive_operation(&AutomotiveOperationRecord {
+            id: source_operation_id,
+            project_root: "/projects/vehicle-parser".to_owned(),
+            operation: "analyze_capture".to_owned(),
+            mode: "offline_pcap".to_owned(),
+            protocol: Some("uds".to_owned()),
+            status: AutomotiveOperationStatus::Running,
+            started_at: Utc::now(),
+            ended_at: None,
+            request_hash: "11".repeat(32),
+            transcript_hash: None,
+            artifact_dir: "projects/vehicle/.service/automotive/source".to_owned(),
+            approval_json: None,
+            result_json: None,
+            error: None,
+        })
+        .await
+        .unwrap();
+    store
+        .complete_automotive_operation(
+            source_operation_id,
+            AutomotiveOperationStatus::Done,
+            Utc::now(),
+            None,
+            Some(r#"{"result":"capture_analysis"}"#),
+            None,
+        )
+        .await
+        .unwrap();
+    let record = AutomotiveStateCorpusRecord {
+        project_root: "/projects/vehicle-parser".to_owned(),
+        protocol: "uds".to_owned(),
+        state_digest: "33".repeat(32),
+        artifact_sha256: "44".repeat(32),
+        source_operation_id,
+        artifact_path: "projects/vehicle/.service/automotive/state-corpus/uds/state/artifact"
+            .to_owned(),
+        created_at: Utc::now(),
+    };
+
+    assert_eq!(
+        with_unrelated_wal_writer(&store, other.record_automotive_state_corpus(&record)).await,
+        record
+    );
+    assert_eq!(
+        store
+            .automotive_state_corpus(&record.project_root, 10)
+            .await
+            .unwrap(),
+        vec![record]
+    );
+}
+
+#[tokio::test]
+async fn upsert_target_waits_for_unrelated_wal_writer_and_preserves_identity() {
+    let (store, dir) = temp_store().await;
+    let other = Store::connect(dir.path().join("test.db")).await.unwrap();
+    let target = sample_target("/projects/parser");
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    let harness = sample_harness(target.id);
+    store.upsert_harness(&harness).await.unwrap();
+    let mut rediscovered = target.clone();
+    rediscovered.id = Uuid::new_v4();
+    rediscovered.rationale = "rediscovered under contention".to_owned();
+
+    with_unrelated_wal_writer(&store, other.upsert_target(&rediscovered, Utc::now())).await;
+
+    let targets = store.list_targets("/projects/parser").await.unwrap();
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].id, target.id);
+    assert_eq!(targets[0].rationale, "rediscovered under contention");
+    let harnesses = store.list_harnesses(target.id).await.unwrap();
+    assert_eq!(harnesses.len(), 1);
+    assert_eq!(harnesses[0].id, harness.id);
+    assert_eq!(harnesses[0].target_id, target.id);
+}

@@ -327,6 +327,7 @@ async fn run_records_a_seed_and_replay_reexecutes_with_it() {
     // would have applied.
     let mut legacy_config = config;
     legacy_config.seed = None;
+    legacy_config.seed_corpus = None;
     legacy_config.replay_of = None;
     let mut legacy = hf_storage::RunRecord::new(
         run.project_root.clone(),
@@ -351,6 +352,20 @@ async fn run_records_a_seed_and_replay_reexecutes_with_it() {
         "an absent recorded seed must derive deterministically from the original run id"
     );
     assert_eq!(legacy_replayed_config.replay_of, Some(legacy.id));
+
+    let mut malformed = run.clone();
+    malformed.id = Uuid::new_v4();
+    malformed.config.as_mut().unwrap().seed_corpus = Some(dir.path().join("foreign-corpus"));
+    store.insert_run(&malformed).await.unwrap();
+    let before_bad_path = runtime.campaign_count();
+    let error = container
+        .replay_run(malformed.id, &|_| {})
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("retained corpus path"));
+    assert!(error.contains(&malformed.id.to_string()));
+    assert_eq!(runtime.campaign_count(), before_bad_path);
 
     // Replay is a new execution. It preserves reproducibility inputs only
     // after the current operator policy admits the recorded engine and

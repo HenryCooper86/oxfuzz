@@ -14,7 +14,8 @@ use super::harness_workspace::{
     harness_binary_name, read_current_harness_id, read_current_harness_source,
 };
 use super::project_identity::{
-    canonical_project_root, project_lookup_identity, stored_project_matches,
+    canonical_project_root, project_lookup_identity, retained_run_target_selector,
+    stored_project_matches,
 };
 use super::staging::quarantine_corpus_entry;
 use super::workspace::{resolve_workspace_directory, run_output_relative, workspace_dir};
@@ -147,7 +148,8 @@ impl ServiceContainer {
             .ok_or_else(|| {
                 ClassifiedError::Validation(format!("run {} evidence has no target record", run.id))
             })?;
-        let workspace = workspace_dir(Path::new(&run.project_root), &target.symbol);
+        let target_selector = retained_run_target_selector(run, &target)?;
+        let workspace = workspace_dir(Path::new(&run.project_root), &target_selector);
         let relative_root = PathBuf::from("runs").join(run.id.to_string());
         let candidate = workspace.join(&relative_root);
         match std::fs::symlink_metadata(&candidate) {
@@ -194,11 +196,11 @@ impl ServiceContainer {
             .into_iter()
             .map(|h| (h.id, h))
             .collect();
-        let targets: std::collections::HashMap<Uuid, String> = store
+        let targets: std::collections::HashMap<Uuid, hf_core::target::TargetCandidate> = store
             .list_all_targets()
             .await?
             .into_iter()
-            .map(|t| (t.id, t.symbol))
+            .map(|t| (t.id, t))
             .collect();
         let mut crashes_by_run: std::collections::HashMap<Uuid, usize> =
             std::collections::HashMap::new();
@@ -213,7 +215,9 @@ impl ServiceContainer {
                     .as_ref()
                     .and_then(|cfg| harnesses.get(&cfg.harness_id))
                     .map(|h| h.target_id);
-                let target = target_id.and_then(|id| targets.get(&id).cloned());
+                let candidate = target_id.and_then(|id| targets.get(&id));
+                let target = candidate.map(|target| target.symbol.clone());
+                let target_selector = candidate.map(super::qualified_target_selector);
                 // Presentation layers use this opaque key to compare a run only
                 // with an experiment that has the same target, engine, budget,
                 // sanitizer, corpus, environment, and engine arguments.
@@ -240,6 +244,7 @@ impl ServiceContainer {
                 RunHistoryItem {
                     target_id,
                     requested_duration_secs,
+                    target_selector,
                     id: r.id.to_string(),
                     project_root: r.project_root,
                     target,

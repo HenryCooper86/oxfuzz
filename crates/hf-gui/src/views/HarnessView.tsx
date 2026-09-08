@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, lazy, Suspense } from "react";
+import { useState, useEffect, useRef, useCallback, lazy, Suspense } from "react";
 import { useI18n } from "../i18nContext";
 import { getTransport, pickFolder } from "../lib";
 import { useProject } from "../providers/project";
@@ -22,7 +22,7 @@ import { FuzzingPolicyNotice } from "../components/FuzzingPolicyNotice";
 import { TargetSelectionRepairNotice } from "../components/TargetSelectionRepairNotice";
 import { projectStorageKey } from "../lib/projectState";
 import { WorkOrderPanel } from "../components/WorkOrderPanel";
-import { harnessReviewMatchesScope } from "../lib/harnessScope";
+import { harnessReviewMatchesScope, candidateTargetSelector, matchesTargetSelection } from "../lib/harnessScope";
 
 /** Which generator wrote a draft. Under `auto` a provider outage substitutes
  *  the template, and the two harnesses are materially different. */
@@ -159,6 +159,9 @@ export function HarnessView({
     if (path) setLocalProject(path);
   }
 
+  const selectedTargetRef = useRef(selectedTarget);
+  selectedTargetRef.current = selectedTarget;
+
   // Auto-run discover when project is set.
   useEffect(() => {
     if (!project || selectionBlocked) return;
@@ -168,8 +171,13 @@ export function HarnessView({
         if (cancelled) return;
         setDiscoverError(null);
         setInventory(inv);
-        if (inv.candidates.length > 0) {
-          setSelectedTarget([...inv.candidates].sort((a, b) => b.fit_score - a.fit_score)[0].symbol);
+        const selectedMatches = inv.candidates.filter(candidate =>
+          matchesTargetSelection(candidate.symbol, candidateTargetSelector(candidate), selectedTargetRef.current),
+        );
+        if (inv.candidates.length > 0 && selectedMatches.length !== 1) {
+          const best = [...inv.candidates].sort((a, b) => b.fit_score - a.fit_score)[0];
+          const duplicate = inv.candidates.filter(candidate => candidate.symbol === best.symbol).length > 1;
+          setSelectedTarget(duplicate ? candidateTargetSelector(best) : best.symbol);
         }
       })
       .catch((e) => {
@@ -507,7 +515,12 @@ export function HarnessView({
               }}
               options={[...inventory.candidates]
                 .sort((a, b) => b.fit_score - a.fit_score)
-                .map((c) => ({ value: c.symbol, label: `${c.symbol} (${t("harness.fit")}: ${c.fit_score.toFixed(2)})` }))}
+                .map((c) => {
+                  const qualified = candidateTargetSelector(c);
+                  const duplicate = inventory.candidates.filter(candidate => candidate.symbol === c.symbol).length > 1;
+                  const value = selectedTarget === qualified || duplicate ? qualified : c.symbol;
+                  return { value, label: `${value} (${t("harness.fit")}: ${c.fit_score.toFixed(2)})` };
+                })}
             />
           </div>
           <div className="flex flex-col gap-1 w-40">
@@ -571,8 +584,9 @@ export function HarnessView({
           target={selectedTarget}
           language={lang}
           engine={engine}
-          onPromoted={(harnessId) => {
-            setExternalPromotion({ harnessId, project, target: selectedTarget, language: lang, engine });
+          onPromoted={(harnessId, targetSelector) => {
+            setSelectedTarget(targetSelector);
+            setExternalPromotion({ harnessId, project, target: targetSelector, language: lang, engine });
             setHarness(null);
             setPrevSource(null);
             setShowDiff(false);

@@ -25,5 +25,5 @@ it.each(["Sidebar Corpus","Sidebar Workflow"])("loads real Corpus and explicitly
  for(let i=0;i<10&&!host.querySelector('[aria-label="Experiment history"]');i++)await act(async()=>{await new Promise(r=>setTimeout(r,20));});
  expect(host.textContent).toContain("Coverage experiments");const history=host.querySelector<HTMLSelectElement>('[aria-label="Experiment history"]')!;await act(async()=>{history.value=saved.id;history.dispatchEvent(new Event("change",{bubbles:true}));});await click("Open Harness");expect(host.textContent).toContain("Existing Harness controls");expect(invoke.mock.calls.some(([cmd])=>/compile|refine|seed|promote|run_fuzzer/.test(cmd))).toBe(false);
  if(entry==="Sidebar Workflow"){expect(host.textContent).toContain("Fuzzing Workflow");await click("Corpus");}else await click("Sidebar Corpus");
- const reopened=host.querySelector<HTMLSelectElement>('[aria-label="Experiment history"]')!;expect(reopened).toBeTruthy();expect(reopened.value).toBe(saved.id);await click("Open Run");expect(host.textContent).toContain("Existing Run controls");
+ const reopened=host.querySelector<HTMLSelectElement>('[aria-label="Experiment history"]')!;expect(reopened).toBeTruthy();expect(reopened.value).toBe(saved.id);expect(host.textContent).toContain("Start a new campaign and use its recorded seed as a new baseline");
 });

@@ -1,10 +1,11 @@
 # Coverage Experiments
 
-Status: **proposed Phase 7 implementation**. Owners: `hf-service` for experiment
+Status: **implemented**. Owners: `hf-service` for experiment
 policy and workflow, `hf-storage` for durable records and reference protection,
 `hf-web` and `hf-gui` for presentation. This document is the authoritative
 experiment design; [Coverage Blockers](coverage-blocker-design.md) supplies
-optional suggestions. No implementation is delivered by this design change.
+optional suggestions. The feature retains proposals and results but does not
+execute experiment work.
 
 ## 1. Operator workflow and scope
 
@@ -12,8 +13,8 @@ An engineer selects a retained terminal campaign for the current project and
 target, reviews `grow_corpus` or `refine_harness`, a goal function, their own
 hypothesis, and a positive duration budget. Preparation persists that exact
 intent and baseline evidence before any navigation. The engineer explicitly
-uses existing Corpus, Harness, and Run workflows, then attaches one later
-terminal campaign, or cancels the investigation with a reason. Reopening shows
+uses existing Corpus and Harness workflows, then explicitly starts the existing
+CLI replay operation with the baseline seed and attaches one later terminal campaign, or cancels the investigation with a reason. Reopening shows
 the immutable proposal and its history, including unsuccessful attempts.
 
 Preparation is an evidence write, not execution authorization. Create, get,
@@ -29,11 +30,11 @@ experiment, even if its hypothesis and baseline match an earlier record.
 History has no automatic pruning. There is no public single-experiment deletion
 operation; explicit project deletion and knowledge clearing own cleanup.
 
-## 2. Proposed public APIs and ownership
+## 2. Public APIs and ownership
 
 All methods are async and return `Result<_, CoverageExperimentError>`. The
 service owns these request/view types in `coverage_experiments`; transports
-re-export their serialization rather than reconstructing policy. Proposed names:
+re-export their serialization rather than reconstructing policy. Implemented names:
 
 ```rust
 create_coverage_experiment(CreateCoverageExperimentRequest) -> CoverageExperimentView
@@ -73,7 +74,7 @@ kind, goal, hypothesis, duration, and baseline evidence. The page contains
 unknown fields rejected. All nullable evidence fields must be present as JSON
 null when unavailable; omitted keys are malformed, never historical defaults.
 
-Proposed unconditional storage module: `coverage_experiment_store.rs`, with
+The unconditional storage module is `coverage_experiment_store.rs`, with
 `CoverageExperimentRecord`, `CoverageExperimentRunEvidenceV1`,
 `CoverageExperimentResultEvidenceV1`, and strict enums. Store methods:
 `insert_coverage_experiment(&record)`, `coverage_experiment(id)`,
@@ -487,13 +488,31 @@ retained run/target inventories for the baseline picker; no exploration call is
 needed. Existing run history additionally exposes nullable typed `target_id` and
 `requested_duration_secs` from its retained harness/config. Requested duration
 is distinct from existing elapsed `duration_secs`; missing config stays null.
+Review items and run history additionally expose nullable service-owned
+`target_selector`, the complete relative-file-qualified target identity alongside
+the display symbol. Qualified desktop selections match that exact value; bare
+selections retain their existing symbol filter and explicit duplicate-UUID choice.
+Selector formatting is shared with retained replay/closeout resolution.
+
 A selected terminal campaign supplies the exact target UUID and requested budget.
 When one symbol has several retained target IDs, the operator selects the ID
 explicitly before viewing scoped history. A selected blocker may prefill kind/function; the operator reviews and
 edits them and writes the hypothesis. Show baseline status, duration, unavailable
 evidence and limits. Prepare persists first; only then offer explicit navigation
-to Corpus for growth or Harness for refinement, and existing Run controls. No
-navigation handler invokes an action. Preserve experiment ID when returning. The GUI stores only the selected ID in a
+to Corpus for growth or Harness for refinement. For a baseline with a retained
+seed, show the exact command `oxfuzz run . --replay <baseline UUID>` using the
+same oxfuzz configuration and database as the app. The required positional `.`
+is ignored by replay, which resolves the original project from the retained run;
+the project must remain available. Existing replay and closeout share exact
+retained workspace-selector resolution described in [Run Closeout](run-closeout-design.md),
+preserving both ordinary bare-symbol and imported file-qualified workspaces.
+Replay uses the current promoted harness and
+corpus under current policy; all other compared settings must remain unchanged.
+Ordinary Run derives a new seed and cannot provide a matching experiment result.
+A legacy baseline with no retained seed cannot be recreated by replay; direct
+the operator to start a new campaign and prepare against its recorded seed.
+There is no new REST/native replay capability, automatic execution, or relaxed
+seed comparison. No navigation handler invokes an action. Preserve experiment ID when returning. The GUI stores only the selected ID in a
 local preference keyed by canonical project and target UUID, then reloads its
 record through the scoped service read. Preference failures are visible; this
 pointer never substitutes for the durable record.

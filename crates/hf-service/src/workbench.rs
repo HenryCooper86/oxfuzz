@@ -92,6 +92,8 @@ pub struct HarnessReviewItem {
     pub target_id: String,
     pub project_root: String,
     pub target_symbol: String,
+    /// Complete file-qualified identity when the retained target exists.
+    pub target_selector: Option<String>,
     pub engine: String,
     pub language: String,
     pub status: String,
@@ -250,7 +252,10 @@ pub async fn dashboard<S: std::hash::BuildHasher>(
         .iter()
         .filter(|t| {
             project_matches(t.project_root.as_path(), project_filter_ref)
-                && active_target.is_none_or(|symbol| t.symbol == symbol)
+                && active_target.is_none_or(|selector| {
+                    t.symbol == selector
+                        || crate::container::qualified_target_selector(t) == selector
+                })
         })
         .cloned()
         .collect();
@@ -287,27 +292,17 @@ pub async fn dashboard<S: std::hash::BuildHasher>(
 
     let filtered_harnesses: Vec<Harness> = harnesses
         .into_iter()
-        .filter(|h| project_filter_ref.is_none() || target_ids_for_project.contains(&h.target_id))
+        .filter(|h| target_ids_for_project.contains(&h.target_id))
         .filter(|h| {
-            active_target.is_none_or(|symbol| {
-                targets
-                    .iter()
-                    .find(|t| t.id == h.target_id)
-                    .is_some_and(|t| t.symbol == symbol)
-            })
+            active_target.is_none_or(|_| target_ids_for_active_target.contains(&h.target_id))
         })
         .collect();
 
     let filtered_crashes: Vec<Crash> = crashes
         .into_iter()
-        .filter(|c| project_filter_ref.is_none() || target_ids_for_project.contains(&c.target_id))
+        .filter(|c| target_ids_for_project.contains(&c.target_id))
         .filter(|c| {
-            active_target.is_none_or(|symbol| {
-                targets
-                    .iter()
-                    .find(|t| t.id == c.target_id)
-                    .is_some_and(|t| t.symbol == symbol)
-            })
+            active_target.is_none_or(|_| target_ids_for_active_target.contains(&c.target_id))
         })
         .collect();
 
@@ -645,6 +640,7 @@ fn harness_review_items(
                     .map(|t| t.project_root.to_string_lossy().to_string())
                     .unwrap_or_default(),
                 target_symbol: target.map_or_else(|| "unknown".to_owned(), |t| t.symbol.clone()),
+                target_selector: target.map(crate::container::qualified_target_selector),
                 engine: format!("{:?}", h.engine),
                 language: format!("{:?}", h.language),
                 status: format!("{:?}", h.status),

@@ -1679,6 +1679,110 @@ async fn deleting_a_terminal_run_removes_its_exact_evidence_directory() {
     assert!(!root.exists());
 }
 
+async fn qualified_run_deletion_fixture(
+    name: &str,
+    valid_corpus_provenance: bool,
+) -> (
+    ServiceContainer,
+    tempfile::TempDir,
+    Arc<hf_storage::Store>,
+    hf_storage::RunRecord,
+    std::path::PathBuf,
+) {
+    isolate_workspace();
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path().join(name);
+    std::fs::create_dir_all(&project).unwrap();
+    let store = Arc::new(
+        hf_storage::Store::connect(directory.path().join("runs.db"))
+            .await
+            .unwrap(),
+    );
+    let target = stored_target(&project, "parse_work_order");
+    let harness = stored_harness(target.id, &target.symbol);
+    store
+        .upsert_target(&target, chrono::Utc::now())
+        .await
+        .unwrap();
+    store.upsert_harness(&harness).await.unwrap();
+    let selector = format!(
+        "{}::{}",
+        target.location.file.to_string_lossy(),
+        target.symbol
+    );
+    let workspace = hf_service::workspace_dir(&project, &selector);
+    let mut run = stored_run(&project, harness.id, chrono::Utc::now());
+    run.config.as_mut().unwrap().seed_corpus = Some(if valid_corpus_provenance {
+        workspace.join("corpus")
+    } else {
+        directory.path().join("unmanaged-corpus")
+    });
+    run.evidence_dir = Some(
+        std::path::PathBuf::from("runs")
+            .join(run.id.to_string())
+            .join("out")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    store.insert_run(&run).await.unwrap();
+    let evidence_root = workspace.join("runs").join(run.id.to_string());
+    std::fs::create_dir_all(evidence_root.join("out")).unwrap();
+    std::fs::write(evidence_root.join("out/crash-1"), b"qualified evidence").unwrap();
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None)
+        .with_store(Arc::clone(&store));
+    (container, directory, store, run, evidence_root)
+}
+
+#[tokio::test]
+async fn qualified_run_delete_removes_the_retained_work_order_evidence() {
+    let (container, _directory, store, run, evidence_root) =
+        qualified_run_deletion_fixture("delete-qualified-run", true).await;
+
+    container.delete_run(&run.id.to_string()).await.unwrap();
+
+    assert!(store.get_run(run.id).await.unwrap().is_none());
+    assert!(!evidence_root.exists());
+}
+
+#[tokio::test]
+async fn qualified_run_clear_removes_the_retained_work_order_evidence() {
+    let (container, _directory, store, run, evidence_root) =
+        qualified_run_deletion_fixture("clear-qualified-run", true).await;
+
+    container.clear_all_runs().await.unwrap();
+
+    assert!(store.get_run(run.id).await.unwrap().is_none());
+    assert!(!evidence_root.exists());
+}
+
+#[tokio::test]
+async fn qualified_run_delete_refuses_invalid_corpus_before_mutation() {
+    let (container, _directory, store, run, evidence_root) =
+        qualified_run_deletion_fixture("delete-invalid-qualified-run", false).await;
+
+    let error = container
+        .delete_run(&run.id.to_string())
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("retained corpus path does not identify a workspace"));
+    assert!(store.get_run(run.id).await.unwrap().is_some());
+    assert!(evidence_root.join("out/crash-1").is_file());
+}
+
+#[tokio::test]
+async fn qualified_run_clear_refuses_invalid_corpus_before_mutation() {
+    let (container, _directory, store, run, evidence_root) =
+        qualified_run_deletion_fixture("clear-invalid-qualified-run", false).await;
+
+    let error = container.clear_all_runs().await.unwrap_err().to_string();
+
+    assert!(error.contains("retained corpus path does not identify a workspace"));
+    assert!(store.get_run(run.id).await.unwrap().is_some());
+    assert!(evidence_root.join("out/crash-1").is_file());
+}
+
 #[tokio::test]
 async fn run_deletion_rejects_live_and_qualification_records() {
     isolate_workspace();

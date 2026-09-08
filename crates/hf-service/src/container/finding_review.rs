@@ -11,7 +11,9 @@ use crate::finding_review::{FindingDispositionFilter, FindingReviewFilter, Findi
 use crate::triage_disposition::Disposition;
 use crate::workbench::crash_review_items;
 
-use super::project_identity::{project_lookup_identity, stored_project_matches};
+use super::project_identity::{
+    project_lookup_identity, retained_run_target_selector, stored_project_matches,
+};
 use super::ServiceContainer;
 
 const HISTORICAL_ACTION_REASON: &str =
@@ -39,10 +41,10 @@ impl ServiceContainer {
             .filter(|(_, target)| stored_project_matches(&target.project_root, &requested))
             .map(|(id, target)| (*id, target.clone()))
             .collect::<HashMap<_, _>>();
-        let all_runs = store
-            .list_runs(None)
-            .await?
-            .into_iter()
+        let newest_first_runs = store.list_runs(None).await?;
+        let all_runs = newest_first_runs
+            .iter()
+            .cloned()
             .map(|run| (run.id, run))
             .collect::<HashMap<_, _>>();
         let project_run_ids = all_runs
@@ -83,15 +85,13 @@ impl ServiceContainer {
             }
         }
 
-        let mut latest_run_by_target = HashMap::new();
-        for target_id in targets.keys().copied() {
-            if let Some(run) = self
-                .latest_run_record_for_target_id(project, target_id)
-                .await?
-            {
-                latest_run_by_target.insert(target_id, run.id);
-            }
-        }
+        let latest_run_by_target = self
+            .latest_run_records_for_targets(
+                project,
+                crashes.iter().map(|crash| crash.target_id).collect(),
+                &newest_first_runs,
+            )
+            .await?;
 
         #[cfg(feature = "patch-to-proof")]
         let remediation_by_crash: HashMap<Uuid, RemediationOperationRecord> = {
@@ -131,12 +131,14 @@ impl ServiceContainer {
                     crash.id, crash.target_id
                 ))
             })?;
-            let latest = latest_run_by_target.get(&target.id) == Some(&run.id);
+            let latest = latest_run_by_target.get(&target.id).map(|run| run.id) == Some(run.id);
+            let target_selector = retained_run_target_selector(run, target)?;
             let item = FindingReviewItem {
                 crash,
                 project_root: run.project_root.clone(),
                 target_id: target.id,
                 target_symbol: target.symbol.clone(),
+                target_selector,
                 target_language: target.language,
                 engine: run.engine,
                 proof: review.proof,

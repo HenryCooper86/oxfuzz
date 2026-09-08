@@ -147,15 +147,15 @@ describe("transport", () => {
       await transport.invoke("finding_review_queue", { project: "/tmp/project", filter: { disposition: { mode: "open" } } });
       await transport.invoke("finding_review", { project: "/tmp/project", findingId: "finding/id" });
       await transport.invoke("finding_proof_card_for_crash", { project: "/tmp/project", crashId: "finding/id" });
-      await transport.invoke("generate_report", { project: "/tmp/project", target: "parse", expectedRunId: "run-id" });
-      await transport.invoke("push_to_defectdojo", { project: "/tmp/project", target: "parse", expectedRunId: "run-id" });
+      await transport.invoke("generate_report", { project: "/tmp/project", target: "src/parser.c::parse", expectedRunId: "run-id" });
+      await transport.invoke("push_to_defectdojo", { project: "/tmp/project", target: "src/parser.c::parse", expectedRunId: "run-id" });
 
       expect(calls[0].url).toBe("http://localhost:8081/findings/review");
       expect(JSON.parse(String(calls[0].init.body))).toEqual({ project: "/tmp/project", filter: { disposition: { mode: "open" } } });
       expect(calls[1].url).toBe("http://localhost:8081/findings/finding%2Fid/review?project=%2Ftmp%2Fproject");
       expect(calls[2].url).toBe("http://localhost:8081/findings/finding%2Fid/proof-card?project=%2Ftmp%2Fproject");
-      expect(JSON.parse(String(calls[3].init.body))).toMatchObject({ expected_run_id: "run-id" });
-      expect(JSON.parse(String(calls[4].init.body))).toMatchObject({ expected_run_id: "run-id" });
+      expect(JSON.parse(String(calls[3].init.body))).toEqual({ project: "/tmp/project", target: "src/parser.c::parse", expected_run_id: "run-id" });
+      expect(JSON.parse(String(calls[4].init.body))).toEqual({ project: "/tmp/project", target: "src/parser.c::parse", expected_run_id: "run-id" });
     } finally {
       globalThis.fetch = originalFetch;
     }

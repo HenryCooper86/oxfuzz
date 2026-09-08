@@ -14,7 +14,9 @@ use super::ServiceContainer;
 #[cfg(any(feature = "triage-disposition", feature = "patch-to-proof"))]
 pub(crate) struct CrashOwner {
     pub crash: Crash,
+    #[cfg(feature = "triage-disposition")]
     pub run: RunRecord,
+    #[cfg(feature = "triage-disposition")]
     pub target: TargetCandidate,
 }
 
@@ -82,9 +84,19 @@ impl ServiceContainer {
         project: &Path,
         crash_id: Uuid,
     ) -> Result<CrashOwner, ClassifiedError> {
-        let (crash, run, target) = self
+        let resolved = self
             .resolve_crash_owner_for_project(project, crash_id)
             .await?;
-        Ok(CrashOwner { crash, run, target })
+        #[cfg(feature = "triage-disposition")]
+        let (crash, run, target) = resolved;
+        #[cfg(not(feature = "triage-disposition"))]
+        let (crash, _, _) = resolved;
+        Ok(CrashOwner {
+            crash,
+            #[cfg(feature = "triage-disposition")]
+            run,
+            #[cfg(feature = "triage-disposition")]
+            target,
+        })
     }
 }

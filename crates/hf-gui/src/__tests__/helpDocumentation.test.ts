@@ -65,6 +65,39 @@ describe("in-app documentation", () => {
     expect(chineseCorpus?.body).toContain("未知");
   });
 
+  it("documents retained health, closeout, work-order, and experiment handoffs in both languages", () => {
+    const englishHarness = HELP_SECTIONS.find((section) => section.id === "harness");
+    const chineseHarness = HELP_SECTIONS_ZH.find((section) => section.id === "harness");
+    const englishRun = HELP_SECTIONS.find((section) => section.id === "run");
+    const chineseRun = HELP_SECTIONS_ZH.find((section) => section.id === "run");
+    const englishCorpus = HELP_SECTIONS.find((section) => section.id === "corpus");
+    const chineseCorpus = HELP_SECTIONS_ZH.find((section) => section.id === "corpus");
+    const englishRuns = HELP_SECTIONS.find((section) => section.id === "runs");
+    const chineseRuns = HELP_SECTIONS_ZH.find((section) => section.id === "runs");
+
+    expect(englishHarness?.body).toContain("file-qualified target selector");
+    expect(englishHarness?.body).toContain("retained attempt ID");
+    expect(chineseHarness?.body).toContain("文件限定目标选择器");
+    expect(chineseHarness?.body).toContain("保留的尝试 ID");
+
+    expect(englishRun?.body).toContain("whole-run mean");
+    expect(englishRun?.body).toContain("read-only");
+    expect(chineseRun?.body).toContain("全程平均值");
+    expect(chineseRun?.body).toContain("只读");
+
+    expect(englishRuns?.body).toContain("seven-step");
+    expect(englishRuns?.body).toContain("Analyze / Resume");
+    expect(chineseRuns?.body).toContain("七个步骤");
+    expect(chineseRuns?.body).toContain("分析 / 继续");
+
+    expect(englishCorpus?.body).toContain("oxfuzz run . --replay");
+    expect(englishCorpus?.body).toContain("same configuration and database");
+    expect(englishCorpus?.body).toContain("legacy baseline");
+    expect(chineseCorpus?.body).toContain("oxfuzz run . --replay");
+    expect(chineseCorpus?.body).toContain("相同的配置和数据库");
+    expect(chineseCorpus?.body).toContain("旧版基线");
+  });
+
   it("links shipped documentation surfaces to the public GitHub project", () => {
     const helpView = source("../views/HelpView.tsx");
     const aboutTab = source("../components/settings/AboutTab.tsx");

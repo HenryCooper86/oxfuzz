@@ -374,9 +374,9 @@ impl ServiceContainer {
             crashes: None,
         };
         let payload = &preflight.work_order.payload;
-        let target_selector = format!(
-            "{}::{}",
-            payload.target.relative_source, payload.target.symbol
+        let target_selector = super::file_qualified_target_selector(
+            &payload.target.relative_source,
+            &payload.target.symbol,
         );
 
         let compiled = match self

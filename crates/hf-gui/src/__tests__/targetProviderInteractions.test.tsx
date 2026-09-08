@@ -894,6 +894,7 @@ describe("Harness repair interactions", () => {
       target_id: "candidate-1",
       project_root: PROJECT,
       target_symbol: "parse_input",
+      target_selector: "src/parser.c::parse_input",
       engine: "LibFuzzer",
       language: "C",
       status,

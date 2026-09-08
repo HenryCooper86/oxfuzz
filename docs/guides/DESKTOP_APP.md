@@ -50,7 +50,11 @@ source digest stay in history. Importing does not compile or approve anything.
 **Qualify in sandbox** is a separate action. Ranking compares retained attempts
 for the selected immutable submission, and **Promote selected attempt** approves
 only the exact smoke-passed attempt you selected after its independent review
-evidence is available.
+evidence is available. The selected row retains its submission and attempt IDs.
+When duplicate file-local symbols exist, the service-returned
+`relative-file::complete-symbol` selector identifies the reviewed target; the
+display symbol alone does not. Promotion carries that selector into Harness,
+Run, run history, and the Corpus experiment inventory.
 
 **3. Run the fuzzer.** Launch an enabled engine against the promoted harness.
 The Run view shows campaign limits and retained metrics. Current rate, whole-run
@@ -85,6 +89,13 @@ Legacy summaries have no invented run UUID: old throughput is peak evidence,
 and old callback counts cannot establish raw crash deltas, so those remain
 Unknown. A failed v2 write or unreadable v1 source does not delete recoverable
 legacy storage.
+
+The telemetry labels are literal: **Current** is the latest valid sample,
+**Mean** is the service-owned arithmetic mean over every retained valid sample
+for the run, and **Peak** is the highest such sample. Reconnect replaces local
+partial telemetry with the retained service snapshot. Campaign Health never
+stops, restarts, or resizes a run and does not independently prove that a
+Docker process, worker, or VM is alive.
 
 ![Run -- approved target, bounded campaign configuration, and retained metrics](../screenshots/run.png)
 
@@ -152,6 +163,16 @@ missing tool rather than offering a plan that would fail. A run whose commands
 all succeed but produces no compile database is reported as a failure, because
 the database is the evidence, not the exit code.
 
+Build Doctor supports optional CMake and plain Make profiles. **Save profile**
+retains the normalized component, compile-database path, definitions, and
+dependencies. **Diagnose** is read-only and shows the exact proposed argv,
+immutable sandbox image, and profile SHA-256. Review those values before
+**Run build plan**; a changed profile digest is refused instead of running a
+stale plan. **Clear profile** removes the saved configuration but preserves
+diagnosis and build history. Builds without the optional feature still allow
+the saved profile to be inspected while diagnosis, mutation, history, and
+execution report that they are unavailable.
+
 **4. Triage the crashes.** Crashes are ingested, deduplicated by stack
 signature, minimized, and classified with CASR for severity and exploitability.
 The default queue shows unfinished findings first. Filters expose resolved
@@ -181,6 +202,8 @@ unavailable. Historical source coverage and blocker evidence are shown as
 unavailable because current workspace files cannot establish what an old run
 covered. The trust report likewise uses exact retained harness approval and
 finding review evidence and never runs coverage or calls a model while reading.
+The seven steps are triage, minimize, corpus absorb, coverage, blockers,
+disposition, and trust report.
 
 **Prove a fix, do not assert one.** The selected finding carries a Patch to
 Proof panel. Paste a candidate unified diff and a bounded follow-up fuzzing
@@ -248,6 +271,27 @@ covered has a route at all. The proposal names the function to aim at and the
 reason behind it. It is advisory and starts nothing; you run the existing refine
 or corpus step yourself. If no coverage measurement exists yet, that is what it
 says, rather than showing an empty blocker list.
+
+**Retain a coverage experiment.** Choose one exact target UUID and terminal
+campaign baseline, then review a **Grow corpus** or **Refine harness** proposal,
+goal function, hypothesis, and duration before **Prepare experiment**. Prepare,
+history reads, navigation to Corpus/Harness, result attachment, and cancellation
+do not execute a provider, harness, coverage tool, or fuzzer. The prepared
+record and its experiment UUID are durable; the browser preference stores only
+which record to reopen.
+
+For a seeded baseline the panel displays the exact existing CLI handoff
+`oxfuzz run . --replay <baseline UUID>`. Run it with the same oxfuzz
+configuration and database as the application, keep the retained original
+project available, use the current promoted harness and corpus, and leave every
+other compared setting unchanged. Ordinary Run chooses a fresh seed. A legacy
+baseline with no retained seed requires a new seeded baseline and a new
+experiment. After a later terminal campaign exists, refresh and explicitly
+**Attach result** or enter a reason and **Cancel experiment**. An incompatible
+result is refused without changing the prepared record. Failed, cancelled,
+missing-edge, mixed legacy-build, and no-observed-input-change results remain
+visible and inconclusive where evidence is missing. Aggregate edge change is
+descriptive and cannot establish entry into the named goal function.
 
 **Review retained evidence.** The Artifacts view collects persisted crash
 reproducers and corpus inputs across the selected project in one place. Reports,

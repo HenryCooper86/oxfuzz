@@ -1,4 +1,4 @@
-import type { HarnessReviewItem } from "../types";
+import type { HarnessReviewItem, TargetCandidate } from "../types";
 
 export function canonicalHarnessLanguage(value: unknown): string {
   if (typeof value !== "string") return "";
@@ -40,7 +40,23 @@ export function harnessReviewMatchesScope(
   language: string,
   engine: string,
 ): boolean {
-  return item.target_symbol === target
+  return matchesTargetSelection(item.target_symbol, item.target_selector, target)
     && canonicalHarnessLanguage(item.language) === canonicalHarnessLanguage(language)
     && canonicalHarnessEngine(item.engine) === canonicalHarnessEngine(engine);
+}
+
+/** Preserve the complete source and symbol spelling; symbols themselves may contain ::. */
+export function qualifiedTargetSelector(relativeSource: string, symbol: string): string {
+  return `${relativeSource}::${symbol}`;
+}
+
+export function matchesTargetSelection(symbol: string | null, selector: string | null, selected: string): boolean {
+  return symbol === selected || selector === selected;
+}
+
+export function candidateTargetSelector(candidate: TargetCandidate): string {
+  const file = candidate.location.file;
+  const root = candidate.project_root.replace(/[\\/]+$/, "");
+  const prefix = [`${root}/`, `${root}\\`].find(value => file.startsWith(value));
+  return qualifiedTargetSelector(prefix ? file.slice(prefix.length) : file, candidate.symbol);
 }

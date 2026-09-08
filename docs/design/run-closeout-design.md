@@ -1,6 +1,6 @@
 # Run Closeout
 
-Status: **active**. Owner: `hf-service`, over retained SQLite closeout records.
+Status: **implemented**. Owner: `hf-service`, over retained SQLite closeout records.
 
 ## 1. Goal
 
@@ -84,6 +84,25 @@ syzkaller records with no `FuzzRunConfig`, are read as unavailable with a
 service-owned reason and cannot start closeout.
 The retained target project must agree with the run project; a run cannot use a
 harness or target owned by another project to start closeout.
+Replay and closeout resolve the retained workspace selector from the exact stored
+target. When the run records a seed-corpus path, it must match exactly the
+service-computed corpus path for either the bare symbol or its relative-file
+qualified selector. A nonmatching path is a named validation error, never an
+execution root. Missing seed-corpus provenance retains the legacy bare-symbol
+selection; normal target ambiguity checks still apply. Imported Work Order runs
+therefore retain their file-qualified workspace through closeout and replay.
+Run-evidence deletion uses the same resolver before it removes either database
+rows or managed files.
+
+The resolver compares the two service-computed locations in deterministic
+bare-then-qualified order. This explicitly supersedes the earlier requirement
+that exactly one computed location match: workspace names append only eight hex
+digits of the selector digest, and this bounded retained-run fix preserves the
+existing deterministic precedence instead of adding collision handling to that
+broader workspace naming scheme. Both candidates still come from the exact
+retained target; an arbitrary or nonmatching retained path is refused. No
+practical collision has been demonstrated; truncated-digest collision handling
+remains an explicit workspace-naming limitation.
 An exclusive per-run file lease covers the complete closeout pass, including
 calls from independent service containers. The closeout executor does not hold
 a workspace lease because composed operations acquire their own workspace and

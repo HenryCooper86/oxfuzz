@@ -1517,12 +1517,13 @@ impl ServiceContainer {
             .map_err(|error| ClassifiedError::Storage(error.to_string()))?
             .into_iter()
             .find(|candidate| candidate.id == harness.target_id)
-            .map(|candidate| candidate.symbol)
             .ok_or_else(|| {
                 ClassifiedError::Validation(format!(
                     "run {run_id} references a target that no longer exists"
                 ))
             })?;
+
+        let target = super::project_identity::retained_run_target_selector(&original, &target)?;
 
         // A config persisted before seeds were recorded replays with the seed
         // the original run would have derived from its own id.

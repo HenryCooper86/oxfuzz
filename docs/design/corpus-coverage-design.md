@@ -1,6 +1,13 @@
 # Corpus & Coverage Design
 
-Status: **draft**. Owner: `hf-corpus` + `hf-coverage`.
+Status: **partially implemented**. Owner: `hf-corpus` + `hf-coverage`.
+
+The bounded corpus operations, shared retained corpus, deterministic run seed
+and replay, qualified reductions, operator capability reads, and retained
+coverage reports described below are implemented. Automatic corpus/coverage
+iteration that independently proposes and executes a new campaign remains
+future work; current blocker and experiment suggestions are advisory and require
+explicit operator action.
 
 ## 1. Goal
 

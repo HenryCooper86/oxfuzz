@@ -9,6 +9,7 @@ const base: HarnessReviewItem = {
   target_id: "t-1",
   project_root: "/proj",
   target_symbol: "parse_packet",
+  target_selector: "parser.c::parse_packet",
   engine: "LibFuzzer",
   language: "C",
   status: "SmokePassed",
