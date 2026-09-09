@@ -191,10 +191,17 @@ impl ProviderPoolImpl {
     /// constructs the appropriate provider backend for each entry, and
     /// delegates to [`from_providers`](Self::from_providers).
     ///
-    /// Providers with `enabled = false` are silently skipped.
+    /// Disabled entries and entries without resolved credentials are skipped.
+    /// Returns a configuration error if no usable provider remains.
     pub fn from_config(config: &ProviderPoolConfig) -> Result<Self, ProviderPoolError> {
         config.validate()?;
         let providers = build_providers(config);
+        if providers.is_empty() {
+            return Err(ProviderPoolError::Config {
+                message: "no usable providers remain after resolving enabled entries and API keys"
+                    .to_owned(),
+            });
+        }
         Ok(Self::from_providers(providers, config))
     }
 }
@@ -1685,6 +1692,19 @@ mod tests {
     }
 
     #[test]
+    fn test_from_config_missing_credentials_fails() {
+        let config: ProviderPoolConfig = toml::from_str(
+            r#"[[providers]]
+id = "missing-key"
+provider_type = "openai-compat"
+model = "fixture"
+"#,
+        )
+        .unwrap();
+        assert!(ProviderPoolImpl::from_config(&config).is_err());
+    }
+
+    #[test]
     fn test_from_config_unknown_type_fails() {
         use crate::config::ProviderConfig;
         let config = ProviderPoolConfig {
@@ -1699,7 +1719,7 @@ mod tests {
                 context_window: 128_000,
                 cost_per_1k_input: 0.0,
                 cost_per_1k_output: 0.0,
-                api_key: None,
+                api_key: Some("fixture-key".to_owned()),
                 api_key_env: None,
                 base_url: None,
                 headers: std::collections::HashMap::new(),
@@ -1718,8 +1738,6 @@ mod tests {
             ..Default::default()
         };
 
-        let pool = ProviderPoolImpl::from_config(&config).expect("should create pool");
-        // Unknown provider type is gracefully skipped, resulting in 0 providers.
-        assert_eq!(pool.providers.len(), 0);
+        assert!(ProviderPoolImpl::from_config(&config).is_err());
     }
 }

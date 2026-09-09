@@ -179,8 +179,13 @@ submission ID; approve the retained attempt rather than rerunning authoring.
 returns `ready`, named `problems`, the selected engine, system probes, and
 `provider_configured`. The provider field is null when not requested. Provider
 configuration is checked without contacting a model; a configured provider does
-not prove valid credentials or connectivity. Duration and provider flags require
+not prove valid credentials or connectivity. A pool with no constructed providers
+(for example, all API-key variables missing or empty) fails preflight. Duration and provider flags require
 `--engine`. Ordinary `doctor` keeps its general any-engine readiness check.
+
+For normal `run`, an omitted `--duration` uses `fuzzing.default_duration_secs`.
+The CLI resolves engine and duration policy before storage bootstrap or seed
+preparation. The service rechecks policy when launching the campaign.
 
 Export returns a content-addressed work-order ID. Import returns an immutable
 submission UUID and records provenance; source must be a nonempty regular,

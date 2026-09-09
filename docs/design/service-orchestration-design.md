@@ -613,3 +613,16 @@ silent fallback, while an omitted agent id intentionally selects the default.
   protocol/mode/capability negotiation, replay validation, structured errors,
   and canonical transcript/state hashing. Future service tests use fake runtime
   envelopes and prove every invalid or unapproved request fails before staging.
+
+### Selected-run admission before CLI side effects
+
+A configured provider pool must contain at least one constructed provider after
+resolving enabled entries and API keys. An empty result is a configuration error,
+not a usable pool. Empty environment-variable keys are unavailable, like missing
+keys. This keeps bootstrap fallback and selected preflight consistent; neither
+claims authentication or network success.
+
+The CLI resolves the service-owned engine/duration policy before bootstrapping
+storage or preparing seeds. Omitted duration uses the configured default. Invalid
+syntax, disabled engines, and rejected durations fail before database or workspace
+creation. The campaign executor repeats policy checks at actual launch.

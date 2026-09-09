@@ -627,6 +627,7 @@ impl ProviderConfig {
         self.api_key_env
             .as_ref()
             .and_then(|env_var| std::env::var(env_var).ok())
+            .filter(|key| !key.is_empty())
     }
 
     /// Resolve the effective tool calling mode for this provider.
@@ -996,6 +997,10 @@ mod tests {
 
         // Without env var set, should return None.
         assert!(config.resolve_api_key().is_none());
+
+        temp_env::with_var("Y_AGENT_TEST_KEY_XYZ", Some(""), || {
+            assert!(config.resolve_api_key().is_none());
+        });
 
         // With env var set.
         temp_env::with_var("Y_AGENT_TEST_KEY_XYZ", Some("sk-test-123"), || {
