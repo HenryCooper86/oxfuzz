@@ -253,6 +253,9 @@ async fn run_records_a_seed_and_replay_reexecutes_with_it() {
         )
         .await
         .expect("prepare harness");
+    let workspace = hf_service::workspace_dir(&project, "parse_value");
+    std::fs::create_dir_all(workspace.join("corpus")).unwrap();
+    std::fs::write(workspace.join("corpus/seed"), b"FUZZ").unwrap();
     container
         .harness_smoke(
             &project,
@@ -289,6 +292,37 @@ async fn run_records_a_seed_and_replay_reexecutes_with_it() {
         "the adapter must receive the recorded seed: {}",
         run_args.join(" ")
     );
+
+    // Both smoke and campaign provenance refer to retained starting inputs.
+    // Mutating either working directory must not change those persisted bytes.
+    let workspace = hf_service::workspace_dir(&project, "parse_value");
+    let records = store.list_runs(None).await.unwrap();
+    assert_eq!(records.len(), 2);
+    for record in records {
+        use sha2::{Digest, Sha256};
+
+        let run_root = workspace.join("runs").join(record.id.to_string());
+        let initial = run_root.join("input/corpus");
+        let mut entries = std::fs::read_dir(&initial)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        entries.sort();
+        assert!(!entries.is_empty(), "run retains its initial seeds");
+        let mut digest = Sha256::new();
+        digest.update(b"oxfuzz-run-corpus-v1\0");
+        for path in &entries {
+            let name = path.file_name().unwrap();
+            let bytes = std::fs::read(path).unwrap();
+            digest.update(Path::new("corpus").join(name).to_string_lossy().as_bytes());
+            digest.update(b"\0");
+            digest.update(&bytes);
+            digest.update(b"\0");
+            std::fs::write(run_root.join("corpus").join(name), b"engine mutation").unwrap();
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
+        assert_eq!(record.corpus_rev, Some(format!("{:x}", digest.finalize())));
+    }
 
     // Replay: a new run row, the same seed on the argv, a link to the original.
     let replay = container.replay_run(summary.run_id, &|_| {}).await.unwrap();

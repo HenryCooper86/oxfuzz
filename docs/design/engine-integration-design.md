@@ -155,3 +155,11 @@ typed evidence rather than adapting one contract into the other.
 - Boundary contract: syzkaller receives a manager config rather than a
   generated userspace harness; the Scapy sidecar remains absent from
   `EngineKind` and the engine registry.
+
+### Retained starting inputs
+
+New userspace campaigns and smoke runs stage an immutable starting corpus beside
+the approved source/binary under `runs/<id>/input/corpus`, then seed the engine's
+writable corpus from that capture. Persisted comparison provenance refers to
+the captured bytes. This preserves original input evidence while engines grow
+the working corpus and the canonical target corpus evolves after merging.

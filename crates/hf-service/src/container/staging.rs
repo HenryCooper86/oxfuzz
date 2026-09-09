@@ -25,6 +25,7 @@ pub(super) struct RunArtifacts {
     pub(super) binary_host: PathBuf,
     pub(super) source_host: PathBuf,
     pub(super) corpus_host: PathBuf,
+    pub(super) initial_corpus_host: PathBuf,
     pub(super) corpus_relative: PathBuf,
     pub(super) binary_container: String,
     pub(super) corpus_container: String,
@@ -264,8 +265,34 @@ fn collect_build_inputs(
     Ok(())
 }
 
+#[cfg(any(test, feature = "patch-to-proof"))]
 pub(super) fn run_context_digests(
     workspace: &Path,
+    sandbox_image_sha256: &str,
+) -> Result<RunContextDigests, ClassifiedError> {
+    context_digests(workspace, &workspace.join("corpus"), sandbox_image_sha256)
+}
+
+/// Hash the starting inputs captured for this run, never the mutable shared corpus.
+pub(super) fn captured_run_context_digests(
+    workspace: &Path,
+    captured_corpus: &Path,
+    sandbox_image_sha256: &str,
+) -> Result<RunContextDigests, ClassifiedError> {
+    let metadata = std::fs::symlink_metadata(captured_corpus).map_err(|error| {
+        ClassifiedError::Validation(format!("inspect retained starting corpus: {error}"))
+    })?;
+    if !metadata.file_type().is_dir() {
+        return Err(ClassifiedError::Validation(
+            "retained starting corpus is not a directory".to_owned(),
+        ));
+    }
+    context_digests(workspace, captured_corpus, sandbox_image_sha256)
+}
+
+fn context_digests(
+    workspace: &Path,
+    corpus_directory: &Path,
     sandbox_image_sha256: &str,
 ) -> Result<RunContextDigests, ClassifiedError> {
     use sha2::{Digest, Sha256};
@@ -345,12 +372,13 @@ pub(super) fn run_context_digests(
     let mut relative_paths = Vec::new();
     collect_build_inputs(workspace, workspace, &mut relative_paths)?;
     collect(workspace, &workspace.join("src"), true, &mut relative_paths)?;
-    collect(
-        workspace,
-        &workspace.join("corpus"),
-        false,
-        &mut relative_paths,
-    )?;
+    let mut corpus_paths = Vec::new();
+    collect(corpus_directory, corpus_directory, false, &mut corpus_paths)?;
+    relative_paths.extend(
+        corpus_paths
+            .into_iter()
+            .map(|path| Path::new("corpus").join(path)),
+    );
     relative_paths.sort();
     relative_paths.dedup();
     if relative_paths.len() > MAX_FILES {
@@ -370,7 +398,10 @@ pub(super) fn run_context_digests(
     let mut total_bytes = 0_u64;
     let mut chunk = [0_u8; 64 * 1024];
     for relative in relative_paths {
-        let path = workspace.join(&relative);
+        let path = match relative.strip_prefix("corpus") {
+            Ok(corpus_path) => corpus_directory.join(corpus_path),
+            Err(_) => workspace.join(&relative),
+        };
         let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
             ClassifiedError::Validation(format!(
                 "inspect comparison input {}: {error}",
@@ -522,7 +553,11 @@ pub(super) fn stage_run_artifacts(
         .map_err(|e| ClassifiedError::Internal(format!("stage approved harness source: {e}")))?;
 
     let live_corpus = ensure_workspace_directory(workspace, Path::new("corpus"))?;
-    hf_corpus::snapshot(&live_corpus, &corpus_host)?;
+    let initial_corpus_host = input_dir.join("corpus");
+    std::fs::create_dir(&initial_corpus_host)
+        .map_err(|e| ClassifiedError::Internal(format!("create retained corpus directory: {e}")))?;
+    hf_corpus::snapshot(&live_corpus, &initial_corpus_host)?;
+    hf_corpus::snapshot(&initial_corpus_host, &corpus_host)?;
 
     let source_sha256 = sha256_file(&source_host)?;
     let binary_sha256 = sha256_file(&binary_host)?;
@@ -531,6 +566,7 @@ pub(super) fn stage_run_artifacts(
         binary_host,
         source_host,
         corpus_host,
+        initial_corpus_host,
         corpus_relative,
         binary_container: format!("{run_container_root}/input/harness"),
         corpus_container: format!("{run_container_root}/corpus"),
@@ -943,6 +979,76 @@ mod staging_tests {
         std::fs::write(&artifacts.binary_host, b"tampered binary").unwrap();
         let error = verify_run_artifacts(&artifacts).unwrap_err();
         assert!(error.to_string().contains("binary digest changed"));
+    }
+
+    #[test]
+    fn retained_starting_corpus_survives_engine_and_canonical_changes() {
+        let workspace = tempfile::tempdir().unwrap();
+        let binary = workspace.path().join("fuzz_parse");
+        std::fs::write(&binary, b"approved binary").unwrap();
+        let live = workspace.path().join("corpus");
+        std::fs::create_dir(&live).unwrap();
+        std::fs::write(live.join("seed"), b"original input").unwrap();
+        let run_id = uuid::Uuid::new_v4();
+        let artifacts = stage_run_artifacts(workspace.path(), run_id, "source", &binary).unwrap();
+        let initial = workspace
+            .path()
+            .join("runs")
+            .join(run_id.to_string())
+            .join("input/corpus");
+        assert_eq!(
+            std::fs::read(initial.join("seed")).unwrap(),
+            b"original input"
+        );
+
+        std::fs::write(artifacts.corpus_host.join("seed"), b"engine mutation").unwrap();
+        std::fs::write(live.join("seed"), b"later canonical input").unwrap();
+        assert_eq!(
+            std::fs::read(initial.join("seed")).unwrap(),
+            b"original input"
+        );
+        let options = super::run_sandbox_options(&artifacts, None);
+        assert!(options.workspace_read_only);
+        assert!(options
+            .extra_mounts
+            .iter()
+            .all(|mount| mount.read_only || !initial.starts_with(&mount.host_path)));
+    }
+
+    #[test]
+    fn captured_context_uses_retained_bytes_and_rejects_missing_snapshot() {
+        let workspace = tempfile::tempdir().unwrap();
+        let binary = workspace.path().join("fuzz_parse");
+        std::fs::write(&binary, b"approved binary").unwrap();
+        let live = workspace.path().join("corpus");
+        std::fs::create_dir(&live).unwrap();
+        std::fs::write(live.join("seed"), b"original input").unwrap();
+        let image = "a".repeat(64);
+        let expected = run_context_digests(workspace.path(), &image).unwrap();
+        let artifacts =
+            stage_run_artifacts(workspace.path(), uuid::Uuid::new_v4(), "source", &binary).unwrap();
+        std::fs::write(live.join("seed"), b"later input").unwrap();
+        let captured = super::captured_run_context_digests(
+            workspace.path(),
+            &artifacts.initial_corpus_host,
+            &image,
+        )
+        .unwrap();
+        assert_eq!(expected.corpus, captured.corpus);
+        assert_eq!(expected.combined, captured.combined);
+        assert_ne!(
+            run_context_digests(workspace.path(), &image)
+                .unwrap()
+                .corpus,
+            captured.corpus
+        );
+        std::fs::remove_dir_all(&artifacts.initial_corpus_host).unwrap();
+        assert!(super::captured_run_context_digests(
+            workspace.path(),
+            &artifacts.initial_corpus_host,
+            &image
+        )
+        .is_err());
     }
 
     #[test]
