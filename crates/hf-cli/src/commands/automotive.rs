@@ -482,7 +482,7 @@ mod automotive_tests {
         ])
         .unwrap();
 
-        let Commands::Automotive {
+        let Commands::Automotive(crate::args::AutomotiveArgs {
             op:
                 AutomotiveOp::PromoteState {
                     project,
@@ -491,7 +491,7 @@ mod automotive_tests {
                     output_artifact,
                     input_artifact,
                 },
-        } = cli.command
+        }) = cli.command
         else {
             panic!("expected the automotive promote-state command");
         };
@@ -611,9 +611,9 @@ mod automotive_tests {
             "25",
         ])
         .unwrap();
-        let Commands::Automotive {
+        let Commands::Automotive(crate::args::AutomotiveArgs {
             op: AutomotiveOp::StateCorpus { project, limit },
-        } = list.command
+        }) = list.command
         else {
             panic!("expected the automotive state-corpus command");
         };
@@ -629,9 +629,9 @@ mod automotive_tests {
             "00000000-0000-4000-8000-000000000001",
         ])
         .unwrap();
-        let Commands::Automotive {
+        let Commands::Automotive(crate::args::AutomotiveArgs {
             op: AutomotiveOp::Operation { project, id },
-        } = one.command
+        }) = one.command
         else {
             panic!("expected the automotive operation command");
         };
@@ -657,7 +657,7 @@ mod automotive_tests {
         ])
         .unwrap();
 
-        let Commands::Automotive {
+        let Commands::Automotive(crate::args::AutomotiveArgs {
             op:
                 AutomotiveOp::Report {
                     project,
@@ -666,7 +666,7 @@ mod automotive_tests {
                     output,
                     report_lang,
                 },
-        } = cli.command
+        }) = cli.command
         else {
             panic!("expected the automotive report command");
         };
@@ -697,9 +697,9 @@ mod automotive_tests {
         ])
         .unwrap();
 
-        let Commands::Automotive {
+        let Commands::Automotive(crate::args::AutomotiveArgs {
             op: AutomotiveOp::Report { report_lang, .. },
-        } = cli.command
+        }) = cli.command
         else {
             panic!("expected the automotive report command");
         };

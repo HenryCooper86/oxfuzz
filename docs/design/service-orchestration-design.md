@@ -626,3 +626,16 @@ The CLI resolves the service-owned engine/duration policy before bootstrapping
 storage or preparing seeds. Omitted duration uses the configured default. Invalid
 syntax, disabled engines, and rejected durations fail before database or workspace
 creation. The campaign executor repeats policy checks at actual launch.
+
+## CLI argument construction
+
+CLI startup must handle help/version and configuration errors on a 1 MiB process
+stack. Each top-level command has a separate derived `clap::Args` struct. The
+command enum delegates argument construction to those structs instead of
+embedding all argument builders in one generated function. Command names,
+flags, defaults, feature selection and service dispatch remain unchanged.
+
+Boxing asynchronous dispatch was rejected after the bounded-stack test still
+failed and the crash trace located the overflow in Clap's argument construction.
+Subprocess tests exercise version output without configuration and bounded-stack
+startup/validation on Unix; ordinary subprocess tests also run on Windows.

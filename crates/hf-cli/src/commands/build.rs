@@ -199,7 +199,9 @@ mod tests {
             vec!["profile", "clear", project, "--json"],
         ] {
             let args = [vec!["oxfuzz", "build"], tail].concat();
-            let Commands::Build { command } = Cli::try_parse_from(args).unwrap().command else {
+            let Commands::Build(crate::args::BuildArgs { command }) =
+                Cli::try_parse_from(args).unwrap().command
+            else {
                 panic!("wrong command")
             };
             let (value, json) = execute(&service, command).await.unwrap();
@@ -285,7 +287,9 @@ mod tests {
             "command:clang",
             "--json",
         ];
-        let Commands::Build { command } = Cli::try_parse_from(args).unwrap().command else {
+        let Commands::Build(crate::args::BuildArgs { command }) =
+            Cli::try_parse_from(args).unwrap().command
+        else {
             panic!("wrong command")
         };
         let (saved, json) = execute(&service, command).await.unwrap();
@@ -299,7 +303,7 @@ mod tests {
             saved["dependencies"],
             serde_json::json!([{"kind":"command","name":"clang"},{"kind":"pkg_config","name":"zlib"}])
         );
-        let Commands::Build { command } = Cli::try_parse_from([
+        let Commands::Build(crate::args::BuildArgs { command }) = Cli::try_parse_from([
             "oxfuzz",
             "build",
             "run",
