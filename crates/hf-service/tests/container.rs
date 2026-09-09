@@ -1936,7 +1936,7 @@ impl hf_core::runtime::RuntimeAdapter for RegressionReplayRuntime {
 }
 
 #[tokio::test]
-async fn verify_regressions_reports_regressed_and_fixed() {
+async fn verify_regressions_reports_observations_without_claiming_a_fix() {
     use std::fs;
     isolate_workspace();
 
@@ -1981,14 +1981,17 @@ async fn verify_regressions_reports_regressed_and_fixed() {
         regressed.summary
     );
 
-    // The fixed input: a clean replay is verified but no longer crashes.
+    // A clean replay records completion without establishing patch verification.
     let fixed = results
         .iter()
         .find(|r| r.input.ends_with("crash-fixed"))
         .expect("fixed result present");
     assert!(fixed.verified, "the clean replay completed");
     assert!(!fixed.still_crashes, "a clean replay does not crash");
-    assert_eq!(fixed.summary, "no crash on replay (fixed)");
+    assert_eq!(
+        fixed.summary,
+        "no crash observed on replay; fix not verified"
+    );
 
     let _ = fs::remove_dir_all(&ws);
 }

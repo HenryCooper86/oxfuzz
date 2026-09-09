@@ -960,7 +960,7 @@ impl ServiceContainer {
                     .chars()
                     .take(200)
                     .collect(),
-                Some(_) => "no crash on replay (fixed)".to_owned(),
+                Some(_) => "no crash observed on replay; fix not verified".to_owned(),
                 None => "replay did not complete; result is inconclusive".to_owned(),
             };
             results.push(RegressionResult {

@@ -1636,7 +1636,7 @@ pub struct RegressionResult {
     pub input: String,
     /// True if the input still triggers a crash (a regression / unfixed bug).
     pub still_crashes: bool,
-    /// Whether the sandbox replay completed and the result is conclusive.
+    /// Whether the sandbox replay completed; this does not verify a patch.
     pub verified: bool,
     /// A short trace/summary line from the replay.
     pub summary: String,

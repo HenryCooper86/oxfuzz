@@ -82,7 +82,7 @@ inside the sandbox.
 
 If someone handed you a build, install it like any other Mac app:
 
-1. Open `oxfuzz_0.1.0_aarch64.dmg` (double-click it).
+1. Open `oxfuzz_<version>_aarch64.dmg` (double-click it).
 2. Drag **oxfuzz** into your **Applications** folder.
 3. Launch it from Applications or Spotlight.
 
@@ -187,7 +187,10 @@ see:
 - **Location** -- the file and line where it crashed.
 - **A drafted bug report** -- a written explanation of the bug and its impact.
 
-A finding here is a real crash the fuzzer reproduced -- a concrete lead to fix.
+A finding is retained evidence to investigate. Check its origin and reproduction
+status before treating it as a target bug: some findings remain inconclusive,
+and kernel triage does not reproduce the retained crash. A clean replay alone
+does not establish that a patch fixes the issue.
 
 ---
 
