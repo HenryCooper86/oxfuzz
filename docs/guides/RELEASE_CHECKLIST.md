@@ -46,12 +46,11 @@ Then run the wider local gate set:
 ```
 
 Do not treat a green local run as a substitute for a green pipeline. Both
-`.gitlab-ci.yml` and `.github/workflows/ci.yml` run the same ten gates
-`./scripts/tests/gates.sh` runs above -- fmt, clippy, check,
-check-no-default-features, test, doc, deny, script-tests, frontend-test, and
-frontend-lint. CI's value here is not additional checks; it is running those
-same gates on a clean machine, on every push, independent of local state.
-Confirm the pipeline for this commit is green before continuing.
+`.gitlab-ci.yml` and `.github/workflows/ci.yml` invoke the shared gate dispatcher
+in `scripts/tests/gates.sh`. Read its `ALL_GATES` list for the current source,
+feature-combination, dependency, coverage, script, translation, and frontend
+checks. Confirm every required pipeline job for this commit is green, including
+the platform jobs; a local result does not establish behavior on another OS.
 
 ## 3. Verify the mandatory sandbox
 

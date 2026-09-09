@@ -125,7 +125,10 @@ finding's fix-verification determination.
   limits before allocating or replaying data. Truncation is surfaced rather
   than silently treating an unbounded directory as fully triaged.
 - A timeout or cancellation is not a crash classification. Only a completed
-  sandbox replay may produce a stack signature or a "fixed" regression result.
+  sandbox replay may produce a stack signature or a no-crash observation. A
+  clean replay alone does not verify a fix; only the complete Patch-to-Proof
+  workflow can establish fix verification. `RegressionResult.verified` records
+  replay completion, never patch verification.
 - Triage uses one bounded deadline across CASR, replay, and report drafting;
   forced CASR termination does not fan out into a longer fallback pass.
 - Raw crash artifacts are interpreted by CASR or replayed only inside the
