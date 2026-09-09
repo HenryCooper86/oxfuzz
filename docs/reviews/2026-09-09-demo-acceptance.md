@@ -89,3 +89,12 @@ Also exercise a smoke-crash path and confirm it remains ineligible for promotion
 Passing unit tests or doctor is insufficient for this milestone. Record engine
 results individually, including failed and blocked cases. Set performance targets
 from these measurements before making comparative claims.
+
+## Follow-up from live preparation
+
+Live preparation exposed a missing case: a configured pool could contain zero
+providers after every API-key lookup failed. Its constructor still returned
+success, so the configuration-only preflight overstated readiness. The
+[second-phase admission fixes](2026-09-09-campaign-admission.md) add regression
+coverage and reject that configuration at its owning constructor. The prior
+fixture evidence above did not cover this case.

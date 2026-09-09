@@ -122,7 +122,7 @@ pub(crate) enum Commands {
         /// Target language (c, cpp, rust, go, python). Defaults to c.
         #[arg(long, default_value = "c")]
         lang: String,
-        /// Duration (e.g. 60m).
+        /// Duration (e.g. 60m). Defaults to the configured fuzzing duration.
         #[arg(long)]
         duration: Option<String>,
         /// Replay a persisted run with its recorded engine, duration, and

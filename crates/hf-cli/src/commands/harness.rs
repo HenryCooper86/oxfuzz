@@ -175,7 +175,6 @@ pub(crate) async fn cmd_run(
     duration: Option<&str>,
     replay: Option<&str>,
 ) -> anyhow::Result<()> {
-    let container = std::sync::Arc::new(ServiceContainer::bootstrap().await);
     let on_progress = |p: FuzzProgress| match p {
         FuzzProgress::LogLine(line) => println!("  {line}"),
         FuzzProgress::CrashesFound(_) => println!("  >> crash found"),
@@ -187,6 +186,7 @@ pub(crate) async fn cmd_run(
         // flags are intentionally not required in this mode.
         let run_id = uuid::Uuid::parse_str(run_id)
             .map_err(|e| anyhow::anyhow!("invalid --replay run id {run_id:?}: {e}"))?;
+        let container = std::sync::Arc::new(ServiceContainer::bootstrap().await);
         println!("\n--- Replaying run {run_id} (live, Ctrl-C to stop) ---");
         let mut handle = {
             let container = std::sync::Arc::clone(&container);
@@ -209,7 +209,12 @@ pub(crate) async fn cmd_run(
         // the value is not threaded further. Still validate it (like triage/ci) so an
         // invalid `--lang` is rejected up front rather than silently ignored.
         parse_lang(lang)?;
-        let duration_secs = duration.map(parse_duration).transpose()?.unwrap_or(3600);
+        let requested_duration = duration.map(parse_duration).transpose()?;
+        let resolved =
+            hf_service::config::resolve_fuzzing_run(Some(engine_kind), requested_duration)
+                .map_err(anyhow::Error::msg)?;
+        let duration_secs = resolved.duration_secs;
+        let container = std::sync::Arc::new(ServiceContainer::bootstrap().await);
         // Ensure a seed corpus exists before running. A failure here is not fatal
         // (the engine can still run on an empty corpus) but must not be silent.
         if let Err(e) = container.generate_seeds(&project, target).await {
