@@ -42,7 +42,10 @@ use crate::commands::system::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .init();
     let cli = Cli::parse();
     match cli.command {
         Commands::Init => {
@@ -56,7 +59,20 @@ async fn main() -> anyhow::Result<()> {
             }
             println!("  database: {}", report.db_path.display());
         }
-        Commands::Doctor { json } => cmd_doctor(json).await?,
+        Commands::Doctor {
+            json,
+            engine,
+            duration,
+            require_provider,
+        } => {
+            cmd_doctor(
+                json,
+                engine.as_deref(),
+                duration.as_deref(),
+                require_provider,
+            )
+            .await?;
+        }
         Commands::Build { command } => commands::build::run(command).await?,
         Commands::Discover {
             project,
@@ -82,13 +98,19 @@ async fn main() -> anyhow::Result<()> {
             engine,
             lang,
             draft_only,
+            json,
             ai,
             repair,
             refine,
             promote,
         } => {
+            let output = if json {
+                commands::harness::HarnessOutput::Json
+            } else {
+                commands::harness::HarnessOutput::Text
+            };
             cmd_harness(
-                project, &target, &engine, &lang, draft_only, ai, repair, refine, promote,
+                project, &target, &engine, &lang, draft_only, ai, repair, refine, promote, output,
             )
             .await?;
         }

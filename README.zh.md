@@ -76,21 +76,24 @@ oxfuzz triage <project> --target <relative-file>::<symbol>
 Docker 必须已安装并正在运行，且至少配置一个 LLM 提供方。完整搭建见
 **[安装与构建](docs/guides/INSTALL.md)** 与 **[配置](docs/guides/CONFIGURATION.md)**。
 
-## 90 秒演示
+## 带人工评审的演示
 
-完成上面的快速开始后，观看 oxfuzz 端到端地重新发现一个植入的、CVE 级别的缺陷——
-其中包括人工晋升门禁，这正是关键所在：
+完成快速开始后，使用演示脚本发现示例目标并准备待评审的 harness：
 
 ```bash
-./scripts/demo-cve-rediscovery.sh            # 完整运行；晋升前会征询确认
-./scripts/demo-cve-rediscovery.sh --preflight-only   # 无副作用的就绪检查
+./scripts/demo-cve-rediscovery.sh            # 资格验证、评审，然后批准指定的尝试
+./scripts/demo-cve-rediscovery.sh --preflight-only   # 检查所选引擎、策略和提供方配置
 ```
 
-默认目标（`examples/aflpp_persistent`）信任声明的长度字节而非实际存在的载荷——
-这是众多真实解析器 CVE 背后的"长度字段信任"模式。发现阶段找到入口点，模型编写
-的 harness 必须通过 lint、沙箱编译、独立评审和冒烟运行，然后**脚本会停下来等待
-你的批准**，才会开始任何完整模糊测试。一次有界的运行与缺陷分诊（triage）收尾。
-其他示例隔离其他缺陷类别；见 **[examples/README.md](examples/README.md)**。
+默认目标（`examples/aflpp_persistent`）信任声明的长度字节而非实际可用的载荷。
+脚本只生成一个草稿，将其原始源码导入持久保存的 Work Order，再进行 lint、沙箱编译、
+独立评审和冒烟测试。脚本显示源码和资格验证结果，然后请你批准该尝试 ID。
+批准后只晋升该尝试，不会重新生成 harness，随后启动有界运行和缺陷分诊。
+拒绝或遇到 EOF 都会停止流程；不提供 `--yes` 跳过确认的选项。
+
+植入的缺陷可能在冒烟测试期间就触发崩溃。资格验证失败会在晋升前停止，并保留尝试供调查。
+预检检查提供方配置，不验证凭据或模型连通性。完成时间和缺陷发现取决于提供方、引擎、
+harness 和语料库。其他示例分别覆盖其他缺陷类别；见 **[examples/README.md](examples/README.md)**。
 
 ---
 

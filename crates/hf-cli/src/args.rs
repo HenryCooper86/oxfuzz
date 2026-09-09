@@ -29,6 +29,15 @@ pub(crate) enum Commands {
     Init,
     /// Check whether the mandatory sandbox and at least one fuzzing engine are ready.
     Doctor {
+        /// Check this engine and its current campaign policy instead of any engine.
+        #[arg(long)]
+        engine: Option<String>,
+        /// Validate this duration against campaign policy.
+        #[arg(long, requires = "engine")]
+        duration: Option<String>,
+        /// Require configured model access without contacting a provider.
+        #[arg(long, requires = "engine")]
+        require_provider: bool,
         /// Emit the service-owned status as JSON.
         #[arg(long)]
         json: bool,
@@ -75,6 +84,9 @@ pub(crate) enum Commands {
         /// Target language (c, cpp, rust, go, python). Defaults to c.
         #[arg(long, default_value = "c")]
         lang: String,
+        /// Emit the draft as JSON; never compile, refine, repair or promote.
+        #[arg(long, requires = "draft_only", conflicts_with_all = ["repair", "refine", "promote"])]
+        json: bool,
         /// Skip compile and smoke fuzz (draft only).
         #[arg(long)]
         draft_only: bool,
@@ -935,5 +947,76 @@ mod build_read_feature_off_tests {
             Cli::try_parse_from(["oxfuzz", "build", "profile", "show", "/project", "--json"])
                 .is_ok()
         );
+    }
+}
+
+#[cfg(test)]
+mod demo_cli_tests {
+    use super::Cli;
+    use clap::Parser as _;
+
+    #[test]
+    fn draft_json_requires_a_nonexecuting_draft() {
+        let base = [
+            "oxfuzz",
+            "harness",
+            "/tmp/project",
+            "--target",
+            "parse",
+            "--engine",
+            "libfuzzer",
+        ];
+        let mut args = base.to_vec();
+        args.extend(["--draft-only", "--json"]);
+        assert!(Cli::try_parse_from(&args).is_ok());
+        for flag in ["--refine", "--promote"] {
+            let mut invalid = args.clone();
+            invalid.push(flag);
+            assert!(Cli::try_parse_from(invalid).is_err());
+        }
+        let mut invalid = args.clone();
+        invalid.extend(["--repair", "1"]);
+        assert!(Cli::try_parse_from(invalid).is_err());
+        let mut invalid = base.to_vec();
+        invalid.push("--json");
+        assert!(Cli::try_parse_from(invalid).is_err());
+    }
+
+    #[test]
+    fn selected_doctor_accepts_campaign_inputs_and_requires_engine_scope() {
+        assert!(Cli::try_parse_from([
+            "oxfuzz",
+            "doctor",
+            "--engine",
+            "libfuzzer",
+            "--duration",
+            "30s",
+            "--require-provider",
+            "--json"
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from(["oxfuzz", "doctor", "--require-provider"]).is_err());
+        assert!(Cli::try_parse_from(["oxfuzz", "doctor", "--duration", "30s"]).is_err());
+    }
+
+    #[cfg(feature = "harness-work-order")]
+    #[test]
+    fn work_order_json_export_excludes_markdown_output() {
+        let mut args = vec![
+            "oxfuzz",
+            "work-order",
+            "export",
+            "/tmp/project",
+            "--target",
+            "parse",
+            "--engine",
+            "libfuzzer",
+            "--lang",
+            "c",
+            "--json",
+        ];
+        assert!(Cli::try_parse_from(&args).is_ok());
+        args.extend(["--out", "packet.md"]);
+        assert!(Cli::try_parse_from(args).is_err());
     }
 }
