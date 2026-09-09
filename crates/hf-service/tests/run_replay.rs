@@ -302,6 +302,10 @@ async fn run_records_a_seed_and_replay_reexecutes_with_it() {
         use sha2::{Digest, Sha256};
 
         let run_root = workspace.join("runs").join(record.id.to_string());
+        assert_eq!(
+            std::fs::read_to_string(run_root.join("input/source-context/parser.c")).unwrap(),
+            FIXTURE,
+        );
         let initial = run_root.join("input/corpus");
         let mut entries = std::fs::read_dir(&initial)
             .unwrap()

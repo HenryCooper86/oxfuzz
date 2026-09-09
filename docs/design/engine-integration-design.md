@@ -163,3 +163,20 @@ the approved source/binary under `runs/<id>/input/corpus`, then seed the engine'
 writable corpus from that capture. Persisted comparison provenance refers to
 the captured bytes. This preserves original input evidence while engines grow
 the working corpus and the canonical target corpus evolves after merging.
+
+### Retained source context
+
+New userspace campaign and smoke runs retain the files included in their
+existing source-context identity under `runs/<id>/input/source-context`, using
+the same workspace-relative paths. This includes staged C/C++ source and headers,
+Cargo manifests, and the recursive `src` tree. Capture precedes hashing; recorded
+source and combined identities derive from the captured tree, not later reads
+of the live workspace. The existing comparison limits (100,000 files and 16 GiB
+combined input bytes) still apply, and copies stream within the remaining budget.
+A failed staging attempt removes only the unique unreferenced run directory it
+created.
+
+This is the source context present at launch, not a claim that arbitrary project
+files, dynamic dependencies, dictionaries, or the original compiler inputs have
+all been archived. An exact-input rerun still needs complete execution-input
+identity and admission. Old source hashes cannot recover files never retained.

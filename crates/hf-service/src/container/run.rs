@@ -679,7 +679,7 @@ impl ServiceContainer {
             &workspace.join(harness_binary_name(target)),
         )?;
         let context = match captured_run_context_digests(
-            workspace,
+            &artifacts.source_context_host,
             &artifacts.initial_corpus_host,
             sandbox_image.sha256(),
         ) {
