@@ -88,3 +88,26 @@ implementation and its release verification are specified in
 [Windows-Confined Harness Work-Order Reads](../superpowers/specs/2026-08-31-windows-confined-work-order-read-design.md).
 
 Discovery restores a selection only when it identifies exactly one candidate. An ambiguous legacy bare symbol falls back to the highest-ranked candidate with its complete file-qualified selector, keeping the selected value visible and executable without choosing between same-symbol targets implicitly at run time.
+
+## 4. Reviewed CLI demo
+
+The bundled demo uses the existing retained workflow: discover, export the
+packet as JSON, generate one draft as JSON without compilation, import that
+exact source with tool provenance, qualify the immutable submission, display
+its source and terminal evidence, then ask for human promotion of that attempt
+UUID. Decline or EOF ends the workflow. Blanket `--yes` approval is unsupported.
+No generation, repair, or qualification occurs after the approval prompt.
+The campaign and triage use the packet's complete file-qualified selector.
+Failed qualification remains retained and stops before promotion; a known fixture
+may already trigger a crash during smoke, which must be investigated rather
+than bypassing the clean-promotion requirement.
+
+`work-order export --json` serializes the existing service packet and conflicts
+with `--out`. `harness --draft-only --json` serializes the existing `HarnessDraft`
+and conflicts with repair, refinement and promotion. These are presentation
+options, not new generation or execution APIs. The demo requires model authoring
+and never silently substitutes a heuristic draft. Runtime and provider failures
+stop the script with the retained IDs already printed for investigation.
+
+Structured CLI output reserves stdout for JSON; tracing diagnostics go to stderr,
+including when provider configuration is invalid or verbose logging is enabled.

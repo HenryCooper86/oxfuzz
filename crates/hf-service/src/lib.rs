@@ -244,7 +244,7 @@ pub use semgrep::{
     SemgrepCancelOutcome, SemgrepFindingView, SemgrepInventoryView, SemgrepOperationState,
     SemgrepOperationView, SemgrepOverlayState, SemgrepTargetView,
 };
-pub use system::{system_status, SystemStatus};
+pub use system::{fuzzing_preflight, system_status, FuzzingPreflight, SystemStatus};
 #[cfg(feature = "triage-disposition")]
 pub use triage_disposition::{
     triage_disposition, triage_order_key, ClaimCeiling, Disposition, DispositionAction,

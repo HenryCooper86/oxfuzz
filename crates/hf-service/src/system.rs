@@ -93,6 +93,83 @@ pub async fn system_status() -> SystemStatus {
     }
 }
 
+/// Readiness of one selected campaign, without authoring or executing a target.
+#[derive(Debug, Clone, Serialize)]
+pub struct FuzzingPreflight {
+    /// Selected engine whose toolchain and policy were checked.
+    pub engine: hf_core::engine::EngineKind,
+    /// Current sandbox and installed-tool evidence.
+    pub status: SystemStatus,
+    /// Whether a provider pool was constructible, if requested. No model was called.
+    pub provider_configured: Option<bool>,
+    /// True when every requested prerequisite passed.
+    pub ready: bool,
+    /// Named missing prerequisites or invalid campaign settings.
+    pub problems: Vec<String>,
+}
+
+/// Probe one campaign's engine, duration policy and optional provider configuration.
+///
+/// Does not bootstrap persistence, contact a model, or authorize execution.
+/// Provider authentication and reachability are established only by later calls.
+#[tracing::instrument]
+pub async fn fuzzing_preflight(
+    engine: hf_core::engine::EngineKind,
+    duration_secs: Option<u64>,
+    require_provider: bool,
+) -> FuzzingPreflight {
+    let policy = crate::config::resolve_fuzzing_run(Some(engine), duration_secs).map(|_| ());
+    let provider_configured = require_provider.then(|| {
+        crate::container::provider_pool_from_config()
+            .or_else(crate::container::provider_pool_from_env)
+            .is_some()
+    });
+    assess_fuzzing_preflight(system_status().await, engine, provider_configured, policy)
+}
+
+fn assess_fuzzing_preflight(
+    status: SystemStatus,
+    engine: hf_core::engine::EngineKind,
+    provider_configured: Option<bool>,
+    policy: Result<(), String>,
+) -> FuzzingPreflight {
+    use hf_core::engine::EngineKind;
+    let mut problems = Vec::new();
+    if !status.docker.is_ready() {
+        problems.push("Docker is unavailable or disabled".to_owned());
+    }
+    if !status.sandbox_image.is_ready() {
+        problems.push("sandbox image is unavailable".to_owned());
+    }
+    let engine_ready = match engine {
+        EngineKind::AflPlusPlus => status.aflplusplus,
+        EngineKind::Honggfuzz => status.honggfuzz,
+        EngineKind::LibFuzzer => status.libfuzzer,
+        EngineKind::Syzkaller => status.syzkaller,
+    };
+    if !engine_ready.is_ready() {
+        problems.push(format!(
+            "selected engine {} is unavailable in the sandbox",
+            engine.as_str()
+        ));
+    }
+    if let Err(error) = policy {
+        problems.push(error);
+    }
+    if provider_configured == Some(false) {
+        problems.push(
+            "no usable provider configuration; configure a provider before authoring".to_owned(),
+        );
+    }
+    FuzzingPreflight {
+        engine,
+        status,
+        provider_configured,
+        ready: problems.is_empty(),
+        problems,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{StatusFlag, SystemStatus};
@@ -125,5 +202,61 @@ mod tests {
         assert!(docker_runtime_enabled_from(Some("true")));
         assert!(!docker_runtime_enabled_from(Some("0")));
         assert!(!docker_runtime_enabled_from(Some("false")));
+    }
+    #[test]
+    fn selected_preflight_refuses_missing_requested_engine_even_if_another_is_ready() {
+        let report = super::assess_fuzzing_preflight(
+            status(true, true, true),
+            hf_core::engine::EngineKind::Honggfuzz,
+            Some(true),
+            Ok(()),
+        );
+        assert!(!report.ready);
+        assert!(report
+            .problems
+            .iter()
+            .any(|problem| problem.contains("honggfuzz")));
+    }
+
+    #[test]
+    fn selected_preflight_names_policy_provider_and_sandbox_failures() {
+        let report = super::assess_fuzzing_preflight(
+            status(false, false, false),
+            hf_core::engine::EngineKind::LibFuzzer,
+            Some(false),
+            Err("engine disabled by policy".to_owned()),
+        );
+        assert!(!report.ready);
+        for expected in ["Docker", "image", "provider", "engine disabled by policy"] {
+            assert!(
+                report
+                    .problems
+                    .iter()
+                    .any(|problem| problem.contains(expected)),
+                "missing problem: {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn selected_preflight_does_not_require_an_unrequested_provider() {
+        for configured in [None, Some(true)] {
+            let report = super::assess_fuzzing_preflight(
+                status(true, true, true),
+                hf_core::engine::EngineKind::LibFuzzer,
+                configured,
+                Ok(()),
+            );
+            assert!(report.ready);
+            assert!(report.problems.is_empty());
+            assert_eq!(report.provider_configured, configured);
+        }
+        let report = super::assess_fuzzing_preflight(
+            status(true, true, true),
+            hf_core::engine::EngineKind::LibFuzzer,
+            Some(false),
+            Ok(()),
+        );
+        assert!(!report.ready);
     }
 }

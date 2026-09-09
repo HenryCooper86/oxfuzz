@@ -40,21 +40,36 @@ comment marking the exact faulting statement in the `.c`.
 # Discover the target (offline; uses tree-sitter, no toolchain needed).
 oxfuzz discover examples/libfuzzer_fuzzme --lang c
 
-# Generate a harness, then fuzz it (requires a real engine + clang/ASan).
-oxfuzz harness examples/libfuzzer_fuzzme --target FuzzMe --engine libfuzzer
-oxfuzz run     examples/libfuzzer_fuzzme --target FuzzMe --engine libfuzzer --duration 1m
-oxfuzz triage  examples/libfuzzer_fuzzme --target FuzzMe
+# Export the authoring packet, then write harness.c from its instructions.
+oxfuzz work-order export examples/libfuzzer_fuzzme --target FuzzMe \
+  --lang c --engine libfuzzer --out work-order.md
+oxfuzz work-order import --work-order <work-order SHA-256> \
+  --source harness.c --origin human
+oxfuzz work-order qualify --submission <submission UUID>
+# Review the retained source, independent review and smoke evidence before promotion.
+oxfuzz work-order promote --attempt <attempt UUID>
+oxfuzz run examples/libfuzzer_fuzzme --target fuzz_me.c::FuzzMe \
+  --engine libfuzzer --duration 1m
+oxfuzz triage examples/libfuzzer_fuzzme --target fuzz_me.c::FuzzMe
 ```
 
 Swap the directory and `--target` for any row in the table above, and swap
 `--engine libfuzzer` for `afl++` or `honggfuzz` to drive the same target through
-a different engine. Every target crashes within seconds under a coverage-guided
-engine with AddressSanitizer.
+a different engine. Keep the complete file-qualified selector printed by the
+Work Order. The fixtures contain known triggers; time to discover them depends
+on the engine, qualified harness and seed corpus. See the
+[CLI guide](../docs/guides/CLI_REFERENCE.md) for the full review workflow.
 
-For the guided end-to-end version -- discovery through triage with the human
-promotion gate in the middle -- run
-`scripts/demo-cve-rediscovery.sh` (see the README's demo section;
-`--preflight-only` checks readiness side-effect-free).
+`scripts/demo-cve-rediscovery.sh` automates this retained-attempt workflow:
+it displays the imported source and qualification result, then asks for human
+approval before promoting that exact attempt. Failed qualification, declined
+approval, EOF, or stale promotion stops before a campaign starts. A smoke crash
+is retained for investigation. Use `--example <directory-name>` to select any
+fixture above; `--yes` is unsupported.
+
+`--preflight-only` checks the selected engine, duration policy, sandbox, and
+provider configuration before discovery. It does not verify provider credentials,
+model connectivity, or live qualification.
 
 Corpora and crash artifacts are generated at runtime and are not committed to
 this repository -- only the `.c`, `.h`, and this `.md` file live here. The

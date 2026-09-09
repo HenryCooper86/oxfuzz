@@ -92,7 +92,37 @@ pub(crate) async fn cmd_arm(url: &str, off: bool, status: bool) -> anyhow::Resul
     Ok(())
 }
 
-pub(crate) async fn cmd_doctor(json: bool) -> anyhow::Result<()> {
+pub(crate) async fn cmd_doctor(
+    json: bool,
+    engine: Option<&str>,
+    duration: Option<&str>,
+    require_provider: bool,
+) -> anyhow::Result<()> {
+    if let Some(engine) = engine {
+        let engine = crate::parse::parse_engine(engine)?;
+        let duration = duration.map(crate::parse::parse_duration).transpose()?;
+        let report = hf_service::fuzzing_preflight(engine, duration, require_provider).await;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            println!("Selected campaign readiness: {}", report.ready);
+            for problem in &report.problems {
+                eprintln!("{problem}");
+            }
+            if report.provider_configured == Some(true) {
+                println!(
+                    "Provider configuration present; authentication and connectivity are untested."
+                );
+            }
+        }
+        if !report.ready {
+            anyhow::bail!(
+                "selected campaign preflight failed: {}",
+                report.problems.join("; ")
+            );
+        }
+        return Ok(());
+    }
     let status = hf_service::system_status().await;
     if json {
         println!("{}", serde_json::to_string_pretty(&status)?);

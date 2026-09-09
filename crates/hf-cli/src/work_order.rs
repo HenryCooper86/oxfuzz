@@ -34,6 +34,9 @@ pub enum WorkOrderCommand {
         /// Fuzzing engine.
         #[arg(long)]
         engine: String,
+        /// Emit the service packet as JSON instead of rendered Markdown.
+        #[arg(long, conflicts_with = "out")]
+        json: bool,
         /// Write the rendered packet here instead of standard output.
         #[arg(long)]
         out: Option<PathBuf>,
@@ -244,6 +247,7 @@ where
             lang,
             engine,
             out,
+            json,
         } => {
             let language = parse_lang(&lang)?;
             let engine = parse_engine(&engine)?;
@@ -256,8 +260,12 @@ where
                     engine,
                 })
                 .await?;
-            let rendered = hf_service::render_work_order(&work_order);
-            write_export(&rendered, out.as_deref())?;
+            if json {
+                print_json(&serde_json::to_value(work_order)?)?;
+            } else {
+                let rendered = hf_service::render_work_order(&work_order);
+                write_export(&rendered, out.as_deref())?;
+            }
         }
         command @ WorkOrderCommand::Import { .. } => {
             let request = import_submission_request(command)?;
@@ -605,6 +613,7 @@ mod tests {
             lang,
             engine,
             out,
+            ..
         } = export
         else {
             panic!("expected export command");

@@ -34,7 +34,20 @@ derives core fuzzing readiness. CLI, web, and desktop surfaces may format that
 result, but they must not infer readiness from host engine binaries or make an
 optional integration such as DefectDojo a release gate.
 
-### 3.1 CI Gate Ownership
+### 3.1 Selected campaign preflight
+
+The service's selected-engine preflight combines sandbox/tool presence, the
+current engine/duration policy resolution, and optional provider configuration
+readiness. It returns named problems and a service-derived ready flag; CLI exit
+status follows that result. `doctor --engine <engine> [--duration <duration>]
+[--require-provider]` exposes it without creating a session, database, draft or
+campaign. Ordinary `doctor` retains its existing any-engine status API.
+Provider readiness means a pool can be constructed from the existing config/env
+resolution, not that authentication, network access or model quality was tested.
+The preflight never invokes a model; authoring still enforces its required-model
+policy, and qualification/execution repeat their own admission checks.
+
+### 3.2 CI Gate Ownership
 
 The non-interactive CI pipeline is a service operation. `hf-service` selects an
 explicit permissive guardrail instance for that operation, requires an already

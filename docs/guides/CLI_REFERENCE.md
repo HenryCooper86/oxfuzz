@@ -113,7 +113,7 @@ Binary Tool integration is outside this release's scope.
 | Command | What it does |
 | --- | --- |
 | `init` | Scaffold config from templates and create/migrate the database. |
-| `doctor [--json]` | Probe the mandatory Docker sandbox and its bundled engines; exit non-zero when fuzzing is not ready. |
+| `doctor [--engine <e> [--duration <d>] [--require-provider]] [--json]` | Probe Docker and bundled engines. With `--engine`, enforce selected-engine availability and run policy; optionally require provider configuration. Exit non-zero on failure. |
 | `discover <project> --lang c [--rank] [--semgrep]` | Scan a project and produce a ranked Target Inventory; `--semgrep` explicitly adds advisory C/C++ enrichment. |
 | `harness <project> --target <sym> --engine <e> [--draft-only] [--repair N] [--refine] [--promote]` | Write, compile (optionally auto-repair or coverage-refine), and smoke-qualify a newly generated harness. Without `--promote`, review the output; rerunning creates another draft. Use the retained Work Order flow below when approval must name a previously reviewed source. |
 | `work-order export\|import\|list\|submissions\|qualify\|rank\|promote ...` | Manage immutable external harness packets, submissions, qualification attempts, deterministic ranking, and exact-attempt promotion. |
@@ -151,7 +151,7 @@ The Work Order feature exposes exactly seven CLI operations:
 
 ```bash
 oxfuzz work-order export <project> --target <symbol> --lang c \
-  --engine libfuzzer [--out packet.md]
+  --engine libfuzzer [--out packet.md | --json]
 oxfuzz work-order import --work-order <work-order SHA-256> \
   --source harness.c --origin human [--parent <submission UUID>]
 oxfuzz work-order import --work-order <work-order SHA-256> \
@@ -163,6 +163,24 @@ oxfuzz work-order qualify --submission <submission UUID>
 oxfuzz work-order rank --attempt <attempt UUID> [--attempt <attempt UUID> ...]
 oxfuzz work-order promote --attempt <attempt UUID>
 ```
+
+CLI tracing diagnostics go to stderr, keeping JSON stdout parseable even with
+verbose logging or invalid provider configuration.
+
+For scripts, `work-order export --json` returns the complete retained packet,
+including its ID and file-qualified target. It cannot be combined with `--out`.
+`harness <project> --target <symbol> --engine <engine> --draft-only --json`
+returns a draft including its exact source. JSON draft output requires
+`--draft-only` and rejects repair, refinement, and promotion. Add `--ai require`
+when model authoring is required. Import that source and qualify the returned
+submission ID; approve the retained attempt rather than rerunning authoring.
+
+`doctor --engine <engine> --duration <duration> --require-provider --json`
+returns `ready`, named `problems`, the selected engine, system probes, and
+`provider_configured`. The provider field is null when not requested. Provider
+configuration is checked without contacting a model; a configured provider does
+not prove valid credentials or connectivity. Duration and provider flags require
+`--engine`. Ordinary `doctor` keeps its general any-engine readiness check.
 
 Export returns a content-addressed work-order ID. Import returns an immutable
 submission UUID and records provenance; source must be a nonempty regular,

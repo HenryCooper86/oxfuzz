@@ -4,6 +4,11 @@ use std::path::PathBuf;
 use crate::args::AiOption;
 use crate::parse::{parse_duration, parse_engine, parse_lang};
 
+pub(crate) enum HarnessOutput {
+    Text,
+    Json,
+}
+
 pub(crate) async fn cmd_harness(
     project: PathBuf,
     target: &str,
@@ -14,6 +19,7 @@ pub(crate) async fn cmd_harness(
     repair: usize,
     refine: bool,
     promote: bool,
+    output: HarnessOutput,
 ) -> anyhow::Result<()> {
     let engine = parse_engine(engine)?;
     let lang = parse_lang(lang)?;
@@ -70,6 +76,10 @@ pub(crate) async fn cmd_harness(
     let draft = container
         .harness_draft_with_policy(&project, target, engine, lang, ai.into())
         .await?;
+    if matches!(output, HarnessOutput::Json) {
+        println!("{}", serde_json::to_string_pretty(&draft)?);
+        return Ok(());
+    }
     println!("--- Harness draft ---");
     println!("{}", draft.source);
     // Say which generator answered. Under `auto` a provider outage silently

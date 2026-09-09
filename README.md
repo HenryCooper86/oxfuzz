@@ -94,25 +94,30 @@ Docker must be installed and running, and at least one LLM provider configured.
 See **[Install & Build](docs/guides/INSTALL.md)** and
 **[Configuration](docs/guides/CONFIGURATION.md)** for the full setup.
 
-## The 90-second demo
+## The reviewed demo
 
-Once the quick start above is done, watch oxfuzz rediscover a planted,
-CVE-class bug end to end -- including the human promotion gate, which is the
-point:
+After the quick start, use the demo to discover an example target and prepare a
+harness for review:
 
 ```bash
-./scripts/demo-cve-rediscovery.sh            # full run; asks before promoting
-./scripts/demo-cve-rediscovery.sh --preflight-only   # side-effect-free readiness check
+./scripts/demo-cve-rediscovery.sh            # qualify, review, then approve an exact attempt
+./scripts/demo-cve-rediscovery.sh --preflight-only   # check selected engine, policy, provider configuration
 ```
 
-The default target (`examples/aflpp_persistent`) trusts a declared length
-byte over the payload actually present -- the length-field-trust pattern
-behind a long line of real parser CVEs. Discovery finds the entry point, the
-model writes a harness that must pass lint, sandboxed compilation,
-independent review, and a smoke run, then **the script stops and waits for
-your approval** before any full fuzzing. A bounded run and triage close the
-story. Other fixtures isolate other bug classes; see
-**[examples/README.md](examples/README.md)**.
+The default target (`examples/aflpp_persistent`) trusts a declared length byte
+more than the available payload. The script generates one draft, imports its
+exact source into a retained Work Order, and qualifies it through lint,
+sandboxed compilation, independent review, and smoke testing. It displays the
+source and qualification result before asking you to approve that attempt ID.
+Approval promotes that exact attempt without generating another harness, then
+starts a bounded run and triage. Declining or reaching EOF stops the workflow;
+there is no `--yes` bypass.
+
+A planted bug may already crash during smoke testing. Failed qualification stops
+before promotion and retains the attempt for investigation. Preflight checks
+provider configuration, not credentials or model connectivity. Completion time
+and crash discovery depend on the provider, engine, harness, and corpus. Other
+fixtures isolate other bug classes; see **[examples/README.md](examples/README.md)**.
 
 ---
 
