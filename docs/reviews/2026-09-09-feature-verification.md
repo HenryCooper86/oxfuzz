@@ -81,6 +81,11 @@ These are proposed acceptance targets for oxfuzz, not claims about measured perf
 
 ## Recommended work order
 
+The [skipped and deferred work handoff](2026-09-09-skipped-and-deferred-work.md)
+records the user's subsequent cybersecurity exclusion, external prerequisites,
+and unfinished functional work separately. Use it with the phase reports below;
+the original verification record describes the state at the initial audit.
+
 1. Restore current dependency gates and correct the demo's exact-source approval/preflight defects.
 2. Establish live userspace acceptance for libFuzzer, AFL++ and honggfuzz, including cancellation, corpus retention, crash reproduction and minimization. Keep each engine's result separate.
 3. Add immutable-input reruns and exact per-run function coverage; these support trustworthy investigations and experiments.
