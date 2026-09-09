@@ -56,3 +56,16 @@ fn omitted_run_duration_uses_the_configured_default() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("for 23s"), "{stdout}");
 }
+
+#[test]
+fn overflowing_duration_is_a_named_error_before_storage_or_seed_preparation() {
+    for suffix in ['m', 'h'] {
+        let directory = tempfile::tempdir().unwrap();
+        let output = run(directory.path(), Some(&format!("{}{suffix}", u64::MAX)));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{stderr}");
+        assert!(stderr.contains("duration exceeds"), "{stderr}");
+        assert!(!directory.path().join("data.db").exists());
+        assert!(!directory.path().join("workspace").exists());
+    }
+}

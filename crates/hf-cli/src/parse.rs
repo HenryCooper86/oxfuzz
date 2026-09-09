@@ -11,17 +11,19 @@ pub(crate) fn parse_engine(s: &str) -> Result<EngineKind, anyhow::Error> {
 /// Parse a human duration string like "60m", "2h", "30s".
 pub(crate) fn parse_duration(s: &str) -> Result<u64, anyhow::Error> {
     let s = s.trim();
-    if let Some(n) = s.strip_suffix('s') {
-        return Ok(n.parse()?);
-    }
-    if let Some(n) = s.strip_suffix('m') {
-        return Ok(n.parse::<u64>()? * 60);
-    }
-    if let Some(n) = s.strip_suffix('h') {
-        return Ok(n.parse::<u64>()? * 3600);
-    }
-    // Fallback: parse as raw seconds.
-    Ok(s.parse()?)
+    let (number, multiplier) = if let Some(number) = s.strip_suffix('s') {
+        (number, 1)
+    } else if let Some(number) = s.strip_suffix('m') {
+        (number, 60)
+    } else if let Some(number) = s.strip_suffix('h') {
+        (number, 3600)
+    } else {
+        (s, 1)
+    };
+    number
+        .parse::<u64>()?
+        .checked_mul(multiplier)
+        .ok_or_else(|| anyhow::anyhow!("duration exceeds supported seconds range"))
 }
 
 /// Parse a comma-separated list of unsigned integers, each decimal or `0x` hex.
@@ -39,4 +41,29 @@ pub(crate) fn parse_u32_list(input: &str) -> anyhow::Result<Vec<u32>> {
                 .map_err(|_| anyhow::anyhow!("invalid integer '{token}'"))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod duration_tests {
+    use super::parse_duration;
+
+    #[test]
+    fn duration_conversion_rejects_values_that_exceed_seconds_capacity() {
+        for (suffix, multiplier) in [('m', 60_u64), ('h', 3600)] {
+            let too_large = u64::MAX / multiplier + 1;
+            let error = parse_duration(&format!("{too_large}{suffix}")).unwrap_err();
+            assert!(error.to_string().contains("duration exceeds"));
+        }
+    }
+
+    #[test]
+    fn duration_conversion_preserves_the_largest_representable_values() {
+        for (suffix, multiplier) in [("", 1_u64), ("s", 1), ("m", 60), ("h", 3600)] {
+            let value = u64::MAX / multiplier;
+            assert_eq!(
+                parse_duration(&format!(" {value}{suffix} ")).unwrap(),
+                value * multiplier,
+            );
+        }
+    }
 }
