@@ -25,9 +25,9 @@ use super::output_budget::{monitor_run_output, run_artifacts_within_budget};
 use super::policy::CurrentHarnessEvidence;
 use super::project_identity::canonical_project_root;
 use super::staging::{
-    resolve_run_sandbox_image, retain_run_context, run_context_digests, run_sandbox_options,
-    stage_run_artifacts, verify_run_artifacts, verify_staged_qualification, ReplayProvenance,
-    RunArtifacts,
+    captured_run_context_digests, resolve_run_sandbox_image, retain_run_context,
+    run_sandbox_options, stage_run_artifacts, verify_run_artifacts, verify_staged_qualification,
+    ReplayProvenance, RunArtifacts,
 };
 use super::workspace::{
     prepare_configured_workspace_root, run_output_relative, workspace_dir,
@@ -672,14 +672,27 @@ impl ServiceContainer {
         let sandbox_image = resolve_run_sandbox_image(self.runtime.as_ref()).await?;
         self.verify_harness_dispatch_image(project, qualified, Some(sandbox_image.reference()))
             .await?;
-        let context = run_context_digests(workspace, sandbox_image.sha256())?;
-        retain_run_context(&mut record, context);
         let artifacts = stage_run_artifacts(
             workspace,
             record.id,
             &qualified.source,
             &workspace.join(harness_binary_name(target)),
         )?;
+        let context = match captured_run_context_digests(
+            workspace,
+            &artifacts.initial_corpus_host,
+            sandbox_image.sha256(),
+        ) {
+            Ok(context) => context,
+            Err(error) => {
+                if let Some(run_root) = artifacts.output_host.parent() {
+                    // Best-effort removal of staging not referenced by a persisted run.
+                    let _ = std::fs::remove_dir_all(run_root);
+                }
+                return Err(error);
+            }
+        };
+        retain_run_context(&mut record, context);
         if let Err(error) = verify_staged_qualification(qualified, &artifacts) {
             if let Some(run_root) = artifacts.output_host.parent() {
                 let _ignored_cleanup_error = std::fs::remove_dir_all(run_root);

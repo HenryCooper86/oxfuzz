@@ -32,8 +32,8 @@ use super::project_identity::{
     stored_project_matches,
 };
 use super::staging::{
-    qualification_evidence, resolve_run_sandbox_image, retain_run_context, run_context_digests,
-    sha256_file, stage_run_artifacts, verify_run_artifacts,
+    captured_run_context_digests, qualification_evidence, resolve_run_sandbox_image,
+    retain_run_context, sha256_file, stage_run_artifacts, verify_run_artifacts,
 };
 use super::workspace::{
     prepare_configured_workspace_root, workspace_dir, workspace_relative_record,
@@ -1247,9 +1247,22 @@ impl ServiceContainer {
         let sandbox_image = resolve_run_sandbox_image(self.runtime.as_ref()).await?;
         self.verify_harness_dispatch_image(project, &harness, Some(sandbox_image.reference()))
             .await?;
-        let context = run_context_digests(&workspace, sandbox_image.sha256())?;
-        retain_run_context(&mut smoke_record, context);
         let artifacts = stage_run_artifacts(&workspace, smoke_record.id, &harness.source, &binary)?;
+        let context = match captured_run_context_digests(
+            &workspace,
+            &artifacts.initial_corpus_host,
+            sandbox_image.sha256(),
+        ) {
+            Ok(context) => context,
+            Err(error) => {
+                if let Some(run_root) = artifacts.output_host.parent() {
+                    // Best-effort removal of staging not referenced by a persisted run.
+                    let _ = std::fs::remove_dir_all(run_root);
+                }
+                return Err(error);
+            }
+        };
+        retain_run_context(&mut smoke_record, context);
         if artifacts.binary_sha256 != reviewed_binary_sha256 {
             if let Some(run_root) = artifacts.output_host.parent() {
                 // Best-effort cleanup only; no run record references this

@@ -298,3 +298,8 @@ line is bounded as well, so malformed output cannot bypass the cap.
 - Read-only readiness fixtures assert zero runtime/image/provider calls;
   configured-input denial is separately tested through final executors,
   including builds without the optional `build-doctor` surface.
+
+The run's `input/corpus` directory retains the starting corpus along with the
+approved source and binary. It is covered by the primary read-only workspace
+mount and is never included in writable overlays. Fuzzer writes go to the
+separate run corpus/output directories.

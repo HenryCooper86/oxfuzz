@@ -246,3 +246,23 @@ harness. The complete contract and safety boundary are defined in
   a destination payload is written.
 - Integration: snapshots reject symlinks and non-regular entries.
 - Integration: listing and snapshot merging are deterministic and bounded.
+
+## Retained starting corpus
+
+Every new staged userspace run keeps the starting flat corpus at
+`runs/<run-id>/input/corpus`. The service snapshots the canonical corpus into
+that directory once, then copies those retained bytes into the run's writable
+`corpus` directory. Engine discoveries and later canonical-corpus edits cannot
+replace the original starting inputs. Existing corpus size and entry limits
+apply to each copy; retaining the original requires one additional corpus copy.
+
+Campaign and smoke provenance hashes the captured starting directory under the
+same logical `corpus/<filename>` names used by existing context digests. It does
+not independently hash a mutable canonical directory before copying it. The
+primary sandbox workspace is read-only; only the working corpus and output
+receive writable overlays, never the retained input directory.
+
+This retention is a prerequisite for immutable-input reruns. Current `replay_run`
+still uses the current promoted harness and canonical corpus, and must continue
+to say so. Legacy records without retained starting inputs cannot be treated as
+having them reconstructed from a matching digest or today's corpus.
