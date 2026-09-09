@@ -46,6 +46,9 @@ Provider readiness means a pool can be constructed from the existing config/env
 resolution, not that authentication, network access or model quality was tested.
 The preflight never invokes a model; authoring still enforces its required-model
 policy, and qualification/execution repeat their own admission checks.
+CLI duration notation is converted with checked arithmetic before service
+bootstrap. Values that cannot be represented in seconds return a named input
+error, while representable values remain subject to the service duration policy.
 
 ### 3.2 CI Gate Ownership
 
