@@ -464,7 +464,7 @@ mod tests {
 
         for (args, expected) in commands {
             let cli = Cli::try_parse_from(args).expect("approved command parses");
-            let Commands::WorkOrder { command } = cli.command else {
+            let Commands::WorkOrder(crate::args::WorkOrderArgs { command }) = cli.command else {
                 panic!("expected work-order command");
             };
             let actual = match command {
@@ -552,28 +552,40 @@ mod tests {
             let cli = Cli::try_parse_from(args).expect("emitted argv parses through the real CLI");
 
             match (step, cli.command) {
-                (WorkOrderStep::Import, Commands::WorkOrder { command }) => {
+                (
+                    WorkOrderStep::Import,
+                    Commands::WorkOrder(crate::args::WorkOrderArgs { command }),
+                ) => {
                     assert!(matches!(command, WorkOrderCommand::Import { .. }));
                 }
-                (WorkOrderStep::Qualify, Commands::WorkOrder { command }) => {
+                (
+                    WorkOrderStep::Qualify,
+                    Commands::WorkOrder(crate::args::WorkOrderArgs { command }),
+                ) => {
                     assert!(matches!(command, WorkOrderCommand::Qualify { .. }));
                 }
-                (WorkOrderStep::Rank, Commands::WorkOrder { command }) => {
+                (
+                    WorkOrderStep::Rank,
+                    Commands::WorkOrder(crate::args::WorkOrderArgs { command }),
+                ) => {
                     assert!(matches!(command, WorkOrderCommand::Rank { .. }));
                 }
-                (WorkOrderStep::Promote, Commands::WorkOrder { command }) => {
+                (
+                    WorkOrderStep::Promote,
+                    Commands::WorkOrder(crate::args::WorkOrderArgs { command }),
+                ) => {
                     assert!(matches!(command, WorkOrderCommand::Promote { .. }));
                 }
                 (
                     WorkOrderStep::RunCampaign { duration_secs: 300 },
-                    Commands::Run {
+                    Commands::Run(crate::args::RunArgs {
                         project,
                         target,
                         engine,
                         lang,
                         duration,
                         replay,
-                    },
+                    }),
                 ) => {
                     assert_eq!(project, PathBuf::from("/tmp/project"));
                     assert_eq!(target.as_deref(), Some("src/parser.cpp::ns::parse_packet"));
@@ -582,7 +594,10 @@ mod tests {
                     assert_eq!(duration.as_deref(), Some("300s"));
                     assert!(replay.is_none());
                 }
-                (WorkOrderStep::Coverage, Commands::Coverage { project, target }) => {
+                (
+                    WorkOrderStep::Coverage,
+                    Commands::Coverage(crate::args::CoverageArgs { project, target }),
+                ) => {
                     assert_eq!(project, PathBuf::from("/tmp/project"));
                     assert_eq!(target, "src/parser.cpp::ns::parse_packet");
                 }
@@ -980,7 +995,7 @@ mod tests {
 
     fn parse_work_order_command<const N: usize>(args: [&str; N]) -> WorkOrderCommand {
         let cli = Cli::try_parse_from(args).expect("work-order command parses");
-        let Commands::WorkOrder { command } = cli.command else {
+        let Commands::WorkOrder(crate::args::WorkOrderArgs { command }) = cli.command else {
             panic!("expected work-order command");
         };
         command

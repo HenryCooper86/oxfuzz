@@ -59,12 +59,12 @@ async fn main() -> anyhow::Result<()> {
             }
             println!("  database: {}", report.db_path.display());
         }
-        Commands::Doctor {
+        Commands::Doctor(args::DoctorArgs {
             json,
             engine,
             duration,
             require_provider,
-        } => {
+        }) => {
             cmd_doctor(
                 json,
                 engine.as_deref(),
@@ -73,15 +73,15 @@ async fn main() -> anyhow::Result<()> {
             )
             .await?;
         }
-        Commands::Build { command } => commands::build::run(command).await?,
-        Commands::Discover {
+        Commands::Build(args::BuildArgs { command }) => commands::build::run(command).await?,
+        Commands::Discover(args::DiscoverArgs {
             project,
             lang,
             rank,
             ai,
             #[cfg(feature = "semgrep-enrichment")]
             semgrep,
-        } => {
+        }) => {
             cmd_discover(
                 project,
                 &lang,
@@ -92,18 +92,17 @@ async fn main() -> anyhow::Result<()> {
             )
             .await?;
         }
-        Commands::Harness {
+        Commands::Harness(args::HarnessArgs {
             project,
             target,
             engine,
             lang,
-            draft_only,
-            json,
+            draft: args::HarnessDraftArgs { draft_only, json },
             ai,
             repair,
             refine,
             promote,
-        } => {
+        }) => {
             let output = if json {
                 commands::harness::HarnessOutput::Json
             } else {
@@ -114,14 +113,14 @@ async fn main() -> anyhow::Result<()> {
             )
             .await?;
         }
-        Commands::Run {
+        Commands::Run(args::RunArgs {
             project,
             target,
             engine,
             lang,
             duration,
             replay,
-        } => {
+        }) => {
             cmd_run(
                 project,
                 target.as_deref(),
@@ -132,7 +131,7 @@ async fn main() -> anyhow::Result<()> {
             )
             .await?;
         }
-        Commands::Campaign {
+        Commands::Campaign(args::CampaignArgs {
             project,
             target,
             engine,
@@ -140,7 +139,7 @@ async fn main() -> anyhow::Result<()> {
             duration_secs,
             iterations,
             ai,
-        } => {
+        }) => {
             cmd_campaign(
                 project,
                 target.as_deref(),
@@ -152,31 +151,37 @@ async fn main() -> anyhow::Result<()> {
             )
             .await?;
         }
-        Commands::Triage {
+        Commands::Triage(args::TriageArgs {
             project,
             target,
             lang,
-        } => cmd_triage(project, &target, &lang).await?,
-        Commands::Corpus {
+        }) => cmd_triage(project, &target, &lang).await?,
+        Commands::Corpus(args::CorpusArgs {
             project,
             target,
             op,
             from,
-        } => cmd_corpus(project, &target, &op, from.as_deref()).await?,
-        Commands::Coverage { project, target } => cmd_coverage(project, &target).await?,
+        }) => cmd_corpus(project, &target, &op, from.as_deref()).await?,
+        Commands::Coverage(args::CoverageArgs { project, target }) => {
+            cmd_coverage(project, &target).await?;
+        }
         #[cfg(feature = "campaign-trust")]
-        Commands::Trust { run } => cmd_trust(&run).await?,
+        Commands::Trust(args::TrustArgs { run }) => cmd_trust(&run).await?,
         #[cfg(feature = "unreached-surface")]
-        Commands::Unreached { project, lang } => cmd_unreached(project, &lang).await?,
+        Commands::Unreached(args::UnreachedArgs { project, lang }) => {
+            cmd_unreached(project, &lang).await?;
+        }
         #[cfg(feature = "unreached-surface")]
-        Commands::Attribution { project, lang } => cmd_attribution(project, &lang).await?,
+        Commands::Attribution(args::AttributionArgs { project, lang }) => {
+            cmd_attribution(project, &lang).await?;
+        }
         #[cfg(feature = "campaign-health")]
-        Commands::Health { run } => cmd_health(&run).await?,
+        Commands::Health(args::HealthArgs { run }) => cmd_health(&run).await?,
         #[cfg(feature = "run-closeout")]
-        Commands::Closeout { run } => cmd_closeout(&run).await?,
+        Commands::Closeout(args::CloseoutArgs { run }) => cmd_closeout(&run).await?,
         #[cfg(feature = "harness-work-order")]
-        Commands::WorkOrder { command } => work_order::run(command).await?,
-        Commands::Ci {
+        Commands::WorkOrder(args::WorkOrderArgs { command }) => work_order::run(command).await?,
+        Commands::Ci(args::CiArgs {
             project,
             target,
             engine,
@@ -184,35 +189,39 @@ async fn main() -> anyhow::Result<()> {
             duration,
             sarif,
             ai,
-        } => cmd_ci(project, &target, &engine, &lang, &duration, &sarif, ai).await?,
-        Commands::Regress { project, target } => cmd_regress(project, &target).await?,
-        Commands::Ingest { project, file } => cmd_ingest(project, &file).await?,
-        Commands::Sarif {
+        }) => cmd_ci(project, &target, &engine, &lang, &duration, &sarif, ai).await?,
+        Commands::Regress(args::RegressArgs { project, target }) => {
+            cmd_regress(project, &target).await?;
+        }
+        Commands::Ingest(args::IngestArgs { project, file }) => cmd_ingest(project, &file).await?,
+        Commands::Sarif(args::SarifArgs {
             project,
             target,
             out,
-        } => cmd_sarif(project, &target, out.as_deref()).await?,
-        Commands::Repro {
+        }) => cmd_sarif(project, &target, out.as_deref()).await?,
+        Commands::Repro(args::ReproArgs {
             project,
             target,
             engine,
             lang,
             crash,
             out,
-        } => cmd_repro(project, &target, &engine, &lang, crash.as_deref(), &out).await?,
-        Commands::Defectdojo {
+        }) => cmd_repro(project, &target, &engine, &lang, crash.as_deref(), &out).await?,
+        Commands::Defectdojo(args::DefectdojoArgs {
             project,
             target,
             test,
-        } => cmd_defectdojo(project, target.as_deref(), test).await?,
-        Commands::Export { project, output } => cmd_export(project, output).await?,
-        Commands::Report {
+        }) => cmd_defectdojo(project, target.as_deref(), test).await?,
+        Commands::Export(args::ExportArgs { project, output }) => {
+            cmd_export(project, output).await?;
+        }
+        Commands::Report(args::ReportArgs {
             project,
             target,
             out,
             report_lang,
-        } => cmd_report(project, &target, out.as_deref(), &report_lang).await?,
-        Commands::Serve { host, port } => {
+        }) => cmd_report(project, &target, out.as_deref(), &report_lang).await?,
+        Commands::Serve(args::ServeArgs { host, port }) => {
             let security = hf_web::WebSecurityConfig::from_env();
             let addr = std::net::SocketAddr::new(host, port);
             hf_web::validate_bind_addr(addr, security.token_configured())?;
@@ -221,22 +230,22 @@ async fn main() -> anyhow::Result<()> {
             let listener = tokio::net::TcpListener::bind(addr).await?;
             axum::serve(listener, app).await?;
         }
-        Commands::Arm { url, off, status } => cmd_arm(&url, off, status).await?,
-        Commands::Tui { project } => {
+        Commands::Arm(args::ArmArgs { url, off, status }) => cmd_arm(&url, off, status).await?,
+        Commands::Tui(args::TuiArgs { project }) => {
             tui::Tui::run(&project).await?;
         }
-        Commands::Agent {
+        Commands::Agent(args::AgentArgs {
             message,
             project,
             agent,
-        } => cmd_agent(&message, project, agent.as_deref()).await?,
-        Commands::Knowledge { op } => cmd_knowledge(op)?,
-        Commands::Schedule { op } => cmd_schedule(op).await?,
-        Commands::Session { op } => cmd_session(op).await?,
-        Commands::Providers { op } => cmd_providers(op).await?,
-        Commands::Policy { op } => cmd_policy(op).await?,
+        }) => cmd_agent(&message, project, agent.as_deref()).await?,
+        Commands::Knowledge(args::KnowledgeArgs { op }) => cmd_knowledge(op)?,
+        Commands::Schedule(args::ScheduleArgs { op }) => cmd_schedule(op).await?,
+        Commands::Session(args::SessionArgs { op }) => cmd_session(op).await?,
+        Commands::Providers(args::ProvidersArgs { op }) => cmd_providers(op).await?,
+        Commands::Policy(args::PolicyArgs { op }) => cmd_policy(op).await?,
         #[cfg(feature = "automotive-scapy")]
-        Commands::Automotive { op } => cmd_automotive(op).await?,
+        Commands::Automotive(args::AutomotiveArgs { op }) => cmd_automotive(op).await?,
     }
     Ok(())
 }

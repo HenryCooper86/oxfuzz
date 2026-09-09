@@ -505,7 +505,7 @@ mod doctor_tests {
 
         assert!(matches!(
             cli.command,
-            Commands::Discover { semgrep: true, .. }
+            Commands::Discover(crate::args::DiscoverArgs { semgrep: true, .. })
         ));
     }
 
@@ -563,12 +563,15 @@ mod providers_tests {
     #[test]
     fn providers_command_parses_bare_list_and_thaw() {
         let cli = Cli::try_parse_from(["oxfuzz", "providers"]).unwrap();
-        assert!(matches!(cli.command, Commands::Providers { op: None }));
+        assert!(matches!(
+            cli.command,
+            Commands::Providers(crate::args::ProvidersArgs { op: None })
+        ));
 
         let cli = Cli::try_parse_from(["oxfuzz", "providers", "thaw", "openai-main"]).unwrap();
-        let Commands::Providers {
+        let Commands::Providers(crate::args::ProvidersArgs {
             op: Some(ProvidersOp::Thaw { id }),
-        } = cli.command
+        }) = cli.command
         else {
             panic!("expected providers thaw");
         };
@@ -619,18 +622,18 @@ mod policy_tests {
     #[test]
     fn policy_decisions_parses_with_a_bounded_limit() {
         let cli = Cli::try_parse_from(["oxfuzz", "policy", "decisions"]).unwrap();
-        let Commands::Policy {
+        let Commands::Policy(crate::args::PolicyArgs {
             op: PolicyOp::Decisions { limit },
-        } = cli.command
+        }) = cli.command
         else {
             panic!("expected policy decisions");
         };
         assert_eq!(limit, 50);
 
         let cli = Cli::try_parse_from(["oxfuzz", "policy", "decisions", "--limit", "5"]).unwrap();
-        let Commands::Policy {
+        let Commands::Policy(crate::args::PolicyArgs {
             op: PolicyOp::Decisions { limit },
-        } = cli.command
+        }) = cli.command
         else {
             panic!("expected policy decisions");
         };
@@ -651,22 +654,22 @@ mod schedule_cli_tests {
         let list = Cli::try_parse_from(["oxfuzz", "schedule", "recovery", "list"]).unwrap();
         assert!(matches!(
             list.command,
-            Commands::Schedule {
+            Commands::Schedule(crate::args::ScheduleArgs {
                 op: ScheduleOp::Recovery {
                     op: ScheduleRecoveryOp::List
                 }
-            }
+            })
         ));
 
         let acknowledge =
             Cli::try_parse_from(["oxfuzz", "schedule", "recovery", "acknowledge", "occ-123"])
                 .unwrap();
-        let Commands::Schedule {
+        let Commands::Schedule(crate::args::ScheduleArgs {
             op:
                 ScheduleOp::Recovery {
                     op: ScheduleRecoveryOp::Acknowledge { occurrence_id },
                 },
-        } = acknowledge.command
+        }) = acknowledge.command
         else {
             panic!("expected recovery acknowledgement");
         };

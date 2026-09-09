@@ -535,7 +535,8 @@ mod report_cli_tests {
     fn report_language_defaults_to_english_and_accepts_chinese() {
         let default_cli =
             Cli::try_parse_from(["oxfuzz", "report", "/tmp/project", "--target", "parse"]).unwrap();
-        let Commands::Report { report_lang, .. } = default_cli.command else {
+        let Commands::Report(crate::args::ReportArgs { report_lang, .. }) = default_cli.command
+        else {
             panic!("expected the report command");
         };
         assert_eq!(
@@ -553,7 +554,7 @@ mod report_cli_tests {
             "zh",
         ])
         .unwrap();
-        let Commands::Report { report_lang, .. } = chinese.command else {
+        let Commands::Report(crate::args::ReportArgs { report_lang, .. }) = chinese.command else {
             panic!("expected the report command");
         };
         assert_eq!(
