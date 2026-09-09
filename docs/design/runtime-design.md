@@ -303,3 +303,8 @@ The run's `input/corpus` directory retains the starting corpus along with the
 approved source and binary. It is covered by the primary read-only workspace
 mount and is never included in writable overlays. Fuzzer writes go to the
 separate run corpus/output directories.
+
+The run's `input/source-context` tree retains launch-time source-context bytes.
+Like the harness and starting corpus, it is covered by the read-only workspace
+mount and is never exposed through a writable run mount. Copying files out of
+the live workspace prevents later source edits from changing this retained tree.

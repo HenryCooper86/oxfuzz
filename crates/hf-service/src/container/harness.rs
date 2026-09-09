@@ -1249,7 +1249,7 @@ impl ServiceContainer {
             .await?;
         let artifacts = stage_run_artifacts(&workspace, smoke_record.id, &harness.source, &binary)?;
         let context = match captured_run_context_digests(
-            &workspace,
+            &artifacts.source_context_host,
             &artifacts.initial_corpus_host,
             sandbox_image.sha256(),
         ) {

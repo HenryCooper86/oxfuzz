@@ -26,6 +26,7 @@ pub(super) struct RunArtifacts {
     pub(super) source_host: PathBuf,
     pub(super) corpus_host: PathBuf,
     pub(super) initial_corpus_host: PathBuf,
+    pub(super) source_context_host: PathBuf,
     pub(super) corpus_relative: PathBuf,
     pub(super) binary_container: String,
     pub(super) corpus_container: String,
@@ -208,7 +209,7 @@ const NON_BUILD_INPUT_DIRS: [&str; 6] = ["corpus", "src", "out", "runs", "fuzz",
 /// layout: a flat scan of the workspace root would digest only the files that
 /// happen to sit at the top level and silently stop covering the rest, which
 /// would leave run provenance asserting more than it checked. Symlinks fail
-/// closed for the same reason they do in `collect`.
+/// closed for the same reason they do in `collect_context_paths`.
 fn collect_build_inputs(
     root: &Path,
     directory: &Path,
@@ -265,6 +266,149 @@ fn collect_build_inputs(
     Ok(())
 }
 
+const MAX_RUN_CONTEXT_FILES: usize = 100_000;
+const MAX_RUN_CONTEXT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+
+fn collect_context_paths(
+    root: &Path,
+    directory: &Path,
+    recursive: bool,
+    paths: &mut Vec<PathBuf>,
+) -> Result<(), ClassifiedError> {
+    if !directory.exists() {
+        return Ok(());
+    }
+    let metadata = std::fs::symlink_metadata(directory).map_err(|error| {
+        ClassifiedError::Validation(format!(
+            "inspect comparison context {}: {error}",
+            directory.display()
+        ))
+    })?;
+    if !metadata.file_type().is_dir() {
+        return Err(ClassifiedError::Validation(format!(
+            "comparison context contains a non-directory component: {}",
+            directory.display()
+        )));
+    }
+    let mut entries = std::fs::read_dir(directory)
+        .map_err(|error| {
+            ClassifiedError::Validation(format!(
+                "read comparison context {}: {error}",
+                directory.display()
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            ClassifiedError::Validation(format!("read comparison context entry: {error}"))
+        })?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        let path = entry.path();
+        let kind = entry.file_type().map_err(|error| {
+            ClassifiedError::Validation(format!(
+                "inspect comparison context {}: {error}",
+                path.display()
+            ))
+        })?;
+        if kind.is_symlink() {
+            return Err(ClassifiedError::Validation(format!(
+                "comparison context contains a symlink: {}",
+                path.display()
+            )));
+        }
+        if kind.is_dir() {
+            if recursive {
+                collect_context_paths(root, &path, true, paths)?;
+            }
+        } else if kind.is_file() {
+            paths.push(path.strip_prefix(root).unwrap_or(&path).to_path_buf());
+        }
+    }
+    Ok(())
+}
+
+fn source_context_paths(root: &Path) -> Result<Vec<PathBuf>, ClassifiedError> {
+    let metadata = std::fs::symlink_metadata(root).map_err(|error| {
+        ClassifiedError::Validation(format!("inspect source context directory: {error}"))
+    })?;
+    if !metadata.file_type().is_dir() {
+        return Err(ClassifiedError::Validation(
+            "source context is not a directory".to_owned(),
+        ));
+    }
+    let mut paths = Vec::new();
+    collect_build_inputs(root, root, &mut paths)?;
+    collect_context_paths(root, &root.join("src"), true, &mut paths)?;
+    paths.sort();
+    paths.dedup();
+    if paths.len() > MAX_RUN_CONTEXT_FILES {
+        return Err(ClassifiedError::Validation(format!(
+            "source context exceeds {MAX_RUN_CONTEXT_FILES} files"
+        )));
+    }
+    Ok(paths)
+}
+
+fn capture_source_context(root: &Path, destination: &Path) -> Result<(), ClassifiedError> {
+    let mut remaining = MAX_RUN_CONTEXT_BYTES;
+    for relative in source_context_paths(root)? {
+        let output = destination.join(&relative);
+        if let Some(parent) = output.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                ClassifiedError::Internal(format!(
+                    "create retained source context directory: {error}"
+                ))
+            })?;
+        }
+        remaining -= copy_source_context_file(&root.join(relative), &output, remaining)?;
+    }
+    Ok(())
+}
+
+fn copy_source_context_file(
+    source: &Path,
+    destination: &Path,
+    maximum_bytes: u64,
+) -> Result<u64, ClassifiedError> {
+    use std::io::Read as _;
+
+    let metadata = std::fs::symlink_metadata(source).map_err(|error| {
+        ClassifiedError::Validation(format!("inspect source context file: {error}"))
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(ClassifiedError::Validation(
+            "source context input is not a regular file".to_owned(),
+        ));
+    }
+    let input = std::fs::File::open(source).map_err(|error| {
+        ClassifiedError::Validation(format!("open source context file: {error}"))
+    })?;
+    let opened = input.metadata().map_err(|error| {
+        ClassifiedError::Validation(format!("inspect opened source context file: {error}"))
+    })?;
+    if !opened.file_type().is_file() {
+        return Err(ClassifiedError::Validation(
+            "opened source context input is not a regular file".to_owned(),
+        ));
+    }
+    if opened.len() > maximum_bytes {
+        return Err(ClassifiedError::Validation(
+            "source context exceeds remaining byte budget".to_owned(),
+        ));
+    }
+    let mut output = std::fs::File::create_new(destination).map_err(|error| {
+        ClassifiedError::Internal(format!("create retained source context file: {error}"))
+    })?;
+    let copied = std::io::copy(&mut input.take(maximum_bytes + 1), &mut output)
+        .map_err(|error| ClassifiedError::Internal(format!("copy source context file: {error}")))?;
+    if copied > maximum_bytes {
+        return Err(ClassifiedError::Validation(
+            "source context exceeds remaining byte budget".to_owned(),
+        ));
+    }
+    Ok(copied)
+}
+
 #[cfg(any(test, feature = "patch-to-proof"))]
 pub(super) fn run_context_digests(
     workspace: &Path,
@@ -273,9 +417,9 @@ pub(super) fn run_context_digests(
     context_digests(workspace, &workspace.join("corpus"), sandbox_image_sha256)
 }
 
-/// Hash the starting inputs captured for this run, never the mutable shared corpus.
+/// Hash captured source context and starting corpus, never their mutable live trees.
 pub(super) fn captured_run_context_digests(
-    workspace: &Path,
+    source_context: &Path,
     captured_corpus: &Path,
     sandbox_image_sha256: &str,
 ) -> Result<RunContextDigests, ClassifiedError> {
@@ -287,7 +431,7 @@ pub(super) fn captured_run_context_digests(
             "retained starting corpus is not a directory".to_owned(),
         ));
     }
-    context_digests(workspace, captured_corpus, sandbox_image_sha256)
+    context_digests(source_context, captured_corpus, sandbox_image_sha256)
 }
 
 fn context_digests(
@@ -297,67 +441,6 @@ fn context_digests(
 ) -> Result<RunContextDigests, ClassifiedError> {
     use sha2::{Digest, Sha256};
     use std::io::Read as _;
-
-    const MAX_FILES: usize = 100_000;
-    const MAX_BYTES: u64 = 16 * 1024 * 1024 * 1024;
-
-    fn collect(
-        root: &Path,
-        directory: &Path,
-        recursive: bool,
-        paths: &mut Vec<PathBuf>,
-    ) -> Result<(), ClassifiedError> {
-        if !directory.exists() {
-            return Ok(());
-        }
-        let metadata = std::fs::symlink_metadata(directory).map_err(|error| {
-            ClassifiedError::Validation(format!(
-                "inspect comparison context {}: {error}",
-                directory.display()
-            ))
-        })?;
-        if !metadata.file_type().is_dir() {
-            return Err(ClassifiedError::Validation(format!(
-                "comparison context contains a non-directory component: {}",
-                directory.display()
-            )));
-        }
-        let mut entries = std::fs::read_dir(directory)
-            .map_err(|error| {
-                ClassifiedError::Validation(format!(
-                    "read comparison context {}: {error}",
-                    directory.display()
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| {
-                ClassifiedError::Validation(format!("read comparison context entry: {error}"))
-            })?;
-        entries.sort_by_key(std::fs::DirEntry::file_name);
-        for entry in entries {
-            let path = entry.path();
-            let kind = entry.file_type().map_err(|error| {
-                ClassifiedError::Validation(format!(
-                    "inspect comparison context {}: {error}",
-                    path.display()
-                ))
-            })?;
-            if kind.is_symlink() {
-                return Err(ClassifiedError::Validation(format!(
-                    "comparison context contains a symlink: {}",
-                    path.display()
-                )));
-            }
-            if kind.is_dir() {
-                if recursive {
-                    collect(root, &path, true, paths)?;
-                }
-            } else if kind.is_file() {
-                paths.push(path.strip_prefix(root).unwrap_or(&path).to_path_buf());
-            }
-        }
-        Ok(())
-    }
 
     if sandbox_image_sha256.len() != 64
         || !sandbox_image_sha256
@@ -369,11 +452,9 @@ fn context_digests(
         ));
     }
 
-    let mut relative_paths = Vec::new();
-    collect_build_inputs(workspace, workspace, &mut relative_paths)?;
-    collect(workspace, &workspace.join("src"), true, &mut relative_paths)?;
+    let mut relative_paths = source_context_paths(workspace)?;
     let mut corpus_paths = Vec::new();
-    collect(corpus_directory, corpus_directory, false, &mut corpus_paths)?;
+    collect_context_paths(corpus_directory, corpus_directory, false, &mut corpus_paths)?;
     relative_paths.extend(
         corpus_paths
             .into_iter()
@@ -381,9 +462,9 @@ fn context_digests(
     );
     relative_paths.sort();
     relative_paths.dedup();
-    if relative_paths.len() > MAX_FILES {
+    if relative_paths.len() > MAX_RUN_CONTEXT_FILES {
         return Err(ClassifiedError::Validation(format!(
-            "comparison context exceeds {MAX_FILES} files"
+            "comparison context exceeds {MAX_RUN_CONTEXT_FILES} files"
         )));
     }
 
@@ -417,9 +498,9 @@ fn context_digests(
         total_bytes = total_bytes.checked_add(metadata.len()).ok_or_else(|| {
             ClassifiedError::Validation("comparison context size overflow".to_owned())
         })?;
-        if total_bytes > MAX_BYTES {
+        if total_bytes > MAX_RUN_CONTEXT_BYTES {
             return Err(ClassifiedError::Validation(format!(
-                "comparison context exceeds {MAX_BYTES} bytes"
+                "comparison context exceeds {MAX_RUN_CONTEXT_BYTES} bytes"
             )));
         }
         let component_digest = if relative.starts_with("corpus") {
@@ -527,55 +608,72 @@ pub(super) fn stage_run_artifacts(
             run_root.display()
         ))
     })?;
-    let input_dir = run_root.join("input");
-    let corpus_relative = PathBuf::from("runs")
-        .join(run_id.to_string())
-        .join("corpus");
-    let corpus_host = workspace.join(&corpus_relative);
-    let output_relative = run_output_relative(run_id);
-    let output_host = workspace.join(&output_relative);
-    std::fs::create_dir(&input_dir)
-        .map_err(|e| ClassifiedError::Internal(format!("create run input directory: {e}")))?;
-    std::fs::create_dir(&corpus_host)
-        .map_err(|e| ClassifiedError::Internal(format!("create run corpus directory: {e}")))?;
-    std::fs::create_dir(&output_host)
-        .map_err(|e| ClassifiedError::Internal(format!("create run output directory: {e}")))?;
+    let staged = (|| {
+        let input_dir = run_root.join("input");
+        let corpus_relative = PathBuf::from("runs")
+            .join(run_id.to_string())
+            .join("corpus");
+        let corpus_host = workspace.join(&corpus_relative);
+        let output_relative = run_output_relative(run_id);
+        let output_host = workspace.join(&output_relative);
+        std::fs::create_dir(&input_dir)
+            .map_err(|e| ClassifiedError::Internal(format!("create run input directory: {e}")))?;
+        std::fs::create_dir(&corpus_host)
+            .map_err(|e| ClassifiedError::Internal(format!("create run corpus directory: {e}")))?;
+        std::fs::create_dir(&output_host)
+            .map_err(|e| ClassifiedError::Internal(format!("create run output directory: {e}")))?;
 
-    let binary_host = input_dir.join("harness");
-    std::fs::copy(&approved_binary, &binary_host).map_err(|e| {
-        ClassifiedError::Validation(format!(
-            "stage approved harness binary {}: {e}",
-            binary.display()
-        ))
-    })?;
-    let source_host = input_dir.join("harness.source");
-    std::fs::write(&source_host, source)
-        .map_err(|e| ClassifiedError::Internal(format!("stage approved harness source: {e}")))?;
+        let binary_host = input_dir.join("harness");
+        std::fs::copy(&approved_binary, &binary_host).map_err(|e| {
+            ClassifiedError::Validation(format!(
+                "stage approved harness binary {}: {e}",
+                binary.display()
+            ))
+        })?;
+        let source_host = input_dir.join("harness.source");
+        std::fs::write(&source_host, source).map_err(|e| {
+            ClassifiedError::Internal(format!("stage approved harness source: {e}"))
+        })?;
 
-    let live_corpus = ensure_workspace_directory(workspace, Path::new("corpus"))?;
-    let initial_corpus_host = input_dir.join("corpus");
-    std::fs::create_dir(&initial_corpus_host)
-        .map_err(|e| ClassifiedError::Internal(format!("create retained corpus directory: {e}")))?;
-    hf_corpus::snapshot(&live_corpus, &initial_corpus_host)?;
-    hf_corpus::snapshot(&initial_corpus_host, &corpus_host)?;
+        let live_corpus = ensure_workspace_directory(workspace, Path::new("corpus"))?;
+        let initial_corpus_host = input_dir.join("corpus");
+        std::fs::create_dir(&initial_corpus_host).map_err(|e| {
+            ClassifiedError::Internal(format!("create retained corpus directory: {e}"))
+        })?;
+        hf_corpus::snapshot(&live_corpus, &initial_corpus_host)?;
+        hf_corpus::snapshot(&initial_corpus_host, &corpus_host)?;
 
-    let source_sha256 = sha256_file(&source_host)?;
-    let binary_sha256 = sha256_file(&binary_host)?;
-    let run_container_root = format!("/work/runs/{run_id}");
-    Ok(RunArtifacts {
-        binary_host,
-        source_host,
-        corpus_host,
-        initial_corpus_host,
-        corpus_relative,
-        binary_container: format!("{run_container_root}/input/harness"),
-        corpus_container: format!("{run_container_root}/corpus"),
-        output_host,
-        output_container: format!("{run_container_root}/out"),
-        output_relative,
-        source_sha256,
-        binary_sha256,
-    })
+        let source_context_host = input_dir.join("source-context");
+        std::fs::create_dir(&source_context_host).map_err(|error| {
+            ClassifiedError::Internal(format!("create retained source context: {error}"))
+        })?;
+        capture_source_context(workspace, &source_context_host)?;
+
+        let source_sha256 = sha256_file(&source_host)?;
+        let binary_sha256 = sha256_file(&binary_host)?;
+        let run_container_root = format!("/work/runs/{run_id}");
+        Ok(RunArtifacts {
+            binary_host,
+            source_host,
+            corpus_host,
+            initial_corpus_host,
+            source_context_host,
+            corpus_relative,
+            binary_container: format!("{run_container_root}/input/harness"),
+            corpus_container: format!("{run_container_root}/corpus"),
+            output_host,
+            output_container: format!("{run_container_root}/out"),
+            output_relative,
+            source_sha256,
+            binary_sha256,
+        })
+    })();
+    if staged.is_err() {
+        if let Err(error) = std::fs::remove_dir_all(&run_root) {
+            tracing::warn!(%error, "failed to remove unreferenced run staging directory");
+        }
+    }
+    staged
 }
 
 /// Fail closed if a staged source/binary changed between approval and launch.
@@ -1049,6 +1147,104 @@ mod staging_tests {
             &image
         )
         .is_err());
+    }
+
+    #[test]
+    fn retained_source_context_survives_live_source_and_header_changes() {
+        let workspace = tempfile::tempdir().unwrap();
+        let binary = workspace.path().join("fuzz_parse");
+        std::fs::write(&binary, b"approved binary").unwrap();
+        std::fs::create_dir_all(workspace.path().join("component/include")).unwrap();
+        std::fs::create_dir(workspace.path().join("src")).unwrap();
+        std::fs::write(
+            workspace.path().join("component/parse.c"),
+            b"original C source",
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.path().join("component/include/config.h"),
+            b"original header",
+        )
+        .unwrap();
+        std::fs::write(workspace.path().join("src/lib.rs"), b"original Rust source").unwrap();
+        let image = "a".repeat(64);
+        let expected = run_context_digests(workspace.path(), &image).unwrap();
+        let run_id = uuid::Uuid::new_v4();
+        let artifacts =
+            stage_run_artifacts(workspace.path(), run_id, "harness source", &binary).unwrap();
+        let retained = workspace
+            .path()
+            .join("runs")
+            .join(run_id.to_string())
+            .join("input/source-context");
+        assert_eq!(
+            std::fs::read(retained.join("component/parse.c")).unwrap(),
+            b"original C source"
+        );
+        assert_eq!(
+            std::fs::read(retained.join("src/lib.rs")).unwrap(),
+            b"original Rust source"
+        );
+        std::fs::write(
+            workspace.path().join("component/parse.c"),
+            b"changed source",
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.path().join("component/include/config.h"),
+            b"changed header",
+        )
+        .unwrap();
+        let captured =
+            super::captured_run_context_digests(&retained, &artifacts.initial_corpus_host, &image)
+                .unwrap();
+        assert_eq!(captured.source, expected.source);
+        assert_eq!(captured.combined, expected.combined);
+        assert_ne!(
+            run_context_digests(workspace.path(), &image)
+                .unwrap()
+                .source,
+            captured.source
+        );
+        let options = super::run_sandbox_options(&artifacts, None);
+        assert!(options
+            .extra_mounts
+            .iter()
+            .all(|mount| mount.read_only || !retained.starts_with(&mount.host_path)));
+        std::fs::remove_dir_all(&retained).unwrap();
+        assert!(super::captured_run_context_digests(
+            &retained,
+            &artifacts.initial_corpus_host,
+            &image
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn source_context_copy_rejects_files_above_its_remaining_budget() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.c");
+        let destination = directory.path().join("copy.c");
+        std::fs::write(&source, b"eight123").unwrap();
+        let error = super::copy_source_context_file(&source, &destination, 3).unwrap_err();
+        assert!(error.to_string().contains("source context exceeds"));
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn failed_staging_removes_its_unique_unreferenced_directory() {
+        let workspace = tempfile::tempdir().unwrap();
+        let binary = workspace.path().join("fuzz_parse");
+        std::fs::write(&binary, b"approved binary").unwrap();
+        std::fs::write(workspace.path().join("corpus"), b"not a corpus directory").unwrap();
+        let run_id = uuid::Uuid::new_v4();
+        assert!(stage_run_artifacts(workspace.path(), run_id, "source", &binary).is_err());
+        assert!(!workspace
+            .path()
+            .join("runs")
+            .join(run_id.to_string())
+            .exists());
+        assert!(binary.exists());
     }
 
     #[test]
