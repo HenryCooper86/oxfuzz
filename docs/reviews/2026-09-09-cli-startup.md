@@ -33,5 +33,9 @@ checks and domain coverage passed (91.12% aggregate line coverage).
 
 Raw local logs are `/tmp/oxfuzz-cli-startup-*.log`. The Windows job
 for the earlier admission commit was superseded before it finished; no Windows
-pass is inferred from its cancellation. A completed hosted run of this fix is
-still required.
+pass is inferred from its cancellation.
+
+Hosted follow-up: [GitHub CI run 34329337050](https://github.com/HenryCooper86/oxfuzz/actions/runs/34329337050)
+completed successfully for commit `23cf4a2c`. Rust gates, Windows tests, macOS
+tests, dependency policy, coverage, frontend gates and the aggregate gate all
+passed. This result applies to that commit, not later phases.
