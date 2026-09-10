@@ -5,12 +5,13 @@ import { useI18n } from "../i18nContext";
 import { useProject } from "../providers/project";
 import { useToast } from "../components/ui/toastContext";
 import { useConfirm } from "../providers/confirm";
-import type { RunHistoryItem, CoverageSample } from "../types";
+import type { RunHistoryItem, CoverageSample, ViewType } from "../types";
 import { ViewHeader, EmptyState, Button, IconButton, Input } from "../components/ui";
 import { Play, Bug, Clock, GitCompare, X, Search, Activity, Zap, TrendingUp, LineChart, AlertTriangle, RotateCcw, Trash2 } from "lucide-react";
 import { DiffView } from "../components/DiffView";
 import { buildRunComparisons } from "../lib/runComparison";
 import { RunComparison } from "../components/RunComparison";
+import { ReplayRun } from "../components/ReplayRun";
 import { RunCloseoutPanel } from "../components/RunCloseoutPanel";
 import { uuid } from "../providers/runOutputValidation";
 import type { MorningHealthSummary } from "../lib/transport";
@@ -34,12 +35,12 @@ const STATUS_COLOR: Record<string, string> = {
 // A history of every fuzz run for the active project (all projects when none
 // selected), with crash counts and durations, plus a two-run compare. Runs are
 // read from the persisted store, so the history survives restarts.
-export function RunsView() {
+export function RunsView({ onNavigate }: { onNavigate?: (view: ViewType) => void }) {
   const { activeProject } = useProject();
-  return <ScopedRunsView key={activeProject} />;
+  return <ScopedRunsView key={activeProject} onNavigate={onNavigate} />;
 }
 
-function ScopedRunsView() {
+function ScopedRunsView({ onNavigate }: { onNavigate?: (view: ViewType) => void }) {
   const { t } = useI18n();
   const { activeProject } = useProject();
   const [runs, setRuns] = useState<RunHistoryItem[]>([]);
@@ -433,6 +434,7 @@ function ScopedRunsView() {
                       <CoverageCurve samples={data} />
                     )}
                     <div className="mt-4 border-t border-border pt-3">
+                      {r.kind.toLowerCase() === "campaign" && r.ended_at && <ReplayRun runId={r.id} onNavigate={onNavigate} />}
                       <RunCloseoutPanel runId={r.id} runKind={r.kind} runStatus={r.status} />
                     </div>
                   </div>

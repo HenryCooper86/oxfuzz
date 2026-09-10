@@ -42,6 +42,35 @@ use super::{
     TerminalRunMetrics,
 };
 
+/// Settings presented to an operator before starting a new replay campaign.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplayReview {
+    /// Original retained run.
+    pub run_id: Uuid,
+    /// Canonical owning project.
+    pub project: PathBuf,
+    /// Exact retained target selector.
+    pub target: String,
+    /// Retained engine, admitted by current policy.
+    pub engine: EngineKind,
+    /// Decimal text preserves all 64 seed bits in browser clients.
+    pub seed: String,
+    /// Retained requested duration.
+    pub duration_secs: u64,
+    /// Current memory limit.
+    pub max_mem_mb: String,
+    /// Current CPU limit.
+    pub max_cpus: u32,
+}
+
+struct RunLaunch {
+    project: PathBuf,
+    target: String,
+    resolved: crate::config::ResolvedFuzzingRun,
+    replay: Option<ReplayProvenance>,
+}
+
 pub(crate) struct CampaignRunLimits {
     pub(crate) iterations: usize,
     pub(crate) time: Option<std::time::Duration>,
@@ -586,6 +615,16 @@ impl ServiceContainer {
         let tracked_started = move |run_id: Uuid| {
             if let Ok(mut slot) = captured.lock() {
                 *slot = Some(run_id);
+            }
+            if let Some(provenance) = replay {
+                self.run_journal.note(
+                    run_id,
+                    "replay",
+                    &format!(
+                        "replays run {} with seed {}",
+                        provenance.original_run_id, provenance.seed
+                    ),
+                );
             }
             on_started(run_id);
         };
@@ -1301,6 +1340,45 @@ impl ServiceContainer {
         on_status: Arc<dyn Fn(Uuid, RunLifecycleStatus) + Send + Sync + 'static>,
     ) -> Result<Uuid, ClassifiedError> {
         let resolved = resolve_fuzzing_run(engine, duration_secs)?;
+        self.start_run_launch(
+            RunLaunch {
+                project,
+                target,
+                resolved,
+                replay: None,
+            },
+            on_progress,
+            on_status,
+        )
+        .await
+    }
+
+    /// Start a reviewed replay with service-owned progress and cancellation.
+    ///
+    /// # Errors
+    /// Rejects changed review settings, unavailable evidence, or failed admission.
+    pub async fn start_replay(
+        &self,
+        review: ReplayReview,
+        on_progress: Arc<dyn Fn(Uuid, FuzzProgress) + Send + Sync + 'static>,
+        on_status: Arc<dyn Fn(Uuid, RunLifecycleStatus) + Send + Sync + 'static>,
+    ) -> Result<Uuid, ClassifiedError> {
+        let launch = self.reviewed_replay(review).await?;
+        self.start_run_launch(launch, on_progress, on_status).await
+    }
+
+    async fn start_run_launch(
+        &self,
+        launch: RunLaunch,
+        on_progress: Arc<dyn Fn(Uuid, FuzzProgress) + Send + Sync + 'static>,
+        on_status: Arc<dyn Fn(Uuid, RunLifecycleStatus) + Send + Sync + 'static>,
+    ) -> Result<Uuid, ClassifiedError> {
+        let RunLaunch {
+            project,
+            target,
+            resolved,
+            replay,
+        } = launch;
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let started_tx = Arc::new(std::sync::Mutex::new(Some(started_tx)));
         let active_id = Arc::new(std::sync::Mutex::new(None));
@@ -1344,7 +1422,7 @@ impl ServiceContainer {
                         resolved,
                         &progress_sink,
                         &started_sink,
-                        None,
+                        replay,
                     )
                     .await;
                 match result {
@@ -1548,6 +1626,62 @@ impl ServiceContainer {
         run_id: Uuid,
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
     ) -> Result<RunSummary, ClassifiedError> {
+        let (_, launch) = self.resolve_replay(run_id).await?;
+        self.run_fuzzer_with_started(
+            &launch.project,
+            &launch.target,
+            launch.resolved,
+            on_progress,
+            &|_| {},
+            launch.replay,
+        )
+        .await
+    }
+
+    /// Read replay settings without starting work or granting execution approval.
+    ///
+    /// # Errors
+    /// Rejects missing retained evidence and settings denied by current policy.
+    pub async fn replay_review(&self, run_id: Uuid) -> Result<ReplayReview, ClassifiedError> {
+        self.resolve_replay(run_id).await.map(|(review, _)| review)
+    }
+
+    /// Execute the exact reviewed settings through normal sandbox and promotion checks.
+    ///
+    /// # Errors
+    /// Rejects stale settings, unavailable evidence, denied execution, or runtime failure.
+    pub async fn replay_run_reviewed(
+        &self,
+        review: ReplayReview,
+        on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
+        on_started: &(dyn Fn(Uuid) + Send + Sync),
+    ) -> Result<RunSummary, ClassifiedError> {
+        let launch = self.reviewed_replay(review).await?;
+        self.run_fuzzer_with_started(
+            &launch.project,
+            &launch.target,
+            launch.resolved,
+            on_progress,
+            on_started,
+            launch.replay,
+        )
+        .await
+    }
+
+    async fn reviewed_replay(&self, review: ReplayReview) -> Result<RunLaunch, ClassifiedError> {
+        let (current, launch) = self.resolve_replay(review.run_id).await?;
+        if current != review {
+            return Err(ClassifiedError::Validation(
+                "Replay settings changed. Review the replay again before starting.".to_owned(),
+            ));
+        }
+        Ok(launch)
+    }
+
+    async fn resolve_replay(
+        &self,
+        run_id: Uuid,
+    ) -> Result<(ReplayReview, RunLaunch), ClassifiedError> {
         let store = self.store.as_ref().ok_or_else(|| {
             ClassifiedError::Validation("fuzz runs require the persistent service store".to_owned())
         })?;
@@ -1556,6 +1690,14 @@ impl ServiceContainer {
             .await
             .map_err(|error| ClassifiedError::Storage(error.to_string()))?
             .ok_or_else(|| ClassifiedError::Validation(format!("run not found: {run_id}")))?;
+        if original.kind != RunKind::Campaign
+            || original.ended_at.is_none()
+            || original.engine == EngineKind::Syzkaller
+        {
+            return Err(ClassifiedError::Validation(
+                "Replay requires a terminal userspace campaign".to_owned(),
+            ));
+        }
         let config = original.config.clone().ok_or_else(|| {
             ClassifiedError::Validation(format!("run {run_id} has no recorded config to replay"))
         })?;
@@ -1595,25 +1737,28 @@ impl ServiceContainer {
             original.engine,
             config.duration.map_or(3600, |duration| duration.as_secs()),
         )?;
-        let journal = Arc::clone(&self.run_journal);
-        self.run_fuzzer_with_started(
-            project.as_path(),
-            &target,
-            resolved,
-            on_progress,
-            &move |replayed_run_id| {
-                journal.note(
-                    replayed_run_id,
-                    "replay",
-                    &format!("replays run {run_id} with seed {seed}"),
-                );
+        let review = ReplayReview {
+            run_id,
+            project: project.clone(),
+            target: target.clone(),
+            engine: resolved.engine,
+            seed: seed.to_string(),
+            duration_secs: resolved.duration_secs,
+            max_mem_mb: resolved.max_mem_mb.to_string(),
+            max_cpus: resolved.max_cpus,
+        };
+        Ok((
+            review,
+            RunLaunch {
+                project,
+                target,
+                resolved,
+                replay: Some(ReplayProvenance {
+                    original_run_id: run_id,
+                    seed,
+                }),
             },
-            Some(ReplayProvenance {
-                original_run_id: run_id,
-                seed,
-            }),
-        )
-        .await
+        ))
     }
 
     /// Run a syzkaller kernel-fuzzing campaign through the sandbox.

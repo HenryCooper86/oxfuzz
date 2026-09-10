@@ -49,6 +49,7 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
       },
       loadOlderHealthEvents: controller.loadOlderHealthEvents,
       runFuzzer: controller.runFuzzer,
+      replayRun: controller.replayRun,
       runSyzkaller: controller.runSyzkaller,
       cancelRun: controller.cancelRun,
       clear: controller.clear,

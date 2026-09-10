@@ -4,6 +4,13 @@
 
 export const enExtra: Record<string, string> = {
   "sidebar.workspace": "Workspace",
+  "replay.review": "Review replay",
+  "replay.start": "Start reviewed replay",
+  "replay.original": "Original run",
+  "replay.limits": "This starts a new sandboxed campaign using the current promoted harness and current corpus. The seed and duration come from the original run; current resource limits apply. Results may differ. Harness approval and execution policy still apply.",
+  "replay.finished": "Replay ended. Refresh run history to review its status and evidence before attaching an experiment result.",
+  "replay.monitor": "Track progress and stop this campaign from Run. You can leave this page while it runs.",
+  "replay.wrongRun": "The replay review belongs to a different run. Load the review again.",
   "sidebar.moreTools": "More tools",
   "workflow.next": "Next: {stage}",
   "workflow.reviewFindings": "Review findings",
@@ -1914,6 +1921,13 @@ export const enExtra: Record<string, string> = {
 
 export const zhExtra: Record<string, string> = {
   "sidebar.workspace": "工作区",
+  "replay.review": "审查重放",
+  "replay.start": "启动已审查的重放",
+  "replay.original": "原始运行",
+  "replay.limits": "这将使用当前已批准的测试桩和当前语料库，启动新的沙箱模糊测试。随机种子和时长沿用原始运行，资源限制采用当前设置。结果可能不同，测试桩审批和执行策略仍然适用。",
+  "replay.finished": "重放已结束。请刷新运行历史，审查状态和证据后再关联实验结果。",
+  "replay.monitor": "可在运行页面查看进度并停止本次任务。任务运行时可以离开此页面。",
+  "replay.wrongRun": "重放审查属于其他运行，请重新加载。",
   "sidebar.moreTools": "更多工具",
   "workflow.next": "下一步：{stage}",
   "workflow.reviewFindings": "审查发现",

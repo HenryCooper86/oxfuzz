@@ -21,6 +21,16 @@ describe("tauri transport run admission", () => {
     core.invoke.mockReset();
   });
 
+  it("delivers replay admission through the request channel", async () => {
+    core.invoke.mockResolvedValue({ run_id: "new-run" });
+    const admitted = vi.fn();
+    await createTauriTransport().invoke("replay_run", { review: { seed: "18446744073709551615" } }, { onRunStarted: admitted });
+    const args = core.invoke.mock.calls[0][1];
+    args.onRunStarted.onmessage("new-run");
+    expect(admitted).toHaveBeenCalledWith("new-run");
+    expect(args.review.seed).toBe("18446744073709551615");
+  });
+
   it("isolates request-scoped admission channels for both native launch commands", async () => {
     const completions = new Map<string, (value: unknown) => void>();
     core.invoke.mockImplementation((command: string) =>

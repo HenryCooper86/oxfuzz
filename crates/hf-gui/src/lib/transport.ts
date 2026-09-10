@@ -183,3 +183,14 @@ export interface Transport {
 export function isTauriEnvironment(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
+
+export interface ReplayReview {
+  run_id: string;
+  project: string;
+  target: string;
+  engine: string;
+  seed: string;
+  duration_secs: number;
+  max_mem_mb: string;
+  max_cpus: number;
+}

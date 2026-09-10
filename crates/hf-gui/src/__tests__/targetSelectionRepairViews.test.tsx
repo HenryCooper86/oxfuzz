@@ -69,7 +69,7 @@ function renderWithRepair(
             <RunOutputContext.Provider value={{
               log: [], stats: { currentExecs: null, meanExecs: null, peakExecs: null, edges: 0, rawCrashSignals: 0 }, summary: null,
               running: false, cancelling: false, lastTarget: "", lastEngine: "",
-              runFuzzer, runSyzkaller, cancelRun: async () => undefined, clear: () => undefined,
+              runFuzzer, replayRun: async () => 0, runSyzkaller, cancelRun: async () => undefined, clear: () => undefined,
             }}>
               <TargetContext.Provider value={targetValue(selectionRepair)}>{view}</TargetContext.Provider>
             </RunOutputContext.Provider>

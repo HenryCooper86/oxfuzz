@@ -179,8 +179,8 @@ pub use container::{
     runtime_from_env, workspace_dir, workspace_root, AgentInstanceSnapshot, AgentPoolSnapshot,
     ArtifactSummary, CompileOutcome, CorpusCapabilities, CorpusCapability, CorpusImportOutcome,
     CorpusInventory, CoverageSample, EffectiveAutoRevert, MemorySnapshot, MinimizeOutcome,
-    ProviderSnapshot, RegressionResult, RunCancelOutcome, RunControlStatus, RunHistoryItem,
-    RunLifecycleStatus, RunOwnerView, RunSummary, SchedulableTarget, SeedEntry,
+    ProviderSnapshot, RegressionResult, ReplayReview, RunCancelOutcome, RunControlStatus,
+    RunHistoryItem, RunLifecycleStatus, RunOwnerView, RunSummary, SchedulableTarget, SeedEntry,
     SeedRegenerationOutcome, SeedSurvivalReport, ServiceContainer, SystemSnapshot,
     SyzkallerRunOpts, SyzkallerSummary,
 };

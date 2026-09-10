@@ -535,6 +535,8 @@ export class RunOutputController {
   }
   runFuzzer: RunOutputValue["runFuzzer"] = (params) =>
     this.launch("run_fuzzer", params, params.engine);
+  replayRun: RunOutputValue["replayRun"] = (review) =>
+    this.launch("replay_run", { runId: review.run_id, project: review.project, review }, review.engine);
   runSyzkaller: RunOutputValue["runSyzkaller"] = (opts) =>
     this.launch("run_syzkaller", { opts }, "syzkaller");
   clear = () => {

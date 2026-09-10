@@ -1826,6 +1826,88 @@ fn send_run_admission(
     channel.map_or(Ok(()), |channel| channel.send(run_id.to_string()))
 }
 
+fn native_run_callbacks(
+    app: tauri::AppHandle,
+    webview: tauri::Webview,
+    on_run_started: Option<tauri::ipc::JavaScriptChannelId>,
+) -> (
+    impl Fn(FuzzProgress) + Send + Sync,
+    impl Fn(uuid::Uuid) + Send + Sync,
+) {
+    use tauri::Emitter;
+    let on_run_started = on_run_started.map(|channel| channel.channel_on(webview));
+    let run_id = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let progress_id = std::sync::Arc::clone(&run_id);
+    let app_handle = app.clone();
+    let on_progress = move |progress: FuzzProgress| {
+        // A poisoned identity lock leaves progress unattributed; scoped admission remains separate.
+        let run_id = progress_id.lock().ok().and_then(|value| *value);
+        let _event_has_no_listener =
+            app_handle.emit("run:progress", run_progress_payload(run_id, progress));
+    };
+    let started_id = std::sync::Arc::clone(&run_id);
+    let started_app = app.clone();
+    let on_started = move |id: uuid::Uuid| {
+        if let Ok(mut current) = started_id.lock() {
+            *current = Some(id);
+        }
+        if let Err(error) = send_run_admission(on_run_started.as_ref(), id) {
+            let _event_has_no_listener = started_app.emit(
+                "run:progress",
+                run_progress_payload(
+                    Some(id),
+                    FuzzProgress::LogLine(format!(
+                        "Run {id} was admitted, but request-scoped admission delivery failed: {error}"
+                    )),
+                ),
+            );
+        }
+        let _event_has_no_listener = started_app.emit(
+            "run:status",
+            serde_json::json!({ "run_id": id, "status": "running" }),
+        );
+    };
+
+    (on_progress, on_started)
+}
+
+/// Read the retained settings and current policy for an explicit replay review.
+#[tauri::command]
+pub async fn replay_review(
+    state: tauri::State<'_, crate::state::AppState>,
+    run_id: String,
+) -> Result<hf_service::ReplayReview, String> {
+    state
+        .container
+        .replay_review(uuid::Uuid::parse_str(&run_id).map_err(|error| error.to_string())?)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Start an explicitly reviewed replay using normal sandbox and promotion checks.
+#[tauri::command]
+pub async fn replay_run(
+    state: tauri::State<'_, crate::state::AppState>,
+    app: tauri::AppHandle,
+    webview: tauri::Webview,
+    review: hf_service::ReplayReview,
+    on_run_started: Option<tauri::ipc::JavaScriptChannelId>,
+) -> Result<serde_json::Value, String> {
+    let (on_progress, on_started) = native_run_callbacks(app, webview, on_run_started);
+    // The reviewed launch click is the desktop user's execution approval, as for run_fuzzer.
+    let container = state.container.clone().with_guardrails(Guardrails::new(
+        GuardrailPolicy::default(),
+        std::sync::Arc::new(AutoApproveGate),
+    ));
+    let summary = container
+        .replay_run_reviewed(review, &on_progress, &on_started)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut result = serde_json::to_value(summary).map_err(|error| error.to_string())?;
+    result["exit_code"] = serde_json::Value::Null;
+    Ok(result)
+}
+
 /// Drive a compiled harness against its target inside the sandbox, streaming
 /// progress to the GUI as `run:progress` events (`{ run_id, type, data }`).
 ///
@@ -1917,38 +1999,7 @@ pub async fn run_fuzzer(
         )),
     );
 
-    let on_run_started = on_run_started.map(|channel| channel.channel_on(webview));
-    let run_id = std::sync::Arc::new(std::sync::Mutex::new(None));
-    let progress_id = std::sync::Arc::clone(&run_id);
-    let app_handle = app.clone();
-    let on_progress = move |progress: FuzzProgress| {
-        // A poisoned identity lock leaves progress unattributed; scoped admission remains separate.
-        let run_id = progress_id.lock().ok().and_then(|value| *value);
-        let _event_has_no_listener =
-            app_handle.emit("run:progress", run_progress_payload(run_id, progress));
-    };
-    let started_id = std::sync::Arc::clone(&run_id);
-    let started_app = app.clone();
-    let on_started = move |id: uuid::Uuid| {
-        if let Ok(mut current) = started_id.lock() {
-            *current = Some(id);
-        }
-        if let Err(error) = send_run_admission(on_run_started.as_ref(), id) {
-            let _event_has_no_listener = started_app.emit(
-                "run:progress",
-                run_progress_payload(
-                    Some(id),
-                    FuzzProgress::LogLine(format!(
-                        "Run {id} was admitted, but request-scoped admission delivery failed: {error}"
-                    )),
-                ),
-            );
-        }
-        let _event_has_no_listener = started_app.emit(
-            "run:status",
-            serde_json::json!({ "run_id": id, "status": "running" }),
-        );
-    };
+    let (on_progress, on_started) = native_run_callbacks(app, webview, on_run_started);
 
     // The explicit "Run Fuzzer" click is the human approval for this high-risk
     // action (sandboxed via hf-runtime); auto-approve so the workflow run is not

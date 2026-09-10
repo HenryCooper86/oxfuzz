@@ -294,11 +294,13 @@ do not execute a provider, harness, coverage tool, or fuzzer. The prepared
 record and its experiment UUID are durable; the browser preference stores only
 which record to reopen.
 
-For a seeded baseline the panel displays the exact existing CLI handoff
-`oxfuzz run . --replay <baseline UUID>`. Run it with the same oxfuzz
-configuration and database as the application, keep the retained original
-project available, use the current promoted harness and corpus, and leave every
-other compared setting unchanged. Ordinary Run chooses a fresh seed. A legacy
+For a seeded baseline, choose **Review replay** and inspect the project, target,
+engine, retained seed and duration, and current memory/CPU limits. **Start reviewed
+replay** starts a new campaign using the current promoted harness and corpus.
+Run History offers the same action when a terminal campaign is expanded. Changed
+review settings are refused; reload the review before retrying. Keep the original
+project available and other compared settings unchanged. Progress and cancellation
+remain available in Run, even after leaving the review. Ordinary Run chooses a fresh seed. A legacy
 baseline with no retained seed requires a new seeded baseline and a new
 experiment. After a later terminal campaign exists, refresh and explicitly
 **Attach result** or enter a reason and **Cancel experiment**. An incompatible

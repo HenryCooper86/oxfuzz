@@ -13,7 +13,7 @@ export function createTauriTransport(): Transport {
       if (["coverage_experiment_create", "coverage_experiment_get", "coverage_experiment_list", "coverage_experiment_complete", "coverage_experiment_cancel"].includes(command)) {
         return invoke<T>(command, new TextEncoder().encode(JSON.stringify(args)));
       }
-      const isRunLaunch = command === "run_fuzzer" || command === "run_syzkaller";
+      const isRunLaunch = command === "replay_run" || command === "run_fuzzer" || command === "run_syzkaller";
       const invokeArgs = isRunLaunch && options?.onRunStarted
         ? {
             ...args,
