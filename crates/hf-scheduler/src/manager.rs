@@ -261,6 +261,20 @@ impl OccurrenceMetrics {
     }
 }
 
+/// Liveness of the scheduler's long-lived evaluator and executor tasks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SchedulerRuntimeStatus {
+    /// No evaluator or executor task is registered.
+    Stopped,
+    /// Startup is preparing recovery and task registration.
+    Starting,
+    /// Both long-lived tasks are alive.
+    Running,
+    /// At least one registered task finished unexpectedly.
+    Failed,
+}
+
 /// Runtime-owned scheduler state that changes when the trigger loop starts/stops.
 struct RuntimeState {
     recovery_handle: Option<JoinHandle<()>>,
@@ -2495,12 +2509,31 @@ impl SchedulerManager {
     ///
     /// Panics if the internal scheduler runtime mutex is poisoned.
     pub fn is_running(&self) -> bool {
-        self.runtime
+        self.runtime_status() == SchedulerRuntimeStatus::Running
+    }
+
+    /// Report both long-lived loops; finite recovery submission is not a liveness signal.
+    ///
+    /// # Panics
+    /// Panics if the scheduler runtime mutex is poisoned.
+    pub fn runtime_status(&self) -> SchedulerRuntimeStatus {
+        let runtime = self
+            .runtime
             .lock()
-            .expect("scheduler runtime lock poisoned")
-            .eval_handle
-            .as_ref()
-            .is_some_and(|handle| !handle.is_finished())
+            .expect("scheduler runtime lock poisoned");
+        if runtime.starting {
+            SchedulerRuntimeStatus::Starting
+        } else {
+            match (&runtime.eval_handle, &runtime.exec_handle) {
+                (None, None) => SchedulerRuntimeStatus::Stopped,
+                (Some(evaluator), Some(executor))
+                    if !evaluator.is_finished() && !executor.is_finished() =>
+                {
+                    SchedulerRuntimeStatus::Running
+                }
+                _ => SchedulerRuntimeStatus::Failed,
+            }
+        }
     }
 }
 
@@ -2513,6 +2546,43 @@ impl Default for SchedulerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn runtime_status_requires_both_long_lived_loops() {
+        let manager = SchedulerManager::with_defaults();
+        assert_eq!(manager.runtime_status(), SchedulerRuntimeStatus::Stopped);
+        manager.start(Duration::from_secs(3600)).await;
+        assert_eq!(manager.runtime_status(), SchedulerRuntimeStatus::Running);
+        let abort = manager
+            .runtime
+            .lock()
+            .unwrap()
+            .exec_handle
+            .as_ref()
+            .unwrap()
+            .abort_handle();
+        abort.abort();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !manager
+                .runtime
+                .lock()
+                .unwrap()
+                .exec_handle
+                .as_ref()
+                .unwrap()
+                .is_finished()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(manager.runtime_status(), SchedulerRuntimeStatus::Failed);
+        assert!(!manager.is_running());
+        manager.stop().await;
+        assert_eq!(manager.runtime_status(), SchedulerRuntimeStatus::Stopped);
+    }
+
     use crate::config::{ConcurrencyPolicy, MissedPolicy};
     use crate::dispatcher::{DispatchError, DispatchResult};
     use crate::occurrence::{

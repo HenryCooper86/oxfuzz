@@ -50,10 +50,10 @@ use commands::{
     run_harness_source, run_history, run_owner, run_syzkaller, save_agent, save_report_draft,
     save_skill, schedule_concurrency_limits, schedule_concurrency_set, schedule_create,
     schedule_delete, schedule_history, schedule_history_clear, schedule_list,
-    schedule_recovery_acknowledge, schedule_recovery_list, schedule_set_enabled, schedule_targets,
-    seed_survival, semgrep_available, set_automotive_settings, set_project_auto_revert_override,
-    set_providers, start_remediation_verification, system_snapshot, system_status_cmd, triage,
-    verify_crash, workbench_dashboard, write_config,
+    schedule_recovery_acknowledge, schedule_recovery_list, schedule_runtime, schedule_set_enabled,
+    schedule_targets, seed_survival, semgrep_available, set_automotive_settings,
+    set_project_auto_revert_override, set_providers, start_remediation_verification,
+    system_snapshot, system_status_cmd, triage, verify_crash, workbench_dashboard, write_config,
 };
 use work_order_commands::{
     work_order_attempt, work_order_attempts, work_order_export, work_order_get, work_order_import,
@@ -292,6 +292,7 @@ pub fn run() {
             schedule_history,
             schedule_history_clear,
             schedule_targets,
+            schedule_runtime,
             schedule_concurrency_limits,
             schedule_concurrency_set,
             schedule_create,
