@@ -9,6 +9,60 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ## Unreleased
 
+## 0.5.0 - 2026-09-10
+
+### Added
+
+- Guided desktop setup with verified provider connections and readiness checks.
+- Reviewed campaign replay from run history, with launch details, durable run
+  tracking, and controls for interrupted runs.
+- Run results linked directly to findings for the selected project and run,
+  alongside retained coverage evidence and clearer comparison explanations.
+- Schedule previews showing upcoming opportunities and remaining budgets.
+- Reviewed project allocation quotas for campaigns and incremental refresh of
+  changed knowledge entries.
+
+### Improved
+
+- Desktop navigation focuses on the guided campaign workflow. Workflow and
+  settings modules load when needed, reducing the initial frontend bundle.
+- Campaign approval, recovery, coverage errors, and small-window layouts give
+  operators clearer next steps.
+- Scheduling reports failed worker loops and enforces campaign allowances;
+  startup failures retain recoverable state.
+- Launch-time source context and starting corpus are retained with bounded
+  staging and hashes computed from the captured inputs.
+- Project knowledge and event subscribers are isolated so one project or slow
+  subscriber does not interfere with another.
+- Project documentation is reorganized, with a focused backlog and capability
+  acceptance checklist.
+
+### Fixed
+
+- CLI startup stack overflow on small process stacks and overflowing duration
+  conversions.
+- Empty provider configuration and campaign requests exceeding configured limits
+  now fail before execution.
+- The demo promotes the exact retained harness attempt and checks readiness for
+  the selected campaign before authoring.
+- A clean regression replay is described as an observation rather than proof
+  that a bug is fixed.
+- Updated the frontend test dependencies past the Vitest mocker advisory.
+
+### Upgrade notes and limitations
+
+- Back up the runtime database and configuration before upgrading. This release
+  adds no database migrations and retains existing configuration.
+- Reviewed replay launches a new campaign using current workspace inputs. It
+  does not provide exact historical reproduction. Aggregate coverage does not
+  establish target-function entry by the original run.
+- Build Doctor configures CMake and plain Make projects. Go/Python discovery
+  does not imply complete harness support.
+- Desktop downloads are unsigned. Patch-to-Proof remains unavailable on
+  Windows, and syzkaller requires a separately configured kernel/VM environment.
+- Docker sandboxing, source review, and human approval remain required for
+  generated harness execution.
+
 ## 0.4.0 - 2026-09-08
 
 ### Added
