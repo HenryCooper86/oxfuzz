@@ -129,3 +129,10 @@ bounded message.
   prove a background start returns a queryable durable UUID before mocked
   execution, then exact cooperative cancellation reaches a terminal row.
 - `hf-web` depends only on `hf-service`, never on domain/runtime crates.
+
+## Browser event delivery
+
+SSE parsing and subscriber delivery are separate operations. A throwing
+subscriber is logged by event name without payload data, and remaining
+subscribers and subsequent frames continue on the same connection. Subscriber
+exceptions are never retried as raw JSON payloads or treated as transport loss.
