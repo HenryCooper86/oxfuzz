@@ -3,7 +3,7 @@
 //! Indexes a project's source files into a per-project [`HybridRetriever`] so
 //! the GUI Knowledge view and the agent's `KnowledgeSearch` tool can search the
 //! codebase. The index is held in a process-global cache keyed by project path;
-//! it is rebuilt on demand via [`index_project`].
+//! changed entries refresh on demand via [`index_project`] and [`search_project_ensured`].
 //!
 //! hf-knowledge's tokenizer targets natural language: it strips code punctuation
 //! without splitting on it (so `copy_chunk(const` becomes one mangled token). We
@@ -11,6 +11,9 @@
 //! and normalize queries the same way, while keeping the original text for the
 //! snippet shown to the user.
 
+mod indexing;
+#[cfg(test)]
+mod refresh_tests;
 mod storage;
 pub(crate) use storage::KnowledgeOperation;
 
@@ -27,11 +30,11 @@ use hf_knowledge::config::KnowledgeConfig;
 use hf_knowledge::retrieval::{HybridRetriever, RetrievalConfig, RetrievalFilter, SearchStrategy};
 use hf_knowledge::tokenizer::AutoTokenizer;
 use hf_prompt::RelatedContext;
-use ignore::WalkBuilder;
 use serde::Serialize;
 
 /// A built per-project index: the BM25 retriever (over normalized text) plus a
 /// map from chunk id to the original source text for display.
+#[derive(Clone)]
 struct ProjectIndex {
     retriever: HybridRetriever<AutoTokenizer>,
     originals: HashMap<String, String>,
@@ -42,6 +45,13 @@ struct ProjectIndex {
     /// When this index was built.
     indexed_at: chrono::DateTime<chrono::Utc>,
     generation: String,
+    entries: std::collections::BTreeMap<String, indexing::IndexedEntry>,
+    config_digest: String,
+    effective: KnowledgeConfiguration,
+    embedder: Option<Arc<dyn EmbeddingProvider>>,
+    warnings: Vec<String>,
+    embedding_warning: Option<String>,
+    query_warning: Arc<Mutex<Option<String>>>,
 }
 
 /// Process-global per-project index cache.
@@ -60,6 +70,40 @@ const KNOWLEDGE_EXTS: &[&str] = &[
 pub struct KnowledgeStats {
     pub files: usize,
     pub chunks: usize,
+    /// Source/document entries rechunked during this refresh.
+    pub updated_entries: usize,
+    /// Entries retained without rechunking or re-embedding.
+    pub reused_entries: usize,
+    /// Entries removed from this snapshot.
+    pub removed_entries: usize,
+}
+
+/// Non-secret retrieval settings for configured or indexed data.
+#[derive(Debug, Clone, Serialize)]
+pub struct KnowledgeConfiguration {
+    /// Resolved keyword, hybrid or semantic retrieval strategy.
+    pub retrieval_strategy: String,
+    /// Effective L2 token cap, including the embedding model's limit.
+    pub chunk_max_tokens: u32,
+    /// Configured model, or the model whose vectors are retained.
+    pub embedding_model: Option<String>,
+    /// Embedding dimensionality when vectors are configured or retained.
+    pub embedding_dimensions: Option<usize>,
+}
+
+impl KnowledgeConfiguration {
+    fn from_config(config: &KnowledgeConfig) -> Self {
+        Self {
+            retrieval_strategy: config.retrieval_strategy.clone(),
+            chunk_max_tokens: config.effective_l2_max_tokens(),
+            embedding_model: config
+                .embedding_enabled
+                .then(|| config.embedding_model.clone()),
+            embedding_dimensions: config
+                .embedding_enabled
+                .then_some(config.embedding_dimensions),
+        }
+    }
 }
 
 /// Read-only status of a project's knowledge base: whether this process holds
@@ -81,11 +125,14 @@ pub struct KnowledgeIndexStatus {
     pub legacy_documents_preserved: bool,
     /// RFC3339 build time of the current index, when one exists.
     pub indexed_at: Option<String>,
-    /// Retrieval strategy a (re)index applies ("hybrid", "keyword", or
-    /// "semantic" when the embedding pipeline is enabled).
-    pub retrieval_strategy: String,
-    /// Token budget per indexed chunk (L2).
-    pub chunk_max_tokens: u32,
+    /// Current settings that a refresh will apply.
+    pub configured: KnowledgeConfiguration,
+    /// Settings actually used by the retained snapshot.
+    pub effective: Option<KnowledgeConfiguration>,
+    /// True for changed sources/configuration; absent if not indexed or inspection failed.
+    pub stale: Option<bool>,
+    /// Bounded diagnostics for skipped inputs or explicit keyword fallback.
+    pub warnings: Vec<String>,
 }
 
 /// A single search hit from the project knowledge base.
@@ -114,13 +161,12 @@ fn code_normalize(s: &str) -> String {
         .collect()
 }
 
-/// Index a project's source files into a BM25 knowledge base, replacing any
-/// existing index for that project.
+/// Refresh source/document entries, reusing unchanged chunks and vectors.
 ///
 /// # Errors
 /// Returns `ClassifiedError` if the project tree cannot be walked.
 pub fn index_project(project: &Path) -> Result<KnowledgeStats, ClassifiedError> {
-    index_project_with_config(project, crate::config::effective_knowledge_config())
+    index_project_with_config(project, &crate::config::effective_knowledge_config())
 }
 
 fn retrieval_config(config: &KnowledgeConfig) -> RetrievalConfig {
@@ -145,110 +191,51 @@ fn retrieval_config(config: &KnowledgeConfig) -> RetrievalConfig {
 
 fn index_project_with_config(
     project: &Path,
-    config: KnowledgeConfig,
+    config: &KnowledgeConfig,
 ) -> Result<KnowledgeStats, ClassifiedError> {
+    refresh_project(project, config, true)
+}
+
+fn refresh_project(
+    project: &Path,
+    config: &KnowledgeConfig,
+    retry_degraded: bool,
+) -> Result<KnowledgeStats, ClassifiedError> {
+    refresh_project_snapshot(project, config, retry_degraded).map(|(stats, _)| stats)
+}
+
+fn refresh_project_snapshot(
+    project: &Path,
+    config: &KnowledgeConfig,
+    retry_degraded: bool,
+) -> Result<(KnowledgeStats, Arc<ProjectIndex>), ClassifiedError> {
+    let gate = indexing::refresh_gate(&docs_dir(project))?;
+    let _guard = gate
+        .lock()
+        .map_err(|_| ClassifiedError::Internal("knowledge refresh lock poisoned".into()))?;
     let operation = KnowledgeOperation::acquire(project)?;
-    index_in_operation(&operation, config)
+    let embedder = build_embedder(config);
+    indexing::refresh(&operation, config, embedder, retry_degraded)
 }
 
 pub(crate) fn index_in_operation(
     operation: &KnowledgeOperation,
-    config: KnowledgeConfig,
+    config: &KnowledgeConfig,
 ) -> Result<KnowledgeStats, ClassifiedError> {
-    let project = operation.project.as_path();
-    let generation = operation.generation()?;
-    let embedder = build_embedder(&config);
-    let retrieval = retrieval_config(&config);
-    let chunker = ChunkingStrategy::new(config);
-    let mut retriever = HybridRetriever::with_config(AutoTokenizer::new(), retrieval);
-    let mut originals: HashMap<String, String> = HashMap::new();
-    // Collect chunks first so embeddings (when enabled) can be produced in a
-    // single batch call, rather than one API round-trip per chunk.
-    let mut collected: Vec<Chunk> = Vec::new();
-    let mut files = 0usize;
-
-    for entry in WalkBuilder::new(project)
-        .hidden(true)
-        .git_ignore(true)
-        .build()
-    {
-        let Ok(entry) = entry else { continue };
-        if !entry.file_type().is_some_and(|t| t.is_file()) {
-            continue;
-        }
-        let path = entry.path();
-        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
-            continue;
-        };
-        if !KNOWLEDGE_EXTS.contains(&ext) {
-            continue;
-        }
-        let Ok(content) = std::fs::read_to_string(path) else {
-            continue;
-        };
-        if content.trim().is_empty() {
-            continue;
-        }
-        files += 1;
-        // `/`-separated on every host: the label is shown to users, matched
-        // against queries, and stored in chunk metadata.
-        let rel = path.strip_prefix(project).map_or_else(
-            |_| path.to_string_lossy().to_string(),
-            hf_core::runtime::posix_relative,
-        );
-        let meta = ChunkMetadata {
-            source: rel.clone(),
-            title: rel.clone(),
-            ..Default::default()
-        };
-        for mut chunk in chunker.chunk(&rel, &content, ChunkLevel::L2, &meta) {
-            // Keep the original text for the snippet; index a normalized copy.
-            originals.insert(chunk.id.clone(), chunk.content.clone());
-            chunk.content = code_normalize(&chunk.content);
-            collected.push(chunk);
-        }
-    }
-
-    // Also index any documents ingested for this project (markitdown output).
-    // Ingested docs are counted separately as `documents`, not as source
-    // `files`, so a single doc is not double-counted across both stats.
-    index_docs_dir(&docs_dir(project), &chunker, &mut originals, &mut collected);
-
-    let chunks = collected.len();
-    finalize_index(&mut retriever, collected, embedder.as_ref());
-
-    let index = Arc::new(ProjectIndex {
-        retriever,
-        originals,
-        files,
-        chunks,
-        indexed_at: chrono::Utc::now(),
-        generation,
-    });
-    let key = operation.docs.clone();
-    if let Ok(mut map) = cache().lock() {
-        // Bound the process-global cache: a long-running `serve` handling many
-        // distinct project paths would otherwise pin every retriever plus its
-        // full source text in RAM forever, growing to OOM. When at capacity,
-        // evict the oldest-built entry (it is rebuilt on demand on next access).
-        if !map.contains_key(&key) && map.len() >= MAX_CACHED_PROJECT_INDEXES {
-            if let Some(oldest) = map
-                .iter()
-                .min_by_key(|(_, index)| index.indexed_at)
-                .map(|(oldest_key, _)| oldest_key.clone())
-            {
-                map.remove(&oldest);
-            }
-        }
-        map.insert(key, index);
-    }
-    Ok(KnowledgeStats { files, chunks })
+    let embedder = build_embedder(config);
+    index_in_operation_with_embedder(operation, config, embedder, true)
 }
 
-/// Maximum number of per-project indexes held in the process-global cache.
-/// Each entry retains a full hybrid retriever plus every chunk's original
-/// source text, so this caps resident memory for a server that indexes many
-/// projects over its lifetime.
+fn index_in_operation_with_embedder(
+    operation: &KnowledgeOperation,
+    config: &KnowledgeConfig,
+    embedder: Option<Arc<dyn EmbeddingProvider>>,
+    retry_degraded: bool,
+) -> Result<KnowledgeStats, ClassifiedError> {
+    indexing::refresh(operation, config, embedder, retry_degraded).map(|(stats, _)| stats)
+}
+
+/// Bound retained project snapshots in a long-running service.
 const MAX_CACHED_PROJECT_INDEXES: usize = 8;
 
 /// The per-project directory holding ingested documents (converted to Markdown
@@ -280,47 +267,6 @@ fn docs_root_from(workspace_override: Option<OsString>) -> PathBuf {
     }
 }
 
-/// Index Markdown/text files from a directory into the retriever, labelled
-/// `doc:<filename>`. Used for ingested documents that live outside the project.
-fn index_docs_dir(
-    dir: &Path,
-    chunker: &ChunkingStrategy,
-    originals: &mut HashMap<String, String>,
-    collected: &mut Vec<Chunk>,
-) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if ext != "md" && ext != "txt" {
-            continue;
-        }
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        if content.trim().is_empty() {
-            continue;
-        }
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("doc");
-        let source = format!("doc:{name}");
-        let meta = ChunkMetadata {
-            source: source.clone(),
-            title: source.clone(),
-            ..Default::default()
-        };
-        for mut chunk in chunker.chunk(&source, &content, ChunkLevel::L2, &meta) {
-            originals.insert(chunk.id.clone(), chunk.content.clone());
-            chunk.content = code_normalize(&chunk.content);
-            collected.push(chunk);
-        }
-    }
-}
-
 /// Build the embedding provider for a config, or `None` when embedding is
 /// disabled (the guaranteed-offline BM25-only default).
 fn build_embedder(config: &KnowledgeConfig) -> Option<Arc<dyn EmbeddingProvider>> {
@@ -340,55 +286,64 @@ fn build_embedder(config: &KnowledgeConfig) -> Option<Arc<dyn EmbeddingProvider>
     )))
 }
 
-/// Drive an async batch-embed to completion from this synchronous, possibly
-/// `spawn_blocking` context without risking a `block_on`-within-a-runtime panic:
-/// the future runs on a fresh scoped thread (never a runtime worker). Returns
-/// `None` when no tokio runtime is available (e.g. a pure-sync unit test) or the
-/// embedding call fails, so callers fall back to BM25-only indexing.
+/// Execute embedding work off the caller's runtime thread and validate foreign vectors.
 fn embed_blocking(
     embedder: &Arc<dyn EmbeddingProvider>,
     texts: &[String],
-) -> Option<Vec<Vec<f32>>> {
-    let handle = tokio::runtime::Handle::try_current().ok()?;
-    let joined = std::thread::scope(|scope| {
+) -> Result<Vec<Vec<f32>>, &'static str> {
+    let handle = tokio::runtime::Handle::try_current()
+        .map_err(|_| "Embedding runtime unavailable; using keyword retrieval")?;
+    let results = std::thread::scope(|scope| {
         scope
             .spawn(|| handle.block_on(embedder.embed_batch(texts)))
             .join()
-            .ok()
-    })?;
-    match joined {
-        Ok(results) => Some(results.into_iter().map(|r| r.vector).collect()),
-        Err(error) => {
-            tracing::warn!("embedding failed, falling back to BM25 for this index: {error}");
-            None
-        }
+    })
+    .map_err(|_| "Embedding worker failed; using keyword retrieval")?
+    .map_err(|_| "Embedding request failed; using keyword retrieval")?;
+    if results.len() != texts.len()
+        || results.iter().any(|result| {
+            result.dimensions != embedder.dimensions()
+                || result.vector.len() != embedder.dimensions()
+                || result.vector.is_empty()
+                || result.vector.iter().any(|value| !value.is_finite())
+        })
+    {
+        return Err("Embedding response count or dimensions are invalid; using keyword retrieval");
     }
+    Ok(results.into_iter().map(|result| result.vector).collect())
 }
 
-/// Index every collected chunk. With an embedder present, batch-embed the
-/// normalized chunk text and index chunk+vector (enabling real cosine); on any
-/// embedding failure or dimension mismatch, fall back to BM25-only indexing so
-/// retrieval never silently breaks.
 fn finalize_index(
     retriever: &mut HybridRetriever<AutoTokenizer>,
     collected: Vec<Chunk>,
     embedder: Option<&Arc<dyn EmbeddingProvider>>,
-) {
+) -> Option<String> {
+    if collected.is_empty() {
+        return None;
+    }
+    let mut warning = None;
     if let Some(embedder) = embedder {
-        let texts: Vec<String> = collected.iter().map(|c| c.content.clone()).collect();
-        if let Some(vectors) = embed_blocking(embedder, &texts) {
-            if vectors.len() == collected.len() {
+        let texts: Vec<_> = collected
+            .iter()
+            .map(|chunk| chunk.content.clone())
+            .collect();
+        match embed_blocking(embedder, &texts) {
+            Ok(vectors) => {
                 for (chunk, vector) in collected.into_iter().zip(vectors) {
                     retriever.index_with_embedding(chunk, vector, 1.0);
                 }
-                return;
+                return None;
             }
-            tracing::warn!("embedding count mismatch; indexing BM25-only");
+            Err(reason) => {
+                tracing::warn!(reason, "knowledge embedding degraded");
+                warning = Some(reason.to_owned());
+            }
         }
     }
     for chunk in collected {
         retriever.index(chunk);
     }
+    warning
 }
 
 fn current_index(project: &Path) -> Option<Arc<ProjectIndex>> {
@@ -422,8 +377,37 @@ pub fn is_indexed(project: &Path) -> bool {
 /// a future `index_project` would apply.
 #[must_use]
 pub fn stats_project(project: &Path) -> KnowledgeIndexStatus {
+    stats_project_with_config(project, &crate::config::effective_knowledge_config())
+}
+
+fn stats_project_with_config(project: &Path, config: &KnowledgeConfig) -> KnowledgeIndexStatus {
     let cached = current_index(project);
-    let config = crate::config::effective_knowledge_config();
+    let configured = KnowledgeConfiguration::from_config(config);
+    let mut warnings = cached
+        .as_ref()
+        .map_or_else(Vec::new, |index| index.warnings.clone());
+    if let Some(index) = &cached {
+        match index.query_warning.lock() {
+            Ok(warning) => warnings.extend(warning.iter().cloned()),
+            Err(_) => warnings.push("Last query diagnostics unavailable".into()),
+        }
+    }
+    let stale = cached.as_ref().and_then(|index| {
+        if let (Ok(scan), Ok(digest)) = (indexing::scan(project), indexing::config_digest(config)) {
+            let complete = scan.warnings.is_empty();
+            warnings.extend(scan.warnings);
+            complete.then(|| {
+                index.config_digest != digest
+                    || !indexing::same_entries(&index.entries, &scan.entries)
+            })
+        } else {
+            warnings.push("Could not inspect current knowledge sources or configuration".into());
+            None
+        }
+    });
+    warnings.sort();
+    warnings.dedup();
+    warnings.truncate(5);
     KnowledgeIndexStatus {
         indexed: cached.is_some(),
         files: cached.as_ref().map_or(0, |i| i.files),
@@ -431,8 +415,10 @@ pub fn stats_project(project: &Path) -> KnowledgeIndexStatus {
         documents: count_docs(project),
         legacy_documents_preserved: storage::legacy_documents_preserved(project),
         indexed_at: cached.as_ref().map(|i| i.indexed_at.to_rfc3339()),
-        retrieval_strategy: config.retrieval_strategy,
-        chunk_max_tokens: config.l2_max_tokens,
+        configured,
+        effective: cached.as_ref().map(|index| index.effective.clone()),
+        stale,
+        warnings,
     }
 }
 
@@ -453,8 +439,7 @@ fn count_docs(project: &Path) -> usize {
     })
 }
 
-/// Search a project, building the index first if this process has not indexed
-/// it yet.
+/// Refresh changed or deleted entries and search the resulting snapshot.
 ///
 /// The BM25 index is an in-memory, process-local cache, so [`search_project`]
 /// (a pure lookup) silently returns nothing in a process that has not indexed
@@ -464,13 +449,13 @@ fn count_docs(project: &Path) -> usize {
 /// run this on a blocking thread.
 #[must_use]
 pub fn search_project_ensured(project: &Path, query: &str, limit: usize) -> Vec<KnowledgeHit> {
-    if !is_indexed(project) {
-        if let Err(e) = index_project(project) {
-            tracing::warn!(error = %e, "knowledge: on-demand index failed");
-            return Vec::new();
+    match refresh_project_snapshot(project, &crate::config::effective_knowledge_config(), false) {
+        Ok((_, index)) => search_snapshot(&index, query, limit),
+        Err(error) => {
+            tracing::warn!(%error, "knowledge refresh failed");
+            Vec::new()
         }
     }
-    search_project(project, query, limit)
 }
 
 /// Search a project's knowledge base. Returns an empty list if the project has
@@ -481,25 +466,46 @@ pub fn search_project(project: &Path, query: &str, limit: usize) -> Vec<Knowledg
     let Some(index) = index else {
         return Vec::new();
     };
+    search_snapshot(&index, query, limit)
+}
+
+fn search_snapshot(index: &ProjectIndex, query: &str, limit: usize) -> Vec<KnowledgeHit> {
     let filter = RetrievalFilter {
         limit,
         ..Default::default()
     };
     let normalized = code_normalize(query);
-    // Embed the query when embeddings are enabled so the hybrid ranker runs real
-    // cosine against the stored chunk vectors; fall back to BM25-only otherwise.
-    let config = crate::config::effective_knowledge_config();
-    let results = match build_embedder(&config)
-        .and_then(|embedder| embed_blocking(&embedder, std::slice::from_ref(&normalized)))
-        .and_then(|mut vectors| vectors.pop())
-    {
-        Some(query_vector) => index.retriever.search_with_embedding(
+    // Query with the snapshot's provider so model changes cannot mix vector spaces.
+    let vectors = index
+        .embedder
+        .as_ref()
+        .map(|embedder| embed_blocking(embedder, std::slice::from_ref(&normalized)));
+    let query_warning = match &vectors {
+        Some(Err(reason)) => Some(format!("Last embedding query: {reason}")),
+        _ => None,
+    };
+    match index.query_warning.lock() {
+        Ok(mut warning) => *warning = query_warning,
+        Err(error) => tracing::warn!(%error, "could not retain knowledge query diagnostics"),
+    }
+    let results = match vectors {
+        Some(Ok(vectors)) => index.retriever.search_with_embedding(
             &normalized,
-            Some(query_vector.as_slice()),
+            vectors.first().map(Vec::as_slice),
             &filter,
         ),
+        Some(Err(reason)) => {
+            tracing::warn!(reason, "knowledge query embedding degraded");
+            index.retriever.search_with_strategy(
+                SearchStrategy::KeywordSearch,
+                &normalized,
+                None,
+                &filter,
+            )
+        }
         None => index.retriever.search(&normalized, &filter),
     };
+
     results
         .into_iter()
         .map(|r| {
@@ -588,6 +594,14 @@ pub fn triage_related_context(
 }
 
 #[cfg(test)]
+fn test_guard() -> std::sync::MutexGuard<'static, ()> {
+    static TESTS: Mutex<()> = Mutex::new(());
+    TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use hf_core::engine::EngineKind;
@@ -644,6 +658,7 @@ mod tests {
 
     #[test]
     fn index_and_search_finds_code_symbol() {
+        let _guard = super::test_guard();
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("chunk.c"),
@@ -664,6 +679,7 @@ mod tests {
 
     #[test]
     fn source_labels_are_slash_separated_on_every_host() {
+        let _guard = super::test_guard();
         // The chunk source label is presented to users and matched against
         // queries, so a nested file must be labeled `sub/inner.c` even where
         // the host walker yields `sub\inner.c`.
@@ -684,12 +700,14 @@ mod tests {
 
     #[test]
     fn search_unindexed_project_is_empty() {
+        let _guard = super::test_guard();
         let dir = tempfile::tempdir().unwrap();
         assert!(search_project(dir.path(), "anything", 10).is_empty());
     }
 
     #[test]
     fn stats_unindexed_project_reports_not_indexed() {
+        let _guard = super::test_guard();
         let dir = tempfile::tempdir().unwrap();
 
         let status = stats_project(dir.path());
@@ -702,6 +720,7 @@ mod tests {
 
     #[test]
     fn stats_after_index_reports_counts_time_and_config() {
+        let _guard = super::test_guard();
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("chunk.c"),
@@ -720,14 +739,15 @@ mod tests {
             "an index build records its time"
         );
         assert!(
-            !status.retrieval_strategy.is_empty(),
+            !status.configured.retrieval_strategy.is_empty(),
             "config summary carries the active strategy"
         );
-        assert!(status.chunk_max_tokens > 0);
+        assert!(status.configured.chunk_max_tokens > 0);
     }
 
     #[test]
     fn stats_counts_ingested_documents_on_disk() {
+        let _guard = super::test_guard();
         // A unique tempdir project gives a unique (and isolated) docs dir.
         let dir = tempfile::tempdir().unwrap();
         let docs = docs_dir(dir.path());
@@ -743,6 +763,7 @@ mod tests {
 
     #[test]
     fn docs_dir_honors_workspace_override() {
+        let _guard = super::test_guard();
         let project = Path::new("/tmp/example-project");
         let root = std::ffi::OsString::from("/tmp/hf-test-workspace");
 
@@ -757,6 +778,7 @@ mod tests {
 
     #[test]
     fn ensured_search_indexes_on_demand() {
+        let _guard = super::test_guard();
         // Fresh project, never indexed (mirrors a server restarted between an
         // index call and a search). The plain lookup is empty; the ensured
         // variant indexes on demand and finds the symbol.
@@ -778,6 +800,7 @@ mod tests {
 
     #[test]
     fn retrieval_config_applies_strategy_threshold_and_weights() {
+        let _guard = super::test_guard();
         let knowledge = KnowledgeConfig {
             retrieval_strategy: "hybrid".to_owned(),
             min_similarity_threshold: 0.42,
@@ -796,6 +819,7 @@ mod tests {
 
     #[test]
     fn configured_chunk_limit_reaches_project_index() {
+        let _guard = super::test_guard();
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("limited.c"),
@@ -809,7 +833,7 @@ mod tests {
             ..KnowledgeConfig::default()
         };
 
-        index_project_with_config(dir.path(), config).unwrap();
+        index_project_with_config(dir.path(), &config).unwrap();
 
         assert!(!search_project(dir.path(), "alpha", 10).is_empty());
         assert!(
@@ -820,6 +844,7 @@ mod tests {
 
     #[test]
     fn ingested_documents_are_indexed_and_searchable() {
+        let _guard = super::test_guard();
         // A unique tempdir project gives a unique (and isolated) docs dir.
         let dir = tempfile::tempdir().unwrap();
         let docs = docs_dir(dir.path());
@@ -848,6 +873,7 @@ mod tests {
 
     #[test]
     fn harness_related_context_surfaces_call_sites_and_excludes_own_definition() {
+        let _guard = super::test_guard();
         let dir = tempfile::tempdir().unwrap();
         index_fixture_project(dir.path());
         let target = fixture_target();
@@ -869,6 +895,7 @@ mod tests {
 
     #[test]
     fn harness_related_context_empty_when_unindexed() {
+        let _guard = super::test_guard();
         // Never indexed: retrieval degrades to no context rather than failing.
         let dir = tempfile::tempdir().unwrap();
         assert!(harness_related_context(dir.path(), &fixture_target()).is_empty());
@@ -876,6 +903,7 @@ mod tests {
 
     #[test]
     fn harness_prompt_unchanged_without_index() {
+        let _guard = super::test_guard();
         // Composition as container.rs performs it: without an index the
         // assembled prompt is byte-identical to the base prompt.
         let dir = tempfile::tempdir().unwrap();
@@ -895,6 +923,7 @@ mod tests {
 
     #[test]
     fn harness_prompt_carries_related_context_when_indexed() {
+        let _guard = super::test_guard();
         let dir = tempfile::tempdir().unwrap();
         index_fixture_project(dir.path());
         let target = fixture_target();
@@ -914,6 +943,7 @@ mod tests {
 
     #[test]
     fn triage_related_context_finds_target_references() {
+        let _guard = super::test_guard();
         let dir = tempfile::tempdir().unwrap();
         index_fixture_project(dir.path());
 
@@ -931,6 +961,7 @@ mod tests {
 
     #[test]
     fn triage_related_context_empty_when_unindexed() {
+        let _guard = super::test_guard();
         let dir = tempfile::tempdir().unwrap();
         assert!(triage_related_context(dir.path(), "parse_header", "asan").is_empty());
     }

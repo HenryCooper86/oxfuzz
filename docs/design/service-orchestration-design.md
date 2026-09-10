@@ -76,6 +76,35 @@ process removes or recreates a project's knowledge directory. Project deletion
 removes owned documents and invalidates the local index while holding that
 lease; unrelated projects and original source repositories remain untouched.
 
+### 3.4 Incremental knowledge refresh
+
+Ensured search compares content and configuration SHA-256 fingerprints before
+querying. Changed entries replace their chunks and vectors; deleted or unreadable
+entries lose their old searchable text. Unchanged entries retain their chunks
+and vectors. A cloned retriever snapshot is published atomically so concurrent
+readers never observe a partially updated index. Source files and ingested
+documents have distinct internal identities even when their display names collide.
+
+Concurrent refreshes for one canonical project serialize and recheck the latest
+snapshot, sharing completed work. The existing cross-process knowledge lease
+still excludes ingestion and deletion. Refresh reads the tree and hashes contents;
+it does not claim constant-time refresh or rely only on timestamps. No filesystem
+watcher is introduced. Explicit refresh retries degraded embeddings.
+
+Each index captures its configuration and embedding provider. Cached queries
+use that provider instead of mixing new-model queries with old-model vectors.
+Keyword relevance uses a query-relative 0–1 scale before the configured similarity
+threshold; raw BM25 remains available separately. The default offline hybrid
+mode retains its existing lexical-overlap contribution without claiming an
+embedding model. Provider responses must have the expected count, finite coordinates and declared
+dimensions. Missing runtime, failed requests or malformed vectors cause explicit
+keyword fallback. Status reports effective versus configured strategy, token
+limit and model, stale or unknown source state, and bounded diagnostics for
+unreadable inputs or degraded embeddings. Source/status walks run on blocking
+workers in asynchronous transports. Pure cached prompt-context lookup retains
+its existing non-refreshing semantics; model-visible hits still use the existing
+persisted tool and prompt paths.
+
 ## 4. Orchestration Flow
 
 1. `discover` -> `TargetInventory` persisted; HITL selects targets.

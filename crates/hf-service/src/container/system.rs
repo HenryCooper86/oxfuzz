@@ -288,7 +288,7 @@ impl ServiceContainer {
 
         crate::knowledge::index_in_operation(
             &knowledge,
-            crate::config::effective_knowledge_config(),
+            &crate::config::effective_knowledge_config(),
         )
     }
 }

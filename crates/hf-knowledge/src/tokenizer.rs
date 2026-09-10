@@ -25,7 +25,7 @@ pub trait Tokenizer: Send + Sync {
 /// Whitespace-based tokenizer for English text.
 ///
 /// Splits on whitespace, lowercases, and removes punctuation.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct SimpleTokenizer;
 
 impl SimpleTokenizer {
@@ -64,7 +64,7 @@ fn get_jieba() -> &'static Jieba {
 /// Uses jieba's `cut_all` mode (全模式分词) for maximum recall,
 /// which is better suited for keyword indexing and BM25.
 /// Inspired by `MaxKB`'s jieba segmentation approach.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ChineseTokenizer;
 
 impl ChineseTokenizer {
@@ -96,7 +96,7 @@ impl Tokenizer for ChineseTokenizer {
 
 /// Auto-detecting tokenizer that dispatches to the appropriate backend
 /// based on content analysis.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct AutoTokenizer {
     simple: SimpleTokenizer,
     chinese: ChineseTokenizer,

@@ -133,7 +133,7 @@ pub struct RetrievalFilter {
 ///
 /// In development/test mode, uses in-memory chunk store.
 /// Supports blend search fusion, paragraph-level dedup, and quality/freshness boosts.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HybridRetriever<T: Tokenizer> {
     /// In-memory chunk store.
     chunks: Vec<Chunk>,
@@ -269,6 +269,17 @@ impl<T: Tokenizer> HybridRetriever<T> {
         }
     }
 
+    /// Remove a chunk and all of its keyword, vector and quality evidence.
+    pub fn remove(&mut self, chunk_id: &str) {
+        self.remove_indexed_chunk(chunk_id);
+        self.bm25.remove(chunk_id);
+    }
+
+    /// Apply resolved retrieval settings to this snapshot.
+    pub fn set_config(&mut self, config: RetrievalConfig) {
+        self.config = config;
+    }
+
     /// Check whether the retriever has any stored embeddings.
     pub fn has_embeddings(&self) -> bool {
         !self.embeddings.is_empty()
@@ -294,9 +305,20 @@ impl<T: Tokenizer> HybridRetriever<T> {
         query_embedding: Option<&[f32]>,
         filter: &RetrievalFilter,
     ) -> Vec<RetrievalResult> {
+        self.search_with_strategy(self.config.strategy, query, query_embedding, filter)
+    }
+
+    /// Search with an explicit strategy, including keyword fallback after a query failure.
+    pub fn search_with_strategy(
+        &self,
+        strategy: SearchStrategy,
+        query: &str,
+        query_embedding: Option<&[f32]>,
+        filter: &RetrievalFilter,
+    ) -> Vec<RetrievalResult> {
         let limit = if filter.limit == 0 { 10 } else { filter.limit };
 
-        let mut results = match self.config.strategy {
+        let mut results = match strategy {
             SearchStrategy::KeywordSearch => self.keyword_search(query, filter),
             SearchStrategy::SemanticSearch => {
                 self.semantic_search_with_embedding(query, query_embedding, filter)
@@ -350,6 +372,10 @@ impl<T: Tokenizer> HybridRetriever<T> {
     /// BM25 keyword search only.
     fn keyword_search(&self, query: &str, filter: &RetrievalFilter) -> Vec<RetrievalResult> {
         let bm25_results = self.bm25.search(query, Self::bm25_candidate_count(filter));
+        let max_score = bm25_results
+            .iter()
+            .map(|result| result.score)
+            .fold(0.0_f64, f64::max);
         let bm25_map: HashMap<&str, f64> = bm25_results
             .iter()
             .map(|r| (r.chunk_id.as_str(), r.score))
@@ -361,7 +387,11 @@ impl<T: Tokenizer> HybridRetriever<T> {
             .filter_map(|c| {
                 bm25_map.get(c.id.as_str()).map(|&score| RetrievalResult {
                     chunk: c.clone(),
-                    relevance: score,
+                    relevance: if max_score > 0.0 {
+                        score / max_score
+                    } else {
+                        0.0
+                    },
                     vector_score: None,
                     bm25_score: Some(score),
                 })

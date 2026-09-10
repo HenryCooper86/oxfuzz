@@ -1294,10 +1294,10 @@ async fn knowledge_stats_unindexed_reports_not_indexed() {
     assert_eq!(json["chunks"], 0);
     assert!(json["documents"].is_number());
     assert!(
-        json["retrieval_strategy"].is_string(),
+        json["configured"]["retrieval_strategy"].is_string(),
         "config summary carries the active strategy"
     );
-    assert!(json["chunk_max_tokens"].is_number());
+    assert!(json["configured"]["chunk_max_tokens"].is_number());
 }
 
 #[tokio::test]
