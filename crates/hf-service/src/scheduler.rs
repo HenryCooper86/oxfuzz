@@ -1271,9 +1271,7 @@ pub fn parse_trigger(kind: &str, value: &str) -> Result<TriggerConfig, String> {
                 .trim()
                 .parse()
                 .map_err(|_| format!("invalid interval seconds: {value:?}"))?;
-            if secs == 0 {
-                return Err("interval must be > 0 seconds".to_owned());
-            }
+            hf_scheduler::interval::IntervalSchedule::new(secs).validate()?;
             Ok(TriggerConfig::Interval {
                 interval_secs: secs,
             })
@@ -1524,6 +1522,10 @@ impl FuzzCampaignDispatcher {
                 message: error.to_string(),
             })?;
 
+        let Some(_dispatch) = self.state.try_dispatch(&params.schedule_id) else {
+            return Ok(skip_result("this campaign already has work in progress"));
+        };
+
         // 1. Budget. Spent -> record one skip and pause, so it stops re-firing.
         let state = self.state.snapshot(&params.schedule_id);
         if let Some(reason) = budget_skip_reason(&state, &params) {
@@ -1598,13 +1600,20 @@ impl FuzzCampaignDispatcher {
         let started = std::time::Instant::now();
         let result = self
             .container
-            .run_campaign(
+            .run_campaign_with_limits(
                 Path::new(&params.project),
                 Some(&pick.target),
                 engine,
                 lang,
                 params.duration_secs,
-                3,
+                crate::container::CampaignRunLimits {
+                    iterations: params.max_runs.map_or(3, |maximum| {
+                        maximum.saturating_sub(state.runs_done).min(3) as usize
+                    }),
+                    time: params.max_total_secs.map(|maximum| {
+                        std::time::Duration::from_secs(maximum.saturating_sub(state.secs_done))
+                    }),
+                },
             )
             .await;
         let elapsed = started.elapsed();
@@ -2558,6 +2567,11 @@ impl CampaignScheduler {
         params: &CampaignParams,
         trigger: TriggerConfig,
     ) -> Result<Schedule, CampaignSchedulerError> {
+        if let TriggerConfig::Interval { interval_secs } = &trigger {
+            hf_scheduler::interval::IntervalSchedule::new(*interval_secs)
+                .validate()
+                .map_err(CampaignSchedulerError::Validation)?;
+        }
         if matches!(&trigger, TriggerConfig::OneTime { .. }) {
             self.probe_one_time_journal_for_creation().await?;
         }
@@ -2707,11 +2721,7 @@ impl CampaignScheduler {
         if ok {
             if let Err(error) = self.persist().await {
                 if let Some(previous) = previous {
-                    if previous.enabled {
-                        self.manager.resume(id).await;
-                    } else {
-                        self.manager.pause(id).await;
-                    }
+                    self.manager.register(previous).await;
                 }
                 return Err(error.into());
             }

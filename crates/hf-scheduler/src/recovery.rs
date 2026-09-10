@@ -100,9 +100,13 @@ pub(crate) fn recover_missed(store: &ScheduleStore, now: DateTime<Utc>) -> Recov
     let mut plan = RecoveryPlan::default();
 
     for schedule in store.list_enabled() {
-        let Some(last_fire) = schedule.last_fire else {
-            plan_never_fired(schedule, now, &mut plan);
-            continue;
+        let last_fire = match schedule.last_fire {
+            Some(last) => last,
+            None if matches!(schedule.trigger, TriggerConfig::Cron { .. }) => schedule.created_at,
+            None => {
+                plan_never_fired(schedule, now, &mut plan);
+                continue;
+            }
         };
 
         let Some((first_fire, cadence, missed_count, latest_due)) =
@@ -158,6 +162,13 @@ pub(crate) fn recover_missed(store: &ScheduleStore, now: DateTime<Utc>) -> Recov
 fn plan_never_fired(schedule: &Schedule, now: DateTime<Utc>, plan: &mut RecoveryPlan) {
     match &schedule.trigger {
         TriggerConfig::Event { .. } => return,
+        TriggerConfig::Interval { interval_secs }
+            if crate::interval::IntervalSchedule::new(*interval_secs)
+                .next_fire(now)
+                .is_none() =>
+        {
+            return
+        }
         TriggerConfig::OneTime { at } if *at > now => return,
         TriggerConfig::OneTime { .. }
             if schedule.policies.effective_missed_policy() == MissedPolicy::Skip =>
@@ -177,9 +188,10 @@ fn plan_never_fired(schedule: &Schedule, now: DateTime<Utc>, plan: &mut Recovery
 }
 
 fn add_intervals(start: DateTime<Utc>, interval: Duration, count: u64) -> Option<DateTime<Utc>> {
+    // Unrepresentable occurrence counts cannot advance the recovery cursor.
     let count = i64::try_from(count).ok()?;
     let seconds = interval.num_seconds().checked_mul(count)?;
-    start.checked_add_signed(Duration::seconds(seconds))
+    start.checked_add_signed(Duration::try_seconds(seconds)?)
 }
 
 fn missed_occurrences(
@@ -189,7 +201,7 @@ fn missed_occurrences(
 ) -> Option<(DateTime<Utc>, RecoveryCadence, u64, DateTime<Utc>)> {
     match &schedule.trigger {
         TriggerConfig::Interval { interval_secs } => {
-            let interval = Duration::seconds(i64::try_from(*interval_secs).unwrap_or(i64::MAX));
+            let interval = crate::interval::IntervalSchedule::new(*interval_secs).duration()?;
             if interval <= Duration::zero() {
                 return None;
             }
@@ -277,6 +289,42 @@ mod tests {
                 max_executions_per_hour: 0,
             },
         )
+    }
+
+    #[test]
+    fn new_cron_is_not_recovered_before_its_first_occurrence() {
+        use chrono::TimeZone;
+        let now = Utc.with_ymd_and_hms(2026, 9, 10, 12, 0, 0).unwrap();
+        let mut schedule = Schedule::new(
+            "nightly",
+            "nightly",
+            TriggerConfig::Cron {
+                expression: "0 2 * * *".into(),
+                timezone: "UTC".into(),
+            },
+            "wf",
+        );
+        schedule.created_at = now;
+        let mut store = ScheduleStore::new();
+        store.register(schedule);
+        assert_eq!(recover_missed(&store, now).trigger_count(), 0);
+    }
+
+    #[test]
+    fn excessive_interval_does_not_panic_recovery() {
+        let now = Utc::now();
+        let mut schedule = Schedule::new(
+            "large",
+            "large",
+            TriggerConfig::Interval {
+                interval_secs: u64::MAX,
+            },
+            "wf",
+        );
+        schedule.last_fire = Some(now);
+        let mut store = ScheduleStore::new();
+        store.register(schedule);
+        assert_eq!(recover_missed(&store, now).trigger_count(), 0);
     }
 
     #[test]

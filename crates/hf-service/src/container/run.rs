@@ -42,6 +42,17 @@ use super::{
     TerminalRunMetrics,
 };
 
+pub(crate) struct CampaignRunLimits {
+    pub(crate) iterations: usize,
+    pub(crate) time: Option<std::time::Duration>,
+}
+
+fn notify_run_subscriber(callback: impl FnOnce()) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback)).is_err() {
+        tracing::warn!("fuzz run subscriber panicked");
+    }
+}
+
 struct PreparedUserspaceRun {
     config: FuzzRunConfig,
     record: RunRecord,
@@ -1120,6 +1131,30 @@ impl ServiceContainer {
         duration_secs: u64,
         max_iterations: usize,
     ) -> Result<CampaignOutcome, ClassifiedError> {
+        self.run_campaign_with_limits(
+            project,
+            target,
+            engine,
+            lang,
+            duration_secs,
+            CampaignRunLimits {
+                iterations: max_iterations.max(1),
+                time: None,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn run_campaign_with_limits(
+        &self,
+        project: &Path,
+        target: Option<&str>,
+        engine: EngineKind,
+        lang: TargetLanguage,
+        duration_secs: u64,
+        limits: CampaignRunLimits,
+    ) -> Result<CampaignOutcome, ClassifiedError> {
+        let started = std::time::Instant::now();
         let project_root = canonical_project_root(project)?;
         let project = project_root.as_path();
         let resolved = resolve_fuzzing_run(engine, duration_secs)?;
@@ -1174,11 +1209,19 @@ impl ServiceContainer {
         let mut auto_reverts = 0usize;
         let mut termination = hf_core::runtime::CommandTermination::Completed;
         let mut last_stagnation: Option<hf_coverage::StagnationProposal> = None;
-        let cap = max_iterations.max(1);
+        let cap = limits.iterations;
         while iterations < cap {
+            let mut iteration_run = resolved;
+            if let Some(time) = limits.time {
+                let remaining = time.as_secs().saturating_sub(started.elapsed().as_secs());
+                if remaining == 0 {
+                    break;
+                }
+                iteration_run.duration_secs = iteration_run.duration_secs.min(remaining);
+            }
             iterations += 1;
             let summary = self
-                .run_fuzzer_with_started(project, &target, resolved, &noop, &|_| {}, None)
+                .run_fuzzer_with_started(project, &target, iteration_run, &noop, &|_| {}, None)
                 .await?;
             termination = summary.termination;
             edges = edges.max(summary.edges);
@@ -1213,7 +1256,8 @@ impl ServiceContainer {
         // the compile action is already policy-allowed -- otherwise the plateau
         // is surfaced for a human to trigger refinement through the normal
         // approval path, so the campaign never blocks here.
-        let refine = if crashes == 0
+        let refine = if limits.time.is_none_or(|time| started.elapsed() < time)
+            && crashes == 0
             && termination != hf_core::runtime::CommandTermination::Cancelled
             && last_stagnation == Some(hf_coverage::StagnationProposal::NewHarness)
         {
@@ -1262,8 +1306,6 @@ impl ServiceContainer {
         let container = self.clone();
 
         tokio::spawn({
-            let started_tx = Arc::clone(&started_tx);
-            let active_id = Arc::clone(&active_id);
             async move {
                 let progress_sink = {
                     let active_id = Arc::clone(&active_id);
@@ -1271,7 +1313,7 @@ impl ServiceContainer {
                     move |progress| {
                         if let Ok(id) = active_id.lock() {
                             if let Some(id) = *id {
-                                on_progress(id, progress);
+                                notify_run_subscriber(|| on_progress(id, progress));
                             }
                         }
                     }
@@ -1284,9 +1326,10 @@ impl ServiceContainer {
                         if let Ok(mut id) = active_id.lock() {
                             *id = Some(run_id);
                         }
-                        on_status(run_id, RunLifecycleStatus::Running);
+                        notify_run_subscriber(|| on_status(run_id, RunLifecycleStatus::Running));
                         if let Ok(mut sender) = started_tx.lock() {
                             if let Some(sender) = sender.take() {
+                                // The caller may have disconnected; the service still owns the run.
                                 let _ = sender.send(Ok(run_id));
                             }
                         }
@@ -1312,15 +1355,16 @@ impl ServiceContainer {
                         } else {
                             RunLifecycleStatus::Done
                         };
-                        on_status(summary.run_id, status);
+                        notify_run_subscriber(|| on_status(summary.run_id, status));
                     }
                     Err(error) => {
                         let run_id = active_id.lock().ok().and_then(|id| *id);
                         if let Some(run_id) = run_id {
                             tracing::error!(%run_id, %error, "background fuzz run failed");
-                            on_status(run_id, RunLifecycleStatus::Failed);
+                            notify_run_subscriber(|| on_status(run_id, RunLifecycleStatus::Failed));
                         } else if let Ok(mut sender) = started_tx.lock() {
                             if let Some(sender) = sender.take() {
+                                // A disconnected caller cannot receive the startup error.
                                 let _ = sender.send(Err(error));
                             }
                         }

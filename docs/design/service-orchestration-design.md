@@ -151,7 +151,11 @@ Presentation layers that need non-blocking execution call the service run-start
 API. The service completes all preflight checks, stages immutable evidence,
 inserts the running row, syncs the recovery journal, and registers cooperative
 cancellation before returning the UUID. It then owns the background task and
-emits run-id-attributed progress and lifecycle callbacks. A pre-reservation
+emits run-id-attributed progress and lifecycle callbacks. Each subscriber is
+isolated from panics; notification failure is logged and cannot abort the
+campaign or prevent reservation acknowledgement. Only the background task
+owns the acknowledgement sender, so an unexpected pre-start task failure also
+resolves the caller's wait. A pre-reservation
 failure returns directly to the caller and never creates a phantom id; a
 post-reservation failure repairs the persisted row to `failed` before emitting
 the terminal lifecycle event. Status and cancellation queries use service DTOs
