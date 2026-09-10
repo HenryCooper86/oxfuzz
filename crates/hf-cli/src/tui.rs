@@ -23,7 +23,7 @@ use ratatui::Terminal;
 /// The TUI application state.
 pub struct Tui {
     /// Discovery goes through the service so results persist and business logic
-    /// stays out of this presentation layer (AGENTS.md 2.9).
+    /// stays out of this presentation layer (Engineering Protocol 2.9).
     container: ServiceContainer,
     project: PathBuf,
     lang: TargetLanguage,

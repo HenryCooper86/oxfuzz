@@ -1291,7 +1291,7 @@ impl ServiceContainer {
 
         // Coverage-driven loop: if the campaign plateaued on coverage without
         // finding a crash, PROPOSE a targeted refined harness aimed at the
-        // uncovered frontier. HITL (AGENTS.md 2.12): the proposal is left
+        // uncovered frontier. HITL (Engineering Protocol 2.12): the proposal is left
         // `Compiled`, never promoted or auto-run, and it is only attempted when
         // the compile action is already policy-allowed -- otherwise the plateau
         // is surfaced for a human to trigger refinement through the normal

@@ -337,7 +337,7 @@ No test invokes a provider.
    today's behavior.
 6. A missing Chinese translation is a compile error, not a silently untranslated
    string.
-7. The mandated gates pass in `AGENTS.md` 4.5 order.
+7. The mandated gates pass in [Engineering Protocol](../standards/ENGINEERING_PROTOCOL.md) 4.5 order.
 
 ## 12. Rejected Alternatives
 

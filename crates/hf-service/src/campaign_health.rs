@@ -8,7 +8,7 @@
 //!
 //! It reports. It does not stop, restart, or resize a campaign: run control has
 //! an approval path, and a health reporter that restarts a crashing harness
-//! hides the harness defect (AGENTS.md 2.19).
+//! hides the harness defect (Engineering Protocol 2.19).
 
 use std::collections::HashSet;
 

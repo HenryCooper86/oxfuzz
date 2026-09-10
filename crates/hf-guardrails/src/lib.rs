@@ -1,8 +1,8 @@
 //! hf-guardrails: the safety layer that gates privileged actions.
 //!
 //! Fuzzing executes untrusted, possibly malformed code, so no single
-//! abstraction may make the system unsafe (AGENTS.md 2.5). Every build and
-//! fuzzer invocation is assessed here before it runs (AGENTS.md 2.12): an
+//! abstraction may make the system unsafe (Engineering Protocol 2.5). Every build and
+//! fuzzer invocation is assessed here before it runs (Engineering Protocol 2.12): an
 //! [`Action`] is scored to a [`RiskTier`], a [`GuardrailPolicy`] turns that into
 //! a [`Decision`], and anything requiring human consent is routed to an
 //! [`ApprovalGate`].
@@ -77,7 +77,7 @@ pub trait Advisor: Send + Sync {
 /// action a human just approved can still be denied here.
 ///
 /// For a system whose central promise is that a generated harness never runs on
-/// the host without consent (AGENTS.md 2.5, 2.12), that ordering is the point:
+/// the host without consent (Engineering Protocol 2.5, 2.12), that ordering is the point:
 /// consent is a necessary condition for execution, never a sufficient one.
 pub trait DenyGuard: Send + Sync {
     /// Return why `action` must not proceed, or `None` to abstain.
@@ -262,7 +262,7 @@ impl Guardrails {
     /// auto-approve-with-audit for trusted local loops; `strict` is an alias for
     /// the default and remains accepted for compatibility.
     ///
-    /// This is the safety boundary for untrusted execution (AGENTS.md 2.5/2.12):
+    /// This is the safety boundary for untrusted execution (Engineering Protocol 2.5/2.12):
     /// `bootstrap()` constructs guardrails here, so a generated harness never
     /// runs on the host without an explicit opt-in.
     #[must_use]

@@ -579,7 +579,7 @@ async fn dashboard_without_active_project_is_empty_not_global_aggregate() {
 /// The dashboard's crash queue is the triage queue: the crash a person should
 /// open first is first, and each entry carries what to do and what may be
 /// claimed. Ordering here rather than in a parallel view keeps one meaning in
-/// one home (AGENTS.md 2.18).
+/// one home (Engineering Protocol 2.18).
 #[cfg(feature = "triage-disposition")]
 #[tokio::test]
 async fn the_crash_queue_is_ordered_by_disposition_and_carries_one_next_action() {

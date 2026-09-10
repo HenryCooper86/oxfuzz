@@ -102,7 +102,7 @@ pub fn parse_frames(log: &str) -> Vec<StackFrame> {
 /// Whether a function name is a harness entry point oxfuzz writes.
 ///
 /// Exposed so coverage attribution asks the same question stack attribution
-/// does, against one list (AGENTS.md 2.18).
+/// does, against one list (Engineering Protocol 2.18).
 #[must_use]
 pub fn is_harness_function(name: &str) -> bool {
     HARNESS_FUNCTIONS.contains(&name)

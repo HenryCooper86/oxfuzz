@@ -2,12 +2,11 @@
 
 Status: **proposed**. Supersedes: none. Owner: `hf-runtime` and `hf-tools`.
 Related: `runtime-design.md`, `docs/standards/DEFENSIVE_PATTERNS.md` rules 1, 6,
-and 8, `docs/design/deepseek-harness-study.md` items 2.2 and 2.3.
+and 8.
 
 ## 1. Purpose
 
-Two narrow changes to the sandbox boundary, both prompted by the DeepSeek
-Harness study and both scoped down after reading the current implementation.
+Two proposed changes to sandbox outcomes and path resolution:
 
 1. A sandboxed command's terminal outcome does not distinguish *confinement
    refused the operation* from *the runner never started it*. Both are sandbox
@@ -145,7 +144,7 @@ re-resolving immediately before use and is accepted for this threat model.
   direction (`ARCHITECTURE.md`), and the two need a shared *meaning*, not a
   shared *implementation*.
 - **Leaving the root derivations separate and adding a comment.** Rejected:
-  `AGENTS.md` 2.18 -- unexplained asymmetry between parallel values signals a
+  [Engineering Protocol](../standards/ENGINEERING_PROTOCOL.md) 2.18 -- unexplained asymmetry between parallel values signals a
   missed extraction.
 - **A `Denied` variant without evidence.** Rejected: a boolean that cannot be
   traced to the signature that set it cannot be reviewed after the fact, and

@@ -8,7 +8,7 @@ use crate::parse::{parse_duration, parse_engine, parse_lang};
 /// Print campaign health conditions for one run.
 ///
 /// Rendering only: every condition, severity, and sentence arrives decided by
-/// `hf-service` (AGENTS.md 2.9).
+/// `hf-service` (Engineering Protocol 2.9).
 #[cfg(feature = "campaign-health")]
 pub(crate) async fn cmd_health(run: &str) -> anyhow::Result<()> {
     use hf_service::PlateauCheck;
@@ -41,7 +41,7 @@ pub(crate) async fn cmd_health(run: &str) -> anyhow::Result<()> {
 /// Run and print the closeout chain for one run.
 ///
 /// Rendering only: every step, outcome, and sentence arrives decided by
-/// `hf-service` (AGENTS.md 2.9).
+/// `hf-service` (Engineering Protocol 2.9).
 #[cfg(feature = "run-closeout")]
 fn render_closeout_outcome(outcome: &hf_service::StepOutcome) -> (&'static str, String) {
     use hf_service::StepOutcome;
@@ -94,7 +94,7 @@ mod closeout_render_tests {
 /// Print the campaign trust audit for one run.
 ///
 /// Rendering only: every verdict, sentence, and withheld claim arrives decided
-/// by `hf-service` (AGENTS.md 2.9).
+/// by `hf-service` (Engineering Protocol 2.9).
 #[cfg(feature = "campaign-trust")]
 pub(crate) async fn cmd_trust(run: &str) -> anyhow::Result<()> {
     use hf_service::GateVerdict;

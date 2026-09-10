@@ -32,12 +32,12 @@ Two, both already owned by the service:
 
 Nothing else. In particular the disposition never reads the harness source, the
 coverage export, or a model opinion. A disposition that depended on a model
-opinion would not be reconstructable from persisted state (AGENTS.md 2.13).
+opinion would not be reconstructable from persisted state (ENGINEERING_PROTOCOL.md 2.13).
 
 The card is the single home for per-claim detail. The disposition **does not
 restate it**: it carries the tier, the action, and the claim ceiling, and a
 consumer that wants to know why reads the card it was derived from
-(AGENTS.md 2.18).
+(ENGINEERING_PROTOCOL.md 2.18).
 
 ## 4. Dispositions
 
@@ -83,7 +83,7 @@ Exactly one per disposition, from a fixed vocabulary. The action is a typed
 value whose serialized name is the stable identifier a consumer localizes
 against; it carries a human sentence alongside. There is no separate reason code,
 because a second identifier for the same meaning would be a second home for it
-(AGENTS.md 2.18).
+(ENGINEERING_PROTOCOL.md 2.18).
 
 | Disposition | Action | Meaning |
 | --- | --- | --- |
@@ -98,7 +98,7 @@ because a second identifier for the same meaning would be a second home for it
 The action names a step; it does not perform one. `minimize_input` and
 `repair_harness` both correspond to paths that already exist with their own
 approval surfaces, and the disposition deliberately does not offer a second
-entrypoint to either (AGENTS.md 2.19).
+entrypoint to either (ENGINEERING_PROTOCOL.md 2.19).
 
 ## 6. Claim Ceiling
 

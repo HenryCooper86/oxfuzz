@@ -427,7 +427,7 @@ account for all of them, both recorded in that branch's plan.
 5. Omitting the language anywhere yields an English report, unchanged from
    today's behavior.
 6. A missing Chinese translation is a compile error.
-7. The mandated gates pass in `AGENTS.md` 4.5 order.
+7. The mandated gates pass in [Engineering Protocol](../standards/ENGINEERING_PROTOCOL.md) 4.5 order.
 
 ## 12. Rejected Alternatives
 

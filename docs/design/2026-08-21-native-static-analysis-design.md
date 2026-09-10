@@ -431,7 +431,7 @@ persisted, because it is now cheap enough to recompute and can never be stale.
 
 ## 14. Testing Strategy
 
-TDD throughout, per `AGENTS.md` 2.7.
+TDD throughout, per [Engineering Protocol](../standards/ENGINEERING_PROTOCOL.md) 2.7.
 
 **Rule compilation.** One test compiles every embedded `.scm` for every
 language. A malformed query cannot reach a user.

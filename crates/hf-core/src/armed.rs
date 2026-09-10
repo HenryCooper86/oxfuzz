@@ -17,7 +17,7 @@
 //! already in the codebase: after a restart a promoted revision's approval is
 //! still valid, while the armed state is not.
 //!
-//! See `docs/design/deepseek-harness-study.md` item 1.5.
+//! See `docs/design/portfolio-campaigns.md`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

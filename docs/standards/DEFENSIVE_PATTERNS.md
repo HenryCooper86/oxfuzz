@@ -16,8 +16,8 @@ a gap is named, it was confirmed by reading the source, not inferred.
 
 Adapted from the `defensive-patterns` document in DeepSeek Harness
 (`deepseek-ai/deepseek-harness`, MIT). Two of its seven rules do not transfer to
-Rust unchanged and are restated below; see `docs/design/deepseek-harness-study.md`
-for the full comparison. Test-tier counterparts are in `TEST_STRATEGY.md`.
+Rust unchanged and are restated below. Test-tier counterparts are in
+`TEST_STRATEGY.md`.
 
 ## 1. Report orthogonal outcomes independently
 

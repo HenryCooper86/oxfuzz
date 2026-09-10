@@ -1,7 +1,7 @@
 <!--
 GitHub twin of .gitlab/merge_request_templates/Default.md. Keep the two aligned:
-the checklist tracks the AGENTS.md engineering and safety protocol, which is
-mandatory for the whole repository. Read AGENTS.md before opening this PR.
+the checklist tracks the mandatory repository engineering and safety protocol.
+Read docs/standards/ENGINEERING_PROTOCOL.md before opening this PR.
 -->
 
 ## Summary
@@ -34,7 +34,7 @@ List the exact commands and results used to verify this change.
 ```
 
 - [ ] Tests were added before production code where behavior changed.
-- [ ] Applicable Rust gates passed in the order required by `AGENTS.md`
+- [ ] Applicable Rust gates passed in the order required by [Engineering Protocol](../docs/standards/ENGINEERING_PROTOCOL.md)
       (`scripts/tests/gates.sh` runs them; CI runs the same gates).
 - [ ] Applicable frontend tests, production build, bundle budget, and lint
       passed.

@@ -2,7 +2,7 @@
 
 Status: **implemented**. Owner: `hf-service`. The implementation details,
 limits, durable records, stable errors, and REST resources are defined in the
-[Harness Work Order v2 specification](../superpowers/specs/2026-08-30-harness-work-order-v2-design.md).
+[Harness Work Order v2 specification](2026-08-30-harness-work-order-v2-design.md).
 
 ## 1. Purpose
 
@@ -85,7 +85,7 @@ than a canonicalize-then-open sequence. Unix uses descriptor-relative
 link-like path components. Common service code classifies, size-checks, and
 reads the returned handle without reopening its path. The Windows
 implementation and its release verification are specified in
-[Windows-Confined Harness Work-Order Reads](../superpowers/specs/2026-08-31-windows-confined-work-order-read-design.md).
+[Windows-Confined Harness Work-Order Reads](2026-08-31-windows-confined-work-order-read-design.md).
 
 Discovery restores a selection only when it identifies exactly one candidate. An ambiguous legacy bare symbol falls back to the highest-ranked candidate with its complete file-qualified selector, keeping the selected value visible and executable without choosing between same-symbol targets implicitly at run time.
 

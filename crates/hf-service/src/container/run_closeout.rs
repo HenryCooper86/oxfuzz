@@ -36,7 +36,7 @@ impl ServiceContainer {
     /// consume its output still run.
     ///
     /// Closeout performs sandboxed work and is therefore invoked deliberately
-    /// rather than fired automatically when a run ends (AGENTS.md 2.12).
+    /// rather than fired automatically when a run ends (Engineering Protocol 2.12).
     ///
     /// # Errors
     /// Returns `ClassifiedError::Validation` when the run is unknown, its

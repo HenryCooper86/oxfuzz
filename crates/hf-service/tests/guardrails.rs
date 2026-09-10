@@ -1,7 +1,7 @@
 //! Guardrail authorization wiring for the low-risk service entry points:
 //! target discovery, harness drafting, corpus operations, and chat.
 //!
-//! The default policy auto-allows these tiers (AGENTS.md 2.5), so behavior is
+//! The default policy auto-allows these tiers (Engineering Protocol 2.5), so behavior is
 //! unchanged under default/permissive guardrails; a policy that denies the
 //! tier must block the operation through the same
 //! `GuardrailError -> ClassifiedError::Validation` mapping the already-gated

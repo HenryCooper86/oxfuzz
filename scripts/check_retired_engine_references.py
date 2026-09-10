@@ -80,10 +80,10 @@ HISTORICAL_OCCURRENCE_CONTRACTS = {
     pathlib.Path("crates/hf-core/src/retired_engine.rs"): HistoricalOccurrenceContract(4, "e15a24a055064af3f6a954a4005caa84b985a4f2158964905efa2b6860baf5ec"),
     pathlib.Path("crates/hf-storage/migrations/0024_retired_engine_records.sql"): HistoricalOccurrenceContract(27, "e46fc9e9205499e7b572c09f8657713a049057e5d359e5b5dfe08ac92470ddf3"),
     pathlib.Path("crates/hf-storage/tests/retired_engine_migration.rs"): HistoricalOccurrenceContract(28, "28989e3f83b797ef990b6a8ffa88c2b377120422acfb87282fc65ce51c6e1d22"),
-    pathlib.Path("docs/superpowers/specs/2026-08-11-clusterfuzzlite-removal-design.md"): HistoricalOccurrenceContract(14, "ba68718775b5b9b6db38e28a93a702d20ee5fe4ff75a73922849a686902355b1"),
+    pathlib.Path("docs/design/2026-08-11-clusterfuzzlite-removal-design.md"): HistoricalOccurrenceContract(14, "ba68718775b5b9b6db38e28a93a702d20ee5fe4ff75a73922849a686902355b1"),
     pathlib.Path("crates/hf-gui/src/lib/retiredEngine.ts"): HistoricalOccurrenceContract(3, "0c84e97c315144c25b4db1128c6dd9c1b22374666f7b91f6318f5e6e273e11df"),
-    pathlib.Path("scripts/check_retired_engine_references.py"): HistoricalOccurrenceContract(2, "19fe94b96ae26495bd3633c46648d264d33bbd222b371e5971fd5dd4a1b23c43"),
-    pathlib.Path("scripts/tests/test_retired_engine_references.py"): HistoricalOccurrenceContract(57, "fb8d834739da1f65c6f6796061ef7fe65498e568f97923fc2adc025e89f65e01"),
+    pathlib.Path("scripts/check_retired_engine_references.py"): HistoricalOccurrenceContract(2, "82e66e2ef9c18f0a9427aaa810bd910700a7e6aec73c518cd08aa2c4a29ac58c"),
+    pathlib.Path("scripts/tests/test_retired_engine_references.py"): HistoricalOccurrenceContract(57, "88785264173561eb854670a333da9d1962894bd4c74c75e9fc853553d395bc80"),
 }
 ALLOWED_FILES = set(HISTORICAL_OCCURRENCE_CONTRACTS)
 

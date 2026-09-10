@@ -10,7 +10,7 @@ use std::path::Path;
 ///
 /// This is what `runtime_from_env` installs when the Docker daemon is not
 /// reachable, and refusing is the point. A harness build or fuzz run is
-/// untrusted code (AGENTS.md 2.5 / 2.12), so with no sandbox available the
+/// untrusted code (Engineering Protocol 2.5 / 2.12), so with no sandbox available the
 /// only safe answer is to fail the operation -- never to fall back to running
 /// it on the host. Tests and presentation layers use it for the same reason:
 /// they can construct a service without any risk of execution.

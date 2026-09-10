@@ -311,7 +311,7 @@ impl ServiceContainer {
                 // toward uncovered code and recompile a PROPOSAL. It returns a
                 // compiled-but-unqualified revision -- never promoted -- so the
                 // orchestrator must still re-smoke it and a human must promote
-                // (AGENTS.md 2.12). This acts on the not-promotion-ready guidance
+                // (Engineering Protocol 2.12). This acts on the not-promotion-ready guidance
                 // that `harness` emits on a hollow pass.
                 let target = arg_str(args, "target")?;
                 let language = parse_language(arg_str(args, "lang").unwrap_or("c"))?;

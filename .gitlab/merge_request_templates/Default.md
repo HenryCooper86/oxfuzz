@@ -28,7 +28,7 @@ List the exact commands and results used to verify this change.
 ```
 
 - [ ] Tests were added before production code where behavior changed.
-- [ ] Applicable Rust gates passed in the order required by `AGENTS.md`.
+- [ ] Applicable Rust gates passed in the order required by [Engineering Protocol](../../docs/standards/ENGINEERING_PROTOCOL.md).
 - [ ] Applicable frontend tests, production build, bundle budget, and lint
       passed.
 - [ ] No generated harness or fuzzer was executed on the host.

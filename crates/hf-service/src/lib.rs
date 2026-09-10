@@ -5,8 +5,8 @@
 //! [`ServiceContainer`] is the single canonical service object: every
 //! presentation layer (CLI, web, GUI) constructs one via
 //! [`ServiceContainer::bootstrap`] and calls methods through it, keeping
-//! business logic out of presentation crates (AGENTS.md 2.9) and routing every
-//! build/run through `hf-runtime` sandboxing (AGENTS.md 2.12).
+//! business logic out of presentation crates (Engineering Protocol 2.9) and routing every
+//! build/run through `hf-runtime` sandboxing (Engineering Protocol 2.12).
 
 pub mod agent;
 #[cfg(feature = "automotive-scapy")]

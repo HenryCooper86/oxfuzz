@@ -1,6 +1,6 @@
 //! Tauri commands -- thin wrappers around `hf-service::ServiceContainer`.
 //!
-//! Per AGENTS.md 2.9: no domain logic here. All business logic lives in
+//! Per Engineering Protocol 2.9: no domain logic here. All business logic lives in
 //! `hf-service`; these commands handle I/O, Tauri event emission, and
 //! argument marshalling only.
 
@@ -1787,7 +1787,7 @@ pub async fn chat_agent(
         .track_agent(agent_id.as_deref().unwrap_or("agent"));
 
     // Drive the turn through the shared service-layer orchestration so the GUI,
-    // web, and CLI all run the agent identically (AGENTS.md 2.9).
+    // web, and CLI all run the agent identically (Engineering Protocol 2.9).
     container
         .run_chat_turn(
             hf_service::AgentTurnRequest {
@@ -3868,7 +3868,7 @@ pub async fn run_syzkaller(
 // ---------------------------------------------------------------------------
 
 // These commands are thin presentation wrappers over `hf_service::config`,
-// the single source of truth shared with the CLI and web API (AGENTS.md 2.9).
+// the single source of truth shared with the CLI and web API (Engineering Protocol 2.9).
 // The serde shapes are re-exported unchanged so the frontend JSON is identical.
 
 pub use hf_service::config::{AppPaths, ModelInfo, ProviderConfig};

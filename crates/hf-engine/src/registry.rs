@@ -1,7 +1,7 @@
 //! Engine adapters: map an [`EngineKind`] to its command-construction logic.
 //!
 //! New engines are added by implementing [`EngineAdapter`] and registering them
-//! in [`adapter_for`] (AGENTS.md 2.1: extend via traits, not core changes).
+//! in [`adapter_for`] (Engineering Protocol 2.1: extend via traits, not core changes).
 
 use hf_core::engine::{EngineKind, FuzzRunConfig};
 

@@ -10,8 +10,8 @@ the document that matches your task.
 | --- | --- | --- |
 | New users and enthusiasts | [Getting Started](guides/GETTING_STARTED.md) | [The Desktop App](guides/DESKTOP_APP.md), the [CLI Reference](guides/CLI_REFERENCE.md), and the [Safety Model](guides/SAFETY_MODEL.md) |
 | Fuzzing operators | [Getting Started](guides/GETTING_STARTED.md) | [Harness Standard](standards/HARNESS_STANDARD.md), [Target Taxonomy](standards/TARGET_TAXONOMY.md), and [Engine Adapter Standard](standards/ENGINE_ADAPTER_STANDARD.md) |
-| Release managers | [Release Checklist](guides/RELEASE_CHECKLIST.md) | [Test Strategy](standards/TEST_STRATEGY.md), [Engineering Standards](standards/ENGINEERING_STANDARDS.md), and `AGENTS.md` |
-| Contributors | [AGENTS.md](../AGENTS.md) at the repository root | [Design Overview](design/DESIGN_OVERVIEW.md), [Test Strategy](standards/TEST_STRATEGY.md), and the design for the subsystem being changed |
+| Release managers | [Release Checklist](guides/RELEASE_CHECKLIST.md) | [Test Strategy](standards/TEST_STRATEGY.md), [Engineering Standards](standards/ENGINEERING_STANDARDS.md), and [Engineering Protocol](standards/ENGINEERING_PROTOCOL.md) |
+| Contributors | [Engineering Protocol](standards/ENGINEERING_PROTOCOL.md) | [Design Overview](design/DESIGN_OVERVIEW.md), [Test Strategy](standards/TEST_STRATEGY.md), and the design for the subsystem being changed |
 | API and integration users | [Web API Security Design](design/web-api-security-design.md) | [Service Orchestration](design/service-orchestration-design.md), the [Configuration reference](guides/CONFIGURATION.md), and generated API help |
 | Automotive security users | [Automotive Protocol Fuzzing Design](design/automotive-protocol-fuzzing-design.md) | The automotive workflows in the [CLI Reference](guides/CLI_REFERENCE.md) and the [release checklist](guides/RELEASE_CHECKLIST.md) |
 
@@ -31,6 +31,8 @@ the document that matches your task.
   human-in-the-loop approval.
 - [Release Checklist](guides/RELEASE_CHECKLIST.md) defines the source,
   sandbox, packaging, security, and GitLab handoff gates.
+- [Capability Acceptance](guides/CAPABILITY_ACCEPTANCE.md) lists live workflow
+  and usability checks, with remaining work tracked in the [backlog](../TODO.md).
 - [Continuous Integration](guides/CI.md) documents the two-host gate setup.
 - [Syzkaller Setup](guides/SYZKALLER_SETUP.md) covers the advanced kernel
   workflow and its stronger environment requirements.
@@ -56,6 +58,7 @@ update and review the design before changing production behavior.
 
 ## Engineering standards
 
+- [Engineering Protocol](standards/ENGINEERING_PROTOCOL.md)
 - [Test Strategy](standards/TEST_STRATEGY.md)
 - [Defensive Patterns](standards/DEFENSIVE_PATTERNS.md)
 - [Engineering Standards](standards/ENGINEERING_STANDARDS.md)
@@ -66,7 +69,7 @@ update and review the design before changing production behavior.
 - [Harness Standard](standards/HARNESS_STANDARD.md)
 - [Engine Adapter Standard](standards/ENGINE_ADAPTER_STANDARD.md)
 
-[AGENTS.md](../AGENTS.md) is the mandatory repository protocol. When a guide, design, and
+[Engineering Protocol](standards/ENGINEERING_PROTOCOL.md) is the mandatory repository protocol. When a guide, design, and
 implementation disagree, treat that mismatch as a defect: verify the service
 behavior, then update the owning design and user-facing documentation together.
 
