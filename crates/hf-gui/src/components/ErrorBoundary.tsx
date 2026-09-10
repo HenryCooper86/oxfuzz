@@ -4,6 +4,8 @@ interface Props {
   children: ReactNode;
   /** Bump this (e.g. the active view id) to auto-recover when the user navigates. */
   resetKey?: string;
+  /** Exit a full-window view whose module could not load. */
+  recoveryAction?: { label: string; onClick: () => void };
 }
 
 interface State {
@@ -45,11 +47,11 @@ export class ErrorBoundary extends Component<Props, State> {
             {error.message || String(error)}
           </p>
           <button
-            onClick={() => this.setState({ error: null })}
+            onClick={this.props.recoveryAction?.onClick ?? (() => this.setState({ error: null }))}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md"
             style={{ background: "var(--accent)", color: "var(--accent-contrast)", border: "none", cursor: "pointer" }}
           >
-            Reload view
+            {this.props.recoveryAction?.label ?? "Reload view"}
           </button>
         </div>
       </div>
