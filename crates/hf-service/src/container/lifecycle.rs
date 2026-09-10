@@ -495,6 +495,7 @@ impl ServiceContainer {
         // or trailing-slash caller path can never wipe the disk while orphaning the
         // DB rows (e.g. `/tmp/p` vs the stored `/private/tmp/p` on macOS).
         let identity = project_lookup_identity(project);
+        let knowledge = crate::knowledge::KnowledgeOperation::acquire(&identity)?;
         #[cfg(feature = "semgrep-enrichment")]
         let _semgrep_project = acquire_semgrep_project_lease(&identity)?;
         if let Some(store) = &self.store {
@@ -504,6 +505,7 @@ impl ServiceContainer {
                 .await
                 .map_err(|e| ClassifiedError::Internal(format!("delete project: {e}")))?;
         }
+        knowledge.remove()?;
         let dir = project_workspace_dir(&identity);
         match std::fs::remove_dir_all(&dir) {
             Ok(()) => {}

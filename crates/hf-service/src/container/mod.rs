@@ -84,10 +84,10 @@ use hf_runtime::{RuntimeConfig, SANDBOX_IMAGE};
 use hf_storage::{GuardrailDecisionRecord, RunRecord, RunStatus, Store};
 #[cfg(feature = "harness-work-order")]
 pub(crate) use project_identity::file_qualified_target_selector;
-pub(crate) use project_identity::{canonical_project_root, qualified_target_selector};
-use project_identity::{
-    project_lookup_identity, project_slug, select_target_candidate, stored_project_matches,
+pub(crate) use project_identity::{
+    canonical_project_root, project_lookup_identity, qualified_target_selector,
 };
+use project_identity::{project_slug, select_target_candidate, stored_project_matches};
 #[cfg(feature = "patch-to-proof")]
 pub(crate) use staging::run_context_source_digest;
 use staging::{qualification_evidence, sha256_file, RunArtifacts};

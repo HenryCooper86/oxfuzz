@@ -11,6 +11,9 @@
 //! and normalize queries the same way, while keeping the original text for the
 //! snippet shown to the user.
 
+mod storage;
+pub(crate) use storage::KnowledgeOperation;
+
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -38,11 +41,12 @@ struct ProjectIndex {
     chunks: usize,
     /// When this index was built.
     indexed_at: chrono::DateTime<chrono::Utc>,
+    generation: String,
 }
 
 /// Process-global per-project index cache.
-fn cache() -> &'static Mutex<HashMap<String, Arc<ProjectIndex>>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, Arc<ProjectIndex>>>> = OnceLock::new();
+fn cache() -> &'static Mutex<HashMap<PathBuf, Arc<ProjectIndex>>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Arc<ProjectIndex>>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -73,6 +77,8 @@ pub struct KnowledgeIndexStatus {
     /// Ingested documents on disk, indexed into the retriever alongside the
     /// source `files` (counted separately, never folded into `files`).
     pub documents: usize,
+    /// Older documents whose project ownership cannot be established; re-ingest to use them.
+    pub legacy_documents_preserved: bool,
     /// RFC3339 build time of the current index, when one exists.
     pub indexed_at: Option<String>,
     /// Retrieval strategy a (re)index applies ("hybrid", "keyword", or
@@ -114,10 +120,7 @@ fn code_normalize(s: &str) -> String {
 /// # Errors
 /// Returns `ClassifiedError` if the project tree cannot be walked.
 pub fn index_project(project: &Path) -> Result<KnowledgeStats, ClassifiedError> {
-    Ok(index_project_with_config(
-        project,
-        crate::config::effective_knowledge_config(),
-    ))
+    index_project_with_config(project, crate::config::effective_knowledge_config())
 }
 
 fn retrieval_config(config: &KnowledgeConfig) -> RetrievalConfig {
@@ -140,7 +143,20 @@ fn retrieval_config(config: &KnowledgeConfig) -> RetrievalConfig {
     }
 }
 
-fn index_project_with_config(project: &Path, config: KnowledgeConfig) -> KnowledgeStats {
+fn index_project_with_config(
+    project: &Path,
+    config: KnowledgeConfig,
+) -> Result<KnowledgeStats, ClassifiedError> {
+    let operation = KnowledgeOperation::acquire(project)?;
+    index_in_operation(&operation, config)
+}
+
+pub(crate) fn index_in_operation(
+    operation: &KnowledgeOperation,
+    config: KnowledgeConfig,
+) -> Result<KnowledgeStats, ClassifiedError> {
+    let project = operation.project.as_path();
+    let generation = operation.generation()?;
     let embedder = build_embedder(&config);
     let retrieval = retrieval_config(&config);
     let chunker = ChunkingStrategy::new(config);
@@ -207,8 +223,9 @@ fn index_project_with_config(project: &Path, config: KnowledgeConfig) -> Knowled
         files,
         chunks,
         indexed_at: chrono::Utc::now(),
+        generation,
     });
-    let key = project.to_string_lossy().to_string();
+    let key = operation.docs.clone();
     if let Ok(mut map) = cache().lock() {
         // Bound the process-global cache: a long-running `serve` handling many
         // distinct project paths would otherwise pin every retriever plus its
@@ -225,7 +242,7 @@ fn index_project_with_config(project: &Path, config: KnowledgeConfig) -> Knowled
         }
         map.insert(key, index);
     }
-    KnowledgeStats { files, chunks }
+    Ok(KnowledgeStats { files, chunks })
 }
 
 /// Maximum number of per-project indexes held in the process-global cache.
@@ -243,12 +260,9 @@ pub fn docs_dir(project: &Path) -> PathBuf {
 }
 
 fn docs_dir_from(project: &Path, workspace_override: Option<OsString>) -> PathBuf {
-    let key: String = project
-        .to_string_lossy()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect();
-    docs_root_from(workspace_override).join(key)
+    docs_root_from(workspace_override)
+        .join("v2")
+        .join(storage::identity(project))
 }
 
 fn docs_root_from(workspace_override: Option<OsString>) -> PathBuf {
@@ -377,11 +391,30 @@ fn finalize_index(
     }
 }
 
+fn current_index(project: &Path) -> Option<Arc<ProjectIndex>> {
+    let key = docs_dir(project);
+    let mut map = match cache().lock() {
+        Ok(map) => map,
+        Err(error) => {
+            tracing::error!(%error, "knowledge cache poisoned");
+            return None;
+        }
+    };
+    let index = map.get(&key)?;
+    match std::fs::read_to_string(key.join(".generation")) {
+        Ok(generation) if generation == index.generation => Some(Arc::clone(index)),
+        // Deleted/recreated storage or unreadable generation makes a cached result unusable.
+        _ => {
+            map.remove(&key);
+            None
+        }
+    }
+}
+
 /// Whether a project has an index built this session.
 #[must_use]
 pub fn is_indexed(project: &Path) -> bool {
-    let key = project.to_string_lossy().to_string();
-    cache().lock().is_ok_and(|m| m.contains_key(&key))
+    current_index(project).is_some()
 }
 
 /// Read-only status of a project's knowledge base. Never builds an index: an
@@ -389,14 +422,14 @@ pub fn is_indexed(project: &Path) -> bool {
 /// a future `index_project` would apply.
 #[must_use]
 pub fn stats_project(project: &Path) -> KnowledgeIndexStatus {
-    let key = project.to_string_lossy().to_string();
-    let cached = cache().lock().ok().and_then(|m| m.get(&key).cloned());
+    let cached = current_index(project);
     let config = crate::config::effective_knowledge_config();
     KnowledgeIndexStatus {
         indexed: cached.is_some(),
         files: cached.as_ref().map_or(0, |i| i.files),
         chunks: cached.as_ref().map_or(0, |i| i.chunks),
         documents: count_docs(project),
+        legacy_documents_preserved: storage::legacy_documents_preserved(project),
         indexed_at: cached.as_ref().map(|i| i.indexed_at.to_rfc3339()),
         retrieval_strategy: config.retrieval_strategy,
         chunk_max_tokens: config.l2_max_tokens,
@@ -444,8 +477,7 @@ pub fn search_project_ensured(project: &Path, query: &str, limit: usize) -> Vec<
 /// not been indexed yet.
 #[must_use]
 pub fn search_project(project: &Path, query: &str, limit: usize) -> Vec<KnowledgeHit> {
-    let key = project.to_string_lossy().to_string();
-    let index = cache().lock().ok().and_then(|m| m.get(&key).cloned());
+    let index = current_index(project);
     let Some(index) = index else {
         return Vec::new();
     };
@@ -718,7 +750,8 @@ mod tests {
             docs_dir_from(project, Some(root)),
             Path::new("/tmp/hf-test-workspace")
                 .join("knowledge")
-                .join("_tmp_example_project")
+                .join("v2")
+                .join(storage::identity(project))
         );
     }
 
@@ -776,7 +809,7 @@ mod tests {
             ..KnowledgeConfig::default()
         };
 
-        index_project_with_config(dir.path(), config);
+        index_project_with_config(dir.path(), config).unwrap();
 
         assert!(!search_project(dir.path(), "alpha", 10).is_empty());
         assert!(

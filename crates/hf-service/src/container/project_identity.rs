@@ -46,7 +46,7 @@ pub(super) fn stored_project_matches(stored: &Path, canonical: &Path) -> bool {
     stored == canonical || std::fs::canonicalize(stored).is_ok_and(|resolved| resolved == canonical)
 }
 
-pub(super) fn project_lookup_identity(project: &Path) -> PathBuf {
+pub(crate) fn project_lookup_identity(project: &Path) -> PathBuf {
     std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf())
 }
 

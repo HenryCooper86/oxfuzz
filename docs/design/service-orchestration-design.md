@@ -60,6 +60,22 @@ only parses input, renders progress/outcome, writes the service-produced SARIF
 to the requested destination, and chooses its process exit status. It never
 mutates process-global guardrail environment variables.
 
+### 3.3 Project knowledge ownership
+
+Ingested documents use a versioned directory keyed by a SHA-256 digest of the
+canonical project path bytes. The same identity keys the in-memory index.
+Legacy punctuation-replaced directories have no reliable ownership evidence:
+they are preserved in place, never automatically indexed, migrated, or deleted.
+Knowledge status identifies preserved legacy documents and directs operators to
+re-ingest their original documents into the selected project.
+
+Indexing, ingestion, and project cleanup share an exclusive project knowledge
+lease outside the deletable document directory. Busy operations return an
+explicit error. Index generation markers invalidate stale caches when another
+process removes or recreates a project's knowledge directory. Project deletion
+removes owned documents and invalidates the local index while holding that
+lease; unrelated projects and original source repositories remain untouched.
+
 ## 4. Orchestration Flow
 
 1. `discover` -> `TargetInventory` persisted; HITL selects targets.
