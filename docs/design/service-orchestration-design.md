@@ -763,3 +763,15 @@ limits beside the explicit launch action. Invalid duration input disables
 launch and identifies the accepted range; the service remains responsible for
 enforcing current policy at execution. A new campaign is distinct from resuming
 an analysis closeout or dismissing an interruption.
+
+### Retained campaign result presentation
+
+Expanded run history presents the retained target selector, engine, requested
+budget, observed status, crash artifact count, and coverage availability. A
+zero-crash result describes this observation only and never establishes project
+safety. Coverage read failure is distinct from an empty retained sample series.
+Finding navigation selects the owning project and passes the exact run ID to
+the existing service finding filter, including all dispositions for this review.
+Report navigation opens the owning project's report tools without generating
+or publishing a report. Evidence interpretation remains in service proof and
+closeout reports.

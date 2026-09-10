@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getTransport, onDataChanged, emitDataChanged } from "../lib";
-import { formatRunHistoryError } from "../lib/invokeError";
+import { formatInvokeError, formatRunHistoryError } from "../lib/invokeError";
 import { useI18n } from "../i18nContext";
 import { useProject } from "../providers/project";
 import { useToast } from "../components/ui/toastContext";
@@ -11,6 +11,7 @@ import { Play, Bug, Clock, GitCompare, X, Search, Activity, Zap, TrendingUp, Lin
 import { DiffView } from "../components/DiffView";
 import { buildRunComparisons } from "../lib/runComparison";
 import { RunComparison } from "../components/RunComparison";
+import { RunEvidenceSummary } from "../components/RunEvidenceSummary";
 import { ReplayRun } from "../components/ReplayRun";
 import { RunCloseoutPanel } from "../components/RunCloseoutPanel";
 import { uuid } from "../providers/runOutputValidation";
@@ -35,16 +36,16 @@ const STATUS_COLOR: Record<string, string> = {
 // A history of every fuzz run for the active project (all projects when none
 // selected), with crash counts and durations, plus a two-run compare. Runs are
 // read from the persisted store, so the history survives restarts.
-type RunsViewProps = { onNavigate?: (view: ViewType) => void; focus?: { project: string; id: string } | null; onClearFocus?: () => void };
+type RunsViewProps = { onNavigate?: (view: ViewType) => void; focus?: { project: string; id: string } | null; onClearFocus?: () => void; onReviewFindings?: (run: RunHistoryItem) => void };
 export function RunsView(props: RunsViewProps) {
   const { activeProject } = useProject();
   const focusedId = props.focus?.project === activeProject ? props.focus.id : undefined;
   return <ScopedRunsView key={`${activeProject}\0${focusedId ?? ""}`} {...props} focusedId={focusedId} />;
 }
 
-function ScopedRunsView({ onNavigate, focusedId, onClearFocus }: RunsViewProps & { focusedId?: string }) {
+function ScopedRunsView({ onNavigate, focusedId, onClearFocus, onReviewFindings }: RunsViewProps & { focusedId?: string }) {
   const { t } = useI18n();
-  const { activeProject } = useProject();
+  const { activeProject, setActiveProject } = useProject();
   const [runs, setRuns] = useState<RunHistoryItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -52,7 +53,7 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus }: RunsViewProps &
   const [filter, setFilter] = useState(focusedId ?? "");
   const [expanded, setExpanded] = useState<string | null>(null);
   // Per-run coverage curve cache: undefined = not fetched, "loading", or samples.
-  const [series, setSeries] = useState<Record<string, CoverageSample[] | "loading">>({});
+  const [series, setSeries] = useState<Record<string, CoverageSample[] | "loading" | { error: string }>>({});
   const { toast } = useToast();
   const confirm = useConfirm();
   // The harness diff modal opened from a coverage-trend change marker.
@@ -67,17 +68,19 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus }: RunsViewProps &
   const [morningLoading, setMorningLoading] = useState(true);
   const requestGeneration = useRef(0);
 
-  const toggleCurve = useCallback(async (id: string) => {
-    setExpanded((cur) => (cur === id ? null : id));
-    if (series[id] !== undefined) return;
+  const loadCurve = useCallback(async (id: string) => {
     setSeries((s) => ({ ...s, [id]: "loading" }));
     try {
       const samples = await getTransport().invoke<CoverageSample[]>("run_coverage_series", { runId: id });
       setSeries((s) => ({ ...s, [id]: samples }));
-    } catch {
-      setSeries((s) => ({ ...s, [id]: [] }));
+    } catch (error) {
+      setSeries((s) => ({ ...s, [id]: { error: formatInvokeError(error) } }));
     }
-  }, [series]);
+  }, []);
+  const toggleCurve = useCallback((id: string) => {
+    setExpanded((cur) => (cur === id ? null : id));
+    if (series[id] === undefined) void loadCurve(id);
+  }, [series, loadCurve]);
 
   const load = useCallback(async () => {
     const generation = ++requestGeneration.current;
@@ -360,13 +363,13 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus }: RunsViewProps &
             return (
               <div key={r.id} id={`run-${r.id}`} className="flex flex-col">
                 <div
-                  className="surface-card flex items-center gap-3 transition-colors"
+                  className="surface-card flex flex-wrap items-center gap-3 transition-colors"
                   style={{ padding: "var(--space-sm) var(--space-md)", borderColor: isSel || isOpen ? "var(--accent)" : undefined }}
                 >
                   <button
                     onClick={() => toggle(r.id)}
-                    className="flex items-center gap-3 flex-1 min-w-0 text-left bg-transparent"
-                    style={{ border: "none", cursor: "pointer" }}
+                    className="flex flex-wrap items-center gap-x-3 gap-y-1 flex-1 min-w-0 text-left bg-transparent"
+                    style={{ border: "none", cursor: "pointer", flexBasis: 280 }}
                     title={t("runs.selectToCompare")}
                   >
                     <Play size={14} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
@@ -433,10 +436,15 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus }: RunsViewProps &
                 </div>
                 {isOpen && (
                   <div className="surface-card mt-1" style={{ padding: "var(--space-md)" }}>
+                    <RunEvidenceSummary run={r} onFindings={onReviewFindings ? () => onReviewFindings(r) : undefined} onReport={onNavigate ? () => { setActiveProject(r.project_root); onNavigate("reports"); } : undefined} />
                     {data === "loading" || data === undefined ? (
                       <p className="text-xs text-text-muted">{t("runs.loadingCurve")}</p>
-                    ) : data.length < 2 ? (
+                    ) : !Array.isArray(data) ? (
+                      <div role="alert" className="text-sm text-error">{t("results.curveFailed", { error: data.error })} <Button onClick={() => void loadCurve(r.id)}>{t("common.retry")}</Button></div>
+                    ) : data.length === 0 ? (
                       <p className="text-xs text-text-muted">{t("runs.noCoverageSamples")}</p>
+                    ) : data.length === 1 ? (
+                      <p className="text-xs text-text-muted">{t("results.oneSample", { edges: data[0].edges })}</p>
                     ) : (
                       <CoverageCurve samples={data} />
                     )}

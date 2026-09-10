@@ -496,6 +496,13 @@ const SCREEN_RUNS = `
 **Purpose:** every fuzz run for the active project, with trends and a two-run
 comparison.
 
+Expand a run to see **What this run observed**: its exact target, requested
+budget, retained crash artifacts, and coverage availability. Zero retained
+crashes does not establish project safety. A failed coverage read offers Retry;
+one sample is shown as an observation, not a trend. **Review findings** opens
+that project's findings filtered to this exact run, including all dispositions.
+**Open project reports** opens report tools without generating or publishing.
+
 **What you can do:**
 
 - Select up to two runs to **compare**.

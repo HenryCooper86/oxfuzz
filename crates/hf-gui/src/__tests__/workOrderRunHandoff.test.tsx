@@ -97,6 +97,8 @@ it("carries the promoted exact selector through real Harness, Run, Corpus and re
   expect(start!.disabled).toBe(false);
   await act(async () => start!.click()); await flush();
   expect(invoke.mock.calls.find(([command]) => command === "run_fuzzer")?.[1]).toEqual({ project: "/project", target: selector, engine: "libfuzzer", duration: 60 });
+  expect(host.textContent).toContain("No crash artifacts were retained");
+  expect(host.textContent).toContain("does not establish that the project is safe");
   await click("Show Corpus");
   expect(host.querySelector('[aria-label="Baseline campaign"]')).toBeTruthy();
   await click("Show Harness");

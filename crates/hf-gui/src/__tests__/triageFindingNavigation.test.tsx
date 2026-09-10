@@ -169,6 +169,22 @@ describe("retained finding navigation", () => {
     container.remove();
   });
 
+  it("requests all dispositions for the exact run opened from history", async () => {
+    localStorage.clear();
+    await act(async () => root.render(<Providers><TriageView initialRunId="older-run" /></Providers>));
+    await flush();
+    const request = invoke.mock.calls.find(([command]) => command === "finding_review_queue")?.[1];
+    expect(request).toMatchObject({ project: PROJECT_A, filter: { run_id: "older-run", disposition: { mode: "all" } } });
+    expect(invoke.mock.calls.some(([command]) => command === "scan_crashes" || command === "triage_crashes")).toBe(false);
+  });
+
+  it("keeps a saved finding from another run out of the scoped review", async () => {
+    await act(async () => root.render(<Providers><TriageView initialRunId="newer-run" /></Providers>));
+    await flush();
+    expect(invoke.mock.calls.some(([command, args]) => command === "finding_review" && args.findingId === older.crash.id)).toBe(false);
+    expect(container.textContent).not.toContain("historical/parser.c:73");
+  });
+
   it("restores exact historical evidence per project without starting work", async () => {
     await act(async () => root.render(<Providers><TriageView /></Providers>));
     await flush();

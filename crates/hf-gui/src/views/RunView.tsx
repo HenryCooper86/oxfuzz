@@ -8,6 +8,7 @@ import { useRunOutput } from "../providers/runOutput";
 import { useTarget } from "../providers/target";
 import { Button, Input, Select, ViewHeader } from "../components/ui";
 import { SandboxBanner } from "../components/SandboxBanner";
+import { RunOutcomeNotice } from "../components/RunEvidenceSummary";
 import { Play, Activity, AlertTriangle, FolderOpen, Square, RotateCw, RotateCcw } from "lucide-react";
 import type { HarnessReviewItem, ViewType } from "../types";
 import { useFuzzingSettings } from "../hooks/useFuzzingSettings";
@@ -430,6 +431,11 @@ export function RunView({
           {lastEngine === "syzkaller" && <StatCard icon={<Play size={16} />} label={t("run.executed")} value={summary.execs} color="var(--accent)" />}
         </div>
       )}
+
+      {summary && !running && <section className="surface-card p-3 flex flex-col gap-2">
+        <RunOutcomeNotice crashes={summary.crashes} />
+        {onNavigate && <Button className="self-start" onClick={() => onNavigate("runs")}>{t("nav.runs")}</Button>}
+      </section>}
 
       {summary && !running && summary.stagnation && (
         <div
