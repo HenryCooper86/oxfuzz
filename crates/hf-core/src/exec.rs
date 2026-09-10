@@ -166,16 +166,6 @@ impl ExecutionResult {
     pub fn success(&self) -> bool {
         self.exit_code == 0
     }
-
-    /// Get stdout as a UTF-8 string, lossy.
-    pub fn stdout_string(&self) -> String {
-        String::from_utf8_lossy(&self.stdout).into_owned()
-    }
-
-    /// Get stderr as a UTF-8 string, lossy.
-    pub fn stderr_string(&self) -> String {
-        String::from_utf8_lossy(&self.stderr).into_owned()
-    }
 }
 
 /// Resource usage reported after execution.
