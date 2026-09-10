@@ -14,6 +14,11 @@ GATES = REPOSITORY_ROOT / "scripts" / "tests" / "gates.sh"
 
 
 class GateDispatcherTests(unittest.TestCase):
+    def test_ci_invokes_the_independent_feature_matrix(self) -> None:
+        for path in (REPOSITORY_ROOT / ".github/workflows/ci.yml", REPOSITORY_ROOT / ".gitlab-ci.yml"):
+            with self.subTest(pipeline=path):
+                self.assertIn("scripts/tests/gates.sh check-feature-matrix", path.read_text())
+
     def make_stub(self, directory: pathlib.Path, name: str, body: str) -> None:
         """Place an executable stub named `name` in `directory`."""
         path = directory / name

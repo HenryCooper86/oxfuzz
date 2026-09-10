@@ -45,6 +45,7 @@ rust:
     - scripts/tests/gates.sh clippy
     - scripts/tests/gates.sh check
     - scripts/tests/gates.sh check-no-default-features
+    - scripts/tests/gates.sh check-feature-matrix
     - scripts/tests/gates.sh test
     - scripts/tests/gates.sh doc
 
