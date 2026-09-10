@@ -7,6 +7,7 @@
 // dictionaries to extend coverage.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { enResults, zhResults } from "./i18n.results";
 import { enExperiments, zhExperiments } from "./i18n.experiments";
 import { enExtra, zhExtra } from "./i18n.extra";
 import {
@@ -21,6 +22,7 @@ type Dict = Record<string, string>;
 
 const en: Dict = {
   ...enExperiments,
+  ...enResults,
   // Sidebar navigation
   "nav.dashboard": "Dashboard",
   "nav.chat": "AI Assistant",
@@ -182,6 +184,7 @@ const en: Dict = {
 
 const zh: Dict = {
   ...zhExperiments,
+  ...zhResults,
   // Sidebar navigation
   "nav.dashboard": "仪表盘",
   "nav.chat": "AI 助手",

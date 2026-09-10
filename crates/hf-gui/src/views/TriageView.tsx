@@ -30,17 +30,17 @@ function shortId(id: string): string {
   return id.length > 12 ? id.slice(0, 8) : id;
 }
 
-export function TriageView({ embedded = false }: { embedded?: boolean }) {
+export function TriageView({ embedded = false, initialRunId }: { embedded?: boolean; initialRunId?: string }) {
   const { activeProject } = useProject();
-  return <ScopedTriageView key={activeProject} embedded={embedded} />;
+  return <ScopedTriageView key={`${activeProject}\0${initialRunId ?? ""}`} embedded={embedded} initialRunId={initialRunId} />;
 }
 
-function ScopedTriageView({ embedded }: { embedded: boolean }) {
+function ScopedTriageView({ embedded, initialRunId }: { embedded: boolean; initialRunId?: string }) {
   const { t, locale } = useI18n();
   const { activeProject } = useProject();
   const { markDone, markSkipped } = usePipeline();
   const { lastTarget, lastEngine, summary } = useRunOutput();
-  const { selection, selectFinding } = useFindingSelection();
+  const { selection: savedSelection, selectFinding } = useFindingSelection();
   const [queue, setQueue] = useState<FindingReviewItem[]>([]);
   const [selectedFinding, setSelectedFinding] = useState<FindingReviewItem | null>(null);
   const [queueLoading, setQueueLoading] = useState(false);
@@ -48,10 +48,11 @@ function ScopedTriageView({ embedded }: { embedded: boolean }) {
   const [queueError, setQueueError] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
-  const [dispositionFilter, setDispositionFilter] = useState("open");
+  const [dispositionFilter, setDispositionFilter] = useState(initialRunId ? "all" : "open");
   const [originFilter, setOriginFilter] = useState("");
   const [severityFilter, setSeverityFilter] = useState("");
-  const [runFilter, setRunFilter] = useState("");
+  const [runFilter, setRunFilter] = useState(initialRunId ?? "");
+  const selection = savedSelection && (!runFilter || savedSelection.runId === runFilter) ? savedSelection : null;
   const [targetFilter, setTargetFilter] = useState("");
   const [reloadVersion, setReloadVersion] = useState(0);
   const [scanning, setScanning] = useState(false);
@@ -306,18 +307,18 @@ function ScopedTriageView({ embedded }: { embedded: boolean }) {
       {disabledReason && <div role="status" className="surface-card text-xs text-text-muted" style={{ padding: "var(--space-sm) var(--space-md)" }}>{disabledReason}</div>}
       <div className="surface-card grid gap-2" style={{ padding: "var(--space-sm)", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))" }}>
         <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={t("triage.searchFindings")} />
-        <select aria-label={t("triage.filterDisposition")} value={dispositionFilter} onChange={(event) => setDispositionFilter(event.target.value)}>
+        <select className="bg-surface-secondary text-text-primary border border-border rounded-md px-2 py-1 min-w-0" aria-label={t("triage.filterDisposition")} value={dispositionFilter} onChange={(event) => setDispositionFilter(event.target.value)}>
           <option value="open">{t("triage.filterOpen")}</option><option value="all">{t("triage.filterAll")}</option>
           {DISPOSITIONS.map((disposition) => <option key={disposition} value={`only:${disposition}`}>{t(`triage.disposition.${disposition}`)}</option>)}
         </select>
-        <select aria-label={t("triage.filterOrigin")} value={originFilter} onChange={(event) => setOriginFilter(event.target.value)}>
+        <select className="bg-surface-secondary text-text-primary border border-border rounded-md px-2 py-1 min-w-0" aria-label={t("triage.filterOrigin")} value={originFilter} onChange={(event) => setOriginFilter(event.target.value)}>
           <option value="">{t("triage.filterAnyOrigin")}</option><option value="target">target</option><option value="unknown">unknown</option><option value="runtime">runtime</option><option value="harness">harness</option>
         </select>
-        <select aria-label={t("triage.filterSeverity")} value={severityFilter} onChange={(event) => setSeverityFilter(event.target.value)}>
+        <select className="bg-surface-secondary text-text-primary border border-border rounded-md px-2 py-1 min-w-0" aria-label={t("triage.filterSeverity")} value={severityFilter} onChange={(event) => setSeverityFilter(event.target.value)}>
           <option value="">{t("triage.filterAnySeverity")}</option><option value="exploitable">exploitable</option><option value="probably_exploitable">probably exploitable</option><option value="not_exploitable">not exploitable</option><option value="undefined">undefined</option><option value="unavailable">unclassified</option>
         </select>
-        <Input value={runFilter} onChange={(event) => setRunFilter(event.target.value)} placeholder={t("triage.filterRun")} mono />
-        <Input value={targetFilter} onChange={(event) => setTargetFilter(event.target.value)} placeholder={t("triage.filterTarget")} mono />
+        <Input aria-label={t("triage.filterRun")} value={runFilter} onChange={(event) => setRunFilter(event.target.value)} placeholder={t("triage.filterRun")} mono />
+        <Input aria-label={t("triage.filterTarget")} value={targetFilter} onChange={(event) => setTargetFilter(event.target.value)} placeholder={t("triage.filterTarget")} mono />
       </div>
       {queueError && <div role="alert" className="surface-card text-xs" style={{ padding: "var(--space-sm)", color: "var(--error)" }}>{t("triage.queueFailed", { error: queueError })}</div>}
       {queueLoading && <div role="status" className="text-xs text-text-muted">{t("triage.loadingQueue")}</div>}

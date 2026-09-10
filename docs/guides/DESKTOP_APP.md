@@ -318,6 +318,14 @@ missing-edge, mixed legacy-build, and no-observed-input-change results remain
 visible and inconclusive where evidence is missing. Aggregate edge change is
 descriptive and cannot establish entry into the named goal function.
 
+Expand a run in Run History to review its exact target, requested budget,
+retained crash count, and coverage availability. Zero retained crashes does not
+establish project safety. Failed coverage reads offer retry, and a single
+sample is distinguished from a trend. **Review findings** opens that run's
+owning project and applies the exact run filter with all dispositions visible.
+**Open project reports** opens the owning project's report tools without
+generating or publishing anything.
+
 **Review retained evidence.** The Artifacts view collects persisted crash
 reproducers and corpus inputs across the selected project in one place. Reports,
 run history, policy audit, and evidence export provide the wider audit trail.

@@ -99,7 +99,8 @@ function detectPlatform(): "macos" | "windows" | "linux" | "unknown" {
 function AppInner() {
   const { theme, setTheme } = usePrefs();
   const { t } = useI18n();
-  const { setActiveProject } = useProject();
+  const { activeProject, setActiveProject } = useProject();
+  const [findingRun, setFindingRun] = useState<{ project: string; id: string } | null>(null);
   const [activeView, setActiveView] = useState<ViewType>("dashboard");
   const [focusedRun, setFocusedRun] = useState<{ project: string; id: string } | null>(null);
   const [settingsReturnView, setSettingsReturnView] = useState<ViewType>("dashboard");
@@ -109,6 +110,7 @@ function AppInner() {
   // Settings is a full-window editor. Preserve the originating workspace so
   // closing it never unexpectedly drops an operator into the chat surface.
   const navigate = (view: ViewType) => {
+    if (view === "triage") setFindingRun(null);
     if (view === "settings") {
       setSettingsReturnView(activeView === "settings" ? settingsReturnView : activeView);
     }
@@ -135,7 +137,7 @@ function AppInner() {
   const [showDiag, setShowDiag] = useState(false);
   const [showObs, setShowObs] = useState(false);
   const [showInfo, setShowInfo] = useState(false);
-  const [showProgress, setShowProgress] = useState(true);
+  const [showProgress, setShowProgress] = useState(() => typeof window === "undefined" || window.innerWidth >= 1100);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [setupDone, setSetupDone] = useState(() => localStorage.getItem("hf_setup_completed") === "true" || localStorage.getItem("hf_setup_deferred") === "true");
   const [setupDeferred, setSetupDeferred] = useState(() => localStorage.getItem("hf_setup_completed") !== "true" && localStorage.getItem("hf_setup_deferred") === "true");
@@ -245,12 +247,12 @@ function AppInner() {
                 )}
                 {activeView === "run" && (
                   <ViewCanvas>
-                    <RunView onNavigate={setActiveView} />
+                    <RunView onNavigate={navigate} />
                   </ViewCanvas>
                 )}
                 {activeView === "triage" && (
                   <ViewCanvas>
-                    <TriageView />
+                    <TriageView initialRunId={findingRun?.project === activeProject ? findingRun.id : undefined} />
                   </ViewCanvas>
                 )}
                 {activeView === "corpus" && (
@@ -260,7 +262,7 @@ function AppInner() {
                 )}
                 {activeView === "projects" && (
                   <ViewCanvas>
-                    <ProjectsView onNavigate={setActiveView} />
+                    <ProjectsView onNavigate={navigate} />
                   </ViewCanvas>
                 )}
                 {activeView === "artifacts" && (
@@ -276,7 +278,7 @@ function AppInner() {
                 {activeView === "runs" && (
                   <ViewCanvas>
                     <Suspense fallback={<LoadingState />}>
-                      <RunsView onNavigate={navigate} focus={focusedRun} onClearFocus={() => setFocusedRun(null)} />
+                      <RunsView onNavigate={navigate} focus={focusedRun} onClearFocus={() => setFocusedRun(null)} onReviewFindings={run => { setActiveProject(run.project_root); navigate("triage"); setFindingRun({ project: run.project_root, id: run.id }); }} />
                     </Suspense>
                   </ViewCanvas>
                 )}

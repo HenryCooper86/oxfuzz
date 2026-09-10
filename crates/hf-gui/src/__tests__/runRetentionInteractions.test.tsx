@@ -48,3 +48,26 @@ it("focuses the requested retained run and explains a missing history entry", as
  expect(host.textContent).toContain("This run is not present in retained history");
  expect(host.querySelectorAll('[aria-label="Delete run"]')).toHaveLength(0);
 });
+
+it("keeps a failed coverage read distinct from missing evidence and retries it", async () => {
+ vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true); localStorage.clear();
+ let reads = 0;
+ mocks.invoke.mockImplementation(async (command: string) => {
+   if (command === "run_history") return history;
+   if (command === "run_coverage_series") { if (++reads === 1) throw new Error("Evidence read failed"); return [{t:0,edges:1,execs:2}]; }
+   return null;
+ });
+ mocks.transport = { invoke: mocks.invoke, listen: async () => () => {} };
+ const host = document.createElement("div"); document.body.append(host); const root = createRoot(host);
+ cleanup = async () => { await act(async () => root.unmount()); host.remove(); };
+ const findings = vi.fn();
+ await act(async () => root.render(<I18nProvider><ProjectProvider><RunsView onReviewFindings={findings}/></ProjectProvider></I18nProvider>));
+ await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Toggle coverage curve"]')!.click());
+ expect(host.textContent).toContain("Evidence read failed");
+ expect(host.textContent).not.toContain("No coverage samples were recorded");
+ await act(async () => [...host.querySelectorAll("button")].find(b=>b.textContent==="Retry")!.click());
+ expect(reads).toBe(2); expect(host.textContent).not.toContain("Evidence read failed");
+ expect(host.textContent).toContain("Only one coverage sample was retained");
+ await act(async () => [...host.querySelectorAll("button")].find(b=>b.textContent==="Review findings")!.click());
+ expect(findings).toHaveBeenCalledWith(history[0]);
+});

@@ -1,0 +1,28 @@
+export const enResults: Record<string, string> = {
+  "results.scope": "What this run observed",
+  "results.budget": "Requested budget: {value}s",
+  "results.budgetUnknown": "Requested budget unavailable",
+  "results.noCrashes": "No crash artifacts were retained during this run.",
+  "results.crashes": "{n} retained crash artifacts need evidence review; a crash alone does not establish exploitability.",
+  "results.limit": "This result covers this target, harness, inputs, and run budget. It does not establish that the project is safe or that every reachable path was tested.",
+  "results.coverageUnknown": "Coverage was not recorded. Missing coverage is not zero coverage.",
+  "results.coverage": "Recorded peak edges: {n}. Aggregate edges do not prove that a particular function was reached.",
+  "results.findings": "Review findings",
+  "results.reports": "Open project reports",
+  "results.curveFailed": "Could not load retained coverage: {error}",
+  "results.oneSample": "Only one coverage sample was retained ({edges} edges); a trend needs at least two samples.",
+};
+export const zhResults: Record<string, string> = {
+  "results.scope": "本次运行的观察结果",
+  "results.budget": "请求的预算：{value} 秒",
+  "results.budgetUnknown": "请求的预算不可用",
+  "results.noCrashes": "本次运行没有保留崩溃文件。",
+  "results.crashes": "有 {n} 个保留的崩溃文件需要审查证据；单次崩溃并不能证明可利用性。",
+  "results.limit": "此结果仅涵盖本次目标、测试桩、输入和运行预算，不能证明项目安全，也不能证明已测试所有可达路径。",
+  "results.coverageUnknown": "未记录覆盖率。缺少覆盖率并不等于零覆盖率。",
+  "results.coverage": "记录的峰值边数：{n}。汇总边数不能证明已到达某个特定函数。",
+  "results.findings": "审查发现",
+  "results.reports": "打开项目报告",
+  "results.curveFailed": "无法加载保留的覆盖率：{error}",
+  "results.oneSample": "仅保留了一个覆盖率样本（{edges} 条边），至少需要两个样本才能显示趋势。",
+};
