@@ -101,6 +101,7 @@ function AppInner() {
   const { t } = useI18n();
   const { setActiveProject } = useProject();
   const [activeView, setActiveView] = useState<ViewType>("dashboard");
+  const [focusedRun, setFocusedRun] = useState<{ project: string; id: string } | null>(null);
   const [settingsReturnView, setSettingsReturnView] = useState<ViewType>("dashboard");
   // Bumping this key remounts ChatView, clearing the conversation for a new target.
   const [chatResetKey, setChatResetKey] = useState(0);
@@ -214,7 +215,7 @@ function AppInner() {
                   <p className="m-0 flex-1 text-sm text-text-secondary">{t("setup.deferred")}</p>
                   <Button variant="outline" size="sm" onClick={() => setSetupDone(false)}>{t("setup.resume")}</Button>
                 </div>}
-                <RecoveryBanner />
+                <RecoveryBanner onReview={run => { setActiveProject(run.project); setFocusedRun({ project: run.project, id: run.run_id }); navigate("runs"); }} />
                 <ErrorBoundary resetKey={activeView}>
                 <Suspense fallback={<LoadingState />}>
                 {activeView === "chat" && (
@@ -275,7 +276,7 @@ function AppInner() {
                 {activeView === "runs" && (
                   <ViewCanvas>
                     <Suspense fallback={<LoadingState />}>
-                      <RunsView onNavigate={navigate} />
+                      <RunsView onNavigate={navigate} focus={focusedRun} onClearFocus={() => setFocusedRun(null)} />
                     </Suspense>
                   </ViewCanvas>
                 )}

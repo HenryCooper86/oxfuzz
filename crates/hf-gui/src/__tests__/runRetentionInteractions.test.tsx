@@ -29,3 +29,22 @@ it.each(["http","native"])("actual RunsView shows deletion and clear retention o
  const remove=host.querySelector<HTMLButtonElement>('[aria-label="Delete run"]')!;expect(remove,host.textContent+JSON.stringify(mocks.invoke.mock.calls)).toBeTruthy();await act(async()=>remove.click());expect(document.body.textContent).toContain(`Run ${error.run_id} is retained by experiment ${error.experiment_id} (baseline).`);
  const clear=[...host.querySelectorAll("button")].find(b=>b.textContent?.includes("Clear all"))!;expect(clear).toBeTruthy();await act(async()=>clear.click());expect(document.body.textContent).not.toContain("[object Object]");expect(host.textContent).toContain("parse");
 });
+
+it("focuses the requested retained run and explains a missing history entry", async () => {
+ vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true); localStorage.clear();
+ localStorage.setItem("hf_active_project", "/project"); localStorage.setItem("hf_recent_projects", JSON.stringify(["/project"]));
+ mocks.invoke.mockImplementation(async (command: string) => command === "run_history" ? [...history, {...history[0], id: "10000000-0000-4000-8000-000000000002", target: "other"}] : null);
+ mocks.transport = { invoke: mocks.invoke, listen: async () => () => {} };
+ const host = document.createElement("div"); document.body.append(host); const root = createRoot(host);
+ cleanup = async () => { await act(async () => root.unmount()); host.remove(); };
+ const clear = vi.fn();
+ const render = (id: string) => root.render(<I18nProvider><ProjectProvider><RunsView focus={{project: "/project", id}} onClearFocus={clear}/></ProjectProvider></I18nProvider>);
+ await act(async () => render(error.run_id));
+ expect(host.querySelectorAll('[aria-label="Delete run"]')).toHaveLength(1);
+ expect(host.textContent).toContain(`Reviewing retained run ${error.run_id}`);
+ await act(async () => [...host.querySelectorAll("button")].find(b => b.textContent === "Show all runs")!.click());
+ expect(clear).toHaveBeenCalledOnce();
+ await act(async () => render("10000000-0000-4000-8000-000000000003"));
+ expect(host.textContent).toContain("This run is not present in retained history");
+ expect(host.querySelectorAll('[aria-label="Delete run"]')).toHaveLength(0);
+});

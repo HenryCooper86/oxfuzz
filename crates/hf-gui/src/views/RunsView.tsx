@@ -35,19 +35,21 @@ const STATUS_COLOR: Record<string, string> = {
 // A history of every fuzz run for the active project (all projects when none
 // selected), with crash counts and durations, plus a two-run compare. Runs are
 // read from the persisted store, so the history survives restarts.
-export function RunsView({ onNavigate }: { onNavigate?: (view: ViewType) => void }) {
+type RunsViewProps = { onNavigate?: (view: ViewType) => void; focus?: { project: string; id: string } | null; onClearFocus?: () => void };
+export function RunsView(props: RunsViewProps) {
   const { activeProject } = useProject();
-  return <ScopedRunsView key={activeProject} onNavigate={onNavigate} />;
+  const focusedId = props.focus?.project === activeProject ? props.focus.id : undefined;
+  return <ScopedRunsView key={`${activeProject}\0${focusedId ?? ""}`} {...props} focusedId={focusedId} />;
 }
 
-function ScopedRunsView({ onNavigate }: { onNavigate?: (view: ViewType) => void }) {
+function ScopedRunsView({ onNavigate, focusedId, onClearFocus }: RunsViewProps & { focusedId?: string }) {
   const { t } = useI18n();
   const { activeProject } = useProject();
   const [runs, setRuns] = useState<RunHistoryItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string[]>([]);
-  const [filter, setFilter] = useState("");
+  const [filter, setFilter] = useState(focusedId ?? "");
   const [expanded, setExpanded] = useState<string | null>(null);
   // Per-run coverage curve cache: undefined = not fetched, "loading", or samples.
   const [series, setSeries] = useState<Record<string, CoverageSample[] | "loading">>({});
@@ -249,6 +251,11 @@ function ScopedRunsView({ onNavigate }: { onNavigate?: (view: ViewType) => void 
         </div>
       )}
 
+      {focusedId && <div role="status" className="surface-card p-3 text-sm break-all">
+        {t("recovery.reviewing", { id: focusedId })}
+        {!loading && !runs.some(run => run.id === focusedId) && <p>{t("recovery.missing")}</p>}
+        <Button onClick={onClearFocus}>{t("recovery.showAll")}</Button>
+      </div>}
       <MorningHealth summary={morning} loading={morningLoading} error={morningError} t={t} onSelect={(id) => { setFilter(id); if (expanded !== id) void toggleCurve(id); }} />
 
       <AutoRevertPolicyCard project={activeProject} />
