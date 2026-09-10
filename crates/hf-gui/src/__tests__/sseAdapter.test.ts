@@ -1,7 +1,39 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { SseAdapter } from "../lib/sseAdapter";
 
 describe("SseAdapter", () => {
+  it("isolates failing subscribers and keeps later frames on the same connection", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const encoder = new TextEncoder();
+    const fetchMock = vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode("event: run:status\ndata: null\n\n"));
+        for (const status of ["running", "done"]) {
+          controller.enqueue(encoder.encode(`event: run:status\ndata: {"data":{"run_id":"run-1","status":"${status}"}}\n\n`));
+        }
+      },
+    })));
+    vi.stubGlobal("fetch", fetchMock);
+    const adapter = new SseAdapter("http://localhost:8081");
+    const failing = vi.fn(() => { throw new Error("subscriber failed"); });
+    const healthy = vi.fn();
+    const unlisten = [
+      adapter.listen("stream:connected", failing),
+      adapter.listen("run:status", failing),
+      adapter.listen("run:status", healthy),
+    ];
+    try {
+      await vi.waitFor(() => expect(healthy).toHaveBeenCalledTimes(2));
+      expect(healthy.mock.calls.map(([event]) => event.payload.status)).toEqual(["running", "done"]);
+      expect(failing).toHaveBeenCalledTimes(3);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      unlisten.forEach(stop => stop());
+      vi.unstubAllGlobals();
+      warn.mockRestore();
+    }
+  });
+
   it("announces a successful connection before streamed delivery", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () =>
