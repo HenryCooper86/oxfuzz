@@ -1427,6 +1427,58 @@ async fn schedule_list_without_scheduler_returns_empty_array() {
 }
 
 #[tokio::test]
+async fn schedule_http_list_preserves_service_preview() {
+    allow_open_dev_mode();
+    let root = tempfile::tempdir().unwrap();
+    let scheduler = std::sync::Arc::new(
+        hf_service::scheduler::CampaignScheduler::try_start(
+            hf_service::ServiceContainer::stubbed(),
+            root.path().join("schedules.json"),
+            None,
+        )
+        .await
+        .unwrap(),
+    );
+    let params = hf_service::scheduler::CampaignParams {
+        project: root.path().display().to_string(),
+        max_runs: Some(5),
+        duration_secs: 60,
+        ..Default::default()
+    };
+    scheduler
+        .try_create(
+            "preview",
+            &params,
+            hf_service::scheduler::parse_trigger("cron", "CRON_TZ=Asia/Shanghai 0 9 * * *")
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let expected = serde_json::to_value(scheduler.list_views().await.unwrap()).unwrap();
+    let app = hf_web::router::build_with_state(
+        hf_web::router::AppState::new(hf_service::ServiceContainer::stubbed())
+            .with_scheduler(scheduler.clone()),
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/schedule")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    scheduler.stop().await;
+    assert_eq!(value[0]["preview"], expected[0]["preview"]);
+    assert_eq!(value[0]["preview"]["timezone"], "Asia/Shanghai");
+}
+
+#[tokio::test]
 async fn schedule_limits_without_scheduler_are_explicitly_unavailable() {
     allow_open_dev_mode();
     let app = hf_web::router::build();

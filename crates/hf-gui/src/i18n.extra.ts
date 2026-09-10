@@ -3,6 +3,20 @@
 // regenerate from the localized views.
 
 export const enExtra: Record<string, string> = {
+  "automation.preview.scheduled": "Next scheduled opportunity",
+  "automation.preview.due": "Due at the next scheduler tick",
+  "automation.preview.paused": "Paused",
+  "automation.preview.budget_exhausted": "Budget spent",
+  "automation.preview.recovery_required": "Recovery acknowledgement required",
+  "automation.preview.consumed": "One-time schedule consumed",
+  "automation.preview.waiting_for_event": "Waiting for an event",
+  "automation.preview.unavailable": "Schedule preview unavailable",
+  "automation.preview.remainingRuns": "{n} runs remaining",
+  "automation.preview.remainingSecs": "{n}s remaining",
+  "automation.preview.unbounded": "No budget limit",
+  "automation.preview.details": "Upcoming times",
+  "automation.preview.advisory": "Times may shift with active work, recovery, and available budget.",
+  "automation.preview.timezoneFallback": "Unknown timezone; using UTC",
   "buildDoctor.currentUnavailable": "Current build readiness is unavailable. Refresh before generating or approving a plan.",
   "buildDoctor.previousDiagnosis": "Previous diagnosis (not current readiness)",
   "buildDoctor.capturedProfile": "Captured profile",
@@ -1851,6 +1865,20 @@ export const enExtra: Record<string, string> = {
 };
 
 export const zhExtra: Record<string, string> = {
+  "automation.preview.scheduled": "下次计划时间",
+  "automation.preview.due": "将在下次调度检查时触发",
+  "automation.preview.paused": "已暂停",
+  "automation.preview.budget_exhausted": "预算已用尽",
+  "automation.preview.recovery_required": "需要确认恢复状态",
+  "automation.preview.consumed": "一次性计划已使用",
+  "automation.preview.waiting_for_event": "等待事件触发",
+  "automation.preview.unavailable": "无法预览计划",
+  "automation.preview.remainingRuns": "剩余 {n} 次运行",
+  "automation.preview.remainingSecs": "剩余 {n} 秒",
+  "automation.preview.unbounded": "无预算限制",
+  "automation.preview.details": "即将到来的时间",
+  "automation.preview.advisory": "时间可能因正在执行的任务、恢复状态和剩余预算而变化。",
+  "automation.preview.timezoneFallback": "时区未知，使用 UTC",
   "buildDoctor.currentUnavailable": "当前构建就绪状态不可用。请刷新后再生成或批准计划。",
   "buildDoctor.previousDiagnosis": "此前诊断（非当前就绪状态）",
   "buildDoctor.capturedProfile": "留存配置",
