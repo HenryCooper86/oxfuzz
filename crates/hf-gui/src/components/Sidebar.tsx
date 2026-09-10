@@ -15,54 +15,29 @@ interface SidebarProps {
   onSelectTarget: (path: string) => void;
 }
 
-// Labels are resolved from i18n at render (`t(`nav.${view}`)`), so an item only
-// needs its view id and icon -- no hardcoded label to drift out of sync.
-// `children` renders indented sub-items, used to nest the workflow stages under
-// the unified entry they belong to.
-type NavItem = {
-  view: ViewType;
-  icon: React.ComponentType<{ size?: number }>;
-  children?: NavItem[];
-};
-
-// Pipeline: the campaign lifecycle. "Fuzzing Workflow" (WorkflowView) is the
-// unified accordion that drives discover -> harness -> run -> triage -> corpus
-// as one connected flow and is the landing view when a target is opened, so
-// those five stages are its children here -- also reachable as standalone
-// deep-dive pages. Dashboard is the cross-target overview and leads the section.
-const PIPELINE_ITEMS: NavItem[] = [
+type NavItem = { view: ViewType; icon: React.ComponentType<{ size?: number }> };
+const PRIMARY_ITEMS: NavItem[] = [
   { view: "dashboard", icon: LayoutDashboard },
-  {
-    view: "workflow",
-    icon: Workflow,
-    children: [
-      { view: "discover", icon: Crosshair },
-      { view: "harness", icon: FileCode },
-      { view: "run", icon: Play },
-      { view: "triage", icon: Bug },
-      { view: "corpus", icon: Database },
-    ],
-  },
-];
-
-// Results: the durable records a campaign produces.
-const RESULTS_ITEMS: NavItem[] = [
-  { view: "projects", icon: FolderOpen },
-  { view: "artifacts", icon: Boxes },
-  { view: "reports", icon: FileText },
+  { view: "workflow", icon: Workflow },
+  { view: "triage", icon: Bug },
   { view: "runs", icon: History },
-  { view: "changes", icon: GitCompare },
-  { view: "audit", icon: ScrollText },
-];
-
-// AI system: the assistant plus the agents, skills, knowledge, and automation
-// that drive it -- previously scattered between Pipeline and Library.
-const AI_SYSTEM_ITEMS: NavItem[] = [
+  { view: "reports", icon: FileText },
+  { view: "projects", icon: FolderOpen },
   { view: "chat", icon: MessageSquare },
-  { view: "agents", icon: Bot },
-  { view: "skills", icon: Puzzle },
-  { view: "knowledge", icon: BookOpen },
-  { view: "automation", icon: Zap },
+];
+const TOOL_GROUPS: { label: string; items: NavItem[] }[] = [
+  { label: "sidebar.pipeline", items: [
+    { view: "discover", icon: Crosshair }, { view: "harness", icon: FileCode },
+    { view: "run", icon: Play }, { view: "corpus", icon: Database },
+  ] },
+  { label: "sidebar.results", items: [
+    { view: "artifacts", icon: Boxes }, { view: "changes", icon: GitCompare }, { view: "audit", icon: ScrollText },
+  ] },
+  { label: "sidebar.aiSystem", items: [
+    { view: "agents", icon: Bot }, { view: "skills", icon: Puzzle },
+    { view: "knowledge", icon: BookOpen }, { view: "automation", icon: Zap },
+  ] },
+  { label: "sidebar.vehicle", items: [{ view: "automotive", icon: CarFront }] },
 ];
 
 function basename(path: string): string {
@@ -84,19 +59,17 @@ function NavButton({
   item,
   active,
   onNavigate,
-  depth = 0,
 }: {
   item: NavItem;
   active: boolean;
   onNavigate: (view: ViewType) => void;
-  /** Indent level; >0 marks a sub-item nested under its parent entry. */
-  depth?: number;
 }) {
   const { view, icon: Icon } = item;
   const { t } = useI18n();
   return (
     <button
       onClick={() => onNavigate(view)}
+      aria-current={active ? "page" : undefined}
       className={`flex items-center gap-2 w-full text-left rounded-md transition-all duration-150 outline-none ${
         active
           ? "bg-surface-active text-text-primary border border-border"
@@ -104,14 +77,13 @@ function NavButton({
       }`}
       style={{
         padding: "7px 10px",
-        paddingLeft: 10 + depth * 18,
         fontSize: "13px",
         fontWeight: 500,
         marginBottom: "2px",
       }}
     >
       <span style={{ color: active ? "var(--accent)" : "inherit", display: "flex" }}>
-        <Icon size={depth > 0 ? 16 : 18} />
+        <Icon size={18} />
       </span>
       <span>{t(`nav.${view}`)}</span>
     </button>
@@ -123,6 +95,7 @@ function DefectDojoButton({ active, onOpen }: { active: boolean; onOpen: () => v
   return (
     <button
       onClick={onOpen}
+      aria-current={active ? "page" : undefined}
       title="Open DefectDojo in the app"
       className={`flex items-center gap-2 w-full text-left rounded-md transition-all duration-150 outline-none ${
         active
@@ -207,10 +180,8 @@ export function Sidebar({ activeView, onNavigate, onNewTarget, onSelectTarget }:
   const { activeProject, recentProjects, removeRecent } = useProject();
   const { target } = useTarget();
   const { t } = useI18n();
-  // DefectDojo is surfaced only once configured, so the sidebar stays clean for
-  // projects that never use it. Automotive, by contrast, is always present (see
-  // the Vehicle Security section below).
   const { configured: defectDojoOn } = useDefectDojo();
+  const specialist = TOOL_GROUPS.some(group => group.items.some(item => item.view === activeView)) || activeView === "defectdojo";
 
   return (
     <nav
@@ -268,52 +239,21 @@ export function Sidebar({ activeView, onNavigate, onNewTarget, onSelectTarget }:
           ))
         )}
 
-        <SectionLabel>{t("sidebar.pipeline")}</SectionLabel>
-        {PIPELINE_ITEMS.map((item) => (
-          <div key={item.view}>
-            <NavButton item={item} active={activeView === item.view} onNavigate={onNavigate} />
-            {item.children?.map((child) => (
-              <NavButton
-                key={child.view}
-                item={child}
-                active={activeView === child.view}
-                onNavigate={onNavigate}
-                depth={1}
-              />
-            ))}
-          </div>
-        ))}
-
-        <SectionLabel>{t("sidebar.results")}</SectionLabel>
-        {RESULTS_ITEMS.map((item) => (
-          <NavButton key={item.view} item={item} active={activeView === item.view} onNavigate={onNavigate} />
-        ))}
-
-        <SectionLabel>{t("sidebar.aiSystem")}</SectionLabel>
-        {AI_SYSTEM_ITEMS.map((item) => (
-          <NavButton key={item.view} item={item} active={activeView === item.view} onNavigate={onNavigate} />
-        ))}
-
-        {/* Automotive is a permanent, first-class capability: always present and
-            never gated behind a runtime toggle. It renders as a standard nav row
-            for visual consistency with the rest of the sidebar. When the
-            subsystem is off or absent from the build, the workspace itself
-            explains how to enable it or that it is unavailable. */}
-        <SectionLabel>{t("sidebar.vehicle")}</SectionLabel>
-        <NavButton
-          item={{ view: "automotive", icon: CarFront }}
-          active={activeView === "automotive"}
-          onNavigate={onNavigate}
-        />
-
-        {/* DefectDojo stays an optional add-on, shown only once configured, so
-            the sidebar stays uncluttered for projects that never use it. */}
-        {defectDojoOn && (
-          <>
+        <SectionLabel>{t("sidebar.workspace")}</SectionLabel>
+        {PRIMARY_ITEMS.map(item => <NavButton key={item.view} item={item} active={activeView === item.view} onNavigate={onNavigate} />)}
+        <details key={specialist ? activeView : "primary"} open={specialist} className="mt-3">
+          <summary className="cursor-pointer rounded-md px-2 py-2 text-sm text-text-secondary">
+            {t("sidebar.moreTools")}{specialist ? ` · ${t(`nav.${activeView}`)}` : ""}
+          </summary>
+          {TOOL_GROUPS.map(group => <div key={group.label}>
+            <SectionLabel>{t(group.label)}</SectionLabel>
+            {group.items.map(item => <NavButton key={item.view} item={item} active={activeView === item.view} onNavigate={onNavigate} />)}
+          </div>)}
+          {defectDojoOn && <>
             <SectionLabel>{t("sidebar.integrations")}</SectionLabel>
             <DefectDojoButton active={activeView === "defectdojo"} onOpen={() => onNavigate("defectdojo")} />
-          </>
-        )}
+          </>}
+        </details>
       </div>
 
       {/* Footer: help and settings pinned at the bottom (Apple-style nav), then

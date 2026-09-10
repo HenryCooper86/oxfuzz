@@ -3,6 +3,10 @@
 // regenerate from the localized views.
 
 export const enExtra: Record<string, string> = {
+  "sidebar.workspace": "Workspace",
+  "sidebar.moreTools": "More tools",
+  "workflow.next": "Next: {stage}",
+  "workflow.reviewFindings": "Review findings",
   "setup.title": "Get ready to fuzz",
   "setup.subtitle": "Connect AI, check your sandbox, then open a project.",
   "setup.steps": "Setup steps",
@@ -1909,6 +1913,10 @@ export const enExtra: Record<string, string> = {
 };
 
 export const zhExtra: Record<string, string> = {
+  "sidebar.workspace": "工作区",
+  "sidebar.moreTools": "更多工具",
+  "workflow.next": "下一步：{stage}",
+  "workflow.reviewFindings": "审查发现",
   "setup.title": "准备开始模糊测试",
   "setup.subtitle": "连接 AI，检查沙箱，然后打开项目。",
   "setup.steps": "设置步骤",

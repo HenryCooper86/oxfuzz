@@ -25,12 +25,13 @@ it never grants execution approval. Optional integrations and detailed settings
 stay in Settings. With no project selected, the Dashboard presents one action
 to open the project workflow.
 
-After that the left
-sidebar is your control panel. Pipeline surfaces cover the Dashboard, AI
-Assistant, guided workflow, Discover, Harness, Run, Triage, and Corpus. Library
-and operations surfaces add Projects, Artifacts, Reports, Run History, Policy
-Audit, Agents, Skills, Knowledge, Automation, Automotive, DefectDojo, Help &
-Docs, and Settings.
+The sidebar keeps the Dashboard, guided workflow, Triage, Run History,
+Reports, Projects, and AI Assistant visible. Expand **More tools** to reach
+Discover, Harness, Run, Corpus, Artifacts, Changes, Policy Audit, Agents,
+Skills, Knowledge, Automation, Automotive, and configured DefectDojo.
+Opening a specialist page expands its navigation group. Help and Settings
+remain available at the bottom. The workflow's **Next** button opens the
+current stage; starting work still requires that stage's action and approvals.
 
 ### A campaign, end to end
 

@@ -169,7 +169,8 @@ loop, not a final step.
   ("discover targets and fuzz the riskiest one") and it drives the tools for
   you, asking approval at the gates.
 
-Each stage also has its own dedicated sidebar screen if you prefer to work them
+The **Next** button opens the current stage without starting work. Expand
+**More tools** in the sidebar for dedicated stage screens if you prefer to work them
 one at a time.
 `;
 
