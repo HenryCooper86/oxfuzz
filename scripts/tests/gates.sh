@@ -23,6 +23,7 @@ COVERAGE_CRATES=(hf-discovery hf-harness hf-engine hf-crash)
 # hf-web and hf-service. Checking them one at a time catches undeclared feature
 # coupling that default and all-feature builds both hide.
 PRODUCT_FEATURES=(
+  campaign-allocation
   automotive-lab
   automotive-scapy
   campaign-health

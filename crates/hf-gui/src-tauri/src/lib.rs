@@ -15,7 +15,8 @@ use tauri::Manager;
 
 use closeout_commands::{run_closeout, run_closeout_report};
 use commands::{
-    agent_info, agent_tools, all_corpus, all_crashes, app_paths, approve_remediation_operation,
+    agent_info, agent_tools, all_corpus, all_crashes, allocation_candidates, allocation_propose,
+    allocation_review, allocation_status, app_paths, approve_remediation_operation,
     artifact_summary, auto_revert_events, automotive_analyze_capture, automotive_build_replay_plan,
     automotive_capabilities, automotive_diff_captures, automotive_execute_replay,
     automotive_generate_mutations, automotive_import_capture, automotive_lab_coverage,
@@ -192,6 +193,10 @@ pub fn run() {
             generate_report,
             export_report,
             export_repro,
+            allocation_candidates,
+            allocation_status,
+            allocation_propose,
+            allocation_review,
             campaign_advice,
             campaign_evidence,
             export_remediation_draft,

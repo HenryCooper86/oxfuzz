@@ -7,7 +7,8 @@ description = "REST API + SSE streaming"
 
 # Automotive on by default; `--no-default-features` drops it (see hf-cli note).
 [features]
-default = ["automotive-lab", "automotive-scapy", "campaign-health", "build-context", "concolic-enrichment", "build-doctor", "campaign-trust", "change-aware", "coverage-blockers", "coverage-experiments", "harness-tournament", "harness-work-order", "native-analysis", "oracle-studio", "patch-to-proof", "proof-carrying", "run-closeout", "semgrep-enrichment", "triage-disposition", "unreached-surface"]
+campaign-allocation = ["hf-service/campaign-allocation"]
+default = ["campaign-allocation", "automotive-lab", "automotive-scapy", "campaign-health", "build-context", "concolic-enrichment", "build-doctor", "campaign-trust", "change-aware", "coverage-blockers", "coverage-experiments", "harness-tournament", "harness-work-order", "native-analysis", "oracle-studio", "patch-to-proof", "proof-carrying", "run-closeout", "semgrep-enrichment", "triage-disposition", "unreached-surface"]
 automotive-scapy = ["hf-service/automotive-scapy"]
 build-context = ["hf-service/build-context"]
 build-doctor = ["build-context", "hf-service/build-doctor"]
@@ -28,6 +29,7 @@ campaign-health = ["hf-service/campaign-health"]
 concolic-enrichment = ["hf-service/concolic-enrichment"]
 run-closeout = ["campaign-trust", "campaign-health", "unreached-surface", "hf-service/run-closeout"]
 harness-work-order = ["build-context", "hf-service/harness-work-order"]
+
 
 [dependencies]
 hf-service = { workspace = true }

@@ -1,3 +1,4 @@
+import { CampaignAllocation } from "../components/CampaignAllocation";
 import { KnowledgeIndexDetails, type KnowledgeIndexDetailsStatus } from "../components/KnowledgeIndexDetails";
 import { SchedulerRuntimeStatus, type CampaignSchedulerStatus } from "../components/SchedulerRuntimeStatus";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useState, type ReactNode } from "react";
@@ -1619,6 +1620,7 @@ export function AutomationView() {
       )}
 
       <SchedulerRuntimeStatus status={runtimeStatus} />
+      {project ? <CampaignAllocation key={project} project={project} /> : null}
 
       <ScheduleRecoveryPanel
         recoveries={recoveries}

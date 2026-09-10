@@ -1400,6 +1400,38 @@ fn skip_result(reason: &str) -> DispatchResult {
     }
 }
 
+fn requested_campaign_engine(params: &CampaignParams) -> Result<Option<EngineKind>, String> {
+    params
+        .target
+        .as_deref()
+        .filter(|target| !target.is_empty())
+        .map(|_| {
+            params
+                .engine
+                .parse::<EngineKind>()
+                .map_err(|error| error.clone())
+        })
+        .transpose()
+}
+
+fn filter_campaign_targets(
+    all: Vec<SchedulableTarget>,
+    params: &CampaignParams,
+) -> Result<Vec<SchedulableTarget>, String> {
+    let engine = requested_campaign_engine(params)?;
+    Ok(all
+        .into_iter()
+        .filter(|candidate| {
+            params
+                .target
+                .as_deref()
+                .filter(|target| !target.is_empty())
+                .is_none_or(|target| candidate.target == target)
+                && engine.is_none_or(|engine| candidate.engine == engine.as_str())
+        })
+        .collect())
+}
+
 impl FuzzCampaignDispatcher {
     /// The promoted targets this campaign may fuzz, in priority order. A single
     /// campaign narrows to its one target; a portfolio takes them all.
@@ -1412,12 +1444,7 @@ impl FuzzCampaignDispatcher {
             .schedulable_targets(Path::new(&params.project))
             .await
             .map_err(|e| e.to_string())?;
-        let selected: Vec<SchedulableTarget> =
-            match params.target.as_deref().filter(|t| !t.is_empty()) {
-                Some(sym) => all.into_iter().filter(|t| t.target == sym).collect(),
-                None => all,
-            };
-        Ok(priority_order(selected))
+        Ok(priority_order(filter_campaign_targets(all, params)?))
     }
 
     /// Best-effort follow-up when a scheduled run finds crashes: save a report
@@ -1576,8 +1603,43 @@ impl FuzzCampaignDispatcher {
             )));
         };
 
+        let requested_secs = params
+            .max_total_secs
+            .map_or(params.duration_secs, |maximum| {
+                params
+                    .duration_secs
+                    .min(maximum.saturating_sub(state.secs_done))
+            });
+        let requested_engine = match requested_campaign_engine(&params) {
+            Ok(engine) => engine,
+            Err(error) => return Ok(skip_result(&error)),
+        };
+        let allocation = match self
+            .container
+            .admit_scheduled_allocation(
+                Path::new(&params.project),
+                params.target.as_deref(),
+                requested_engine,
+                &params.schedule_id,
+                requested_secs,
+            )
+            .await
+        {
+            Ok(grant) => grant,
+            Err(error) => return Ok(skip_result(&error.to_string())),
+        };
+
         // 3. Pick the next target in priority rotation (promoted only).
-        let targets = match self.resolve_targets(&params).await {
+        let resolved_targets = match &allocation {
+            Some(grant) => Ok(vec![SchedulableTarget {
+                target: grant.candidate.dispatch_target.clone(),
+                engine: grant.candidate.engine.clone(),
+                language: grant.candidate.language.clone(),
+                fit_score: 1.0,
+            }]),
+            None => self.resolve_targets(&params).await,
+        };
+        let targets = match resolved_targets {
             Ok(t) => t,
             Err(e) => {
                 return Ok(DispatchResult {
@@ -1632,24 +1694,34 @@ impl FuzzCampaignDispatcher {
         // advances the cursor only (no charge) so a target that keeps failing
         // yields to the next instead of pinning the rotation.
         let started = std::time::Instant::now();
-        let result = self
-            .container
-            .run_campaign_with_limits(
+        let campaign = Box::pin(
+            self.container.run_campaign_with_limits(
                 Path::new(&params.project),
                 Some(&pick.target),
                 engine,
                 lang,
-                params.duration_secs,
+                allocation
+                    .as_ref()
+                    .map_or(params.duration_secs, |grant| grant.duration_secs),
                 crate::container::CampaignRunLimits {
-                    iterations: params.max_runs.map_or(3, |maximum| {
-                        maximum.saturating_sub(state.runs_done).min(3) as usize
-                    }),
+                    iterations: allocation.as_ref().map_or_else(
+                        || {
+                            params.max_runs.map_or(3, |maximum| {
+                                maximum.saturating_sub(state.runs_done).min(3) as usize
+                            })
+                        },
+                        |_| 1,
+                    ),
                     time: params.max_total_secs.map(|maximum| {
                         std::time::Duration::from_secs(maximum.saturating_sub(state.secs_done))
                     }),
                 },
-            )
-            .await;
+            ),
+        );
+        let result = match &allocation {
+            Some(grant) => crate::campaign_allocation::with_grant(grant, campaign).await,
+            None => campaign.await,
+        };
         let elapsed = started.elapsed();
         let duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
 
@@ -7212,5 +7284,83 @@ mod tests {
             .contains("budget"));
         // Unbounded campaign never hits a budget skip.
         assert!(budget_skip_reason(&spent, &CampaignParams::default()).is_none());
+    }
+}
+
+#[cfg(all(test, feature = "campaign-allocation"))]
+mod allocation_dispatch_tests {
+    use super::*;
+    #[tokio::test]
+    async fn direct_dispatch_denies_an_unreviewed_project_allocation() {
+        let root = tempfile::tempdir().unwrap();
+        let project = std::fs::canonicalize(root.path()).unwrap();
+        let candidate = crate::campaign_allocation::AllocationCandidate {
+            target: "parser.c::parser".into(),
+            dispatch_target: "parser".into(),
+            engine: "libfuzzer".into(),
+            language: "c".into(),
+            target_id: uuid::Uuid::new_v4(),
+            harness_id: uuid::Uuid::new_v4(),
+            source_sha256: "a".repeat(64),
+        };
+        let store = crate::campaign_allocation::AllocationStore::new(
+            &crate::container::workspace_root().join("allocations-v1"),
+            project.clone(),
+        );
+        store
+            .propose(
+                crate::campaign_allocation::make_proposal(&project, vec![candidate], &[], 1, 10)
+                    .unwrap(),
+            )
+            .unwrap();
+        let state =
+            Arc::new(CampaignStateStore::try_load(root.path().join("campaigns.json")).unwrap());
+        let dispatcher = FuzzCampaignDispatcher {
+            container: ServiceContainer::stubbed(),
+            state: Arc::clone(&state),
+            gate: Arc::new(ConcurrencyGate::new(1)),
+            notifier: Arc::new(Mutex::new(None)),
+            schedules: Arc::new(ScheduleFileStore::new(root.path().join("schedules.json"))),
+            manager: Weak::new(),
+        };
+        let result = dispatcher
+            .dispatch_campaign(
+                CAMPAIGN_KIND,
+                CampaignParams {
+                    project: project.to_string_lossy().into_owned(),
+                    schedule_id: "direct".into(),
+                    duration_secs: 10,
+                    ..CampaignParams::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            result
+                .summary
+                .contains("project allocation is not approved"),
+            "{result:?}"
+        );
+        assert_eq!(state.snapshot("direct").runs_done, 0);
+        assert!(store.inspect().unwrap().unwrap().reservations.is_empty());
+    }
+    #[test]
+    fn single_target_schedule_preserves_selected_engine() {
+        let entries = ["libfuzzer", "honggfuzz"]
+            .map(|engine| SchedulableTarget {
+                target: "parser".into(),
+                engine: engine.into(),
+                language: "c".into(),
+                fit_score: 1.0,
+            })
+            .to_vec();
+        let params = CampaignParams {
+            target: Some("parser".into()),
+            engine: "libfuzzer".into(),
+            ..CampaignParams::default()
+        };
+        let selected = filter_campaign_targets(entries, &params).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].engine, "libfuzzer");
     }
 }

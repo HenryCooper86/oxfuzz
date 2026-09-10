@@ -98,6 +98,52 @@ Invalid, non-finite, negative, incomparable, excessive, or duplicate run inputs
 fail closed. Ties are resolved by stable engine id and run id so identical input
 always yields identical output.
 
+### 4.1 Reviewed scheduled allocations
+
+The `campaign-allocation` feature extends advice with a service-owned project
+allocation. A proposal freezes selected file-qualified targets, engines, exact
+active promoted harness UUIDs and source digests, qualification-owned workspace
+selectors, and retained run facts. The
+latest two successful campaigns with matching comparison keys and binary
+digests support within-target growth: positive growth receives weight two;
+plateau or unavailable comparable evidence receives weight one with a reason.
+Absolute edge counts from different targets are never compared.
+
+Every selected target receives one run before remaining runs are distributed
+in a stable weighted cycle. Each target owns its quota; a frequently firing
+schedule cannot spend another target's minimum. Minimum service means reserved
+opportunities, conditional on a matching enabled schedule actually firing.
+The per-run sandbox fuzz-time cap is floor(total seconds / total runs); any
+remainder remains unallocated. These are requested fuzz seconds, not a bound on
+build, seed generation, triage, or total wall-clock time. This is not a dollar
+budget; the existing coverage-per-cost advisor remains available separately.
+
+The operator approves an exact proposal UUID and SHA-256. Versioned JSON state
+under the configured workspace retains the proposal, review state and every
+reservation. Canonical project identity determines storage ownership. Each
+mutation uses an OS file lock and an atomic synced replacement. Previous revoked
+plans are archived before replacement. Invalid durable state fails closed.
+There is one current plan per project; replacing an approved plan requires
+revocation and a new explicit approval, never an automatic budget reset.
+
+Every scheduled campaign requests admission in its dispatcher. A project with
+no plan keeps existing scheduling behavior. Draft, revoked, exhausted, stale
+harness, or feature-disabled plans deny new admission. Approval limits one
+iteration per grant and the granted duration. A reservation is durable before
+execution and remains charged after failure, cancellation, or process death.
+The executor verifies the exact approved harness, granted duration and
+single-attempt allowance before preparing a userspace run. Existing human promotion, scheduler arming, build-input checks and runtime
+sandboxing still apply. Revocation affects future admissions; issued grants
+remain authorized. Manual runs use their existing independent operator authority.
+
+Presentation lists candidates, requests proposals, displays retained reasons,
+quotas and consumption, approves an exact digest, or revokes a plan. It does not
+compute weights or resource decisions. JSON sidecars reuse the scheduler's
+synced state writer and avoid coupling allocation history to run pruning;
+SQLite transactions remain a valid future storage choice, not a destructive
+migration risk. Client-supplied yield values and silent failed-run refunds are
+rejected because neither provides reproducible resource accounting.
+
 ## 5. Remediation Handoff
 
 `hf-crash` owns a versioned, serializable remediation contract. A draft binds:

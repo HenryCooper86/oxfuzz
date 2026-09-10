@@ -353,6 +353,53 @@ async fn discover_harness_run_triage_end_to_end() {
     assert_eq!(promoted.status, HarnessStatus::Promoted);
     assert_eq!(promoted.target_id, candidate.id);
 
+    #[cfg(feature = "campaign-allocation")]
+    {
+        let mut historical = promoted.clone();
+        historical.id = uuid::Uuid::new_v4();
+        historical.engine = EngineKind::Honggfuzz;
+        historical.smoke_run = None;
+        store.upsert_harness(&historical).await.unwrap();
+        let candidates = container.allocation_candidates(&project).await.unwrap();
+        assert!(!candidates
+            .iter()
+            .any(|item| item.harness_id == historical.id));
+        assert!(candidates.iter().any(|item| item.harness_id == promoted.id));
+        let plan = container
+            .propose_allocation(hf_service::campaign_allocation::AllocationRequest {
+                project: project.to_string_lossy().into_owned(),
+                harness_ids: vec![promoted.id],
+                max_runs: 3,
+                max_total_secs: 31,
+            })
+            .await
+            .unwrap();
+        assert_eq!(plan.proposal.entries[0].max_runs, 3);
+        assert_eq!(plan.proposal.per_run_secs, 10);
+        assert!(plan.reservations.is_empty());
+        assert!(container
+            .review_allocation(&project, plan.proposal.id, "stale-digest", true)
+            .await
+            .is_err());
+        let approved = container
+            .review_allocation(&project, plan.proposal.id, &plan.digest, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            approved.status,
+            hf_service::campaign_allocation::AllocationStatus::Approved
+        );
+        let revoked = container
+            .review_allocation(&project, plan.proposal.id, &plan.digest, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            revoked.status,
+            hf_service::campaign_allocation::AllocationStatus::Revoked
+        );
+        // The following explicitly requested manual run has independent authority.
+    }
+
     // 3. Bounded campaign: the stub engine writes a crash artifact; the run is
     // recorded with its termination and metrics.
     let summary = container

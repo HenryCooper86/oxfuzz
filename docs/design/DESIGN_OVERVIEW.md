@@ -37,7 +37,7 @@ all under human-in-the-loop supervision.
 | Finding proof view | hf-service | `FindingProofCard`, `CrashReviewItem` | finding-proof-card-design.md |
 | Corpus management | hf-corpus + hf-service | bounded corpus I/O plus service-owned inventory, import outcome, and engine-operation availability | corpus-coverage-design.md |
 | Coverage tracking | hf-coverage | `CoverageReport` | corpus-coverage-design.md |
-| Campaign evidence and advice | hf-service + hf-coverage | versioned evidence/advice DTOs | proof-carrying-campaign-intelligence.md |
+| Campaign evidence and advice | hf-service + hf-coverage | versioned evidence/advice DTOs, reviewed project allocation quotas and durable admission | proof-carrying-campaign-intelligence.md |
 | Sandbox / runtime | hf-runtime | `RuntimeAdapter` | runtime-design.md |
 | Tool registry | hf-tools | `Tool`, `ToolRegistry` | ../standards/TOOL_CALL_PROTOCOL.md |
 | Skill evolution | hf-skills | `SkillRegistry` | (none; built-in skills ship in `crates/hf-skills/src/builtins/`) |

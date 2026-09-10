@@ -2592,6 +2592,58 @@ pub async fn export_repro(
     Ok(Some(written.to_string_lossy().to_string()))
 }
 
+/// List exact promoted allocation candidates.
+#[tauri::command]
+pub async fn allocation_candidates(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+) -> Result<Vec<hf_service::campaign_allocation::AllocationCandidate>, String> {
+    state
+        .container
+        .allocation_candidates(std::path::Path::new(&project))
+        .await
+        .map_err(|error| error.to_string())
+}
+/// Inspect current project allocation and consumption.
+#[tauri::command]
+pub async fn allocation_status(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+) -> Result<Option<hf_service::campaign_allocation::AllocationView>, String> {
+    state
+        .container
+        .allocation_status(std::path::Path::new(&project))
+        .await
+        .map_err(|error| error.to_string())
+}
+/// Persist a proposal without approving it.
+#[tauri::command]
+pub async fn allocation_propose(
+    state: tauri::State<'_, crate::state::AppState>,
+    request: hf_service::campaign_allocation::AllocationRequest,
+) -> Result<hf_service::campaign_allocation::AllocationView, String> {
+    state
+        .container
+        .propose_allocation(request)
+        .await
+        .map_err(|error| error.to_string())
+}
+/// Record explicit review of the displayed proposal.
+#[tauri::command]
+pub async fn allocation_review(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    id: uuid::Uuid,
+    digest: String,
+    approve: bool,
+) -> Result<hf_service::campaign_allocation::AllocationView, String> {
+    state
+        .container
+        .review_allocation(std::path::Path::new(&project), id, &digest, approve)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 /// Return a side-effect-free campaign proposal and its supporting evidence.
 #[cfg(feature = "proof-carrying")]
 #[tauri::command]

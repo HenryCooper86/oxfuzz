@@ -7,6 +7,7 @@
 //! (AGENTS.md 2.12).
 
 pub(crate) mod build_context;
+mod campaign_allocation;
 #[cfg(feature = "campaign-health")]
 mod campaign_health;
 #[cfg(feature = "campaign-trust")]
