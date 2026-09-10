@@ -19,8 +19,8 @@ function budget(name, fallback) {
 // another parser long before it fires on our own code growing, which is the
 // thing a budget is supposed to catch.
 const limits = {
-  initial: budget("HF_GUI_INITIAL_JS_BUDGET", 1_200_000),
-  chunk: budget("HF_GUI_MAX_CHUNK_BUDGET", 900_000),
+  initial: budget("HF_GUI_INITIAL_JS_BUDGET", 800_000),
+  chunk: budget("HF_GUI_MAX_CHUNK_BUDGET", 800_000),
   app: budget("HF_GUI_APP_JS_BUDGET", 1_400_000),
   vendor: budget("HF_GUI_VENDOR_JS_BUDGET", 3_700_000),
 };

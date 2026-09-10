@@ -15,14 +15,7 @@ import { DiagnosticsPanel } from "./components/observation/DiagnosticsPanel";
 import { ObservabilityPanel } from "./components/observation/ObservabilityPanel";
 import { InfoPanel } from "./components/observation/InfoPanel";
 import { SetupWizard } from "./components/wizard/SetupWizard";
-import { SettingsView } from "./components/settings/SettingsView";
-import { WorkflowView } from "./views/WorkflowView";
-import { DiscoverView } from "./views/DiscoverView";
-import { HarnessView } from "./views/HarnessView";
-import { RunView } from "./views/RunView";
-import { TriageView } from "./views/TriageView";
 import { DashboardView } from "./views/DashboardView";
-const CorpusView = lazy(() => import("./views/CorpusView").then(module => ({ default: module.CorpusView })));
 import { ProjectsView } from "./views/ProjectsView";
 import { ArtifactsView } from "./views/ArtifactsView";
 import { ReportsView } from "./views/ReportsView";
@@ -45,6 +38,14 @@ import { ProgressPanel } from "./components/ProgressPanel";
 import { isTauriEnvironment, pickFolder } from "./lib";
 import { MessageSquare, Crosshair, Play, Bug, Database, Settings, FileCode, FileText, History, Activity, Gauge, Info, FolderOpen, Boxes, ListChecks, Bot, Puzzle, BookOpen, Zap, LayoutDashboard, ScrollText, ShieldCheck, LifeBuoy, CarFront , GitCompare} from "lucide-react";
 
+const SettingsView = lazy(() => import("./components/settings/SettingsView").then(module => ({ default: module.SettingsView })));
+const WorkflowView = lazy(() => import("./views/WorkflowView").then(module => ({ default: module.WorkflowView })));
+const DiscoverView = lazy(() => import("./views/DiscoverView").then(module => ({ default: module.DiscoverView })));
+const HarnessView = lazy(() => import("./views/HarnessView").then(module => ({ default: module.HarnessView })));
+const RunView = lazy(() => import("./views/RunView").then(module => ({ default: module.RunView })));
+const TriageView = lazy(() => import("./views/TriageView").then(module => ({ default: module.TriageView })));
+const CorpusView = lazy(() => import("./views/CorpusView").then(module => ({ default: module.CorpusView })));
+
 const AuditView = lazy(() =>
   import("./views/AuditView").then(({ AuditView: View }) => ({ default: View })),
 );
@@ -57,16 +58,8 @@ const HelpView = lazy(() =>
   import("./views/HelpView").then(({ HelpView: View }) => ({ default: View })),
 );
 
-// Chat, Runs, and the four Feature views are reached only by navigation and
-// are large enough that Rollup emits a real chunk for each, so they are kept
-// out of the entry chunk. Dashboard is deliberately eager: it is the startup
-// view, and loading it lazily would show a fallback on every launch.
-//
-// Audit now also loads on navigation, including its policy-decision list.
-// Other navigation-only views remain static. Earlier splitting experiments
-// made the entry chunk larger: their own code is small
-// once the shared components they use -- which the entry chunk already carries
-// -- are excluded, so the lazy wrapper cost more than the split saved.
+// Dashboard is eager for startup. Workflow and its directly accessible stages
+// must all be deferred: an eager Workflow import would also load every stage.
 const ChatView = lazy(() =>
   import("./views/ChatView").then(({ ChatView: View }) => ({ default: View })),
 );
@@ -171,6 +164,13 @@ function AppInner() {
         <CampaignCrashToaster />
         <div className="app-root flex h-full w-full bg-surface-primary text-text-primary">
         {activeView === "settings" ? (
+          <ErrorBoundary recoveryAction={{ label: t("settings.back"), onClick: () => setActiveView(settingsReturnView) }}>
+          <Suspense fallback={
+            <div className="flex-1 p-4">
+              <button className="text-sm mb-4" onClick={() => setActiveView(settingsReturnView)}>{t("settings.back")}</button>
+              <LoadingState />
+            </div>
+          }>
           <SettingsView
             onBack={() => setActiveView(settingsReturnView)}
             onRunWizard={() => {
@@ -178,6 +178,8 @@ function AppInner() {
               setSetupDone(false);
             }}
           />
+          </Suspense>
+          </ErrorBoundary>
         ) : (
           <>
           {sidebarVisible && <Sidebar activeView={activeView} onNavigate={navigate} onNewTarget={startNewTarget} onSelectTarget={selectTarget} />}
@@ -202,6 +204,7 @@ function AppInner() {
               <main className="flex-1 min-w-0 overflow-hidden flex flex-col">
                 <RecoveryBanner />
                 <ErrorBoundary resetKey={activeView}>
+                <Suspense fallback={<LoadingState />}>
                 {activeView === "chat" && (
                   <Suspense fallback={<LoadingState />}>
                     <ChatView key={chatResetKey} />
@@ -319,6 +322,7 @@ function AppInner() {
                   </ViewCanvas>
                 )}
                 {activeView === "defectdojo" && <DefectDojoView onBack={() => navigate("dashboard")} />}
+                </Suspense>
                 </ErrorBoundary>
               </main>
 

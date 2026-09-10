@@ -103,3 +103,12 @@ docker logs -f oxfuzz-gitlab-runner
 ```
 
 Then push a branch and confirm the pipeline leaves "pending" and runs.
+
+### Frontend JavaScript budgets
+
+Both desktop and HTTP production builds enforce an 800,000-byte initial
+JavaScript budget, including transitive static imports, and an 800,000-byte
+limit for each chunk. The total app and vendor limits remain 1,400,000 and
+3,700,000 bytes. Navigation-only workflow stages and Settings load on demand;
+Dashboard remains eager. These limits guard the built output rather than source
+file size.

@@ -600,6 +600,22 @@ and REST handlers are typed transports only; neither constructs a registry or
 chooses a path. A missing selected agent is a validation error rather than a
 silent fallback, while an omitted agent id intentionally selects the default.
 
+### Frontend view loading
+
+Desktop and HTTP share the same React navigation and service DTOs. Dashboard
+remains part of startup. Settings, Workflow, and the individual Discover,
+Harness, Run, and Triage views load when first selected. Workflow imports the
+same stage modules, so their code is shared between guided and direct navigation.
+The shared project, target, pipeline, and run providers stay mounted above
+navigation while a view loads.
+
+Loading replaces only the view content; workspace navigation stays available.
+Full-window Settings offers a return action both while loading and after a
+module-load failure, preserving the originating view. Existing per-view error
+handling contains failed imports. Build checks measure the complete static
+import graph, not just the entry file, so moving bytes to another eagerly
+loaded chunk cannot satisfy the startup budget.
+
 ## 6. Tests
 
 - Integration: end-to-end loop with mocked LLM and mocked engine.
