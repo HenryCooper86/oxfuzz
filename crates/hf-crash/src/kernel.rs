@@ -7,7 +7,7 @@
 //! through [`crate::classify()`] yields no frames and an empty signature, which
 //! makes dedup keep every duplicate, so this module parses it on its own terms.
 //!
-//! Design: `.claude/plans/syzkaller-kernel-crash-triage-20260828.md`.
+//! Design: `docs/design/crash-triage-design.md`.
 
 use sha2::{Digest, Sha256};
 

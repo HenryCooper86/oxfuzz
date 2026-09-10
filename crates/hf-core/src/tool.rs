@@ -197,7 +197,7 @@ pub enum ToolError {
 /// before dispatch, in `hf_agent::AgentBackend::approve_tool` for an agent's
 /// tool call and in `hf-guardrails` for a service action, and isolation happens
 /// in the `RuntimeAdapter`. A hook on this trait would sit past both and could
-/// be bypassed by any direct caller (AGENTS.md 2.19), so there is none.
+/// be bypassed by any direct caller (Engineering Protocol 2.19), so there is none.
 #[async_trait]
 pub trait Tool: Send + Sync {
     /// Execute the tool with validated input.

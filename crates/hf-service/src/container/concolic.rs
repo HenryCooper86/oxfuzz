@@ -1,6 +1,6 @@
 //! The sandboxed concolic enrichment pass.
 //!
-//! Every step goes through `hf-runtime` (AGENTS.md 2.12): an instrumented build
+//! Every step goes through `hf-runtime` (Engineering Protocol 2.12): an instrumented build
 //! of an untrusted project is untrusted code.
 
 use std::collections::{HashMap, HashSet};
@@ -312,7 +312,7 @@ impl ServiceContainer {
         // on every undefined reference the harness declares `extern` and
         // never defines itself. `list_c_files` is the same recursive,
         // symlink-refusing, shell-quoting walk the ordinary harness compile
-        // uses (AGENTS.md 2.18): the driver and harness are excluded here,
+        // uses (Engineering Protocol 2.18): the driver and harness are excluded here,
         // where the ordinary compile excludes only the harness.
         let extra_sources =
             hf_harness::list_c_files(workspace, "/work", &["harness.c", "symcc_driver.c"]);

@@ -11,7 +11,7 @@ budget, auto-reporting and notifying when it finds crashes.
 
 A scheduled campaign only ever runs a **human-promoted** harness. `run_campaign`
 (`hf-service/src/container.rs`) refuses anything else -- generation, smoke, and
-promotion are deliberately human steps (AGENTS.md 2.5/2.12). Portfolio campaigns
+promotion are deliberately human steps (ENGINEERING_PROTOCOL.md 2.5/2.12). Portfolio campaigns
 do not weaken this: they only ever select from `schedulable_targets`, which
 returns promoted harnesses. "Choose the folder and target and run" means *choose
 among what a human already approved*, not generate-and-run.
@@ -212,7 +212,7 @@ and `debounce_secs` narrow and collapse fires. Creation goes through
 `parse_trigger("event", "<type>")`; unknown event types are rejected so a typo
 can never arm a schedule that can never fire.
 
-## Layering (AGENTS.md 2.9 -- all logic in hf-service)
+## Layering (ENGINEERING_PROTOCOL.md 2.9 -- all logic in hf-service)
 
 | Layer | Location |
 |-------|----------|

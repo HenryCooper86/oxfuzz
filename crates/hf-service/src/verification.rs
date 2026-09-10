@@ -1,7 +1,6 @@
 //! Deterministic self-verification of harness-generation outcomes.
 //!
-//! Implements the cheapest tier of lesson L2 (see
-//! `docs/design/grok-build-lessons-20260719.md`): before a compiled, "passed"
+//! Before a compiled, "passed"
 //! harness flows downstream, inspect the concrete smoke-run signals for a hollow
 //! pass -- a harness that builds and reports success yet never actually drives
 //! the target (near-zero execs). Pure and deterministic: no LLM, sandbox, or
@@ -117,7 +116,7 @@ pub fn assess_harness_smoke(summary: &SmokeRunSummary, status: HarnessStatus) ->
 /// What the orchestrator should do next given a harness smoke verdict. Purely
 /// advisory -- it is fed back as the harness tool result so the agent refines a
 /// hollow pass instead of moving to promote it. It enforces nothing and
-/// auto-runs nothing: promotion stays an explicit human action (AGENTS.md 2.12),
+/// auto-runs nothing: promotion stays an explicit human action (Engineering Protocol 2.12),
 /// and a refine, if the agent chooses one, only ever PROPOSES a new revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HarnessNextStep {
@@ -164,7 +163,7 @@ pub enum Confidence {
 /// An LLM verifier's structured judgment of a triaged crash: whether it looks
 /// like a deterministically-reproducing, genuine target bug versus a harness or
 /// setup artifact. Advisory only -- it informs the human reviewer and never
-/// closes, files, or reclassifies a crash on its own (AGENTS.md 2.12).
+/// closes, files, or reclassifies a crash on its own (Engineering Protocol 2.12).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CrashVerdict {
     pub reproduces_deterministically: bool,

@@ -118,7 +118,7 @@ pub struct RelatedContext {
 }
 
 /// Hard character budget for the related-context section injected into a
-/// prompt. AGENTS.md 2.4 requires injected knowledge to stay token-bounded;
+/// prompt. Engineering Protocol 2.4 requires injected knowledge to stay token-bounded;
 /// 2000 chars is roughly 500 tokens.
 pub const MAX_RELATED_CONTEXT_CHARS: usize = 2000;
 
@@ -189,7 +189,7 @@ pub struct AcceptedExample {
 
 /// Characters of one accepted example's source shown to the model. An accepted
 /// harness is the strongest conditioning signal the prompt carries, but a whole
-/// oversized harness crowds out the target's own context (AGENTS.md 2.4).
+/// oversized harness crowds out the target's own context (Engineering Protocol 2.4).
 pub const MAX_ACCEPTED_EXAMPLE_CHARS: usize = 6000;
 
 /// Render previously accepted harnesses as a prompt section.
@@ -246,7 +246,7 @@ pub fn render_harness_prompt_with_examples(
 }
 
 /// Include directories listed in a prompt. Past this the list stops helping the
-/// model choose a header and starts consuming the budget (AGENTS.md 2.4).
+/// model choose a header and starts consuming the budget (Engineering Protocol 2.4).
 const MAX_PROMPT_INCLUDE_DIRS: usize = 20;
 
 /// Preprocessor defines listed in a prompt, bounded for the same reason.

@@ -612,9 +612,7 @@ The implementation updates:
 - `docs/design/portfolio-campaigns.md`;
 - `docs/design/service-orchestration-design.md`;
 - `docs/standards/DATABASE_SCHEMA.md`;
-- CLI and REST documentation where schedule commands are listed; and
-- the July 19 grok-build lessons report with a dated follow-up rather than
-  rewriting the original research baseline.
+- CLI and REST documentation where schedule commands are listed.
 
 ## 17. Security and Safety
 

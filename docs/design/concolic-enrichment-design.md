@@ -42,7 +42,7 @@ not a new kind of thing on that surface.
 
 ## 4. The Operation
 
-Four steps, each through `hf-runtime` (AGENTS.md 2.12). Nothing runs on the
+Four steps, each through `hf-runtime` (ENGINEERING_PROTOCOL.md 2.12). Nothing runs on the
 host.
 
 1. **Build.** Compile the target's promoted harness and the staged target with
@@ -73,7 +73,7 @@ host.
 
 Step 4 is deliberately the existing path rather than a parallel store. A solved
 input is a corpus input; giving it a second home would mean every consumer of
-the corpus had to learn about concolic enrichment (AGENTS.md 2.18).
+the corpus had to learn about concolic enrichment (ENGINEERING_PROTOCOL.md 2.18).
 
 The ordinary in-workspace corpus bookkeeping is authorized as `CorpusOp`.
 Before the instrumented build or any target execution, the service separately
@@ -97,7 +97,7 @@ Four validated configuration fields bound it, under a `concolic` section:
 - **`max_solved_inputs`** -- solved inputs retained from one pass.
 - **`total_timeout_secs`** -- wall-clock for the whole pass.
 
-These are configuration and not constants (AGENTS.md 2.15). A deployment
+These are configuration and not constants (ENGINEERING_PROTOCOL.md 2.15). A deployment
 enriching a small binary parser and one enriching a protocol stack do not share
 a per-input timeout, and a `DEFAULT_*` constant would make that a code change.
 Validation rejects a zero in any field: a zero bound is not "unlimited" here,
@@ -186,7 +186,7 @@ absent capability when guessed wrong.
   `RuntimeAdapter` is `run_command`, one bounded command per invocation, with no
   `spawn`. Two cooperating long-lived processes sharing an output directory
   would either need that trait extended or a wrapper script running both inside
-  one invocation, and in both cases the per-process resource limits AGENTS.md
+  one invocation, and in both cases the per-process resource limits ENGINEERING_PROTOCOL.md
   2.12 relies on stop describing what actually runs. Recorded here as a possible
   later phase so this design does not have to be redone if that model is added.
 - **The `simple` runtime backend** -- section 8. It was chosen in an earlier
@@ -195,7 +195,7 @@ absent capability when guessed wrong.
   inputs at all. The assumption was corrected by building both and running
   them, not by reading about them.
 - **Running SymCC on the host** -- every build and every execution of an
-  instrumented target goes through `hf-runtime` (AGENTS.md 2.12). An
+  instrumented target goes through `hf-runtime` (ENGINEERING_PROTOCOL.md 2.12). An
   instrumented build of an untrusted project is untrusted code.
 - **Unbounded exploration** -- section 5.
 - **A separate store for solved inputs** -- section 4.

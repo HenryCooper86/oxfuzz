@@ -12,7 +12,7 @@ the two cannot drift from the single source of truth.
 `scripts/tests/gates.sh` is authoritative. Run it locally before pushing:
 
 ```bash
-scripts/tests/gates.sh            # every gate, in AGENTS.md 4.5 order
+scripts/tests/gates.sh            # every gate, in ENGINEERING_PROTOCOL.md 4.5 order
 scripts/tests/gates.sh clippy test  # only the named gates
 ```
 

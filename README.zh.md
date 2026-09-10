@@ -120,7 +120,7 @@ harness 和语料库。其他示例分别覆盖其他缺陷类别；见 **[examp
 
 **项目**
 
-- [贡献指南](CONTRIBUTING.md) &middot; [安全策略](SECURITY.md) &middot; [愿景](VISION.md) &middot; [工程协议](AGENTS.md)
+- [贡献指南](CONTRIBUTING.md) &middot; [安全策略](SECURITY.md) &middot; [愿景](VISION.md) &middot; [工程协议](docs/standards/ENGINEERING_PROTOCOL.md)
 
 ---
 

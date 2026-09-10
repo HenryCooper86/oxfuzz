@@ -7,7 +7,7 @@ import { useI18n } from "../i18nContext";
 // A persistent, actionable banner shown in the Docker-dependent views (Harness,
 // Run) when the sandbox can't execute -- so a first-run user learns *why* a
 // build/run is blocked and what to do, instead of hitting a silent gate. Every
-// harness build and fuzz run goes through the sandbox (AGENTS.md 2.12), so with
+// harness build and fuzz run goes through the sandbox (Engineering Protocol 2.12), so with
 // Docker down or the image missing nothing can proceed.
 export function SandboxBanner() {
   const { t } = useI18n();

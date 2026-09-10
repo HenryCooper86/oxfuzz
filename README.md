@@ -143,7 +143,7 @@ New here? Start with the **[Getting Started guide](docs/guides/GETTING_STARTED.m
 
 **Project**
 
-- [Contributing](CONTRIBUTING.md) &middot; [Security policy](SECURITY.md) &middot; [Vision](VISION.md) &middot; [Engineering protocol](AGENTS.md)
+- [Contributing](CONTRIBUTING.md) &middot; [Security policy](SECURITY.md) &middot; [Vision](VISION.md) &middot; [Engineering protocol](docs/standards/ENGINEERING_PROTOCOL.md)
 
 ---
 

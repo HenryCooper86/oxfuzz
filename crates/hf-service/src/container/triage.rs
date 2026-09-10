@@ -804,7 +804,7 @@ impl ServiceContainer {
     /// Best-effort and advisory: with no provider configured it returns `None`
     /// for every crash (no fabricated opinion), it is bounded to a fixed number
     /// of model calls per pass, and it never reclassifies, files, or closes a
-    /// crash -- the verdict only informs a human reviewer (AGENTS.md 2.12).
+    /// crash -- the verdict only informs a human reviewer (Engineering Protocol 2.12).
     /// Verify a single crash on demand (L2 increment 4c): a thin wrapper over
     /// [`Self::verify_crashes`] so a presentation layer can offer a per-crash
     /// "verify" action without running the model on every crash in a triage scan.

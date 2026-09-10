@@ -8,7 +8,7 @@
 //! I/O, owns no parser, and never learns what a target candidate is; joining
 //! findings to candidates and scoring them belongs to `hf-discovery`.
 //!
-//! See `docs/superpowers/specs/2026-08-21-native-static-analysis-design.md`.
+//! See `docs/design/2026-08-21-native-static-analysis-design.md`.
 
 mod catalog;
 mod context;

@@ -611,7 +611,7 @@ impl ServiceContainer {
         // operation it is. This sits in the executor rather than the public
         // wrapper: `_with_context` is what actually performs the copy, and a
         // guard the direct caller can step around is not a guard
-        // (AGENTS.md 2.19).
+        // (Engineering Protocol 2.19).
         self.authorize_recorded(
             hf_guardrails::Action::CorpusOp,
             "automotive_state_promote",
@@ -1280,7 +1280,7 @@ fn result_state_signatures(result: &AutomotiveResult) -> &[StateSignature] {
 /// The single home for "which outputs does this result own": both the
 /// promotable-artifact listing and the by-id lookup promotion validates with
 /// read it, so a caller can never be offered a selector that validation would
-/// then reject (AGENTS.md 2.18).
+/// then reject (Engineering Protocol 2.18).
 fn result_output_artifacts(result: &AutomotiveResult) -> Vec<&ArtifactRef> {
     match result {
         AutomotiveResult::CaptureAnalysis(result) => vec![&result.transcript],
@@ -4848,7 +4848,7 @@ mod tests {
         // persists a row, so it is a corpus filesystem operation and passes the
         // same guardrail every other one does. The denial is asserted through
         // the executor that actually performs the copy, not a wrapper a direct
-        // caller could bypass (AGENTS.md 2.19).
+        // caller could bypass (Engineering Protocol 2.19).
         use hf_guardrails::{DenyAll, GuardrailPolicy, Guardrails, RiskTier};
 
         let temp = tempfile::tempdir().unwrap();

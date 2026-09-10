@@ -69,7 +69,7 @@ runs tests, lints, or dependency checks. `scripts/tests/gates.sh` defines the
 full gate sequence but only runs when a developer remembers to invoke it. The
 README refers to "GitLab CI jobs for locked all-feature coverage"; no
 `.gitlab-ci.yml` exists in the repository. Every quality guarantee in
-`AGENTS.md` currently depends on manual discipline.
+[Engineering Protocol](../standards/ENGINEERING_PROTOCOL.md) currently depends on manual discipline.
 
 The repository is being prepared for public release. An open repository with no
 visible gate invites contributions that cannot be evaluated mechanically, and
@@ -89,7 +89,7 @@ passing, and Linux runners are free for public repositories.
   triage, corpus operations, chat, reporting, and integrations;
 - 16 colocated `#[cfg(test)]` modules.
 
-`AGENTS.md` requires units that have one clear purpose and can be understood
+[Engineering Protocol](../standards/ENGINEERING_PROTOCOL.md) requires units that have one clear purpose and can be understood
 and tested independently. This file satisfies neither. It also concentrates
 merge conflict risk: the next three projects all add service methods.
 
@@ -189,7 +189,7 @@ does not queue redundant work.
 
 Three jobs run in parallel on `ubuntu-latest`.
 
-**`rust`** runs the five Rust gates in the order `AGENTS.md` section 4.5
+**`rust`** runs the five Rust gates in the order [Engineering Protocol](../standards/ENGINEERING_PROTOCOL.md) section 4.5
 mandates: format check, Clippy with warnings denied, workspace check, workspace
 test, and documentation build. The toolchain comes from `rust-toolchain.toml`;
 `Swatinem/rust-cache` absorbs the cold build cost. The `script-tests` gate rides
@@ -272,7 +272,7 @@ and the `HF_WORKSPACE_DIR` override, the ownership manifest with its adoption
 rules, the advisory lock file, cleanup-root validation, protected path
 enumeration, `workspace_dir`, `project_workspace_dir`, `document_staging_dir`,
 `run_output_relative`, and the symlink-refusing `resolve_workspace_directory`.
-This is the `AGENTS.md` section 2.12 guarantee that untrusted input never
+This is the [Engineering Protocol](../standards/ENGINEERING_PROTOCOL.md) section 2.12 guarantee that untrusted input never
 touches the host filesystem outside the workspace.
 
 **`container/staging.rs`** — approval-to-execution integrity. `RunArtifacts`,
@@ -493,7 +493,7 @@ alone goes red while the others still report.
    `GuardrailDecisionRecord` field, in both desktop and browser transports.
 10. `TODO.md` and `CONTRIBUTING.md` contain no statement contradicted by the
     codebase.
-11. The full gate sequence passes in the order `AGENTS.md` section 4.5
+11. The full gate sequence passes in the order [Engineering Protocol](../standards/ENGINEERING_PROTOCOL.md) section 4.5
     mandates.
 
 ## 12. Rejected Alternatives

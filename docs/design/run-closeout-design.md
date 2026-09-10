@@ -115,7 +115,7 @@ target leases.
   prevent disposition derivation, which does not consume it.
 - **Running closeout automatically at run end** -- closeout performs sandboxed
   work, and starting sandboxed work without an approval surface contradicts
-  AGENTS.md 2.12. Closeout is offered when a run ends; it is invoked
+  ENGINEERING_PROTOCOL.md 2.12. Closeout is offered when a run ends; it is invoked
   deliberately.
 - **Adding new analysis inside closeout** -- closeout composes; any new analysis
   is its own subsystem with its own design.

@@ -526,7 +526,7 @@ fn search_snapshot(index: &ProjectIndex, query: &str, limit: usize) -> Vec<Knowl
 }
 
 /// Number of related knowledge chunks injected into a harness/triage prompt.
-/// Kept small (AGENTS.md 2.4): the prompt already carries the target details,
+/// Kept small (Engineering Protocol 2.4): the prompt already carries the target details,
 /// so this is supporting usage context, not a code dump. The section renderer
 /// (`hf_prompt::render_related_context_section`) applies the hard char budget.
 const PROMPT_CONTEXT_TOP_K: usize = 4;

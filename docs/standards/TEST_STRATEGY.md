@@ -50,7 +50,7 @@ Run in order before declaring a task done:
 12. `npm --prefix crates/hf-gui run lint`
 
 All `cargo test` invocations use the repository error-output filter documented
-in `AGENTS.md`. The workspace test suite includes an explicit sandbox and
+in [Engineering Protocol](ENGINEERING_PROTOCOL.md). The workspace test suite includes an explicit sandbox and
 harness-qualification contract test
 (`hf-service/tests/harness_qualification.rs`); it uses mocked adapters and
 never executes a generated harness on the host. Both GitHub Actions and

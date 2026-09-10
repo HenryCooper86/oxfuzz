@@ -153,7 +153,7 @@ runner appears in the project's CI settings. The helper is invoked by the user
   `config.yml` routing security reports to `SECURITY.md` (not public issues).
 - **`.github/PULL_REQUEST_TEMPLATE.md`.** GitHub twin of
   `.gitlab/merge_request_templates/Default.md`, keeping the same architecture,
-  safety, verification, and documentation checklist aligned to `AGENTS.md`.
+  safety, verification, and documentation checklist aligned to [Engineering Protocol](../standards/ENGINEERING_PROTOCOL.md).
 
 ### 4.7 Documentation reverts
 

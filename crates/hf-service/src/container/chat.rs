@@ -155,7 +155,7 @@ impl ServiceContainer {
 
     /// Create a new top-level chat session, returning its id, or `None` when no
     /// database is configured. Shared by every presentation layer so session
-    /// creation behaves identically (AGENTS.md 2.9).
+    /// creation behaves identically (Engineering Protocol 2.9).
     pub async fn create_chat_session(
         &self,
         title: Option<String>,

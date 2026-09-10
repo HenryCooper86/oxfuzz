@@ -291,7 +291,7 @@ class RetiredEngineReferenceTests(unittest.TestCase):
             pathlib.Path("crates/hf-storage/migrations/0024_retired_engine_records.sql"),
             pathlib.Path("crates/hf-storage/tests/retired_engine_migration.rs"),
             pathlib.Path(
-                "docs/superpowers/specs/2026-08-11-clusterfuzzlite-removal-design.md"
+                "docs/design/2026-08-11-clusterfuzzlite-removal-design.md"
             ),
             pathlib.Path("crates/hf-gui/src/lib/retiredEngine.ts"),
             pathlib.Path("scripts/check_retired_engine_references.py"),

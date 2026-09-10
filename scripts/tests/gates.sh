@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # oxfuzz -- quality gates.
 #
-#   scripts/tests/gates.sh                 # every gate, in AGENTS.md 4.5 order
+#   scripts/tests/gates.sh                 # every gate, in Engineering Protocol 4.5 order
 #   scripts/tests/gates.sh clippy test     # only the named gates
 #
 # This file is the single definition of what each gate means. Continuous
@@ -55,7 +55,7 @@ gate_fmt() {
 
 gate_clippy() {
   # `--fix` is deliberately absent: it mutates the working tree, which is
-  # correct locally and wrong as a gate. AGENTS.md 4.5 keeps the fixing pass as
+  # correct locally and wrong as a gate. Engineering Protocol 4.5 keeps the fixing pass as
   # a developer step; this is the verifying pass.
   # --all-targets extends linting to test/example/bench code, which a plain
   # `cargo clippy --workspace` never compiles and therefore never lints.

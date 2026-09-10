@@ -491,7 +491,7 @@ to `active implementation` when the first production task lands.
 
 ### Completion gates
 
-Run the repository quality gates in the order required by `AGENTS.md` and
+Run the repository quality gates in the order required by [Engineering Protocol](../standards/ENGINEERING_PROTOCOL.md) and
 `docs/standards/TEST_STRATEGY.md`. All `cargo test` output uses the repository's
 error-output filter. No test executes a generated harness or fuzzer on the
 host; runtime and provider behavior use controlled adapters.

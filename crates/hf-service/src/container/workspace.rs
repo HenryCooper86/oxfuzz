@@ -2,7 +2,7 @@
 //!
 //! Every path that a project name, target name, or run id contributes to is
 //! resolved here. The module exists so that boundary has one name and one test
-//! surface: `AGENTS.md` 2.12 requires untrusted inputs never to touch the host
+//! surface: `Engineering Protocol` 2.12 requires untrusted inputs never to touch the host
 //! filesystem outside the workspace, and that guarantee is only as good as the
 //! resolution functions below.
 
@@ -489,7 +489,7 @@ pub(super) fn clear_managed_workspace_root(root: &Path) -> Result<(), Classified
 /// sanitised before use: only `Normal` path components are kept, dropping any
 /// root, prefix, or `..` segment. This guarantees the result always stays
 /// within the per-project base directory, satisfying the sandbox boundary in
-/// AGENTS.md 2.12 (untrusted inputs never touch the host FS outside the
+/// Engineering Protocol 2.12 (untrusted inputs never touch the host FS outside the
 /// workspace).
 #[must_use]
 pub fn workspace_dir(project: &Path, target: &str) -> PathBuf {

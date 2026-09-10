@@ -326,7 +326,7 @@ async fn permissive_allows_everything() {
 }
 
 // ---------------------------------------------------------------------------
-// Monotonic guards (study item 1.4)
+// Monotonic guards
 //
 // The property under test is that no extension point can re-permit what the
 // safety layer denied. Every assertion goes through `authorize`, the operation
@@ -432,7 +432,7 @@ async fn an_advisor_cannot_loosen_a_policy_denial() {
 }
 
 // ---------------------------------------------------------------------------
-// Disarm on recovery (study item 1.5)
+// Disarm on recovery
 // ---------------------------------------------------------------------------
 
 fn armed_guardrails(state: &hf_core::armed::ArmedState) -> Guardrails {

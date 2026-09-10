@@ -2,9 +2,9 @@
 //!
 //! Mirrors the `y-service::ServiceContainer` pattern: the GUI, CLI, and
 //! web API all construct one container and call service methods through it.
-//! This keeps business logic out of presentation crates (AGENTS.md 2.9) and
+//! This keeps business logic out of presentation crates (Engineering Protocol 2.9) and
 //! ensures every build / fuzz run goes through `hf-runtime` sandboxing
-//! (AGENTS.md 2.12).
+//! (Engineering Protocol 2.12).
 
 pub(crate) mod build_context;
 mod campaign_allocation;
@@ -778,7 +778,7 @@ impl ServiceContainer {
     /// record is uniform: the policy outcome, and the approval-gate outcome
     /// when the gate was consulted.
     ///
-    /// Recording is best-effort (AGENTS.md 2.5): a storage failure is logged
+    /// Recording is best-effort (Engineering Protocol 2.5): a storage failure is logged
     /// and never changes the authorization outcome, which stays exactly what
     /// [`Guardrails::authorize`] returns.
     pub(crate) async fn authorize_recorded(
@@ -2010,7 +2010,7 @@ pub struct EffectiveAutoRevert {
 /// Whether an operation may, must, or must not use an LLM.
 ///
 /// Kept in the service rather than in a CLI flag because it decides which
-/// generator runs, which is business logic (AGENTS.md 2.9). It exists because
+/// generator runs, which is business logic (Engineering Protocol 2.9). It exists because
 /// picking the generator from whether a key happens to be exported is not a
 /// decision anyone made: the model and the template produce materially
 /// different harnesses, and a caller who wanted one should not silently receive
@@ -2451,7 +2451,7 @@ fn generate_harness_body(symbol: &str, signature: Option<&str>) -> String {
 /// feedback loop from `docs/design/corpus-coverage-design.md` §4: we detect
 /// stagnation and *propose* iterating rather than regenerating a harness
 /// autonomously, which would bypass the human-in-the-loop review that harness
-/// execution requires (AGENTS.md §2.12).
+/// execution requires (Engineering Protocol §2.12).
 struct CoverageFeedback<'a> {
     /// The run the streamed edge readings are measured for.
     run_id: Uuid,

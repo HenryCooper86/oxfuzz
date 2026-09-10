@@ -2,8 +2,8 @@
 
 Thank you for helping improve oxfuzz. This repository treats generated
 code, fuzzing engines, crash inputs, and external targets as untrusted. Read
-`AGENTS.md` before opening a change; its engineering and safety protocol is
-mandatory for the entire repository.
+[the engineering protocol](docs/standards/ENGINEERING_PROTOCOL.md) before
+opening a change; its requirements apply to the entire repository.
 
 ## Before you change code
 

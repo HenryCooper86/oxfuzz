@@ -76,7 +76,7 @@ and token files are owner-only, and the password is sent to the local token API
 over standard input rather than exposed in process arguments or terminal
 output.
 
-## Layering (AGENTS.md 2.9 -- all logic in hf-service)
+## Layering (ENGINEERING_PROTOCOL.md 2.9 -- all logic in hf-service)
 
 | Layer | Location | Responsibility |
 |-------|----------|----------------|

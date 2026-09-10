@@ -23,7 +23,7 @@ identity class, and artifact checksums in the release evidence.
 
 ## 2. Run source quality gates
 
-Rust development gates must run in the order defined by `AGENTS.md`:
+Rust development gates must run in the order defined by [Engineering Protocol](../standards/ENGINEERING_PROTOCOL.md):
 
 ```bash
 cargo fmt --all

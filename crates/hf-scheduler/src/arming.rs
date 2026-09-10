@@ -11,7 +11,7 @@
 //! producer needs. The state lives in `hf-core`, which has no async runtime, so
 //! the notification half belongs here rather than there.
 //!
-//! See `docs/design/deepseek-harness-study.md` item 1.5.
+//! See `docs/design/portfolio-campaigns.md`.
 
 use std::sync::Arc;
 

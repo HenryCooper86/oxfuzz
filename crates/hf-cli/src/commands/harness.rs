@@ -405,7 +405,7 @@ pub(crate) async fn cmd_corpus(
 /// Print the entry points no retained measurement has covered.
 ///
 /// Rendering only: the ranking, the attempt history, and the unavailable
-/// reason all arrive decided by `hf-service` (AGENTS.md 2.9).
+/// reason all arrive decided by `hf-service` (Engineering Protocol 2.9).
 #[cfg(feature = "unreached-surface")]
 pub(crate) async fn cmd_unreached(project: PathBuf, lang: &str) -> anyhow::Result<()> {
     use hf_service::SurfaceMeasurement;
@@ -442,7 +442,7 @@ pub(crate) async fn cmd_unreached(project: PathBuf, lang: &str) -> anyhow::Resul
 }
 
 /// Rendering only: the attribution tiers and ordering arrive decided by
-/// `hf-service` (AGENTS.md 2.9).
+/// `hf-service` (Engineering Protocol 2.9).
 #[cfg(feature = "unreached-surface")]
 pub(crate) async fn cmd_attribution(project: PathBuf, lang: &str) -> anyhow::Result<()> {
     use hf_service::{AttributionTier, SurfaceMeasurement};

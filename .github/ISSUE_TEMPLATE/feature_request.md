@@ -25,7 +25,7 @@ Other approaches you weighed and why they fall short.
 
 - [ ] This does not weaken sandboxing, guardrails, or human-in-the-loop approval.
 - [ ] This fits the inward-pointing layering (business logic in `hf-service`;
-      presentation layers stay thin), as described in `CLAUDE.md` / `AGENTS.md`.
+      presentation layers stay thin), as described in [the engineering protocol](../../docs/standards/ENGINEERING_PROTOCOL.md).
 
 ## Additional context
 

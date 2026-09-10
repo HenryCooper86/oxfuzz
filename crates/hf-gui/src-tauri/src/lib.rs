@@ -1,8 +1,8 @@
 //! `oxfuzz` GUI -- Tauri v2 desktop app.
 //!
 //! Thin Tauri command wrappers around `hf-service::ServiceContainer`. No
-//! domain logic here (AGENTS.md 2.9). All builds and fuzz runs go through
-//! `hf-runtime` sandboxing (AGENTS.md 2.12).
+//! domain logic here (Engineering Protocol 2.9). All builds and fuzz runs go through
+//! `hf-runtime` sandboxing (Engineering Protocol 2.12).
 
 mod closeout_commands;
 mod commands;

@@ -50,7 +50,7 @@ pub struct LintFinding {
     pub line: u32,
 }
 
-/// Language sets reused across rules, one home per meaning (AGENTS.md 2.18).
+/// Language sets reused across rules, one home per meaning (Engineering Protocol 2.18).
 const LANGS_C_CPP: &[TargetLanguage] = &[TargetLanguage::C, TargetLanguage::Cpp];
 const LANGS_C_CPP_RUST: &[TargetLanguage] =
     &[TargetLanguage::C, TargetLanguage::Cpp, TargetLanguage::Rust];
@@ -218,7 +218,7 @@ pub struct HarnessRuleSummary {
 ///
 /// Exposed so an authoring packet can state the constraints up front instead of
 /// letting an author discover them as compile failures, and so the packet
-/// cannot drift from what the lint actually checks (AGENTS.md 2.18).
+/// cannot drift from what the lint actually checks (Engineering Protocol 2.18).
 #[must_use]
 pub fn harness_rules() -> Vec<HarnessRuleSummary> {
     RULES

@@ -1,6 +1,6 @@
 //! oxfuzz CLI entry point.
 //!
-//! The CLI is a thin presentation layer (AGENTS.md 2.9): every command builds
+//! The CLI is a thin presentation layer (Engineering Protocol 2.9): every command builds
 //! the canonical [`hf_service::ServiceContainer`] via `bootstrap()` and calls
 //! service methods through it. No domain logic lives here.
 

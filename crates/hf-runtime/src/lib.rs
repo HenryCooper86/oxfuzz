@@ -3,7 +3,7 @@
 //! Implements `RuntimeAdapter` from `hf-core` with a production
 //! `DockerRuntime`; `StubRuntime` is a non-executing test/presentation double.
 //!
-//! See `docs/design/runtime-design.md` and `AGENTS.md` section 2.12
+//! See `docs/design/runtime-design.md` and `Engineering Protocol` section 2.12
 //! (Fuzzing Safety First).
 
 pub mod adapter;

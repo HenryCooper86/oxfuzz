@@ -25,7 +25,7 @@
 //! optimization, and turning a successful tool call into an error because its
 //! transcript could not be written would be failing worse than not spilling.
 //!
-//! See `docs/design/deepseek-harness-study.md` item 1.3.
+//! See `docs/standards/DEFENSIVE_PATTERNS.md` section 6.
 
 use std::fs;
 use std::io;

@@ -9,10 +9,10 @@
 //!
 //! Every value here is derived from the proof card and the persisted crash.
 //! Nothing reads harness source, a coverage export, or a model opinion, so a
-//! disposition is reconstructable from persisted state (AGENTS.md 2.13). The
+//! disposition is reconstructable from persisted state (Engineering Protocol 2.13). The
 //! card remains the single home for per-claim detail: a disposition carries the
 //! tier, the action, and the ceiling, and a consumer wanting the reasoning
-//! reads the card it came from (AGENTS.md 2.18).
+//! reads the card it came from (Engineering Protocol 2.18).
 
 use hf_core::crash::{Crash, CrashOrigin};
 use serde::{Deserialize, Serialize};
@@ -67,11 +67,11 @@ pub enum Disposition {
 ///
 /// The serialized name is the stable identifier a consumer localizes against;
 /// there is no separate reason code, because a second identifier for one
-/// meaning would be a second home for it (AGENTS.md 2.18).
+/// meaning would be a second home for it (Engineering Protocol 2.18).
 ///
 /// An action names a step. It does not perform one: minimization and harness
 /// repair already have approval paths, and this module does not offer a second
-/// entrypoint to either (AGENTS.md 2.19).
+/// entrypoint to either (Engineering Protocol 2.19).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DispositionAction {

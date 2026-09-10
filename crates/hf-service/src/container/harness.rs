@@ -507,7 +507,7 @@ impl ServiceContainer {
     /// project, same language as the candidate, newest first. Each is a
     /// persisted record (the `harnesses` row a human promotion approved), so
     /// the model-visible prompt section stays reconstructable from durable
-    /// state (AGENTS.md 2.13).
+    /// state (Engineering Protocol 2.13).
     ///
     /// Degrades to no examples: without a store, or on a store read failure,
     /// the draft prompt renders exactly as it did before this conditioning
@@ -2038,7 +2038,7 @@ const MAX_CANDIDATE_ERROR_BYTES: usize = 2048;
 
 /// Accepted examples conditioning one draft. Two carry the house style
 /// without crowding the target's own context out of the prompt budget
-/// (AGENTS.md 2.4).
+/// (Engineering Protocol 2.4).
 const MAX_ACCEPTED_EXAMPLES: usize = 2;
 
 pub(super) fn sha256_hex(bytes: &[u8]) -> String {

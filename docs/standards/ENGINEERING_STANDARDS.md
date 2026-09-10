@@ -8,7 +8,7 @@ Status: **active**. Scope: Rust code across the workspace.
 - `PascalCase` types.
 - `SCREAMING_SNAKE_CASE` constants.
 - `max_width = 100`, 4-space indent (see `rustfmt.toml`).
-- No inline lint suppression (see AGENTS.md 2.10).
+- No inline lint suppression (see ENGINEERING_PROTOCOL.md 2.10).
 
 ## 2. Dependencies
 

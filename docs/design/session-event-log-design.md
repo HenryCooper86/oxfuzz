@@ -2,8 +2,7 @@
 
 Status: **proposed**. Supersedes: none. Owner: `hf-session`, `hf-storage`,
 `hf-context`, `hf-agent`.
-Related: `docs/design/deepseek-harness-study.md` item 2.1,
-`docs/design/agent-prompt-security-design.md`, `AGENTS.md` 2.13.
+Related: `docs/design/agent-prompt-security-design.md`, [Engineering Protocol](../standards/ENGINEERING_PROTOCOL.md) 2.13.
 
 ## 1. Purpose
 
@@ -18,7 +17,7 @@ claims oxfuzz already makes and currently under-delivers.
 
 ## 2. The invariant
 
-`AGENTS.md` 2.13, adopted from the DeepSeek Harness study:
+[Engineering Protocol](../standards/ENGINEERING_PROTOCOL.md) 2.13, adapted from DeepSeek Harness:
 
 > Anything that reaches a provider request must be reconstructable from
 > persisted state. A new model-visible input requires a new persisted record.
@@ -34,7 +33,7 @@ each is a different projection of one log.
 | --- | --- | --- |
 | "every run, corpus mutation, and crash is journaled and replayable" | `VISION.md` | Partial |
 | "replay is available only for supported active-engine runs" | `DESIGN_OVERVIEW.md` section 2 | The concession |
-| "WAL-based recoverability" | `AGENTS.md` design pillars | Holds for runs |
+| "WAL-based recoverability" | [Engineering Protocol](../standards/ENGINEERING_PROTOCOL.md) design pillars | Holds for runs |
 | Prompt contract asserted on a captured `ChatRequest` | `agent-prompt-security-design.md` section 6 | Asserted at send time, not reconstructable afterwards |
 
 The gap is specific: run evidence is durable, but the *agent's* model-visible
@@ -147,7 +146,7 @@ document once they are in place, for three reasons:
 
 - 6.1 converts a hypothesis into a measurement. If the reconstruction test
   passes, the promise is already kept and this whole change is unnecessary.
-- The Tier 1 work from the study touches `hf-guardrails`, `hf-context`, and
+- Changes to enforcement and context assembly touch `hf-guardrails`, `hf-context`, and
   `hf-service`. Rewriting `hf-session` underneath it would make every one of
   those changes harder to review.
 - oxfuzz's log is not primarily a conversation. It is *fuzzing evidence* --

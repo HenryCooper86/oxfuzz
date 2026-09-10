@@ -165,7 +165,7 @@ fn honggfuzz_args_have_run_time() {
 /// step -- copy the same map into `ResourceLimits.env`, which the Docker
 /// adapter renders as `--env=K=V` on every sandboxed command. An `env K=V`
 /// wrapper in the argument list would be a second home for one meaning
-/// (AGENTS.md 2.18), and it would displace the fuzzer program from argv[0].
+/// (Engineering Protocol 2.18), and it would displace the fuzzer program from argv[0].
 ///
 /// The surviving home is covered by `hf-runtime`'s `docker_args` tests, which
 /// assert the `--env=` rendering and the defaults-plus-overrides overlay.

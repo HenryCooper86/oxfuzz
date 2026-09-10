@@ -1,6 +1,6 @@
 # oxfuzz Engineering Protocol
 
-Scope: entire repository. All rules are mandatory.
+Scope: entire repository. These requirements apply to every contribution.
 
 ## 1) Project Snapshot
 
@@ -81,7 +81,7 @@ oxfuzz/
 
 When uncertain -> High.
 
-## 4) Agent Workflow
+## 4) Development Workflow
 
 ### 4.1 Implementation (TDD)
 
@@ -92,13 +92,13 @@ When uncertain -> High.
 - Rust casing: `snake_case` files/fns - `PascalCase` types - `SCREAMING_SNAKE_CASE` consts.
 - Dependencies point inward to `hf-core`; every subsystem behind a feature flag.
 
-### 4.2 Sub-Agent Work
+### 4.2 Agent Subsystem Changes
 
 - Read `docs/standards/AGENT_AUTONOMY.md` before designing or implementing any sub-agent component (delegation, agent pools, autonomy).
 
 ### 4.3 R&D Planning
 
-- **Before any R&D action**: write a plan to `.claude/plans` covering scope, steps, dependencies, and verification criteria. No implementation until the plan exists.
+- Before research or implementation, record scope, steps, dependencies, and verification criteria in the issue or pull request. Keep local working notes out of the repository.
 
 ### 4.4 Commit Discipline
 
@@ -114,7 +114,7 @@ After completing Rust code changes, run the following checks **in order** and fi
 - **`cargo check --workspace`** -- Full workspace compilation must succeed with no errors.
 - **`cargo doc --workspace --no-deps`** -- Documentation must build without errors.
 
-No task is complete until every applicable gate passes cleanly.
+Every applicable gate must pass before merge.
 
 ### 4.6 Rust Test Output Filtering
 
@@ -139,7 +139,7 @@ cargo test [args] 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^
 ## 6) Formatting Constraints
 
 - **No emoji anywhere.**
-- **Word choice** -- Before writing `contract`, `boundary`, or `shape`, ask whether a more exact term names the subject: write `trait method`, `JSON validation`, or `public API` instead. No metaphors. Do not comment on facts that are obvious from the code.
+- **Word choice** -- Use precise terms such as `trait method`, `JSON validation`, or `public API`. Avoid metaphors and comments that repeat facts already clear from the code.
 
 ## 7) TODO Tiers
 

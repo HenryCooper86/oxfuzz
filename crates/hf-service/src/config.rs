@@ -3,7 +3,7 @@
 //! Config lives in `<repo>/config/<section>.toml` (falling back to the bundled
 //! `<section>.example.toml` template). The CLI, web API, and GUI all read and
 //! write it through these functions so the logic lives in the service layer and
-//! never diverges between presentations (AGENTS.md 2.9).
+//! never diverges between presentations (Engineering Protocol 2.9).
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -189,7 +189,7 @@ impl Default for FuzzingSettings {
 ///
 /// A deployment fuzzing a slow target and one fuzzing a fast parser do not
 /// share a plateau window, so these are validated configuration rather than
-/// constants (AGENTS.md 2.15).
+/// constants (Engineering Protocol 2.15).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CampaignHealthSettings {
@@ -286,7 +286,7 @@ impl CampaignHealthSettings {
 ///
 /// Path explosion is concolic execution's normal failure mode rather than its
 /// exceptional one, so a pass is bounded on four axes. These are validated
-/// configuration and not constants (AGENTS.md 2.15): a deployment enriching a
+/// configuration and not constants (Engineering Protocol 2.15): a deployment enriching a
 /// small binary parser and one enriching a protocol stack do not share a
 /// per-input timeout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

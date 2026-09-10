@@ -52,7 +52,7 @@ service decision point.
 Registered in `config.rs` `CONFIG_SECTIONS` + `bundled_example`. The live
 `issue_tracker.toml` is gitignored (it may hold a token).
 
-## Layering (AGENTS.md 2.9 -- all logic in hf-service)
+## Layering (ENGINEERING_PROTOCOL.md 2.9 -- all logic in hf-service)
 
 | Layer | Location |
 |-------|----------|
