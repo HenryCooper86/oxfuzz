@@ -255,3 +255,15 @@ This is a bounded calendar preview, not a reservation or a forecast of completed
 work. It does not expand recovery queues, allocate future budget across fires,
 or promise that concurrency, policy, or recovery admission will permit a run.
 Reading a preview never dispatches or advances a schedule.
+
+## Scheduler runtime status
+
+Automation polls a service-owned runtime status alongside its schedule list.
+Running requires both the long-lived trigger evaluator and executor tasks to be
+alive. A finished task in a started runtime is failed even if its sibling is
+still alive. Startup, stopped loops, missing scheduler, and disarmed execution
+are displayed separately. The recovery producer is finite and its normal
+completion does not mark the runtime failed. Failure directs the operator to
+inspect service logs and restart the service; the UI never silently rearms or
+restarts work. This reports loop liveness, not successful dispatch or quiescence
+of campaigns during shutdown.

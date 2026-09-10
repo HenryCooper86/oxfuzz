@@ -3,6 +3,12 @@
 // regenerate from the localized views.
 
 export const enExtra: Record<string, string> = {
+  "automation.runtime.running": "Scheduler is running",
+  "automation.runtime.failed": "A scheduler loop stopped unexpectedly. Restart the service and inspect its logs before relying on scheduled work.",
+  "automation.runtime.stopped": "Scheduler is stopped",
+  "automation.runtime.starting": "Scheduler is starting",
+  "automation.runtime.unavailable": "Scheduler status is unavailable. Refresh or check the service connection.",
+  "automation.runtime.disarmed": "Execution is disarmed. Review and authorize scheduled execution before expecting runs.",
   "automation.preview.scheduled": "Next scheduled opportunity",
   "automation.preview.due": "Due at the next scheduler tick",
   "automation.preview.paused": "Paused",
@@ -1865,6 +1871,12 @@ export const enExtra: Record<string, string> = {
 };
 
 export const zhExtra: Record<string, string> = {
+  "automation.runtime.running": "调度器正在运行",
+  "automation.runtime.failed": "调度循环意外停止。请重启服务并检查日志后再使用计划任务。",
+  "automation.runtime.stopped": "调度器已停止",
+  "automation.runtime.starting": "调度器正在启动",
+  "automation.runtime.unavailable": "无法获取调度器状态。请刷新或检查服务连接。",
+  "automation.runtime.disarmed": "计划执行尚未授权。请先审查并授权计划执行。",
   "automation.preview.scheduled": "下次计划时间",
   "automation.preview.due": "将在下次调度检查时触发",
   "automation.preview.paused": "已暂停",

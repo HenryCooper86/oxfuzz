@@ -1,3 +1,4 @@
+import { SchedulerRuntimeStatus, type CampaignSchedulerStatus } from "../components/SchedulerRuntimeStatus";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useState, type ReactNode } from "react";
 import { Button, IconButton, EmptyState, Input, LoadingState, Select, SeverityBadge, Textarea, ViewHeader } from "../components/ui";
 import { Puzzle, BookOpen, Zap, Target, FileCode, Activity, Bug, Crosshair, Play, Loader2, Plus, Trash2, RotateCw, RotateCcw, Copy, Square, Bot, Shield, Database, Pencil, Save, X, Search, FilePlus, FolderOpen, Layers } from "lucide-react";
@@ -1287,6 +1288,7 @@ export function AutomationView() {
   const [concurrencyLimits, setConcurrencyLimits] =
     useState<CampaignConcurrencyLimits | null>(null);
   const [concurrencyLimitsLoaded, setConcurrencyLimitsLoaded] = useState(false);
+  const [runtimeStatus, setRuntimeStatus] = useState<CampaignSchedulerStatus | null>(null);
 
   const projects = useMemo(() => {
     const all = [project, activeProject, ...recentProjects].filter(Boolean);
@@ -1300,8 +1302,10 @@ export function AutomationView() {
         getTransport().invoke<CampaignView[]>("schedule_list"),
         getTransport().invoke<ExecutionView[]>("schedule_history", { limit: 20 }),
         getTransport().invoke<OneTimeRecoveryView[]>("schedule_recovery_list"),
+        getTransport().invoke<CampaignSchedulerStatus | null>("schedule_runtime"),
       ] as const),
-      commit: ([nextCampaigns, nextHistory, nextRecoveries]) => {
+      commit: ([nextCampaigns, nextHistory, nextRecoveries, nextRuntime]) => {
+        setRuntimeStatus(nextRuntime.status === "fulfilled" ? nextRuntime.value : null);
         if (nextCampaigns.status === "fulfilled") {
           setCampaigns(nextCampaigns.value);
         } else {
@@ -1612,6 +1616,8 @@ export function AutomationView() {
           error={fuzzingPolicyError}
         />
       )}
+
+      <SchedulerRuntimeStatus status={runtimeStatus} />
 
       <ScheduleRecoveryPanel
         recoveries={recoveries}

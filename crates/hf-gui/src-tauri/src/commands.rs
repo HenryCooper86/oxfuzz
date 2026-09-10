@@ -1348,6 +1348,14 @@ pub async fn schedule_create(
         .map_err(|error| error.to_string())
 }
 
+/// Scheduler task liveness and execution authorization.
+#[tauri::command]
+pub fn schedule_runtime(
+    state: tauri::State<'_, crate::state::AppState>,
+) -> hf_service::scheduler::CampaignSchedulerStatus {
+    state.scheduler.runtime_status()
+}
+
 /// Both scheduler concurrency caps and their effective fuzz-run ceiling.
 #[tauri::command]
 pub async fn schedule_concurrency_limits(

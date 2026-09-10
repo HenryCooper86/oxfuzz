@@ -542,6 +542,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .route("/knowledge/search", post(knowledge_search))
         .route("/knowledge/stats", get(knowledge_stats))
         // Campaign scheduling.
+        .route("/schedule/runtime", get(schedule_runtime))
         .route("/schedule", get(schedule_list).post(schedule_create))
         .route("/schedule/recovery", get(schedule_recovery_list))
         .route(
@@ -3348,6 +3349,17 @@ async fn schedule_disarm(State(state): State<AppState>) -> Json<serde_json::Valu
 
 async fn schedule_concurrency_get(State(state): State<AppState>) -> Json<usize> {
     Json(state.scheduler.as_ref().map_or(0, |s| s.max_concurrent()))
+}
+
+async fn schedule_runtime(
+    State(state): State<AppState>,
+) -> Json<Option<hf_service::scheduler::CampaignSchedulerStatus>> {
+    Json(
+        state
+            .scheduler
+            .as_ref()
+            .map(|scheduler| scheduler.runtime_status()),
+    )
 }
 
 async fn schedule_concurrency_limits(

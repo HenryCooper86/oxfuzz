@@ -1578,3 +1578,27 @@ async fn provider_thaw_maps_service_errors_to_http() {
         "unexpected error body: {json}"
     );
 }
+
+#[tokio::test]
+async fn scheduler_runtime_without_scheduler_is_explicitly_unavailable() {
+    allow_open_dev_mode();
+    let response = hf_web::router::build_with_state(hf_web::router::AppState::new(
+        hf_service::ServiceContainer::stubbed(),
+    ))
+    .oneshot(
+        Request::builder()
+            .uri("/schedule/runtime")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::Value::Null
+    );
+}

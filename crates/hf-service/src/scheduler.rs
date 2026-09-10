@@ -7,6 +7,17 @@
 //! the background, and persists schedules to JSON so they survive restarts.
 
 mod preview;
+pub use hf_scheduler::manager::SchedulerRuntimeStatus;
+
+/// Service runtime availability, separate from authorization to execute work.
+#[derive(Debug, Clone, Serialize)]
+pub struct CampaignSchedulerStatus {
+    /// Liveness of both long-lived scheduler tasks.
+    pub state: SchedulerRuntimeStatus,
+    /// Whether the operator has authorized scheduled execution.
+    pub armed: bool,
+}
+
 pub use preview::{SchedulePreview, SchedulePreviewState};
 
 use std::collections::{HashMap, HashSet};
@@ -2204,8 +2215,16 @@ impl CampaignScheduler {
         self.gate.limit()
     }
 
-    /// Return both independently configured concurrency limits and the
-    /// effective ceiling that applies to active fuzz runs.
+    /// Report scheduler task liveness separately from execution authorization.
+    #[must_use]
+    pub fn runtime_status(&self) -> CampaignSchedulerStatus {
+        CampaignSchedulerStatus {
+            state: self.manager.runtime_status(),
+            armed: self.is_armed(),
+        }
+    }
+
+    /// Both configured concurrency caps and their effective minimum.
     #[must_use]
     pub fn concurrency_limits(&self) -> CampaignConcurrencyLimits {
         let active_fuzz_campaign_limit = self.gate.limit();

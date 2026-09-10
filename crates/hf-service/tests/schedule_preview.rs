@@ -12,6 +12,10 @@ async fn schedule_list_includes_calendar_preview_without_dispatching() {
     )
     .await
     .unwrap();
+    assert_eq!(
+        scheduler.runtime_status().state,
+        hf_service::scheduler::SchedulerRuntimeStatus::Running
+    );
     let params = CampaignParams {
         project: root.path().display().to_string(),
         target: None,
@@ -36,6 +40,10 @@ async fn schedule_list_includes_calendar_preview_without_dispatching() {
     let after = serde_json::to_value(scheduler.list().await).unwrap();
     let history = scheduler.recent_executions(10).await.unwrap();
     scheduler.stop().await;
+    assert_eq!(
+        scheduler.runtime_status().state,
+        hf_service::scheduler::SchedulerRuntimeStatus::Stopped
+    );
     assert_eq!(before, after);
     assert!(history.is_empty());
     assert_eq!(views[0]["id"], schedule.id);

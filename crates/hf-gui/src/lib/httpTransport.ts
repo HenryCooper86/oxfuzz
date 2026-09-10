@@ -188,6 +188,7 @@ const COMMAND_MAP: Record<string, CommandEndpoint> = {
   },
   schedule_targets: { method: "POST", path: "/schedule/targets" },
   schedule_concurrency_get: { method: "GET", path: "/schedule/concurrency" },
+  schedule_runtime: { method: "GET", path: "/schedule/runtime" },
   schedule_concurrency_limits: { method: "GET", path: "/schedule/concurrency/limits" },
   schedule_concurrency_set: { method: "POST", path: "/schedule/concurrency" },
   schedule_delete: { method: "DELETE", path: "/schedule/{id}" },
