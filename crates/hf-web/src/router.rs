@@ -444,6 +444,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .route("/crashes/all", get(all_crashes))
         .route("/corpus/all", get(all_corpus))
         .route("/runs/history", post(run_history))
+        .route("/runs/compare", post(run_comparison))
         .route("/runs/coverage", post(run_coverage_series))
         .route("/runs/harness-source", post(run_harness_source))
         .route("/runs/revert-harness", post(revert_harness_from_run))
@@ -1909,6 +1910,34 @@ struct GenerateSeedsRequest {
 
 async fn report_formats(State(state): State<AppState>) -> ApiResult<Vec<String>> {
     Ok(Json(state.container.report_formats()))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunComparisonRequest {
+    baseline_id: uuid::Uuid,
+    result_id: uuid::Uuid,
+}
+
+async fn run_comparison(
+    State(state): State<AppState>,
+    Json(request): Json<RunComparisonRequest>,
+) -> ApiResult<serde_json::Value> {
+    for id in [request.baseline_id, request.result_id] {
+        let project = state
+            .container
+            .run_project(id)
+            .await
+            .map_err(classified_api_error)?;
+        let _approved_owner = approved_project(&state, &project)?;
+    }
+    Ok(Json(public_value(
+        state
+            .container
+            .run_comparison(request.baseline_id, request.result_id)
+            .await
+            .map_err(classified_api_error)?,
+    )))
 }
 
 async fn run_history(

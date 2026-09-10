@@ -2592,6 +2592,20 @@ pub async fn export_repro(
     Ok(Some(written.to_string_lossy().to_string()))
 }
 
+/// Explain retained evidence for two selected campaigns.
+#[tauri::command]
+pub async fn run_comparison(
+    state: tauri::State<'_, crate::state::AppState>,
+    baseline_id: uuid::Uuid,
+    result_id: uuid::Uuid,
+) -> Result<hf_service::run_comparison::RunComparisonAssessment, String> {
+    state
+        .container
+        .run_comparison(baseline_id, result_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 /// List exact promoted allocation candidates.
 #[tauri::command]
 pub async fn allocation_candidates(

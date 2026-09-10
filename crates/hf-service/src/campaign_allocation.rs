@@ -232,16 +232,13 @@ fn comparable_evidence(
         .iter()
         .filter(|run| {
             run.target_id == Some(candidate.target_id)
-                && run.kind == "Campaign"
-                && run.status == "Done"
+                && crate::run_comparison::comparison_reason(run, run)
+                    == crate::run_comparison::RunComparisonReason::Comparable
                 && run
                     .engine
                     .parse::<hf_core::engine::EngineKind>()
                     .is_ok_and(|engine| engine.as_str() == candidate.engine)
                 && run.harness_rev.as_deref() == Some(candidate.source_sha256.as_str())
-                && run.edges.is_some()
-                && run.comparison_key.is_some()
-                && run.binary_rev.is_some()
         })
         .collect::<Vec<_>>();
     runs.sort_by(|a, b| (&b.started_at, &b.id).cmp(&(&a.started_at, &a.id)));
@@ -251,7 +248,8 @@ fn comparable_evidence(
     let mut selected = runs
         .iter()
         .filter(|run| {
-            run.comparison_key == latest.comparison_key && run.binary_rev == latest.binary_rev
+            crate::run_comparison::comparison_reason(run, latest)
+                == crate::run_comparison::RunComparisonReason::Comparable
         })
         .take(2)
         .filter_map(|run| {

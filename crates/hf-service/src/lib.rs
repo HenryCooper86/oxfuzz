@@ -75,6 +75,7 @@ pub mod repro;
 pub mod run_closeout;
 mod run_history_error;
 pub use run_history_error::RunHistoryError;
+pub mod run_comparison;
 pub mod sarif;
 mod schedule_retirement;
 pub mod scheduler;

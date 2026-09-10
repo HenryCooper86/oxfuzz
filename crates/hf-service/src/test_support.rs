@@ -15,7 +15,7 @@ pub use hf_core::provider::{
 };
 pub use hf_core::types::ProviderId;
 use hf_scheduler::{ExecutionStatus, Schedule, ScheduleExecution, TriggerConfig};
-pub use hf_storage::{HarnessApprovalKind, Store};
+pub use hf_storage::{HarnessApprovalKind, RunRecord, RunStatus, Store};
 use hf_storage::{NewScheduleOccurrence, ScheduleOccurrenceTransition};
 
 use crate::scheduler::{CampaignParams, CampaignScheduler};

@@ -75,6 +75,7 @@ const COMMAND_MAP: Record<string, CommandEndpoint> = {
   report_formats: { method: "GET", path: "/report/formats" },
   all_crashes: { method: "GET", path: "/crashes/all" },
   all_corpus: { method: "GET", path: "/corpus/all" },
+  run_comparison: { method: "POST", path: "/runs/compare" },
   run_history: { method: "POST", path: "/runs/history" },
   run_coverage_series: { method: "POST", path: "/runs/coverage" },
   run_harness_source: { method: "POST", path: "/runs/harness-source" },
