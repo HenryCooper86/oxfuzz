@@ -262,6 +262,22 @@ impl ServiceContainer {
         loaded
     }
 
+    /// Persist the first setup connection and make it available without a restart.
+    ///
+    /// # Errors
+    /// Refuses an existing pool or invalid configuration, and reports persistence
+    /// or activation failure without claiming that setup succeeded.
+    pub fn initialize_provider(
+        &self,
+        provider: &crate::config::ProviderConfig,
+    ) -> Result<(), String> {
+        crate::config::initialize_provider(provider)?;
+        if !self.reload_providers() {
+            return Err("Provider saved but could not be activated. Review it in Settings.".into());
+        }
+        Ok(())
+    }
+
     /// The active guardrail engine.
     #[must_use]
     pub fn guardrails(&self) -> &Guardrails {

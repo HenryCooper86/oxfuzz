@@ -577,6 +577,9 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .route("/config/toml_to_value", post(config_toml_to_value))
         .route("/config/value_to_toml", post(config_value_to_toml))
         .route("/config/providers", get(get_providers).post(set_providers))
+        .route("/config/providers/test", post(provider_test))
+        .route("/system/setup", get(setup_readiness))
+        .route("/system/setup/providers", get(setup_providers).post(initialize_provider))
         .route("/config/fuzzing", get(get_fuzzing_settings))
         .route(
             "/config/defectdojo",
@@ -3679,6 +3682,43 @@ async fn get_providers(State(_): State<AppState>) -> Json<serde_json::Value> {
         .map(public_provider_value)
         .collect();
     Json(serde_json::Value::Array(providers))
+}
+
+async fn setup_readiness() -> Json<hf_service::system::SetupReadiness> {
+    Json(hf_service::system::setup_readiness().await)
+}
+
+async fn setup_providers() -> ApiResult<serde_json::Value> {
+    let providers = hf_service::config::setup_providers()
+        .map_err(map_err(StatusCode::BAD_REQUEST))?
+        .into_iter()
+        .map(public_provider_value)
+        .collect();
+    Ok(Json(serde_json::Value::Array(providers)))
+}
+
+async fn initialize_provider(
+    State(state): State<AppState>,
+    Json(request): Json<ProviderConnectionRequest>,
+) -> ApiResult<()> {
+    state
+        .container
+        .initialize_provider(&request.provider)
+        .map(Json)
+        .map_err(map_err(StatusCode::BAD_REQUEST))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderConnectionRequest {
+    provider: hf_service::config::ProviderConfig,
+}
+
+async fn provider_test(Json(request): Json<ProviderConnectionRequest>) -> ApiResult<String> {
+    hf_service::config::test_provider(request.provider)
+        .await
+        .map(Json)
+        .map_err(map_err(StatusCode::BAD_REQUEST))
 }
 
 fn public_provider_value(provider: hf_service::config::ProviderConfig) -> serde_json::Value {

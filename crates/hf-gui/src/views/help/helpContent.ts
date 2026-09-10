@@ -93,7 +93,7 @@ covered in the project README.
 
 | You need | Why |
 | --- | --- |
-| **An AI provider key** | The AI writes the harness code and drafts bug reports. |
+| **An AI connection** | The AI writes test drivers and drafts bug reports. Hosted providers need an API key; local Ollama does not. |
 | **Docker** | Runs the sandbox that isolates untrusted code. Install OrbStack or Docker Desktop; the app can start Docker for you. |
 | **A project to test** | A folder of C or C++ source works best today. |
 
@@ -102,21 +102,26 @@ inside the sandbox image.
 
 ## The setup wizard, step by step
 
-1. **Welcome** -- an overview.
-2. **Providers** -- paste your **API key**, set the **Model** (e.g. \`gpt-4o\`)
-   and **Base URL**. This is the one required step: without a provider the AI
-   cannot write harnesses or reports.
-3. **Sandbox** -- confirms the mandatory Docker boundary and shows how to build
-   the sandbox image.
-4. **Guardrails** -- the human-approval gates for compiling harnesses and
-   starting runs.
-5. **Storage** -- where run data, corpora, and crashes live (informational).
-6. **Complete** -- click **Get Started**.
+1. **AI connection** -- choose a provider, enter its key when needed, and choose
+   a model available in your account. Custom endpoints are under **Advanced
+   connection settings**. Click **Test connection**, then **Save and continue**.
+   Testing sends a short request and may incur provider usage charges. Changing
+   any field requires another test. Saved provider pools are kept; edit them in
+   **Settings**.
+2. **Sandbox** -- inspect Docker, the sandbox image and installed fuzzing tools.
+   On desktop, **Prepare sandbox** can start an installed Docker application and
+   build the image when its build files are available. This can take several
+   minutes. In the browser, your server administrator prepares the sandbox;
+   **Check again** refreshes its status. Continue becomes available when the
+   service reports the runtime ready.
+3. **Start a project** -- click **Open project workflow**, then choose a folder.
+   The workflow guides you through targets, test drivers, campaigns and findings.
 
-You can add providers and tune enabled engines and bounded resource limits later
-in **Settings**. Sandbox isolation, blocked networking, and human approval are
-enforced guarantees rather than editable switches. On first launch the app also
-builds the sandbox image, which can take a few minutes.
+**Set up later** lets you explore without marking setup complete. The reminder
+survives restarts; use **Finish setup** to return. Completing setup does not
+approve running your project. Code review, sandbox isolation and human approval
+remain mandatory. Optional integrations, storage and detailed settings are in
+**Settings**.
 
 ## Then what?
 

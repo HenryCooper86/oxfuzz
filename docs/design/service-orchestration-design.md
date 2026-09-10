@@ -36,6 +36,36 @@ optional integration such as DefectDojo a release gate.
 
 ### 3.1 Selected campaign preflight
 
+#### GUI first-run setup
+
+Setup reads only provider configuration present in the runtime configuration
+directory; a bundled provider example is not a saved AI connection. The service
+reports malformed saved configuration as an error and refuses first-provider
+initialization when a configured pool already exists. Successful initialization
+refreshes the live service pool so no restart is required. Ordinary provider
+editing remains in Settings.
+
+The first-run GUI presents AI configuration, sandbox readiness and an explicit
+handoff to the connected project workflow. Optional integrations remain in
+Settings. Setup deferral is a persisted presentation preference, distinct from
+completion and never execution authority. A persistent reminder permits return.
+
+The existing system probe supplies a setup view with its service-derived
+`runtime_ready` value. Desktop may explicitly invoke its existing supported
+Docker/sandbox preparation operation, then recheck the service. Browser clients
+inspect their server's readiness and do not pretend a status GET installs tools.
+Readiness is an observation; all later execution checks remain mandatory.
+
+New provider configuration is tested only after an explicit user action, using
+the existing short service probe through either desktop or authorized HTTP.
+The UI warns that the probe contacts the provider. Editing any configuration
+invalidates its test result, and superseded replies cannot approve a new value.
+Existing provider pools are retained when setup is reopened; editing those
+pools remains in Settings. Saving a first provider rechecks for an existing pool
+and refuses to replace it. Setup is completed only after provider configuration
+has been handled and the sandbox probe reports ready. No sample campaign or
+fuzzer starts automatically.
+
 The service's selected-engine preflight combines sandbox/tool presence, the
 current engine/duration policy resolution, and optional provider configuration
 readiness. It returns named problems and a service-derived ready flag; CLI exit

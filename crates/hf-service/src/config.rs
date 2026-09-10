@@ -1471,7 +1471,7 @@ impl AutomotiveConfigStore {
     pub fn new(directory: impl Into<PathBuf>) -> Self {
         let directory = directory.into();
         Self {
-            transaction_lock: integration_config_lock(&directory),
+            transaction_lock: config_transaction_lock(&directory),
             directory,
         }
     }
@@ -1576,7 +1576,7 @@ impl IntegrationConfigStore {
     pub fn new(directory: impl Into<PathBuf>) -> Self {
         let directory = directory.into();
         Self {
-            transaction_lock: integration_config_lock(&directory),
+            transaction_lock: config_transaction_lock(&directory),
             directory,
             #[cfg(test)]
             patch_gate: None,
@@ -1686,7 +1686,7 @@ fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     }
 }
 
-fn integration_config_lock(directory: &Path) -> Arc<Mutex<()>> {
+fn config_transaction_lock(directory: &Path) -> Arc<Mutex<()>> {
     static LOCKS: OnceLock<Mutex<std::collections::HashMap<PathBuf, Weak<Mutex<()>>>>> =
         OnceLock::new();
 
@@ -2410,6 +2410,8 @@ pub fn write_config(name: &str, content: &str) -> Result<(), String> {
         parse_oxfuzz_runtime_config(content)?;
     }
     let dir = config_dir();
+    let transaction_lock = config_transaction_lock(&dir);
+    let _transaction = lock_recover(&transaction_lock);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     write_private_config_file(&dir.join(format!("{section}.toml")), content)
 }
@@ -2560,6 +2562,45 @@ fn try_get_providers() -> Result<Vec<ProviderConfig>, String> {
     parse_provider_config(&read_config("providers")?)
 }
 
+/// Read saved provider configuration for setup, excluding bundled examples.
+///
+/// # Errors
+/// Returns an error if a saved configuration cannot be read or validated.
+pub fn setup_providers() -> Result<Vec<ProviderConfig>, String> {
+    setup_providers_from(&config_dir())
+}
+
+fn setup_providers_from(directory: &Path) -> Result<Vec<ProviderConfig>, String> {
+    for name in ["providers.toml", "providers.example.toml"] {
+        match std::fs::symlink_metadata(directory.join(name)) {
+            Ok(_) => return parse_provider_config(&read_config_from(directory, "providers")?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Ok(Vec::new())
+}
+
+/// Save the first provider without replacing an existing configured pool.
+///
+/// Uses the same in-process transaction lock as provider editing. As with other
+/// config writes, separate processes are not coordinated by an advisory lock.
+///
+/// # Errors
+/// Returns an error for existing providers, invalid config, or failed persistence.
+pub fn initialize_provider(provider: &ProviderConfig) -> Result<(), String> {
+    initialize_provider_at(&config_dir(), provider)
+}
+
+fn initialize_provider_at(directory: &Path, provider: &ProviderConfig) -> Result<(), String> {
+    let transaction_lock = config_transaction_lock(directory);
+    let _transaction = lock_recover(&transaction_lock);
+    if !setup_providers_from(directory)?.is_empty() {
+        return Err("Provider configuration already exists. Reopen setup or edit it in Settings; nothing was replaced.".into());
+    }
+    set_providers_at(directory, std::slice::from_ref(provider))
+}
+
 fn merge_provider_secrets(incoming: &mut [ProviderConfig], existing: &[ProviderConfig]) {
     let existing: std::collections::HashMap<_, _> = existing
         .iter()
@@ -2594,9 +2635,12 @@ fn merge_provider_secrets(incoming: &mut [ProviderConfig], existing: &[ProviderC
 /// # Errors
 /// Returns an error when the provider config cannot be written.
 pub fn set_providers_preserving_secrets(providers: &[ProviderConfig]) -> Result<(), String> {
+    let directory = config_dir();
+    let transaction_lock = config_transaction_lock(&directory);
+    let _transaction = lock_recover(&transaction_lock);
     let mut merged = providers.to_vec();
     merge_provider_secrets(&mut merged, &try_get_providers()?);
-    set_providers(&merged)
+    set_providers_at(&directory, &merged)
 }
 
 /// Quote/escape a value as a TOML basic string.
@@ -2739,7 +2783,14 @@ fn render_provider_headers(body: &mut String, provider: &ProviderConfig) {
 /// # Errors
 /// Returns an error string if the rendered TOML is invalid or cannot be written.
 pub fn set_providers(providers: &[ProviderConfig]) -> Result<(), String> {
-    let existing = read_config("providers")?;
+    let directory = config_dir();
+    let transaction_lock = config_transaction_lock(&directory);
+    let _transaction = lock_recover(&transaction_lock);
+    set_providers_at(&directory, providers)
+}
+
+fn set_providers_at(directory: &Path, providers: &[ProviderConfig]) -> Result<(), String> {
+    let existing = read_config_from(directory, "providers")?;
     let preamble = existing.find("[[providers]]").map_or_else(
         || {
             "# oxfuzz -- LLM Provider Pool Configuration\n\
@@ -2758,9 +2809,8 @@ pub fn set_providers(providers: &[ProviderConfig]) -> Result<(), String> {
 
     let content = format!("{preamble}{body}");
     parse_provider_config(&content)?;
-    let dir = config_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    write_private_config_file(&dir.join("providers.toml"), &content)
+    std::fs::create_dir_all(directory).map_err(|e| e.to_string())?;
+    write_private_config_file(&directory.join("providers.toml"), &content)
 }
 
 /// Probe a provider configuration by building it and sending a tiny chat
@@ -3431,6 +3481,62 @@ product_name = "old-product"
         assert!(raw.contains("new-product"));
         assert!(raw.contains("synthetic-new-token"));
         assert!(!raw.contains("synthetic-old-token"));
+    }
+
+    #[test]
+    fn setup_provider_initialization_ignores_bundled_examples_and_preserves_saved_pools() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(setup_providers_from(directory.path()).unwrap().is_empty());
+        let provider: ProviderConfig = serde_json::from_value(serde_json::json!({
+            "id": "configured", "provider_type": "openai", "model": "fixture-model"
+        }))
+        .unwrap();
+        initialize_provider_at(directory.path(), &provider).unwrap();
+        let saved = std::fs::read(directory.path().join("providers.toml")).unwrap();
+        assert_eq!(
+            setup_providers_from(directory.path()).unwrap()[0].id,
+            "configured"
+        );
+        assert!(initialize_provider_at(directory.path(), &provider).is_err());
+        assert_eq!(
+            std::fs::read(directory.path().join("providers.toml")).unwrap(),
+            saved
+        );
+        std::fs::write(
+            directory.path().join("providers.toml"),
+            "[[providers]]\nid = [invalid",
+        )
+        .unwrap();
+        assert!(setup_providers_from(directory.path()).is_err());
+        assert!(initialize_provider_at(directory.path(), &provider).is_err());
+    }
+
+    #[test]
+    fn competing_setup_saves_create_only_one_first_provider() {
+        let directory = tempfile::tempdir().unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = ["first", "second"]
+            .into_iter()
+            .map(|id| {
+                let directory = directory.path().to_path_buf();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let provider = serde_json::from_value(serde_json::json!({
+                        "id": id, "provider_type": "openai", "model": "fixture-model"
+                    }))
+                    .unwrap();
+                    barrier.wait();
+                    initialize_provider_at(&directory, &provider)
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+        assert_eq!(setup_providers_from(directory.path()).unwrap().len(), 1);
     }
 
     #[test]

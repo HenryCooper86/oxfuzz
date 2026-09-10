@@ -223,6 +223,7 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
   }, [toast, t]);
 
   const reload = useCallback(async () => {
+    if (!activeProject) return;
     setLoading(true);
     setError(null);
     const [nextDashboard, nextReports, nextSystem] = await Promise.all([
@@ -236,7 +237,7 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
       selectReport(nextReports[0]);
     }
     setLoading(false);
-  }, [editor.content, loadDashboard, reloadReports]);
+  }, [activeProject, editor.content, loadDashboard, reloadReports]);
 
   // Keep the latest `reload` reachable from the mount effect without listing it
   // as a dependency. `reload` closes over `editor.content`, so a new identity is
@@ -247,6 +248,7 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
   reloadRef.current = reload;
 
   useEffect(() => {
+    if (!activeProject) return;
     let cancelled = false;
     async function loadInitialDashboard() {
       const [nextDashboard, nextReports, nextSystem] = await Promise.all([
@@ -272,7 +274,7 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
       cancelled = true;
       unsubscribe();
     };
-  }, [loadDashboard, reloadReports]);
+  }, [activeProject, loadDashboard, reloadReports]);
 
   function selectReport(report: ReportDraft) {
     setEditor(editorFromReport(report));
@@ -379,6 +381,12 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
     onNavigate?.("triage");
   }
 
+  if (!activeProject) return <section className="surface-card flex flex-col items-start gap-4 p-6">
+    <FolderOpen size={28} className="text-text-secondary" aria-hidden="true" />
+    <ViewHeader title={t("setup.emptyTitle")} description={t("setup.emptyHint")} />
+    <Button variant="primary" onClick={() => onNavigate?.("workflow")} disabled={!onNavigate}>{t("setup.openWorkflow")}</Button>
+  </section>;
+
   const tabs = workbenchTabs(dashboard, t);
 
   return (
@@ -415,22 +423,6 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
           </Button>
         </div>
       </div>
-
-      {!activeProject && (
-        <section
-          className="surface-card flex items-start gap-3"
-          style={{ padding: "var(--space-md)", borderColor: "var(--accent)", background: "var(--accent-subtle)" }}
-          role="status"
-        >
-          <FolderOpen size={18} style={{ color: "var(--accent)", flexShrink: 0, marginTop: 2 }} />
-          <div className="min-w-0">
-            <h2 className="text-sm font-semibold text-text-primary">{t("dashboard.chooseProjectTitle")}</h2>
-            <p className="mt-1 text-sm text-text-secondary">
-              {t("dashboard.chooseProjectPre")}<strong className="text-text-primary">{t("dashboard.openProject")}</strong>{t("dashboard.chooseProjectPost")}
-            </p>
-          </div>
-        </section>
-      )}
 
       <div
         className="flex flex-wrap gap-1 border-b border-border"
