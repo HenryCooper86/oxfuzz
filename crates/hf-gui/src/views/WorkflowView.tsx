@@ -135,6 +135,11 @@ export function WorkflowView() {
       </section>
 
       {/* Core linear stages */}
+      {!gated && <Button variant="primary" className="self-start" onClick={() => {
+        setExpanded(activeStage);
+        sectionRefs.current[activeStage]?.scrollIntoView({ behavior: "smooth", block: "start" });
+        sectionRefs.current[activeStage]?.querySelector("button")?.focus();
+      }}>{allComplete ? t("workflow.reviewFindings") : t("workflow.next", { stage: t(`workflow.${activeStage}Label`) })}</Button>}
       {CORE_STAGES.map(({ id, n, icon: Icon, Component }) => {
         const label = t(`workflow.${id}Label`);
         const hint = t(`workflow.${id}Hint`);
@@ -151,13 +156,14 @@ export function WorkflowView() {
             className="surface-card"
             style={{
               overflow: "hidden",
-              opacity: gated ? 0.5 : 1,
               borderLeft: `3px solid ${current ? "var(--accent)" : done ? "var(--success)" : "var(--border)"}`,
             }}
           >
             <button
               onClick={() => !gated && setExpanded(open ? null : id)}
               disabled={gated}
+              aria-expanded={open}
+              aria-controls={`workflow-stage-${id}`}
               className="flex items-center justify-between w-full text-left"
               style={{ padding: "12px 14px", background: "transparent", border: "none", cursor: gated ? "not-allowed" : "pointer", color: "var(--text-primary)" }}
             >
@@ -175,7 +181,7 @@ export function WorkflowView() {
               {open ? <ChevronDown size={16} className="text-text-muted" /> : <ChevronRight size={16} className="text-text-muted" />}
             </button>
             {open && (
-              <div style={{ padding: "0 14px 16px", borderTop: "1px solid var(--border)" }}>
+              <div id={`workflow-stage-${id}`} style={{ padding: "0 14px 16px", borderTop: "1px solid var(--border)" }}>
                 <div style={{ paddingTop: "14px" }}>
                   <Component
                     embedded

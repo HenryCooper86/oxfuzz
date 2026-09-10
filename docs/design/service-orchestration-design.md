@@ -737,3 +737,13 @@ Boxing asynchronous dispatch was rejected after the bounded-stack test still
 failed and the crash trace located the overflow in Clap's argument construction.
 Subprocess tests exercise version output without configuration and bounded-stack
 startup/validation on Unix; ordinary subprocess tests also run on Windows.
+
+### GUI navigation and next-step presentation
+
+The primary sidebar emphasizes the connected workflow and retained results.
+Specialist stage pages and administration remain available under More tools;
+navigating directly to a specialist page exposes its selected navigation item.
+The workflow offers a next-step navigation action from its existing progress
+context. That context is a navigation hint, not service readiness or approval.
+Opening a step never starts an operation, and all execution checks remain in
+its owning service operation. Completed workflows offer a findings review.

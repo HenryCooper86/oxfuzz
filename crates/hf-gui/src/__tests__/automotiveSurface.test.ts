@@ -28,7 +28,7 @@ describe("automotive surface boundaries", () => {
     // `enabled` toggle the way the optional DefectDojo entry is.
     expect(sidebar).not.toContain("AutomotiveNavButton");
     expect(sidebar).not.toContain("automotiveTag");
-    expect(sidebar).toContain('t("sidebar.vehicle")');
+    expect(sidebar).toContain('label: "sidebar.vehicle"');
     expect(sidebar).toMatch(/view:\s*"automotive",\s*icon:\s*CarFront/);
     expect(sidebar).not.toMatch(/automotiveOn\s*&&/);
   });
