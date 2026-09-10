@@ -646,6 +646,7 @@ impl ServiceContainer {
         corpus_dir: PathBuf,
         replay: Option<ReplayProvenance>,
     ) -> Result<PreparedUserspaceRun, ClassifiedError> {
+        crate::campaign_allocation::verify_granted_harness(qualified, resolved.duration_secs)?;
         let engine = resolved.engine;
         let extra_args = self
             .build_run_dictionary_args(project, target, workspace, engine)
@@ -2393,5 +2394,159 @@ mod semgrep_ranking_consumer_tests {
             "explicit target changed under overlay: {explicit}"
         );
         assert_eq!(semgrep_run_count(&store).await, before);
+    }
+}
+
+#[cfg(test)]
+mod allocation_preparation_tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+    #[tokio::test]
+    async fn userspace_preparation_rejects_a_harness_changed_after_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let harness = hf_core::harness::Harness {
+            id: Uuid::new_v4(),
+            target_id: Uuid::new_v4(),
+            engine: EngineKind::LibFuzzer,
+            source: "changed source".into(),
+            language: TargetLanguage::C,
+            sanitizer: hf_core::target::Sanitizer::Address,
+            status: HarnessStatus::Promoted,
+            smoke_run: None,
+            build_cmd: hf_core::harness::BuildCommand {
+                compiler: "clang".into(),
+                args: Vec::new(),
+                output: root.path().join("unused"),
+                extra_flags: Vec::new(),
+            },
+        };
+        let grant = crate::campaign_allocation::AllocationGrant {
+            id: Uuid::new_v4(),
+            plan_id: Uuid::new_v4(),
+            schedule_id: "schedule".into(),
+            created_at: Utc::now().to_rfc3339(),
+            duration_secs: 10,
+            candidate: crate::campaign_allocation::AllocationCandidate {
+                target: "a.c::parse".into(),
+                dispatch_target: "parse".into(),
+                target_id: harness.target_id,
+                harness_id: harness.id,
+                engine: "libfuzzer".into(),
+                language: "c".into(),
+                source_sha256: "a".repeat(64),
+            },
+        };
+        let service = ServiceContainer::stubbed();
+        let result = crate::campaign_allocation::with_grant(
+            &grant,
+            service.prepare_userspace_run(
+                root.path(),
+                "parse",
+                resolve_fuzzing_run(EngineKind::LibFuzzer, 10).unwrap(),
+                &harness,
+                root.path(),
+                root.path().join("corpus"),
+                None,
+            ),
+        )
+        .await;
+        let Err(error) = result else {
+            panic!("changed harness was prepared");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("active harness changed since allocation approval"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+    #[tokio::test]
+    async fn userspace_preparation_enforces_one_attempt_and_granted_seconds() {
+        let root = tempfile::tempdir().unwrap();
+        let harness = hf_core::harness::Harness {
+            id: Uuid::new_v4(),
+            target_id: Uuid::new_v4(),
+            engine: EngineKind::LibFuzzer,
+            source: "approved source".into(),
+            language: TargetLanguage::C,
+            sanitizer: hf_core::target::Sanitizer::Address,
+            status: HarnessStatus::Promoted,
+            smoke_run: None,
+            build_cmd: hf_core::harness::BuildCommand {
+                compiler: "clang".into(),
+                args: Vec::new(),
+                output: root.path().join("unused"),
+                extra_flags: Vec::new(),
+            },
+        };
+        let grant = crate::campaign_allocation::AllocationGrant {
+            id: Uuid::new_v4(),
+            plan_id: Uuid::new_v4(),
+            schedule_id: "schedule".into(),
+            created_at: Utc::now().to_rfc3339(),
+            duration_secs: 10,
+            candidate: crate::campaign_allocation::AllocationCandidate {
+                target: "a.c::parse".into(),
+                dispatch_target: "parse".into(),
+                target_id: harness.target_id,
+                harness_id: harness.id,
+                engine: "libfuzzer".into(),
+                language: "c".into(),
+                source_sha256: format!("{:x}", Sha256::digest(harness.source.as_bytes())),
+            },
+        };
+        let service = ServiceContainer::stubbed();
+        crate::campaign_allocation::with_grant(&grant, async {
+            let result = service
+                .prepare_userspace_run(
+                    root.path(),
+                    "parse",
+                    resolve_fuzzing_run(EngineKind::LibFuzzer, 11).unwrap(),
+                    &harness,
+                    root.path(),
+                    root.path().join("corpus"),
+                    None,
+                )
+                .await;
+            let Err(error) = result else {
+                panic!("over-budget run prepared");
+            };
+            assert!(
+                error.to_string().contains("exceeds allocation duration"),
+                "{error}"
+            );
+        })
+        .await;
+        crate::campaign_allocation::with_grant(&grant, async {
+            let first = service
+                .prepare_userspace_run(
+                    root.path(),
+                    "parse",
+                    resolve_fuzzing_run(EngineKind::LibFuzzer, 10).unwrap(),
+                    &harness,
+                    root.path(),
+                    root.path().join("corpus"),
+                    None,
+                )
+                .await;
+            assert!(first.is_err());
+            let second = service
+                .prepare_userspace_run(
+                    root.path(),
+                    "parse",
+                    resolve_fuzzing_run(EngineKind::LibFuzzer, 10).unwrap(),
+                    &harness,
+                    root.path(),
+                    root.path().join("corpus"),
+                    None,
+                )
+                .await;
+            let Err(error) = second else {
+                panic!("grant reused");
+            };
+            assert!(error.to_string().contains("already attempted"), "{error}");
+        })
+        .await;
     }
 }

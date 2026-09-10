@@ -728,6 +728,53 @@ async fn successful_promotion_returns_an_explicit_path_free_promoted_view() {
         .expect("REST promotion retained approval");
     assert_eq!(approval.harness_id.to_string(), harness_id);
     assert_eq!(approval.approval_kind, HarnessApprovalKind::CleanSmoke);
+    #[cfg(feature = "campaign-allocation")]
+    {
+        let (status, candidates, _) = json_request(
+            &fixture.app,
+            Method::POST,
+            "/campaign/allocation/candidates",
+            serde_json::json!({"project": fixture.project}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{candidates}");
+        assert!(candidates
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|candidate| candidate["harness_id"] == harness_id));
+        let (status, plan, _) = json_request(&fixture.app, Method::POST, "/campaign/allocation/propose", serde_json::json!({"project": fixture.project, "harness_ids": [harness_id], "max_runs": 3, "max_total_secs": 31})).await;
+        assert_eq!(status, StatusCode::OK, "{plan}");
+        assert_eq!(plan["status"], "draft");
+        assert_eq!(plan["proposal"]["entries"][0]["max_runs"], 3);
+        let review = serde_json::json!({"project": fixture.project, "id": plan["proposal"]["id"], "digest": plan["digest"], "approve": true});
+        let (status, approved, _) = json_request(
+            &fixture.app,
+            Method::POST,
+            "/campaign/allocation/review",
+            review.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{approved}");
+        assert_eq!(approved["status"], "approved");
+        let (status, _, _) = json_request(
+            &fixture.app,
+            Method::POST,
+            "/campaign/allocation/status",
+            serde_json::json!({"project": fixture.project.join("missing-outside")}),
+        )
+        .await;
+        assert!(!status.is_success());
+        let (status, revoked, _) =
+            json_request(&fixture.app, Method::POST, "/campaign/allocation/review", {
+                let mut revoke = review;
+                revoke["approve"] = serde_json::json!(false);
+                revoke
+            })
+            .await;
+        assert_eq!(status, StatusCode::OK, "{revoked}");
+        assert_eq!(revoked["status"], "revoked");
+    }
 }
 
 #[tokio::test]

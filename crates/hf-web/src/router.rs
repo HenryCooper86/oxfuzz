@@ -23,6 +23,8 @@ use hf_service::{
 use crate::security::{redact_config_text, redact_public_json};
 use crate::WebSecurityConfig;
 
+mod allocation;
+
 const SSE_CHANNEL_CAPACITY: usize = 256;
 const MAX_SSE_EVENT_BYTES: usize = 64 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
@@ -542,6 +544,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .route("/knowledge/search", post(knowledge_search))
         .route("/knowledge/stats", get(knowledge_stats))
         // Campaign scheduling.
+        .merge(allocation::routes())
         .route("/schedule/runtime", get(schedule_runtime))
         .route("/schedule", get(schedule_list).post(schedule_create))
         .route("/schedule/recovery", get(schedule_recovery_list))

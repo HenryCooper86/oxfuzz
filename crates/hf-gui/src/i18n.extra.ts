@@ -3,6 +3,25 @@
 // regenerate from the localized views.
 
 export const enExtra: Record<string, string> = {
+  "allocation.harnessRevision": "Approved harness revision",
+  "allocation.title": "Reviewed project allocation",
+  "allocation.scope": "Applies to scheduled campaigns for this project. Pending or revoked plans block new admission. Failed and interrupted reservations stay charged. Revocation stops future admission; it does not cancel issued grants. Manual runs retain their separate authorization.",
+  "allocation.noCandidates": "No active promoted harnesses are available. Qualify and promote a harness first.",
+  "allocation.runs": "Reserved runs",
+  "allocation.seconds": "Total fuzz seconds",
+  "allocation.prepare": "Prepare allocation",
+  "allocation.draft": "Awaiting review",
+  "allocation.approved": "Approved",
+  "allocation.revoked": "Revoked",
+  "allocation.charged": "reservations charged",
+  "allocation.cap": "At most {seconds}s per run; {remainder}s unallocated. Preparation and triage time are excluded.",
+  "allocation.target": "Target / engine",
+  "allocation.evidence": "Retained evidence and reason",
+  "allocation.edges": "edges",
+  "allocation.reviewDigest": "Proposal SHA-256",
+  "allocation.approve": "Approve this allocation",
+  "allocation.revoke": "Revoke allocation",
+
   "knowledge.checkStatus": "Check index status",
   "knowledge.configuration": "{strategy} · {tokens} tokens · {model}",
   "knowledge.noEmbedding": "No embedding model",
@@ -1878,6 +1897,25 @@ export const enExtra: Record<string, string> = {
 };
 
 export const zhExtra: Record<string, string> = {
+  "allocation.harnessRevision": "已批准的测试驱动版本",
+  "allocation.title": "已审核的项目配额",
+  "allocation.scope": "适用于此项目的定时任务。待审核或已撤销的方案会阻止新的执行准入。失败或中断的预留仍计入消耗。撤销仅停止后续准入，不会取消已发出的执行许可。手动运行使用独立授权。",
+  "allocation.noCandidates": "没有可用的活动已批准测试驱动。请先完成测试鉴定并批准。",
+  "allocation.runs": "预留运行次数",
+  "allocation.seconds": "总模糊测试秒数",
+  "allocation.prepare": "生成配额方案",
+  "allocation.draft": "等待审核",
+  "allocation.approved": "已批准",
+  "allocation.revoked": "已撤销",
+  "allocation.charged": "已计费预留",
+  "allocation.cap": "每次最多 {seconds} 秒；{remainder} 秒未分配。不包括准备和故障分析时间。",
+  "allocation.target": "目标 / 引擎",
+  "allocation.evidence": "留存证据与原因",
+  "allocation.edges": "覆盖边",
+  "allocation.reviewDigest": "方案 SHA-256",
+  "allocation.approve": "批准此配额方案",
+  "allocation.revoke": "撤销配额",
+
   "knowledge.checkStatus": "检查索引状态",
   "knowledge.configuration": "{strategy} · {tokens} 令牌 · {model}",
   "knowledge.noEmbedding": "未使用嵌入模型",

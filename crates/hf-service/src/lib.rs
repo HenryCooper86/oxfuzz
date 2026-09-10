@@ -20,6 +20,7 @@ pub mod automotive_report;
 #[cfg(feature = "build-doctor")]
 pub mod build_doctor;
 pub mod build_profiles;
+pub mod campaign_allocation;
 #[cfg(feature = "campaign-health")]
 pub mod campaign_health;
 #[cfg(feature = "proof-carrying")]

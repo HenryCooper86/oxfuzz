@@ -93,6 +93,10 @@ const COMMAND_MAP: Record<string, CommandEndpoint> = {
     emptyBody: true,
   },
   cancel_run_by_id: { method: "POST", path: "/runs/{run_id}/cancel" },
+  allocation_candidates: { method: "POST", path: "/campaign/allocation/candidates" },
+  allocation_status: { method: "POST", path: "/campaign/allocation/status" },
+  allocation_propose: { method: "POST", path: "/campaign/allocation/propose" },
+  allocation_review: { method: "POST", path: "/campaign/allocation/review" },
   campaign_advice: { method: "POST", path: "/campaign/advice" },
   campaign_evidence: { method: "POST", path: "/campaign/evidence" },
   remediation_draft: { method: "POST", path: "/remediation/draft" },
@@ -595,7 +599,7 @@ export function createHttpTransport(options: HttpTransportOptions = {}): Transpo
       }
       const requestArgs = command === "patch_defectdojo_config" || command === "patch_issue_tracker_config"
         ? typedPatchBody(args)
-        : command === "campaign_advice"
+        : command === "campaign_advice" || command === "allocation_propose"
           ? args?.request as Record<string, unknown> | undefined
           : args;
       return request<T>(endpoint, requestArgs, options);
