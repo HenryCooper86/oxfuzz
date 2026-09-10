@@ -275,7 +275,7 @@ function AppInner() {
                 {activeView === "runs" && (
                   <ViewCanvas>
                     <Suspense fallback={<LoadingState />}>
-                      <RunsView />
+                      <RunsView onNavigate={navigate} />
                     </Suspense>
                   </ViewCanvas>
                 )}

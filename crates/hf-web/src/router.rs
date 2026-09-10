@@ -449,6 +449,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .route("/runs/harness-source", post(run_harness_source))
         .route("/runs/revert-harness", post(revert_harness_from_run))
         .route("/runs/start", post(run_start))
+        .route("/runs/{id}/replay", get(replay_review).post(replay_start))
         .route("/runs/{id}/owner", get(run_owner))
         .route("/runs/{id}/status", get(run_status))
         .route("/runs/{id}/cancel", post(cancel_run_by_id))
@@ -2011,6 +2012,59 @@ struct RunStartRequest {
     duration_secs: u64,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplayStartRequest {
+    review: hf_service::ReplayReview,
+}
+
+enum CampaignLaunch {
+    Fresh {
+        project: PathBuf,
+        target: String,
+        engine: EngineKind,
+        duration_secs: u64,
+    },
+    Replay(hf_service::ReplayReview),
+}
+
+async fn replay_review(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> ApiResult<serde_json::Value> {
+    let owner = state
+        .container
+        .run_project(id)
+        .await
+        .map_err(classified_api_error)?;
+    let _approved_owner = approved_project(&state, &owner)?;
+    let review = state
+        .container
+        .replay_review(id)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(review)))
+}
+
+async fn replay_start(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+    Json(req): Json<ReplayStartRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let owner = state
+        .container
+        .run_project(id)
+        .await
+        .map_err(classified_api_error)?;
+    let _approved_owner = approved_project(&state, &owner)?;
+    if id != req.review.run_id {
+        return Err(classified_api_error(ClassifiedError::Validation(
+            "Replay review does not match the requested run".to_owned(),
+        )));
+    }
+    launch_campaign(state, CampaignLaunch::Replay(req.review)).await
+}
+
 async fn run_start(
     State(state): State<AppState>,
     Json(req): Json<RunStartRequest>,
@@ -2023,6 +2077,22 @@ async fn run_start(
                 .to_owned(),
         )));
     }
+    launch_campaign(
+        state,
+        CampaignLaunch::Fresh {
+            project,
+            target: req.target,
+            engine,
+            duration_secs: req.duration_secs,
+        },
+    )
+    .await
+}
+
+async fn launch_campaign(
+    state: AppState,
+    launch: CampaignLaunch,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let progress_state = state.clone();
     let on_progress = std::sync::Arc::new(move |run_id: uuid::Uuid, progress: FuzzProgress| {
         let (kind, data) = match progress {
@@ -2049,18 +2119,33 @@ async fn run_start(
             tracing::warn!(%run_id, %error, "dropping invalid run status event");
         }
     });
-    let run_id = state
-        .container
-        .start_fuzzer(
+    let run_id = match launch {
+        CampaignLaunch::Fresh {
             project,
-            req.target,
+            target,
             engine,
-            req.duration_secs,
-            on_progress,
-            on_status,
-        )
-        .await
-        .map_err(classified_api_error)?;
+            duration_secs,
+        } => {
+            state
+                .container
+                .start_fuzzer(
+                    project,
+                    target,
+                    engine,
+                    duration_secs,
+                    on_progress,
+                    on_status,
+                )
+                .await
+        }
+        CampaignLaunch::Replay(review) => {
+            state
+                .container
+                .start_replay(review, on_progress, on_status)
+                .await
+        }
+    }
+    .map_err(classified_api_error)?;
     Ok((
         StatusCode::ACCEPTED,
         Json(serde_json::json!({

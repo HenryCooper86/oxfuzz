@@ -4,6 +4,7 @@ import { formatInvokeError } from "../lib/invokeError";
 import { useI18n } from "../i18nContext";
 import type { RunHistoryItem, ViewType } from "../types";
 import type { CoverageExperiment, ExperimentAdvice, ExperimentCursor, ExperimentKind, ExperimentPage, ExperimentRun } from "../types/coverageExperiments";
+import { ReplayRun } from "./ReplayRun";
 import { Button } from "./ui";
 import { matchesTargetSelection } from "../lib/harnessScope";
 
@@ -135,11 +136,7 @@ function ExperimentWorkspace({ project, targetId, runs, advice, onNavigate, inve
       <RunEvidence run={selected.baseline} label={t("experiments.baselineStatus")} />
       {selected.status === "prepared" && <>
         <div className="flex gap-2"><Button disabled={!onNavigate} onClick={() => onNavigate?.(selected.kind === "grow_corpus" ? "corpus" : "harness")}>{t(selected.kind === "grow_corpus" ? "experiments.openCorpus" : "experiments.openHarness")}</Button></div>
-        {selected.baseline.seed === null ? <p className="text-xs">{t("experiments.replaySeedMissing")}</p> : <div className="text-xs">
-          <p>{t("experiments.replayGuidance")}</p>
-          <code className="break-all">{`oxfuzz run . --replay ${selected.baseline_run_id}`}</code>
-          <p>{t("experiments.replaySettings")}</p>
-        </div>}
+        {selected.baseline.seed === null ? <p className="text-xs">{t("experiments.replaySeedMissing")}</p> : <ReplayRun runId={selected.baseline_run_id} onNavigate={onNavigate} />}
         <p className="text-xs">{t("experiments.error.invalid_chronology")}</p>
         <label>{t("experiments.result")}<select aria-label={t("experiments.result")} value={result} disabled={disabled} onChange={event => setResult(event.target.value)}><option value="">{t("experiments.choose")}</option>{laterRuns.map(run => <option key={run.id} value={run.id}>{run.id} · {run.started_at} · {t(`experiments.status.${run.status.toLowerCase() === "cancelled" ? "cancelledRun" : run.status.toLowerCase()}`)}</option>)}</select></label>
         <Button disabled={disabled || !result} onClick={() => void write("coverage_experiment_complete", { id: selected.id, request: { scope, result_run_id: result } })}>{t("experiments.attach")}</Button>

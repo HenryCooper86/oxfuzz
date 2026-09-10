@@ -423,10 +423,11 @@ screen checks retained state only; it does not discover targets or run engines.
 **Coverage experiments:** prepare a reviewed “Grow corpus” or “Refine harness”
 proposal against one retained terminal campaign, then perform the work through
 the existing controls. Preparation, navigation, history reads, and attachment
-do not run a provider, harness, or fuzzer. To reproduce a seeded baseline, use
-\`oxfuzz run . --replay <baseline UUID>\` with the same configuration and database
-as the app, the retained original project, the current promoted harness and
-corpus, and every other compared setting unchanged. Ordinary Run chooses a new
+do not run a provider, harness, or fuzzer. Choose **Review replay** for a seeded
+baseline, inspect the retained seed and duration and current resource limits,
+then choose **Start reviewed replay**. It uses the original project and current
+promoted harness and corpus. Track or stop the new campaign in Run. Keep every
+other compared setting unchanged. Ordinary Run chooses a new
 seed. A legacy baseline without a retained seed needs a new seeded baseline.
 After a later terminal run exists, refresh and explicitly attach it; the
 service rejects incomparable setup and leaves the prepared record unchanged.

@@ -90,11 +90,11 @@ describe("in-app documentation", () => {
     expect(chineseRuns?.body).toContain("七个步骤");
     expect(chineseRuns?.body).toContain("分析 / 继续");
 
-    expect(englishCorpus?.body).toContain("oxfuzz run . --replay");
-    expect(englishCorpus?.body).toContain("same configuration and database");
+    expect(englishCorpus?.body).toContain("Start reviewed replay");
+    expect(englishCorpus?.body).toContain("current resource limits");
     expect(englishCorpus?.body).toContain("legacy baseline");
-    expect(chineseCorpus?.body).toContain("oxfuzz run . --replay");
-    expect(chineseCorpus?.body).toContain("相同的配置和数据库");
+    expect(chineseCorpus?.body).toContain("启动已审查的重放");
+    expect(chineseCorpus?.body).toContain("当前资源限制");
     expect(chineseCorpus?.body).toContain("旧版基线");
   });
 

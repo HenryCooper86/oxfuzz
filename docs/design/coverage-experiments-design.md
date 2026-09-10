@@ -500,10 +500,11 @@ explicitly before viewing scoped history. A selected blocker may prefill kind/fu
 edits them and writes the hypothesis. Show baseline status, duration, unavailable
 evidence and limits. Prepare persists first; only then offer explicit navigation
 to Corpus for growth or Harness for refinement. For a baseline with a retained
-seed, show the exact command `oxfuzz run . --replay <baseline UUID>` using the
-same oxfuzz configuration and database as the app. The required positional `.`
-is ignored by replay, which resolves the original project from the retained run;
-the project must remain available. Existing replay and closeout share exact
+seed, offer **Review replay** using the app's existing service and database.
+The review displays the original run, project, exact target selector, engine,
+seed as decimal text, duration, and current memory/CPU limits. The launch
+operation re-resolves and compares this review before admitting a run; changed
+settings require a new review. The project must remain available. Existing replay and closeout share exact
 retained workspace-selector resolution described in [Run Closeout](run-closeout-design.md),
 preserving both ordinary bare-symbol and imported file-qualified workspaces.
 Replay uses the current promoted harness and
@@ -511,8 +512,12 @@ corpus under current policy; all other compared settings must remain unchanged.
 Ordinary Run derives a new seed and cannot provide a matching experiment result.
 A legacy baseline with no retained seed cannot be recreated by replay; direct
 the operator to start a new campaign and prepare against its recorded seed.
-There is no new REST/native replay capability, automatic execution, or relaxed
-seed comparison. No navigation handler invokes an action. Preserve experiment ID when returning. The GUI stores only the selected ID in a
+REST and native replay use the same service replay and durable run lifecycle,
+including cancellation and progress. REST authorizes the retained owner before
+reading review details or executing; native launch is an explicit human action.
+There is no automatic execution or relaxed seed comparison. Result attachment
+remains a separate reviewed action after refreshing retained run history.
+No navigation handler invokes an action. Preserve experiment ID when returning. The GUI stores only the selected ID in a
 local preference keyed by canonical project and target UUID, then reloads its
 record through the scoped service read. Preference failures are visible; this
 pointer never substitutes for the durable record.

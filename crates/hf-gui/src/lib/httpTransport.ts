@@ -80,6 +80,8 @@ const COMMAND_MAP: Record<string, CommandEndpoint> = {
   run_coverage_series: { method: "POST", path: "/runs/coverage" },
   run_harness_source: { method: "POST", path: "/runs/harness-source" },
   revert_harness_from_run: { method: "POST", path: "/runs/revert-harness" },
+  replay_review: { method: "GET", path: "/runs/{run_id}/replay" },
+  replay_run: { method: "POST", path: "/runs/{run_id}/replay" },
   run_fuzzer: { method: "POST", path: "/runs/start" },
   run_owner: { method: "GET", path: "/runs/{run_id}/owner" },
   run_status: { method: "GET", path: "/runs/{run_id}/status" },
@@ -455,6 +457,7 @@ export function createHttpTransport(options: HttpTransportOptions = {}): Transpo
   }
 
   async function runFuzzer(
+    command: "run_fuzzer" | "replay_run",
     args?: Record<string, unknown>,
     options?: InvokeOptions,
   ): Promise<FuzzerRunResult> {
@@ -463,8 +466,8 @@ export function createHttpTransport(options: HttpTransportOptions = {}): Transpo
     }
 
     const startPromise = request<RunStartResponse>(
-      COMMAND_MAP.run_fuzzer,
-      runStartArgs(args),
+      COMMAND_MAP[command],
+      command === "replay_run" ? { runId: args?.runId, review: args?.review } : runStartArgs(args),
     );
     pendingRunStart = startPromise;
     let start: RunStartResponse;
@@ -558,7 +561,7 @@ export function createHttpTransport(options: HttpTransportOptions = {}): Transpo
       args?: Record<string, unknown>,
       options?: InvokeOptions,
     ): Promise<T> {
-      if (command === "run_fuzzer") return runFuzzer(args, options) as Promise<T>;
+      if (command === "run_fuzzer" || command === "replay_run") return runFuzzer(command, args, options) as Promise<T>;
       if (command === "cancel_run") return cancelActiveRun(args) as Promise<T>;
       if (command === "semgrep_enrich") return startSemgrep(args) as Promise<T>;
       if (command === "semgrep_cancel") {

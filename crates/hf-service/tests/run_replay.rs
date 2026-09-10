@@ -329,7 +329,74 @@ async fn run_records_a_seed_and_replay_reexecutes_with_it() {
     }
 
     // Replay: a new run row, the same seed on the argv, a link to the original.
-    let replay = container.replay_run(summary.run_id, &|_| {}).await.unwrap();
+    let review = container.replay_review(summary.run_id).await.unwrap();
+    assert_eq!(review.seed, seed.to_string());
+    let denied = container
+        .clone()
+        .with_guardrails(hf_guardrails::Guardrails::new(
+            hf_guardrails::GuardrailPolicy::default(),
+            Arc::new(hf_guardrails::DenyAll),
+        ));
+    let before_denial = runtime.campaign_count();
+    assert!(denied
+        .replay_run_reviewed(review.clone(), &|_| {}, &|_| {})
+        .await
+        .is_err());
+    assert!(denied
+        .start_replay(review.clone(), Arc::new(|_, _| {}), Arc::new(|_, _| {}))
+        .await
+        .is_err());
+    assert_eq!(runtime.campaign_count(), before_denial);
+    let mut stale = review.clone();
+    stale.duration_secs += 1;
+    let count = runtime.campaign_count();
+    assert!(container
+        .replay_run_reviewed(stale, &|_| {}, &|_| {})
+        .await
+        .is_err());
+    assert_eq!(runtime.campaign_count(), count);
+    let admitted = Mutex::new(None);
+    let replay = container
+        .replay_run_reviewed(review, &|_| {}, &|id| {
+            *admitted.lock().unwrap() = Some(id);
+        })
+        .await
+        .unwrap();
+    assert_eq!(*admitted.lock().unwrap(), Some(replay.run_id));
+    let (status_tx, mut statuses) = tokio::sync::mpsc::unbounded_channel();
+    let background_id = container
+        .start_replay(
+            container.replay_review(summary.run_id).await.unwrap(),
+            Arc::new(|_, _| {}),
+            Arc::new(move |id, status| {
+                status_tx.send((id, status)).unwrap();
+            }),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let (id, status) = statuses.recv().await.unwrap();
+            assert_eq!(id, background_id);
+            if status == hf_service::RunLifecycleStatus::Done {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_ne!(background_id, summary.run_id);
+    assert_eq!(
+        store
+            .get_run(background_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .config
+            .unwrap()
+            .replay_of,
+        Some(summary.run_id)
+    );
     assert_ne!(replay.run_id, summary.run_id);
     let replayed = store.get_run(replay.run_id).await.unwrap().unwrap();
     assert_eq!(replayed.status, RunStatus::Done);

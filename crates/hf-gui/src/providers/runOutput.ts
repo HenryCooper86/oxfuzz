@@ -1,3 +1,4 @@
+import type { ReplayReview } from "../lib/transport";
 import { createContext, useContext } from "react";
 
 export interface RunStats {
@@ -51,6 +52,7 @@ export interface RunOutputValue {
     engine: string;
     duration: number;
   }) => Promise<number>;
+  replayRun: (review: ReplayReview) => Promise<number>;
   runSyzkaller: (options: Record<string, unknown>) => Promise<number>;
   cancelRun: () => Promise<void>;
   clear: () => void;
@@ -79,6 +81,7 @@ export function useRunOutput(): RunOutputValue {
       healthEvents: [],
       loadOlderHealthEvents: async () => {},
       runFuzzer: async () => 0,
+      replayRun: async () => { throw new Error("Run controller unavailable"); },
       runSyzkaller: async () => 0,
       cancelRun: async () => {},
       clear: () => {},

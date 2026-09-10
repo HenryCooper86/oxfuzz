@@ -202,7 +202,9 @@ describe("transport", () => {
     }
   });
 
-  it("bridges run_fuzzer to the durable asynchronous run contract", async () => {
+  it.each(["run_fuzzer", "replay_run"])("bridges %s to the durable asynchronous run lifecycle", async (command) => {
+    const review = { run_id: "22222222-2222-4222-8222-222222222222", project: "/tmp/project", target: "parse_entry", engine: "libfuzzer", seed: "18446744073709551615", duration_secs: 60, max_mem_mb: "512", max_cpus: 1 };
+    const startPath = command === "replay_run" ? `/runs/${review.run_id}/replay` : "/runs/start";
     const calls: Array<{ url: string; init: RequestInit }> = [];
     const progress: RunProgressEvent[] = [];
     const encoder = new TextEncoder();
@@ -212,7 +214,7 @@ describe("transport", () => {
       const request = { url: String(url), init: init ?? {} };
       calls.push(request);
       const path = new URL(request.url).pathname;
-      if (path === "/runs/start") {
+      if (path === startPath) {
         return new Response(
           JSON.stringify({ run_id: "11111111-1111-4111-8111-111111111111", status: "running" }),
           { status: 202, headers: { "content-type": "application/json" } },
@@ -280,7 +282,7 @@ describe("transport", () => {
       const unlisten = await transport.listen<RunProgressEvent>("run:progress", (event) => {
         progress.push(event.payload);
       });
-      const result = await transport.invoke<FuzzerRunResult>("run_fuzzer", {
+      const result = await transport.invoke<FuzzerRunResult>(command, command === "replay_run" ? { runId: review.run_id, project: review.project, review } : {
         project: "/tmp/project",
         target: "parse_entry",
         engine: "libfuzzer",
@@ -302,9 +304,9 @@ describe("transport", () => {
         { run_id: "other-run", type: "LogLine", data: "ignore" },
         { run_id: "11111111-1111-4111-8111-111111111111", type: "LogLine", data: "owned" },
       ]);
-      const start = calls.find((call) => call.url.endsWith("/runs/start"));
+      const start = calls.find((call) => call.url.endsWith(startPath));
       expect(start?.init.method).toBe("POST");
-      expect(JSON.parse(String(start?.init.body))).toEqual({
+      expect(JSON.parse(String(start?.init.body))).toEqual(command === "replay_run" ? { review } : {
         project: "/tmp/project",
         target: "parse_entry",
         engine: "libfuzzer",
