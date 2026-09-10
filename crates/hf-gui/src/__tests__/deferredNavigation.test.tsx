@@ -9,9 +9,11 @@ const loaded = vi.hoisted(() => new Set<string>());
 vi.mock("../lib", async () => ({
   ...await vi.importActual("../lib"),
   getTransport: () => ({ invoke: async () => [], listen: async () => () => {} }),
+  pickFolder: async () => "/fixture-project",
 }));
 vi.mock("../components/Sidebar", () => ({
-  Sidebar: ({ onNavigate }: { onNavigate: (view: ViewType) => void }) => <nav>
+  Sidebar: ({ onNavigate, onNewTarget }: { onNavigate: (view: ViewType) => void; onNewTarget: () => void }) => <nav>
+    <button onClick={onNewTarget}>Open project</button>
     {(["dashboard", "workflow", "discover", "harness", "run", "triage", "settings"] as const).map(view =>
       <button key={view} onClick={() => onNavigate(view)}>{view}</button>)}
   </nav>,
@@ -58,10 +60,38 @@ it("keeps deferred modules out of startup, loads requested views, and returns fr
     await act(async () => { await vi.waitFor(() => expect(loaded.has("settings")).toBe(true)); });
     await click("Close settings");
     expect(host.textContent).toContain("triage ready");
+    await click("Open project");
+    expect(host.textContent).toContain("workflow ready");
   } finally {
     await act(async () => root.unmount());
     host.remove();
     localStorage.clear();
     vi.unstubAllGlobals();
+  }
+});
+
+it("remembers setup deferral and lets the user return without claiming completion", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  localStorage.clear();
+  const host = document.createElement("div"); document.body.append(host);
+  const root = createRoot(host);
+  const click = async (label: string) => {
+    const button = [...host.querySelectorAll("button")].find(button => button.textContent === label);
+    expect(button, host.textContent ?? "").toBeTruthy();
+    await act(async () => button!.click());
+  };
+  try {
+    await act(async () => root.render(<App />));
+    await click("Set up later");
+    expect(localStorage.getItem("hf_setup_completed")).not.toBe("true");
+    expect(localStorage.getItem("hf_setup_deferred")).toBe("true");
+    expect(host.textContent).toContain("Setup is unfinished");
+    await act(async () => root.render(null));
+    await act(async () => root.render(<App />));
+    expect(host.textContent).toContain("Setup is unfinished");
+    await click("Finish setup");
+    expect(host.textContent).toContain("AI connection");
+  } finally {
+    await act(async () => root.unmount()); host.remove(); localStorage.clear(); vi.unstubAllGlobals();
   }
 });

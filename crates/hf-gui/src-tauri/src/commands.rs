@@ -651,6 +651,12 @@ pub async fn system_status_cmd() -> SystemStatus {
     system_status().await
 }
 
+/// Inspect first-run setup through the service-owned readiness assessment.
+#[tauri::command]
+pub async fn setup_readiness() -> hf_service::system::SetupReadiness {
+    hf_service::system::setup_readiness().await
+}
+
 /// Ensure Docker is ready (daemon running + sandbox image loaded), starting
 /// and building as needed. Invoked by the frontend on launch.
 #[tauri::command]
@@ -3835,6 +3841,21 @@ pub fn list_models() -> Vec<ModelInfo> {
 #[must_use]
 pub fn get_providers() -> Vec<ProviderConfig> {
     hf_service::config::get_providers()
+}
+
+/// Read saved providers without treating bundled examples as configured.
+#[tauri::command]
+pub fn setup_providers() -> Result<Vec<ProviderConfig>, String> {
+    hf_service::config::setup_providers()
+}
+
+/// Save a first connection without replacing an existing provider pool.
+#[tauri::command]
+pub fn initialize_provider(
+    state: tauri::State<'_, crate::state::AppState>,
+    provider: ProviderConfig,
+) -> Result<(), String> {
+    state.container.initialize_provider(&provider)
 }
 
 /// Load the service-validated fuzzing policy used by subsequent operations.

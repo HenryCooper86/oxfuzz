@@ -64,6 +64,30 @@ impl SystemStatus {
     }
 }
 
+/// Read-only setup observation; completing the wizard never authorizes execution.
+#[derive(Debug, Clone, Serialize)]
+pub struct SetupReadiness {
+    /// Individual observations from the existing system probe.
+    pub status: SystemStatus,
+    /// Service-owned core runtime readiness, excluding optional integrations.
+    pub runtime_ready: bool,
+}
+
+impl From<SystemStatus> for SetupReadiness {
+    fn from(status: SystemStatus) -> Self {
+        let runtime_ready = status.fuzzing_ready();
+        Self {
+            status,
+            runtime_ready,
+        }
+    }
+}
+
+/// Inspect setup prerequisites without preparing or executing a target.
+pub async fn setup_readiness() -> SetupReadiness {
+    system_status().await.into()
+}
+
 /// Compute the current system status by probing Docker, the sandbox image, and
 /// the configured `DefectDojo`.
 pub async fn system_status() -> SystemStatus {
@@ -184,6 +208,20 @@ mod tests {
             honggfuzz: StatusFlag(false),
             syzkaller: StatusFlag(false),
             defectdojo: StatusFlag(false),
+        }
+    }
+
+    #[test]
+    fn setup_view_serializes_service_owned_readiness_without_optional_integrations() {
+        for (docker, image, engine, expected) in [
+            (true, true, true, true),
+            (true, true, false, false),
+            (false, true, true, false),
+        ] {
+            let view = super::SetupReadiness::from(status(docker, image, engine));
+            let json = serde_json::to_value(view).unwrap();
+            assert_eq!(json["runtime_ready"], expected);
+            assert_eq!(json["status"]["defectdojo"], false);
         }
     }
 

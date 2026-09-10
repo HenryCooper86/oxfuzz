@@ -9,7 +9,7 @@ import { ConfirmProvider } from "./providers/ConfirmContext";
 import { TooltipProvider } from "./components/ui/Tooltip";
 import { ToastProvider } from "./components/ui/Toast";
 import { useToast } from "./components/ui/toastContext";
-import { ViewCanvas } from "./components/ui";
+import { Button, ViewCanvas } from "./components/ui";
 import { getTransport } from "./lib";
 import { DiagnosticsPanel } from "./components/observation/DiagnosticsPanel";
 import { ObservabilityPanel } from "./components/observation/ObservabilityPanel";
@@ -115,14 +115,14 @@ function AppInner() {
   };
 
   // "New fuzzing target": pick a project folder, make it active, and land on
-  // Discover. Per-target pipeline/target state is retained, so an existing
+  // Workflow. Per-target pipeline/target state is retained, so an existing
   // project keeps its progress; a brand-new one starts fresh. Cancelling is a no-op.
   const startNewTarget = async () => {
     const path = await pickFolder();
     if (!path) return;
     setActiveProject(path);
     setChatResetKey((k) => k + 1);
-    setActiveView("discover");
+    setActiveView("workflow");
   };
 
   // Switch the active fuzzing target to an existing project. Its per-target
@@ -136,7 +136,8 @@ function AppInner() {
   const [showInfo, setShowInfo] = useState(false);
   const [showProgress, setShowProgress] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [setupDone, setSetupDone] = useState(localStorage.getItem("hf_setup_completed") === "true");
+  const [setupDone, setSetupDone] = useState(() => localStorage.getItem("hf_setup_completed") === "true" || localStorage.getItem("hf_setup_deferred") === "true");
+  const [setupDeferred, setSetupDeferred] = useState(() => localStorage.getItem("hf_setup_completed") !== "true" && localStorage.getItem("hf_setup_deferred") === "true");
   const platform = detectPlatform();
 
   // Bootstrap platform-conditional chrome: expose host (tauri/web) and OS on
@@ -149,7 +150,14 @@ function AppInner() {
   }, []);
 
   if (!setupDone) {
-    return <SetupWizard onComplete={() => setSetupDone(true)} />;
+    return <SetupWizard onComplete={outcome => {
+      const deferred = outcome === "deferred";
+      localStorage.setItem(deferred ? "hf_setup_deferred" : "hf_setup_completed", "true");
+      localStorage.removeItem(deferred ? "hf_setup_completed" : "hf_setup_deferred");
+      setSetupDeferred(deferred);
+      setSetupDone(true);
+      setActiveView("workflow");
+    }} />;
   }
 
   // The embedded DefectDojo webview is a full external app; give it the whole
@@ -202,6 +210,10 @@ function AppInner() {
             />
             <div className="flex flex-1 overflow-hidden">
               <main className="flex-1 min-w-0 overflow-hidden flex flex-col">
+                {setupDeferred && <div className="flex flex-wrap items-center gap-3 border-b border-border bg-surface-secondary px-4 py-3">
+                  <p className="m-0 flex-1 text-sm text-text-secondary">{t("setup.deferred")}</p>
+                  <Button variant="outline" size="sm" onClick={() => setSetupDone(false)}>{t("setup.resume")}</Button>
+                </div>}
                 <RecoveryBanner />
                 <ErrorBoundary resetKey={activeView}>
                 <Suspense fallback={<LoadingState />}>

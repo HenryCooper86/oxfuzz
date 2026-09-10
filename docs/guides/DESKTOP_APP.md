@@ -11,8 +11,21 @@ and triage all run locally with the same sandboxing and guardrails as the CLI.
 open target/release/bundle/macos/oxfuzz.app
 ```
 
-On first launch a short setup wizard configures your LLM provider, checks the
-sandbox, and points oxfuzz at your first project. After that the left
+On first launch, setup has three steps: **AI connection**, **Sandbox**, and
+**Start a project**. Test a new provider before saving it; existing provider
+pools remain available for editing in Settings. Custom endpoints are under
+Advanced connection settings. The sandbox step checks service readiness and
+offers **Prepare sandbox** on desktop when setup needs attention. Preparation
+requires an installed Docker application and the sandbox build files; browser
+users ask their server administrator to prepare it and use **Check again**.
+
+**Set up later** retains an unfinished-setup reminder across restarts.
+**Finish setup** returns to the wizard. Completion opens the guided workflow;
+it never grants execution approval. Optional integrations and detailed settings
+stay in Settings. With no project selected, the Dashboard presents one action
+to open the project workflow.
+
+After that the left
 sidebar is your control panel. Pipeline surfaces cover the Dashboard, AI
 Assistant, guided workflow, Discover, Harness, Run, Triage, and Corpus. Library
 and operations surfaces add Projects, Artifacts, Reports, Run History, Policy
