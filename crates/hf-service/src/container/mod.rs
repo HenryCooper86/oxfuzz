@@ -38,6 +38,7 @@ mod output_budget;
 mod policy;
 mod project_identity;
 mod run;
+pub(crate) use run::CampaignRunLimits;
 #[cfg(feature = "run-closeout")]
 mod run_closeout;
 mod staging;

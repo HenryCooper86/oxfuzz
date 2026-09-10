@@ -42,7 +42,23 @@ archiving a user's database.
 `record_success` advances the target cursor once after a successful campaign
 outcome, adds every completed fuzz iteration to `runs_done`, and adds measured
 wall-clock campaign work to `secs_done`. Failed attempts and skipped fires do not
-consume the success budget.
+consume the success budget. A per-schedule dispatch permit covers reading this
+state, executing the campaign, and persisting its result; overlapping fires for
+that schedule skip rather than reuse an uncharged allowance. Different schedules
+still run concurrently under the global cap.
+
+Each fire passes at most the remaining run count to the campaign operation.
+When a time budget is configured, the operation checks the remaining elapsed
+allowance before every iteration and caps that fuzzer's requested duration to
+the remaining whole-second budget. Elapsed time is measured in completed seconds,
+matching the persisted counter and engine duration setting; a one-second budget
+therefore permits a one-second run despite fractional setup time. Zero remaining
+seconds ends the loop. Qualification,
+triage, cancellation, and teardown may finish beyond the time allowance; this
+success budget is not a hard process deadline. Refinement is skipped once time
+is spent. Interrupted/failed work is not charged under the existing success
+accounting; a strict resource-spend budget would require durable reservations
+and separate attempt accounting.
 
 Both `campaign_state.json` and `schedules.json` use same-directory temporary
 files, file `fsync`, atomic replacement, and parent-directory `fsync`. A missing
@@ -146,6 +162,15 @@ Queued work remains `Pending` until it owns both its per-schedule queue position
 and a global execution slot. Pending/running rows and started rows still needed
 by the rolling-hour limit are protected from history pruning; the configured
 display-history cap is restored as those rows finish or age out.
+
+A newly created cron schedule waits for the first calendar occurrence strictly
+after its creation time. Recovery uses that same starting point and applies the
+configured missed-fire policy only to occurrences that were actually due.
+Re-enabling a cron schedule advances its cursor to activation time; disabled
+periods are not implicitly replayed. Interval schedules retain their immediate
+first-fire behavior. Operator and persisted intervals must be positive and
+representable as a Chrono duration; next-date calculation is checked and an
+unrepresentable future occurrence is never dispatched.
 
 Cron values may be created as `CRON_TZ=<IANA zone> <five-field expression>`.
 The zone is validated at creation, persisted in `TriggerConfig`, and used by

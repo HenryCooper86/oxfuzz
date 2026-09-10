@@ -16,7 +16,10 @@ pub enum TriggerConfig {
         timezone: String,
     },
     /// Fixed interval trigger.
-    Interval { interval_secs: u64 },
+    Interval {
+        #[serde(deserialize_with = "crate::interval::deserialize_interval_secs")]
+        interval_secs: u64,
+    },
     /// Event-driven trigger.
     Event {
         event_type: String,
@@ -219,8 +222,12 @@ impl ScheduleStore {
     /// Enable or disable a schedule.
     pub fn set_enabled(&mut self, id: &str, enabled: bool) -> bool {
         if let Some(s) = self.schedules.iter_mut().find(|s| s.id == id) {
+            let now = Utc::now();
+            if enabled && !s.enabled && matches!(s.trigger, TriggerConfig::Cron { .. }) {
+                s.last_fire = Some(now);
+            }
             s.enabled = enabled;
-            s.updated_at = Utc::now();
+            s.updated_at = now;
             true
         } else {
             false
@@ -275,6 +282,36 @@ mod tests {
             "test-wf",
         )
         .with_tags(vec!["maintenance".into()])
+    }
+
+    #[test]
+    fn reenabled_cron_starts_from_activation() {
+        let mut store = ScheduleStore::new();
+        let mut schedule = Schedule::new(
+            "cron",
+            "cron",
+            TriggerConfig::Cron {
+                expression: "* * * * *".into(),
+                timezone: "UTC".into(),
+            },
+            "wf",
+        );
+        schedule.enabled = false;
+        schedule.last_fire = Some(Utc::now() - chrono::Duration::days(1));
+        store.register(schedule);
+        let before = Utc::now();
+        assert!(store.set_enabled("cron", true));
+        let schedule = store.get("cron").unwrap();
+        assert!(schedule.last_fire.unwrap() >= before);
+        assert!(crate::trigger::evaluate_trigger(schedule, Utc::now()).is_none());
+    }
+
+    #[test]
+    fn persisted_intervals_reject_unrepresentable_values() {
+        for seconds in [0, u64::MAX, i64::MAX as u64] {
+            let value = serde_json::json!({"type":"interval", "interval_secs":seconds});
+            assert!(serde_json::from_value::<TriggerConfig>(value).is_err());
+        }
     }
 
     #[test]

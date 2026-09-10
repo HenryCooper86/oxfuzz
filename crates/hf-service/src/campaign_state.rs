@@ -7,7 +7,7 @@
 //! user's targets/harnesses/runs/crashes on the next launch. State that only the
 //! scheduler owns has no business forcing that risk on everything else.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -159,6 +159,7 @@ pub(crate) fn atomic_write_json<T: Serialize>(
 pub struct CampaignStateStore {
     path: PathBuf,
     inner: Mutex<Persisted>,
+    dispatching: Mutex<HashSet<String>>,
 }
 
 impl CampaignStateStore {
@@ -172,6 +173,7 @@ impl CampaignStateStore {
         Ok(Self {
             path,
             inner: Mutex::new(inner),
+            dispatching: Mutex::new(HashSet::new()),
         })
     }
 
@@ -187,6 +189,21 @@ impl CampaignStateStore {
             Ok(store) => store,
             Err(error) => panic!("campaign state cannot be loaded: {error}"),
         }
+    }
+
+    /// Reserve this schedule's allowance until the fire has persisted its outcome.
+    pub(crate) fn try_dispatch(self: &Arc<Self>, id: &str) -> Option<CampaignDispatchPermit> {
+        let mut dispatching = self
+            .dispatching
+            .lock()
+            .expect("campaign dispatch registry poisoned");
+        if !dispatching.insert(id.to_owned()) {
+            return None;
+        }
+        Some(CampaignDispatchPermit {
+            state: Arc::clone(self),
+            id: id.to_owned(),
+        })
     }
 
     /// This campaign's progress, or the zero state if it has never run.
@@ -318,6 +335,21 @@ impl CampaignStateStore {
     }
 }
 
+pub(crate) struct CampaignDispatchPermit {
+    state: Arc<CampaignStateStore>,
+    id: String,
+}
+
+impl Drop for CampaignDispatchPermit {
+    fn drop(&mut self) {
+        self.state
+            .dispatching
+            .lock()
+            .expect("campaign dispatch registry poisoned")
+            .remove(&self.id);
+    }
+}
+
 /// A resizable cap on how many campaigns fuzz at once.
 ///
 /// [`Self::try_enter`] returns a permit that frees its slot on drop; `None` means
@@ -392,6 +424,17 @@ impl Drop for ConcurrencyPermit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn same_schedule_cannot_reuse_an_in_flight_allowance() {
+        let root = tempfile::tempdir().unwrap();
+        let state = Arc::new(CampaignStateStore::load(root.path().join("state.json")));
+        let permit = state.try_dispatch("first").unwrap();
+        assert!(state.try_dispatch("first").is_none());
+        assert!(state.try_dispatch("other").is_some());
+        drop(permit);
+        assert!(state.try_dispatch("first").is_some());
+    }
 
     #[test]
     fn state_round_trips_through_disk() {

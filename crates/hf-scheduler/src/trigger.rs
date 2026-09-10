@@ -65,16 +65,14 @@ pub fn evaluate_trigger(schedule: &Schedule, now: DateTime<Utc>) -> Option<Fired
             timezone,
         } => {
             let cron = CronSchedule::new(expression).with_timezone(timezone);
-            match schedule.last_fire {
-                Some(last) => cron.next_fire(last).is_some_and(|next| next <= now),
-                None => true, // Never fired; fire immediately.
-            }
+            cron.next_fire(schedule.last_fire.unwrap_or(schedule.created_at))
+                .is_some_and(|next| next <= now)
         }
         TriggerConfig::Interval { interval_secs } => {
             let interval = IntervalSchedule::new(*interval_secs);
             match schedule.last_fire {
-                Some(last) => interval.next_fire(last) <= now,
-                None => true, // Never fired; fire immediately.
+                Some(last) => interval.next_fire(last).is_some_and(|next| next <= now),
+                None => interval.next_fire(now).is_some(), // Valid intervals fire immediately.
             }
         }
         TriggerConfig::OneTime { at } => {
@@ -125,6 +123,39 @@ pub fn evaluate_all(schedules: &[Schedule], now: DateTime<Utc>) -> Vec<FiredTrig
 mod tests {
     use super::*;
     use chrono::Duration;
+
+    #[test]
+    fn new_cron_waits_for_its_first_calendar_occurrence() {
+        use chrono::TimeZone;
+        let created = Utc.with_ymd_and_hms(2026, 9, 10, 12, 0, 0).unwrap();
+        let mut schedule = Schedule::new(
+            "nightly",
+            "nightly",
+            TriggerConfig::Cron {
+                expression: "0 2 * * *".into(),
+                timezone: "UTC".into(),
+            },
+            "wf",
+        );
+        schedule.created_at = created;
+        assert!(evaluate_trigger(&schedule, created).is_none());
+        assert!(evaluate_trigger(&schedule, created + Duration::hours(13)).is_none());
+        assert!(evaluate_trigger(&schedule, created + Duration::hours(14)).is_some());
+    }
+
+    #[test]
+    fn excessive_interval_does_not_panic_evaluation() {
+        let mut schedule = Schedule::new(
+            "large",
+            "large",
+            TriggerConfig::Interval {
+                interval_secs: u64::MAX,
+            },
+            "wf",
+        );
+        schedule.last_fire = Some(Utc::now());
+        assert!(evaluate_trigger(&schedule, Utc::now()).is_none());
+    }
 
     #[test]
     fn test_trigger_engine_cron_fires() {

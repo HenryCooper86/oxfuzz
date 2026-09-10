@@ -2904,13 +2904,15 @@ mod tests {
         let schedule = Schedule::new(
             "fast-interval",
             "Fast Interval",
-            TriggerConfig::Interval { interval_secs: 0 }, // fires immediately
+            TriggerConfig::Interval { interval_secs: 1 }, // fires immediately
             "wf",
         );
         mgr.register(schedule).await;
 
         // Start with a short tick.
         mgr.start(Duration::from_millis(20)).await;
+        // The initial occurrence is restored by startup recovery.
+        mgr.arm();
 
         // Wait enough for at least one tick + execution.
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -4399,12 +4401,14 @@ mod tests {
         mgr.register(Schedule::new(
             "persisted-interval",
             "Persisted Interval",
-            TriggerConfig::Interval { interval_secs: 0 },
+            TriggerConfig::Interval { interval_secs: 1 },
             "wf",
         ))
         .await;
 
         mgr.start(Duration::from_millis(20)).await;
+        // The initial occurrence is restored by startup recovery.
+        mgr.arm();
         tokio::time::sleep(Duration::from_millis(100)).await;
         mgr.stop().await;
 
