@@ -186,16 +186,6 @@ pub enum ToolError {
     Other { message: String },
 }
 
-impl ToolError {
-    /// Whether this error is safe to retry.
-    pub fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            Self::Timeout { .. } | Self::RateLimited { .. } | Self::ExternalServiceError { .. }
-        )
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Traits
 // ---------------------------------------------------------------------------

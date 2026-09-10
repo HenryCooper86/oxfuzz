@@ -142,33 +142,6 @@ impl<T: Tokenizer> Bm25Index<T> {
         self.index.retain(|_, postings| !postings.is_empty());
     }
 
-    /// Remove all chunks matching the given set of IDs in a single pass.
-    ///
-    /// Much faster than calling `remove()` in a loop for large batches,
-    /// since the inverted index is scanned only once (O(terms × postings))
-    /// instead of once per chunk (O(chunks × terms × postings)).
-    pub fn remove_bulk(&mut self, chunk_ids: &std::collections::HashSet<String>) {
-        if chunk_ids.is_empty() {
-            return;
-        }
-
-        // Update doc metadata.
-        for id in chunk_ids {
-            if let Some(doc_len) = self.doc_lengths.remove(id) {
-                self.doc_count = self.doc_count.saturating_sub(1);
-                self.total_length -= f64::from(doc_len);
-            }
-        }
-
-        // Single-pass removal from inverted index.
-        for postings in self.index.values_mut() {
-            postings.retain(|p| !chunk_ids.contains(&p.chunk_id));
-        }
-
-        // Clean up empty terms.
-        self.index.retain(|_, postings| !postings.is_empty());
-    }
-
     /// Search the index and return scored results.
     pub fn search(&self, query: &str, top_k: usize) -> Vec<Bm25Result> {
         let query_tokens = self.tokenizer.tokenize(query);
