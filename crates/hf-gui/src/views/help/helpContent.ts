@@ -329,6 +329,13 @@ const SCREEN_RUN = `
 **Purpose:** drive a fuzzing engine (or a Syzkaller kernel campaign) against the
 target inside the sandbox and watch live progress.
 
+**Starting this campaign** lists the selected scope and resource limits beside
+the launch button. Duration must be a whole number within the displayed limit.
+After a desktop interruption, **Review run** opens the owning project's retained
+history. Dismissal only removes the reminder; it does not resume the campaign
+or delete evidence. Failed reads and dismissals offer retry. Browser users use
+Run History's interrupted category.
+
 **What you can do:**
 
 - **Run Fuzzer** (or **Launch Campaign** for Syzkaller). Set the **engine**,

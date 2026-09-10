@@ -61,6 +61,10 @@ export function RunView({
         ?? engineOptions[0])?.value ?? selectedEngine;
   const duration = durationOverride ?? (fuzzingSettings ? String(fuzzingSettings.default_duration_secs) : "");
 
+  const durationSeconds = Number(duration);
+  const validDuration = duration.trim() !== "" && Number.isSafeInteger(durationSeconds)
+    && durationSeconds >= 1 && !!fuzzingSettings && durationSeconds <= fuzzingSettings.sandbox.max_duration_secs;
+
   // Suggest the project's harnessed targets so the standalone Run view isn't a
   // blank free-text field (you can only fuzz a target that has a harness).
   const [targetSuggestions, setTargetSuggestions] = useState<string[]>([]);
@@ -147,7 +151,7 @@ export function RunView({
   }
 
   async function run() {
-    if (selectionBlocked) return;
+    if (selectionBlocked || !validDuration) return;
     const policy = fuzzingSettings;
     if (!policy) return;
     if (!project) return;
@@ -159,10 +163,7 @@ export function RunView({
         ? await runSyzkaller({
             project,
             arch: sandboxArch,
-            duration: Math.max(
-              1,
-              Math.floor(Number(duration) || policy.default_duration_secs),
-            ),
+            duration: durationSeconds,
             kernel_image: kernelImage || null,
             disk_image: diskImage || null,
             ssh_key: sshKey || null,
@@ -173,10 +174,7 @@ export function RunView({
             project,
             target,
             engine,
-            duration: Math.max(
-              1,
-              Math.floor(Number(duration) || policy.default_duration_secs),
-            ),
+            duration: durationSeconds,
           });
       markDone("run");
       // If the run found no crashes, there is nothing to triage.
@@ -281,6 +279,9 @@ export function RunView({
           <Label>{t("run.duration")}</Label>
           <Input
             type="number"
+            aria-label={t("run.duration")}
+            aria-invalid={!validDuration && fuzzingPolicyLoaded}
+            aria-describedby={!validDuration ? "run-duration-error" : undefined}
             min={1}
             max={fuzzingSettings?.sandbox.max_duration_secs}
             value={duration}
@@ -320,12 +321,19 @@ export function RunView({
         </div>
       )}
 
+      {!validDuration && fuzzingSettings && <p id="run-duration-error" role="alert" className="text-sm text-error">{t("run.invalidDuration", { max: fuzzingSettings.sandbox.max_duration_secs })}</p>}
+      {fuzzingSettings && project && <section className="surface-card p-3 text-sm" aria-label={t("run.approvalTitle")}>
+        <p className="font-semibold">{t("run.approvalTitle")}</p>
+        <p className="break-all">{project} · {isSyz ? t("run.kernelArtifacts") : target} · {engine}</p>
+        <p>{validDuration ? `${durationSeconds}s` : t("run.invalidBudget")} · {fuzzingSettings.sandbox.max_mem_mb} MiB · {fuzzingSettings.sandbox.max_cpus} CPU</p>
+        <p>{t(isSyz ? "run.approvalKernel" : "run.approvalDetail")}</p>
+      </section>}
       <div className="flex items-center gap-2">
         <Button
           variant="primary"
           className="self-start"
           onClick={run}
-          disabled={selectionBlocked || !fuzzingSettings || running || !project || (!isSyz && (!target || !harnessBuilt || !harnessApproved))}
+          disabled={selectionBlocked || !validDuration || !fuzzingSettings || running || !project || (!isSyz && (!target || !harnessBuilt || !harnessApproved))}
           loading={running}
         >
           {!running && <Play size={14} />}

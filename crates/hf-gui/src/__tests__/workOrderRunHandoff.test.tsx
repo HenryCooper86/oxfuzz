@@ -80,6 +80,21 @@ it("carries the promoted exact selector through real Harness, Run, Corpus and re
   await click("Show Run");
   const start = [...host.querySelectorAll("button")].find(item => item.textContent?.includes("Run Fuzzer"));
   expect(start, host.textContent ?? "").toBeTruthy(); expect(start!.disabled).toBe(false);
+  expect(host.textContent).toContain("Starting this campaign");
+  const durationInput = host.querySelector<HTMLInputElement>('input[type="number"]')!;
+  for (const invalid of ["", "0", "1.5", "999999999"]) {
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(durationInput, invalid);
+      durationInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(start!.disabled).toBe(true);
+    expect(invoke.mock.calls.filter(([command]) => command === "run_fuzzer")).toHaveLength(0);
+  }
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(durationInput, "60");
+    durationInput.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  expect(start!.disabled).toBe(false);
   await act(async () => start!.click()); await flush();
   expect(invoke.mock.calls.find(([command]) => command === "run_fuzzer")?.[1]).toEqual({ project: "/project", target: selector, engine: "libfuzzer", duration: 60 });
   await click("Show Corpus");

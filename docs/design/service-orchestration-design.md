@@ -747,3 +747,19 @@ The workflow offers a next-step navigation action from its existing progress
 context. That context is a navigation hint, not service readiness or approval.
 Opening a step never starts an operation, and all execution checks remain in
 its owning service operation. Completed workflows offer a findings review.
+
+### GUI interruption recovery and launch review
+
+The interruption banner reads the persisted journal and links the exact run ID
+and owning project into Run History. Dismissal acknowledges the journal entry;
+it does not delete evidence or resume execution. Read and dismissal failures
+remain visible with retry, and outstanding writes are serialized in the view.
+The GUI makes no claim that interrupted artifacts survived intact.
+The journal reminder uses desktop IPC only. Browser users review the existing
+project-scoped interrupted category in Run History's service health summary.
+
+The Run screen displays selected scope, requested duration, and current resource
+limits beside the explicit launch action. Invalid duration input disables
+launch and identifies the accepted range; the service remains responsible for
+enforcing current policy at execution. A new campaign is distinct from resuming
+an analysis closeout or dismissing an interruption.

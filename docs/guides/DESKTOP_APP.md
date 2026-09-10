@@ -79,6 +79,15 @@ the durable result. Stop applies only to the exact foreground run UUID, even if
 you select another project while it is running.
 
 Campaign Health is read-only. The Run view keeps a retained alert history and
+shows the selected target, budget, and resource limits before the launch action.
+Invalid duration input prevents launch and explains the accepted range.
+After a desktop interruption, **Review run** opens its owning project and exact
+retained history entry. A failed journal read or dismissal offers retry.
+**Dismiss** removes the reminder; it neither deletes evidence nor continues the
+campaign. Browser users review interrupted campaigns through Run History's
+health summary. Retained artifacts may be incomplete after an interruption.
+
+The Run view
 can explicitly load older alert pages. Run History shows the service-defined
 morning categories for failed, stalled, interrupted, and unprocessed campaign
 runs; one run may appear in more than one category. Scheduled campaigns have no
