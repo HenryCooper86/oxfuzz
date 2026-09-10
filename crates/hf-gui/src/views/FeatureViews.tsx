@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useReducer, useState, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useState, type ReactNode } from "react";
 import { Button, IconButton, EmptyState, Input, LoadingState, Select, SeverityBadge, Textarea, ViewHeader } from "../components/ui";
 import { Puzzle, BookOpen, Zap, Target, FileCode, Activity, Bug, Crosshair, Play, Loader2, Plus, Trash2, RotateCw, RotateCcw, Copy, Square, Bot, Shield, Database, Pencil, Save, X, Search, FilePlus, FolderOpen, Layers } from "lucide-react";
 import { getTransport, pickFile, pickFolder, emitDataChanged } from "../lib";
@@ -23,6 +23,9 @@ import {
   initialRecoveryLoadState,
   recoveryLoadReducer,
 } from "../lib/scheduleRecovery";
+
+import type { SchedulePreview } from "../components/CampaignSchedulePreview";
+const CampaignSchedulePreview = lazy(() => import("../components/CampaignSchedulePreview"));
 
 // ---------------------------------------------------------------------------
 // Agents
@@ -1214,6 +1217,7 @@ interface CampaignView {
   secs_done: number;
   last_fire: string | null;
   durability_status: "ready" | "consumed" | "recovery_required";
+  preview: SchedulePreview;
 }
 
 interface ExecutionView {
@@ -1742,6 +1746,9 @@ export function AutomationView() {
                 {c.max_runs != null ? ` · ${c.runs_done}/${c.max_runs} ${t("automation.runsUnit")}` : c.max_total_secs != null ? ` · ${c.secs_done}/${c.max_total_secs}s` : c.runs_done > 0 ? ` · ${c.runs_done} ${t("automation.runsUnit")}` : ""}
                 {c.last_fire ? ` · ${t("automation.lastFire", { time: new Date(c.last_fire).toLocaleString() })}` : ` · ${t("automation.neverRun")}`}
               </span>
+              <Suspense fallback={<span className="text-xs text-text-muted">{t("common.loading")}</span>}>
+                <CampaignSchedulePreview preview={c.preview} />
+              </Suspense>
             </div>
             <Button variant={c.enabled ? "outline" : "primary"} size="sm"
               onClick={() => toggle(c.id, !c.enabled)}

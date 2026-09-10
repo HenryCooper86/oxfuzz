@@ -228,3 +228,30 @@ can never arm a schedule that can never fire.
 
 - No autonomous harness generation/promotion -- the safety gate is the point.
 - No queuing of blocked fires -- skip and record why, so it stays visible and bounded.
+
+## Read-only schedule preview
+
+Each `CampaignView` carries a service-produced `preview` with up to three
+scheduling opportunities, the effective timezone, any legacy timezone fallback,
+and remaining successful-run/time allowance. Desktop and HTTP return the same
+DTO through their existing list/create/update responses; rendering formats the
+returned instants but does not calculate schedule rules.
+
+The preview uses the evaluator's current persisted cursor and calendar parser.
+New cron schedules start after creation; intervals are initially due now. An
+overdue trigger is labelled due at the next scheduler tick, followed by future
+calendar occurrences. Interval projections assume dispatch at the displayed
+opportunity and therefore shift with actual dispatch time. A one-time schedule
+has at most one opportunity; an event schedule has no predicted timestamp.
+
+Recovery-required and consumed one-time schedules have no opportunities. An
+exhausted budget or a paused schedule also has no opportunities. Remaining
+allowances saturate at zero; absent limits remain explicitly unbounded. An
+invalid retained trigger or undecodable campaign parameters produces an
+unavailable preview. Legacy unknown cron zones display effective UTC and a
+fallback notice, matching the evaluator's existing behavior.
+
+This is a bounded calendar preview, not a reservation or a forecast of completed
+work. It does not expand recovery queues, allocate future budget across fires,
+or promise that concurrency, policy, or recovery admission will permit a run.
+Reading a preview never dispatches or advances a schedule.

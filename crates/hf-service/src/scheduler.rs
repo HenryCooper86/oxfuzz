@@ -6,6 +6,9 @@
 //! headlessly through the [`ServiceContainer`] when a schedule fires, ticks in
 //! the background, and persists schedules to JSON so they survive restarts.
 
+mod preview;
+pub use preview::{SchedulePreview, SchedulePreviewState};
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
@@ -1177,6 +1180,8 @@ pub struct CampaignView {
     pub last_fire: Option<String>,
     /// Durability state for one-time dispatch admission and recovery.
     pub durability_status: CampaignDurabilityStatus,
+    /// Read-only calendar opportunities and remaining successful-work allowance.
+    pub preview: SchedulePreview,
 }
 
 /// A past campaign execution for the GUI history view.
@@ -1225,9 +1230,27 @@ fn view_of_execution(ex: &ScheduleExecution, campaign: &str) -> ExecutionView {
 }
 
 /// Map a stored [`Schedule`] to a [`CampaignView`].
-fn view_of(schedule: &Schedule) -> CampaignView {
-    let params: CampaignParams =
-        serde_json::from_value(schedule.parameter_values.clone()).unwrap_or_default();
+fn view_of(
+    schedule: &Schedule,
+    progress: CampaignRuntimeState,
+    durability: CampaignDurabilityStatus,
+    now: chrono::DateTime<chrono::Utc>,
+) -> CampaignView {
+    let (params, preview) = match serde_json::from_value::<CampaignParams>(
+        schedule.parameter_values.clone(),
+    ) {
+        Ok(params) => {
+            let preview =
+                SchedulePreview::for_schedule(schedule, &params, progress, durability, now);
+            (params, preview)
+        }
+        Err(error) => {
+            // Keep existing empty labels for dynamic or malformed parameters;
+            // the preview explicitly reports that timing cannot be calculated.
+            tracing::warn!(schedule_id = %schedule.id, %error, "campaign parameters cannot be previewed");
+            (CampaignParams::default(), SchedulePreview::unavailable())
+        }
+    };
     let trigger = match &schedule.trigger {
         TriggerConfig::Interval { interval_secs } => format!("every {interval_secs}s"),
         TriggerConfig::Cron { expression, .. } => format!("cron: {expression}"),
@@ -1246,11 +1269,11 @@ fn view_of(schedule: &Schedule) -> CampaignView {
         duration_secs: params.duration_secs,
         max_runs: params.max_runs,
         max_total_secs: params.max_total_secs,
-        // Progress is filled in by `list_views` from the state store.
-        runs_done: 0,
-        secs_done: 0,
+        runs_done: progress.runs_done,
+        secs_done: progress.secs_done,
         last_fire: schedule.last_fire.map(|t| t.to_rfc3339()),
-        durability_status: CampaignDurabilityStatus::Ready,
+        durability_status: durability,
+        preview,
     }
 }
 
@@ -2242,27 +2265,26 @@ impl CampaignScheduler {
         if self.store.is_some() {
             self.refresh_one_time_receipt_statuses(&schedules).await?;
         }
+        let now = chrono::Utc::now();
         let mut views = Vec::with_capacity(schedules.len());
         for schedule in &schedules {
-            let mut view = view_of(schedule);
+            let progress = self.state.snapshot(&schedule.id);
+            let mut durability = CampaignDurabilityStatus::Ready;
+            if matches!(&schedule.trigger, TriggerConfig::OneTime { .. }) {
+                durability = match self.manager.one_time_runtime_status(&schedule.id).await {
+                    OneTimeRuntimeStatus::Ready if schedule.last_fire.is_some() => {
+                        CampaignDurabilityStatus::Consumed
+                    }
+                    OneTimeRuntimeStatus::Ready => CampaignDurabilityStatus::Ready,
+                    OneTimeRuntimeStatus::Consumed => CampaignDurabilityStatus::Consumed,
+                    OneTimeRuntimeStatus::RecoveryRequired { .. } => {
+                        CampaignDurabilityStatus::RecoveryRequired
+                    }
+                };
+            }
+            let mut view = view_of(schedule, progress, durability, now);
             if view.last_fire.is_none() {
                 view.last_fire = fires.get(&schedule.id).cloned();
-            }
-            let progress = self.state.snapshot(&schedule.id);
-            view.runs_done = progress.runs_done;
-            view.secs_done = progress.secs_done;
-            if matches!(&schedule.trigger, TriggerConfig::OneTime { .. }) {
-                view.durability_status =
-                    match self.manager.one_time_runtime_status(&schedule.id).await {
-                        OneTimeRuntimeStatus::Ready if schedule.last_fire.is_some() => {
-                            CampaignDurabilityStatus::Consumed
-                        }
-                        OneTimeRuntimeStatus::Ready => CampaignDurabilityStatus::Ready,
-                        OneTimeRuntimeStatus::Consumed => CampaignDurabilityStatus::Consumed,
-                        OneTimeRuntimeStatus::RecoveryRequired { .. } => {
-                            CampaignDurabilityStatus::RecoveryRequired
-                        }
-                    };
             }
             views.push(view);
         }
