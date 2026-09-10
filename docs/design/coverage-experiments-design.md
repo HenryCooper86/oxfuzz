@@ -571,3 +571,26 @@ same translated disabled state, distinguishing 404/403/storage errors and
 ignoring late feature-off responses after project switches. Run repository-required
 quality gates for implementation changes; design-only verification uses diff,
 reference checks and requirement self-review.
+
+## Run History comparison inspection
+
+The existing two-run history view requests a service-owned assessment of its
+selected baseline and result. Completed campaign status and retained setup keys
+establish whether the target, engine, duration, memory/CPU settings, sanitizer,
+starting corpus, environment, arguments and captured context match. A missing
+setup is reported as unavailable; mismatched setup is reported separately.
+
+Raw edge totals are directly compared only when both runs also retain the same
+exact executable SHA-256 and coverage totals. Changed executables can change
+instrumented edge identities, so matching settings alone do not justify an edge
+delta. The response identifies harness/executable changes independently and
+returns the signed delta as a decimal string, preserving the full integer range
+through JavaScript. Random seeds can still affect measurements; a delta is an
+observation, not evidence of correctness or exploitability.
+
+HTTP authorizes each retained run's project before requesting the assessment.
+Desktop IPC delegates to the same service. Presentation renders its reason,
+loads by exact selected IDs, ignores superseded replies and keeps history usable
+when comparison is unavailable. Existing experiment lifecycle and approval
+requirements remain owned by their operations. Allocation evidence uses the
+same service measurement assessment for selecting comparable retained runs.

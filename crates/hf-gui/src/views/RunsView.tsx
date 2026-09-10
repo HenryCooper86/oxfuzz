@@ -10,6 +10,7 @@ import { ViewHeader, EmptyState, Button, IconButton, Input } from "../components
 import { Play, Bug, Clock, GitCompare, X, Search, Activity, Zap, TrendingUp, LineChart, AlertTriangle, RotateCcw, Trash2 } from "lucide-react";
 import { DiffView } from "../components/DiffView";
 import { buildRunComparisons } from "../lib/runComparison";
+import { RunComparison } from "../components/RunComparison";
 import { RunCloseoutPanel } from "../components/RunCloseoutPanel";
 import { uuid } from "../providers/runOutputValidation";
 import type { MorningHealthSummary } from "../lib/transport";
@@ -314,10 +315,11 @@ function ScopedRunsView() {
               <X size={14} />
             </IconButton>
           </div>
+          <RunComparison baselineId={compareRuns[0].id} resultId={compareRuns[1].id} />
           <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 200px), 1fr))" }}>
-            {compareRuns.map((r) => (
+            {compareRuns.map((r, index) => (
               <div key={r.id} className="rounded-md border border-border min-w-0" style={{ padding: "var(--space-md)", background: "var(--surface-secondary)" }}>
-                <div className="text-sm font-semibold truncate">{r.engine}</div>
+                <div className="text-sm font-semibold truncate">{t(index === 0 ? "runs.comparison.baseline" : "runs.comparison.result")} - {r.engine}</div>
                 <div className="text-xs text-text-muted mb-2">{r.target ?? t("runs.unknownTarget")} · {new Date(r.started_at).toLocaleString()}</div>
                 <CompareRow label={t("runs.status")} value={r.status} />
                 <CompareRow label={t("runs.harness")} value={revLabel(r.harness_rev) ?? "—"} />

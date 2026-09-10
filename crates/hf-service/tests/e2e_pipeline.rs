@@ -446,6 +446,27 @@ async fn discover_harness_run_triage_end_to_end() {
     assert_eq!(persisted.len(), 1);
     assert_eq!(persisted[0].id, crash.id);
 
+    #[cfg(feature = "triage-disposition")]
+    {
+        let review = container
+            .finding_review_for_project(&project, crash.id)
+            .await
+            .unwrap();
+        assert_eq!(review.crash.id, crash.id);
+        assert_eq!(review.crash.run_id, summary.run_id);
+        assert_eq!(review.target_id, candidate.id);
+        assert_eq!(review.target_selector, "parse_value");
+        assert!(review.latest_scoped_actions_allowed);
+        assert_eq!(
+            review.proof.external_reachability.determination,
+            hf_service::finding_proof::ReachabilityDetermination::NotVerified
+        );
+        assert_eq!(
+            review.proof.fix_verification.determination,
+            hf_service::finding_proof::FixVerificationDetermination::NotVerified
+        );
+    }
+
     // A second triage pass over the same evidence dedups: the deterministic
     // crash id is re-derived and the row replaced, not duplicated.
     let reprises = container.triage(&project, "parse_value").await.unwrap();
