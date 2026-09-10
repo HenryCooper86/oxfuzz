@@ -3,6 +3,14 @@
 // regenerate from the localized views.
 
 export const enExtra: Record<string, string> = {
+  "knowledge.checkStatus": "Check index status",
+  "knowledge.configuration": "{strategy} · {tokens} tokens · {model}",
+  "knowledge.noEmbedding": "No embedding model",
+  "knowledge.indexedSettings": "Indexed settings",
+  "knowledge.configuredSettings": "Configured settings",
+  "knowledge.stale": "Index is stale. Search refreshes changed entries; refresh explicitly to retry embeddings.",
+  "knowledge.current": "Index matches current sources and configuration",
+  "knowledge.freshnessUnavailable": "Could not verify current source state",
   "automation.runtime.running": "Scheduler is running",
   "automation.runtime.failed": "A scheduler loop stopped unexpectedly. Restart the service and inspect its logs before relying on scheduled work.",
   "automation.runtime.stopped": "Scheduler is stopped",
@@ -1019,7 +1027,6 @@ export const enExtra: Record<string, string> = {
   "knowledge.clearBtnTitle": "Delete all discovered targets, runs, and crashes",
   "knowledge.clearMessage": "{total} entries (targets, runs, crashes) across every project, plus generated harnesses and corpus. Configuration is not affected. This cannot be undone.",
   "knowledge.clearTitle": "Clear all learned knowledge",
-  "knowledge.configSummary": "{strategy} retrieval · {tokens} tokens/chunk",
   "knowledge.description": "What oxfuzz has learned about your projects — discovered targets, fuzz runs, and crashes found.",
   "knowledge.docsCount": "{n} ingested documents",
   "knowledge.legacyDocumentsPreserved": "Older documents were preserved, but their project ownership is ambiguous. Add the original documents again to include them in search.",
@@ -1871,6 +1878,14 @@ export const enExtra: Record<string, string> = {
 };
 
 export const zhExtra: Record<string, string> = {
+  "knowledge.checkStatus": "检查索引状态",
+  "knowledge.configuration": "{strategy} · {tokens} 令牌 · {model}",
+  "knowledge.noEmbedding": "未使用嵌入模型",
+  "knowledge.indexedSettings": "索引实际设置",
+  "knowledge.configuredSettings": "当前配置",
+  "knowledge.stale": "索引已过期。搜索将刷新变更条目；手动刷新可重试嵌入。",
+  "knowledge.current": "索引与当前源文件和配置一致",
+  "knowledge.freshnessUnavailable": "无法确认当前源文件状态",
   "automation.runtime.running": "调度器正在运行",
   "automation.runtime.failed": "调度循环意外停止。请重启服务并检查日志后再使用计划任务。",
   "automation.runtime.stopped": "调度器已停止",
@@ -2887,7 +2902,6 @@ export const zhExtra: Record<string, string> = {
   "knowledge.clearBtnTitle": "删除所有已发现的目标、运行和崩溃",
   "knowledge.clearMessage": "涵盖所有项目的 {total} 条记录（目标、运行、崩溃），以及生成的测试桩和语料库。配置不受影响。此操作无法撤销。",
   "knowledge.clearTitle": "清空所有已学习的知识",
-  "knowledge.configSummary": "{strategy} 检索 · 每分块 {tokens} tokens",
   "knowledge.description": "oxfuzz 对你的项目已了解的内容——已发现的目标、模糊测试运行以及发现的崩溃。",
   "knowledge.docsCount": "{n} 个已导入文档",
   "knowledge.legacyDocumentsPreserved": "旧文档已保留，但无法确认其所属项目。请重新添加原始文档，以便将其纳入搜索。",

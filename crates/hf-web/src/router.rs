@@ -3097,7 +3097,15 @@ async fn knowledge_stats(
     axum::extract::Query(req): axum::extract::Query<ProjectRequest>,
 ) -> ApiResult<hf_service::knowledge::KnowledgeIndexStatus> {
     let project = approved_project(&state, std::path::Path::new(&req.project))?;
-    Ok(Json(hf_service::knowledge::stats_project(&project)))
+    let status =
+        tokio::task::spawn_blocking(move || hf_service::knowledge::stats_project(&project))
+            .await
+            .map_err(|error| {
+                classified_api_error(ClassifiedError::Internal(format!(
+                    "knowledge status task failed: {error}"
+                )))
+            })?;
+    Ok(Json(status))
 }
 
 async fn knowledge_index(

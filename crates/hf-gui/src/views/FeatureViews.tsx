@@ -1,3 +1,4 @@
+import { KnowledgeIndexDetails, type KnowledgeIndexDetailsStatus } from "../components/KnowledgeIndexDetails";
 import { SchedulerRuntimeStatus, type CampaignSchedulerStatus } from "../components/SchedulerRuntimeStatus";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useState, type ReactNode } from "react";
 import { Button, IconButton, EmptyState, Input, LoadingState, Select, SeverityBadge, Textarea, ViewHeader } from "../components/ui";
@@ -854,15 +855,13 @@ interface KnowledgeStats {
   chunks: number;
 }
 // Read-only index status from `knowledge_stats` (never triggers a reindex).
-interface KnowledgeIndexStatus {
+interface KnowledgeIndexStatus extends KnowledgeIndexDetailsStatus {
   indexed: boolean;
   files: number;
   chunks: number;
   documents: number;
   legacy_documents_preserved: boolean;
   indexed_at: string | null;
-  retrieval_strategy: string;
-  chunk_max_tokens: number;
 }
 
 // BM25 search over the active project's source, backed by hf-knowledge.
@@ -949,6 +948,7 @@ function KnowledgeBaseSearch() {
     setError(null);
     try {
       setHits(await getTransport().invoke<KnowledgeHit[]>("knowledge_search", { project: activeProject, query, limit: 10 }));
+      await refreshStatus();
     } catch (e) {
       setHits(null);
       setError(t("knowledge.searchFailed", { error: String(e) }));
@@ -981,6 +981,7 @@ function KnowledgeBaseSearch() {
             {ingesting ? <Loader2 size={13} className="animate-spin" /> : <FilePlus size={13} />}
             {ingesting ? t("knowledge.ingesting") : t("knowledge.addDoc")}
           </button>
+          <Button variant="outline" size="sm" disabled={!activeProject} onClick={() => void refreshStatus()}>{t("knowledge.checkStatus")}</Button>
           <button
             onClick={index}
             disabled={indexing || !activeProject}
@@ -996,11 +997,11 @@ function KnowledgeBaseSearch() {
       </p>
       {current && (
         <p className="text-xs text-text-muted">
-          {t("knowledge.configSummary", { strategy: current.retrieval_strategy, tokens: current.chunk_max_tokens })}
           {current.documents > 0 && ` · ${t("knowledge.docsCount", { n: current.documents })}`}
           {current.indexed_at && ` · ${t("knowledge.lastIndexed", { time: new Date(current.indexed_at).toLocaleString() })}`}
         </p>
       )}
+      {current && <KnowledgeIndexDetails status={current} />}
       {current?.legacy_documents_preserved && (
         <p className="text-xs" style={{ color: "var(--warning, #d9a441)" }}>
           {t("knowledge.legacyDocumentsPreserved")}

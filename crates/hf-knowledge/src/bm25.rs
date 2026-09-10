@@ -25,7 +25,7 @@ struct Posting {
 ///
 /// Supports language-aware tokenization via the [`Tokenizer`] trait,
 /// enabling both English and Chinese keyword search.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Bm25Index<T: Tokenizer> {
     tokenizer: T,
     /// term → list of postings.

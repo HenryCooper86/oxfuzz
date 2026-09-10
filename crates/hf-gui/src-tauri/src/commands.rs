@@ -1420,18 +1420,29 @@ pub async fn schedule_set_enabled(
         .map_err(|error| error.to_string())
 }
 
-/// Index a project's source files into its BM25 knowledge base.
+/// Refresh the project index on a blocking worker.
 #[tauri::command]
-pub fn knowledge_index(project: String) -> Result<hf_service::knowledge::KnowledgeStats, String> {
-    hf_service::knowledge::index_project(std::path::Path::new(&project)).map_err(|e| e.to_string())
+pub async fn knowledge_index(
+    project: String,
+) -> Result<hf_service::knowledge::KnowledgeStats, String> {
+    tokio::task::spawn_blocking(move || {
+        hf_service::knowledge::index_project(std::path::Path::new(&project))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())
 }
 
-/// Read-only status of a project's knowledge base (no reindex): index size and
-/// build time, ingested-document count, and the active retrieval config.
+/// Inspect source fingerprints and effective index settings without rebuilding.
 #[tauri::command]
-#[must_use]
-pub fn knowledge_stats(project: String) -> hf_service::knowledge::KnowledgeIndexStatus {
-    hf_service::knowledge::stats_project(std::path::Path::new(&project))
+pub async fn knowledge_stats(
+    project: String,
+) -> Result<hf_service::knowledge::KnowledgeIndexStatus, String> {
+    tokio::task::spawn_blocking(move || {
+        hf_service::knowledge::stats_project(std::path::Path::new(&project))
+    })
+    .await
+    .map_err(|error| error.to_string())
 }
 
 /// Convert a document (PDF/Office/HTML/...) to Markdown via markitdown in the
@@ -1449,21 +1460,22 @@ pub async fn knowledge_ingest(
         .map_err(|e| e.to_string())
 }
 
-/// Search a project's knowledge base, indexing it on demand if this process has
-/// not yet (the index is an in-memory cache, so a restart would otherwise return
-/// nothing). Runs on Tauri's blocking command pool, so the tree walk is fine.
+/// Refresh changed knowledge entries and search on a blocking worker.
 #[tauri::command]
-#[must_use]
-pub fn knowledge_search(
+pub async fn knowledge_search(
     project: String,
     query: String,
     limit: Option<usize>,
-) -> Vec<hf_service::knowledge::KnowledgeHit> {
-    hf_service::knowledge::search_project_ensured(
-        std::path::Path::new(&project),
-        &query,
-        limit.unwrap_or(10),
-    )
+) -> Result<Vec<hf_service::knowledge::KnowledgeHit>, String> {
+    tokio::task::spawn_blocking(move || {
+        hf_service::knowledge::search_project_ensured(
+            std::path::Path::new(&project),
+            &query,
+            limit.unwrap_or(10),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
