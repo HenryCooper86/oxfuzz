@@ -855,6 +855,7 @@ interface KnowledgeIndexStatus {
   files: number;
   chunks: number;
   documents: number;
+  legacy_documents_preserved: boolean;
   indexed_at: string | null;
   retrieval_strategy: string;
   chunk_max_tokens: number;
@@ -994,6 +995,11 @@ function KnowledgeBaseSearch() {
           {t("knowledge.configSummary", { strategy: current.retrieval_strategy, tokens: current.chunk_max_tokens })}
           {current.documents > 0 && ` · ${t("knowledge.docsCount", { n: current.documents })}`}
           {current.indexed_at && ` · ${t("knowledge.lastIndexed", { time: new Date(current.indexed_at).toLocaleString() })}`}
+        </p>
+      )}
+      {current?.legacy_documents_preserved && (
+        <p className="text-xs" style={{ color: "var(--warning, #d9a441)" }}>
+          {t("knowledge.legacyDocumentsPreserved")}
         </p>
       )}
       {!activeProject && (

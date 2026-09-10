@@ -248,7 +248,8 @@ impl ServiceContainer {
         // Stage below the Docker runtime's approved workspace root, not in the
         // durable knowledge directory (which lives elsewhere in app data).
         prepare_configured_workspace_root()?;
-        let docs = crate::knowledge::docs_dir(project);
+        let knowledge = crate::knowledge::KnowledgeOperation::acquire(project)?;
+        let docs = &knowledge.docs;
         let staging = document_staging_dir(project, Uuid::new_v4());
         std::fs::create_dir_all(&staging)
             .map_err(|e| ClassifiedError::Internal(format!("mkdir staging: {e}")))?;
@@ -276,7 +277,7 @@ impl ServiceContainer {
         }
 
         // Persist the Markdown under the docs dir, then re-index.
-        std::fs::create_dir_all(&docs)
+        std::fs::create_dir_all(docs)
             .map_err(|e| ClassifiedError::Internal(format!("mkdir docs: {e}")))?;
         let stem = Path::new(name)
             .file_stem()
@@ -285,7 +286,10 @@ impl ServiceContainer {
         std::fs::write(docs.join(format!("{stem}.md")), &result.stdout)
             .map_err(|e| ClassifiedError::Internal(format!("write doc markdown: {e}")))?;
 
-        crate::knowledge::index_project(project)
+        crate::knowledge::index_in_operation(
+            &knowledge,
+            crate::config::effective_knowledge_config(),
+        )
     }
 }
 
