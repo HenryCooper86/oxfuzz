@@ -42,3 +42,39 @@ database, isolated config, workspace, immutable inputs, journals, and per-engine
 Record the tested git revision and working-tree diff alongside this directory.
 An incomplete engine is not a pass. This bounded check is not an overnight soak,
 Linux/KVM qualification, physical-bench validation, or packaged-app user testing.
+
+## Repeated qualification cycles
+
+After approval of the sources above, the operator can set
+`OXFUZZ_LIVE_APPROVAL_SHA256` to that approved digest and run:
+
+```bash
+python3 scripts/qualify_engines.py \
+  --output /absolute/path/to/new-qualification-evidence \
+  --cycles 10 \
+  --cycle-timeout-secs 900
+```
+
+The output directory must be new and outside this repository. The runner is
+currently POSIX-only. Each cycle invokes the normal live fixture with the
+`proof-carrying` feature, including a fresh real-provider review. The timeout
+includes Cargo startup/build time. Cycle count and timeout are explicit; a
+cycle count does not promise an elapsed overnight duration.
+
+`manifest.json` records repository/file identities, platform, command, limits,
+cycle outcomes, and per-engine median/nearest-rank P95 Stop latency with sample
+counts. Each `cycle-NNNNN` retains its process log and the fixture's database,
+workspace, profiles, and reports. Environment values and patch contents are not
+copied into the manifest. Keep the evidence directory private; logs are retained
+as produced by the fixture.
+
+The runner stops on the first failure, source/repository change, missing report,
+reused run identity, timeout, or interruption. Nonzero exits never count as a
+pass, even if some engine reports exist. Timeout or interruption kills the owned
+local process group and marks sandbox cleanup unverified; inspect the dedicated
+runtime before another invocation. A manifest left `running` after abrupt host
+loss is incomplete. There is no automatic resume, retry, or container deletion.
+
+These cycles exercise normal qualification and Stop repeatedly. They do not
+inject worker loss, disk pressure, or service restarts, and do not replace those
+separate acceptance scenarios.

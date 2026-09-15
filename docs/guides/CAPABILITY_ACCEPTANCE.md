@@ -64,3 +64,12 @@ physical interfaces, and approved test destinations for external publication.
   identities. Temporary local files are not durable release evidence.
 - Do not count a replay as a verified fix, aggregate edges as function entry,
   or a successful bounded run as proof that a target is safe.
+
+## Userspace qualification runner
+
+The [qualification procedure](../../examples/qualification/README.md) provides
+`scripts/qualify_engines.py` for explicitly approved repeated cycles. Retain its
+manifest and per-cycle evidence when recording userspace engine results. A
+successful manifest covers that fixture's normal lifecycle only. Worker-loss,
+disk-pressure, service-restart, kernel, hardware, and installed-client acceptance
+remain separate measurements.

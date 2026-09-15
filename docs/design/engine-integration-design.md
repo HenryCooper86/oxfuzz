@@ -203,3 +203,28 @@ old harness or rebuild from current source. Evidence is verified again before
 dispatch. Missing legacy manifests are reported as unavailable; they cannot be
 reconstructed retrospectively. Identical inputs do not guarantee identical
 results from nondeterministic engines, thread scheduling, or external hardware.
+
+## Repeated userspace qualification
+
+The opt-in `scripts/qualify_engines.py` operator tool runs the existing
+`cancellation_live` qualification test for an explicit number of cycles. It
+requires the exact approved source digest and an explicit per-cycle timeout.
+It does not launch harnesses directly: compilation, review, smoke, campaign,
+Stop, and replay remain owned by `hf-service` and `hf-runtime`.
+
+Every invocation creates a fresh evidence directory and records the Git revision,
+working-tree patch digest, source digest, command, and selected limits. Every
+cycle receives a fresh child evidence directory and a log. A manifest is written
+before launching each process and atomically replaced on completion. Failed,
+interrupted, timed-out, missing-evidence, or incomplete cycles stop the sequence;
+none contributes a passing result. A stale `running` record after abrupt host
+loss remains incomplete; there is no automatic resume or retry.
+
+Successful cycles require exactly one report for each userspace engine, distinct
+campaign/replay UUIDs, finite bounded Stop times, and successful smoke evidence.
+The runner summarizes median and nearest-rank P95 Stop latency by engine, with
+sample counts. These are measurements for this fixture and environment only.
+Timeout/interruption stops the owned local process group and records that sandbox
+cleanup is unverified; it never deletes unrelated containers. Dedicated disposable
+runtime resources remain required. Repeated normal cycles do not qualify worker
+loss, disk pressure, service restart, physical hardware, or installed applications.

@@ -38,8 +38,8 @@ replace these live checks.
   deduplication, remote identity, and interrupted-operation recovery.
 - [ ] Run an overnight soak with disposable storage and runtime resources,
   covering worker loss, disk pressure, restart, scheduler recovery, and Stop
-  latency. The bounded live qualification fixture is prepared; it does not replace
-  an overnight soak.
+  latency. The bounded fixture and repeated-cycle runner are prepared; normal
+  repeated cycles do not replace fault injection or measured overnight acceptance.
 - [ ] Validate installed desktop applications on supported platforms with
   representative users: setup, first campaign, historical findings, corpus
   import, keyboard navigation, and interrupted-session recovery. Measure task
