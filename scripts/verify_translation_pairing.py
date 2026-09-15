@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import hashlib
+import os
 import pathlib
 import re
 import sys
@@ -280,12 +281,22 @@ def render_record(english: pathlib.Path, chinese: pathlib.Path) -> str:
 
 def tracked_files() -> list[str]:
     """Repository-relative paths of every candidate document, in path order."""
+
+    def unreadable_directory(error: OSError) -> None:
+        raise error
+
     found = []
-    for path in REPOSITORY_ROOT.rglob("*.md"):
-        relative = path.relative_to(REPOSITORY_ROOT)
-        if any(part in EXCLUDED_DIRECTORY_NAMES for part in relative.parts[:-1]):
-            continue
-        found.append(str(relative))
+    for directory, subdirectories, files in os.walk(
+        REPOSITORY_ROOT, onerror=unreadable_directory, followlinks=False
+    ):
+        relative = pathlib.Path(directory).relative_to(REPOSITORY_ROOT)
+        subdirectories[:] = [
+            name
+            for name in subdirectories
+            if name not in EXCLUDED_DIRECTORY_NAMES
+            and not ((relative / name).as_posix() + "/").startswith(EXCLUDED_PREFIXES)
+        ]
+        found.extend((relative / name).as_posix() for name in files if name.endswith(".md"))
     return sorted(found)
 
 

@@ -5,10 +5,13 @@ only guards if the regression actually turns it red
 (docs/standards/DEFENSIVE_PATTERNS.md, Verification).
 """
 
+import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT / "scripts"))
@@ -128,6 +131,39 @@ class RecordTest(unittest.TestCase):
     def test_a_malformed_line_is_rejected_rather_than_skipped(self):
         with self.assertRaises(PairingError):
             parse_record("README.md abc\n")
+
+
+class DiscoveryTraversalTest(unittest.TestCase):
+    def test_excluded_directories_are_never_opened(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            excluded = [
+                "target",
+                ".git",
+                "crates/ui/node_modules",
+                "crates/ui/dist",
+                "third_party",
+                "vendor",
+                "fuzz_workspace",
+                "crates/hf-service/tests/fixtures",
+            ]
+            for name in excluded:
+                child = root / name
+                child.mkdir(parents=True)
+                (child / "ignored.md").write_text("ignored", encoding="utf-8")
+            (root / "docs").mkdir()
+            (root / "docs/guide.md").write_text("guide", encoding="utf-8")
+            (root / "README.md").write_text("readme", encoding="utf-8")
+            forbidden = {root / name for name in excluded}
+            original_scandir = os.scandir
+
+            def guarded_scandir(path):
+                self.assertNotIn(pathlib.Path(path), forbidden)
+                return original_scandir(path)
+
+            with mock.patch.object(pairing, "REPOSITORY_ROOT", root):
+                with mock.patch("os.scandir", side_effect=guarded_scandir):
+                    self.assertEqual(pairing.tracked_files(), ["README.md", "docs/guide.md"])
 
 
 class RepositoryCorpusTest(unittest.TestCase):
