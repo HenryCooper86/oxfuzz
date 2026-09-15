@@ -236,7 +236,6 @@ mod coverage_feedback_tests {
 
     #[test]
     fn callback_observes_committed_proposal_without_holding_feedback_locks() {
-        let fb;
         let feedback: std::sync::OnceLock<&CoverageFeedback<'_>> = std::sync::OnceLock::new();
         let emit = |_p: FuzzProgress| {
             let current = feedback.get().unwrap();
@@ -247,7 +246,7 @@ mod coverage_feedback_tests {
                 .expect("callback must not hold proposal lock");
             assert_eq!(*proposal, Some(StagnationProposal::CustomMutator));
         };
-        fb = CoverageFeedback::new(uuid::Uuid::new_v4(), policy(0), &emit);
+        let fb = CoverageFeedback::new(uuid::Uuid::new_v4(), policy(0), &emit);
         assert!(feedback.set(&fb).is_ok());
         fb.on_edges(100);
         fb.on_edges(100);
