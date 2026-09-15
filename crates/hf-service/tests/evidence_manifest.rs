@@ -255,6 +255,7 @@ async fn service_assembles_a_manifest_from_durable_run_and_approval_evidence() {
             extra_args: Vec::new(),
             seed: Some(9),
             replay_of: None,
+            input_manifest_sha256: None,
         }),
         now,
     );

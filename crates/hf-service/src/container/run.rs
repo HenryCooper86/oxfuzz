@@ -26,8 +26,8 @@ use super::policy::CurrentHarnessEvidence;
 use super::project_identity::canonical_project_root;
 use super::staging::{
     captured_run_context_digests, resolve_run_sandbox_image, retain_run_context,
-    run_sandbox_options, stage_run_artifacts, verify_run_artifacts, verify_staged_qualification,
-    ReplayProvenance, RunArtifacts,
+    run_sandbox_options, stage_replay_artifacts, stage_run_artifacts, verify_run_artifacts,
+    verify_staged_qualification, ReplayProvenance, RunArtifacts,
 };
 use super::workspace::{
     prepare_configured_workspace_root, run_output_relative, workspace_dir,
@@ -41,6 +41,16 @@ use super::{
     RunLifecycleStatus, RunSummary, ServiceContainer, SyzkallerRunOpts, SyzkallerSummary,
     TerminalRunMetrics,
 };
+
+/// Inputs selected explicitly for a seeded campaign.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayInputs {
+    /// Reproduce the verified historical execution inputs.
+    Retained,
+    /// Test the current promoted harness and corpus with the original seed.
+    Current,
+}
 
 /// Settings presented to an operator before starting a new replay campaign.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -58,10 +68,14 @@ pub struct ReplayReview {
     pub seed: String,
     /// Retained requested duration.
     pub duration_secs: u64,
-    /// Current memory limit.
+    /// Retained memory limit, admitted by current policy.
     pub max_mem_mb: String,
-    /// Current CPU limit.
+    /// Retained CPU limit, admitted by current policy.
     pub max_cpus: u32,
+    /// Digest binding the exact retained files and execution settings.
+    pub input_manifest_sha256: Option<String>,
+    /// Historical replay or an explicitly requested current-input experiment.
+    pub inputs: ReplayInputs,
 }
 
 struct RunLaunch {
@@ -612,11 +626,12 @@ impl ServiceContainer {
         // name it.
         let started_run = std::sync::Arc::new(std::sync::Mutex::new(None));
         let captured = std::sync::Arc::clone(&started_run);
+        let replay_note = replay.clone();
         let tracked_started = move |run_id: Uuid| {
             if let Ok(mut slot) = captured.lock() {
                 *slot = Some(run_id);
             }
-            if let Some(provenance) = replay {
+            if let Some(provenance) = &replay_note {
                 self.run_journal.note(
                     run_id,
                     "replay",
@@ -687,9 +702,15 @@ impl ServiceContainer {
     ) -> Result<PreparedUserspaceRun, ClassifiedError> {
         crate::campaign_allocation::verify_granted_harness(qualified, resolved.duration_secs)?;
         let engine = resolved.engine;
-        let extra_args = self
-            .build_run_dictionary_args(project, target, workspace, engine)
-            .await;
+        let historical = replay
+            .as_ref()
+            .is_some_and(|value| value.inputs == ReplayInputs::Retained);
+        let extra_args = if historical {
+            Vec::new()
+        } else {
+            self.build_run_dictionary_args(project, target, workspace, engine)
+                .await
+        };
         let mut config = FuzzRunConfig {
             harness_id: qualified.id,
             engine,
@@ -702,33 +723,78 @@ impl ServiceContainer {
             extra_args,
             seed: None,
             replay_of: None,
+            input_manifest_sha256: None,
         };
         let store = self.store.as_ref().ok_or_else(|| {
             ClassifiedError::Validation("fuzz runs require the persistent service store".to_owned())
         })?;
+        #[cfg(feature = "proof-carrying")]
+        super::function_coverage::configure(&mut config, qualified, false);
         let mut record = RunRecord::new(
             project.to_string_lossy().to_string(),
             engine,
             None,
             Utc::now(),
         );
-        match replay {
+        match &replay {
             Some(provenance) => {
                 config.seed = Some(provenance.seed);
                 config.replay_of = Some(provenance.original_run_id);
             }
             None => config.seed = Some(hf_engine::seed::derive_run_seed(record.id)),
         }
-        record.config = Some(config.clone());
-        let sandbox_image = resolve_run_sandbox_image(self.runtime.as_ref()).await?;
-        self.verify_harness_dispatch_image(project, qualified, Some(sandbox_image.reference()))
-            .await?;
-        let artifacts = stage_run_artifacts(
-            workspace,
-            record.id,
-            &qualified.source,
-            &workspace.join(harness_binary_name(target)),
-        )?;
+        let (artifacts, sandbox_image) = if let Some(provenance) = replay
+            .as_ref()
+            .filter(|value| value.inputs == ReplayInputs::Retained)
+        {
+            let original = store
+                .get_run(provenance.original_run_id)
+                .await?
+                .ok_or_else(|| ClassifiedError::Validation("replay run disappeared".to_owned()))?;
+            let retained = original.config.ok_or_else(|| {
+                ClassifiedError::Validation("replay config disappeared".to_owned())
+            })?;
+            if retained.input_manifest_sha256 != provenance.input_manifest_sha256 {
+                return Err(ClassifiedError::Validation(
+                    "Replay inputs changed. Review the replay again.".to_owned(),
+                ));
+            }
+            let (artifacts, image) = stage_replay_artifacts(
+                workspace,
+                record.id,
+                provenance.original_run_id,
+                &retained,
+            )?;
+            config = retained;
+            config.replay_of = Some(provenance.original_run_id);
+            config.input_manifest_sha256 = None;
+            (
+                artifacts,
+                hf_core::runtime::ImmutableImageReference::from_sha256_id(image)?,
+            )
+        } else {
+            let image = resolve_run_sandbox_image(self.runtime.as_ref()).await?;
+            self.verify_harness_dispatch_image(project, qualified, Some(image.reference()))
+                .await?;
+            let artifacts = stage_run_artifacts(
+                workspace,
+                record.id,
+                &qualified.source,
+                &workspace.join(harness_binary_name(target)),
+            )?;
+            if let Err(error) = super::retained_inputs::capture_workspace(
+                workspace,
+                &artifacts.input_host.join("workspace"),
+            ) {
+                if let Some(root) = artifacts.input_host.parent() {
+                    if let Err(cleanup) = std::fs::remove_dir_all(root) {
+                        tracing::warn!(%cleanup, "failed to remove unreferenced campaign inputs");
+                    }
+                }
+                return Err(error);
+            }
+            (artifacts, image)
+        };
         let context = match captured_run_context_digests(
             &artifacts.source_context_host,
             &artifacts.initial_corpus_host,
@@ -756,7 +822,29 @@ impl ServiceContainer {
             }
             return Err(error);
         }
-        let sandbox = run_sandbox_options(&artifacts, Some(sandbox_image.reference().to_owned()));
+        if let Err(error) = super::retained_inputs::seal(
+            &artifacts.input_host,
+            sandbox_image.reference(),
+            &mut config,
+        ) {
+            if let Some(root) = artifacts.input_host.parent() {
+                if let Err(cleanup) = std::fs::remove_dir_all(root) {
+                    tracing::warn!(%cleanup, "failed to remove unreferenced campaign manifest staging");
+                }
+            }
+            return Err(error);
+        }
+        record.config = Some(config.clone());
+        let mut sandbox =
+            run_sandbox_options(&artifacts, Some(sandbox_image.reference().to_owned()));
+        sandbox
+            .extra_mounts
+            .push(hf_core::runtime::SandboxMount::read_only(
+                artifacts.input_host.clone(),
+                format!("/work/runs/{}/input", record.id),
+            ));
+        #[cfg(feature = "proof-carrying")]
+        super::function_coverage::prepare(&config, &artifacts, &mut sandbox)?;
         record.status = RunStatus::Running;
         record.harness_rev = Some(artifacts.source_sha256.clone());
         record.binary_rev = Some(artifacts.binary_sha256.clone());
@@ -825,14 +913,11 @@ impl ServiceContainer {
         let (engine, duration_secs) = (resolved.engine, resolved.duration_secs);
 
         let target_revision = self.acquire_target_revision(project, target).await?;
-        let qualified = self.active_harness_locked(project, target, engine).await?;
-        if qualified.status != HarnessStatus::Promoted {
-            return Err(ClassifiedError::Validation(format!(
-                "active harness '{target}' is {:?}; run smoke qualification and explicitly promote it before starting a full campaign",
-                qualified.status
-            )));
-        }
-        self.verify_harness_qualification_locked(project, target, &qualified)
+        let historical = replay
+            .as_ref()
+            .is_some_and(|value| value.inputs == ReplayInputs::Retained);
+        let qualified = self
+            .campaign_harness(project, target, engine, replay.as_ref())
             .await?;
         self.authorize_recorded(
             Action::RunFuzzer {
@@ -847,7 +932,9 @@ impl ServiceContainer {
         let workspace = workspace_dir(project, target);
         let corpus_dir = ensure_workspace_directory(&workspace, Path::new("corpus"))?;
 
-        userspace_harness_binary(&workspace, target)?;
+        if !historical {
+            userspace_harness_binary(&workspace, target)?;
+        }
 
         let store = self.store.as_ref().ok_or_else(|| {
             ClassifiedError::Validation("fuzz runs require the persistent service store".to_owned())
@@ -957,8 +1044,11 @@ impl ServiceContainer {
         // Stream progress live: `on_progress` fires for each output line and
         // stat as the fuzzer runs, not post-hoc.
         let run_result = async {
-            self.verify_harness_dispatch_image(project, &qualified, sandbox.image.as_deref())
-                .await?;
+            if !historical {
+                self.verify_harness_dispatch_image(project, &qualified, sandbox.image.as_deref())
+                    .await?;
+            }
+            super::retained_inputs::verify(&artifacts.input_host, &run_cfg)?;
             runner
                 .run_streaming_opts(
                     engine,
@@ -967,7 +1057,7 @@ impl ServiceContainer {
                     &artifacts.corpus_container,
                     &artifacts.output_container,
                     self.runtime.as_ref(),
-                    &workspace,
+                    &artifacts.input_host.join("workspace"),
                     &sandbox,
                     &cancel,
                     &watched,
@@ -1053,6 +1143,10 @@ impl ServiceContainer {
                 .map_err(|status_error| ClassifiedError::Storage(status_error.to_string()))?;
             return Err(error);
         }
+
+        #[cfg(feature = "proof-carrying")]
+        self.close_function_coverage(&run_record, &artifacts, &cancel)
+            .await;
 
         // Summarize from the parsed events. Live streaming already forwarded
         // them to `on_progress`, so do not re-emit here.
@@ -1603,20 +1697,13 @@ impl ServiceContainer {
             .await
     }
 
-    /// Re-execute a recorded run with its engine, duration, and RNG seed.
+    /// Re-execute a campaign with its verified retained execution inputs.
     ///
-    /// The original run's persisted config supplies every reproducibility
-    /// input; when it predates recorded seeds, the seed is re-derived from the
-    /// original run id exactly as the original run path would have derived it.
-    /// The replay launches through the normal run path (same authorization,
-    /// sandboxing, corpus merge, and WAL journaling), so the replayed run is
-    /// persisted as its own new campaign row whose config links back to the
-    /// original via `replay_of` and pins the same `seed`. Because replay is a
-    /// new execution, the current operator policy must still admit the engine
-    /// and duration, and its current sandbox resource limits apply. The corpus
-    /// and promoted harness are intentionally taken from the target's current
-    /// state: replay pins the RNG seed, not the (deliberately evolving) shared
-    /// corpus. The original run's row and journal state are untouched.
+    /// The promoted source/binary, starting corpus, dictionary, workspace files,
+    /// image, seed, and execution settings are copied into a new run. Current
+    /// policy must admit the recorded settings. The active harness is unchanged.
+    /// Older runs without an input manifest cannot be reproduced through this API.
+    /// Identical inputs do not imply deterministic engine or thread scheduling.
     ///
     /// # Errors
     /// Returns `ClassifiedError` if the run or its harness/target is unknown,
@@ -1626,7 +1713,7 @@ impl ServiceContainer {
         run_id: Uuid,
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
     ) -> Result<RunSummary, ClassifiedError> {
-        let (_, launch) = self.resolve_replay(run_id).await?;
+        let (_, launch) = self.resolve_replay(run_id, ReplayInputs::Retained).await?;
         self.run_fuzzer_with_started(
             &launch.project,
             &launch.target,
@@ -1643,7 +1730,21 @@ impl ServiceContainer {
     /// # Errors
     /// Rejects missing retained evidence and settings denied by current policy.
     pub async fn replay_review(&self, run_id: Uuid) -> Result<ReplayReview, ClassifiedError> {
-        self.resolve_replay(run_id).await.map(|(review, _)| review)
+        self.replay_review_with_inputs(run_id, None).await
+    }
+
+    /// Review a historical replay or a seeded experiment using current inputs.
+    ///
+    /// # Errors
+    /// Rejects unavailable inputs, missing seeds, and settings denied by current policy.
+    pub async fn replay_review_with_inputs(
+        &self,
+        run_id: Uuid,
+        inputs: Option<ReplayInputs>,
+    ) -> Result<ReplayReview, ClassifiedError> {
+        self.resolve_replay(run_id, inputs.unwrap_or(ReplayInputs::Retained))
+            .await
+            .map(|(review, _)| review)
     }
 
     /// Execute the exact reviewed settings through normal sandbox and promotion checks.
@@ -1669,7 +1770,7 @@ impl ServiceContainer {
     }
 
     async fn reviewed_replay(&self, review: ReplayReview) -> Result<RunLaunch, ClassifiedError> {
-        let (current, launch) = self.resolve_replay(review.run_id).await?;
+        let (current, launch) = self.resolve_replay(review.run_id, review.inputs).await?;
         if current != review {
             return Err(ClassifiedError::Validation(
                 "Replay settings changed. Review the replay again before starting.".to_owned(),
@@ -1681,6 +1782,7 @@ impl ServiceContainer {
     async fn resolve_replay(
         &self,
         run_id: Uuid,
+        inputs: ReplayInputs,
     ) -> Result<(ReplayReview, RunLaunch), ClassifiedError> {
         let store = self.store.as_ref().ok_or_else(|| {
             ClassifiedError::Validation("fuzz runs require the persistent service store".to_owned())
@@ -1701,6 +1803,20 @@ impl ServiceContainer {
         let config = original.config.clone().ok_or_else(|| {
             ClassifiedError::Validation(format!("run {run_id} has no recorded config to replay"))
         })?;
+        let input_manifest_sha256 = if inputs == ReplayInputs::Retained {
+            Some(config.input_manifest_sha256.clone().ok_or_else(|| {
+                ClassifiedError::Validation(
+                    "immutable replay is unavailable: this run has no input manifest".to_owned(),
+                )
+            })?)
+        } else {
+            None
+        };
+        if config.engine != original.engine {
+            return Err(ClassifiedError::Validation(
+                "retained replay engine disagrees with its configuration".to_owned(),
+            ));
+        }
         let project = canonical_project_root(Path::new(&original.project_root))?;
         let harness = store
             .get_harness(config.harness_id)
@@ -1725,18 +1841,39 @@ impl ServiceContainer {
 
         let target = super::project_identity::retained_run_target_selector(&original, &target)?;
 
-        // A config persisted before seeds were recorded replays with the seed
-        // the original run would have derived from its own id.
-        let seed = config
-            .seed
-            .unwrap_or_else(|| hf_engine::seed::derive_run_seed(run_id));
-        // Replay preserves the recorded engine and duration only when the
-        // current operator policy still admits them. Current sandbox resource
-        // limits apply because replay starts a new execution.
-        let resolved = resolve_fuzzing_run(
+        let mut resolved = resolve_fuzzing_run(
             original.engine,
             config.duration.map_or(3600, |duration| duration.as_secs()),
         )?;
+        if config.max_mem_mb > resolved.max_mem_mb || config.max_cpus > resolved.max_cpus {
+            return Err(ClassifiedError::Validation(
+                "recorded replay resource limits exceed current policy".to_owned(),
+            ));
+        }
+        resolved.max_mem_mb = config.max_mem_mb;
+        resolved.max_cpus = config.max_cpus;
+        if inputs == ReplayInputs::Retained {
+            let input = super::workspace::resolve_workspace_directory(
+                &workspace_dir(&project, &target),
+                &PathBuf::from("runs").join(run_id.to_string()).join("input"),
+            )?;
+            let image = super::retained_inputs::verify(&input, &config)?;
+            let image = hf_core::runtime::ImmutableImageReference::from_sha256_id(image)?;
+            if original.sandbox_rev.as_deref()
+                != Some(&format!(
+                    "{}{}",
+                    super::EXACT_DOCKER_IMAGE_REV_PREFIX,
+                    image.sha256()
+                ))
+            {
+                return Err(ClassifiedError::Validation(
+                    "replay image differs from retained run provenance".to_owned(),
+                ));
+            }
+        }
+        let seed = config.seed.ok_or_else(|| {
+            ClassifiedError::Validation("immutable replay requires a recorded seed".to_owned())
+        })?;
         let review = ReplayReview {
             run_id,
             project: project.clone(),
@@ -1746,6 +1883,8 @@ impl ServiceContainer {
             duration_secs: resolved.duration_secs,
             max_mem_mb: resolved.max_mem_mb.to_string(),
             max_cpus: resolved.max_cpus,
+            input_manifest_sha256: input_manifest_sha256.clone(),
+            inputs,
         };
         Ok((
             review,
@@ -1756,9 +1895,72 @@ impl ServiceContainer {
                 replay: Some(ReplayProvenance {
                     original_run_id: run_id,
                     seed,
+                    input_manifest_sha256,
+                    inputs,
                 }),
             },
         ))
+    }
+
+    async fn campaign_harness(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+        replay: Option<&ReplayProvenance>,
+    ) -> Result<Harness, ClassifiedError> {
+        let historical = replay.filter(|value| value.inputs == ReplayInputs::Retained);
+        let qualified = if let Some(provenance) = historical {
+            self.replay_harness(provenance).await?
+        } else {
+            self.active_harness_locked(project, target, engine).await?
+        };
+        if qualified.status != HarnessStatus::Promoted {
+            return Err(ClassifiedError::Validation(format!(
+                "active harness '{target}' is {:?}; run smoke qualification and explicitly promote it before starting a full campaign",
+                qualified.status
+            )));
+        }
+        if historical.is_none() {
+            self.verify_harness_qualification_locked(project, target, &qualified)
+                .await?;
+        }
+        Ok(qualified)
+    }
+
+    async fn replay_harness(
+        &self,
+        provenance: &ReplayProvenance,
+    ) -> Result<Harness, ClassifiedError> {
+        let store = self.store.as_ref().ok_or_else(|| {
+            ClassifiedError::Validation("replay requires persistent storage".to_owned())
+        })?;
+        let original = store
+            .get_run(provenance.original_run_id)
+            .await?
+            .ok_or_else(|| ClassifiedError::Validation("replay run disappeared".to_owned()))?;
+        let config = original
+            .config
+            .as_ref()
+            .ok_or_else(|| ClassifiedError::Validation("replay config disappeared".to_owned()))?;
+        if config.input_manifest_sha256 != provenance.input_manifest_sha256 {
+            return Err(ClassifiedError::Validation(
+                "Replay inputs changed. Review the replay again.".to_owned(),
+            ));
+        }
+        let harness = store.get_harness(config.harness_id).await?.ok_or_else(|| {
+            ClassifiedError::Validation("historical harness is missing".to_owned())
+        })?;
+        self.verify_harness_qualification_record(&harness).await?;
+        let (_, source, binary) = super::staging::qualification_evidence(&harness)?;
+        if original.harness_rev.as_deref() != Some(source)
+            || original.binary_rev.as_deref() != Some(binary)
+        {
+            return Err(ClassifiedError::Validation(
+                "historical run does not match promoted qualification".to_owned(),
+            ));
+        }
+        Ok(harness)
     }
 
     /// Run a syzkaller kernel-fuzzing campaign through the sandbox.

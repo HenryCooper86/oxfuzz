@@ -502,13 +502,20 @@ evidence and limits. Prepare persists first; only then offer explicit navigation
 to Corpus for growth or Harness for refinement. For a baseline with a retained
 seed, offer **Review replay** using the app's existing service and database.
 The review displays the original run, project, exact target selector, engine,
-seed as decimal text, duration, and current memory/CPU limits. The launch
+seed as decimal text, duration, retained memory/CPU limits, and the execution-input
+manifest digest. The launch
 operation re-resolves and compares this review before admitting a run; changed
 settings require a new review. The project must remain available. Existing replay and closeout share exact
 retained workspace-selector resolution described in [Run Closeout](run-closeout-design.md),
 preserving both ordinary bare-symbol and imported file-qualified workspaces.
-Replay uses the current promoted harness and
-corpus under current policy; all other compared settings must remain unchanged.
+Run history offers retained-input replay, which uses the verified historical
+harness, starting corpus, dictionary, image, and settings. Experiments instead
+offer an explicitly labeled current-input rerun: it retains the baseline seed
+and admitted resource settings while capturing the current promoted harness and
+corpus as a new campaign. The review includes this input selection and launch
+rechecks it. Missing historical manifests make retained replay unavailable;
+they never silently select current inputs. A current-input rerun records its own
+manifest for later historical replay.
 Ordinary Run derives a new seed and cannot provide a matching experiment result.
 A legacy baseline with no retained seed cannot be recreated by replay; direct
 the operator to start a new campaign and prepare against its recorded seed.

@@ -148,6 +148,7 @@ async fn fixture(name: &str) -> Fixture {
             extra_args: Vec::new(),
             seed: None,
             replay_of: None,
+            input_manifest_sha256: None,
         }),
         chrono::Utc::now(),
     );

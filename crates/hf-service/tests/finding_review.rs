@@ -105,6 +105,7 @@ fn run(project: &str, harness_id: Uuid, engine: EngineKind, offset_minutes: i64)
             extra_args: Vec::new(),
             seed: None,
             replay_of: None,
+            input_manifest_sha256: None,
         }),
         Utc::now() + Duration::minutes(offset_minutes),
     );

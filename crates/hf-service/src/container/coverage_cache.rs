@@ -100,26 +100,20 @@ pub(super) fn parse_covered_functions(json: &str) -> Vec<String> {
     };
     let mut covered: Vec<String> = value
         .get("data")
-        .and_then(|d| d.get(0))
-        .and_then(|d| d.get("functions"))
         .and_then(serde_json::Value::as_array)
-        .map(|funcs| {
-            funcs
-                .iter()
-                .filter(|f| {
-                    f.get("count")
-                        .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(0)
-                        > 0
-                })
-                .filter_map(|f| {
-                    f.get("name")
-                        .and_then(|n| n.as_str())
-                        .map(ToOwned::to_owned)
-                })
-                .collect()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("functions").and_then(serde_json::Value::as_array))
+        .flatten()
+        .filter(|function| {
+            function
+                .get("count")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|count| count > 0)
         })
-        .unwrap_or_default();
+        .filter_map(|function| function.get("name").and_then(serde_json::Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect();
     covered.sort();
     covered.dedup();
     covered
@@ -140,6 +134,15 @@ mod coverage_tests {
         let covered = parse_covered_functions(json);
         assert_eq!(covered, vec!["decode", "parse_entry", "validate"]);
         assert!(!covered.contains(&"never_called".to_owned()));
+    }
+
+    #[test]
+    fn covered_functions_include_all_export_entries() {
+        let json = r#"{"data":[
+            {"functions":[{"name":"first","count":1}]},
+            {"functions":[{"name":"second","count":2},{"name":"first","count":3}]}
+        ]}"#;
+        assert_eq!(parse_covered_functions(json), vec!["first", "second"]);
     }
 
     #[test]

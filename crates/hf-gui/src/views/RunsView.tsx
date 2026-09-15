@@ -12,6 +12,7 @@ import { DiffView } from "../components/DiffView";
 import { buildRunComparisons } from "../lib/runComparison";
 import { RunComparison } from "../components/RunComparison";
 import { RunEvidenceSummary } from "../components/RunEvidenceSummary";
+import { RunFunctionCoverage } from "../components/RunFunctionCoverage";
 import { ReplayRun } from "../components/ReplayRun";
 import { RunCloseoutPanel } from "../components/RunCloseoutPanel";
 import { uuid } from "../providers/runOutputValidation";
@@ -449,7 +450,7 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus, onReviewFindings 
                       <CoverageCurve samples={data} />
                     )}
                     <div className="mt-4 border-t border-border pt-3">
-                      {r.kind.toLowerCase() === "campaign" && r.ended_at && <ReplayRun runId={r.id} onNavigate={onNavigate} />}
+                      {r.kind.toLowerCase() === "campaign" && r.ended_at && <><ReplayRun runId={r.id} onNavigate={onNavigate} /><RunFunctionCoverage runId={r.id} /></>}
                       <RunCloseoutPanel runId={r.id} runKind={r.kind} runStatus={r.status} />
                     </div>
                   </div>

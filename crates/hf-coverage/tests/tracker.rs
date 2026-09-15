@@ -234,3 +234,50 @@ fn propose_action_returns_none_when_progressing() {
     let proposal = propose_action(&tracker, &policy(60));
     assert!(proposal.is_none(), "should not propose when progressing");
 }
+
+#[test]
+fn zero_edge_baseline_uses_its_measurement_time() {
+    let mut tracker = CoverageTracker::new();
+    let run_id = Uuid::new_v4();
+    tracker.update_at(
+        &report(0, run_id),
+        Instant::now()
+            .checked_sub(Duration::from_secs(300))
+            .unwrap(),
+    );
+    tracker.update(&report(0, run_id));
+    assert!(tracker.is_stagnant(120));
+}
+
+#[test]
+fn changing_runs_resets_the_stagnation_history() {
+    let mut tracker = stagnant_tracker(500);
+    let run_id = Uuid::new_v4();
+    tracker.update(&report(0, run_id));
+    assert_eq!(tracker.run_id(), run_id);
+    assert_eq!(tracker.last_delta(), 0);
+    assert!(!tracker.is_stagnant(120));
+    tracker.update(&report(0, run_id));
+    assert!(!tracker.is_stagnant(120));
+}
+
+#[test]
+fn edge_delta_remains_positive_across_signed_counter_range() {
+    let mut tracker = CoverageTracker::new();
+    let run_id = Uuid::new_v4();
+    tracker.update(&report(i64::MAX as u64, run_id));
+    tracker.update(&report(i64::MAX as u64 + 1, run_id));
+    assert_eq!(tracker.last_delta(), 1);
+    tracker.update(&report(i64::MAX as u64, run_id));
+    assert_eq!(tracker.last_delta(), -1);
+}
+
+#[test]
+fn unrepresentable_edge_deltas_saturate_with_their_sign() {
+    let mut tracker = CoverageTracker::new();
+    let run_id = Uuid::new_v4();
+    tracker.update(&report(u64::MAX, run_id));
+    assert_eq!(tracker.last_delta(), i64::MAX);
+    tracker.update(&report(0, run_id));
+    assert_eq!(tracker.last_delta(), i64::MIN);
+}

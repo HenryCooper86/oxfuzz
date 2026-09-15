@@ -324,7 +324,7 @@ pub(crate) struct RunHealthMonitor {
     handle: Option<tokio::task::JoinHandle<()>>,
     abort: Option<tokio::task::AbortHandle>,
     settings: crate::config::CampaignHealthSettings,
-    source_schedule_id: Option<String>,
+    source_schedule_id: Option<(String, u64)>,
     finished: bool,
 }
 
@@ -340,7 +340,8 @@ impl RunHealthMonitor {
         let task_stop = stop.clone();
         let task_container = container.clone();
         let task_settings = settings;
-        let source_schedule_id = crate::scheduler::dispatching_schedule();
+        let source_schedule_id = crate::scheduler::dispatching_schedule()
+            .map(|id| (id, hf_scheduler::current_cascade_depth()));
         let task_source_schedule_id = source_schedule_id.clone();
         let task = async move {
             let mut ticks = tokio::time::interval(interval);
@@ -593,27 +594,32 @@ mod tests {
         manager.start(std::time::Duration::from_millis(10)).await;
         container.bind_scheduler_events(&manager);
 
-        crate::scheduler::with_dispatching_schedule(Some("producer".to_owned()), async {
-            let monitor = RunHealthMonitor::start(
-                container,
-                registry,
-                run_id,
-                std::time::Duration::from_secs(3600),
-                crate::config::CampaignHealthSettings::default(),
-            );
-            tokio::time::timeout(std::time::Duration::from_secs(2), async {
-                while manager.execution_history("other").await.is_empty() {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .expect("other subscriber fired");
-            monitor.finish().await;
-        })
+        crate::scheduler::with_dispatching_schedule(
+            Some(("producer".to_owned(), 3)),
+            Box::pin(async {
+                let monitor = RunHealthMonitor::start(
+                    container,
+                    registry,
+                    run_id,
+                    std::time::Duration::from_secs(3600),
+                    crate::config::CampaignHealthSettings::default(),
+                );
+                tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    while manager.execution_history("other").await.is_empty() {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("other subscriber fired");
+                monitor.finish().await;
+            }),
+        )
         .await;
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         assert!(manager.execution_history("producer").await.is_empty());
-        assert_eq!(manager.execution_history("other").await.len(), 1);
+        let history = manager.execution_history("other").await;
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].request_summary["cascade_depth"], 4);
         manager.stop().await;
     }
 

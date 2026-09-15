@@ -157,6 +157,7 @@ async fn triage_fixture(name: &str, crash_files: &[String]) -> TriageFixture {
             extra_args: Vec::new(),
             seed: None,
             replay_of: None,
+            input_manifest_sha256: None,
         }),
         Utc::now(),
     );

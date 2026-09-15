@@ -86,6 +86,7 @@ impl RecordingRuntime {
 }
 
 fn write_fuzzing_policy(enabled_engines: &[&str], max_duration_secs: u64) {
+    let collect_function_coverage = cfg!(feature = "proof-carrying");
     let enabled_engines = enabled_engines
         .iter()
         .map(|engine| format!("\"{engine}\""))
@@ -101,6 +102,7 @@ fn write_fuzzing_policy(enabled_engines: &[&str], max_duration_secs: u64) {
         &format!(
             r"
 [fuzzing]
+collect_function_coverage = {collect_function_coverage}
 enabled_engines = [{enabled_engines}]
 default_engine = {default_engine}
 default_duration_secs = 30
@@ -141,8 +143,28 @@ impl RuntimeAdapter for RecordingRuntime {
         cmd: &[String],
         cwd: &Path,
         limits: &ResourceLimits,
-        _opts: &SandboxOptions,
+        opts: &SandboxOptions,
     ) -> Result<CommandResult, ClassifiedError> {
+        if cmd.first().is_some_and(|value| value == "llvm-profdata") {
+            let output = &opts
+                .extra_mounts
+                .iter()
+                .find(|mount| mount.container_path == "/profiles/output")
+                .unwrap()
+                .host_path;
+            std::fs::write(output.join("merged.profdata"), "indexed profile").unwrap();
+            return Ok(completed(0, "", cwd));
+        }
+        if cmd.iter().any(|value| value.contains("llvm-cov export")) {
+            let output = &opts
+                .extra_mounts
+                .iter()
+                .find(|mount| mount.container_path == "/profiles/output")
+                .unwrap()
+                .host_path;
+            std::fs::write(output.join("export.json"), r#"{"data":[{"functions":[{"name":"parse_value","count":17,"filenames":["/work/parser.c"]}]}]}"#).unwrap();
+            return Ok(completed(0, "", cwd));
+        }
         if cmd.iter().any(|argument| argument.contains(" -o ")) {
             return self.run_command(cmd, cwd, limits).await;
         }
@@ -158,12 +180,24 @@ impl RuntimeAdapter for RecordingRuntime {
         &self,
         cmd: &[String],
         cwd: &Path,
-        _limits: &ResourceLimits,
-        _opts: &SandboxOptions,
+        limits: &ResourceLimits,
+        opts: &SandboxOptions,
         _cancel: &tokio_util::sync::CancellationToken,
         on_line: &LineSink<'_>,
     ) -> Result<CommandResult, ClassifiedError> {
+        if cmd.first().is_some_and(|value| value == "llvm-profdata")
+            || cmd.iter().any(|value| value.contains("llvm-cov export"))
+        {
+            return self.run_command_opts(cmd, cwd, limits, opts).await;
+        }
         self.commands.lock().unwrap().push(cmd.to_vec());
+        if let Some(mount) = opts
+            .extra_mounts
+            .iter()
+            .find(|mount| mount.container_path == "/work/function-coverage")
+        {
+            std::fs::write(mount.host_path.join("123.profraw"), "raw profile").unwrap();
+        }
         on_line("#1 pulse cov: 42 ft: 84 exec/s: 256");
         on_line("DONE cov: 42 ft: 84 corp: 3/24b exec/s: 256");
         Ok(completed(0, "", cwd))
@@ -272,12 +306,34 @@ async fn run_records_a_seed_and_replay_reexecutes_with_it() {
 
     // A campaign run records a deterministic seed, derived from its run id by
     // default, and the engine adapter receives exactly that seed.
+    let workspace = hf_service::workspace_dir(&project, "parse_value");
+    std::fs::write(
+        workspace.join("tokens.c"),
+        "const char *magic = \"REPLAY_DICTIONARY\";",
+    )
+    .unwrap();
     let summary = container
         .run_fuzzer(&project, "parse_value", EngineKind::LibFuzzer, 60, &|_| {})
         .await
         .unwrap();
     let run = store.get_run(summary.run_id).await.unwrap().unwrap();
     assert_eq!(run.status, RunStatus::Done);
+    #[cfg(feature = "proof-carrying")]
+    {
+        let evidence = store
+            .run_function_coverage(run.id)
+            .await
+            .unwrap()
+            .expect("exact campaign function export");
+        assert_eq!(evidence.binary_sha256, run.binary_rev.clone().unwrap());
+        let functions = hf_coverage::parse_llvm_function_coverage(&evidence.export_json).unwrap();
+        assert_eq!(functions[0].name, "parse_value");
+        assert_eq!(functions[0].count, 17);
+        let view =
+            serde_json::to_value(container.run_function_coverage(run.id).await.unwrap()).unwrap();
+        assert_eq!(view["functions"][0]["count"], "17");
+        assert_eq!(view["observed_functions"], 1);
+    }
     let config = run.config.clone().expect("campaign run config");
     let seed = config.seed.expect("campaign run must record a seed");
     assert_eq!(
@@ -329,6 +385,16 @@ async fn run_records_a_seed_and_replay_reexecutes_with_it() {
     }
 
     // Replay: a new run row, the same seed on the argv, a link to the original.
+    let retained_workspace = workspace.join(format!("runs/{}/input/workspace", summary.run_id));
+    assert_eq!(
+        std::fs::read_to_string(retained_workspace.join("parser.c")).unwrap(),
+        FIXTURE
+    );
+    let dictionary = std::fs::read(retained_workspace.join("fuzzer.dict")).unwrap();
+    std::fs::write(workspace.join("parser.c"), "changed project source").unwrap();
+    std::fs::write(workspace.join("fuzz_parse_value"), "changed active binary").unwrap();
+    std::fs::write(workspace.join("corpus/new-seed"), "new canonical seed").unwrap();
+    std::fs::write(workspace.join("fuzzer.dict"), "changed dictionary").unwrap();
     let review = container.replay_review(summary.run_id).await.unwrap();
     assert_eq!(review.seed, seed.to_string());
     let denied = container
@@ -398,6 +464,20 @@ async fn run_records_a_seed_and_replay_reexecutes_with_it() {
         Some(summary.run_id)
     );
     assert_ne!(replay.run_id, summary.run_id);
+    let replay_root = workspace.join(format!("runs/{}", replay.run_id));
+    assert_eq!(
+        std::fs::read_to_string(replay_root.join("input/workspace/parser.c")).unwrap(),
+        FIXTURE
+    );
+    assert_eq!(
+        std::fs::read(replay_root.join("input/workspace/fuzzer.dict")).unwrap(),
+        dictionary
+    );
+    assert!(!replay_root.join("input/corpus/new-seed").exists());
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("fuzz_parse_value")).unwrap(),
+        "changed active binary"
+    );
     let replayed = store.get_run(replay.run_id).await.unwrap().unwrap();
     assert_eq!(replayed.status, RunStatus::Done);
     let replayed_config = replayed.config.clone().expect("replayed run config");
@@ -427,6 +507,22 @@ async fn run_records_a_seed_and_replay_reexecutes_with_it() {
     assert_eq!(original_config.seed, Some(seed));
     assert_eq!(original_config.replay_of, None);
 
+    // Direct and reviewed execution reject changed retained bytes before dispatch.
+    let original_input = workspace.join(format!("runs/{}/input", summary.run_id));
+    let before_tamper = runtime.campaign_count();
+    let approved = container.replay_review(summary.run_id).await.unwrap();
+    std::fs::write(original_input.join("workspace/fuzzer.dict"), "tampered").unwrap();
+    assert!(container.replay_run(summary.run_id, &|_| {}).await.is_err());
+    assert!(container
+        .replay_run_reviewed(approved, &|_| {}, &|_| {})
+        .await
+        .is_err());
+    assert_eq!(runtime.campaign_count(), before_tamper);
+    std::fs::write(original_input.join("workspace/fuzzer.dict"), &dictionary).unwrap();
+    std::fs::write(original_input.join("unexpected"), "foreign input").unwrap();
+    assert!(container.replay_review(summary.run_id).await.is_err());
+    std::fs::remove_file(original_input.join("unexpected")).unwrap();
+
     // A legacy run persisted before seeds were recorded replays with the seed
     // derived from its own run id -- the same derivation the original run path
     // would have applied.
@@ -434,6 +530,7 @@ async fn run_records_a_seed_and_replay_reexecutes_with_it() {
     legacy_config.seed = None;
     legacy_config.seed_corpus = None;
     legacy_config.replay_of = None;
+    legacy_config.input_manifest_sha256 = None;
     let mut legacy = hf_storage::RunRecord::new(
         run.project_root.clone(),
         EngineKind::LibFuzzer,
@@ -443,20 +540,9 @@ async fn run_records_a_seed_and_replay_reexecutes_with_it() {
     legacy.status = RunStatus::Done;
     legacy.ended_at = Some(chrono::Utc::now());
     store.insert_run(&legacy).await.unwrap();
-    let legacy_replay = container.replay_run(legacy.id, &|_| {}).await.unwrap();
-    let legacy_replayed_config = store
-        .get_run(legacy_replay.run_id)
-        .await
-        .unwrap()
-        .unwrap()
-        .config
-        .expect("legacy replay run config");
-    assert_eq!(
-        legacy_replayed_config.seed,
-        Some(hf_engine::seed::derive_run_seed(legacy.id)),
-        "an absent recorded seed must derive deterministically from the original run id"
-    );
-    assert_eq!(legacy_replayed_config.replay_of, Some(legacy.id));
+    let before_legacy = runtime.campaign_count();
+    assert!(container.replay_run(legacy.id, &|_| {}).await.is_err());
+    assert_eq!(runtime.campaign_count(), before_legacy);
 
     let mut malformed = run.clone();
     malformed.id = Uuid::new_v4();

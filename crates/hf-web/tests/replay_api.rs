@@ -21,11 +21,17 @@ async fn replay_authorizes_the_retained_owner_before_review_or_start() {
     let security =
         hf_web::WebSecurityConfig::new(None, true, Vec::new(), vec![root.path().into()]).unwrap();
     let app = hf_web::build_with_state_and_security(hf_web::AppState::new(service), security);
-    for method in ["GET", "POST"] {
+    for (method, endpoint) in [
+        ("GET", "replay"),
+        ("POST", "replay"),
+        ("GET", "function-coverage"),
+    ] {
         let body = if method == "POST" {
             serde_json::json!({"review": {
             "run_id": run.id, "project": root.path(), "target": "parse", "engine": "LibFuzzer",
-            "seed": "18446744073709551615", "duration_secs": 60, "max_mem_mb": "512", "max_cpus": 1
+            "seed": "18446744073709551615", "duration_secs": 60, "max_mem_mb": "512", "max_cpus": 1,
+            "inputs": "retained",
+            "input_manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         }}).to_string()
         } else {
             String::new()
@@ -35,7 +41,7 @@ async fn replay_authorizes_the_retained_owner_before_review_or_start() {
             .oneshot(
                 Request::builder()
                     .method(method)
-                    .uri(format!("/runs/{}/replay", run.id))
+                    .uri(format!("/runs/{}/{endpoint}", run.id))
                     .header("content-type", "application/json")
                     .body(Body::from(body))
                     .unwrap(),

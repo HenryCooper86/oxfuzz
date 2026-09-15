@@ -19,6 +19,11 @@ const RETIRED_ENGINE_ALIASES = [
 ];
 
 describe("fuzzing settings", () => {
+  it("preserves an explicit function-coverage choice through settings edits", () => {
+    const normalized = normalizeFuzzingSettings({ fuzzing: { ...DEFAULT_FUZZING_SETTINGS, collect_function_coverage: true } });
+    expect(normalized.settings).toMatchObject({ collect_function_coverage: true });
+    expect(validateEffectiveFuzzingSettings({ ...DEFAULT_FUZZING_SETTINGS, collect_function_coverage: true })).toMatchObject({ collect_function_coverage: true });
+  });
   it("exposes exactly the supported engine portfolio", () => {
     expect(FUZZING_ENGINE_OPTIONS.map((option) => option.value)).toEqual([
       "libfuzzer",
@@ -53,6 +58,7 @@ describe("fuzzing settings", () => {
 
     expect(normalized).toEqual({
       settings: {
+        collect_function_coverage: false,
         enabled_engines: ["afl++", "honggfuzz"],
         default_engine: "afl++",
         default_duration_secs: 45,
@@ -153,6 +159,7 @@ describe("fuzzing settings", () => {
 
   it("accepts only a complete, internally consistent effective policy", () => {
     const effective = {
+      collect_function_coverage: false,
       enabled_engines: ["afl++", "honggfuzz"],
       default_engine: "honggfuzz",
       default_duration_secs: 120,
@@ -176,6 +183,7 @@ describe("fuzzing settings", () => {
 
   it("loads the typed policy endpoint and fails closed for an invalid response", async () => {
     const effective = {
+      collect_function_coverage: false,
       enabled_engines: ["libfuzzer"],
       default_engine: "libfuzzer",
       default_duration_secs: 30,

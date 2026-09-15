@@ -22,6 +22,7 @@ use super::{harness_binary_name, is_regular_file, EXACT_DOCKER_IMAGE_REV_PREFIX}
 
 /// Immutable inputs and writable evidence location prepared for one run.
 pub(super) struct RunArtifacts {
+    pub(super) input_host: PathBuf,
     pub(super) binary_host: PathBuf,
     pub(super) source_host: PathBuf,
     pub(super) corpus_host: PathBuf,
@@ -41,10 +42,12 @@ pub(super) struct RunArtifacts {
 /// RNG seed that run recorded. Threaded from `replay_run` into the normal run
 /// path so the replayed run's persisted config pins the same seed and links
 /// back to the original run.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct ReplayProvenance {
     pub(super) original_run_id: Uuid,
     pub(super) seed: u64,
+    pub(super) input_manifest_sha256: Option<String>,
+    pub(super) inputs: super::run::ReplayInputs,
 }
 
 /// Compute a full SHA-256 digest without loading a potentially large binary in
@@ -653,6 +656,7 @@ pub(super) fn stage_run_artifacts(
         let binary_sha256 = sha256_file(&binary_host)?;
         let run_container_root = format!("/work/runs/{run_id}");
         Ok(RunArtifacts {
+            input_host: input_dir,
             binary_host,
             source_host,
             corpus_host,
@@ -674,6 +678,72 @@ pub(super) fn stage_run_artifacts(
         }
     }
     staged
+}
+
+/// Create a new writable run around verified retained historical inputs.
+pub(super) fn stage_replay_artifacts(
+    workspace: &Path,
+    run_id: Uuid,
+    original_id: Uuid,
+    config: &hf_core::engine::FuzzRunConfig,
+) -> Result<(RunArtifacts, String), ClassifiedError> {
+    let runs = ensure_workspace_directory(workspace, Path::new("runs"))?;
+    let original =
+        resolve_workspace_directory(&runs, &PathBuf::from(original_id.to_string()).join("input"))?;
+    let run_root = runs.join(run_id.to_string());
+    std::fs::create_dir(&run_root).map_err(|error| {
+        ClassifiedError::Validation(format!("create replay directory: {error}"))
+    })?;
+    let result = (|| {
+        let input_host = run_root.join("input");
+        std::fs::create_dir(&input_host).map_err(|error| {
+            ClassifiedError::Validation(format!("create replay inputs: {error}"))
+        })?;
+        let image = super::retained_inputs::copy_verified(&original, &input_host, config)?;
+        let corpus_relative = PathBuf::from("runs")
+            .join(run_id.to_string())
+            .join("corpus");
+        let output_relative = run_output_relative(run_id);
+        let corpus_host = workspace.join(&corpus_relative);
+        let output_host = workspace.join(&output_relative);
+        for directory in [&corpus_host, &output_host] {
+            std::fs::create_dir(directory).map_err(|error| {
+                ClassifiedError::Validation(format!("create replay output: {error}"))
+            })?;
+        }
+        let initial_corpus_host = input_host.join("corpus");
+        hf_corpus::snapshot(&initial_corpus_host, &corpus_host)?;
+        let binary_host = input_host.join("harness");
+        let source_host = input_host.join("harness.source");
+        let source_sha256 = sha256_file(&source_host)?;
+        let binary_sha256 = sha256_file(&binary_host)?;
+        let root = format!("/work/runs/{run_id}");
+        Ok((
+            RunArtifacts {
+                source_context_host: input_host.join("source-context"),
+                input_host,
+                binary_host,
+                source_host,
+                initial_corpus_host,
+                corpus_host,
+                output_host,
+                corpus_relative,
+                output_relative,
+                source_sha256,
+                binary_sha256,
+                binary_container: format!("{root}/input/harness"),
+                corpus_container: format!("{root}/corpus"),
+                output_container: format!("{root}/out"),
+            },
+            image,
+        ))
+    })();
+    if result.is_err() {
+        if let Err(error) = std::fs::remove_dir_all(&run_root) {
+            tracing::warn!(%error, "failed to remove unreferenced replay staging");
+        }
+    }
+    result
 }
 
 /// Fail closed if a staged source/binary changed between approval and launch.

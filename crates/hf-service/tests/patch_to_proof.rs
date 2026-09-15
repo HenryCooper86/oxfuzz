@@ -212,6 +212,7 @@ async fn fixture() -> (
             extra_args: Vec::new(),
             seed: Some(7),
             replay_of: None,
+            input_manifest_sha256: None,
         }),
         Utc::now(),
     );

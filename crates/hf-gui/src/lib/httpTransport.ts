@@ -80,6 +80,7 @@ const COMMAND_MAP: Record<string, CommandEndpoint> = {
   run_coverage_series: { method: "POST", path: "/runs/coverage" },
   run_harness_source: { method: "POST", path: "/runs/harness-source" },
   revert_harness_from_run: { method: "POST", path: "/runs/revert-harness" },
+  run_function_coverage: { method: "GET", path: "/runs/{run_id}/function-coverage" },
   replay_review: { method: "GET", path: "/runs/{run_id}/replay" },
   replay_run: { method: "POST", path: "/runs/{run_id}/replay" },
   run_fuzzer: { method: "POST", path: "/runs/start" },

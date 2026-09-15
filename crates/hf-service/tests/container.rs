@@ -154,6 +154,7 @@ fn stored_run(
             extra_args: Vec::new(),
             seed: None,
             replay_of: None,
+            input_manifest_sha256: None,
         }),
         started_at,
     );

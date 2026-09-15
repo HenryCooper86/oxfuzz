@@ -11,6 +11,9 @@ use crate::store::{Schedule, TriggerConfig};
 /// A fired trigger event, produced when a trigger condition is met.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FiredTrigger {
+    /// Number of scheduled event links preceding this dispatch.
+    #[serde(default)]
+    pub cascade_depth: u64,
     /// The schedule that produced this trigger.
     pub schedule_id: String,
     /// When the trigger evaluation happened.
@@ -98,6 +101,7 @@ pub fn evaluate_trigger(schedule: &Schedule, now: DateTime<Utc>) -> Option<Fired
             TriggerConfig::Event { .. } => TriggerType::Event,
         };
         Some(FiredTrigger {
+            cascade_depth: 0,
             schedule_id: schedule.id.clone(),
             fired_at: now,
             trigger_type,

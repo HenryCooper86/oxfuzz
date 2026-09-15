@@ -120,3 +120,32 @@ fn parse_done_line() {
         "should detect done: {events:?}"
     );
 }
+
+#[test]
+fn live_throughput_preserves_fractional_executions_per_second() {
+    for line in ["exec speed : 0.5/sec", "Speed : 1234.5/sec [avg: 1000]"] {
+        let expected = if line.starts_with("exec") {
+            0.5
+        } else {
+            1234.5
+        };
+        let events = hf_engine::progress::parse_progress_events(line);
+        assert!(
+            events.iter().any(|event| matches!(event,
+                FuzzProgress::ExecsPerSec(rate) if (*rate - expected).abs() < f64::EPSILON
+            )),
+            "{line}: {events:?}"
+        );
+    }
+}
+
+#[test]
+fn throughput_before_execs_label_does_not_read_later_counters() {
+    let events = hf_engine::progress::parse_progress_events("5000 execs/sec, 3 crashes");
+    assert!(
+        events.iter().any(|event| matches!(event,
+            FuzzProgress::ExecsPerSec(rate) if (*rate - 5000.0).abs() < f64::EPSILON
+        )),
+        "{events:?}"
+    );
+}

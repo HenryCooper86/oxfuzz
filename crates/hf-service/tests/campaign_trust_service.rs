@@ -139,6 +139,7 @@ fn run(harness_id: Uuid, status: RunStatus) -> RunRecord {
             extra_args: Vec::new(),
             seed: None,
             replay_of: None,
+            input_manifest_sha256: None,
         }),
         Utc::now(),
     );

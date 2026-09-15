@@ -40,6 +40,8 @@ auto_revert_notify_only = false
 # before every new harness operation or campaign. A Settings save therefore
 # affects the next operation without changing a campaign already in flight.
 [fuzzing]
+# Instrument new C/C++ harnesses; adds overhead and requires requalification.
+collect_function_coverage = false
 enabled_engines = ["libfuzzer", "afl++", "honggfuzz", "syzkaller"]
 default_engine = "libfuzzer"
 default_duration_secs = 60
@@ -110,6 +112,8 @@ max_depth = 10
 
 # Background campaign scheduling. A zero history limit means unlimited.
 [scheduler]
+# Maximum event links after an interactive or time-triggered root; 0 disables chaining.
+max_event_cascade_depth = 8
 max_concurrent_executions = 10
 default_missed_policy = "skip" # catch_up | skip | backfill
 default_concurrency_policy = "skip_if_running" # allow | skip_if_running | queue | cancel_previous

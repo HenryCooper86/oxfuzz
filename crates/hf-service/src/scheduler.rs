@@ -998,14 +998,17 @@ pub(crate) fn dispatching_schedule() -> Option<String> {
 
 /// Run one future with the originating schedule restored across a task spawn.
 pub(crate) async fn with_dispatching_schedule<F>(
-    schedule_id: Option<String>,
+    origin: Option<(String, u64)>,
     future: F,
 ) -> F::Output
 where
     F: std::future::Future,
 {
-    match schedule_id {
-        Some(schedule_id) => DISPATCHING_SCHEDULE.scope(schedule_id, future).await,
+    match origin {
+        Some((schedule_id, depth)) => {
+            hf_scheduler::with_cascade_depth(depth, DISPATCHING_SCHEDULE.scope(schedule_id, future))
+                .await
+        }
         None => future.await,
     }
 }
@@ -1562,7 +1565,7 @@ impl WorkflowDispatcher for FuzzCampaignDispatcher {
         // event bridge can refuse to re-fire that same schedule.
         let schedule_id = params.schedule_id.clone();
         Box::pin(with_dispatching_schedule(
-            Some(schedule_id),
+            Some((schedule_id, hf_scheduler::current_cascade_depth())),
             self.dispatch_campaign(workflow_id, params),
         ))
         .await
@@ -5953,6 +5956,7 @@ mod tests {
             scheduler
                 .manager
                 .emit_event(IncomingEvent {
+                    cascade_depth: 0,
                     event_type: EVENT_RUN_COMPLETED.to_owned(),
                     payload: None,
                     timestamp: Utc::now(),
@@ -6053,6 +6057,7 @@ mod tests {
         let fired = scheduler
             .manager
             .emit_event(IncomingEvent {
+                cascade_depth: 0,
                 event_type: EVENT_RUN_COMPLETED.to_owned(),
                 payload: None,
                 timestamp: Utc::now(),
@@ -6131,6 +6136,7 @@ mod tests {
             scheduler
                 .manager
                 .emit_event(IncomingEvent {
+                    cascade_depth: 0,
                     event_type: EVENT_RUN_COMPLETED.to_owned(),
                     payload: None,
                     timestamp: Utc::now(),
@@ -6184,6 +6190,7 @@ mod tests {
             scheduler
                 .manager
                 .emit_event(IncomingEvent {
+                    cascade_depth: 0,
                     event_type: EVENT_RUN_COMPLETED.to_owned(),
                     payload: None,
                     timestamp: Utc::now(),
@@ -6260,6 +6267,7 @@ mod tests {
             scheduler
                 .manager
                 .emit_event(IncomingEvent {
+                    cascade_depth: 0,
                     event_type: EVENT_RUN_COMPLETED.to_owned(),
                     payload: None,
                     timestamp: Utc::now(),
@@ -6446,6 +6454,7 @@ mod tests {
             .trigger_sender()
             .unwrap()
             .send(FiredTrigger {
+                cascade_depth: 0,
                 schedule_id: "once".to_owned(),
                 fired_at: Utc::now(),
                 trigger_type: TriggerType::OneTime,
@@ -6469,6 +6478,7 @@ mod tests {
             scheduler
                 .manager
                 .emit_event(IncomingEvent {
+                    cascade_depth: 0,
                     event_type: EVENT_RUN_COMPLETED.to_owned(),
                     payload: None,
                     timestamp: Utc::now(),

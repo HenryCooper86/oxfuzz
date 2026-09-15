@@ -194,6 +194,22 @@ impl ServiceContainer {
                 })
                 .unwrap_or_default()
         };
+        #[cfg(feature = "proof-carrying")]
+        let flags = {
+            let mut flags = flags;
+            if crate::config::effective_fuzzing_settings()
+                .map_err(ClassifiedError::Validation)?
+                .collect_function_coverage
+                && matches!(language, TargetLanguage::C | TargetLanguage::Cpp)
+            {
+                flags.extend(
+                    super::function_coverage::PROFILE_FLAGS
+                        .iter()
+                        .map(|flag| (*flag).to_owned()),
+                );
+            }
+            flags
+        };
         let context = context.filter(|context| profile.is_some() || !context.is_empty());
         let profile_sha256 = profile.as_ref().map(|p| p.profile_sha256.clone());
         let compile_database_sha256 = database

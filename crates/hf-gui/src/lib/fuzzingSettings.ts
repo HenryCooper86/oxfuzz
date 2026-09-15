@@ -18,6 +18,7 @@ export interface FuzzingSandboxSettings {
 }
 
 export interface FuzzingSettings {
+  collect_function_coverage: boolean;
   enabled_engines: FuzzingEngineId[];
   default_engine: FuzzingEngineId;
   default_duration_secs: number;
@@ -26,7 +27,7 @@ export interface FuzzingSettings {
 
 export type FuzzingSettingsNormalization =
   | { settings: FuzzingSettings; error: null }
-  | { settings: null; error: { kind: "retired_engine"; value: string } };
+  | { settings: null; error: { kind: "retired_engine" | "invalid_setting"; value: string } };
 
 /** A fuzzing action is available only after the typed service policy validates. */
 export function fuzzingActionsEnabled(
@@ -36,6 +37,7 @@ export function fuzzingActionsEnabled(
 }
 
 export const DEFAULT_FUZZING_SETTINGS: FuzzingSettings = {
+  collect_function_coverage: false,
   enabled_engines: FUZZING_ENGINE_OPTIONS.map((option) => option.value),
   default_engine: "libfuzzer",
   default_duration_secs: 60,
@@ -93,6 +95,7 @@ export function validateEffectiveFuzzingSettings(value: unknown): FuzzingSetting
   if (new Set(enabled).size !== enabled.length) return null;
 
   const defaultEngine = root.default_engine;
+  if (typeof root.collect_function_coverage !== "boolean") return null;
   if (typeof defaultEngine !== "string" || !enabled.includes(defaultEngine as FuzzingEngineId)) return null;
 
   const sandbox = asRecord(root.sandbox);
@@ -102,6 +105,7 @@ export function validateEffectiveFuzzingSettings(value: unknown): FuzzingSetting
   if (!boundedPositiveInteger(root.default_duration_secs, sandbox.max_duration_secs)) return null;
 
   return {
+    collect_function_coverage: root.collect_function_coverage,
     enabled_engines: [...enabled],
     default_engine: defaultEngine as FuzzingEngineId,
     default_duration_secs: root.default_duration_secs,
@@ -126,6 +130,8 @@ export async function loadEffectiveFuzzingSettings(
 /** Convert the untyped global TOML value into the validated UI shape. */
 export function normalizeFuzzingSettings(root: unknown): FuzzingSettingsNormalization {
   const fuzzing = asRecord(asRecord(root).fuzzing);
+  const collect = fuzzing.collect_function_coverage ?? DEFAULT_FUZZING_SETTINGS.collect_function_coverage;
+  if (typeof collect !== "boolean") return { settings: null, error: { kind: "invalid_setting", value: "fuzzing.collect_function_coverage must be a boolean" } };
   const rawEnabled = Array.isArray(fuzzing.enabled_engines) ? fuzzing.enabled_engines : [];
   const retired = findRetiredEngineValue(rawEnabled) ?? retiredEngineValue(fuzzing.default_engine);
   if (retired !== null) {
@@ -134,7 +140,7 @@ export function normalizeFuzzingSettings(root: unknown): FuzzingSettingsNormaliz
   const enabled = [...new Set(rawEnabled.filter(
     (engine): engine is FuzzingEngineId => typeof engine === "string" && ENGINE_IDS.has(engine),
   ))];
-  if (enabled.length === 0) return { settings: cloneDefaults(), error: null };
+  if (enabled.length === 0) return { settings: { ...cloneDefaults(), collect_function_coverage: collect }, error: null };
 
   const sandbox = asRecord(fuzzing.sandbox);
   const maxDuration = positiveInteger(
@@ -154,6 +160,7 @@ export function normalizeFuzzingSettings(root: unknown): FuzzingSettingsNormaliz
 
   return {
     settings: {
+      collect_function_coverage: collect,
       enabled_engines: enabled,
       default_engine: defaultEngine,
       default_duration_secs: requestedDefault,

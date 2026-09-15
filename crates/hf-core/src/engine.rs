@@ -198,6 +198,9 @@ pub struct FuzzRunConfig {
     /// The run this run replays, when launched through `replay_run`.
     #[serde(default)]
     pub replay_of: Option<Uuid>,
+    /// Digest of the retained execution-input manifest; absent on older runs.
+    #[serde(default)]
+    pub input_manifest_sha256: Option<String>,
 }
 
 /// A progress event streamed from a running fuzzer.

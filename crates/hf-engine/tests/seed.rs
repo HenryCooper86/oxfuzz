@@ -25,6 +25,7 @@ fn cfg(engine: EngineKind, seed: Option<u64>) -> FuzzRunConfig {
         extra_args: Vec::new(),
         seed,
         replay_of: None,
+        input_manifest_sha256: None,
     }
 }
 

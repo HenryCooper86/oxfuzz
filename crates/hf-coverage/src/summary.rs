@@ -72,22 +72,44 @@ struct Metric {
     covered: u64,
 }
 
-/// Parse the `totals` block of an `llvm-cov export` JSON document.
+impl Metric {
+    fn accumulate(&self, covered: &mut u64, total: &mut u64) -> Option<()> {
+        if self.covered > self.count {
+            return None;
+        }
+        *covered = covered.checked_add(self.covered)?;
+        *total = total.checked_add(self.count)?;
+        Some(())
+    }
+}
+
+/// Parse and combine the `totals` blocks of an `llvm-cov export` JSON document.
 ///
-/// Returns `None` if the input is not valid llvm-cov export JSON or carries no
-/// data entry (e.g. an empty `{}` or a non-coverage document).
+/// Returns `None` for malformed input, no data entries, covered counts larger
+/// than their totals, or totals that overflow the report's counters.
 #[must_use]
 pub fn parse_llvm_cov_summary(json: &str) -> Option<CoverageSummary> {
+    // Malformed export JSON means that structural coverage is unavailable.
     let export: Export = serde_json::from_str(json).ok()?;
-    let totals = export.data.into_iter().next()?.totals;
-    Some(CoverageSummary {
-        lines_covered: totals.lines.covered,
-        lines_total: totals.lines.count,
-        functions_covered: totals.functions.covered,
-        functions_total: totals.functions.count,
-        regions_covered: totals.regions.covered,
-        regions_total: totals.regions.count,
-    })
+    if export.data.is_empty() {
+        return None;
+    }
+    let mut summary = CoverageSummary::default();
+    for entry in export.data {
+        entry
+            .totals
+            .lines
+            .accumulate(&mut summary.lines_covered, &mut summary.lines_total)?;
+        entry
+            .totals
+            .functions
+            .accumulate(&mut summary.functions_covered, &mut summary.functions_total)?;
+        entry
+            .totals
+            .regions
+            .accumulate(&mut summary.regions_covered, &mut summary.regions_total)?;
+    }
+    Some(summary)
 }
 
 // -- Uncovered frontier ------------------------------------------------------
@@ -149,18 +171,15 @@ struct FunctionEntry {
 /// aggregate percentages, this points at the concrete `file:line` locations a
 /// refined harness should aim to reach. Results are deduplicated to the first
 /// location per `(function, file, line)` and capped at `MAX_UNCOVERED_REGIONS`.
-/// Returns an empty vector for non-coverage input.
+/// Invalid source locations are omitted. Returns an empty vector for non-coverage input.
 #[must_use]
 pub fn parse_llvm_cov_uncovered(json: &str) -> Vec<UncoveredRegion> {
     let Ok(export) = serde_json::from_str::<ExportFunctions>(json) else {
         return Vec::new();
     };
-    let Some(entry) = export.data.into_iter().next() else {
-        return Vec::new();
-    };
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for func in entry.functions {
+    for func in export.data.into_iter().flat_map(|entry| entry.functions) {
         for region in &func.regions {
             if region.len() < 8 {
                 continue;
@@ -169,10 +188,20 @@ pub fn parse_llvm_cov_uncovered(json: &str) -> Vec<UncoveredRegion> {
             if exec_count != 0 || kind != REGION_KIND_CODE {
                 continue;
             }
-            let line = u32::try_from(region[0]).unwrap_or(0);
-            let col = u32::try_from(region[1]).unwrap_or(0);
-            let file_id = usize::try_from(region[5]).unwrap_or(0);
-            let file = func.filenames.get(file_id).cloned().unwrap_or_default();
+            let (Ok(line), Ok(col), Ok(file_id)) = (
+                u32::try_from(region[0]),
+                u32::try_from(region[1]),
+                usize::try_from(region[5]),
+            ) else {
+                continue;
+            };
+            let Some(file) = func.filenames.get(file_id) else {
+                continue;
+            };
+            if line == 0 || col == 0 || file.is_empty() {
+                continue;
+            }
+            let file = file.clone();
             if seen.insert((func.name.clone(), file.clone(), line)) {
                 out.push(UncoveredRegion {
                     function: func.name.clone(),

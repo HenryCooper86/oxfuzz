@@ -39,7 +39,7 @@ it("carries the promoted exact selector through real Harness, Run, Corpus and re
   const order = { id: "a".repeat(64), schema_version: 2, payload: { target: { symbol: "ns::parse", relative_source: "alternate.c", language: "c" }, engine: "lib_fuzzer" } };
   const review = () => ({ harness_id: harnessId, target_id: targetId, target_symbol: "ns::parse", target_selector: selector, project_root: "/project", engine: "LibFuzzer", language: "C", status: promoted ? "Promoted" : "SmokePassed", build_output: "fuzz", smoke_passed: true, smoke_execs_per_sec: 128, needs_review: !promoted, next_action: "promote", source_preview: "exact imported source", ai_review: { exercises_target: true, safe_to_execute: true, reasons: ["reviewed exact source"], reviewed_at: "now" }, source_sha256: "b".repeat(64), binary_sha256: "c".repeat(64), lint: [] });
   invoke.mockReset(); invoke.mockImplementation(async (command, args) => {
-    if (command === "get_fuzzing_settings") return { enabled_engines: ["libfuzzer"], default_engine: "libfuzzer", default_duration_secs: 60, sandbox: { max_mem_mb: 2048, max_cpus: 1, max_duration_secs: 7200 } };
+    if (command === "get_fuzzing_settings") return { collect_function_coverage: false, enabled_engines: ["libfuzzer"], default_engine: "libfuzzer", default_duration_secs: 60, sandbox: { max_mem_mb: 2048, max_cpus: 1, max_duration_secs: 7200 } };
     if (command === "discover") {
       if (firstDiscovery) {
         firstDiscovery = false;

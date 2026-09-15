@@ -1876,10 +1876,14 @@ fn native_run_callbacks(
 pub async fn replay_review(
     state: tauri::State<'_, crate::state::AppState>,
     run_id: String,
+    inputs: Option<hf_service::ReplayInputs>,
 ) -> Result<hf_service::ReplayReview, String> {
     state
         .container
-        .replay_review(uuid::Uuid::parse_str(&run_id).map_err(|error| error.to_string())?)
+        .replay_review_with_inputs(
+            uuid::Uuid::parse_str(&run_id).map_err(|error| error.to_string())?,
+            inputs,
+        )
         .await
         .map_err(|error| error.to_string())
 }
@@ -5121,4 +5125,17 @@ mod coverage_experiment_ingress_tests {
         }
         scheduler.stop().await;
     }
+}
+
+/// Read persisted function counters without executing a campaign.
+#[tauri::command]
+pub async fn run_function_coverage(
+    state: tauri::State<'_, crate::state::AppState>,
+    run_id: String,
+) -> Result<hf_service::RunFunctionCoverage, String> {
+    state
+        .container
+        .run_function_coverage(uuid::Uuid::parse_str(&run_id).map_err(|error| error.to_string())?)
+        .await
+        .map_err(|error| error.to_string())
 }

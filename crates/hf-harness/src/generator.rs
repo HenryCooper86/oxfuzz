@@ -1004,6 +1004,7 @@ fn smoke_cfg(harness: &Harness) -> hf_core::engine::FuzzRunConfig {
         extra_args: Vec::new(),
         seed: None,
         replay_of: None,
+        input_manifest_sha256: None,
     }
 }
 
@@ -2135,6 +2136,7 @@ Iterations : 12345
             extra_args: Vec::new(),
             seed: None,
             replay_of: None,
+            input_manifest_sha256: None,
         }
     }
 

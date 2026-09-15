@@ -449,6 +449,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .route("/runs/harness-source", post(run_harness_source))
         .route("/runs/revert-harness", post(revert_harness_from_run))
         .route("/runs/start", post(run_start))
+        .route("/runs/{id}/function-coverage", get(run_function_coverage))
         .route("/runs/{id}/replay", get(replay_review).post(replay_start))
         .route("/runs/{id}/owner", get(run_owner))
         .route("/runs/{id}/status", get(run_status))
@@ -2028,7 +2029,13 @@ enum CampaignLaunch {
     Replay(hf_service::ReplayReview),
 }
 
-async fn replay_review(
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplayReviewQuery {
+    inputs: Option<hf_service::ReplayInputs>,
+}
+
+async fn run_function_coverage(
     State(state): State<AppState>,
     Path(id): Path<uuid::Uuid>,
 ) -> ApiResult<serde_json::Value> {
@@ -2038,9 +2045,28 @@ async fn replay_review(
         .await
         .map_err(classified_api_error)?;
     let _approved_owner = approved_project(&state, &owner)?;
+    let evidence = state
+        .container
+        .run_function_coverage(id)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(evidence)))
+}
+
+async fn replay_review(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+    Query(query): Query<ReplayReviewQuery>,
+) -> ApiResult<serde_json::Value> {
+    let owner = state
+        .container
+        .run_project(id)
+        .await
+        .map_err(classified_api_error)?;
+    let _approved_owner = approved_project(&state, &owner)?;
     let review = state
         .container
-        .replay_review(id)
+        .replay_review_with_inputs(id, query.inputs)
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(review)))

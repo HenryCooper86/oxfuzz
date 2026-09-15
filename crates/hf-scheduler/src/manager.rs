@@ -702,6 +702,7 @@ impl SchedulerManager {
         let exec_one_time_global_block = Arc::clone(&self.one_time_global_block);
         let exec_occurrence_metrics = Arc::clone(&self.occurrence_metrics);
         let exec_owner_id = self.owner_id.clone();
+        let max_event_cascade_depth = self.config.max_event_cascade_depth;
         let exec_handle = tokio::spawn(async move {
             Self::executor_loop(
                 rx,
@@ -718,6 +719,7 @@ impl SchedulerManager {
                 exec_one_time_global_block,
                 exec_occurrence_metrics,
                 exec_owner_id,
+                max_event_cascade_depth,
                 exec_shutdown,
             )
             .await;
@@ -853,6 +855,7 @@ impl SchedulerManager {
         one_time_global_block: Arc<Mutex<Option<String>>>,
         occurrence_metrics: Arc<OccurrenceMetrics>,
         owner_id: String,
+        max_event_cascade_depth: u32,
         shutdown: Arc<Notify>,
     ) {
         loop {
@@ -881,6 +884,7 @@ impl SchedulerManager {
                             &one_time_global_block,
                             &occurrence_metrics,
                             &owner_id,
+                            max_event_cascade_depth,
                         ).await;
                     } else {
                         info!("Trigger queue closed, executor stopping");
@@ -1074,6 +1078,7 @@ impl SchedulerManager {
                 "trigger": serde_json::to_value(&schedule.trigger).unwrap_or_default(),
                 "parameter_values": schedule.parameter_values,
                 "trigger_time": fired.fired_at.to_rfc3339(),
+                "cascade_depth": fired.cascade_depth,
             }),
             response_summary: serde_json::json!({
                 "status": "skipped",
@@ -1121,6 +1126,7 @@ impl SchedulerManager {
                 "trigger": serde_json::to_value(&schedule.trigger).unwrap_or_default(),
                 "parameter_values": schedule.parameter_values,
                 "trigger_time": fired.fired_at.to_rfc3339(),
+                "cascade_depth": fired.cascade_depth,
             }),
             response_summary: serde_json::json!({
                 "status": "failed",
@@ -1269,6 +1275,7 @@ impl SchedulerManager {
             "parameter_values": parameter_values,
             "execution_sequence": sequence,
             "trigger_time": fired.fired_at.to_rfc3339(),
+                "cascade_depth": fired.cascade_depth,
         });
         let pending = ScheduleExecution {
             execution_id,
@@ -1872,6 +1879,7 @@ impl SchedulerManager {
         one_time_global_block: &Arc<Mutex<Option<String>>>,
         occurrence_metrics: &Arc<OccurrenceMetrics>,
         owner_id: &str,
+        max_event_cascade_depth: u32,
     ) {
         let Some((schedule, one_time)) =
             Self::load_unblocked_schedule(&fired, store, one_time_status, one_time_global_block)
@@ -1880,59 +1888,35 @@ impl SchedulerManager {
             return;
         };
 
+        if fired.cascade_depth > u64::from(max_event_cascade_depth) {
+            Self::record_policy_skip(
+                &fired,
+                &schedule,
+                format!(
+                    "event cascade depth {} exceeds limit {max_event_cascade_depth}",
+                    fired.cascade_depth
+                ),
+                store,
+                execution_store,
+                persistence.as_ref(),
+            )
+            .await;
+            return;
+        }
+
         let now = chrono::Utc::now();
-        let max_per_hour = schedule.policies.max_executions_per_hour;
-        if max_per_hour > 0 {
-            let since = now - chrono::Duration::hours(1);
-            let (live_started, pending) = {
-                let executions = execution_store.lock().await;
-                (
-                    executions.started_since(&schedule.id, since),
-                    executions.pending_since(&schedule.id, since),
-                )
-            };
-            let persisted_started = if let Some(adapter) = persistence.as_ref() {
-                match adapter.executions_started_since(&schedule.id, since).await {
-                    Ok(count) => usize::try_from(count).unwrap_or(usize::MAX),
-                    Err(error) => {
-                        warn!(
-                            schedule_id = %schedule.id,
-                            %error,
-                            "Cannot verify hourly schedule limit; skipping trigger"
-                        );
-                        if one_time {
-                            *one_time_global_block.lock().await =
-                                Some("one-time hourly execution history is unavailable".to_owned());
-                            return;
-                        }
-                        Self::record_policy_skip(
-                            &fired,
-                            &schedule,
-                            "hourly execution history is unavailable".to_owned(),
-                            store,
-                            execution_store,
-                            persistence.as_ref(),
-                        )
-                        .await;
-                        return;
-                    }
-                }
-            } else {
-                0
-            };
-            let admitted = live_started.max(persisted_started).saturating_add(pending);
-            if admitted >= usize::try_from(max_per_hour).unwrap_or(usize::MAX) {
-                Self::record_policy_skip(
-                    &fired,
-                    &schedule,
-                    format!("hourly execution limit reached ({max_per_hour})"),
-                    store,
-                    execution_store,
-                    persistence.as_ref(),
-                )
-                .await;
-                return;
-            }
+        if !Self::admit_hourly_execution(
+            &fired,
+            &schedule,
+            one_time,
+            store,
+            execution_store,
+            persistence.as_ref(),
+            one_time_global_block,
+        )
+        .await
+        {
+            return;
         }
 
         if one_time {
@@ -2038,6 +2022,7 @@ impl SchedulerManager {
                 "parameter_values": parameter_values,
                 "execution_sequence": sequence,
                 "trigger_time": fired.fired_at.to_rfc3339(),
+                "cascade_depth": fired.cascade_depth,
             });
 
             let pending_record = ScheduleExecution {
@@ -2111,7 +2096,12 @@ impl SchedulerManager {
                     Self::persist_update(persistence_clone.as_ref(), &started).await;
                 }
                 let dispatch_start = std::time::Instant::now();
-                match disp.dispatch(&workflow_id, parameter_values).await {
+                match crate::with_cascade_depth(
+                    fired.cascade_depth,
+                    disp.dispatch(&workflow_id, parameter_values),
+                )
+                .await
+                {
                     Ok(result) => {
                         let duration_ms =
                             u64::try_from(dispatch_start.elapsed().as_millis()).unwrap_or(0);
@@ -2175,24 +2165,112 @@ impl SchedulerManager {
                 handle,
             });
         } else {
-            // Dispatcher-less fallback: instant completion via ScheduleExecutor.
-            let mut store_guard = store.lock().await;
-            let mut exec_guard = executor.lock().await;
-            let mut exec_store_guard = execution_store.lock().await;
-            let execution_id =
-                exec_guard.trigger_execution(&schedule, &mut store_guard, &mut exec_store_guard);
-            let persisted = exec_store_guard.get(&execution_id).cloned();
-            let updated_schedule = store_guard.get(&schedule.id).cloned();
-            debug!(execution_id = %execution_id, "Dispatcher-less fallback execution triggered");
-            drop(exec_store_guard);
-            drop(exec_guard);
-            drop(store_guard);
-            if let Some(updated_schedule) = &updated_schedule {
-                Self::persist_schedule(persistence.as_ref(), updated_schedule).await;
+            Self::dispatch_fallback(
+                &fired,
+                &schedule,
+                store,
+                executor,
+                execution_store,
+                persistence.as_ref(),
+            )
+            .await;
+        }
+    }
+
+    async fn admit_hourly_execution(
+        fired: &FiredTrigger,
+        schedule: &Schedule,
+        one_time: bool,
+        store: &Arc<Mutex<ScheduleStore>>,
+        execution_store: &Arc<Mutex<ExecutionStore>>,
+        persistence: Option<&Arc<dyn SchedulerPersistence>>,
+        one_time_global_block: &Arc<Mutex<Option<String>>>,
+    ) -> bool {
+        let now = chrono::Utc::now();
+        let max_per_hour = schedule.policies.max_executions_per_hour;
+        if max_per_hour > 0 {
+            let since = now - chrono::Duration::hours(1);
+            let (live_started, pending) = {
+                let executions = execution_store.lock().await;
+                (
+                    executions.started_since(&schedule.id, since),
+                    executions.pending_since(&schedule.id, since),
+                )
+            };
+            let persisted_started = if let Some(adapter) = persistence {
+                match adapter.executions_started_since(&schedule.id, since).await {
+                    Ok(count) => usize::try_from(count).unwrap_or(usize::MAX),
+                    Err(error) => {
+                        warn!(
+                            schedule_id = %schedule.id,
+                            %error,
+                            "Cannot verify hourly schedule limit; skipping trigger"
+                        );
+                        if one_time {
+                            *one_time_global_block.lock().await =
+                                Some("one-time hourly execution history is unavailable".to_owned());
+                            return false;
+                        }
+                        Self::record_policy_skip(
+                            fired,
+                            schedule,
+                            "hourly execution history is unavailable".to_owned(),
+                            store,
+                            execution_store,
+                            persistence,
+                        )
+                        .await;
+                        return false;
+                    }
+                }
+            } else {
+                0
+            };
+            let admitted = live_started.max(persisted_started).saturating_add(pending);
+            if admitted >= usize::try_from(max_per_hour).unwrap_or(usize::MAX) {
+                Self::record_policy_skip(
+                    fired,
+                    schedule,
+                    format!("hourly execution limit reached ({max_per_hour})"),
+                    store,
+                    execution_store,
+                    persistence,
+                )
+                .await;
+                return false;
             }
-            if let Some(persisted) = persisted {
-                Self::persist_record(persistence.as_ref(), &persisted).await;
-            }
+        }
+        true
+    }
+
+    async fn dispatch_fallback(
+        fired: &FiredTrigger,
+        schedule: &Schedule,
+        store: &Arc<Mutex<ScheduleStore>>,
+        executor: &Arc<Mutex<ScheduleExecutor>>,
+        execution_store: &Arc<Mutex<ExecutionStore>>,
+        persistence: Option<&Arc<dyn SchedulerPersistence>>,
+    ) {
+        // Dispatcher-less fallback: instant completion via ScheduleExecutor.
+        let mut store_guard = store.lock().await;
+        let mut exec_guard = executor.lock().await;
+        let mut exec_store_guard = execution_store.lock().await;
+        let execution_id =
+            exec_guard.trigger_execution(schedule, &mut store_guard, &mut exec_store_guard);
+        exec_store_guard.update(&execution_id, |record| {
+            record.request_summary["cascade_depth"] = serde_json::json!(fired.cascade_depth);
+        });
+        let persisted = exec_store_guard.get(&execution_id).cloned();
+        let updated_schedule = store_guard.get(&schedule.id).cloned();
+        debug!(execution_id = %execution_id, "Dispatcher-less fallback execution triggered");
+        drop(exec_store_guard);
+        drop(exec_guard);
+        drop(store_guard);
+        if let Some(updated_schedule) = &updated_schedule {
+            Self::persist_schedule(persistence, updated_schedule).await;
+        }
+        if let Some(persisted) = persisted {
+            Self::persist_record(persistence, &persisted).await;
         }
     }
 
@@ -3664,6 +3742,7 @@ mod tests {
             .trigger_sender()
             .expect("scheduler is running")
             .send(FiredTrigger {
+                cascade_depth: 0,
                 schedule_id: schedule_id.to_owned(),
                 fired_at: Utc::now(),
                 trigger_type: TriggerType::OneTime,
@@ -4396,6 +4475,7 @@ mod tests {
         ] {
             sender
                 .send(FiredTrigger {
+                    cascade_depth: 0,
                     schedule_id: schedule_id.to_owned(),
                     fired_at: Utc::now(),
                     trigger_type,
@@ -4408,6 +4488,7 @@ mod tests {
         assert_eq!(
             manager
                 .emit_event(IncomingEvent {
+                    cascade_depth: 0,
                     event_type: "run.completed".to_owned(),
                     payload: Some(serde_json::json!({"run_id": "run-1"})),
                     timestamp: Utc::now(),
@@ -4715,6 +4796,7 @@ mod tests {
         mgr.trigger_sender()
             .expect("scheduler started")
             .send(FiredTrigger {
+                cascade_depth: 0,
                 schedule_id: schedule_id.to_owned(),
                 fired_at: Utc::now(),
                 trigger_type: crate::trigger::TriggerType::Interval,
@@ -5077,6 +5159,7 @@ mod tests {
         payload: serde_json::Value,
     ) -> crate::event_bridge::IncomingEvent {
         crate::event_bridge::IncomingEvent {
+            cascade_depth: 0,
             event_type: event_type.to_owned(),
             payload: Some(payload),
             timestamp: Utc::now(),

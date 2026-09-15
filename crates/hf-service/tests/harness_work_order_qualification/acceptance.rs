@@ -28,11 +28,12 @@ impl RuntimeAdapter for CampaignRuntime {
     ) -> Result<CommandResult, ClassifiedError> {
         self.qualification.run_command(cmd, cwd, limits).await
     }
-    async fn run_command_streaming(
+    async fn run_command_streaming_opts(
         &self,
         cmd: &[String],
         cwd: &Path,
         limits: &ResourceLimits,
+        options: &hf_core::runtime::SandboxOptions,
         _cancel: &tokio_util::sync::CancellationToken,
         on_line: &hf_core::runtime::LineSink<'_>,
     ) -> Result<CommandResult, ClassifiedError> {
@@ -45,12 +46,14 @@ impl RuntimeAdapter for CampaignRuntime {
             .iter()
             .find_map(|arg| arg.strip_prefix("-artifact_prefix="))
             .expect("actual libFuzzer artifact argument");
-        let output = cwd.join(
-            prefix
-                .strip_prefix("/work/")
-                .expect("sandbox workspace path"),
-        );
-        std::fs::create_dir_all(&output).unwrap();
+        assert!(options.workspace_read_only);
+        let output = &options
+            .extra_mounts
+            .iter()
+            .find(|mount| mount.container_path == prefix.trim_end_matches('/') && !mount.read_only)
+            .expect("run-owned writable output mount")
+            .host_path;
+        std::fs::create_dir_all(output).unwrap();
         std::fs::write(output.join("crash-acceptance"), b"synthetic crash input").unwrap();
         for _ in 0..32 {
             on_line("#100 NEW cov: 12 ft: 24 corp: 2/8b exec/s: 128");
@@ -341,11 +344,15 @@ async fn imported_source_reaches_retained_health_closeout_and_explicit_experimen
             .added,
         1
     );
-    // Existing explicit replay preserves the recorded seed while admitting the current corpus.
+    // A reviewed current-input rerun preserves the seed while testing corpus growth.
+    let rerun_review = reopened
+        .replay_review_with_inputs(first.run_id, Some(hf_service::ReplayInputs::Current))
+        .await
+        .unwrap();
     let (second, second_observed) = tokio::join!(
         async {
             reopened
-                .replay_run(first.run_id, &on_progress)
+                .replay_run_reviewed(rerun_review, &on_progress, &|_| {})
                 .await
                 .expect("second campaign")
         },

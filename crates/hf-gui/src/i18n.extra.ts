@@ -3,11 +3,25 @@
 // regenerate from the localized views.
 
 export const enExtra: Record<string, string> = {
+  "functionCoverage.load": "Load campaign function coverage",
+  "functionCoverage.invalid": "Invalid function coverage response.",
+  "functionCoverage.observed": "Functions with observed entry",
+  "functionCoverage.binary": "Binary SHA-256",
+  "functionCoverage.export": "Export SHA-256",
+  "functionCoverage.limit": "Showing up to 200 function measurements.",
+
   "sidebar.workspace": "Workspace",
   "replay.review": "Review replay",
   "replay.start": "Start reviewed replay",
   "replay.original": "Original run",
-  "replay.limits": "This starts a new sandboxed campaign using the current promoted harness and current corpus. The seed and duration come from the original run; current resource limits apply. Results may differ. Harness approval and execution policy still apply.",
+  "replay.limits": "This starts a new sandboxed campaign using verified retained inputs: harness, starting corpus, dictionary, image, seed, and execution settings. Current policy must admit those settings. Results may differ. Harness approval and execution policy still apply.",
+  "settings.fuzzing.functionCoverage": "Collect campaign function coverage",
+  "settings.fuzzing.functionCoverageDesc": "Instrument new C/C++ harnesses. Adds overhead and requires rebuilding and requalification. Missing profiles remain unavailable.",
+  "settings.fuzzing.invalidConfig": "Correct the invalid value in the configuration before editing fuzzing settings.",
+  "replay.inputs": "Retained input SHA-256",
+  "replay.rerunReview": "Review current-input rerun",
+  "replay.rerunStart": "Start reviewed rerun",
+  "replay.currentLimits": "This tests the current promoted harness and current corpus with the original seed and admitted execution settings. New inputs are retained for later replay. Harness approval and execution policy still apply.",
   "replay.finished": "Replay ended. Refresh run history to review its status and evidence before attaching an experiment result.",
   "replay.monitor": "Track progress and stop this campaign from Run. You can leave this page while it runs.",
   "replay.wrongRun": "The replay review belongs to a different run. Load the review again.",
@@ -1931,11 +1945,25 @@ export const enExtra: Record<string, string> = {
 };
 
 export const zhExtra: Record<string, string> = {
+  "functionCoverage.load": "加载运行函数覆盖率",
+  "functionCoverage.invalid": "函数覆盖率响应无效。",
+  "functionCoverage.observed": "已观测到入口的函数",
+  "functionCoverage.binary": "二进制 SHA-256",
+  "functionCoverage.export": "导出 SHA-256",
+  "functionCoverage.limit": "最多显示 200 项函数测量。",
+
   "sidebar.workspace": "工作区",
   "replay.review": "审查重放",
   "replay.start": "启动已审查的重放",
   "replay.original": "原始运行",
-  "replay.limits": "这将使用当前已批准的测试桩和当前语料库，启动新的沙箱模糊测试。随机种子和时长沿用原始运行，资源限制采用当前设置。结果可能不同，测试桩审批和执行策略仍然适用。",
+  "replay.limits": "这将使用已验证的留存输入启动新的沙箱模糊测试，包括测试桩、初始语料库、字典、镜像、随机种子和执行设置。当前策略必须允许这些设置。结果可能不同，测试桩审批和执行策略仍然适用。",
+  "settings.fuzzing.functionCoverage": "收集运行中的函数覆盖率",
+  "settings.fuzzing.functionCoverageDesc": "为新 C/C++ 测试桩插桩，会增加开销，需重新构建并通过验证。缺少剖析数据时显示为不可用。",
+  "settings.fuzzing.invalidConfig": "编辑模糊测试设置前，请先修正配置中的无效值。",
+  "replay.inputs": "留存输入 SHA-256",
+  "replay.rerunReview": "审阅当前输入重运行",
+  "replay.rerunStart": "启动已审阅的重运行",
+  "replay.currentLimits": "这将使用原始随机种子和策略允许的执行设置，测试当前已批准的测试桩和当前语料库。新输入会被留存以便之后重放。测试桩审批和执行策略仍然适用。",
   "replay.finished": "重放已结束。请刷新运行历史，审查状态和证据后再关联实验结果。",
   "replay.monitor": "可在运行页面查看进度并停止本次任务。任务运行时可以离开此页面。",
   "replay.wrongRun": "重放审查属于其他运行，请重新加载。",

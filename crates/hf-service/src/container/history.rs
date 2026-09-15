@@ -735,6 +735,7 @@ mod workspace_lease_tests {
             extra_args: Vec::new(),
             seed: None,
             replay_of: None,
+            input_manifest_sha256: None,
         };
         let mut run = RunRecord::new(
             project.to_string_lossy(),

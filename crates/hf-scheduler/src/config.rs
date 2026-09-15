@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SchedulerConfig {
+    /// Maximum scheduled event links after a root dispatch; zero disables chaining.
+    #[serde(default = "default_max_event_cascade_depth")]
+    pub max_event_cascade_depth: u32,
     /// Maximum number of concurrent schedule executions.
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent_executions: usize,
@@ -48,6 +51,10 @@ pub enum ConcurrencyPolicy {
     CancelPrevious,
 }
 
+fn default_max_event_cascade_depth() -> u32 {
+    8
+}
+
 fn default_max_concurrent() -> usize {
     10
 }
@@ -59,6 +66,7 @@ fn default_history_limit() -> usize {
 impl Default for SchedulerConfig {
     fn default() -> Self {
         Self {
+            max_event_cascade_depth: default_max_event_cascade_depth(),
             max_concurrent_executions: default_max_concurrent(),
             default_missed_policy: MissedPolicy::default(),
             default_concurrency_policy: ConcurrencyPolicy::default(),

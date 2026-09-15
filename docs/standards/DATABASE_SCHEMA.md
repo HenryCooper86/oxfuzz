@@ -57,6 +57,33 @@ listed in their individual sections below.
 
 Indexes: `idx_runs_project(project_root)`, `idx_runs_status(status)`.
 
+New campaign `config_json` records include `input_manifest_sha256`, binding the
+versioned `runs/<id>/input/execution-inputs.json` manifest. The manifest covers
+the complete retained execution workspace, source/binary, starting corpus,
+image, configuration, and normalized engine arguments. Missing values deserialize
+as `None`; legacy rows remain readable but cannot claim immutable-input replay.
+
+### `run_function_coverage`
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `run_id` | `TEXT PRIMARY KEY` | references runs(id), cascading deletion |
+| `binary_sha256` | `TEXT NOT NULL` | owning campaign executable digest |
+| `sandbox_rev` | `TEXT NOT NULL` | owning campaign image identity |
+| `profile_sha256` | `TEXT NOT NULL` | indexed profile digest |
+| `export_sha256` | `TEXT NOT NULL` | exact export bytes digest |
+| `export_json` | `TEXT NOT NULL` | valid LLVM JSON, at most 8 MiB |
+| `collected_at` | `TEXT NOT NULL` | RFC 3339 collection time |
+
+Migration `0034_run_function_coverage.sql` retains one immutable source-function
+export per campaign. `run_id` is the primary key and references `runs(id)` with
+`ON DELETE CASCADE`. Required text fields are `binary_sha256`, `sandbox_rev`,
+`profile_sha256`, `export_sha256`, `export_json`, and `collected_at` (RFC 3339).
+The export is valid JSON bounded to 8 MiB. The owning run's executable and image
+must match in the insertion transaction. Identical retries are idempotent;
+different evidence for the same run is rejected. Absence means unavailable, not
+zero coverage. Raw profiles and the indexed profile remain in run-owned output.
+
 ### `automotive_operations`
 
 | column | SQLite declaration | notes |

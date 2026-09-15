@@ -193,4 +193,6 @@ export interface ReplayReview {
   duration_secs: number;
   max_mem_mb: string;
   max_cpus: number;
+  input_manifest_sha256: string | null;
+  inputs: "retained" | "current";
 }

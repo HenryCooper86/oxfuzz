@@ -1232,6 +1232,7 @@ impl ServiceContainer {
             extra_args: Vec::new(),
             seed: None,
             replay_of: None,
+            input_manifest_sha256: None,
         };
         let mut smoke_record = RunRecord::new(
             project.to_string_lossy().to_string(),
@@ -1242,6 +1243,8 @@ impl ServiceContainer {
         // Persist the deterministic seed with the run config so the smoke run
         // is reproducible, exactly like a campaign run.
         smoke_config.seed = Some(hf_engine::seed::derive_run_seed(smoke_record.id));
+        #[cfg(feature = "proof-carrying")]
+        super::function_coverage::configure(&mut smoke_config, &harness, true);
         smoke_record.config = Some(smoke_config.clone());
         smoke_record.kind = RunKind::Smoke;
         let sandbox_image = resolve_run_sandbox_image(self.runtime.as_ref()).await?;

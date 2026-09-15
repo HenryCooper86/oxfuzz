@@ -93,6 +93,7 @@ fn sample_run(project: &str, harness_id: Uuid) -> RunRecord {
             extra_args: Vec::new(),
             seed: None,
             replay_of: None,
+            input_manifest_sha256: None,
         }),
         Utc::now(),
     );

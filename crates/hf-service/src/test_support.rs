@@ -520,6 +520,7 @@ pub async fn change_aware_fixture() -> Result<ChangeAwareTestFixture, Box<dyn Er
         extra_args: Vec::new(),
         seed: Some(7),
         replay_of: None,
+        input_manifest_sha256: None,
     };
     let image = format!("docker-image-id-sha256:{}", "f".repeat(64));
     let make_run = |source: &str, edges: u64| {
@@ -674,6 +675,7 @@ pub async fn run_closeout_fixture() -> Result<RunCloseoutTestFixture, Box<dyn Er
             extra_args: Vec::new(),
             seed: None,
             replay_of: None,
+            input_manifest_sha256: None,
         }),
         chrono::Utc::now(),
     );

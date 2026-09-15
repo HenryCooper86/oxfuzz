@@ -125,7 +125,9 @@ parses only the exact keys `execs_per_sec`, `edges_found`, `total_edges`, and
 key fail that snapshot rather than being reported as zero.
 
 Streaming stdout remains useful for live logs, but it is not authoritative for
-persisted AFL++ run statistics.
+persisted AFL++ run statistics. Live throughput retains fractional
+executions per second, including rates below one. For the `N execs/sec` form,
+parsing selects the preceding rate rather than a later unrelated counter.
 
 ## 6. Automotive Protocol Sidecar Is Not an Engine
 
@@ -180,3 +182,24 @@ This is the source context present at launch, not a claim that arbitrary project
 files, dynamic dependencies, dictionaries, or the original compiler inputs have
 all been archived. An exact-input rerun still needs complete execution-input
 identity and admission. Old source hashes cannot recover files never retained.
+
+### Immutable execution inputs
+
+Campaigns retain a separate execution workspace, containing every regular file
+visible to the engine except the runtime-owned `runs`, `corpus`, and `out`
+directories. Symlinks and special files are rejected. The engine mounts this
+capture read-only, with only its new corpus and output directories writable.
+The selected dictionary is part of that capture. A versioned manifest binds
+all retained file paths, bytes, executable permissions, the exact sandbox image,
+and the complete run configuration; its SHA-256 is persisted with the config.
+File and byte budgets bound capture and verification.
+
+Replay verifies the manifest, copies the retained inputs into a new run, and
+uses the retained promoted source/binary, starting corpus, dictionary, image,
+seed, arguments, environment, duration and resource settings. Current engine,
+duration and resource policy must admit those settings without silently changing
+them. Approval and smoke evidence remain required. Replay does not activate an
+old harness or rebuild from current source. Evidence is verified again before
+dispatch. Missing legacy manifests are reported as unavailable; they cannot be
+reconstructed retrospectively. Identical inputs do not guarantee identical
+results from nondeterministic engines, thread scheduling, or external hardware.

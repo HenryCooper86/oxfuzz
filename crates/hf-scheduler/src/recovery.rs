@@ -267,6 +267,7 @@ fn trigger_type(schedule: &Schedule) -> TriggerType {
 /// Expand one compact batch item into a trigger.
 pub(crate) fn trigger_at(batch: &RecoveryBatch, at: DateTime<Utc>) -> FiredTrigger {
     FiredTrigger {
+        cascade_depth: 0,
         schedule_id: batch.schedule_id.clone(),
         fired_at: at,
         trigger_type: batch.trigger_type,

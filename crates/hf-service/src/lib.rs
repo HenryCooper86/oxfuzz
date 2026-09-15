@@ -179,10 +179,10 @@ pub use container::{
     runtime_from_env, workspace_dir, workspace_root, AgentInstanceSnapshot, AgentPoolSnapshot,
     ArtifactSummary, CompileOutcome, CorpusCapabilities, CorpusCapability, CorpusImportOutcome,
     CorpusInventory, CoverageSample, EffectiveAutoRevert, MemorySnapshot, MinimizeOutcome,
-    ProviderSnapshot, RegressionResult, ReplayReview, RunCancelOutcome, RunControlStatus,
-    RunHistoryItem, RunLifecycleStatus, RunOwnerView, RunSummary, SchedulableTarget, SeedEntry,
-    SeedRegenerationOutcome, SeedSurvivalReport, ServiceContainer, SystemSnapshot,
-    SyzkallerRunOpts, SyzkallerSummary,
+    ProviderSnapshot, RegressionResult, ReplayInputs, ReplayReview, RunCancelOutcome,
+    RunControlStatus, RunFunctionCoverage, RunHistoryItem, RunLifecycleStatus, RunOwnerView,
+    RunSummary, SchedulableTarget, SeedEntry, SeedRegenerationOutcome, SeedSurvivalReport,
+    ServiceContainer, SystemSnapshot, SyzkallerRunOpts, SyzkallerSummary,
 };
 #[cfg(feature = "coverage-blockers")]
 pub use coverage_blockers::{

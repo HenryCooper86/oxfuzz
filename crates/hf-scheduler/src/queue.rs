@@ -30,6 +30,7 @@ mod tests {
         let (tx, mut rx) = trigger_queue();
 
         let trigger = FiredTrigger {
+            cascade_depth: 0,
             schedule_id: "test".into(),
             fired_at: Utc::now(),
             trigger_type: TriggerType::Interval,

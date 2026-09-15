@@ -90,10 +90,18 @@ impl CoverageTracker {
     /// Stagnation is measured from the last positive delta, so backdating a
     /// progressing report backdates the stagnation clock as well. Used for
     /// replayed/imported readings and for deterministic escalation tests.
+    /// The first reading, including zero edges, starts the measurement interval.
+    /// A different run starts a new interval with its own edge baseline.
     pub fn update_at(&mut self, report: &CoverageReport, at: Instant) {
         let new_edges = report.edges;
+        if self.update_count == 0 || self.run_id != report.run_id {
+            self.last_edges = 0;
+            self.update_count = 0;
+            self.last_progress = at;
+        }
         self.run_id = report.run_id;
-        self.last_delta = new_edges.cast_signed() - self.last_edges.cast_signed();
+        self.last_delta = (i128::from(new_edges) - i128::from(self.last_edges))
+            .clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64;
         if self.last_delta > 0 {
             self.last_progress = at;
         }
@@ -113,7 +121,7 @@ impl CoverageTracker {
         self.last_edges
     }
 
-    /// Returns the last delta (positive = progress).
+    /// Returns the last delta (positive = progress), saturated to the signed range.
     #[must_use]
     pub fn last_delta(&self) -> i64 {
         self.last_delta
@@ -169,3 +177,5 @@ pub fn propose_action(
         Some(StagnationProposal::CustomMutator)
     }
 }
+mod function_coverage;
+pub use function_coverage::{parse_llvm_function_coverage, FunctionCoverage};

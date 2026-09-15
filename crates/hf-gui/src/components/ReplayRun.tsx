@@ -8,11 +8,11 @@ import { useI18n } from "../i18nContext";
 import type { ReplayReview } from "../lib/transport";
 import { Button } from "./ui";
 
-type ReplayProps = { runId: string; onNavigate?: (view: ViewType) => void };
+type ReplayProps = { runId: string; inputs?: ReplayReview["inputs"]; onNavigate?: (view: ViewType) => void };
 export function ReplayRun(props: ReplayProps) {
-  return <ScopedReplay key={props.runId} {...props} />;
+  return <ScopedReplay key={`${props.runId}:${props.inputs ?? "retained"}`} {...props} />;
 }
-function ScopedReplay({ runId, onNavigate }: ReplayProps) {
+function ScopedReplay({ runId, inputs = "retained", onNavigate }: ReplayProps) {
   const { t } = useI18n();
   const output = useRunOutput();
   const { setActiveProject } = useProject();
@@ -34,8 +34,8 @@ function ScopedReplay({ runId, onNavigate }: ReplayProps) {
         emitDataChanged();
         if (active.current) setFinished(true);
       } else {
-        const value = await getTransport().invoke<ReplayReview>("replay_review", { runId });
-        if (value.run_id !== runId) throw new Error(t("replay.wrongRun"));
+        const value = await getTransport().invoke<ReplayReview>("replay_review", { runId, inputs });
+        if (value.run_id !== runId || value.inputs !== inputs) throw new Error(t("replay.wrongRun"));
         if (active.current) { setReview(value); setReplayProject(value.project); }
       }
     } catch (error) {
@@ -48,17 +48,18 @@ function ScopedReplay({ runId, onNavigate }: ReplayProps) {
   return <div className="flex flex-col gap-2 mt-3">
     {error && <p role="alert" className="text-error">{error}</p>}
     {finished && <p role="status">{t("replay.finished")}</p>}
-    {review ? <section className="surface-card p-3 flex flex-col gap-2" aria-label={t("replay.review")}>
+    {review ? <section className="surface-card p-3 flex flex-col gap-2" aria-label={t(inputs === "current" ? "replay.rerunReview" : "replay.review")}>
       <p className="text-xs break-all">{review.project} · {review.target}</p>
       <p>{review.engine} · {review.duration_secs}s · {review.max_mem_mb} MiB · {review.max_cpus} CPU</p>
       <p className="text-xs break-all">{t("experiments.seed")}: {review.seed}</p>
       <p className="text-xs break-all">{t("replay.original")}: {review.run_id}</p>
-      <p className="text-sm">{t("replay.limits")}</p>
+      {review.input_manifest_sha256 && <p className="text-xs break-all">{t("replay.inputs")}: {review.input_manifest_sha256}</p>}
+      <p className="text-sm">{t(inputs === "current" ? "replay.currentLimits" : "replay.limits")}</p>
       <div className="flex gap-2 flex-wrap">
-        <Button variant="primary" disabled={busy || output.running} onClick={() => void perform(true)}>{t("replay.start")}</Button>
+        <Button variant="primary" disabled={busy || output.running} onClick={() => void perform(true)}>{t(inputs === "current" ? "replay.rerunStart" : "replay.start")}</Button>
         <Button onClick={() => setReview(null)}>{t("common.cancel")}</Button>
       </div>
-    </section> : <Button className="self-start" disabled={busy || output.running} onClick={() => void perform(false)}>{busy ? t("common.loading") : t("replay.review")}</Button>}
+    </section> : <Button className="self-start" disabled={busy || output.running} onClick={() => void perform(false)}>{busy ? t("common.loading") : t(inputs === "current" ? "replay.rerunReview" : "replay.review")}</Button>}
     {output.running && replayProject && <><p role="status">{t("replay.monitor")}</p>{onNavigate && <Button className="self-start" onClick={() => { setActiveProject(replayProject); onNavigate("run"); }}>{t("nav.run")}</Button>}</>}
   </div>;
 }

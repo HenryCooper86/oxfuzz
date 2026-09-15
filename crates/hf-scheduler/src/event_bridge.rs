@@ -21,6 +21,8 @@ use crate::trigger::{FiredTrigger, TriggerType};
 /// An incoming event from an external producer.
 #[derive(Debug, Clone)]
 pub struct IncomingEvent {
+    /// Causal depth of the scheduled producer, or zero for an external event.
+    pub cascade_depth: u64,
     /// Event type identifier (e.g. `"file.changed"`).
     pub event_type: String,
     /// Optional payload with event details.
@@ -120,6 +122,11 @@ impl EventBridge {
                 // Match! Enqueue trigger, carrying the event payload so
                 // `{{ event.payload.* }}` expressions resolve at dispatch.
                 let trigger = FiredTrigger {
+                    cascade_depth: if event.source_schedule_id.is_some() {
+                        event.cascade_depth.saturating_add(1)
+                    } else {
+                        event.cascade_depth
+                    },
                     schedule_id: schedule.id.clone(),
                     fired_at: event.timestamp,
                     trigger_type: TriggerType::Event,
@@ -172,6 +179,7 @@ mod tests {
 
         let (tx, mut rx) = trigger_queue();
         let event = IncomingEvent {
+            cascade_depth: 0,
             event_type: "file.changed".into(),
             payload: None,
             timestamp: Utc::now(),
@@ -198,6 +206,7 @@ mod tests {
 
         let (tx, _rx) = trigger_queue();
         let own = IncomingEvent {
+            cascade_depth: 0,
             event_type: "run.completed".into(),
             payload: None,
             timestamp: Utc::now(),
@@ -220,6 +229,7 @@ mod tests {
 
         let (tx, _rx) = trigger_queue();
         let other = IncomingEvent {
+            cascade_depth: 0,
             event_type: "run.completed".into(),
             payload: None,
             timestamp: Utc::now(),
@@ -237,6 +247,7 @@ mod tests {
 
         let (tx, _rx) = trigger_queue();
         let event = IncomingEvent {
+            cascade_depth: 0,
             event_type: "file.created".into(),
             payload: None,
             timestamp: Utc::now(),
@@ -258,6 +269,7 @@ mod tests {
 
         // First event — should fire.
         let event1 = IncomingEvent {
+            cascade_depth: 0,
             event_type: "file.changed".into(),
             payload: None,
             timestamp: now,
@@ -268,6 +280,7 @@ mod tests {
 
         // Second event 2s later — should be debounced.
         let event2 = IncomingEvent {
+            cascade_depth: 0,
             event_type: "file.changed".into(),
             payload: None,
             timestamp: now + Duration::seconds(2),
@@ -278,6 +291,7 @@ mod tests {
 
         // Third event 10s later — should fire.
         let event3 = IncomingEvent {
+            cascade_depth: 0,
             event_type: "file.changed".into(),
             payload: None,
             timestamp: now + Duration::seconds(10),
@@ -303,6 +317,7 @@ mod tests {
 
         let (tx, _rx) = trigger_queue();
         let event = IncomingEvent {
+            cascade_depth: 0,
             event_type: "file.changed".into(),
             payload: None,
             timestamp: Utc::now(),
@@ -333,6 +348,7 @@ mod tests {
 
         let (tx, mut rx) = trigger_queue();
         let non_matching = IncomingEvent {
+            cascade_depth: 0,
             event_type: "crash.found".into(),
             payload: Some(serde_json::json!({"target": "render_frame"})),
             timestamp: Utc::now(),
@@ -344,6 +360,7 @@ mod tests {
             .is_empty());
 
         let matching = IncomingEvent {
+            cascade_depth: 0,
             event_type: "crash.found".into(),
             payload: Some(serde_json::json!({"target": "parse_input"})),
             timestamp: Utc::now(),

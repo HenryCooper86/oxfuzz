@@ -17,7 +17,9 @@
 pub mod arming;
 pub mod config;
 pub mod cron;
+mod dispatch_context;
 pub mod dispatcher;
+pub use dispatch_context::{current_cascade_depth, with_cascade_depth};
 pub mod event;
 pub mod event_bridge;
 pub mod executor;

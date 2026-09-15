@@ -6,6 +6,8 @@
 //! runs, targets, harnesses, crashes, and corpus entries.
 
 mod build_profile_store;
+mod run_function_coverage;
+pub use run_function_coverage::RunFunctionCoverageRecord;
 mod coverage_experiment_store;
 pub use coverage_experiment_store::*;
 mod store;

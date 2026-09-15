@@ -38,7 +38,7 @@ async function input(label: string, value: string) {
   await act(async () => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(field, value); field.dispatchEvent(new Event("input", { bubbles: true })); });
 }
 function baseInvoke(command: string, args: Record<string, unknown>) {
-  if (command === "get_fuzzing_settings") return Promise.resolve({ enabled_engines: ["libfuzzer"], default_engine: "libfuzzer", default_duration_secs: 60, sandbox: { max_mem_mb: 2048, max_cpus: 1, max_duration_secs: 7200 } });
+  if (command === "get_fuzzing_settings") return Promise.resolve({ collect_function_coverage: false, enabled_engines: ["libfuzzer"], default_engine: "libfuzzer", default_duration_secs: 60, sandbox: { max_mem_mb: 2048, max_cpus: 1, max_duration_secs: 7200 } });
   if (command === "system_status_cmd") return Promise.resolve({ docker: true, sandbox_image: true });
   if (command === "discover") return Promise.resolve({ project_root: args.project, candidates: [{ id: "t-1", project_root: args.project, symbol: "parse_input", language: "C", location: { file: "parser.c", line: 1, col: 1 }, fit_score: 0.9, reason: "parser", signature: "int parse_input(const char *data)", callees: [] }], discovered_at: "2026-09-08T00:00:00Z" });
   if (["harness_review_queue", "work_order_list"].includes(command)) return Promise.resolve([]);

@@ -26,10 +26,10 @@ export function FuzzingTab({ value, onChange }: FuzzingTabProps) {
     return (
       <div className="text-text-secondary" style={{ fontSize: "13px" }}>
         <div role="alert" aria-describedby={RETIRED_ENGINE_CONFIG_GUIDANCE_ID}>
-          {formatRetiredEngineError(normalized.error.value)}
+          {normalized.error.kind === "retired_engine" ? formatRetiredEngineError(normalized.error.value) : normalized.error.value}
         </div>
         <p id={RETIRED_ENGINE_CONFIG_GUIDANCE_ID}>
-          {t("settings.fuzzing.retiredEngineConfig")}
+          {t(normalized.error.kind === "retired_engine" ? "settings.fuzzing.retiredEngineConfig" : "settings.fuzzing.invalidConfig")}
         </p>
       </div>
     );
@@ -100,6 +100,9 @@ export function FuzzingTab({ value, onChange }: FuzzingTabProps) {
         title={t("settings.fuzzing.defaults")}
         description={t("settings.fuzzing.defaultsDesc")}
       >
+        <SettingsItem title={t("settings.fuzzing.functionCoverage")} description={t("settings.fuzzing.functionCoverageDesc")}>
+          <Switch checked={settings.collect_function_coverage} ariaLabel={t("settings.fuzzing.functionCoverage")} onChange={(checked) => update({ ...settings, collect_function_coverage: checked })} />
+        </SettingsItem>
         <SettingsItem title={t("settings.fuzzing.defaultEngine")}>
           <Select
             value={settings.default_engine}

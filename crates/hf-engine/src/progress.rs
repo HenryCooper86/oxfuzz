@@ -13,7 +13,7 @@ pub fn parse_progress_line(line: &str) -> Option<FuzzProgress> {
         return Some(FuzzProgress::EdgesCovered(edges));
     }
     if let Some(eps) = execs_from_line(line) {
-        return Some(FuzzProgress::ExecsPerSec(eps as f64));
+        return Some(FuzzProgress::ExecsPerSec(eps));
     }
     if is_finding_signal(&lower) {
         return Some(FuzzProgress::CrashesFound(1));
@@ -56,7 +56,7 @@ pub fn parse_progress_events(line: &str) -> Vec<FuzzProgress> {
         events.push(FuzzProgress::EdgesCovered(edges));
     }
     if let Some(eps) = execs_from_line(line) {
-        events.push(FuzzProgress::ExecsPerSec(eps as f64));
+        events.push(FuzzProgress::ExecsPerSec(eps));
     }
     if is_finding_signal(&lower) {
         events.push(FuzzProgress::CrashesFound(1));
@@ -177,16 +177,24 @@ fn edges_from_line(line: &str) -> Option<u64> {
 /// `Speed : N/sec`, and AFL's `exec speed : N/sec`. Mirrors
 /// `hf-harness`'s `parse_execs_per_sec` so honggfuzz/AFL production runs report
 /// their real throughput instead of zero.
-fn execs_from_line(line: &str) -> Option<u64> {
+fn execs_from_line(line: &str) -> Option<f64> {
     let lower = line.to_ascii_lowercase();
     if lower.contains("exec/s") {
-        parse_number_near(line, "exec/s")
+        rate_after_keyword(line, "exec/s")
     } else if lower.contains("execs") {
-        parse_number_near(line, "execs")
+        let pos = lower.find("execs")?;
+        let after = &line[pos + "execs".len()..];
+        if after.starts_with("/sec") {
+            rate_numbers(&line[..pos])
+                .next_back()
+                .or_else(|| rate_numbers(after).next())
+        } else {
+            rate_numbers(after).next()
+        }
     } else if lower.contains("speed") {
         // honggfuzz "Speed : N/sec" and AFL "exec speed : N/sec" carry neither
         // "exec/s" nor "execs", so without this branch their rate is invisible.
-        parse_number_near(line, "speed")
+        rate_after_keyword(line, "speed")
     } else {
         None
     }
@@ -242,17 +250,19 @@ fn number_after_word(line: &str, word: &str) -> Option<u64> {
     None
 }
 
-fn parse_number_near(line: &str, keyword: &str) -> Option<u64> {
+fn rate_after_keyword(line: &str, keyword: &str) -> Option<f64> {
     let lower = line.to_ascii_lowercase();
     let pos = lower.find(keyword)?;
-    // Search after the keyword first (most common: "cov: 10").
-    let after = &line[pos + keyword.len()..];
-    if let Some(n) = first_number(after) {
-        return Some(n);
-    }
-    // Then before.
-    let before = &line[..pos];
-    last_number(before)
+    rate_numbers(&line[pos + keyword.len()..]).next()
+}
+
+fn rate_numbers(text: &str) -> impl DoubleEndedIterator<Item = f64> + '_ {
+    text.split(|c: char| !c.is_ascii_digit() && c != '.')
+        .filter_map(|token| {
+            // Non-numeric log tokens do not carry a throughput measurement.
+            token.parse::<f64>().ok()
+        })
+        .filter(|value| value.is_finite())
 }
 
 fn last_number(s: &str) -> Option<u64> {

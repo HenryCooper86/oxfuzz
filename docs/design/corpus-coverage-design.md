@@ -231,6 +231,17 @@ plateau drags on, counted in whole windows of the threshold: improving the
 mutation inputs (seeds / dictionary / custom mutator) first, then regenerating
 the harness, and finally recommending to stop spending on the target.
 
+Coverage tracking starts at the first measurement, including a zero-edge
+measurement. Reusing a tracker for another run resets its edge baseline and
+stagnation interval. The service retains the highest recommendation reached
+during a run; progress followed by a shorter plateau cannot lower that result.
+
+Structural coverage parsing combines every export data entry for totals,
+covered functions, and uncovered locations. Impossible covered/total pairs or
+aggregate counter overflow make totals unavailable. Uncovered locations require
+a valid filename index and positive representable line/column numbers; invalid
+locations are omitted rather than replaced with invented coordinates.
+
 The feature-gated coverage-per-cost advisor extends this signal across a bounded
 set of comparable completed campaigns. It uses explicit engine hourly rates,
 attributable model spend, edge deltas, corpus additions, and crash deltas to
@@ -266,3 +277,29 @@ This retention is a prerequisite for immutable-input reruns. Current `replay_run
 still uses the current promoted harness and canonical corpus, and must continue
 to say so. Legacy records without retained starting inputs cannot be treated as
 having them reconstructed from a matching digest or today's corpus.
+# Run-attributed function evidence
+
+The `proof-carrying` implementation may collect source-function counters from
+the actual C/C++ campaign executable. The operator opts in with
+`fuzzing.collect_function_coverage`; its default is false because instrumentation
+adds overhead. Enabling it without the owning feature fails configuration load.
+New C/C++ compilation adds Clang's profile-generation and coverage-mapping flags
+to the retained build inputs before compilation and qualification. Existing
+uninstrumented binaries are not relabeled or rebuilt during measurement.
+
+Instrumented campaigns write raw profiles to a dedicated run-owned writable
+directory through `LLVM_PROFILE_FILE`. Profile filenames use the binary signature with LLVM’s locked merge pool. After execution, `llvm-profdata` and `llvm-cov` process only
+that run's profiles and exact retained executable inside its pinned sandbox.
+No second harness execution or source rebuild occurs. Raw profiles, indexed
+profile, export, hashes and run ownership remain retained. Storage binds evidence
+to the run's executable and image and rejects replacement with different evidence.
+
+Missing profiles, unsupported language/toolchain, malformed export, or interrupted
+collection yield unavailable evidence. Positive counters establish observed
+entry for the uniquely identified function. Zero counters mean not observed in
+the retained profiles; they never prove that no worker entered a function, since
+terminated workers may not flush profiles. A free-text function name matching
+multiple files is ambiguous. Uninstrumented linked libraries are outside the
+measurement. Legacy runs cannot acquire retrospective function-entry claims.
+
+Reference: [Clang source-based coverage](https://clang.llvm.org/docs/SourceBasedCodeCoverage.html).

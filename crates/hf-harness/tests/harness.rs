@@ -379,6 +379,7 @@ async fn smoke_fuzz_uses_one_resolved_config_for_command_runtime_and_summary() {
         extra_args: Vec::new(),
         seed: None,
         replay_of: None,
+        input_manifest_sha256: None,
     };
     let workspace = tempfile::tempdir().expect("temp workspace");
 
@@ -443,6 +444,7 @@ async fn smoke_fuzz_uses_the_resolved_immutable_sandbox_image() {
         extra_args: Vec::new(),
         seed: None,
         replay_of: None,
+        input_manifest_sha256: None,
     };
     let workspace = tempfile::tempdir().expect("temp workspace");
     let image = format!("sha256:{}", "a".repeat(64));

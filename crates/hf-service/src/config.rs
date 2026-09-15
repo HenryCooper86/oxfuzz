@@ -164,6 +164,8 @@ impl Default for FuzzingSandboxSettings {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FuzzingSettings {
+    /// Instrument newly compiled C/C++ harnesses for run-attributed function counters.
+    pub collect_function_coverage: bool,
     /// Canonical engine ids permitted for new harness work and campaigns.
     pub enabled_engines: Vec<String>,
     /// Canonical engine id selected when a client does not provide one.
@@ -177,6 +179,7 @@ pub struct FuzzingSettings {
 impl Default for FuzzingSettings {
     fn default() -> Self {
         Self {
+            collect_function_coverage: false,
             enabled_engines: all_engine_ids(),
             default_engine: EngineKind::LibFuzzer.as_str().to_owned(),
             default_duration_secs: 60,
@@ -717,6 +720,11 @@ impl FuzzingSettings {
     }
 
     fn validate(&self) -> Result<(), String> {
+        if self.collect_function_coverage && !cfg!(feature = "proof-carrying") {
+            return Err(
+                "fuzzing.collect_function_coverage requires the proof-carrying feature".to_owned(),
+            );
+        }
         let enabled = self.enabled_engine_set()?;
         let default_engine = canonical_engine(&self.default_engine)?;
         if !enabled.contains(&default_engine) {
@@ -3865,6 +3873,16 @@ default_duration_secs = 22
     }
 
     #[test]
+    fn function_coverage_requires_its_owning_feature() {
+        let parsed = parse_oxfuzz_runtime_config("[fuzzing]\ncollect_function_coverage = true\n");
+        if cfg!(feature = "proof-carrying") {
+            assert!(parsed.is_ok(), "{parsed:?}");
+        } else {
+            assert!(parsed.unwrap_err().contains("proof-carrying"));
+        }
+    }
+
+    #[test]
     fn fuzzing_policy_uses_defaults_and_rejects_disabled_or_excessive_runs() {
         assert_eq!(
             FuzzingSettings::default().enabled_engines,
@@ -3872,6 +3890,7 @@ default_duration_secs = 22
         );
 
         let settings = FuzzingSettings {
+            collect_function_coverage: false,
             enabled_engines: vec!["honggfuzz".to_owned()],
             default_engine: "honggfuzz".to_owned(),
             default_duration_secs: 30,
@@ -3906,6 +3925,7 @@ default_duration_secs = 22
         // smoke-qualify and promote harnesses: internal pipeline budgets clamp
         // to the ceiling instead of failing the resolution.
         let settings = FuzzingSettings {
+            collect_function_coverage: false,
             default_duration_secs: 30,
             sandbox: FuzzingSandboxSettings {
                 max_duration_secs: 30,
@@ -3936,6 +3956,7 @@ default_duration_secs = 22
     #[test]
     fn harness_default_skips_enabled_engines_that_do_not_support_the_language() {
         let settings = FuzzingSettings {
+            collect_function_coverage: false,
             enabled_engines: vec![
                 "syzkaller".to_owned(),
                 "afl++".to_owned(),
