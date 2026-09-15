@@ -9,6 +9,45 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ## Unreleased
 
+## 0.5.1 - 2026-09-15
+
+### Improved
+
+- Browser project selection validates an approved server directory before opening
+  it. Native desktop file dialogs remain available.
+- Discovery keeps ranked results available and lets users explicitly select a
+  target before continuing. Harness setup puts the required steps first and
+  groups specialist tools under Advanced tools.
+- Setup includes API-key and model guidance. Empty findings and reports explain
+  the next action, and report export options match platform capabilities.
+- Keyboard labels, workflow focus, and compact help navigation improve access
+  for first-time users and smaller windows.
+
+### Fixed
+
+- Readiness indicators now show disconnected/unknown status when the service
+  stops responding and recover on reconnection. Checking status no longer
+  starts Docker or prepares a sandbox implicitly.
+- New project entry consistently opens the guided workflow. Browser settings
+  omit unusable native-only controls and redacted-path copy actions.
+- Campaign replay, run-owned coverage evidence, and schedule budget handling
+  retain and validate the evidence used by each operation.
+- Documentation checks skip excluded directories, and a repeatable userspace
+  engine qualification runner exercises the supported deterministic fixtures.
+
+### Upgrade notes and limitations
+
+- Back up the runtime database and configuration before upgrading. Migration
+  `0034_run_function_coverage.sql` adds retained per-run function-coverage
+  evidence. Existing rows remain readable; missing evidence is unavailable,
+  not zero coverage or a claim of exact historical replay.
+- Browser users need an approved project path from the server administrator;
+  selecting a server path does not upload a local project.
+- Desktop installers remain unsigned/not notarized. Patch-to-Proof remains
+  unavailable on Windows, and syzkaller needs a configured kernel/VM environment.
+- Docker sandboxing, source review, and exact-revision human approval remain
+  required for full campaigns.
+
 ## 0.5.0 - 2026-09-10
 
 ### Added
