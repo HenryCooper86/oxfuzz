@@ -31,7 +31,7 @@ function matches(section: HelpSection, query: string): boolean {
  * report preview, so it needs no backend and works in both desktop and web modes.
  */
 export function HelpView() {
-  const { locale } = useI18n();
+  const { locale, t } = useI18n();
   const zh = locale === "zh";
   const L = (en: string, cn: string) => (zh ? cn : en);
   const sections = zh ? HELP_SECTIONS_ZH : HELP_SECTIONS;
@@ -55,7 +55,7 @@ export function HelpView() {
   })).filter((g) => g.sections.length > 0);
 
   return (
-    <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
+    <div className="help-layout flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <ViewHeader
           title={L("Help & Documentation", "帮助与文档")}
@@ -74,10 +74,18 @@ export function HelpView() {
         </div>
       </div>
 
-      <div className="flex gap-4 min-w-0" style={{ alignItems: "flex-start" }}>
+      <div className="help-compact surface-card p-3">
+        <label htmlFor="help-topic" className="block text-sm mb-2">{t("gui.helpTopics")}</label>
+        <input aria-label={L("Search documentation", "搜索文档")} placeholder={L("Search the docs...", "搜索文档…")} value={query} onChange={event => setQuery(event.target.value)} className="w-full mb-2 bg-surface-secondary text-text-primary border border-border rounded p-2" />
+        <select id="help-topic" aria-label={t("gui.helpTopics")} value={active?.id ?? ""} onChange={event => setActiveId(event.target.value)} className="w-full bg-surface-secondary text-text-primary border border-border rounded p-2">
+          {groups.map(group => <optgroup key={group.id} label={group.title}>{group.sections.map(section => <option key={section.id} value={section.id}>{section.title}</option>)}</optgroup>)}
+          {!active && <option value="">{L("No matching topics", "没有匹配主题")}</option>}
+        </select>
+      </div>
+      <div className="help-columns flex gap-4 min-w-0" style={{ alignItems: "flex-start" }}>
         {/* Left rail: search + grouped table of contents */}
         <nav
-          className="surface-card flex flex-col gap-2 shrink-0"
+          className="help-nav surface-card flex flex-col gap-2 shrink-0"
           style={{ width: 260, padding: "var(--space-md)", position: "sticky", top: 0, maxHeight: "calc(100vh - 160px)", overflow: "auto" }}
           aria-label={L("Documentation sections", "文档章节")}
         >

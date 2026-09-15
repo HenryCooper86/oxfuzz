@@ -12,9 +12,9 @@ const ReportPreview = lazy(() =>
 );
 
 // A dedicated home for every composed report, across all projects/targets.
-// Reports are produced by Triage (auto-composed on crashes) and the Workbench
+// Reports are explicitly composed in Triage and the Workbench
 // Reports tab; this view lists, previews, exports, and deletes them.
-export function ReportsView() {
+export function ReportsView({ onNavigate }: { onNavigate?: (view: import("../types").ViewType) => void }) {
   const { t } = useI18n();
   const confirm = useConfirm();
   const [reports, setReports] = useState<ReportDraft[]>([]);
@@ -127,7 +127,7 @@ export function ReportsView() {
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       <ViewHeader
         title={t("reports.title")}
-        description={t("reports.description")}
+        description={t("gui.reportDescription", { formats: formats.map(format => format.toUpperCase()).join(" / ") })}
       />
 
       {notice && <p className="text-xs text-text-muted">{notice}</p>}
@@ -156,7 +156,8 @@ export function ReportsView() {
         <EmptyState
           icon={<FileText size={20} />}
           title={t("reports.emptyTitle")}
-          hint={t("reports.emptyHint")}
+          hint={t("gui.reportEmpty")}
+          action={onNavigate && <Button onClick={() => onNavigate("triage")}>{t("gui.reviewFindings")}</Button>}
         />
       ) : (
         <div className="flex flex-col gap-1.5">

@@ -7,6 +7,7 @@
 // dictionaries to extend coverage.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { enGui, zhGui } from "./i18n.gui";
 import { enResults, zhResults } from "./i18n.results";
 import { enExperiments, zhExperiments } from "./i18n.experiments";
 import { enExtra, zhExtra } from "./i18n.extra";
@@ -388,8 +389,8 @@ const zh: Dict = {
 // per-view keys generated from the localized components (i18n.extra.ts).
 // Inline keys win on any accidental overlap, keeping the hand-tuned wording.
 const DICTS: Record<Locale, Dict> = {
-  en: { ...enExtra, ...en },
-  zh: { ...zhExtra, ...zh },
+  en: { ...enExtra, ...en, ...enGui },
+  zh: { ...zhExtra, ...zh, ...zhGui },
 };
 
 function loadLocale(): Locale {

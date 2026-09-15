@@ -10,6 +10,7 @@ interface SelectProps {
   disabled?: boolean;
   id?: string;
   ariaLabelledBy?: string;
+  ariaLabel?: string;
   /**
    * Trigger text when nothing is selected. Radix reserves the empty string for
    * "no selection" -- an `Item` may not use it -- so an empty `options` list
@@ -28,6 +29,7 @@ export function Select({
   disabled,
   id,
   ariaLabelledBy,
+  ariaLabel,
   placeholder,
 }: SelectProps) {
   return (
@@ -35,6 +37,7 @@ export function Select({
       <RadixSelect.Trigger
         id={id}
         aria-labelledby={ariaLabelledBy}
+        aria-label={ariaLabel}
         className={`inline-flex items-center justify-between gap-2 px-2 py-1.5 text-12px border border-solid border-[var(--border)] rounded-[var(--radius-md)] bg-[var(--surface-primary)] text-text-primary transition-colors duration-150 outline-none focus:border-[var(--border-focus)] cursor-pointer data-[disabled]:cursor-not-allowed data-[disabled]:opacity-50 ${mono ? "font-[var(--font-mono)]" : "font-sans"} ${className ?? ""}`}
       >
         <RadixSelect.Value placeholder={placeholder} />

@@ -225,6 +225,7 @@ export function RunView({
               <Input
                 mono
                 type="text"
+                aria-label={t("run.project")}
                 placeholder="/path/to/project"
                 value={project}
                 onChange={(e) => setLocalProject(e.target.value)}
@@ -256,6 +257,7 @@ export function RunView({
             <Input
               mono
               type="text"
+              aria-label={t("run.targetSymbol")}
               list="run-target-suggestions"
               placeholder={targetSuggestions[0] ?? "parse_value"}
               value={target}
@@ -271,7 +273,8 @@ export function RunView({
         <div className="flex flex-col gap-1">
           <Label>{t("run.engine")}</Label>
           <Select
-            value={selectionBlocked ? "" : engine}
+            ariaLabel={t("run.engine")}
+              value={selectionBlocked ? "" : engine}
             onChange={setEngine}
             options={engineOptions}
           />
@@ -315,6 +318,7 @@ export function RunView({
             <Input
               type="number"
               min={1}
+              aria-label={t("run.vmCount")}
               value={vmCount}
               onChange={(e) => setVmCount(e.target.value)}
             />

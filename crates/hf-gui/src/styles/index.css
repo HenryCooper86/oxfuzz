@@ -398,3 +398,16 @@ button:disabled {
     scroll-behavior: auto !important;
   }
 }
+
+/* Keep the help article readable when side panels reduce the content width. */
+.help-layout { container-type: inline-size; }
+.help-compact { display: none; }
+@container (max-width: 700px) {
+  .help-compact { display: block; }
+  .help-nav { display: none; }
+  .help-columns { flex-direction: column; }
+  .help-columns > section { width: 100%; min-height: 0 !important; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .help-layout { animation: none !important; }
+}

@@ -3,17 +3,8 @@ import { getTransport, useDefectDojo } from "../lib";
 import { usePrefs } from "../providers/prefs";
 import { useRunStatus } from "../providers/runStatus";
 import type { EngineId, SystemStatus } from "../types";
+import { useI18n } from "../i18nContext";
 import { Container, Box, ShieldCheck } from "lucide-react";
-
-const EMPTY_STATUS: SystemStatus = {
-  docker: false,
-  sandbox_image: false,
-  libfuzzer: false,
-  aflplusplus: false,
-  honggfuzz: false,
-  syzkaller: false,
-  defectdojo: false,
-};
 
 // Engine display order + how each maps to a SystemStatus flag and the engine id
 // the Run view reports while running (so we can highlight the active one).
@@ -26,12 +17,15 @@ const ENGINES: { label: string; key: keyof SystemStatus; runId: EngineId }[] = [
 
 export function StatusBar() {
   const { sandboxArch } = usePrefs();
+  const { t: translate } = useI18n();
+  const [disconnected, setDisconnected] = useState(false);
+  const [lastChecked, setLastChecked] = useState<string | null>(null);
+  const [retry, setRetry] = useState(0);
   const { activeEngine } = useRunStatus();
   // DefectDojo is an optional integration, so it appears in the bar only once
   // configured -- matching the sidebar entry. Green when the instance answers.
   const { configured: defectDojoOn } = useDefectDojo();
   const [status, setStatus] = useState<SystemStatus | null>(null);
-  const [dockerMsg, setDockerMsg] = useState<string | null>(null);
   const [cost, setCost] = useState<{ cost_usd: number; calls: number; input_tokens: number; output_tokens: number } | null>(null);
   const [time, setTime] = useState(new Date().toLocaleTimeString());
 
@@ -42,50 +36,52 @@ export function StatusBar() {
 
   useEffect(() => {
     const t = getTransport();
-    let unlisten: (() => void) | undefined;
-
-    // Live progress while Docker is brought up / the image is built.
-    t.listen<{ message: string }>("docker:status", (e) => setDockerMsg(e.payload.message))
-      .then((u) => { unlisten = u; })
-      .catch(() => {});
-
-    // Kick off the Docker bootstrap (start daemon + ensure the image is built
-    // for the selected arch). Re-runs when the sandbox arch changes, rebuilding
-    // the image for the new platform. Falls back to a plain status read.
-    t.invoke<SystemStatus>("ensure_docker", { arch: sandboxArch })
-      .then(setStatus)
-      .catch(() =>
-        t.invoke<SystemStatus>("system_status_cmd").then(setStatus).catch(() => setStatus(EMPTY_STATUS)),
-      );
+    let active = true;
+    let refreshing = false;
+    const refreshStatus = async () => {
+      if (refreshing) return;
+      refreshing = true;
+      try {
+        const value = await t.invoke<SystemStatus>("system_status_cmd");
+        if (active) {
+          setStatus(value);
+          setDisconnected(false);
+          setLastChecked(new Date().toLocaleTimeString());
+        }
+      } catch {
+        if (active) { setStatus(null); setDisconnected(true); }
+      } finally { refreshing = false; }
+    };
+    void refreshStatus();
 
     // Keep runtime availability and current-session cost indicators fresh.
     // LLM spend accrues invisibly during agent turns / report+harness gen;
     // surface a running total so cost is never a surprise.
     const refreshCost = () => {
       t.invoke<{ cost_usd: number; calls: number; input_tokens: number; output_tokens: number }>("diagnostics_cost_summary")
-        .then(setCost)
+        .then(value => { if (active) setCost(value); })
         // Do not keep labeling a stale value as this session's spend when the
         // diagnostics store is unavailable. The full panel surfaces the error.
-        .catch(() => setCost(null));
+        .catch(() => { if (active) setCost(null); });
     };
     refreshCost();
 
     const poll = setInterval(() => {
-      t.invoke<SystemStatus>("system_status_cmd").then(setStatus).catch(() => {});
+      void refreshStatus();
       refreshCost();
     }, 5000);
 
     return () => {
-      if (unlisten) unlisten();
+      active = false;
       clearInterval(poll);
     };
-  }, [sandboxArch]);
+  }, [sandboxArch, retry]);
 
   return (
     <footer
-      className="flex items-center justify-between flex-shrink-0 select-none"
+      className="flex flex-wrap items-center justify-between gap-2 flex-shrink-0 select-none"
       style={{
-        height: "28px",
+        minHeight: "28px",
         padding: "0 var(--space-lg)",
         background: "var(--surface-secondary)",
         borderTop: "1px solid var(--border)",
@@ -93,7 +89,7 @@ export function StatusBar() {
         color: "var(--text-muted)",
       }}
     >
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3">
         {status && (
           <>
             <StatusDot label="Docker" active={status.docker} icon={<Container size={11} />} />
@@ -115,11 +111,12 @@ export function StatusBar() {
             )}
           </>
         )}
-        {dockerMsg && !(status?.docker && status?.sandbox_image) && (
-          <span style={{ color: "var(--text-secondary)" }}>{dockerMsg}</span>
-        )}
+        {!status && <span role="status">{translate(disconnected ? "gui.disconnected" : "gui.checkingStatus")}
+          {lastChecked && <> · {translate("gui.lastChecked", { time: lastChecked })}</>}
+          {disconnected && <button className="ml-2 underline" onClick={() => setRetry(value => value + 1)}>{translate("common.retry")}</button>}
+        </span>}
       </div>
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3">
         {activeEngine && (
           <span className="flex items-center gap-1.5" style={{ color: "var(--accent)" }}>
             <span

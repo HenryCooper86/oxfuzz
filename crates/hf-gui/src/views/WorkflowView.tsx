@@ -66,13 +66,6 @@ export function WorkflowView() {
   const sectionRefs = useRef<Partial<Record<SectionId, HTMLElement | null>>>({});
   const gated = !activeProject;
 
-  // Auto-expand the active stage as the pipeline advances (adjust-during-render).
-  const [prevActive, setPrevActive] = useState(activeStage);
-  if (!gated && activeStage !== prevActive) {
-    setPrevActive(activeStage);
-    setExpanded(activeStage);
-  }
-
   useEffect(() => {
     if (expanded) {
       sectionRefs.current[expanded]?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -189,7 +182,10 @@ export function WorkflowView() {
                     onNavigate={(view) => {
                       // Stay in the workflow: expand the requested stage's
                       // section (its ViewType id matches the section id).
-                      if (!gated) setExpanded(view as SectionId);
+                      if (!gated) {
+                        setExpanded(view as SectionId);
+                        sectionRefs.current[view as SectionId]?.querySelector("button")?.focus();
+                      }
                     }}
                   />
                 </div>

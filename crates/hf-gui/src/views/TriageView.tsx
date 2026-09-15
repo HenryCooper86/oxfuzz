@@ -10,7 +10,7 @@ import { useFindingSelection } from "../providers/findingSelection";
 import { usePipeline } from "../providers/pipeline";
 import { useProject } from "../providers/project";
 import { useRunOutput } from "../providers/runOutput";
-import type { Crash, CrashVerdict, FindingReviewFilter, FindingReviewItem, TriageDisposition } from "../types";
+import type { ViewType, RunHistoryItem, Crash, CrashVerdict, FindingReviewFilter, FindingReviewItem, TriageDisposition } from "../types";
 
 const ReportPreview = lazy(() =>
   import("../components/ReportPreview").then((module) => ({ default: module.ReportPreview })),
@@ -30,12 +30,12 @@ function shortId(id: string): string {
   return id.length > 12 ? id.slice(0, 8) : id;
 }
 
-export function TriageView({ embedded = false, initialRunId }: { embedded?: boolean; initialRunId?: string }) {
+export function TriageView({ embedded = false, initialRunId, onNavigate }: { embedded?: boolean; initialRunId?: string; onNavigate?: (view: ViewType) => void }) {
   const { activeProject } = useProject();
-  return <ScopedTriageView key={`${activeProject}\0${initialRunId ?? ""}`} embedded={embedded} initialRunId={initialRunId} />;
+  return <ScopedTriageView key={`${activeProject}\0${initialRunId ?? ""}`} embedded={embedded} initialRunId={initialRunId} onNavigate={onNavigate} />;
 }
 
-function ScopedTriageView({ embedded, initialRunId }: { embedded: boolean; initialRunId?: string }) {
+function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: boolean; initialRunId?: string; onNavigate?: (view: ViewType) => void }) {
   const { t, locale } = useI18n();
   const { activeProject } = useProject();
   const { markDone, markSkipped } = usePipeline();
@@ -69,6 +69,19 @@ function ScopedTriageView({ embedded, initialRunId }: { embedded: boolean; initi
   const selectionGeneration = useRef(0);
   const mounted = useRef(true);
   const isKernelRun = lastEngine === "syzkaller";
+
+  const [hasRuns, setHasRuns] = useState<boolean | null>(null);
+  useEffect(() => {
+    let active = true;
+    if (!activeProject) return;
+    void getTransport().invoke<RunHistoryItem[]>("run_history", { project: activeProject }).then(runs => {
+      if (active && Array.isArray(runs)) setHasRuns(runs.length > 0);
+    }).catch(() => {
+      // Findings remain usable if the optional empty-state history check fails.
+      if (active) setHasRuns(null);
+    });
+    return () => { active = false; };
+  }, [activeProject, reloadVersion, summary]);
 
   const serviceFilter = useMemo<FindingReviewFilter>(() => ({
     disposition: dispositionFilter.startsWith("only:")
@@ -306,7 +319,7 @@ function ScopedTriageView({ embedded, initialRunId }: { embedded: boolean; initi
       {message && <div className="text-xs text-text-muted">{message}</div>}
       {disabledReason && <div role="status" className="surface-card text-xs text-text-muted" style={{ padding: "var(--space-sm) var(--space-md)" }}>{disabledReason}</div>}
       <div className="surface-card grid gap-2" style={{ padding: "var(--space-sm)", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))" }}>
-        <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={t("triage.searchFindings")} />
+        <Input aria-label={t("triage.searchFindings")} value={search} onChange={(event) => setSearch(event.target.value)} placeholder={t("triage.searchFindings")} />
         <select className="bg-surface-secondary text-text-primary border border-border rounded-md px-2 py-1 min-w-0" aria-label={t("triage.filterDisposition")} value={dispositionFilter} onChange={(event) => setDispositionFilter(event.target.value)}>
           <option value="open">{t("triage.filterOpen")}</option><option value="all">{t("triage.filterAll")}</option>
           {DISPOSITIONS.map((disposition) => <option key={disposition} value={`only:${disposition}`}>{t(`triage.disposition.${disposition}`)}</option>)}
@@ -322,7 +335,10 @@ function ScopedTriageView({ embedded, initialRunId }: { embedded: boolean; initi
       </div>
       {queueError && <div role="alert" className="surface-card text-xs" style={{ padding: "var(--space-sm)", color: "var(--error)" }}>{t("triage.queueFailed", { error: queueError })}</div>}
       {queueLoading && <div role="status" className="text-xs text-text-muted">{t("triage.loadingQueue")}</div>}
-      {!queueLoading && !queueError && visibleQueue.length === 0 && <div className="surface-card text-sm text-text-muted" style={{ padding: "var(--space-xl)", textAlign: "center" }}>{t("triage.noMatchingFindings")}</div>}
+      {!queueLoading && !queueError && visibleQueue.length === 0 && <div className="surface-card text-sm text-text-muted" style={{ padding: "var(--space-xl)", textAlign: "center" }}>{hasRuns === false && !runFilter && !targetFilter && !search && !originFilter && !severityFilter ? <>
+        <p className="font-medium">{t("gui.noCampaign")}</p><p>{t("gui.noCampaignHint")}</p>
+        {onNavigate && <Button onClick={() => onNavigate("workflow")}>{t("gui.workflowAction")}</Button>}
+      </> : <><p>{t("gui.noFindingsHint")}</p><Button onClick={() => { setSearch(""); setDispositionFilter("all"); setOriginFilter(""); setSeverityFilter(""); setRunFilter(""); setTargetFilter(""); }}>{t("gui.clearFilters")}</Button></>}</div>}
       {(visibleQueue.length > 0 || selection || detailLoading || detailError) && <div className="flex gap-3" style={{ animation: "slideInUp 0.2s ease" }}>
         <div className="flex flex-col gap-1 flex-1">
           {visibleQueue.map((item) => <button key={item.crash.id} onClick={() => selectFinding(item.crash.id, item.crash.run_id)} className={`surface-card flex items-center gap-2 text-left ${selection?.findingId === item.crash.id ? "border-[var(--border-focus)]" : ""}`} style={{ padding: "var(--space-sm) var(--space-md)" }}>

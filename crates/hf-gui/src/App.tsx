@@ -23,6 +23,7 @@ import { ChangesView } from "./views/ChangesView";
 import { DefectDojoView } from "./views/DefectDojoView";
 import { CommandPalette } from "./components/CommandPalette";
 import { LoadingState } from "./components/ui/Loading";
+import { DiscoveryProvider } from "./providers/DiscoveryContext";
 import { ProjectProvider } from "./providers/ProjectContext";
 import { useProject } from "./providers/project";
 import { PipelineProvider } from "./providers/PipelineContext";
@@ -237,7 +238,7 @@ function AppInner() {
                 )}
                 {activeView === "discover" && (
                   <ViewCanvas>
-                    <DiscoverView />
+                    <DiscoverView onNavigate={navigate} />
                   </ViewCanvas>
                 )}
                 {activeView === "harness" && (
@@ -252,7 +253,7 @@ function AppInner() {
                 )}
                 {activeView === "triage" && (
                   <ViewCanvas>
-                    <TriageView initialRunId={findingRun?.project === activeProject ? findingRun.id : undefined} />
+                    <TriageView onNavigate={navigate} initialRunId={findingRun?.project === activeProject ? findingRun.id : undefined} />
                   </ViewCanvas>
                 )}
                 {activeView === "corpus" && (
@@ -272,7 +273,7 @@ function AppInner() {
                 )}
                 {activeView === "reports" && (
                   <ViewCanvas>
-                    <ReportsView />
+                    <ReportsView onNavigate={navigate} />
                   </ViewCanvas>
                 )}
                 {activeView === "runs" && (
@@ -414,6 +415,7 @@ export default function App() {
     <I18nProvider>
       <PrefsProvider>
         <ProjectProvider>
+          <DiscoveryProvider>
           <FindingSelectionProvider>
             <TargetProvider>
             <PipelineProvider>
@@ -429,6 +431,7 @@ export default function App() {
             </PipelineProvider>
             </TargetProvider>
           </FindingSelectionProvider>
+        </DiscoveryProvider>
         </ProjectProvider>
       </PrefsProvider>
     </I18nProvider>

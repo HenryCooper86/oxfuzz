@@ -203,6 +203,7 @@ const COMMAND_MAP: Record<string, CommandEndpoint> = {
   schedule_set_enabled: { method: "POST", path: "/schedule/{id}/enabled" },
   system_status: { method: "GET", path: "/system/status" },
   system_status_cmd: { method: "GET", path: "/system/status" },
+  select_project: { method: "POST", path: "/projects/select" },
   ensure_docker: { method: "GET", path: "/system/status" },
   chat_agent: { method: "POST", path: "/chat/agent" },
   agent_info: { method: "GET", path: "/agents/info" },

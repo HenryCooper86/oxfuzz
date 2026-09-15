@@ -19,7 +19,7 @@ const invoke = vi.hoisted(() => vi.fn());
 const environment = vi.hoisted(() => ({ tauri: false }));
 vi.mock("../lib", async () => ({
   ...(await vi.importActual<typeof import("../lib")>("../lib")),
-  getTransport: () => ({ invoke }),
+  getTransport: () => ({ invoke: (command: string, args?: Record<string, unknown>) => command === "run_history" ? Promise.resolve([{ id: "retained-run" }]) : invoke(command, args) }),
   isTauriEnvironment: () => environment.tauri,
 }));
 
@@ -344,7 +344,7 @@ describe("retained finding navigation", () => {
     await flush();
 
     expect(container.querySelector('[title="/evidence/resolved/crash-input"]')).not.toBeNull();
-    expect(container.textContent).toContain("triage.noMatchingFindings");
+    expect(container.textContent).toContain("gui.noFindingsHint");
   });
 
   it("does not expose latest-target actions while exact detail is pending or missing", async () => {

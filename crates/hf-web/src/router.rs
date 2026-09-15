@@ -495,6 +495,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         )
         .route("/sarif", post(sarif))
         .route("/knowledge/clear", post(clear_knowledge))
+        .route("/projects/select", post(select_project))
         .route("/projects/delete", post(delete_project))
         .route("/crashes/delete", post(delete_crash))
         .route("/corpus/delete-entry", post(delete_corpus_entry))
@@ -1096,6 +1097,21 @@ fn approved_project(state: &AppState, requested: &std::path::Path) -> Result<Pat
         .security
         .approve_project(requested)
         .map_err(map_err(StatusCode::FORBIDDEN))
+}
+
+#[derive(Deserialize, Serialize)]
+struct ProjectSelection {
+    project: PathBuf,
+}
+
+async fn select_project(
+    State(state): State<AppState>,
+    Json(request): Json<ProjectSelection>,
+) -> ApiResult<ProjectSelection> {
+    let project = approved_project(&state, &request.project)?;
+    // The authenticated caller supplied this path. Return its approved canonical
+    // spelling so subsequent requests select the same directory.
+    Ok(Json(ProjectSelection { project }))
 }
 
 fn approved_optional_project(

@@ -11,6 +11,9 @@ import {
 } from "../lib/semgrep";
 import { useProject } from "../providers/project";
 import { usePipeline } from "../providers/pipeline";
+import { useDiscoveryInventory } from "../providers/discovery";
+import { candidateTargetSelector } from "../lib/harnessScope";
+import type { ViewType } from "../types";
 import { useTarget } from "../providers/target";
 import type {
   BoundSemgrepInventory,
@@ -28,25 +31,26 @@ import { useI18n } from "../i18nContext";
 import { Crosshair, Search, Loader2, FolderOpen, ChevronRight, ChevronDown } from "lucide-react";
 import { shouldLoadCoverage } from "../lib/discoverCoverage";
 
-export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
+export function DiscoverView({ embedded = false, onNavigate }: { embedded?: boolean; onNavigate?: (view: ViewType) => void }) {
   const { t } = useI18n();
   const { activeProject, setActiveProject } = useProject();
   const { markDone } = usePipeline();
   // Language lives in the shared TargetContext so the C/C++ choice made here
   // flows through to Harness generation (which reads it from the same context).
-  const { lang, setLang } = useTarget();
+  const { lang, setLang, setTarget, selectionRepair, storageError } = useTarget();
   // When embedded in the unified workflow, the project is fixed by the
   // workflow's project gate; standalone, this view has its own picker.
   const [localProject, setLocalProject] = useState(activeProject);
   const project = embedded ? activeProject : localProject;
-  const [inventory, setInventory] = useState<TargetInventory | null>(null);
+  const { snapshot, save } = useDiscoveryInventory(project, lang);
+  const inventory = snapshot?.inventory ?? null;
   const [discoveryContext, setDiscoveryContext] =
-    useState<SemgrepContext | null>(null);
+    useState<SemgrepContext | null>(snapshot ? { project, lang } : null);
   const [loading, setLoading] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [semgrepInventory, setSemgrepInventory] =
-    useState<BoundSemgrepInventory | null>(null);
+    useState<BoundSemgrepInventory | null>(snapshot?.semgrep ?? null);
   const [semgrepAvailable, setSemgrepAvailable] = useState(false);
   const [semgrepState, setSemgrepState] =
     useState<SemgrepOperationState | null>(null);
@@ -106,7 +110,7 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
         project,
         lang,
       });
-      setInventory(inv);
+      save({ inventory: inv, semgrep: null });
       setDiscoveryContext({ project, lang });
       setSemgrepInventory(null);
       setSemgrepState(null);
@@ -114,13 +118,13 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
       semgrepOperationIdRef.current = null;
       setSemgrepError(null);
       setActiveProject(project);
-      markDone("discover");
+
     } catch (e) {
       setError(String(e));
     } finally {
       setLoading(false);
     }
-  }, [lang, markDone, project, setActiveProject]);
+  }, [lang, project, setActiveProject, save]);
 
   const enrichWithSemgrep = useCallback(async () => {
     const operationOwned = hasOwnedSemgrepOperation(
@@ -183,7 +187,9 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
           currentSelectionRef.current,
         )
       ) {
-        setSemgrepInventory({ context: operationContext, inventory: result });
+        const enriched = { context: operationContext, inventory: result };
+        setSemgrepInventory(enriched);
+        if (inventory) save({ inventory, semgrep: enriched });
       }
     } catch (cause) {
       const ownershipReleased =
@@ -210,6 +216,7 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
     }
   }, [
     discoveryContext,
+    save,
     inventory,
     lang,
     project,
@@ -268,6 +275,13 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
     { project, lang },
   );
 
+  function selectCandidate(candidate: TargetCandidate) {
+    const duplicate = semgrepPresentation.candidates.some(item => item.id !== candidate.id && item.symbol === candidate.symbol);
+    setTarget(duplicate ? candidateTargetSelector(candidate) : candidate.symbol);
+    markDone("discover");
+    onNavigate?.("harness");
+  }
+
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       {!embedded && (
@@ -282,6 +296,7 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
           <Input
             mono
             type="text"
+            aria-label={t("workflow.chooseProjectHint")}
             placeholder="/path/to/project"
             value={project}
             onChange={(e) => setLocalProject(e.target.value)}
@@ -291,6 +306,7 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
           />
         )}
         <Select
+          ariaLabel={t("harness.language")}
           value={lang}
           onChange={(v) => setLang(v)}
           disabled={loading || semgrepLoading}
@@ -328,6 +344,7 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
       {error && (
         <div
           className="rounded-md text-xs px-3 py-2"
+          role="alert"
           style={{ background: "var(--error-subtle)", color: "var(--error)" }}
         >
           {error}
@@ -401,12 +418,14 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
               n: semgrepPresentation.candidates.length,
             })}
           </div>
+          {semgrepPresentation.candidates.length === 0 && <p role="status" className="text-sm">{t("gui.noTargets")}</p>}
           <div className="flex flex-col gap-1">
             {semgrepPresentation.inventory
               ? semgrepPresentation.candidates.map((candidate) => (
                   <CandidateCard
                     key={candidate.id}
                     candidate={candidate}
+                    onSelect={onNavigate && !selectionRepair && !storageError ? () => selectCandidate(candidate) : undefined}
                     callGraph={semgrepPresentation.inventory?.call_graph ?? {}}
                     project={
                       semgrepPresentation.inventory?.project_root ?? project
@@ -422,6 +441,7 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
                   <CandidateCard
                     key={candidate.id}
                     candidate={candidate}
+                    onSelect={onNavigate && !selectionRepair && !storageError ? () => selectCandidate(candidate) : undefined}
                     callGraph={inventory.call_graph ?? {}}
                     project={discoveryContext?.project ?? project}
                   />
@@ -438,11 +458,13 @@ function CandidateCard({
   callGraph,
   project,
   semgrepScores,
+  onSelect,
 }: {
   candidate: TargetCandidate;
   callGraph: Record<string, string[]>;
   project: string;
   semgrepScores?: SemgrepTargetCandidate;
+  onSelect?: () => void;
 }) {
   const { t } = useI18n();
   const displayedScore = semgrepScores?.effective_score ?? c.fit_score;
@@ -482,13 +504,12 @@ function CandidateCard({
     <div className="surface-card flex flex-col" style={{ padding: 0 }}>
     <div
       className="flex items-center gap-3 transition-all duration-150"
-      style={{ padding: "var(--space-md)", cursor: hasTree ? "pointer" : "default" }}
-      onClick={hasTree ? toggleTree : undefined}
+      style={{ padding: "var(--space-md)" }}
       onMouseEnter={(e) => (e.currentTarget.style.borderColor = "var(--border-focus)")}
       onMouseLeave={(e) => (e.currentTarget.style.borderColor = "var(--border)")}
     >
       {hasTree ? (
-        <span className="shrink-0 text-text-muted">{treeOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</span>
+        <button aria-label={t("discover.toggleCallTreeNode")} aria-expanded={treeOpen} onClick={toggleTree} className="shrink-0 p-2 text-text-muted">{treeOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</button>
       ) : (
         <span className="shrink-0" style={{ width: "14px" }} />
       )}
@@ -561,6 +582,7 @@ function CandidateCard({
         )}
       </div>
     </div>
+    {onSelect && <div className="px-3 pb-3"><Button variant="primary" size="sm" onClick={onSelect}>{t("gui.useTarget")}</Button></div>}
     {treeOpen && hasTree && (
       <div style={{ padding: "0 var(--space-md) var(--space-md) calc(var(--space-md) + 22px)", borderTop: "1px solid var(--border)" }}>
         <div className="flex items-center gap-2 mt-2 mb-1">

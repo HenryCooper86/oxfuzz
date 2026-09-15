@@ -775,3 +775,32 @@ the existing service finding filter, including all dispositions for this review.
 Report navigation opens the owning project's report tools without generating
 or publishing a report. Evidence interpretation remains in service proof and
 closeout reports.
+
+### First-use GUI audit corrections
+
+Browser project selection uses an authenticated server-path dialog. A read-only
+HTTP selection operation canonicalizes the supplied directory through the same
+approved-project policy used by execution. Only a successful response becomes a
+recent/active project. Browser file selection requests a server file path and
+never treats a client filename as uploaded content. Native dialogs remain local.
+A server-path field was chosen over browsing arbitrary server directories: the
+operator supplies the approved path, and existing authorization stays unchanged.
+
+Readiness displays observed, checking, or disconnected state, with the last
+successful observation time. Status polling never prepares Docker or builds an
+image. Sandbox preparation is an explicit desktop action in setup/settings and
+uses the selected architecture; the browser explains that the server owns it.
+
+Discovery results remain in the shared GUI context by project and language while
+navigating. Finishing discovery does not auto-advance: users review and select a
+candidate, then explicitly continue to harness creation. Empty discovery does not
+complete the step. Specialist project-entry routes converge on the guided flow.
+Optional build profiles, work orders, tournaments, and oracle tools are grouped
+under Advanced, with build blockers still visible. A cached discovery inventory
+is presentation state only and grants no build, approval, or execution authority.
+
+Setup includes offline key/model guidance and service-error recovery text.
+Result empty states distinguish no campaigns from no matching findings and link
+back to the workflow. Composed reports describe the explicit composition action
+and advertise only available exports. Settings expose host-appropriate controls;
+inputs have accessible names, and help navigation collapses at narrow widths.

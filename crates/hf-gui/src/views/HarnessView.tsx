@@ -3,6 +3,7 @@ import { useI18n } from "../i18nContext";
 import { getTransport, pickFolder } from "../lib";
 import { useProject } from "../providers/project";
 import { usePipeline } from "../providers/pipeline";
+import { useDiscoveryInventory } from "../providers/discovery";
 import { useTarget } from "../providers/target";
 import type { TargetInventory, HarnessReviewItem } from "../types";
 import { Button, Input, Select, ViewHeader, EmptyState } from "../components/ui";
@@ -159,6 +160,7 @@ export function HarnessView({
     if (path) setLocalProject(path);
   }
 
+  const { snapshot: discovery, save: saveDiscovery } = useDiscoveryInventory(project, lang);
   const selectedTargetRef = useRef(selectedTarget);
   selectedTargetRef.current = selectedTarget;
 
@@ -166,11 +168,12 @@ export function HarnessView({
   useEffect(() => {
     if (!project || selectionBlocked) return;
     let cancelled = false;
-    getTransport().invoke<TargetInventory>("discover", { project, lang })
+    (discovery ? Promise.resolve(discovery.inventory) : getTransport().invoke<TargetInventory>("discover", { project, lang }))
       .then((inv) => {
         if (cancelled) return;
         setDiscoverError(null);
         setInventory(inv);
+        if (!discovery) saveDiscovery({ inventory: inv, semgrep: null });
         const selectedMatches = inv.candidates.filter(candidate =>
           matchesTargetSelection(candidate.symbol, candidateTargetSelector(candidate), selectedTargetRef.current),
         );
@@ -185,7 +188,7 @@ export function HarnessView({
         if (!cancelled) setDiscoverError(String(e));
       });
     return () => { cancelled = true; };
-  }, [project, lang, selectionBlocked, setSelectedTarget]);
+  }, [project, lang, selectionBlocked, setSelectedTarget, discovery, saveDiscovery]);
 
   // Hydrate any harness already persisted for the selected target so a harness
   // built elsewhere (e.g. in the Fuzzing Workflow) is visible here too. The
@@ -488,7 +491,8 @@ export function HarnessView({
         </div>
       )}
 
-      {project && <Suspense fallback={<p role="status">{t("buildDoctor.pending")}</p>}><BuildDoctorPanel project={project} onGenerationBlocked={onBuildAdmission} /></Suspense>}
+      <p className="text-sm text-text-secondary">{t("gui.harnessIntro")}</p>
+      {buildBlocked && <p role="status" className="text-sm">{t("gui.buildBlocked")}</p>}
 
       {/* Target + Engine selection */}
       {inventory && inventory.candidates.length > 0 && (
@@ -497,6 +501,7 @@ export function HarnessView({
             <label className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>{t("harness.target")}</label>
             <Select
               mono
+              ariaLabel={t("harness.target")}
               value={selectedTarget}
               onChange={(v) => {
                 setSelectedTarget(v);
@@ -526,6 +531,7 @@ export function HarnessView({
           <div className="flex flex-col gap-1 w-40">
             <label className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>{t("harness.engine")}</label>
             <Select
+              ariaLabel={t("harness.engine")}
               value={selectionBlocked ? "" : engine}
               onChange={(v) => setEngine(v)}
               options={engineOptions}
@@ -534,6 +540,7 @@ export function HarnessView({
           <div className="flex flex-col gap-1 w-36">
             <label className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>{t("harness.generator")}</label>
             <Select
+              ariaLabel={t("harness.generator")}
               value={aiPolicy}
               onChange={(v) => setAiPolicy(v as AiPolicy)}
               options={[
@@ -546,6 +553,7 @@ export function HarnessView({
           <div className="flex flex-col gap-1 w-32">
             <label className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>{t("harness.language")}</label>
             <Select
+              ariaLabel={t("harness.language")}
               value={lang}
               onChange={(v) => {
                 setLang(v);
@@ -576,36 +584,6 @@ export function HarnessView({
             {t("harness.buildSmokeTest")}
           </Button>
         </div>
-      )}
-
-      {project && selectedTarget && !selectionBlocked && (
-        <WorkOrderPanel
-          project={project}
-          target={selectedTarget}
-          language={lang}
-          engine={engine}
-          onPromoted={(harnessId, targetSelector) => {
-            setSelectedTarget(targetSelector);
-            setExternalPromotion({ harnessId, project, target: targetSelector, language: lang, engine });
-            setHarness(null);
-            setPrevSource(null);
-            setShowDiff(false);
-            setCompileResult(null);
-            setSmokeResult(null);
-            setPromotionResult({
-              status: "Promoted",
-              harness_id: harnessId,
-              message: t("harness.externalPromotionComplete"),
-            });
-            setHarnessStatus("idle");
-            setCompileStatus("done");
-            setSmokeStatus("done");
-            setPromotionStatus("done");
-            setReviewRefresh((value) => value + 1);
-            setCompiled(true);
-            markDone("approve");
-          }}
-        />
       )}
 
       {/* Step pipeline */}
@@ -704,25 +682,6 @@ export function HarnessView({
                 <span style={{ color: compileResult.status === "Compiled" ? "var(--success)" : "var(--error)" }}>
                   {compileResult.message}
                 </span>
-              </div>
-            )}
-            {/* Evaluating several candidates is a choice about the compile step,
-                so it sits alongside it rather than in its own view. */}
-            {project && selectedTarget && (
-              <div className="mt-3">
-                <HarnessTournamentPanel
-                  project={project}
-                  target={selectedTarget}
-                  engine={engine}
-                  lang={lang}
-                />
-              </div>
-            )}
-            {/* An oracle is an alternative harness for the same target, so it
-                belongs with the other harness choices. */}
-            {selectedTarget && (
-              <div className="mt-3">
-                <OracleStudioPanel target={selectedTarget} />
               </div>
             )}
           </Step>
@@ -872,6 +831,61 @@ export function HarnessView({
           hint={t("harness.emptyHint")}
         />
       )}
+      <details className="surface-card p-3" open={buildBlocked || undefined}>
+        <summary className="cursor-pointer text-sm font-medium">{t("gui.advanced")}</summary>
+        <div className="mt-3 flex flex-col gap-4">
+      {project && <Suspense fallback={<p role="status">{t("buildDoctor.pending")}</p>}><BuildDoctorPanel project={project} onGenerationBlocked={onBuildAdmission} /></Suspense>}      {project && selectedTarget && !selectionBlocked && (
+        <WorkOrderPanel
+          project={project}
+          target={selectedTarget}
+          language={lang}
+          engine={engine}
+          onPromoted={(harnessId, targetSelector) => {
+            setSelectedTarget(targetSelector);
+            setExternalPromotion({ harnessId, project, target: targetSelector, language: lang, engine });
+            setHarness(null);
+            setPrevSource(null);
+            setShowDiff(false);
+            setCompileResult(null);
+            setSmokeResult(null);
+            setPromotionResult({
+              status: "Promoted",
+              harness_id: harnessId,
+              message: t("harness.externalPromotionComplete"),
+            });
+            setHarnessStatus("idle");
+            setCompileStatus("done");
+            setSmokeStatus("done");
+            setPromotionStatus("done");
+            setReviewRefresh((value) => value + 1);
+            setCompiled(true);
+            markDone("approve");
+          }}
+        />
+      )}
+
+            {/* Evaluating several candidates is a choice about the compile step,
+                so it sits alongside it rather than in its own view. */}
+            {project && selectedTarget && (
+              <div className="mt-3">
+                <HarnessTournamentPanel
+                  project={project}
+                  target={selectedTarget}
+                  engine={engine}
+                  lang={lang}
+                />
+              </div>
+            )}
+            {/* An oracle is an alternative harness for the same target, so it
+                belongs with the other harness choices. */}
+            {selectedTarget && (
+              <div className="mt-3">
+                <OracleStudioPanel target={selectedTarget} />
+              </div>
+            )}
+        </div>
+      </details>
+
     </div>
   );
 }

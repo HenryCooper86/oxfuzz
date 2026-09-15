@@ -262,7 +262,7 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus, onReviewFindings 
       </div>}
       <MorningHealth summary={morning} loading={morningLoading} error={morningError} t={t} onSelect={(id) => { setFilter(id); if (expanded !== id) void toggleCurve(id); }} />
 
-      <AutoRevertPolicyCard project={activeProject} />
+      <details className="surface-card p-3"><summary className="cursor-pointer text-sm">{t("gui.policySettings")}</summary><AutoRevertPolicyCard project={activeProject} /></details>
 
       {trend.length >= 2 && (
         <section className="surface-card flex flex-col gap-3 min-w-0" style={{ padding: "var(--space-md)" }}>
@@ -348,7 +348,7 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus, onReviewFindings 
       {loading ? (
         <p className="text-sm text-text-muted">{t("runs.loadingRuns")}</p>
       ) : runs.length === 0 ? (
-        <EmptyState icon={<Play size={20} />} title={t("runs.emptyTitle")} hint={t("runs.emptyHint")} />
+        <EmptyState icon={<Play size={20} />} title={t("runs.emptyTitle")} hint={t("gui.noRunsHint")} action={<Button onClick={() => onNavigate?.("workflow")}>{t("gui.workflowAction")}</Button>} />
       ) : (
         <div className="flex flex-col gap-1.5">
           {runs.length > 4 && (

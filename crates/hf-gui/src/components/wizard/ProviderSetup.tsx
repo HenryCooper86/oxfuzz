@@ -20,7 +20,7 @@ export function ProviderSetup({ onContinue }: { onContinue: () => void }) {
     }).catch((error: unknown) => { if (active) setError(String(error)); });
     return () => { active = false; };
   }, [attempt, t]);
-  if (error) return <div role="alert"><p>{t("setup.providerLoadFailed")}: {error}</p><Button onClick={() => { setError(null); setAttempt(value => value + 1); }}>{t("setup.checkAgain")}</Button></div>;
+  if (error) return <div role="alert"><p>{t("setup.providerLoadFailed")}: {error}</p><p>{t("gui.connectionHelp")}</p><Button onClick={() => { setError(null); setAttempt(value => value + 1); }}>{t("setup.checkAgain")}</Button></div>;
   if (providers === null) return <p role="status">{t("setup.loadingProviders")}</p>;
   if (providers.length > 0) return <div className="flex flex-col gap-3">
     <p className="m-0">{t("setup.savedProviders")}</p>
@@ -74,6 +74,7 @@ function NewProviderSetup({ onContinue }: { onContinue: () => void }) {
   }
   return <div className="flex flex-col gap-4">
     <p className="m-0 text-sm text-text-secondary">{t("setup.providerHint")}</p>
+    <details><summary className="cursor-pointer text-sm">{t("gui.keyHelpTitle")}</summary><p className="text-sm">{t("gui.keyHelp")}</p><p className="text-sm">{t("gui.modelHelp")}</p></details>
     <div><label htmlFor="setup-provider" className="block text-sm mb-1">{t("setup.provider")}</label>
       <Select id="setup-provider" value={input.providerType} disabled={saving} options={WIZARD_PROVIDER_TYPES} className="w-full" onChange={providerType => { const preset = wizardProviderPreset(providerType); update({ providerType, apiKey: "", model: preset.model, baseUrl: preset.baseUrl }); }} />
     </div>

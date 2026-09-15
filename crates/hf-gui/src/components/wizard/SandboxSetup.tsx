@@ -2,11 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import { getTransport, isTauriEnvironment } from "../../lib";
 import { useI18n } from "../../i18nContext";
 import type { SystemStatus } from "../../types";
+import { usePrefs } from "../../providers/prefs";
 import { Button } from "../ui/Button";
 
 interface Readiness { status: SystemStatus; runtime_ready: boolean }
-export function SandboxSetup({ onContinue }: { onContinue: () => void }) {
+export function SandboxSetup({ onContinue, allowPrepareReady = false, onBusyChange }: { onContinue?: () => void; allowPrepareReady?: boolean; onBusyChange?: (busy: boolean) => void }) {
   const { t } = useI18n();
+  const { sandboxArch } = usePrefs();
   const [readiness, setReadiness] = useState<Readiness | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -24,16 +26,16 @@ export function SandboxSetup({ onContinue }: { onContinue: () => void }) {
       if (current && request === generation.current) setReadiness(value);
     }).catch((error: unknown) => { if (current && request === generation.current) setError(String(error)); });
     return () => { current = false; };
-  }, [attempt, t]);
+  }, [attempt, t, sandboxArch]);
   async function prepare() {
     if (!desktop || preparing.current) return;
     generation.current += 1;
-    preparing.current = true; setBusy(true); setError(null); setReadiness(null);
+    preparing.current = true; setBusy(true); onBusyChange?.(true); setError(null); setReadiness(null);
     try {
-      await getTransport().invoke("ensure_docker");
+      await getTransport().invoke("ensure_docker", { arch: sandboxArch });
       if (active.current) setAttempt(value => value + 1);
     } catch (error) { if (active.current) setError(String(error)); }
-    finally { preparing.current = false; if (active.current) setBusy(false); }
+    finally { preparing.current = false; if (active.current) { setBusy(false); onBusyChange?.(false); } }
   }
   return <div className="flex flex-col gap-4">
     <p className="m-0 text-sm text-text-secondary">{t("setup.sandboxHint")}</p>
@@ -45,9 +47,9 @@ export function SandboxSetup({ onContinue }: { onContinue: () => void }) {
     </div>}
     {!readiness?.runtime_ready && <p className="m-0 text-sm text-text-secondary">{t(desktop ? "setup.prepareHint" : "setup.serverHint")}</p>}
     <div className="flex flex-wrap gap-2">
-      {desktop && !readiness?.runtime_ready && <Button variant="outline" disabled={busy} onClick={() => void prepare()}>{t("setup.prepareSandbox")}</Button>}
+      {desktop && (allowPrepareReady || !readiness?.runtime_ready) && <Button variant="outline" disabled={busy} onClick={() => void prepare()}>{t("setup.prepareSandbox")}</Button>}
       <Button variant="outline" disabled={busy} onClick={() => { generation.current += 1; setReadiness(null); setError(null); setAttempt(value => value + 1); }}>{t("setup.checkAgain")}</Button>
-      <Button variant="primary" disabled={busy || !!error || !readiness?.runtime_ready} onClick={onContinue}>{t("setup.continue")}</Button>
+      {onContinue && <Button variant="primary" disabled={busy || !!error || !readiness?.runtime_ready} onClick={onContinue}>{t("setup.continue")}</Button>}
     </div>
   </div>;
 }

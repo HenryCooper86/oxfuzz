@@ -154,12 +154,12 @@ loop, not a final step.
 
 1. **Open a project** (sidebar "Open project", or the Workflow project gate).
 2. **Discover** -- click **Discover**; ranked targets appear.
-3. **Harness** -- the top target is auto-selected. **Build & Smoke-Test** runs
+3. **Harness** -- use the target you selected in Discover. **Build & Smoke-Test** runs
    draft -> compile -> smoke -> seeds, then you **Approve for Campaigns**.
 4. **Run** -- **Run Fuzzer** (needs a project, a target, and a harness that is
    both **built** and **approved**).
-5. **Triage** -- runs automatically when a run finishes with crashes; otherwise
-   click **Scan for Crashes**.
+5. **Triage** -- after the run, click **Scan for Crashes** and review the
+   retained findings. Use **Compose Report** to save a report.
 
 ## Two ways to drive it
 
@@ -243,9 +243,9 @@ Corpus sits below as an ongoing tool.
 
 - **Choose Folder...** to set the project (or pick a recent one). Everything
   below the project gate is disabled until a project is chosen.
-- Expand any stage to work it inline. The active stage auto-expands as the
-  pipeline advances, and a stage that reports back (e.g. Run asking to
-  regenerate a harness) expands the right section for you.
+- Expand any stage to work it inline. Review discovery results, then choose
+  **Use this target and continue** to open Harness. Results stay available when
+  you return to Discover. Use **Next** to move to the next unfinished stage.
 
 **What it shows:** a numbered status badge per stage (number / check / dash for
 skipped) and a colored left border (accent = current, green = done).
@@ -377,10 +377,10 @@ and compose a report.
 - **Compose Report** -- generates a Markdown report and saves it as a draft.
 - **Push to DefectDojo** -- appears when crashes exist and DefectDojo is
   configured.
-- Export the report as Markdown, HTML, PDF, or DOCX (PDF/DOCX need \`pandoc\`).
+- Export Markdown or HTML. Desktop also offers PDF/DOCX when the required converter is available.
 
-**Gotchas:** triage needs a run to have happened. When a run finishes *with*
-crashes, oxfuzz **auto-triages and auto-composes a report once** for you.
+**Gotchas:** triage needs a run to have happened. Review the retained findings,
+then choose **Compose Report** to save a report.
 Syzkaller kernel runs are excluded here -- their crashes live in the Syzkaller
 workdir -- so the button is disabled with an explanation.
 
@@ -389,7 +389,7 @@ panel with the CASR analysis, stack signature, and the drafted bug report.
 
 **Reading a finding:** *Kind* is the error class (e.g. "Asan" = a memory bug
 caught by AddressSanitizer). *Severity* rates danger -- "Exploitable" means an
-attacker could likely abuse it. Each finding is a real, reproduced crash.
+attacker could likely abuse it. Check the retained evidence and disposition before treating a finding as a confirmed target bug.
 `;
 
 const SCREEN_CORPUS = `
@@ -481,10 +481,10 @@ const SCREEN_REPORTS = `
 **Purpose:** the home for every composed report across projects and targets.
 
 **What you can do:** filter reports, **Open** one to preview and export it
-(Markdown / HTML / PDF / DOCX), **push** it to DefectDojo, or delete it.
+(Markdown / HTML; desktop also offers supported PDF / DOCX exports), **push** it to DefectDojo, or delete it.
 
-**Where they come from:** Triage produces reports automatically when a run finds
-crashes, and you can compose them by hand from the Dashboard.
+**Where they come from:** choose **Compose Report** in Triage after reviewing
+findings, or compose a report in the Workbench. Reports lists saved drafts.
 
 **What it shows:** a list (title, status, target, updated time) and a preview
 modal that renders Markdown tables and Mermaid diagrams.
@@ -736,10 +736,10 @@ Common messages and what they mean.
 
 ## Setup and sandbox
 
-- **"Docker isn't running"** -- start Docker/OrbStack. The status bar tries to
-  start it and build the sandbox image automatically.
-- **"Fuzzing sandbox image not built"** -- the image is still building or failed;
-  give it a few minutes on first launch.
+- **"Docker isn't running"** -- use **Prepare sandbox** in desktop Setup or
+  Settings -> General. Browser users should ask the service administrator.
+- **"Fuzzing sandbox image not built"** -- explicitly prepare the sandbox and
+  check its progress. The status bar only checks readiness.
 - **"Syzkaller is not available in web mode"** -- kernel/VM campaigns require
   the trusted local desktop workflow; user-space fuzz runs remain available.
 

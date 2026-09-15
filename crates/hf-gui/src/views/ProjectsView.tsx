@@ -41,7 +41,7 @@ export function ProjectsView({ onNavigate }: { onNavigate: (view: ViewType) => v
     const path = await pickFolder();
     if (path) {
       setActiveProject(path);
-      onNavigate("discover");
+      onNavigate("workflow");
     }
   }
 
