@@ -11,3 +11,6 @@ tests/fixtures/** text eol=lf
 # byte-for-byte immutability test and mint databases whose checksums no other
 # host's checkout can reopen.
 crates/hf-storage/migrations/** text eol=lf
+
+# Live qualification approval hashes these exact source bytes on every host.
+examples/qualification/*.c text eol=lf
