@@ -10,7 +10,7 @@ const project = vi.hoisted(() => ({ activeProject: "/fixture", recentProjects: [
 vi.mock("../providers/project", () => ({ useProject: () => project }));
 vi.mock("../providers/target", () => ({ useTarget: () => ({ target: "parse" }) }));
 vi.mock("../lib", () => ({ useDefectDojo: () => ({ configured: true }), pickFolder: vi.fn() }));
-vi.mock("../views/DiscoverView", () => ({ DiscoverView: () => <p>Discovery content</p> }));
+vi.mock("../views/DiscoverView", () => ({ DiscoverView: ({ onNavigate }: { onNavigate: (view: "settings") => void }) => <button onClick={() => onNavigate("settings")}>Open AI Settings</button> }));
 vi.mock("../views/HarnessView", () => ({ HarnessView: () => <p>Harness content</p> }));
 vi.mock("../views/RunView", () => ({ RunView: () => <p>Run content</p> }));
 vi.mock("../views/TriageView", () => ({ TriageView: () => <p>Findings content</p> }));
@@ -42,5 +42,16 @@ it("offers navigation to the next workflow stage without starting work", async (
     expect(next).toBeTruthy(); await act(async () => next!.click());
     expect(host.textContent).toContain("Harness content");
     expect(host.querySelector('[aria-expanded="true"]')?.textContent).toContain("Generate Harness");
+  } finally { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); }
+});
+it("opens AI Settings from Discover within the workflow", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  Element.prototype.scrollIntoView = vi.fn();
+  const host = document.createElement("div"); document.body.append(host); const root = createRoot(host);
+  const navigate = vi.fn();
+  try {
+    await act(async () => root.render(<I18nProvider><WorkflowView onNavigate={navigate} /></I18nProvider>));
+    await act(async () => [...host.querySelectorAll("button")].find(button => button.textContent === "Open AI Settings")!.click());
+    expect(navigate).toHaveBeenCalledWith("settings");
   } finally { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); }
 });

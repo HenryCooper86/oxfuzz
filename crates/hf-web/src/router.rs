@@ -420,6 +420,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
     Router::new()
         .route("/health", get(health))
         .route("/discover", post(discover))
+        .merge(ranked_discovery_routes())
         .route("/semgrep/available", get(semgrep_available))
         .route("/harness/draft", post(harness_draft))
         .route("/harness/compile", post(harness_compile))
@@ -1794,6 +1795,149 @@ async fn discover(
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(inv)))
+}
+
+#[cfg(feature = "ai-target-ranking")]
+fn ranked_discovery_routes() -> Router<AppState> {
+    Router::new()
+        .route("/discover/operations", post(ranked_discovery_start))
+        .route("/discover/operations/{id}", get(ranked_discovery_status))
+        .route(
+            "/discover/operations/{id}/result",
+            get(ranked_discovery_result),
+        )
+        .route(
+            "/discover/operations/{id}/cancel",
+            post(ranked_discovery_cancel),
+        )
+        .route(
+            "/discover/operations/{id}/retry",
+            post(ranked_discovery_retry),
+        )
+}
+
+#[cfg(not(feature = "ai-target-ranking"))]
+fn ranked_discovery_routes() -> Router<AppState> {
+    Router::new()
+}
+
+#[cfg(feature = "ai-target-ranking")]
+#[derive(Serialize)]
+struct RankedDiscoveryStartResponse {
+    operation_id: uuid::Uuid,
+}
+
+#[cfg(feature = "ai-target-ranking")]
+async fn ranked_discovery_start(
+    State(state): State<AppState>,
+    Json(req): Json<DiscoverRequest>,
+) -> Result<(StatusCode, Json<RankedDiscoveryStartResponse>), ApiError> {
+    let lang = parse_lang(&req.lang).map_err(map_err(StatusCode::BAD_REQUEST))?;
+    let project = approved_project(&state, &req.project)?;
+    let id = state
+        .container
+        .start_ranked_discovery(&project, lang)
+        .await
+        .map_err(classified_api_error)?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(RankedDiscoveryStartResponse { operation_id: id }),
+    ))
+}
+
+#[cfg(feature = "ai-target-ranking")]
+async fn approve_ranked_discovery_owner(state: &AppState, id: uuid::Uuid) -> Result<(), ApiError> {
+    let project = state
+        .container
+        .ranked_discovery_project(id)
+        .await
+        .map_err(classified_api_error)?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "discovery operation not found".to_owned(),
+                }),
+            )
+        })?;
+    approved_project(state, &project)?;
+    Ok(())
+}
+
+#[cfg(feature = "ai-target-ranking")]
+async fn ranked_discovery_status(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> ApiResult<hf_service::RankedDiscoveryStatus> {
+    approve_ranked_discovery_owner(&state, id).await?;
+    let status = state
+        .container
+        .ranked_discovery_status(id)
+        .await
+        .map_err(classified_api_error)?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "discovery operation not found".to_owned(),
+                }),
+            )
+        })?;
+    Ok(Json(status))
+}
+
+#[cfg(feature = "ai-target-ranking")]
+async fn ranked_discovery_result(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> ApiResult<hf_service::RankedDiscoveryResult> {
+    approve_ranked_discovery_owner(&state, id).await?;
+    let result = state
+        .container
+        .ranked_discovery_result(id)
+        .await
+        .map_err(classified_api_error)?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "discovery result not published".to_owned(),
+                }),
+            )
+        })?;
+    Ok(Json(result))
+}
+
+#[cfg(feature = "ai-target-ranking")]
+async fn ranked_discovery_cancel(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> ApiResult<bool> {
+    approve_ranked_discovery_owner(&state, id).await?;
+    Ok(Json(
+        state
+            .container
+            .cancel_ranked_discovery(id)
+            .await
+            .map_err(classified_api_error)?,
+    ))
+}
+
+#[cfg(feature = "ai-target-ranking")]
+async fn ranked_discovery_retry(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<(StatusCode, Json<RankedDiscoveryStartResponse>), ApiError> {
+    approve_ranked_discovery_owner(&state, id).await?;
+    let operation_id = state
+        .container
+        .retry_ranked_discovery(id)
+        .await
+        .map_err(classified_api_error)?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(RankedDiscoveryStartResponse { operation_id }),
+    ))
 }
 
 #[derive(Debug, Deserialize)]

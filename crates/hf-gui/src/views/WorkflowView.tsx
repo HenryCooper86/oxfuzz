@@ -48,7 +48,7 @@ const CORE_STAGES: CoreStage[] = [
 
 type SectionId = CoreStageId | "corpus";
 
-export function WorkflowView() {
+export function WorkflowView({ onNavigate }: { onNavigate?: (view: ViewType) => void } = {}) {
   const { t } = useI18n();
   const { activeProject, recentProjects, setActiveProject } = useProject();
   // Single source of truth for stage state: the pipeline's rolled-up core
@@ -180,6 +180,10 @@ export function WorkflowView() {
                     embedded
                     stepPrefix={String(n)}
                     onNavigate={(view) => {
+                      if (view === "settings") {
+                        onNavigate?.(view);
+                        return;
+                      }
                       // Stay in the workflow: expand the requested stage's
                       // section (its ViewType id matches the section id).
                       if (!gated) {

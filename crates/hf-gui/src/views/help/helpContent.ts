@@ -254,20 +254,27 @@ skipped) and a colored left border (accent = current, green = done).
 const SCREEN_DISCOVER = `
 # Discover (Target Discovery)
 
-**Purpose:** scan a C/C++ project to find the functions most worth fuzzing,
-ranked by a fit score.
+**Purpose:** scan a project to find functions worth fuzzing, then assess the
+most promising candidates with AI.
 
 **What you can do:**
 
-- Pick the **language** (C or C++) and click **Discover** (it reads "Scanning..."
-  while it works). Disabled until a project is set.
+- Pick the **language** and click **Discover**. Scan results appear first; AI
+  updates the ranking when assessment finishes. Discover is disabled until a
+  project is set.
+- Review the three AI factors: bug potential, reachable code, and harness
+  feasibility. **Scan only** identifies candidates without an AI assessment.
+- If no AI provider is set up, use **AI Settings**. If assessment fails, use
+  **Retry AI assessment** to assess the retained scan again.
+- Choose **Use this target and continue** to pass the chosen function to Harness.
 - Expand a candidate to see its **call tree**. Expanding fetches per-function
   coverage -- meaningful only after at least one run.
 
-**What it shows:** "N candidates found", sorted by fit score. Each candidate
-lists its symbol, kind, \`file:line\`, a plain-language rationale, fit score,
-complexity, and a reachability badge ("reaches N ..."). The chosen language flows
-into Harness.
+**What it shows:** "N candidates found", initially sorted by scan score. AI
+recommendations show an advisory score and an explanation alongside the
+original scan score; unassessed candidates keep scan order. Each candidate also
+lists its symbol, kind, \`file:line\`, complexity, and reachability.
+**Semgrep enrichment** is a separate optional action after AI assessment.
 
 **Note:** discovery today covers C and C++ (tree-sitter) plus a lexical Rust
 scan. Harness generation additionally supports Rust via cargo-fuzz.

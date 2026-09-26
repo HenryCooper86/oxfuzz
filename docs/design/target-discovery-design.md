@@ -22,7 +22,7 @@ pub struct TargetCandidate {
     pub complexity: Complexity,      // Cyclomatic-ish score
     pub fit_score: f64,              // 0.0 - 1.0
     pub sanitizers: Vec<Sanitizer>,
-    pub rationale: String,           // LLM-produced reasoning
+    pub rationale: String,           // scan explanation
 }
 ```
 
@@ -38,10 +38,9 @@ pub struct TargetCandidate {
    formatting, no input).
 4. **Enrich** -- compute complexity, detect input surface, infer sanitizers
    from build flags.
-5. **Rank** -- LLM-assisted scoring: the agent receives the candidate list
-   with signatures and produces fit scores + rationale.
-6. **Emit** -- `TargetInventory` persisted to `hf-storage`; surfaced to user
-   for HITL selection.
+5. **Rank** -- compute a deterministic heuristic `fit_score` and rationale.
+6. **Emit** -- persist the base `TargetInventory` and surface it for HITL
+   selection. The service can add a separate AI assessment afterward.
 
 **Identity:** persistence identity is `(project_root, relative_file, symbol)`
 (`deterministic_target_id` in `hf-discovery::scanner`) -- stable across
@@ -51,12 +50,39 @@ For analysis the scanner still unions same-named functions' call edges and
 keeps the maximum complexity (the call graph is name-keyed by design). Target
 resolution accepts a `file::symbol` qualifier; a plain symbol matching more
 than one definition is rejected as ambiguous with the qualified forms listed.
+The older direct LLM ranking method matches `(relative_file, symbol)` pairs;
+symbol-only updates cannot select one of several definitions. Progressive AI
+assessment uses the stable candidate UUID. It never overwrites `fit_score`.
+
 Migration 0019 backfills `targets.file` from the stored `data_json` and swaps
 the unique index for the file-scoped one: historical linkage for a
 pre-migration collided symbol stays attached to the surviving legacy row, and
 the second definition becomes a distinct new row on the next scan.
 
-### 3.1 Semgrep Target Enrichment
+### 3.1 AI Target Recommendations
+
+The `ai-target-ranking` feature keeps the scan and AI assessment as separate
+revisions of a service-owned discovery operation. Revision 1 publishes the
+heuristic inventory before provider dispatch. Revision 2 publishes one final
+ordering and validated per-target assessments. `hf-discovery` admits at most
+64 candidates in heuristic order; `hf-prompt` renders batches of at most 16
+with a 32 KiB prompt limit. The model returns target UUIDs and three ratings:
+bug potential, reachable code, and harness feasibility. Reachable code may be
+unknown. Each known rating is 0 through 4; their mean divided by 4 is the
+advisory score. Responses above 64 KiB and other invalid batches contribute
+no assessments. Assessed targets
+sort by advisory score, then base score and stable identity; the remaining
+targets retain heuristic order and an explicit scan-only source.
+
+`hf-service` persists each rendered prompt before sending it to the provider,
+validates complete batches, and publishes a final `ai`, `mixed`, or `heuristic`
+source. Missing or failed providers leave the scan visible. Retry reassesses
+the retained scan under a new operation UUID. An interrupted process retains
+the published scan. The desktop Discover view polls status and displays one
+list with all three factors on assessed rows. No target is selected or run by
+the ranking operation. See [AI Target Ranking in Discover](ai-target-ranking-gui-design.md).
+
+### 3.2 Semgrep Target Enrichment
 
 C and C++ discovery records the complete Tree-sitter function-definition span:
 the definition start line and column plus optional `end_line` and `end_col`.

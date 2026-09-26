@@ -166,6 +166,48 @@ from `data_json` by migration 0019); the triple is the persistence identity of
 a target. Legacy rows whose file could not be backfilled keep `''` and remain
 valid.
 
+### AI target ranking tables
+
+Migrations `0035_ai_target_ranking.sql` and
+`0036_ai_rank_resolved_model.sql` retain progressive Discover operations and
+the exact model-visible prompt for each admitted batch. The scan is published
+at revision 1 before provider dispatch; a final assessment overlay is
+published at revision 2. Cancellation and final publication use conditional
+state updates, so a late provider response cannot replace a terminal result.
+
+#### `ai_discovery_operations`
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | operation UUID |
+| `project_root` | `TEXT NOT NULL` | canonical project |
+| `language` | `TEXT NOT NULL` | selected language |
+| `state` | `TEXT NOT NULL` | scanning, ranking, completed, failed, cancelled, or interrupted |
+| `revision` | `INTEGER NOT NULL` | 0 before scan, 1 scan, 2 final overlay |
+| `scan_json` | `TEXT` | retained base inventory |
+| `assessment_json` | `TEXT` | final validated assessments |
+| `source` | `TEXT NOT NULL` | pending, ai, mixed, or heuristic |
+| `reason_code` | `TEXT` | optional fallback reason |
+| `total_count` | `INTEGER NOT NULL` | scanned candidate count |
+| `assessed_count` | `INTEGER NOT NULL` | AI-assessed candidate count |
+| `started_at` | `TEXT NOT NULL` | operation start timestamp |
+| `scanned_at` | `TEXT` | scan publication timestamp |
+| `ended_at` | `TEXT` | terminal timestamp |
+
+Index: `ai_discovery_project_idx(project_root, started_at DESC)`.
+
+#### `ai_rank_batches`
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `operation_id` | `TEXT NOT NULL` | parent operation; cascade on delete |
+| `batch_index` | `INTEGER NOT NULL` | batch number; composite primary key with operation ID |
+| `prompt` | `TEXT NOT NULL` | exact bounded prompt persisted before dispatch |
+| `provider_model` | `TEXT NOT NULL` | requested model tag |
+| `outcome` | `TEXT NOT NULL` | pending or recorded batch outcome |
+| `assessment_json` | `TEXT` | validated batch result when available |
+| `resolved_model` | `TEXT` | selected provider model from migration 0036 |
+
 ### Semgrep enrichment tables
 
 Migration `0022_semgrep_enrichment.sql` creates the durable Semgrep operation,
@@ -1242,6 +1284,9 @@ bounded deterministic history, and both cleanup operations.
 | `0031_build_profiles.sql` | creates optional project build profiles, strict retained diagnosis evidence, and immutable harness build inputs |
 | `0032_harness_build_contexts.sql` | retains immutable configured BuildContext provider inputs |
 | `0033_coverage_experiments.sql` | immutable coverage-experiment proposal/evidence, prepared-to-terminal CAS, RESTRICT baseline/result run references |
+| `0034_run_function_coverage.sql` | retains per-function coverage evidence for a run |
+| `0035_ai_target_ranking.sql` | creates progressive discovery operations and durable AI prompt batches |
+| `0036_ai_rank_resolved_model.sql` | records the resolved provider model for each AI batch |
 
 ## 7. Read failure contract
 

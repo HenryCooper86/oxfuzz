@@ -10,7 +10,8 @@ description = "CLI + TUI for oxfuzz"
 # to drop the pure-Rust automotive dependency and use the feature-absent paths.
 [features]
 campaign-allocation = ["hf-service/campaign-allocation", "hf-web/campaign-allocation"]
-default = ["campaign-allocation", "automotive-lab", "automotive-scapy", "campaign-health", "build-context", "concolic-enrichment", "build-doctor", "campaign-trust", "change-aware", "coverage-blockers", "coverage-experiments", "harness-tournament", "harness-work-order", "native-analysis", "oracle-studio", "patch-to-proof", "proof-carrying", "run-closeout", "semgrep-enrichment", "triage-disposition", "unreached-surface"]
+default = ["ai-target-ranking", "campaign-allocation", "automotive-lab", "automotive-scapy", "campaign-health", "build-context", "concolic-enrichment", "build-doctor", "campaign-trust", "change-aware", "coverage-blockers", "coverage-experiments", "harness-tournament", "harness-work-order", "native-analysis", "oracle-studio", "patch-to-proof", "proof-carrying", "run-closeout", "semgrep-enrichment", "triage-disposition", "unreached-surface"]
+ai-target-ranking = ["hf-service/ai-target-ranking", "hf-web/ai-target-ranking"]
 automotive-scapy = ["hf-service/automotive-scapy", "hf-web/automotive-scapy"]
 build-context = ["hf-service/build-context", "hf-web/build-context"]
 build-doctor = ["build-context", "hf-service/build-doctor", "hf-web/build-doctor"]
@@ -24,6 +25,7 @@ native-analysis = ["hf-service/native-analysis", "hf-web/native-analysis"]
 proof-carrying = ["hf-service/proof-carrying", "hf-web/proof-carrying"]
 patch-to-proof = ["proof-carrying", "hf-service/patch-to-proof", "hf-web/patch-to-proof"]
 semgrep-enrichment = [
+    "ai-target-ranking",
     "hf-service/semgrep-enrichment",
     "hf-web/semgrep-enrichment",
 ]

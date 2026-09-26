@@ -4,6 +4,34 @@ import { createHttpTransport } from "../lib/httpTransport";
 import type { FuzzerRunResult, RunProgressEvent } from "../lib/transport";
 
 describe("transport", () => {
+  it("maps ranked discovery operations to the REST lifecycle", async () => {
+    const calls: string[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      calls.push(String(url));
+      return new Response(JSON.stringify({ operation_id: "test-id" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+    try {
+      const transport = createHttpTransport();
+      expect(await transport.invoke("ranked_discovery_start", { project: "/p", lang: "c" })).toBe("test-id");
+      await transport.invoke("ranked_discovery_status", { operationId: "test-id" });
+      await transport.invoke("ranked_discovery_result", { operationId: "test-id" });
+      await transport.invoke("ranked_discovery_cancel", { operationId: "test-id" });
+      expect(await transport.invoke("ranked_discovery_retry", { operationId: "test-id" })).toBe("test-id");
+      expect(calls.map((url) => new URL(url).pathname)).toEqual([
+        "/discover/operations",
+        "/discover/operations/test-id",
+        "/discover/operations/test-id/result",
+        "/discover/operations/test-id/cancel",
+        "/discover/operations/test-id/retry",
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
   it("isTauriEnvironment returns false in test env", () => {
     expect(isTauriEnvironment()).toBe(false);
   });

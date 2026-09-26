@@ -28,6 +28,7 @@ all under human-in-the-loop supervision.
 | --- | --- | --- | --- |
 | LLM provider pool | hf-provider | `LlmProvider`, `ProviderPool` | (none; ported from the retired y-agent prototype, documented in crate docs) |
 | Target discovery | hf-discovery | `TargetCandidate`, `TargetInventory` | target-discovery-design.md |
+| AI target recommendations | hf-discovery + hf-prompt + hf-service + hf-storage | `TargetAssessment`, durable `RankedDiscoveryStatus` and `RankedDiscoveryResult` | ai-target-ranking-gui-design.md + target-discovery-design.md |
 | Semgrep target enrichment | hf-discovery + hf-service | `SemgrepFinding`, `SemgrepTargetScore`, `SemgrepInventoryView` | target-discovery-design.md + service-orchestration-design.md |
 | Project build context | hf-service + hf-discovery + hf-core | optional legacy context; authoritative configured input resolution, `BuildContext`, `CompileEntry` | harness-generation-design.md |
 | Harness generation | hf-harness | `Harness`, `HarnessDraft` | harness-generation-design.md |

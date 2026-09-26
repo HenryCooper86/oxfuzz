@@ -6,6 +6,8 @@
 //! ensures every build / fuzz run goes through `hf-runtime` sandboxing
 //! (Engineering Protocol 2.12).
 
+#[cfg(feature = "ai-target-ranking")]
+mod ai_target_ranking;
 pub(crate) mod build_context;
 mod campaign_allocation;
 #[cfg(feature = "campaign-health")]
@@ -13,6 +15,8 @@ mod campaign_health;
 #[cfg(feature = "campaign-trust")]
 mod campaign_trust;
 mod chat;
+#[cfg(feature = "ai-target-ranking")]
+pub use ai_target_ranking::{RankedDiscoveryResult, RankedDiscoveryStatus, RankedInventoryAdvice};
 #[cfg(feature = "concolic-enrichment")]
 mod concolic;
 mod corpus;

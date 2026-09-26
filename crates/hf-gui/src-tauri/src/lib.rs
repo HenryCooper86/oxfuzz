@@ -7,9 +7,16 @@
 mod closeout_commands;
 mod commands;
 mod coverage_experiment_commands;
+#[cfg(feature = "ai-target-ranking")]
+mod ranked_discovery_commands;
 mod state;
 mod work_order_commands;
 
+#[cfg(feature = "ai-target-ranking")]
+use ranked_discovery_commands::{
+    ranked_discovery_cancel, ranked_discovery_result, ranked_discovery_retry,
+    ranked_discovery_start, ranked_discovery_status,
+};
 use state::AppState;
 use tauri::Manager;
 
@@ -109,6 +116,16 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             discover,
+            #[cfg(feature = "ai-target-ranking")]
+            ranked_discovery_start,
+            #[cfg(feature = "ai-target-ranking")]
+            ranked_discovery_status,
+            #[cfg(feature = "ai-target-ranking")]
+            ranked_discovery_result,
+            #[cfg(feature = "ai-target-ranking")]
+            ranked_discovery_cancel,
+            #[cfg(feature = "ai-target-ranking")]
+            ranked_discovery_retry,
             semgrep_available,
             #[cfg(feature = "semgrep-enrichment")]
             semgrep_enrich,

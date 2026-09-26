@@ -31,7 +31,7 @@ pub async fn rank(
         if let Some(c) = inventory
             .candidates
             .iter_mut()
-            .find(|c| c.symbol == update.symbol)
+            .find(|c| c.relative_file() == update.relative_file && c.symbol == update.symbol)
         {
             if (0.0..=1.0).contains(&update.fit_score) {
                 c.fit_score = update.fit_score;
@@ -52,6 +52,7 @@ pub async fn rank(
 
 #[derive(Debug, Deserialize)]
 struct RankUpdate {
+    relative_file: String,
     symbol: String,
     fit_score: f64,
     rationale: String,

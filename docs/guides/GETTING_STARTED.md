@@ -169,6 +169,13 @@ CVE Binary Tool is not part of this integration.
 | **3. Run fuzzer** | Launch an enabled engine against the promoted harness under bounded sandbox limits. |
 | **4. Triage crashes** | Collect crashes, remove duplicates, minimize reproducers, classify severity, and prepare reports for review. |
 
+In the Discover screen, scan-ranked targets appear first. If an AI provider is
+configured, the list updates after assessment and explains bug potential,
+reachable code, and harness feasibility for each assessed target. **Scan only**
+means that target has no AI assessment. You still choose a target yourself with
+**Use this target and continue**. A failed assessment leaves scan results
+available and offers **Retry AI assessment** without another source scan.
+
 The Harness screen makes its internal qualification flow explicit: generate,
 compile in the sandbox, run bounded smoke qualification, review and promote,
 then generate a seed corpus. Promotion is stored against the exact active

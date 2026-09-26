@@ -40,9 +40,17 @@ sandbox and engine readiness, retained evidence, harness promotion state,
 recent campaigns, and crash handoff. A blocked requirement stays visible
 instead of being hidden behind a generic status.
 
-**1. Discover the attack surface.** Point oxfuzz at a C/C++ project and it
-scans for fuzzable functions, ranking them into a Target Inventory by fit score,
-input surface, complexity, and reachability from entry points.
+**1. Discover the attack surface.** Choose a project and language, then click
+**Discover**. A scan-ranked Target Inventory appears first. When AI is
+configured, oxfuzz assesses promising targets automatically and updates the
+same list once. The first assessed target is marked **Recommended first**;
+each assessed card shows bug potential, reachable code, harness feasibility,
+an advisory score, and an explanation beside the unchanged scan score.
+Unassessed targets say **Scan only** and keep their scan order. If no provider
+is configured, **AI Settings** opens setup. If assessment fails, **Retry AI
+assessment** uses the retained scan without rescanning. You choose the target
+explicitly before continuing to Harness. Semgrep enrichment remains a
+separate action after assessment finishes.
 
 ![Discover -- ranked Target Inventory](../screenshots/discover.png)
 

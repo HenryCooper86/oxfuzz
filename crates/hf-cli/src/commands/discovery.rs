@@ -1,6 +1,7 @@
 use hf_service::ServiceContainer;
 #[cfg(feature = "semgrep-enrichment")]
 use hf_service::TargetLanguage;
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::args::AiOption;
@@ -16,7 +17,7 @@ pub(crate) async fn cmd_discover(
     let lang = parse_lang(lang)?;
     let container = ServiceContainer::bootstrap().await;
     #[cfg(feature = "native-analysis")]
-    let mut inv = {
+    let inv = {
         let analyzed = container.discover_analyzed(&project, lang).await?;
         for line in native_overlay_lines(&analyzed) {
             eprintln!("{line}");
@@ -24,13 +25,17 @@ pub(crate) async fn cmd_discover(
         analyzed.inventory
     };
     #[cfg(not(feature = "native-analysis"))]
-    let mut inv = container.discover(&project, lang).await?;
+    let inv = container.discover(&project, lang).await?;
     if rank {
-        let (ranked, note) = rank_inventory(&container, inv, ai).await?;
-        inv = ranked;
+        #[cfg(feature = "ai-target-ranking")]
+        let (ranked, note) = rank_inventory(&container, inv, lang, ai).await?;
+        #[cfg(not(feature = "ai-target-ranking"))]
+        let (ranked, note) = rank_inventory(&container, &inv, lang, ai)?;
         if let Some(note) = note {
             eprintln!("{note}");
         }
+        println!("{}", serde_json::to_string_pretty(&ranked)?);
+        return Ok(());
     }
     println!("{}", serde_json::to_string_pretty(&inv)?);
     Ok(())
@@ -45,45 +50,78 @@ pub(crate) async fn cmd_discover(
 /// last case matters because a configured-but-unreachable provider previously
 /// failed the whole command, which is not what "use the model if you can"
 /// should do.
-#[cfg(not(feature = "semgrep-enrichment"))]
+#[cfg(all(not(feature = "semgrep-enrichment"), feature = "ai-target-ranking"))]
 async fn rank_inventory(
     container: &ServiceContainer,
     inventory: hf_service::TargetInventory,
+    language: hf_service::TargetLanguage,
     ai: AiOption,
-) -> anyhow::Result<(hf_service::TargetInventory, Option<String>)> {
-    if ai == AiOption::Off {
-        return Ok((
-            inventory,
-            Some("note: --ai off; ranking with heuristic scores only".to_owned()),
-        ));
+) -> anyhow::Result<(serde_json::Value, Option<String>)> {
+    let advice = container
+        .rank_discovered_inventory(inventory, language, ai.into())
+        .await?;
+    let note = ranking_note(advice.reason_code.as_deref());
+    Ok((ranked_advice_value(&advice)?, note))
+}
+
+#[cfg(all(
+    not(feature = "semgrep-enrichment"),
+    not(feature = "ai-target-ranking")
+))]
+fn rank_inventory(
+    _container: &ServiceContainer,
+    inventory: &hf_service::TargetInventory,
+    _language: hf_service::TargetLanguage,
+    ai: AiOption,
+) -> anyhow::Result<(serde_json::Value, Option<String>)> {
+    if ai != AiOption::Off {
+        anyhow::bail!("AI target ranking is unsupported in this build");
     }
-    if container.provider_pool().is_none() {
-        if ai == AiOption::Require {
-            anyhow::bail!(
-                "--ai require: LLM ranking was required but no provider is configured; \
-                 set HF_PROVIDER_API_KEY"
-            );
-        }
-        return Ok((
-            inventory,
-            Some(
-                "warning: --rank requested but HF_PROVIDER_API_KEY not set; \
-                 using heuristic scores only"
-                    .to_owned(),
-            ),
-        ));
-    }
-    match container.rank(inventory.clone()).await {
-        Ok(ranked) => Ok((ranked, None)),
-        Err(error) if ai == AiOption::Require => Err(anyhow::anyhow!(
-            "--ai require: LLM ranking was required but the model call failed: {error}"
-        )),
-        Err(error) => Ok((
-            inventory,
-            Some(format!(
-                "warning: LLM ranking failed ({error}); using heuristic scores only"
-            )),
-        )),
+    Ok((
+        serde_json::json!({"inventory": inventory, "ranking_source": "heuristic", "reason_code": "ai_off", "assessments": [], "candidate_sources": candidate_source_rows(inventory, &[])}),
+        Some("note: --ai off; ranking with heuristic scores only".to_owned()),
+    ))
+}
+
+fn candidate_source_rows(
+    inventory: &hf_service::TargetInventory,
+    assessed_ids: &[uuid::Uuid],
+) -> Vec<serde_json::Value> {
+    let assessed: HashSet<_> = assessed_ids.iter().copied().collect();
+    inventory
+        .candidates
+        .iter()
+        .map(|candidate| {
+            serde_json::json!({
+                "target_id": candidate.id,
+                "source": if assessed.contains(&candidate.id) { "ai_assessed" } else { "scan_only" },
+            })
+        })
+        .collect()
+}
+
+#[cfg(feature = "ai-target-ranking")]
+fn ranked_advice_value(
+    advice: &hf_service::RankedInventoryAdvice,
+) -> Result<serde_json::Value, serde_json::Error> {
+    let assessed_ids = advice
+        .assessments
+        .iter()
+        .map(|assessment| assessment.target_id)
+        .collect::<Vec<_>>();
+    let mut value = serde_json::to_value(advice)?;
+    value["candidate_sources"] =
+        serde_json::Value::Array(candidate_source_rows(&advice.inventory, &assessed_ids));
+    Ok(value)
+}
+
+#[cfg(feature = "ai-target-ranking")]
+fn ranking_note(reason: Option<&str>) -> Option<String> {
+    match reason {
+        Some("ai_off") => Some("note: --ai off; ranking with heuristic scores only".to_owned()),
+        Some("no_provider") => Some("warning: --rank requested but no AI provider is configured; using heuristic scores only".to_owned()),
+        Some(reason) => Some(format!("warning: AI ranking used heuristic scores for some targets ({reason})")),
+        None => None,
     }
 }
 
@@ -185,9 +223,9 @@ trait DiscoverCommandService {
     async fn rank_targets(
         &self,
         inventory: hf_service::TargetInventory,
-    ) -> Result<hf_service::TargetInventory, hf_service::ClassifiedError>;
-
-    fn has_provider(&self) -> bool;
+        language: TargetLanguage,
+        ai: AiOption,
+    ) -> Result<hf_service::RankedInventoryAdvice, hf_service::ClassifiedError>;
 
     async fn start_semgrep(
         &self,
@@ -229,12 +267,11 @@ impl DiscoverCommandService for ServiceContainer {
     async fn rank_targets(
         &self,
         inventory: hf_service::TargetInventory,
-    ) -> Result<hf_service::TargetInventory, hf_service::ClassifiedError> {
-        self.rank(inventory).await
-    }
-
-    fn has_provider(&self) -> bool {
-        self.provider_pool().is_some()
+        language: TargetLanguage,
+        ai: AiOption,
+    ) -> Result<hf_service::RankedInventoryAdvice, hf_service::ClassifiedError> {
+        self.rank_discovered_inventory(inventory, language, ai.into())
+            .await
     }
 
     async fn start_semgrep(
@@ -418,38 +455,33 @@ where
     };
     #[cfg(not(feature = "native-analysis"))]
     let mut inventory = service.discover_targets(&project, language).await?;
+    let mut advice = None;
     if rank {
-        // Same three meanings as the non-semgrep path; see `rank_inventory`.
-        if ai == AiOption::Off {
-            output.stderr_line("note: --ai off; ranking with heuristic scores only".to_owned());
-        } else if service.has_provider() {
-            match service.rank_targets(inventory.clone()).await {
-                Ok(ranked) => inventory = ranked,
-                Err(error) if ai == AiOption::Require => {
-                    anyhow::bail!(
-                        "--ai require: LLM ranking was required but the model call \
-                         failed: {error}"
-                    );
-                }
-                Err(error) => output.stderr_line(format!(
-                    "warning: LLM ranking failed ({error}); using heuristic scores only"
-                )),
-            }
-        } else if ai == AiOption::Require {
-            anyhow::bail!(
-                "--ai require: LLM ranking was required but no provider is configured; \
-                 set HF_PROVIDER_API_KEY"
-            );
-        } else {
-            output.stderr_line(
-                "warning: --rank requested but HF_PROVIDER_API_KEY not set; using heuristic scores only"
-                    .to_owned(),
-            );
+        let ranked = service.rank_targets(inventory, language, ai).await?;
+        #[cfg(feature = "ai-target-ranking")]
+        if let Some(note) = ranking_note(ranked.reason_code.as_deref()) {
+            output.stderr_line(note);
         }
+        inventory = ranked.inventory.clone();
+        advice = Some(ranked);
     }
     if !semgrep {
-        output.stdout_line(serde_json::to_string_pretty(&inventory)?);
+        output.stdout_line(match advice {
+            Some(ranked) => serde_json::to_string_pretty(&ranked_advice_value(&ranked)?)?,
+            None => serde_json::to_string_pretty(&inventory)?,
+        });
         return Ok(());
+    }
+    if let Some(ranked) = &advice {
+        let assessed_ids = ranked
+            .assessments
+            .iter()
+            .map(|assessment| assessment.target_id)
+            .collect::<Vec<_>>();
+        output.stderr_line(format!(
+            "AI target sources: {}",
+            serde_json::to_string(&candidate_source_rows(&ranked.inventory, &assessed_ids))?
+        ));
     }
     if !matches!(language, TargetLanguage::C | TargetLanguage::Cpp) {
         anyhow::bail!("Semgrep enrichment supports only C and C++ target inventories");
@@ -478,8 +510,9 @@ mod semgrep_cli_tests {
     use uuid::Uuid;
 
     use super::{
-        bootstrap_discover_service, run_discover_command, semgrep_poll_action, semgrep_state_name,
-        DiscoverCommandOutput, DiscoverCommandService, SemgrepPollAction,
+        bootstrap_discover_service, candidate_source_rows, run_discover_command,
+        semgrep_poll_action, semgrep_state_name, DiscoverCommandOutput, DiscoverCommandService,
+        SemgrepPollAction,
     };
     use crate::args::AiOption;
 
@@ -550,13 +583,36 @@ mod semgrep_cli_tests {
         async fn rank_targets(
             &self,
             _inventory: TargetInventory,
-        ) -> Result<TargetInventory, ClassifiedError> {
+            _language: TargetLanguage,
+            ai: AiOption,
+        ) -> Result<hf_service::RankedInventoryAdvice, ClassifiedError> {
+            if ai == AiOption::Require && !self.provider_available {
+                return Err(ClassifiedError::Provider(
+                    "AI ranking requires a configured provider".to_owned(),
+                ));
+            }
+            if ai == AiOption::Off || !self.provider_available {
+                return Ok(hf_service::RankedInventoryAdvice {
+                    inventory: self.discovered.clone(),
+                    assessments: Vec::new(),
+                    ranking_source: hf_service::RankingSource::Heuristic,
+                    reason_code: Some(
+                        if ai == AiOption::Off {
+                            "ai_off"
+                        } else {
+                            "no_provider"
+                        }
+                        .to_owned(),
+                    ),
+                });
+            }
             self.events.lock().unwrap().push("rank".to_owned());
-            Ok(self.ranked.clone())
-        }
-
-        fn has_provider(&self) -> bool {
-            self.provider_available
+            Ok(hf_service::RankedInventoryAdvice {
+                inventory: self.ranked.clone(),
+                assessments: Vec::new(),
+                ranking_source: hf_service::RankingSource::Heuristic,
+                reason_code: None,
+            })
         }
 
         async fn start_semgrep(
@@ -619,6 +675,25 @@ mod semgrep_cli_tests {
             candidates: Vec::new(),
             call_graph: HashMap::new(),
         }
+    }
+
+    #[test]
+    fn ranked_json_labels_assessed_and_scan_only_candidates() {
+        let first = Uuid::from_u128(1);
+        let second = Uuid::from_u128(2);
+        let inventory: TargetInventory = serde_json::from_value(serde_json::json!({
+            "project_root": "/tmp/project",
+            "candidates": [
+                {"id": first, "project_root": "/tmp/project", "language": "C", "symbol": "parse", "kind": "Parser", "location": {"file": "src/a.c", "line": 1, "col": 1}, "signature": null, "input_surface": "Bytes", "complexity": 3, "fit_score": 0.9, "sanitizers": [], "rationale": ""},
+                {"id": second, "project_root": "/tmp/project", "language": "C", "symbol": "parse", "kind": "Parser", "location": {"file": "src/b.c", "line": 1, "col": 1}, "signature": null, "input_surface": "Bytes", "complexity": 3, "fit_score": 0.8, "sanitizers": [], "rationale": ""}
+            ],
+            "call_graph": {}
+        })).unwrap();
+        let rows = candidate_source_rows(&inventory, &[second]);
+        assert_eq!(rows[0]["target_id"], first.to_string());
+        assert_eq!(rows[0]["source"], "scan_only");
+        assert_eq!(rows[1]["target_id"], second.to_string());
+        assert_eq!(rows[1]["source"], "ai_assessed");
     }
 
     fn result(operation_id: Uuid) -> SemgrepInventoryView {
@@ -723,8 +798,10 @@ mod semgrep_cli_tests {
         assert_eq!(service.event_names(), ["discover"]);
         assert_eq!(
             output.stderr,
-            ["warning: --rank requested but HF_PROVIDER_API_KEY not set; using heuristic scores only"]
+            ["warning: --rank requested but no AI provider is configured; using heuristic scores only"]
         );
+        let json: serde_json::Value = serde_json::from_str(&output.stdout[0]).unwrap();
+        assert_eq!(json["candidate_sources"], serde_json::json!([]));
     }
 
     #[tokio::test]

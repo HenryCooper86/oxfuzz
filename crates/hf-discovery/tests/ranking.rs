@@ -94,8 +94,8 @@ fn cand(symbol: &str) -> TargetCandidate {
 async fn rank_merges_llm_rationale_and_scores() {
     let llm = MockRanker {
         response: r#"[
-            {"symbol":"parse_value","fit_score":0.95,"rationale":"Top-level JSON parser taking raw bytes."},
-            {"symbol":"parse_array","fit_score":0.88,"rationale":"Recursive array parser with allocations."}
+            {"relative_file":"src/json.c","symbol":"parse_value","fit_score":0.95,"rationale":"Top-level JSON parser taking raw bytes."},
+            {"relative_file":"src/json.c","symbol":"parse_array","fit_score":0.88,"rationale":"Recursive array parser with allocations."}
         ]"#
         .to_owned(),
     };
@@ -128,6 +128,43 @@ async fn rank_merges_llm_rationale_and_scores() {
     assert!(
         (ws.fit_score - 0.5).abs() < 1e-6,
         "unranked candidate keeps heuristic score"
+    );
+}
+
+#[tokio::test]
+async fn rank_updates_only_the_matching_file_and_symbol() {
+    let llm = MockRanker {
+        response: r#"[
+            {"relative_file":"src/alternate.c","symbol":"parse_value","fit_score":0.95,"rationale":"The alternate parser handles untrusted bytes."}
+        ]"#
+            .to_owned(),
+    };
+    let first = cand("parse_value");
+    let mut second = cand("parse_value");
+    second.location.file = PathBuf::from("src/alternate.c");
+    let inv = TargetInventory {
+        project_root: PathBuf::from("/p"),
+        candidates: vec![first, second],
+        call_graph: std::collections::HashMap::new(),
+    };
+
+    let ranked = rank(inv, Box::new(llm)).await.expect("rank should succeed");
+    let original = ranked
+        .candidates
+        .iter()
+        .find(|candidate| candidate.relative_file() == "src/json.c")
+        .expect("original parser present");
+    let alternate = ranked
+        .candidates
+        .iter()
+        .find(|candidate| candidate.relative_file() == "src/alternate.c")
+        .expect("alternate parser present");
+    assert_eq!(original.fit_score.to_bits(), 0.5_f64.to_bits());
+    assert!(original.rationale.is_empty());
+    assert_eq!(alternate.fit_score.to_bits(), 0.95_f64.to_bits());
+    assert_eq!(
+        alternate.rationale,
+        "The alternate parser handles untrusted bytes."
     );
 }
 

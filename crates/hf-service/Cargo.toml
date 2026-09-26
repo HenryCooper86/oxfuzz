@@ -9,7 +9,8 @@ description = "Business logic orchestrating discovery, harness, engine, crash, c
 # hf-automotive dependency and compiles the feature-absent orchestration paths.
 [features]
 campaign-allocation = []
-default = ["campaign-allocation", "automotive-lab", "automotive-scapy", "campaign-health", "build-context", "concolic-enrichment", "build-doctor", "campaign-trust", "change-aware", "coverage-blockers", "coverage-experiments", "harness-tournament", "harness-work-order", "native-analysis", "oracle-studio", "patch-to-proof", "proof-carrying", "run-closeout", "semgrep-enrichment", "triage-disposition", "unreached-surface"]
+default = ["ai-target-ranking", "campaign-allocation", "automotive-lab", "automotive-scapy", "campaign-health", "build-context", "concolic-enrichment", "build-doctor", "campaign-trust", "change-aware", "coverage-blockers", "coverage-experiments", "harness-tournament", "harness-work-order", "native-analysis", "oracle-studio", "patch-to-proof", "proof-carrying", "run-closeout", "semgrep-enrichment", "triage-disposition", "unreached-surface"]
+ai-target-ranking = ["hf-discovery/ai-target-ranking"]
 automotive-scapy = ["dep:hf-automotive", "hf-automotive/automotive-scapy"]
 build-context = ["hf-discovery/build-context"]
 build-doctor = ["build-context"]

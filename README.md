@@ -43,6 +43,7 @@ of every term.
 | --- | --- |
 | **Operational Dashboard** | Readiness, harness-review state, recent campaigns, crash handoff, and evidence counts in one operator-focused view. |
 | **Target Discovery** | Semantic + static-analysis scan of a project producing a ranked Target Inventory (fit score, input surface, complexity, call-graph reachability). |
+| **AI Target Recommendations** | Discover shows scan results first, then automatically ranks promising targets by bug potential, reachable code, and harness feasibility; every AI score is explained and the original scan score remains visible. |
 | **Optional Semgrep Enrichment** | Explicit C/C++-only enrichment adds capped, advisory static-analysis signals from a pinned offline rules snapshot without changing normal discovery. |
 | **Harness Generation** | LLM-authored, compile-validated, smoke-fuzzed harnesses per target. |
 | **Engine Integration** | AFL++, honggfuzz, libFuzzer, and syzkaller behind one `EngineAdapter` trait. |

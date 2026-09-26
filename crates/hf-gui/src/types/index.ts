@@ -152,6 +152,41 @@ export interface TargetInventory {
   call_graph?: Record<string, string[]>;
 }
 
+export type RankedDiscoveryState = "scanning" | "ranking" | "completed" | "failed" | "cancelled" | "interrupted";
+export type RankingSource = "pending" | "ai" | "mixed" | "heuristic";
+
+export interface TargetAssessment {
+  target_id: string;
+  bug_potential: number;
+  reachable_code: number | null;
+  harness_feasibility: number;
+  rationale: string;
+  advisory_score: number;
+}
+
+export interface RankedDiscoveryStatus {
+  operation_id: string;
+  state: RankedDiscoveryState;
+  revision: number;
+  assessed_count: number;
+  total_count: number;
+  reason_code: string | null;
+}
+
+export interface RankedDiscoveryResult {
+  operation_id: string;
+  revision: number;
+  project_root: string;
+  language: string;
+  scanned_at: string;
+  inventory: TargetInventory;
+  assessments: TargetAssessment[];
+  assessed_count: number;
+  total_count: number;
+  ranking_source: RankingSource;
+  reason_code: string | null;
+}
+
 export type SemgrepOperationState =
   | "staging"
   | "scanning"

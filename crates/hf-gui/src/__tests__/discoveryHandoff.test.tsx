@@ -13,7 +13,16 @@ vi.mock("../providers/pipeline", () => ({ usePipeline: () => ({ markDone: mocks.
 it("retains results across navigation and explicitly hands the chosen target to Harness", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   const candidate = { id: "one", symbol: "parse", fit_score: 0.8, kind: "Function", complexity: 2, location: { file: "parse.c", line: 1 } };
-  mocks.invoke.mockImplementation(async command => command === "discover" ? { candidates: [candidate], call_graph: {} } : false);
+  const inventory = { candidates: [candidate], call_graph: {} };
+  mocks.invoke.mockImplementation(async command => {
+    if (command === "ranked_discovery_start") return "op-1";
+    if (command === "ranked_discovery_status") return { operation_id: "op-1", state: "completed", revision: 2 };
+    if (command === "ranked_discovery_result") return {
+      operation_id: "op-1", revision: 2, inventory, assessments: [], assessed_count: 0,
+      total_count: 1, ranking_source: "heuristic", reason_code: "no_provider",
+    };
+    return false;
+  });
   const host = document.createElement("div"); const root = createRoot(host); const navigate = vi.fn();
   const render = (show: boolean) => <I18nProvider><DiscoveryProvider>{show && <DiscoverView embedded onNavigate={navigate} />}</DiscoveryProvider></I18nProvider>;
   try {
@@ -23,7 +32,7 @@ it("retains results across navigation and explicitly hands the chosen target to 
     await act(async () => root.render(render(false)));
     await act(async () => root.render(render(true)));
     expect(host.textContent).toContain("parse");
-    expect(mocks.invoke.mock.calls.filter(([c]) => c === "discover")).toHaveLength(1);
+    expect(mocks.invoke.mock.calls.filter(([c]) => c === "ranked_discovery_start")).toHaveLength(1);
     await act(async () => [...host.querySelectorAll("button")].find(b => b.textContent?.includes("Use this target"))!.click());
     expect(mocks.setTarget).toHaveBeenCalled(); expect(navigate).toHaveBeenCalledWith("harness");
   } finally { await act(async () => root.unmount()); vi.unstubAllGlobals(); }

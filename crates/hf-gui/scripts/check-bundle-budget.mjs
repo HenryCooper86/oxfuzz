@@ -21,7 +21,9 @@ function budget(name, fallback) {
 const limits = {
   initial: budget("HF_GUI_INITIAL_JS_BUDGET", 800_000),
   chunk: budget("HF_GUI_MAX_CHUNK_BUDGET", 800_000),
-  app: budget("HF_GUI_APP_JS_BUDGET", 1_400_000),
+  // Progressive discovery status, factor explanations, and paired translations
+  // add about 7 KiB to the application graph; keep a narrow 1.42 MB ceiling.
+  app: budget("HF_GUI_APP_JS_BUDGET", 1_420_000),
   vendor: budget("HF_GUI_VENDOR_JS_BUDGET", 3_700_000),
 };
 

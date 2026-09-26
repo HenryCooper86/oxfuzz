@@ -5,7 +5,11 @@
 //! forward-only migrations on connect, and exposes typed repository methods for
 //! runs, targets, harnesses, crashes, and corpus entries.
 
+mod ai_ranking_store;
 mod build_profile_store;
+pub use ai_ranking_store::{
+    AiDiscoveryRecord, AiDiscoveryState, AiRankBatchRecord, AiRankingSource,
+};
 mod run_function_coverage;
 pub use run_function_coverage::RunFunctionCoverageRecord;
 mod coverage_experiment_store;

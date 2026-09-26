@@ -161,6 +161,8 @@ impl ServiceContainer {
         let store = Store::connect(path)
             .await
             .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
+        #[cfg(feature = "ai-target-ranking")]
+        store.interrupt_active_ai_discoveries().await?;
         Ok(self.with_store(Arc::new(store)))
     }
 
@@ -316,6 +318,12 @@ impl ServiceContainer {
                 (None, PersistenceAvailability::Unavailable)
             }
         };
+        #[cfg(feature = "ai-target-ranking")]
+        if let Some(store) = &store {
+            if let Err(error) = store.interrupt_active_ai_discoveries().await {
+                tracing::error!(%error, "could not mark interrupted AI discovery operations");
+            }
+        }
         #[cfg(feature = "harness-work-order")]
         let work_order_recovery_ready = recover_harness_work_order_attempts(store.as_ref()).await;
         #[cfg(feature = "semgrep-enrichment")]

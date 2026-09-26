@@ -137,7 +137,8 @@ persisted tool and prompt paths.
 
 ## 4. Orchestration Flow
 
-1. `discover` -> `TargetInventory` persisted; HITL selects targets.
+1. `discover` -> `TargetInventory` persisted; the progressive Discover operation
+   publishes that scan first, then an optional AI assessment. HITL selects targets.
 2. For each selected target: `generate_harness` -> compile -> persisted smoke
    evidence (`SmokePassed`).
 3. HITL explicitly promotes the exact revision -> `run_fuzz` -> streaming
@@ -150,6 +151,20 @@ persisted tool and prompt paths.
 harness. It does not generate, repair, refine, or promote code in a headless
 flow, and its outcome reports only work that it actually performed. Harness
 generation and repair remain separate reviewable operations.
+
+`hf-service` owns `start_ranked_discovery`, status/result reads, cancellation,
+and retry. A start creates a durable operation, authorizes discovery, scans,
+and publishes revision 1 before any provider call. It then records each exact
+prompt and resolved model before dispatch and publishes one revision 2 overlay
+after all batches settle. The base `fit_score` stays unchanged. At most 64
+candidates enter AI assessment in batches of at most 16; each prompt is at
+most 32 KiB. Missing, malformed, or failed AI output leaves usable heuristic
+results, with source and reason recorded. Cancellation prevents late
+publication; bootstrap marks unfinished operations interrupted without
+discarding a published scan. Retry uses the retained scan under a new UUID.
+Presentation layers only start and poll the operation. REST reads authorize
+the operation's project, and desktop/browser Discover shows the scan before
+the final assessed order. See [AI Target Ranking in Discover](ai-target-ranking-gui-design.md).
 
 Every engine-specific harness or execution entrypoint first resolves the
 service-owned fuzzing policy. A disabled engine, zero duration, or request above
@@ -791,7 +806,8 @@ successful observation time. Status polling never prepares Docker or builds an
 image. Sandbox preparation is an explicit desktop action in setup/settings and
 uses the selected architecture; the browser explains that the server owns it.
 
-Discovery results remain in the shared GUI context by project and language while
+Discovery results and the active ranking operation remain in the shared GUI
+context by project and language while
 navigating. Finishing discovery does not auto-advance: users review and select a
 candidate, then explicitly continue to harness creation. Empty discovery does not
 complete the step. Specialist project-entry routes converge on the guided flow.

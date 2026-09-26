@@ -184,6 +184,8 @@ pub use container::{
     RunSummary, SchedulableTarget, SeedEntry, SeedRegenerationOutcome, SeedSurvivalReport,
     ServiceContainer, SystemSnapshot, SyzkallerRunOpts, SyzkallerSummary,
 };
+#[cfg(feature = "ai-target-ranking")]
+pub use container::{RankedDiscoveryResult, RankedDiscoveryStatus, RankedInventoryAdvice};
 #[cfg(feature = "coverage-blockers")]
 pub use coverage_blockers::{
     CoverageBlocker, CoverageBlockerRequest, CoverageBlockerView, MeasurementStatus,
@@ -217,6 +219,8 @@ pub use harness_work_order::{
     WorkOrderSeedReference, WorkOrderSourceEvidence, WorkOrderStep, WorkOrderSubmissionOrigin,
     WorkOrderTargetEvidence, HARNESS_WORK_ORDER_SCHEMA_VERSION,
 };
+#[cfg(feature = "ai-target-ranking")]
+pub use hf_storage::{AiDiscoveryState as RankedDiscoveryState, AiRankingSource as RankingSource};
 pub use hf_storage::{AutoRevertEvent, GuardrailDecisionRecord, ProjectAutoRevert};
 #[cfg(feature = "harness-work-order")]
 pub use hf_storage::{HarnessWorkOrderAttemptStage, HarnessWorkOrderAttemptStatus};

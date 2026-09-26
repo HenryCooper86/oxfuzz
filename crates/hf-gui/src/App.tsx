@@ -233,7 +233,7 @@ function AppInner() {
                 )}
                 {activeView === "workflow" && (
                   <ViewCanvas>
-                    <WorkflowView />
+                    <WorkflowView onNavigate={navigate} />
                   </ViewCanvas>
                 )}
                 {activeView === "discover" && (

@@ -150,7 +150,7 @@ pub(crate) struct DiscoverArgs {
     /// Target language (c, cpp, rust, go, python).
     #[arg(long)]
     pub(crate) lang: String,
-    /// Enable LLM-assisted ranking (requires `HF_PROVIDER_API_KEY`).
+    /// Assess target candidates with a configured AI provider when available.
     #[arg(long)]
     pub(crate) rank: bool,
     /// How `--rank` may use the model: `auto` warns and keeps heuristic

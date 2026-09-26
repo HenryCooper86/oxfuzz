@@ -142,16 +142,15 @@ class GateDispatcherTests(unittest.TestCase):
         self.assertEqual(recorded[1], "cargo clippy")
         self.assertEqual(recorded[2], "cargo check")
         self.assertEqual(recorded[3], "cargo clippy")
-        self.assertEqual(recorded[4], "cargo clippy")
-        self.assertEqual(recorded[24], "cargo clippy")
-        self.assertEqual(recorded[25], "cargo test")
-        self.assertEqual(recorded[26], "cargo doc")
-        self.assertEqual(recorded[27], "cargo-deny")
-        self.assertEqual(recorded[28], "cargo-llvm-cov")
-        self.assertEqual(recorded[29], "python3")
-        self.assertEqual(recorded[30], "python3")
-        self.assertEqual(recorded[31], "npm --prefix crates/hf-gui ci")
-        self.assertEqual(recorded[35], "npm --prefix crates/hf-gui run lint")
+        test_index = recorded.index("cargo test")
+        self.assertEqual(recorded[4:test_index], ["cargo clippy"] * (test_index - 4))
+        self.assertEqual(recorded[test_index + 1], "cargo doc")
+        self.assertEqual(recorded[test_index + 2], "cargo-deny")
+        self.assertEqual(recorded[test_index + 3], "cargo-llvm-cov")
+        self.assertEqual(recorded[test_index + 4], "python3")
+        self.assertEqual(recorded[test_index + 5], "python3")
+        self.assertEqual(recorded[test_index + 6], "npm --prefix crates/hf-gui ci")
+        self.assertEqual(recorded[test_index + 10], "npm --prefix crates/hf-gui run lint")
 
     def test_named_subset_runs_only_those_gates(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -191,6 +190,7 @@ class GateDispatcherTests(unittest.TestCase):
             recorded = log.read_text(encoding="utf-8").splitlines()
         self.assertEqual(result.returncode, 0, result.stderr)
         features = [
+            "ai-target-ranking",
             "campaign-allocation",
             "automotive-lab",
             "automotive-scapy",

@@ -56,6 +56,16 @@ oxfuzz work-order qualify --submission <submission UUID>
 oxfuzz work-order promote --attempt <attempt UUID>
 ```
 
+`--rank` uses AI assessment when a provider is available. The JSON includes
+the ordered inventory, per-target UUID assessments, `candidate_sources`
+(`ai_assessed` or `scan_only` in inventory order), `ranking_source`, and a
+reason when it falls back to scan ranking. `--ai auto` keeps scan results when
+the provider is missing or fails; `--ai require` reports an error if AI cannot
+assess every admitted target; `--ai off` uses scan ranking only. AI assessment
+considers at most 64 targets in batches of 16, and leaves every original
+`fit_score` unchanged. The desktop Discover screen runs this assessment
+automatically after its initial scan and displays the three factors directly.
+
 ### 4. Run and inspect the campaign
 
 ```bash
@@ -114,7 +124,7 @@ Binary Tool integration is outside this release's scope.
 | --- | --- |
 | `init` | Scaffold config from templates and create/migrate the database. |
 | `doctor [--engine <e> [--duration <d>] [--require-provider]] [--json]` | Probe Docker and bundled engines. With `--engine`, enforce selected-engine availability and run policy; optionally require provider configuration. Exit non-zero on failure. |
-| `discover <project> --lang c [--rank] [--semgrep]` | Scan a project and produce a ranked Target Inventory; `--semgrep` explicitly adds advisory C/C++ enrichment. |
+| `discover <project> --lang c [--rank] [--ai auto\|require\|off] [--semgrep]` | Scan a project; `--rank` requests service-owned AI assessment, and `--semgrep` explicitly adds separate C/C++ enrichment. |
 | `harness <project> --target <sym> --engine <e> [--draft-only] [--repair N] [--refine] [--promote]` | Write, compile (optionally auto-repair or coverage-refine), and smoke-qualify a newly generated harness. Without `--promote`, review the output; rerunning creates another draft. Use the retained Work Order flow below when approval must name a previously reviewed source. |
 | `work-order export\|import\|list\|submissions\|qualify\|rank\|promote ...` | Manage immutable external harness packets, submissions, qualification attempts, deterministic ranking, and exact-attempt promotion. |
 | `run <project> --target <sym> --engine <e> --duration 60m` | Run a sandboxed campaign with the active promoted harness (Ctrl-C cancels cooperatively). A file-qualified selector is `<relative-file>::<complete-symbol>`; a retained Work Order run always uses that complete selector. |
@@ -278,7 +288,8 @@ new experiment. After the later run terminates, refresh the experiment and
 explicitly attach its run UUID. Failed/cancelled/no-op outcomes remain visible;
 an edge delta is descriptive and does not prove entry into the goal function.
 
-The REST API exposes discovery, harness, user-space run start/status/cancel,
+The REST API exposes deterministic discovery and start/status/result/cancel/retry
+for progressive AI discovery, plus harness, user-space run start/status/cancel,
 corpus, triage, reporting, and management endpoints. Syzkaller remains a
 trusted-local-desktop workflow because its kernel, rootfs, SSH, and VM inputs
 require a stronger boundary.

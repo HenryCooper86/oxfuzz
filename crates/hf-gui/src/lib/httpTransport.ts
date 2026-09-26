@@ -30,6 +30,11 @@ interface CommandEndpoint {
 
 const COMMAND_MAP: Record<string, CommandEndpoint> = {
   discover: { method: "POST", path: "/discover" },
+  ranked_discovery_start: { method: "POST", path: "/discover/operations" },
+  ranked_discovery_status: { method: "GET", path: "/discover/operations/{operation_id}" },
+  ranked_discovery_result: { method: "GET", path: "/discover/operations/{operation_id}/result" },
+  ranked_discovery_cancel: { method: "POST", path: "/discover/operations/{operation_id}/cancel", emptyBody: true },
+  ranked_discovery_retry: { method: "POST", path: "/discover/operations/{operation_id}/retry", emptyBody: true },
   semgrep_available: { method: "GET", path: "/semgrep/available" },
   semgrep_enrich: { method: "POST", path: "/semgrep/enrich" },
   semgrep_status: { method: "GET", path: "/semgrep/enrich/{operation_id}" },
@@ -566,6 +571,11 @@ export function createHttpTransport(options: HttpTransportOptions = {}): Transpo
       if (command === "run_fuzzer" || command === "replay_run") return runFuzzer(command, args, options) as Promise<T>;
       if (command === "cancel_run") return cancelActiveRun(args) as Promise<T>;
       if (command === "semgrep_enrich") return startSemgrep(args) as Promise<T>;
+      if (command === "ranked_discovery_start" || command === "ranked_discovery_retry") {
+        const started = await request<{ operation_id: string }>(COMMAND_MAP[command], args, options);
+        if (!started.operation_id) throw new Error("Ranked discovery did not return an operation id");
+        return started.operation_id as T;
+      }
       if (command === "semgrep_cancel") {
         return cancelSemgrep(args, options) as Promise<T>;
       }
