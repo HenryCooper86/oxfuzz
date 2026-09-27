@@ -121,6 +121,46 @@ mod collection {
             .any(|(key, value)| key == "LLVM_PROFILE_FILE" && value == PROFILE_FILE)
     }
 
+    pub(in crate::container) fn stage_input_workspace(
+        config: &FuzzRunConfig,
+        workspace: &Path,
+        historical: bool,
+    ) -> Result<(), ClassifiedError> {
+        if !requested(config) {
+            return Ok(());
+        }
+        let mountpoint = workspace.join("function-coverage");
+        if historical {
+            let metadata = std::fs::symlink_metadata(&mountpoint).map_err(|error| {
+                ClassifiedError::Validation(format!(
+                    "retained function-coverage mountpoint is missing: {error}"
+                ))
+            })?;
+            if !metadata.file_type().is_dir() {
+                return Err(ClassifiedError::Validation(
+                    "retained function-coverage mountpoint is not a directory".to_owned(),
+                ));
+            }
+            let mut entries = std::fs::read_dir(&mountpoint).map_err(|error| {
+                ClassifiedError::Validation(format!(
+                    "read retained function-coverage mountpoint: {error}"
+                ))
+            })?;
+            if entries.next().is_some() {
+                return Err(ClassifiedError::Validation(
+                    "retained function-coverage mountpoint is not empty".to_owned(),
+                ));
+            }
+        } else {
+            std::fs::create_dir(&mountpoint).map_err(|error| {
+                ClassifiedError::Validation(format!(
+                    "reserved function-coverage path cannot be created: {error}"
+                ))
+            })?;
+        }
+        Ok(())
+    }
+
     pub(in crate::container) fn prepare(
         config: &FuzzRunConfig,
         artifacts: &RunArtifacts,
@@ -344,6 +384,77 @@ mod collection {
 }
 
 #[cfg(feature = "proof-carrying")]
-pub(super) use collection::{configure, prepare};
+pub(super) use collection::{configure, prepare, stage_input_workspace};
 #[cfg(feature = "proof-carrying")]
 pub(super) const PROFILE_FLAGS: [&str; 3] = collection::FLAGS;
+
+#[cfg(all(test, feature = "proof-carrying"))]
+mod staging_tests {
+    use super::collection::stage_input_workspace;
+    use hf_core::engine::FuzzRunConfig;
+
+    fn config(profile: bool) -> FuzzRunConfig {
+        let mut config: FuzzRunConfig = serde_json::from_value(serde_json::json!({
+            "harness_id": uuid::Uuid::nil(), "engine": "libfuzzer",
+            "duration": {"secs": 1, "nanos": 0}, "max_mem_mb": 512, "max_cpus": 1,
+            "seed_corpus": null, "sanitizer": "Address", "env": [], "extra_args": []
+        }))
+        .unwrap();
+        if profile {
+            config.env.push((
+                "LLVM_PROFILE_FILE".to_owned(),
+                "/work/function-coverage/%m.profraw".to_owned(),
+            ));
+        }
+        config
+    }
+
+    #[test]
+    fn new_profile_run_stages_an_empty_mountpoint_before_sealing() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let mut config = config(true);
+        stage_input_workspace(&config, &workspace, false).unwrap();
+        assert!(workspace.join("function-coverage").is_dir());
+        assert_eq!(
+            std::fs::read_dir(workspace.join("function-coverage"))
+                .unwrap()
+                .count(),
+            0
+        );
+        super::super::retained_inputs::seal(root.path(), "image", &mut config).unwrap();
+        super::super::retained_inputs::verify(root.path(), &config).unwrap();
+        std::fs::remove_dir(workspace.join("function-coverage")).unwrap();
+        assert!(super::super::retained_inputs::verify(root.path(), &config).is_err());
+    }
+
+    #[test]
+    fn new_profile_run_rejects_an_existing_project_path() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("function-coverage");
+        std::fs::write(&path, "project data").unwrap();
+        let error = stage_input_workspace(&config(true), root.path(), false).unwrap_err();
+        assert!(error.to_string().contains("reserved function-coverage"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "project data");
+    }
+
+    #[test]
+    fn replay_requires_the_retained_empty_mountpoint() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("function-coverage");
+        let error = stage_input_workspace(&config(true), root.path(), true).unwrap_err();
+        assert!(error.to_string().contains("retained function-coverage"));
+        std::fs::create_dir(&path).unwrap();
+        stage_input_workspace(&config(true), root.path(), true).unwrap();
+        std::fs::write(path.join("unexpected"), "data").unwrap();
+        assert!(stage_input_workspace(&config(true), root.path(), true).is_err());
+    }
+
+    #[test]
+    fn runs_without_profiles_leave_the_workspace_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        stage_input_workspace(&config(false), root.path(), false).unwrap();
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+}

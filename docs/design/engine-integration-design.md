@@ -204,6 +204,18 @@ dispatch. Missing legacy manifests are reported as unavailable; they cannot be
 reconstructed retrospectively. Identical inputs do not guarantee identical
 results from nondeterministic engines, thread scheduling, or external hardware.
 
+For opt-in C/C++ function profiles, stage an empty reserved
+`function-coverage` directory in the captured execution workspace before the
+manifest is sealed. The read-only `/work` bind mount then already contains the
+`/work/function-coverage` target for a separate writable raw-profile mount.
+An existing project path at that reserved name is rejected before run
+admission; it is never overlaid silently. The raw files stay in this run's
+disposable output directory, and replay copies and verifies the same empty
+mountpoint. Without the staged target, Docker cannot create a nested mountpoint
+inside a read-only parent and the campaign fails before the engine starts.
+Moving profile output into an unrecorded mutable workspace path would weaken
+the exact-input and read-only guarantees.
+
 ## Repeated userspace qualification
 
 The opt-in `scripts/qualify_engines.py` operator tool runs the existing

@@ -822,6 +822,17 @@ impl ServiceContainer {
             }
             return Err(error);
         }
+        #[cfg(feature = "proof-carrying")]
+        if let Err(error) = super::function_coverage::stage_input_workspace(
+            &config,
+            &artifacts.input_host.join("workspace"),
+            historical,
+        ) {
+            if let Some(run_root) = artifacts.output_host.parent() {
+                let _ignored_cleanup_error = std::fs::remove_dir_all(run_root);
+            }
+            return Err(error);
+        }
         if let Err(error) = super::retained_inputs::seal(
             &artifacts.input_host,
             sandbox_image.reference(),
