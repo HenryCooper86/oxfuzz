@@ -25,6 +25,7 @@ if [[ -n "${OXFUZZ_SANDBOX_PLATFORM:-}" ]]; then
     run_args+=(--platform "$OXFUZZ_SANDBOX_PLATFORM")
 fi
 docker build "${build_args[@]}" .
+./scripts/verify-sandbox-compilers.sh "$IMAGE"
 
 temp_base="${TMPDIR:-/tmp}"
 temp_base="$(cd "$temp_base" && pwd -P)"

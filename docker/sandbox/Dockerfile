@@ -180,7 +180,7 @@ RUN clang --version \
 # ---------------------------------------------------------------------------
 ARG SYMCC_COMMIT=3b8acabf06c83b92facccde7f6dfb191b1a163b3
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    clang-17 llvm-17 llvm-17-dev llvm-17-tools lld-17 \
+    clang-17 llvm-17 llvm-17-dev llvm-17-tools lld-17 libclang-rt-17-dev \
     libz3-dev z3 zlib1g-dev libzstd-dev \
     && git init /opt/symcc \
     && git -C /opt/symcc remote add origin https://github.com/eurecom-s3/symcc.git \

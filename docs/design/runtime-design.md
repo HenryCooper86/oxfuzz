@@ -20,6 +20,10 @@ and top-level installed tool versions. The canonical build script rejects a
 floating tag and runs a network-disabled, read-only toolchain smoke check after
 the build. Dockerfile verification steps are release gates and must fail rather
 than masking missing advertised tools.
+The smoke check also links a small C program with each advertised userspace
+compiler using the sanitizer and profile flags applied to live harnesses.
+Listing a compiler binary alone does not establish that its architecture's
+runtime libraries are installed.
 
 ## 2. Host Workspace Boundary
 
