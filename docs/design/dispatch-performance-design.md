@@ -60,6 +60,9 @@ profile and whether the checkout was clean. The checkers reject dirty source,
 missing fixture sizes, or missing samples. Retain
 raw JSON alongside the published quantiles so another reviewer can recompute
 them.
+On macOS 27, set `CARGO_PROFILE_RELEASE_STRIP=none` for a release-profile
+history run, as the desktop build does, so the system loader can load Rust
+proc-macro libraries.
 
 ## Rejected alternatives
 

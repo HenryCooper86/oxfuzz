@@ -32,11 +32,10 @@ to record results for pinned revisions and environments. Controlled tests do not
 replace these live checks.
 
 - [ ] Repeat the [dispatch and history baseline](docs/acceptance/performance-2026-09-27.md)
-  on named release-profile runners. The initial dispatch measurement is
-  release-profile, but retained-history measurements are debug-profile only.
-  The macOS 27 release build now succeeds with unstripped proc macros; the
-  retained-history release-profile baseline still needs measurement. Keep
-  history and campaign Stop objectives independent of dispatch.
+  on additional named release-profile runners. The macOS arm64 release-profile
+  dispatch and retained-history baselines are recorded; cross-platform
+  measurements remain open. Keep history and campaign Stop objectives
+  independent of dispatch.
   Owner: `hf-service` and test infrastructure maintainers.
 
 - [ ] Complete the [held-out effectiveness baseline](docs/acceptance/effectiveness-baseline-protocol.md).
