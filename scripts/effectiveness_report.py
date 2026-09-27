@@ -91,10 +91,12 @@ def validate_manifest(manifest, trial, project, condition, outcome):
     run_config = body.get("run_config")
     if not isinstance(run_config, dict):
         raise ValueError("campaign manifest run_config is missing")
-    for field in ("duration_secs", "max_mem_mb", "max_cpus", "sanitizer", "seed"):
+    for field in ("duration_secs", "max_mem_mb", "max_cpus", "seed"):
         wanted = trial["seed"] if field == "seed" else condition[field]
-        if run_config.get(field) != wanted:
+        if type(run_config.get(field)) is not int or run_config[field] != wanted:
             raise ValueError("campaign manifest {} differs from cohort".format(field))
+    if run_config.get("sanitizer") != condition["sanitizer"]:
+        raise ValueError("campaign manifest sanitizer differs from cohort")
     coverage = body.get("coverage")
     cost = body.get("cost")
     if not isinstance(coverage, dict) or not isinstance(cost, dict):

@@ -206,6 +206,21 @@ class ReportTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duration_secs"):
             assemble_report(cohort(), self.observations(manifest), self.root)
 
+    def test_manifest_integer_settings_reject_equal_decimal_values(self):
+        for field in ("duration_secs", "max_mem_mb", "max_cpus", "seed"):
+            value = campaign_manifest()
+            value["body"]["run_config"][field] = float(value["body"]["run_config"][field])
+            manifest = self.artifact("manifest.json", value)
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, field):
+                assemble_report(cohort(), self.observations(manifest), self.root)
+        plan = cohort()
+        plan["conditions"][0]["max_cpus"] = 1
+        value = campaign_manifest()
+        value["body"]["run_config"]["max_cpus"] = True
+        manifest = self.artifact("manifest.json", value)
+        with self.assertRaisesRegex(ValueError, "max_cpus"):
+            assemble_report(plan, self.observations(manifest), self.root)
+
     def test_artifact_hash_and_function_run_identity_are_checked(self):
         manifest = self.artifact("manifest.json", campaign_manifest())
         changed = copy.deepcopy(manifest)

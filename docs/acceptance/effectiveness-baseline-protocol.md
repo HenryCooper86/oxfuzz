@@ -51,6 +51,9 @@ The reader checks file hashes and joins service exports by run, binary,
 source snapshot, image, target, engine, and fixed run settings. It reports
 observed function entry only from a positive exact-run counter. A zero counter
 means `not_observed`, with a limitation, rather than proven non-entry.
+Duration, memory, CPU, and seed in a campaign manifest must retain their JSON
+integer types as well as their frozen values; equal decimal or boolean values
+are not accepted as the same settings.
 
 Current summaries cover terminal trial outcomes, peak edges, attributable
 model-plus-compute cost, and selected-function entry when measured. The report
