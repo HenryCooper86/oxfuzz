@@ -38,3 +38,5 @@ The later [service journal process-loss probe](service-recovery-process-2026-09-
 tests WAL replay and retained run status separately.
 The [backup/restore probe](backup-restore-2026-09-27.md) verifies a separate
 SQLite/WAL snapshot and immutable workspace copy.
+The [bounded fault suite](recovery-fault-runner-2026-09-27.md) combines the
+existing recovery tests into one revision-linked result.
