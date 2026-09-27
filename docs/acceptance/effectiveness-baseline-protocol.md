@@ -34,7 +34,8 @@ targets or finding publication are part of this baseline.
 
 The report reader accepts a separate JSON observation index with
 `schema_version: 1`, the same `cohort_id`, and exactly one entry per declared
-trial. Each entry has `id`, `outcome` (`completed`, `failed`, or `unavailable`),
+trial. Each entry has `id`, `outcome` (`completed`, `failed`, `cancelled`, or
+`unavailable`),
 `reason` (null for a completed trial), and `campaign_manifest` and
 `function_coverage` references. A reference has a path relative to the index
 and the SHA-256 of that exact JSON file; use null for an absent measurement.

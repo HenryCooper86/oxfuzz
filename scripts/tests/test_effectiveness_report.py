@@ -141,6 +141,23 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(report["outcomes"]["failed"], 1)
         self.assertEqual(report["trials"][0]["peak_edges"], {"status": "available", "value": 0})
 
+    def test_cancelled_campaign_keeps_terminal_measurements(self):
+        value = campaign_manifest(4)
+        value["body"]["status"] = "cancelled"
+        manifest = self.artifact("cancelled.json", value)
+        report = assemble_report(cohort(), self.observations(
+            manifest=manifest, outcome="cancelled", reason="operator stopped trial"), self.root)
+        self.assertEqual(report["outcomes"]["cancelled"], 1)
+        self.assertEqual(report["trials"][0]["peak_edges"], {"status": "available", "value": 4})
+
+    def test_cancelled_manifest_cannot_be_reported_as_failed(self):
+        value = campaign_manifest()
+        value["body"]["status"] = "cancelled"
+        manifest = self.artifact("cancelled.json", value)
+        with self.assertRaisesRegex(ValueError, "status"):
+            assemble_report(cohort(), self.observations(
+                manifest=manifest, outcome="failed", reason="operator stopped trial"), self.root)
+
     def test_manifest_must_match_frozen_source_image_target_and_budget(self):
         for field, replacement in [
             ("source_revision", "c" * 64),

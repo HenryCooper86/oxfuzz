@@ -15,7 +15,7 @@ from scripts.effectiveness_benchmark import (
 
 
 MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
-OUTCOMES = {"completed", "failed", "unavailable"}
+OUTCOMES = {"completed", "failed", "cancelled", "unavailable"}
 
 
 def unavailable(reason):
@@ -79,7 +79,7 @@ def validate_manifest(manifest, trial, project, condition, outcome):
         "engine": condition["engine"],
         "source_revision": project["source_sha256"],
         "sandbox_image_sha256": condition["sandbox_image_sha256"],
-        "status": "done" if outcome == "completed" else "failed",
+        "status": "done" if outcome == "completed" else outcome,
     }
     for field, wanted in expected.items():
         if body.get(field) != wanted:
