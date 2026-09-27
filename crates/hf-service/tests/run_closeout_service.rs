@@ -625,7 +625,6 @@ async fn cancelling_a_closeout_releases_its_lease() {
     );
     let runtime = BlockingRuntime::new();
     let first_container = ServiceContainer::new(runtime.clone(), None).with_store(store.clone());
-    let second_container = ServiceContainer::new(runtime.clone(), None).with_store(store);
     let run_id = seeded_run_at(&first_container, project.clone()).await;
     let workspace = hf_service::workspace_dir(&project, "parse_packet");
     std::fs::create_dir_all(workspace.join("out")).unwrap();
@@ -642,14 +641,28 @@ async fn cancelling_a_closeout_releases_its_lease() {
     let cancelled = first.await.unwrap_err();
     assert!(cancelled.is_cancelled());
 
+    let pending = store.closeout_steps(run_id).await.unwrap();
+    assert!(
+        pending.is_empty(),
+        "cancellation inside the first step cannot claim a completed outcome"
+    );
+    drop(store);
+    let reopened = Arc::new(
+        Store::connect(directory.path().join("cancelled.db"))
+            .await
+            .unwrap(),
+    );
+    let second_container = ServiceContainer::new(runtime.clone(), None).with_store(reopened);
+
     runtime.release.add_permits(1);
-    tokio::time::timeout(
+    let resumed = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         second_container.close_out_run(run_id),
     )
     .await
     .expect("retry remained blocked after cancellation")
     .unwrap();
+    assert_eq!(resumed.resumed_at, None);
 }
 
 #[tokio::test]
