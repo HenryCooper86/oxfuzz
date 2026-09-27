@@ -49,6 +49,7 @@ rust:
     - scripts/tests/gates.sh test
     - scripts/tests/gates.sh feature-behavior
     - scripts/tests/gates.sh doc
+    - scripts/tests/gates.sh performance
 
 frontend:
   stage: gate

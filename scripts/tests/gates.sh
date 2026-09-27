@@ -12,7 +12,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-ALL_GATES=(fmt clippy check check-no-default-features check-feature-matrix test feature-behavior doc deny coverage script-tests translation-pairing frontend-test frontend-lint)
+ALL_GATES=(fmt clippy check check-no-default-features check-feature-matrix test feature-behavior doc deny coverage performance script-tests translation-pairing frontend-test frontend-lint)
 
 # Keep the two package groups separate so each instrumented test run has an
 # explicit package set and its own report.
@@ -182,6 +182,13 @@ gate_coverage() {
     --domain-packages "${COVERAGE_DOMAIN_CRATES[@]}" \
     --infrastructure-packages "${COVERAGE_INFRASTRUCTURE_CRATES[@]}" \
     "${baseline_args[@]}"
+}
+
+gate_performance() {
+  # Compile the real dispatch benchmark and validate both retained-report
+  # formats. Timing thresholds run only on a named stable runner.
+  cargo bench -p hf-tools --bench dispatch --no-run
+  python3 -m unittest scripts.tests.test_dispatch_samples scripts.tests.test_history_samples
 }
 
 gate_script_tests() {

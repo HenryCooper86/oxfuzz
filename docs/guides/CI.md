@@ -6,8 +6,8 @@ the two cannot drift from the single source of truth.
 
 | Host | File | Gates | Purpose |
 | --- | --- | --- | --- |
-| GitHub Actions | `.github/workflows/ci.yml` | fourteen required gates, including Linux coverage | public repository |
-| GitLab CI | `.gitlab-ci.yml` | fourteen required gates, including Linux coverage | current OrbStack origin |
+| GitHub Actions | `.github/workflows/ci.yml` | fifteen required gates, including Linux coverage and performance tooling | public repository |
+| GitLab CI | `.gitlab-ci.yml` | fifteen required gates, including Linux coverage and performance tooling | current OrbStack origin |
 
 `scripts/tests/gates.sh` is authoritative. Run it locally before pushing:
 
@@ -16,15 +16,17 @@ scripts/tests/gates.sh            # every gate, in ENGINEERING_PROTOCOL.md 4.5 o
 scripts/tests/gates.sh clippy test  # only the named gates
 ```
 
-The fourteen available gates: `fmt`, `clippy`, `check`,
+The fifteen available gates: `fmt`, `clippy`, `check`,
 `check-no-default-features`, `check-feature-matrix`, `test`, `doc`, `deny`,
-`feature-behavior`, `coverage`, `script-tests`, `translation-pairing`,
+`feature-behavior`, `coverage`, `performance`, `script-tests`, `translation-pairing`,
 `frontend-test`, and `frontend-lint`. The feature-behavior gate executes
 disabled API responses and selected standalone-feature service tests.
 Both CI systems retain structured per-crate coverage reports. The Linux job
 enforces the [recorded baseline](../../config/quality/coverage-baseline.json)
 and fails if a package is missing or its line coverage regresses. On other
-hosts the same gate reports a diagnostic measurement.
+hosts the same gate reports a diagnostic measurement. The performance gate
+compiles the dispatch benchmark and tests the retained-report validators; it
+does not impose timing thresholds on shared CI runners.
 
 `translation-pairing` needs only a Python interpreter -- not even git -- so it
 runs beside `script-tests` rather than behind the Rust gates. A documentation

@@ -554,12 +554,72 @@ async fn proof_card_read_rejects_a_finding_owned_by_another_project() {
 #[tokio::test]
 #[ignore = "manual actual-service profile; no CI timing threshold"]
 async fn profile_retained_multi_target_finding_queue() {
+    let output = std::env::var_os("OXFUZZ_HISTORY_REPORT")
+        .expect("name an output file for retained history samples");
+    let runner = std::env::var("OXFUZZ_PERFORMANCE_RUNNER").expect("name the performance runner");
+    assert!(!runner.trim().is_empty());
+    let output = PathBuf::from(output);
+    assert!(output.is_absolute(), "history report path must be absolute");
+    let mut cases = Vec::new();
+    for (targets_per_project, runs_per_target) in [(80, 20), (80, 40), (160, 40)] {
+        let mut first_query_us = Vec::new();
+        let mut repeat_query_us = Vec::new();
+        let mut preparation_us = Vec::new();
+        for trial in 0..5 {
+            let (preparation, queries) =
+                profile_finding_queue_fixture(targets_per_project, runs_per_target).await;
+            preparation_us.push(preparation);
+            first_query_us.push(queries[0]);
+            repeat_query_us.extend_from_slice(&queries[1..]);
+            eprintln!(
+                "queue_profile trial={trial} targets={} runs={} preparation_us={preparation} first_query_us={}",
+                targets_per_project * 2 + 1,
+                targets_per_project * runs_per_target * 2,
+                queries[0]
+            );
+        }
+        cases.push(serde_json::json!({
+            "targets": targets_per_project * 2 + 1,
+            "runs": targets_per_project * runs_per_target * 2,
+            "preparation_us": preparation_us,
+            "first_query_us": first_query_us,
+            "repeat_query_us": repeat_query_us,
+        }));
+    }
+    let command_output = |program: &str, args: &[&str]| {
+        let result = std::process::Command::new(program)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "profile identity command failed");
+        String::from_utf8(result.stdout).unwrap().trim().to_owned()
+    };
+    let report = serde_json::json!({
+        "schema_version": 1,
+        "environment": {
+            "runner": runner,
+            "revision": command_output("git", &["rev-parse", "HEAD"]),
+            "clean": command_output("git", &["status", "--porcelain"]).is_empty(),
+            "rustc": command_output("rustc", &["--version"]),
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
+        },
+        "cases": cases,
+    });
+    std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+    std::fs::write(output, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+}
+
+async fn profile_finding_queue_fixture(
+    targets_per_project: usize,
+    runs_per_target: usize,
+) -> (u128, Vec<u128>) {
+    let preparation_started = std::time::Instant::now();
     let (container, _directory, template_target, template_harness) = fixture().await;
     let store = container.store().unwrap();
-    // Eighty active targets, twenty with findings, and twenty retained runs each.
-    // A second project carries the same amount of unrelated retained history.
     for project in ["/project-a", "/project-b"] {
-        for index in 0..80 {
+        for index in 0..targets_per_project {
             let mut target = template_target.clone();
             target.id = Uuid::new_v4();
             target.project_root = PathBuf::from(project);
@@ -569,8 +629,13 @@ async fn profile_retained_multi_target_finding_queue() {
             harness.target_id = target.id;
             store.upsert_target(&target, Utc::now()).await.unwrap();
             store.upsert_harness(&harness).await.unwrap();
-            for age in 0..20 {
-                let retained = run(project, harness.id, EngineKind::LibFuzzer, -age);
+            for age in 0..runs_per_target {
+                let retained = run(
+                    project,
+                    harness.id,
+                    EngineKind::LibFuzzer,
+                    -i64::try_from(age).unwrap(),
+                );
                 store.insert_run(&retained).await.unwrap();
                 if index < 20 && age % 5 == 0 {
                     store
@@ -581,14 +646,16 @@ async fn profile_retained_multi_target_finding_queue() {
             }
         }
     }
-    for sample in 0..6 {
+    let preparation_us = preparation_started.elapsed().as_micros();
+    let mut query_us = Vec::with_capacity(6);
+    for _ in 0..6 {
         let start = std::time::Instant::now();
         let items = container
             .finding_review_queue(Path::new("/project-a"), FindingReviewFilter::default())
             .await
             .unwrap();
-        let elapsed = start.elapsed();
-        assert_eq!(items.len(), 80);
+        let elapsed_us = start.elapsed().as_micros();
+        assert_eq!(items.len(), 20 * runs_per_target.div_ceil(5));
         assert_eq!(
             items
                 .iter()
@@ -596,8 +663,9 @@ async fn profile_retained_multi_target_finding_queue() {
                 .count(),
             20
         );
-        eprintln!("queue_profile sample={sample} targets=161 runs=3200 findings=160 selected_findings=80 debug_assertions={} elapsed_us={}", cfg!(debug_assertions), elapsed.as_micros());
+        query_us.push(elapsed_us);
     }
+    (preparation_us, query_us)
 }
 
 #[tokio::test]

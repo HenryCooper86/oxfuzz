@@ -86,6 +86,9 @@ jobs:
       - name: Docs
         run: scripts/tests/gates.sh doc
 
+      - name: Performance measurement tooling
+        run: scripts/tests/gates.sh performance
+
   cross-platform:
     name: ${{ matrix.label }} tests
     runs-on: ${{ matrix.os }}

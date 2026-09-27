@@ -19,6 +19,7 @@ class GateDispatcherTests(unittest.TestCase):
         for path in (REPOSITORY_ROOT / ".github/workflows/ci.yml", REPOSITORY_ROOT / ".gitlab-ci.yml"):
             with self.subTest(pipeline=path):
                 self.assertIn("scripts/tests/gates.sh check-feature-matrix", path.read_text())
+                self.assertIn("scripts/tests/gates.sh performance", path.read_text())
 
     def test_ci_runs_feature_behavior_and_retains_coverage_reports(self) -> None:
         for path in (REPOSITORY_ROOT / ".github/workflows/ci.yml", REPOSITORY_ROOT / ".gitlab-ci.yml"):
@@ -111,6 +112,21 @@ class GateDispatcherTests(unittest.TestCase):
             result = self.run_gates(["feature-behavior"], stub_dir)
         self.assertNotEqual(result.returncode, 0)
 
+    def test_performance_gate_compiles_benchmark_and_checks_report_parsers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            stub_dir = pathlib.Path(directory)
+            cargo_log = stub_dir / "cargo-commands"
+            python_log = stub_dir / "python-commands"
+            self.make_stub(stub_dir, "cargo", f'echo "$*" >> "{cargo_log}"\nexit 0')
+            self.make_stub(stub_dir, "python3", f'echo "$*" >> "{python_log}"\nexit 0')
+            result = self.run_gates(["performance"], stub_dir)
+            cargo = cargo_log.read_text() if cargo_log.exists() else ""
+            python = python_log.read_text() if python_log.exists() else ""
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("bench -p hf-tools --bench dispatch --no-run", cargo)
+        self.assertIn("test_dispatch_samples", python)
+        self.assertIn("test_history_samples", python)
+
     def test_dependency_policy_gate_denies_warning_level_findings(self) -> None:
         """Dependency advisories must not pass merely because they are warnings."""
         with tempfile.TemporaryDirectory() as directory:
@@ -191,9 +207,9 @@ class GateDispatcherTests(unittest.TestCase):
         # One assertion per gate in ALL_GATES, in order. check-no-default-features
         # invokes Clippy for the feature-absent build, so it shows up as a second
         # Clippy entry. The feature-matrix gate then invokes Clippy once per
-        # product feature. script-tests and
-        # translation-pairing both invoke python3, so they show up as two
-        # consecutive "python3" entries. frontend-test runs npm four times
+        # product feature. The coverage parser, performance parser tests,
+        # script-tests, and translation-pairing invoke python3. The
+        # performance gate also compiles the benchmark. frontend-test runs npm four times
         # (ci, test, run build); only the first call is asserted here since it
         # alone identifies that the gate ran in the right position, and
         # frontend-lint's single call follows it.
@@ -207,9 +223,11 @@ class GateDispatcherTests(unittest.TestCase):
         self.assertEqual(recorded[test_index + 6], "cargo doc")
         self.assertEqual(recorded[test_index + 7], "cargo-deny")
         self.assertEqual(recorded[test_index + 8:test_index + 12], ["cargo-llvm-cov"] * 4)
-        self.assertEqual(recorded[test_index + 12:test_index + 15], ["python3"] * 3)
-        self.assertEqual(recorded[test_index + 15], "npm --prefix crates/hf-gui ci")
-        self.assertEqual(recorded[test_index + 19], "npm --prefix crates/hf-gui run lint")
+        self.assertEqual(recorded[test_index + 12], "python3")
+        self.assertEqual(recorded[test_index + 13], "cargo bench")
+        self.assertEqual(recorded[test_index + 14:test_index + 17], ["python3"] * 3)
+        self.assertEqual(recorded[test_index + 17], "npm --prefix crates/hf-gui ci")
+        self.assertEqual(recorded[test_index + 21], "npm --prefix crates/hf-gui run lint")
 
     def test_named_subset_runs_only_those_gates(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
