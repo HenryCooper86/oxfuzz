@@ -27,6 +27,10 @@ scenario checklist and [Support Matrix](../guides/SUPPORT_MATRIX.md) for the
 claims that these records may qualify. Run every generated harness through
 `hf-runtime` only after exact-source review and human approval.
 
+The [2026-09-27 performance record](performance-2026-09-27.md) provides a
+sanitized example for a no-harness benchmark, with raw samples and separate
+executor and history claims.
+
 For desktop publication, the draft release contains a hidden
 `oxfuzz-release-acceptance` JSON block. Enter the candidate commit and reviewed
 HTTPS record URL plus `sha256:` digest for `userspace_engines`,

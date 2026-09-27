@@ -1,6 +1,6 @@
 # Dispatch and retained-history performance
 
-Status: measurement implemented; baseline pending. Owner: `hf-tools`, `hf-agent`, and
+Status: local baseline recorded. Owner: `hf-tools`, `hf-agent`, and
 `hf-service` maintainers.
 
 ## Measurement definition
@@ -48,6 +48,9 @@ Criterion provides repeatable benchmark execution; a small result checker
 validates sample count and computes exact quantiles from retained observations.
 Parser tests reject missing, nonfinite, or mismatched samples before any timing
 claim is published.
+
+The first clean-revision result and its raw samples are in the
+[2026-09-27 performance record](../acceptance/performance-2026-09-27.md).
 
 Use an absolute report path because Cargo starts the benchmark in its crate
 directory. Run the ignored service profile through `scripts/cargo-test-filtered.sh`

@@ -27,6 +27,13 @@ Use the [capability acceptance checklist](docs/guides/CAPABILITY_ACCEPTANCE.md)
 to record results for pinned revisions and environments. Controlled tests do not
 replace these live checks.
 
+- [ ] Repeat the [dispatch and history baseline](docs/acceptance/performance-2026-09-27.md)
+  on named release-profile runners. The initial dispatch measurement is
+  release-profile, but retained-history measurements are debug-profile only;
+  the macOS 27 release build failed while loading a generated `sqlx-macros`
+  library. Keep history and campaign Stop objectives independent of dispatch.
+  Owner: `hf-service` and test infrastructure maintainers.
+
 - [ ] Qualify benign reviewed harnesses on libFuzzer, AFL++, and honggfuzz:
   build, bounded smoke, exact-attempt promotion, campaign, corpus retention,
   Stop, and cleanup. Generated source requires review and human approval before
