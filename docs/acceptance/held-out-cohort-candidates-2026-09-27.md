@@ -16,8 +16,29 @@ fuzzing targets. Three implementations of one input format support an initial
 C-parser comparison, but cannot establish language or target-class parity.
 
 The archive digests identify these review snapshots. They are **not** the
-service's `oxfuzz-run-source-v1` digest of the staged build inputs, which must
-be computed and frozen in the cohort before execution. Also fix the sandbox
-image ID, provider/model, corpus, campaign and model budgets, and trial seeds.
+service's `oxfuzz-run-source-v1` digest of the staged build inputs, calculated
+for a curated subset below and still to be frozen in the cohort. Also fix the
+sandbox image ID, provider/model, corpus, campaign and model budgets, and trial
+seeds.
 Review the exact source and generated harness independently, obtain human
 approval for execution, then build and run only through `hf-runtime`.
+
+A private curated snapshot now contains exactly the two listed C/header files
+for each project at
+`/Users/admin/.codex/qualification-evidence/b1-curated-c-sources-2026-09-27/`.
+Its `manifest.json` SHA-256 is
+`1e8c8820f5abcd4276e90c80c46361dcb216a4d2a37eeabb29ad727210a9d782`.
+Each copied file was byte-compared with `git show HEAD:<path>` at its pinned
+revision. With no other staged source files, the service's source-digest
+algorithm (`oxfuzz-run-source-v1`, sorted relative paths, NUL separators)
+produces these candidate values:
+
+| Curated project | Candidate staged-source SHA-256 |
+| --- | --- |
+| cJSON | `40bf8aa4f015a902780e8c3434b73b1707a6092de135df4251717e65e6674322` |
+| yyjson | `834f84f2a9b46367e671826064ae5653fc3af7f5f272e55c3412bbabe8cd5947` |
+| mjson | `d08d2ca4435421c9827619ce846d3d56be39fe5783286a18aabbf2de04e38f11` |
+
+These are preparation values, not retained campaign evidence. The actual
+service-staged source digest must match before a trial is accepted. The curated
+files have not been compiled, imported into an approved workspace, or run.
