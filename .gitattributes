@@ -14,3 +14,4 @@ crates/hf-storage/migrations/** text eol=lf
 
 # Live qualification approval hashes these exact source bytes on every host.
 examples/qualification/*.c text eol=lf
+examples/qualification/rust/** text eol=lf
