@@ -134,8 +134,8 @@ gate_deny() {
 }
 
 gate_coverage() {
-  # Measure all named packages before setting the Linux no-regression baseline.
-  # The parser rejects missing data even during this measurement phase.
+  # Linux CI enforces the checked-in baseline. Other hosts report measurements
+  # because the Linux source set cannot describe their platform-specific code.
   local binary
   if command -v cargo-llvm-cov >/dev/null; then
     binary="$(command -v cargo-llvm-cov)"
@@ -170,11 +170,18 @@ gate_coverage() {
   }
   coverage_group "${coverage_reports}/domain.json" "${COVERAGE_DOMAIN_CRATES[@]}"
   coverage_group "${coverage_reports}/infrastructure.json" "${COVERAGE_INFRASTRUCTURE_CRATES[@]}"
+  local baseline_args=(--measure)
+  if [ "$(uname -s)" = Linux ]; then
+    baseline_args=(--baseline config/quality/coverage-baseline.json)
+  else
+    echo "Coverage is diagnostic on $(uname -s); the enforced baseline is Linux-only."
+  fi
   python3 scripts/check_coverage.py \
     --domain "${coverage_reports}/domain.json" \
     --infrastructure "${coverage_reports}/infrastructure.json" \
     --domain-packages "${COVERAGE_DOMAIN_CRATES[@]}" \
-    --infrastructure-packages "${COVERAGE_INFRASTRUCTURE_CRATES[@]}" --measure
+    --infrastructure-packages "${COVERAGE_INFRASTRUCTURE_CRATES[@]}" \
+    "${baseline_args[@]}"
 }
 
 gate_script_tests() {

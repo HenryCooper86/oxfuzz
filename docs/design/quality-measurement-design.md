@@ -1,6 +1,6 @@
 # Coverage and feature-behavior measurement
 
-Status: implementation in progress. Owner: repository tooling and test
+Status: Linux baseline enforced. Owner: repository tooling and test
 maintainers. This design implements A4 of the project gap assessment.
 
 ## Scope and result
@@ -13,8 +13,9 @@ that package. Test source, dependencies, generated code, and code compiled only
 on other operating systems are outside this Linux report. The report records
 that limitation and must not be presented as cross-platform coverage.
 
-The planned checked-in baseline stores line counts and covered counts from a passing
-Linux run on the pinned Rust toolchain. Every required package must appear with
+The checked-in baseline stores line counts and covered counts from the successful
+Linux CI run at revision `9dd9846da166f259c954f6869a7e29d21aeffd23` on the
+pinned Rust toolchain. Every required package must appear with
 nonzero measured lines. Missing or malformed report data fails the job. The
 current percentage must not fall below its recorded baseline percentage;
 comparison uses integer counts rather than rounded displayed percentages.
@@ -41,12 +42,19 @@ service operation or wire route whose absence matters to users.
 
 ## Deployment
 
-The gate first runs in measurement mode to obtain a trusted Linux baseline.
-After the baseline is reviewed, GitHub's aggregate `All gates passed` job and
-GitLab's gate stage require coverage validation and feature behavior. A missing
+The Linux gate now enforces `config/quality/coverage-baseline.json`; GitHub's
+aggregate `All gates passed` job and GitLab's gate stage require coverage
+validation and feature behavior. On other hosts the gate reports diagnostic
+measurements because the measured source set differs. A missing
 tool, missing report, failed test, or incomplete package measurement fails the
 gate. A lower initial percentage is reported as work to close, not silently
 accepted as the final standard.
+
+The initial Linux result covers 18 crates. All four domain packages exceed
+80%; `hf-runtime` is at 707/1120 lines (63.12%), below its 70% infrastructure
+target. Its baseline prevents regression while focused runtime tests close
+the remaining gap. No improvement to this package is claimed by enabling the
+gate.
 
 ## Rejected alternatives
 

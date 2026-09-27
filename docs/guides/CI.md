@@ -6,8 +6,8 @@ the two cannot drift from the single source of truth.
 
 | Host | File | Gates | Purpose |
 | --- | --- | --- | --- |
-| GitHub Actions | `.github/workflows/ci.yml` | thirteen required gates; coverage is informational | public repository |
-| GitLab CI | `.gitlab-ci.yml` | thirteen required gates; coverage is informational | current OrbStack origin |
+| GitHub Actions | `.github/workflows/ci.yml` | fourteen required gates, including Linux coverage | public repository |
+| GitLab CI | `.gitlab-ci.yml` | fourteen required gates, including Linux coverage | current OrbStack origin |
 
 `scripts/tests/gates.sh` is authoritative. Run it locally before pushing:
 
@@ -21,9 +21,10 @@ The fourteen available gates: `fmt`, `clippy`, `check`,
 `feature-behavior`, `coverage`, `script-tests`, `translation-pairing`,
 `frontend-test`, and `frontend-lint`. The feature-behavior gate executes
 disabled API responses and selected standalone-feature service tests.
-Both CI systems retain structured per-crate coverage reports. Coverage is
-informational until a Linux no-regression baseline is reviewed; GitHub omits
-it from `gates-passed` and GitLab marks the measurement job optional.
+Both CI systems retain structured per-crate coverage reports. The Linux job
+enforces the [recorded baseline](../../config/quality/coverage-baseline.json)
+and fails if a package is missing or its line coverage regresses. On other
+hosts the same gate reports a diagnostic measurement.
 
 `translation-pairing` needs only a Python interpreter -- not even git -- so it
 runs beside `script-tests` rather than behind the Rust gates. A documentation
@@ -33,14 +34,15 @@ Rust image has no `python3`.
 
 ## GitHub Actions
 
-`ci.yml` runs on every push and pull request in four parallel jobs: Rust gates
-and frontend gates and dependency policy on Linux, plus a `cross-platform`
-matrix that runs `check` and `test` on macOS and Windows. It needs no secrets.
+`ci.yml` runs on every push and pull request in five parallel jobs: Rust gates,
+frontend gates, dependency policy, and coverage on Linux, plus a
+`cross-platform` matrix that runs `check` and `test` on macOS and Windows. It
+needs no secrets.
 Going cross-platform surfaced five real bugs on the first run of each new
 platform, so compile-and-test truth is gated everywhere the desktop app ships;
 style gates stay Linux-only, and `release.yml` builds the four bundles on tag.
 
-A fifth job, `gates-passed`, aggregates the other four and is the single check
+A sixth job, `gates-passed`, aggregates the other five and is the single check
 branch protection should require. Two reasons it exists rather than requiring
 each job by name:
 
@@ -56,8 +58,8 @@ Linux, and Windows when a `v*` tag is pushed. It first checks that the tag and
 three version manifests agree, then opens a single draft and has each platform
 upload into it. Before publication, it waits for the latest push-triggered
 `ci.yml` run on the exact tag commit and requires its `All gates passed` job to
-succeed. The informational coverage job remains informational. It checks that
-all seven required installers are uploaded, nonempty, and have SHA-256 digests.
+succeed, including the Linux coverage baseline. It checks that all seven
+required installers are uploaded, nonempty, and have SHA-256 digests.
 It records the CI
 run and asset digests in the release body. It also requires the editable draft
 acceptance record to name reviewed evidence URLs and hashes for userspace

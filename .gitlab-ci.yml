@@ -111,8 +111,6 @@ supply-chain:
 coverage:
   stage: gate
   image: rust:1.94
-  # Measurement only until a Linux baseline is reviewed and committed.
-  allow_failure: true
   variables:
     CARGO_HOME: $CI_PROJECT_DIR/.cargo
   cache:

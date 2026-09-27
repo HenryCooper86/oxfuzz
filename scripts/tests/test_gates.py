@@ -27,6 +27,11 @@ class GateDispatcherTests(unittest.TestCase):
                 self.assertIn("scripts/tests/gates.sh feature-behavior", source)
                 self.assertIn("scripts/tests/gates.sh coverage", source)
                 self.assertIn("target/coverage/*.json", source)
+        github = (REPOSITORY_ROOT / ".github/workflows/ci.yml").read_text()
+        gitlab = (REPOSITORY_ROOT / ".gitlab-ci.yml").read_text()
+        self.assertIn("needs: [rust, cross-platform, frontend, supply-chain, coverage]", github)
+        self.assertIn("needs.coverage.result == 'success'", github)
+        self.assertNotIn("allow_failure: true", gitlab)
 
     def make_stub(self, directory: pathlib.Path, name: str, body: str) -> None:
         """Place an executable stub named `name` in `directory`."""
@@ -124,6 +129,7 @@ class GateDispatcherTests(unittest.TestCase):
             stub_dir = pathlib.Path(directory)
             target = stub_dir / "target"
             log = stub_dir / "coverage-commands"
+            parser_log = stub_dir / "coverage-parser"
             self.make_stub(
                 stub_dir,
                 "cargo-llvm-cov",
@@ -134,11 +140,13 @@ class GateDispatcherTests(unittest.TestCase):
                 '  chmod 000 "$CARGO_TARGET_DIR/llvm-cov-target/oxfuzz-owned.profraw"\n'
                 'fi\nexit 0',
             )
-            self.make_stub(stub_dir, "python3", 'exit 0')
+            self.make_stub(stub_dir, "python3", f'echo "$*" > "{parser_log}"\nexit 0')
+            self.make_stub(stub_dir, "uname", 'echo Linux')
             result = self.run_gates(
                 ["coverage"], stub_dir, extra_env={"CARGO_TARGET_DIR": str(target)}
             )
             recorded = log.read_text().splitlines()
+            parser_args = parser_log.read_text() if parser_log.exists() else ""
             owned = target / "llvm-cov-target" / "oxfuzz-owned.profraw"
             owner_can_read = owned.exists() and bool(owned.stat().st_mode & stat.S_IRUSR)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -148,6 +156,7 @@ class GateDispatcherTests(unittest.TestCase):
         self.assertIn("llvm-cov --no-report -p hf-provider", recorded[2])
         self.assertIn("llvm-cov report --json --summary-only -p hf-provider", recorded[3])
         self.assertTrue(owner_can_read)
+        self.assertIn("--baseline config/quality/coverage-baseline.json", parser_args)
 
     def test_unknown_gate_name_is_rejected_with_the_valid_list(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

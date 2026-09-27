@@ -116,6 +116,34 @@ class CoverageReportTests(unittest.TestCase):
         self.assertIn("hf-engine: 8/10", result.stdout)
         self.assertIn("hf-runtime: 7/10", result.stdout)
 
+    def test_cli_enforces_a_complete_linux_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            domain = root / "domain.json"
+            infrastructure = root / "infrastructure.json"
+            baseline = root / "baseline.json"
+            domain.write_text(json.dumps(report(file_entry("hf-engine", "lib.rs", 10, 8))))
+            infrastructure.write_text(json.dumps(report(file_entry("hf-runtime", "lib.rs", 10, 7))))
+            baseline.write_text(json.dumps({
+                "schema_version": 1, "platform": sys.platform,
+                "packages": {
+                    "hf-engine": {"lines": 10, "covered": 8},
+                    "hf-runtime": {"lines": 10, "covered": 7},
+                },
+            }))
+            command = [
+                sys.executable, str(ROOT / "scripts/check_coverage.py"),
+                "--domain", str(domain), "--infrastructure", str(infrastructure),
+                "--domain-packages", "hf-engine", "--infrastructure-packages", "hf-runtime",
+                "--baseline", str(baseline),
+            ]
+            passing = subprocess.run(command, capture_output=True, text=True, check=False)
+            self.assertEqual(passing.returncode, 0, passing.stderr)
+            domain.write_text(json.dumps(report(file_entry("hf-engine", "lib.rs", 10, 7))))
+            failing = subprocess.run(command, capture_output=True, text=True, check=False)
+            self.assertNotEqual(failing.returncode, 0)
+            self.assertIn("hf-engine line coverage regressed", failing.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

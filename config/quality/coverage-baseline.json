@@ -1,0 +1,79 @@
+{
+  "packages": {
+    "hf-context": {
+      "covered": 1327,
+      "lines": 1414
+    },
+    "hf-crash": {
+      "covered": 1442,
+      "lines": 1552
+    },
+    "hf-diagnostics": {
+      "covered": 752,
+      "lines": 907
+    },
+    "hf-discovery": {
+      "covered": 1711,
+      "lines": 1862
+    },
+    "hf-engine": {
+      "covered": 1000,
+      "lines": 1096
+    },
+    "hf-guardrails": {
+      "covered": 518,
+      "lines": 545
+    },
+    "hf-harness": {
+      "covered": 1651,
+      "lines": 1863
+    },
+    "hf-knowledge": {
+      "covered": 1988,
+      "lines": 2046
+    },
+    "hf-prompt": {
+      "covered": 1285,
+      "lines": 1327
+    },
+    "hf-provider": {
+      "covered": 7076,
+      "lines": 8569
+    },
+    "hf-runtime": {
+      "covered": 707,
+      "lines": 1120
+    },
+    "hf-scheduler": {
+      "covered": 5876,
+      "lines": 6141
+    },
+    "hf-service": {
+      "covered": 50894,
+      "lines": 60169
+    },
+    "hf-session": {
+      "covered": 1915,
+      "lines": 2146
+    },
+    "hf-skills": {
+      "covered": 273,
+      "lines": 308
+    },
+    "hf-spill": {
+      "covered": 311,
+      "lines": 322
+    },
+    "hf-storage": {
+      "covered": 7198,
+      "lines": 7839
+    },
+    "hf-tools": {
+      "covered": 2050,
+      "lines": 2452
+    }
+  },
+  "platform": "linux",
+  "schema_version": 1,
+  "source_revision": "9dd9846da166f259c954f6869a7e29d21aeffd23"
+}

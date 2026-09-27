@@ -205,12 +205,6 @@ test('waits for a pending CI run on the candidate commit', () => withCandidate(a
   assert.equal(fake.updates.length, 1);
 }));
 
-test('informational coverage failure does not block a successful required gate', () => withCandidate(async root => {
-  const fake = fakeGithub({ runs: [[ciRun({ conclusion: 'failure' })]] });
-  await run(root, fake);
-  assert.equal(fake.updates.length, 1);
-}));
-
 test('a CI rerun queued after installer inspection blocks publication', () => withCandidate(async root => {
   const fake = fakeGithub({ runs: [
     [ciRun()],

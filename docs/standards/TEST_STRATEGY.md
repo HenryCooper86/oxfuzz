@@ -31,10 +31,10 @@ TDD: Red -> Green -> Refactor. No production code without a preceding test.
 Measured by `scripts/tests/gates.sh coverage` using structured `cargo-llvm-cov`
 reports over the four domain crates, the infrastructure crates, and
 `hf-service`. The report names each crate's covered and total source lines.
-This is Linux/default-feature coverage; code compiled only on another OS or
-under another feature selection is outside the measurement. Until a trusted
-Linux baseline is committed, the job reports results and fails on missing data
-without enforcing percentages. The [measurement design](../design/quality-measurement-design.md)
+The [Linux baseline](../../config/quality/coverage-baseline.json) is enforced
+on every CI run; other platforms report diagnostic measurements. Code compiled
+only on another OS or under another feature selection is outside the Linux
+measurement. The [measurement design](../design/quality-measurement-design.md)
 defines the no-regression gate and the separate 80%/70% targets.
 
 ## 5. Quality Gates
