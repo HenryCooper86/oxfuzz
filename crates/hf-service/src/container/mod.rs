@@ -41,7 +41,7 @@ pub use harness_work_order::HarnessWorkOrderExportRequest;
 mod harness_workspace;
 mod history;
 mod lifecycle;
-#[cfg(test)]
+#[cfg(all(test, feature = "run-closeout"))]
 mod live_recovery_tests;
 mod output_budget;
 mod policy;
