@@ -47,6 +47,7 @@ rust:
     - scripts/tests/gates.sh check-no-default-features
     - scripts/tests/gates.sh check-feature-matrix
     - scripts/tests/gates.sh test
+    - scripts/tests/gates.sh feature-behavior
     - scripts/tests/gates.sh doc
 
 frontend:
@@ -106,3 +107,29 @@ supply-chain:
   script:
     - command -v cargo-deny || cargo install cargo-deny --locked
     - scripts/tests/gates.sh deny
+
+coverage:
+  stage: gate
+  image: rust:1.94
+  # Measurement only until a Linux baseline is reviewed and committed.
+  allow_failure: true
+  variables:
+    CARGO_HOME: $CI_PROJECT_DIR/.cargo
+  cache:
+    key: cargo-llvm-cov
+    paths:
+      - .cargo/bin
+      - .cargo/registry
+      - target/
+  before_script:
+    - export PATH="$CARGO_HOME/bin:$PATH"
+    - scripts/ci/install-linux-deps.sh
+    - rustup component add llvm-tools-preview
+    - command -v cargo-llvm-cov || cargo install cargo-llvm-cov --version 0.9.1 --locked
+  script:
+    - scripts/tests/gates.sh coverage
+  artifacts:
+    when: always
+    paths:
+      - target/coverage/*.json
+    expire_in: 14 days

@@ -28,9 +28,14 @@ TDD: Red -> Green -> Refactor. No production code without a preceding test.
 - Infrastructure crates: >= 70%.
 - Presentation crates: smoke tests only.
 
-Measured by `scripts/tests/gates.sh coverage` (`cargo-llvm-cov` over the four
-domain crates). The gate reports per-crate line coverage; thresholds are not
-enforced until a trusted baseline exists.
+Measured by `scripts/tests/gates.sh coverage` using structured `cargo-llvm-cov`
+reports over the four domain crates, the infrastructure crates, and
+`hf-service`. The report names each crate's covered and total source lines.
+This is Linux/default-feature coverage; code compiled only on another OS or
+under another feature selection is outside the measurement. Until a trusted
+Linux baseline is committed, the job reports results and fails on missing data
+without enforcing percentages. The [measurement design](../design/quality-measurement-design.md)
+defines the no-regression gate and the separate 80%/70% targets.
 
 ## 5. Quality Gates
 
@@ -41,13 +46,14 @@ Run in order before declaring a task done:
 3. `cargo clippy --workspace -- -D warnings`
 4. `cargo check --workspace`
 5. `cargo test --workspace`
-6. `cargo doc --workspace --no-deps`
-7. `cargo deny check`
-8. `scripts/tests/gates.sh coverage`
-9. `scripts/verify_translation_pairing.py`
-10. `npm --prefix crates/hf-gui test`
-11. `npm --prefix crates/hf-gui run build`
-12. `npm --prefix crates/hf-gui run lint`
+6. `scripts/tests/gates.sh feature-behavior`
+7. `cargo doc --workspace --no-deps`
+8. `cargo deny check`
+9. `scripts/tests/gates.sh coverage`
+10. `scripts/verify_translation_pairing.py`
+11. `npm --prefix crates/hf-gui test`
+12. `npm --prefix crates/hf-gui run build`
+13. `npm --prefix crates/hf-gui run lint`
 
 All `cargo test` invocations use the repository error-output filter documented
 in [Engineering Protocol](ENGINEERING_PROTOCOL.md). The workspace test suite includes an explicit sandbox and

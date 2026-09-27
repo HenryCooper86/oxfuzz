@@ -80,6 +80,9 @@ jobs:
       - name: Test
         run: scripts/tests/gates.sh test
 
+      - name: Feature behavior
+        run: scripts/tests/gates.sh feature-behavior
+
       - name: Docs
         run: scripts/tests/gates.sh doc
 
@@ -151,11 +154,7 @@ jobs:
       - name: Deny
         run: scripts/tests/gates.sh deny
 
-  # Informational, deliberately NOT in gates-passed' needs: TEST_STRATEGY.md
-  # section 4 sets line-coverage targets that went unmeasured, and the number
-  # must exist and be trusted before a threshold can gate on it. Promoting
-  # this job to required (and adding it to gates-passed) is a separate
-  # decision once a baseline is recorded.
+  # Informational until the measured Linux baseline is reviewed and recorded.
   coverage:
     name: Coverage report
     runs-on: ubuntu-latest
@@ -163,6 +162,9 @@ jobs:
     steps:
       - name: Check out the repository
         uses: actions/checkout@v7
+
+      - name: Install Linux build dependencies
+        run: scripts/ci/install-linux-deps.sh
 
       - name: Provision the pinned toolchain
         run: rustup show active-toolchain
@@ -180,6 +182,14 @@ jobs:
 
       - name: Coverage
         run: scripts/tests/gates.sh coverage
+
+      - name: Retain structured coverage reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-json
+          path: target/coverage/*.json
+          if-no-files-found: error
 
   # Branch protection requires this one check instead of each job above. A
   # matrix job's check name is built from its label, so requiring those by name

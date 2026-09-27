@@ -6,8 +6,8 @@ the two cannot drift from the single source of truth.
 
 | Host | File | Gates | Purpose |
 | --- | --- | --- | --- |
-| GitHub Actions | `.github/workflows/ci.yml` | twelve required gates; coverage is informational | public repository |
-| GitLab CI | `.gitlab-ci.yml` | twelve required gates | current OrbStack origin |
+| GitHub Actions | `.github/workflows/ci.yml` | thirteen required gates; coverage is informational | public repository |
+| GitLab CI | `.gitlab-ci.yml` | thirteen required gates; coverage is informational | current OrbStack origin |
 
 `scripts/tests/gates.sh` is authoritative. Run it locally before pushing:
 
@@ -16,11 +16,14 @@ scripts/tests/gates.sh            # every gate, in ENGINEERING_PROTOCOL.md 4.5 o
 scripts/tests/gates.sh clippy test  # only the named gates
 ```
 
-The thirteen available gates: `fmt`, `clippy`, `check`,
+The fourteen available gates: `fmt`, `clippy`, `check`,
 `check-no-default-features`, `check-feature-matrix`, `test`, `doc`, `deny`,
-`coverage`, `script-tests`, `translation-pairing`, `frontend-test`, and
-`frontend-lint`. GitHub runs the coverage report without including it in the
-required `gates-passed` job; GitLab does not run that informational gate.
+`feature-behavior`, `coverage`, `script-tests`, `translation-pairing`,
+`frontend-test`, and `frontend-lint`. The feature-behavior gate executes
+disabled API responses and selected standalone-feature service tests.
+Both CI systems retain structured per-crate coverage reports. Coverage is
+informational until a Linux no-regression baseline is reviewed; GitHub omits
+it from `gates-passed` and GitLab marks the measurement job optional.
 
 `translation-pairing` needs only a Python interpreter -- not even git -- so it
 runs beside `script-tests` rather than behind the Rust gates. A documentation

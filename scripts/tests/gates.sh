@@ -12,12 +12,16 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-ALL_GATES=(fmt clippy check check-no-default-features check-feature-matrix test doc deny coverage script-tests translation-pairing frontend-test frontend-lint)
+ALL_GATES=(fmt clippy check check-no-default-features check-feature-matrix test feature-behavior doc deny coverage script-tests translation-pairing frontend-test frontend-lint)
 
-# The crates TEST_STRATEGY.md section 4 names for its >= 80% unit-test line
-# coverage target. Measuring exactly what the standard names keeps the
-# instrumented rebuild small enough for every run.
-COVERAGE_CRATES=(hf-discovery hf-harness hf-engine hf-crash)
+# Keep the two package groups separate so each instrumented test run has an
+# explicit package set and its own report.
+COVERAGE_DOMAIN_CRATES=(hf-discovery hf-harness hf-engine hf-crash)
+COVERAGE_INFRASTRUCTURE_CRATES=(
+  hf-provider hf-session hf-context hf-storage hf-knowledge hf-diagnostics
+  hf-spill hf-guardrails hf-prompt hf-tools hf-skills hf-runtime hf-scheduler
+  hf-service
+)
 
 # Each product subsystem is independently selectable in hf-cli and forwards to
 # hf-web and hf-service. Checking them one at a time catches undeclared feature
@@ -93,6 +97,18 @@ gate_test() {
   cargo test --workspace --no-fail-fast 2>&1 | { grep -v "${TEST_NOISE}" || true; }
 }
 
+gate_feature_behavior() {
+  # Compile-only feature checks cannot establish the behavior of a disabled
+  # route or an enabled standalone service operation.
+  ./scripts/cargo-test-filtered.sh -p hf-web --no-default-features --test build_doctor_disabled_api
+  ./scripts/cargo-test-filtered.sh -p hf-web --no-default-features --test coverage_experiments_api
+  ./scripts/cargo-test-filtered.sh -p hf-service --no-default-features --test coverage_experiments
+  ./scripts/cargo-test-filtered.sh -p hf-service --no-default-features \
+    --features proof-carrying --test run_replay
+  ./scripts/cargo-test-filtered.sh -p hf-service --no-default-features \
+    --features patch-to-proof --test finding_review
+}
+
 gate_doc() {
   # -D warnings because rustdoc warnings are not errors by default, so a broken
   # intra-doc link otherwise ships green. --document-private-items because
@@ -118,11 +134,8 @@ gate_deny() {
 }
 
 gate_coverage() {
-  # TEST_STRATEGY.md section 4 sets line-coverage targets that no gate measured,
-  # so the numbers were asserted but never observed. This gate REPORTS per-crate
-  # line coverage for the domain crates; thresholds are not enforced yet: the
-  # measurement must exist and be trusted before a threshold can gate on it.
-  # Enforcement is a separate decision once a baseline is recorded.
+  # Measure all named packages before setting the Linux no-regression baseline.
+  # The parser rejects missing data even during this measurement phase.
   local binary
   if command -v cargo-llvm-cov >/dev/null; then
     binary="$(command -v cargo-llvm-cov)"
@@ -133,12 +146,35 @@ gate_coverage() {
     echo "the llvm-tools-preview rustup component is also required" >&2
     return 1
   fi
-  local crate_args=()
-  local crate
-  for crate in "${COVERAGE_CRATES[@]}"; do
-    crate_args+=(-p "${crate}")
-  done
-  "${binary}" llvm-cov --summary-only "${crate_args[@]}"
+  local coverage_target="${CARGO_TARGET_DIR:-target}/llvm-cov-target"
+  local coverage_reports="${CARGO_TARGET_DIR:-target}/coverage"
+  mkdir -p "${coverage_reports}"
+  coverage_group() {
+    local report="$1"
+    shift
+    local crate_args=()
+    local crate
+    for crate in "$@"; do
+      crate_args+=(-p "${crate}")
+    done
+    "${binary}" llvm-cov --no-report "${crate_args[@]}"
+    # The restrictive-umask child tests intentionally create mode-000 profile
+    # files. Restore owner read access only on this run's generated profiles so
+    # llvm-profdata can merge them; test artifacts remain in the coverage dir.
+    if [ -d "${coverage_target}" ]; then
+      find "${coverage_target}" -maxdepth 1 -type f -name 'oxfuzz-*.profraw' \
+        -exec chmod u+r {} +
+    fi
+    "${binary}" llvm-cov report --json --summary-only "${crate_args[@]}" \
+      --output-path "${report}"
+  }
+  coverage_group "${coverage_reports}/domain.json" "${COVERAGE_DOMAIN_CRATES[@]}"
+  coverage_group "${coverage_reports}/infrastructure.json" "${COVERAGE_INFRASTRUCTURE_CRATES[@]}"
+  python3 scripts/check_coverage.py \
+    --domain "${coverage_reports}/domain.json" \
+    --infrastructure "${coverage_reports}/infrastructure.json" \
+    --domain-packages "${COVERAGE_DOMAIN_CRATES[@]}" \
+    --infrastructure-packages "${COVERAGE_INFRASTRUCTURE_CRATES[@]}" --measure
 }
 
 gate_script_tests() {

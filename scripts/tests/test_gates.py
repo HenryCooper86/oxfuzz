@@ -7,6 +7,7 @@ import stat
 import subprocess
 import tempfile
 import unittest
+from typing import Optional
 
 
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -19,6 +20,14 @@ class GateDispatcherTests(unittest.TestCase):
             with self.subTest(pipeline=path):
                 self.assertIn("scripts/tests/gates.sh check-feature-matrix", path.read_text())
 
+    def test_ci_runs_feature_behavior_and_retains_coverage_reports(self) -> None:
+        for path in (REPOSITORY_ROOT / ".github/workflows/ci.yml", REPOSITORY_ROOT / ".gitlab-ci.yml"):
+            with self.subTest(pipeline=path):
+                source = path.read_text()
+                self.assertIn("scripts/tests/gates.sh feature-behavior", source)
+                self.assertIn("scripts/tests/gates.sh coverage", source)
+                self.assertIn("target/coverage/*.json", source)
+
     def make_stub(self, directory: pathlib.Path, name: str, body: str) -> None:
         """Place an executable stub named `name` in `directory`."""
         path = directory / name
@@ -26,10 +35,12 @@ class GateDispatcherTests(unittest.TestCase):
         path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
     def run_gates(
-        self, arguments: list[str], stub_dir: pathlib.Path, timeout: float = 30.0
+        self, arguments: list[str], stub_dir: pathlib.Path, timeout: float = 30.0,
+        extra_env: Optional[dict[str, str]] = None,
     ) -> subprocess.CompletedProcess[str]:
         environment = dict(os.environ)
         environment["PATH"] = f"{stub_dir}{os.pathsep}{environment['PATH']}"
+        environment.update(extra_env or {})
         return subprocess.run(
             [str(GATES), *arguments],
             check=False,
@@ -72,6 +83,29 @@ class GateDispatcherTests(unittest.TestCase):
             result = self.run_gates(["test"], stub_dir)
         self.assertNotEqual(result.returncode, 0)
 
+    def test_feature_behavior_gate_runs_disabled_and_standalone_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            stub_dir = pathlib.Path(directory)
+            log = stub_dir / "feature-tests"
+            self.make_stub(stub_dir, "cargo", f'echo "$*" >> "{log}"\nexit 0')
+            result = self.run_gates(["feature-behavior"], stub_dir)
+            recorded = log.read_text().splitlines() if log.exists() else []
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(recorded, [
+            "test -p hf-web --no-default-features --test build_doctor_disabled_api",
+            "test -p hf-web --no-default-features --test coverage_experiments_api",
+            "test -p hf-service --no-default-features --test coverage_experiments",
+            "test -p hf-service --no-default-features --features proof-carrying --test run_replay",
+            "test -p hf-service --no-default-features --features patch-to-proof --test finding_review",
+        ])
+
+    def test_feature_behavior_gate_keeps_test_failure_status(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            stub_dir = pathlib.Path(directory)
+            self.make_stub(stub_dir, "cargo", 'echo "feature test failed"\nexit 101')
+            result = self.run_gates(["feature-behavior"], stub_dir)
+        self.assertNotEqual(result.returncode, 0)
+
     def test_dependency_policy_gate_denies_warning_level_findings(self) -> None:
         """Dependency advisories must not pass merely because they are warnings."""
         with tempfile.TemporaryDirectory() as directory:
@@ -85,19 +119,35 @@ class GateDispatcherTests(unittest.TestCase):
             result = self.run_gates(["deny"], stub_dir)
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_coverage_gate_passes_the_required_subcommand_and_domain_crates(self) -> None:
+    def test_coverage_gate_measures_both_groups_and_reopens_owned_profiles(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             stub_dir = pathlib.Path(directory)
+            target = stub_dir / "target"
+            log = stub_dir / "coverage-commands"
             self.make_stub(
                 stub_dir,
                 "cargo-llvm-cov",
-                'expected="llvm-cov --summary-only -p hf-discovery -p hf-harness '
-                '-p hf-engine -p hf-crash"\n'
-                'if [ "$*" = "$expected" ]; then exit 0; fi\n'
-                'echo "unexpected coverage argv: $*" >&2\nexit 64',
+                f'echo "$*" >> "{log}"\n'
+                'if [ "$2" = "--no-report" ]; then\n'
+                '  mkdir -p "$CARGO_TARGET_DIR/llvm-cov-target"\n'
+                '  touch "$CARGO_TARGET_DIR/llvm-cov-target/oxfuzz-owned.profraw"\n'
+                '  chmod 000 "$CARGO_TARGET_DIR/llvm-cov-target/oxfuzz-owned.profraw"\n'
+                'fi\nexit 0',
             )
-            result = self.run_gates(["coverage"], stub_dir)
+            self.make_stub(stub_dir, "python3", 'exit 0')
+            result = self.run_gates(
+                ["coverage"], stub_dir, extra_env={"CARGO_TARGET_DIR": str(target)}
+            )
+            recorded = log.read_text().splitlines()
+            owned = target / "llvm-cov-target" / "oxfuzz-owned.profraw"
+            owner_can_read = owned.exists() and bool(owned.stat().st_mode & stat.S_IRUSR)
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(recorded), 4)
+        self.assertIn("llvm-cov --no-report -p hf-discovery -p hf-harness -p hf-engine -p hf-crash", recorded[0])
+        self.assertIn("llvm-cov report --json --summary-only -p hf-discovery", recorded[1])
+        self.assertIn("llvm-cov --no-report -p hf-provider", recorded[2])
+        self.assertIn("llvm-cov report --json --summary-only -p hf-provider", recorded[3])
+        self.assertTrue(owner_can_read)
 
     def test_unknown_gate_name_is_rejected_with_the_valid_list(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -144,13 +194,13 @@ class GateDispatcherTests(unittest.TestCase):
         self.assertEqual(recorded[3], "cargo clippy")
         test_index = recorded.index("cargo test")
         self.assertEqual(recorded[4:test_index], ["cargo clippy"] * (test_index - 4))
-        self.assertEqual(recorded[test_index + 1], "cargo doc")
-        self.assertEqual(recorded[test_index + 2], "cargo-deny")
-        self.assertEqual(recorded[test_index + 3], "cargo-llvm-cov")
-        self.assertEqual(recorded[test_index + 4], "python3")
-        self.assertEqual(recorded[test_index + 5], "python3")
-        self.assertEqual(recorded[test_index + 6], "npm --prefix crates/hf-gui ci")
-        self.assertEqual(recorded[test_index + 10], "npm --prefix crates/hf-gui run lint")
+        self.assertEqual(recorded[test_index + 1:test_index + 6], ["cargo test"] * 5)
+        self.assertEqual(recorded[test_index + 6], "cargo doc")
+        self.assertEqual(recorded[test_index + 7], "cargo-deny")
+        self.assertEqual(recorded[test_index + 8:test_index + 12], ["cargo-llvm-cov"] * 4)
+        self.assertEqual(recorded[test_index + 12:test_index + 15], ["python3"] * 3)
+        self.assertEqual(recorded[test_index + 15], "npm --prefix crates/hf-gui ci")
+        self.assertEqual(recorded[test_index + 19], "npm --prefix crates/hf-gui run lint")
 
     def test_named_subset_runs_only_those_gates(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
