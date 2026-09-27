@@ -10,6 +10,12 @@ cd "$(dirname "$0")/.."
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 
+# macOS 27 rejects some stripped Rust proc-macro libraries with a misaligned
+# LINKEDIT string pool. Keep their symbols unless the caller selected a profile.
+if [[ "$OS" == "Darwin" && "$(sw_vers -productVersion)" == 27.* && -z "${CARGO_PROFILE_RELEASE_STRIP+x}" ]]; then
+  export CARGO_PROFILE_RELEASE_STRIP=none
+fi
+
 echo "=== Building frontend ==="
 cd crates/hf-gui
 npm ci --silent
