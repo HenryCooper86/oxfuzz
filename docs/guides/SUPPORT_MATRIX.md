@@ -1,14 +1,14 @@
 # Operation support and qualification
 
-Status at source revision `d1aba21c8ad7f48650094a443d43f29bcb781780`
-(v0.5.1 baseline). Update the implementation column when behavior changes and
+Status at source revision `6cb82cea9ea600b0c94923d0bf8d0684eedc5af6`
+(v0.5.1 candidate). Update the implementation column when behavior changes and
 the qualification column only after reviewing a corresponding
 [acceptance record](../acceptance/README.md). A fixture or mocked-runtime test
 establishes implemented behavior, not live engine qualification.
 
 | Target | Discovery | Harness build and smoke | Campaign engine | Run evidence and replay | Host platform scope | Qualification in this checkout |
 | --- | --- | --- | --- | --- | --- | --- |
-| C | Tree-sitter inventory; optional ranking and Semgrep enrichment | Reviewed source, sandbox compile, smoke, exact-revision promotion | AFL++, honggfuzz, libFuzzer | Shared retained corpus; historical retained-input replay; optional LLVM function counters | Docker-backed desktop/CLI paths on Linux, macOS, Windows; live behavior must be qualified per OS | Implemented and covered by controlled tests; three-engine live acceptance remains open |
+| C | Tree-sitter inventory; optional ranking and Semgrep enrichment | Reviewed source, sandbox compile, smoke, exact-revision promotion | AFL++, honggfuzz, libFuzzer | Shared retained corpus; historical retained-input replay; optional LLVM function counters | Docker-backed desktop/CLI paths on Linux, macOS, Windows; live behavior must be qualified per OS | [Ten normal three-engine cycles passed](../acceptance/userspace-2026-09-27.md) for a benign C fixture on macOS arm64; fault, crash and other-platform acceptance remains open |
 | C++ | Tree-sitter inventory; optional ranking and Semgrep enrichment | Same lifecycle with C++ compiler/linker | AFL++, honggfuzz, libFuzzer | Same corpus/replay path; optional LLVM function counters | Docker-backed paths on Linux, macOS, Windows; platform-specific live acceptance open | Implemented and covered by controlled tests; representative real-project acceptance remains open |
 | Rust | Conservative lexical inventory | cargo-fuzz/libFuzzer path in the sandbox | libFuzzer | Userspace run history and replay; C/C++ LLVM function-counter path does not establish Rust function entry | Docker-backed paths on Linux, macOS, Windows; Rust toolchain/image qualification open | Implemented; real Rust campaign acceptance remains open |
 | Go | Conservative lexical inventory | No supported harness engine | Unavailable | No userspace campaign evidence | Discovery code is cross-platform; no campaign platform claim | Discovery only; no campaign claim |

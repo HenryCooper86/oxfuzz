@@ -1,9 +1,9 @@
 # Userspace qualification attempts, 2026-09-27
 
-Outcome: **one complete trial cycle passed; candidate acceptance remains
-incomplete**. The first eight trials failed at the recorded point. The ninth
-passed all three engines on an uncommitted candidate and image; the required
-ten clean-revision cycles and Stop distributions remain unmeasured.
+Outcome: **the first eight trials failed and the ninth preliminary cycle
+passed**. The ninth ran on an uncommitted candidate and image. The later
+[clean-revision qualification](userspace-2026-09-27.md) passed ten independent
+cycles and supplies the accepted Stop distributions.
 
 The operator approved only the benign `examples/qualification/parser.c` and
 `harness.c` pair with combined SHA-256
@@ -57,5 +57,6 @@ Each attempt's full manifest and logs remain under the private local
 `/Users/admin/.codex/qualification-evidence/` directory, in the correspondingly
 named `a2-*` directories. The runner's cleanup flag is conservative; separate
 `docker ps -a` checks found no `hf-run-` containers after the attempts. Exclude
-the eight failed trials from the success sample. The next gate is a clean
-candidate revision and ten repeated cycles on its final image.
+the eight failed trials from the success sample. The subsequent clean candidate
+and final image are recorded in the accepted qualification; these attempts
+remain excluded from its ten-sample statistics.

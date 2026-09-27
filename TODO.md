@@ -8,12 +8,14 @@ qualification from implementation.
 
 ## Functional improvements
 
-- [ ] Qualify retained-input replay and campaign function profiles on real engines.
+- [x] Qualify retained-input replay and campaign function profiles on real engines.
   Implementation retains source, binary, initial corpus, dictionary, settings,
   and image identity; historical replay rejects missing or changed inputs.
   An explicit current-input rerun supports corpus experiments. C/C++ LLVM
   function profiles are opt-in, persisted against the run binary/image, and
-  readable in history; real-engine acceptance remains pending. Owner: `hf-service`.
+  readable in history; [ten normal C-fixture cycles](docs/acceptance/userspace-2026-09-27.md)
+  passed on libFuzzer, AFL++, and honggfuzz. Broader real-project usefulness is
+  separate acceptance work. Owner: `hf-service`.
 - [ ] Broader project builds: extend measured onboarding beyond CMake and plain
   Make, including generated headers and dependencies. Detecting a build system
   does not imply configured build support. Owner: `hf-service`.
@@ -34,10 +36,12 @@ replace these live checks.
   library. Keep history and campaign Stop objectives independent of dispatch.
   Owner: `hf-service` and test infrastructure maintainers.
 
-- [ ] Qualify benign reviewed harnesses on libFuzzer, AFL++, and honggfuzz:
+- [x] Qualify benign reviewed harnesses on libFuzzer, AFL++, and honggfuzz:
   build, bounded smoke, exact-attempt promotion, campaign, corpus retention,
   Stop, and cleanup. Generated source requires review and human approval before
-  execution through `hf-runtime`.
+  execution through `hf-runtime`. Ten normal cycles passed for the
+  [approved C fixture](docs/acceptance/userspace-2026-09-27.md) on macOS arm64;
+  fault and other-platform acceptance remain open.
 - [ ] Qualify syzkaller on a dedicated Linux/KVM setup with identified kernel,
   root filesystem, symbols, and VM settings; verify boot, cancellation, cleanup,
   and failure recovery.

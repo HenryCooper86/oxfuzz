@@ -354,6 +354,20 @@ async fn run_records_a_seed_and_replay_reexecutes_with_it() {
     let workspace = hf_service::workspace_dir(&project, "parse_value");
     let records = store.list_runs(None).await.unwrap();
     assert_eq!(records.len(), 2);
+    #[cfg(feature = "proof-carrying")]
+    {
+        let smoke = records
+            .iter()
+            .find(|record| record.kind == hf_storage::RunKind::Smoke)
+            .expect("smoke run");
+        let view =
+            serde_json::to_value(container.run_function_coverage(smoke.id).await.unwrap()).unwrap();
+        assert_eq!(view["status"], "unavailable");
+        assert!(view["reason"]
+            .as_str()
+            .unwrap()
+            .contains("No exact campaign profile export"));
+    }
     for record in records {
         use sha2::{Digest, Sha256};
 
