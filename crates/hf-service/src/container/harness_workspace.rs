@@ -487,30 +487,25 @@ fn stage_file(root: &Path, path: &Path, workspace: &Path, staged: &mut usize) {
     *staged += 1;
 }
 
-/// Stage a Rust crate (its manifest + `src/` tree) from `project` into
-/// `workspace` so a cargo-fuzz project can depend on it by path. A no-op when the
-/// project has no `Cargo.toml` (i.e. is not a Rust crate).
-///
-/// The `src/` walk goes through [`stage_tree`] like the C/C++ one: two staging
-/// walks with different symlink and bound rules would leave the Rust path as
-/// the weaker of the two for no reason.
+/// Stage Rust manifests and source files, including local workspace members,
+/// so cargo-fuzz path dependencies resolve inside the sandbox. A no-op when
+/// the project has no `Cargo.toml` (i.e. is not a Rust crate).
 fn stage_rust_crate(project: &Path, workspace: &Path, staged: &mut usize) {
-    let manifest = project.join("Cargo.toml");
-    if !manifest.is_file() {
+    if !project.join("Cargo.toml").is_file() {
         return;
     }
-    for name in ["Cargo.toml", "Cargo.lock"] {
-        let src = project.join(name);
-        if src.is_file() {
-            if let Err(e) = std::fs::copy(&src, workspace.join(name)) {
-                tracing::warn!("failed to stage {} into workspace: {e}", src.display());
-            }
-        }
-    }
-    let src_dir = project.join("src");
-    if src_dir.is_dir() {
-        stage_tree(project, &src_dir, workspace, &|_| true, staged);
-    }
+    stage_tree(
+        project,
+        project,
+        workspace,
+        &|path| {
+            matches!(
+                path.file_name().and_then(|name| name.to_str()),
+                Some("Cargo.toml" | "Cargo.lock")
+            ) || path.extension().and_then(|extension| extension.to_str()) == Some("rs")
+        },
+        staged,
+    );
 }
 
 #[cfg(test)]
@@ -738,6 +733,40 @@ mod rust_staging_tests {
             .join("inner")
             .join("mod.rs")
             .is_file());
+    }
+
+    #[test]
+    fn stages_nested_local_workspace_member_without_build_output() {
+        let project = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("Cargo.toml"),
+            "[package]\nname = \"root\"\n[workspace]\nmembers = [\".\", \"crates/codec\"]\n[dependencies]\ncodec = { path = \"crates/codec\" }\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(project.path().join("src")).unwrap();
+        std::fs::write(project.path().join("src/lib.rs"), "pub fn root() {}").unwrap();
+        std::fs::create_dir_all(project.path().join("crates/codec/src")).unwrap();
+        std::fs::write(
+            project.path().join("crates/codec/Cargo.toml"),
+            "[package]\nname = \"codec\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.path().join("crates/codec/src/lib.rs"),
+            "pub fn codec() {}",
+        )
+        .unwrap();
+        std::fs::create_dir_all(project.path().join("crates/codec/target")).unwrap();
+        std::fs::write(project.path().join("crates/codec/target/stale.rs"), "stale").unwrap();
+
+        copy_project_sources(project.path(), workspace.path());
+
+        assert!(workspace.path().join("Cargo.toml").is_file());
+        assert!(workspace.path().join("src/lib.rs").is_file());
+        assert!(workspace.path().join("crates/codec/Cargo.toml").is_file());
+        assert!(workspace.path().join("crates/codec/src/lib.rs").is_file());
+        assert!(!workspace.path().join("crates/codec/target").exists());
     }
 
     #[test]
