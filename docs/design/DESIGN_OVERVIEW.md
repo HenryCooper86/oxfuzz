@@ -189,9 +189,11 @@ recurring schedules retain their existing scheduling path.
    for portability, clang AST optional for precision.)
 2. Should `hf-runtime` support native sandbox (seccomp/pledge) in addition to
    Docker?
-3. How to share corpora across engines for the same target?
-4. How should syzkaller's kernel-campaign configuration coexist with the
+3. How should syzkaller's kernel-campaign configuration coexist with the
    userspace fuzzing policy?
+
+Userspace engines already share one canonical corpus per target, as specified
+in [Corpus & Coverage](corpus-coverage-design.md#32-one-canonical-corpus-per-target-shared-across-engines).
 
 ## 6. Rejected Alternatives
 

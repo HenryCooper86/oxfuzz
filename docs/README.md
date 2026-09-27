@@ -33,6 +33,10 @@ the document that matches your task.
   sandbox, packaging, security, and GitLab handoff gates.
 - [Capability Acceptance](guides/CAPABILITY_ACCEPTANCE.md) lists live workflow
   and usability checks, with remaining work tracked in the [backlog](../TODO.md).
+- [Support Matrix](guides/SUPPORT_MATRIX.md) distinguishes implemented paths
+  from live-qualified ones by operation, language, engine, and platform.
+- [Acceptance Records](acceptance/README.md) defines the evidence needed to
+  substantiate a release capability claim.
 - [Continuous Integration](guides/CI.md) documents the two-host gate setup.
 - [Syzkaller Setup](guides/SYZKALLER_SETUP.md) covers the advanced kernel
   workflow and its stronger environment requirements.

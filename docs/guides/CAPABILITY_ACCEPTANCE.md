@@ -7,6 +7,11 @@ to non-secret retained evidence for each result. Record unsupported operations
 and failures explicitly. The [project backlog](../../TODO.md) lists prerequisites
 and remaining implementation work.
 
+Use the [support matrix](SUPPORT_MATRIX.md) for the current operation-level
+status and the [acceptance record format](../acceptance/README.md) for each
+live result. A checklist row moves to qualified only after the corresponding
+record is reviewed.
+
 Run generated harnesses and engines through `hf-runtime`, with source review and
 human approval. Use dedicated environments for fault injection, kernel VMs and
 physical interfaces, and approved test destinations for external publication.

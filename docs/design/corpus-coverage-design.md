@@ -147,16 +147,18 @@ rows match the survivor set.
 
 Reproducibility is a run property layered on top of the shared corpus: every
 persisted run config records a `seed` (`u64`, derived deterministically from
-the run id when not supplied), and `ServiceContainer::replay_run` re-executes
-a run through the normal run path with that exact seed, persisting a new row
-whose config links back via `replay_of`. Seed flags per engine are specified
-in `docs/standards/ENGINE_ADAPTER_STANDARD.md` section 3.1. Replay pins the
-RNG seed, not the corpus: the run still seeds from the canonical root's
-current state, which may have grown since the original run. A replay is a new
-execution, so the recorded engine and duration must still be admitted by the
-current operator policy. The current sandbox resource limits apply to that new
-execution; lowering a limit or disabling an engine cannot be bypassed through
-historical run data.
+the run id when not supplied), and `ServiceContainer::replay_run` starts a new
+run with the retained source, binary, starting corpus, dictionary, sandbox
+image, seed, and execution settings. It persists a new row linked through
+`replay_of`. Seed flags per engine are specified in
+`docs/standards/ENGINE_ADAPTER_STANDARD.md` section 3.1. The service verifies
+the retained input manifest before staging and again before dispatch. Missing
+or changed inputs fail instead of falling back to the canonical corpus. The
+recorded settings must still be admitted by current policy without silently
+changing them. An explicit current-input rerun uses the currently promoted
+harness and corpus as a separate experiment; it does not claim to replay the
+historical inputs. See `engine-integration-design.md` for retained execution
+inputs and their limits.
 
 Coverage-guided minimization is an execution workflow, not a direct corpus
 filesystem operation. The service accepts only the exact promoted libFuzzer
@@ -273,10 +275,11 @@ not independently hash a mutable canonical directory before copying it. The
 primary sandbox workspace is read-only; only the working corpus and output
 receive writable overlays, never the retained input directory.
 
-This retention is a prerequisite for immutable-input reruns. Current `replay_run`
-still uses the current promoted harness and canonical corpus, and must continue
-to say so. Legacy records without retained starting inputs cannot be treated as
-having them reconstructed from a matching digest or today's corpus.
+Historical `replay_run` uses this retained starting corpus and the verified
+execution-input manifest. Explicit current-input reruns use the current
+promoted harness and canonical corpus and are identified separately. Legacy
+records without retained inputs cannot reconstruct them from a matching digest
+or today's corpus; historical replay reports their absence.
 # Run-attributed function evidence
 
 The `proof-carrying` implementation may collect source-function counters from

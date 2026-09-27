@@ -2,6 +2,9 @@
 
 Open work is listed here. Completed changes are recorded in [CHANGELOG.md](CHANGELOG.md)
 and commit history. Owners are subsystem maintainers unless an issue assigns otherwise.
+The [support matrix](docs/guides/SUPPORT_MATRIX.md) records current operation-level
+availability; [acceptance records](docs/acceptance/README.md) distinguish live
+qualification from implementation.
 
 ## Functional improvements
 
