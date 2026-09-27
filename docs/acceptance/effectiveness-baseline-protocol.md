@@ -1,7 +1,7 @@
 # Held-out effectiveness baseline protocol
 
-Status: **cohort validation only**. No held-out projects, live trials, or
-effectiveness results have been qualified by this file.
+Status: **cohort validation and partial retained-evidence reporting**. No
+held-out projects, live trials, or effectiveness results have been qualified.
 
 Freeze a JSON cohort before collecting outcomes. Validate it with
 `python3 scripts/effectiveness_benchmark.py <cohort.json>`. The validator
@@ -27,3 +27,25 @@ or time-series samples must remain unavailable in the eventual report rather
 than becoming zero. Live work needs independent review and exact-source human
 approval, and all builds and runs must use `hf-runtime` sandboxing. No customer
 targets or finding publication are part of this baseline.
+
+The report reader accepts a separate JSON observation index with
+`schema_version: 1`, the same `cohort_id`, and exactly one entry per declared
+trial. Each entry has `id`, `outcome` (`completed`, `failed`, or `unavailable`),
+`reason` (null for a completed trial), and `campaign_manifest` and
+`function_coverage` references. A reference has a path relative to the index
+and the SHA-256 of that exact JSON file; use null for an absent measurement.
+Generate the report with
+`python3 -m scripts.effectiveness_report <cohort.json> <observations.json>`.
+The reader checks file hashes and joins service exports by run, binary,
+source snapshot, image, target, engine, and fixed run settings. It reports
+observed function entry only from a positive exact-run counter. A zero counter
+means `not_observed`, with a limitation, rather than proven non-entry.
+
+Current summaries cover terminal trial outcomes, peak edges, attributable
+model-plus-compute cost, and selected-function entry when measured. Discovery
+top-k usefulness, qualification rate, time to useful campaign, branch coverage
+over time, and reproducible versus harness-caused crashes remain unavailable
+until their retained inputs and classification are added. The report reader
+checks the whole-file hash supplied by the observation index; review the
+service-produced manifest and its own digest at export time before archiving
+that file.
