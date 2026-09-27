@@ -36,3 +36,5 @@ exhaustion, one-time schedule restart, closeout resumption, backup/restore, or
 12-hour fault behavior. Those A3 scenarios remain open.
 The later [service journal process-loss probe](service-recovery-process-2026-09-27.md)
 tests WAL replay and retained run status separately.
+The [backup/restore probe](backup-restore-2026-09-27.md) verifies a separate
+SQLite/WAL snapshot and immutable workspace copy.
