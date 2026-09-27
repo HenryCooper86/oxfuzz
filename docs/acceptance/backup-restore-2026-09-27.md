@@ -26,10 +26,18 @@ refuses missing, changed, extra, unsafe, and truncated archive entries before
 creating the restore destination. Earlier incomplete local trials remain
 outside the repository and are not counted as passing evidence.
 
+The [legacy migration probe](../../crates/hf-storage/tests/restore_migration.rs)
+ran from clean commit `a0c8c6129a014948cd86b03e46fbccd29df804fd` and
+had SHA-256 `4da4b944be35286d0fcea5fb6b7b78c783b301ea926050896cb356c0126e592d`.
+It built a real `sqlx` database through migration 0018, backed up and restored
+that database through the same script, then opened the restored copy with the
+current `Store`. The retained run and artifact link survived, all current
+migrations applied, and no historical approval was invented. Its private log
+has SHA-256 `ba4d2093a658f3f410a70ccc7302d0e6131597aad36b5db1c993dfc586ffe63c`.
+
 The A2 database was no longer being written during this live fixture copy;
 the active-writer behavior is covered by the synthetic test. Database and
 workspace files are copied in separate steps, so this probe applies to
 immutable referenced artifacts and does not establish an atomic backup of a
-changing project tree. It does not run restored harnesses, check application
-migration of the older fixture, or satisfy the remaining service-fault and
-12-hour-soak scenarios.
+changing project tree. It does not run restored harnesses or exercise the
+remaining service-fault scenarios and 12-hour soak.
