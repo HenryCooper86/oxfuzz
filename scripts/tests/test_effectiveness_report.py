@@ -111,6 +111,37 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(trial["selected_function_entry"]["status"], "unavailable")
         self.assertEqual(report["conditions"]["ranked-libfuzzer"]["peak_edges_median"], 0)
 
+    def test_project_condition_summary_keeps_failed_and_unmeasured_samples(self):
+        plan = cohort()
+        second_project = copy.deepcopy(plan["projects"][0])
+        second_project["id"] = "other-parser"
+        plan["projects"].append(second_project)
+        second_trial = copy.deepcopy(plan["trials"][0])
+        second_trial["id"] = "other-parser-ranked-1"
+        second_trial["project_id"] = "other-parser"
+        plan["trials"].append(second_trial)
+        observations = self.observations(self.artifact("manifest.json", campaign_manifest(7)))
+        observations["trials"].append({
+            "id": second_trial["id"],
+            "outcome": "failed",
+            "reason": "qualification stopped before campaign",
+            "campaign_manifest": None,
+            "function_coverage": None,
+        })
+
+        report = assemble_report(plan, observations, self.root)
+
+        self.assertEqual(report["trials"][1]["project_id"], "other-parser")
+        first = report["projects"]["parser"]["ranked-libfuzzer"]
+        second = report["projects"]["other-parser"]["ranked-libfuzzer"]
+        self.assertEqual(first["peak_edges"], {"samples": [7], "unavailable": 0,
+                                               "median": 7})
+        self.assertEqual(second["outcomes"]["failed"], 1)
+        self.assertEqual(second["peak_edges"], {"samples": [], "unavailable": 1,
+                                                "median": None})
+        self.assertEqual(second["total_cost_usd"]["unavailable"], 1)
+        self.assertEqual(report["conditions"]["ranked-libfuzzer"]["peak_edges_median"], 7)
+
     def test_positive_function_counter_is_observed_entry(self):
         manifest = self.artifact("manifest.json", campaign_manifest(7))
         functions = self.artifact("functions.json", function_coverage("3"))

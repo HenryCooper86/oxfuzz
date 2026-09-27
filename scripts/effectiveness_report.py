@@ -142,9 +142,24 @@ def function_entry(evidence, run_id, binary_sha256, symbol):
     return {"status": "not_observed", "limitation": "zero counters do not prove non-entry"}
 
 
-def median_available(trials, field):
-    values = [trial[field]["value"] for trial in trials if trial[field]["status"] == "available"]
-    return statistics.median(values) if values else None
+def metric_distribution(trials, field):
+    samples = sorted(trial[field]["value"] for trial in trials
+                     if trial[field]["status"] == "available")
+    return {
+        "samples": samples,
+        "unavailable": len(trials) - len(samples),
+        "median": statistics.median(samples) if samples else None,
+    }
+
+
+def summarize_members(members):
+    return {
+        "declared_trials": len(members),
+        "outcomes": {name: sum(trial["outcome"] == name for trial in members)
+                     for name in sorted(OUTCOMES)},
+        "peak_edges": metric_distribution(members, "peak_edges"),
+        "total_cost_usd": metric_distribution(members, "total_cost_usd"),
+    }
 
 
 def assemble_report(cohort, observations, root):
@@ -186,6 +201,7 @@ def assemble_report(cohort, observations, root):
         outcomes[outcome] += 1
         result = {
             "id": trial["id"],
+            "project_id": trial["project_id"],
             "condition_id": trial["condition_id"],
             "outcome": outcome,
             "reason": entry["reason"],
@@ -217,19 +233,28 @@ def assemble_report(cohort, observations, root):
     condition_reports = {}
     for condition_id in conditions:
         members = [trial for trial in trials if trial["condition_id"] == condition_id]
-        condition_reports[condition_id] = {
-            "declared_trials": len(members),
-            "outcomes": {name: sum(trial["outcome"] == name for trial in members)
-                         for name in sorted(OUTCOMES)},
-            "peak_edges_median": median_available(members, "peak_edges"),
-            "total_cost_usd_median": median_available(members, "total_cost_usd"),
+        summary = summarize_members(members)
+        summary["peak_edges_median"] = summary["peak_edges"]["median"]
+        summary["total_cost_usd_median"] = summary["total_cost_usd"]["median"]
+        condition_reports[condition_id] = summary
+    project_reports = {
+        project_id: {
+            condition_id: summarize_members([
+                trial for trial in trials
+                if trial["project_id"] == project_id
+                and trial["condition_id"] == condition_id
+            ])
+            for condition_id in conditions
         }
+        for project_id in projects
+    }
     return {
         "schema_version": 1,
         "cohort_id": cohort["cohort_id"],
         "candidate_commit": cohort["candidate_commit"],
         "outcomes": outcomes,
         "conditions": condition_reports,
+        "projects": project_reports,
         "trials": trials,
     }
 

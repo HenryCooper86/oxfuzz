@@ -47,8 +47,12 @@ observed function entry only from a positive exact-run counter. A zero counter
 means `not_observed`, with a limitation, rather than proven non-entry.
 
 Current summaries cover terminal trial outcomes, peak edges, attributable
-model-plus-compute cost, and selected-function entry when measured. Discovery
-top-k usefulness, qualification rate, time to useful campaign, branch coverage
+model-plus-compute cost, and selected-function entry when measured. The report
+retains each trial's project ID and provides project-by-condition and overall
+condition summaries. Every numeric summary includes the sorted measured
+samples, an unavailable count, and a median; a project with no campaign
+measurement therefore remains visible rather than contributing a false zero.
+Discovery top-k usefulness, qualification rate, time to useful campaign, branch coverage
 over time, and reproducible versus harness-caused crashes remain unavailable
 until their retained inputs and classification are added. The report reader
 checks the whole-file hash supplied by the observation index; review the
