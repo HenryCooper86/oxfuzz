@@ -80,7 +80,7 @@ async fn qualify_engine(container: Arc<ServiceContainer>, root: &Path, engine: E
 
     let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
     let progress = Arc::new(tokio::sync::Notify::new());
-    let runner = {
+    let mut runner = {
         let container = Arc::clone(&container);
         let project = project.clone();
         let progress = Arc::clone(&progress);
@@ -107,9 +107,14 @@ async fn qualify_engine(container: Arc<ServiceContainer>, root: &Path, engine: E
         .await
         .expect("run admission deadline")
         .expect("durable run id");
-    tokio::time::timeout(Duration::from_secs(30), progress.notified())
-        .await
-        .expect("measured engine progress");
+    tokio::select! {
+        result = tokio::time::timeout(Duration::from_secs(30), progress.notified()) => {
+            result.expect("measured engine progress");
+        }
+        result = &mut runner => {
+            panic!("campaign ended before measured engine progress: {result:?}");
+        }
+    }
     let cancel_started = Instant::now();
     assert!(
         container.cancel_run(run_id),
