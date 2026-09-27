@@ -34,3 +34,5 @@ does not establish that a WAL reminder implies Docker cleanup; the runtime
 inventory and service WAL are separate records. It also does not test disk
 exhaustion, one-time schedule restart, closeout resumption, backup/restore, or
 12-hour fault behavior. Those A3 scenarios remain open.
+The later [service journal process-loss probe](service-recovery-process-2026-09-27.md)
+tests WAL replay and retained run status separately.
