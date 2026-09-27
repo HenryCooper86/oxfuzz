@@ -248,7 +248,9 @@ impl OwnedContainerRegistry {
         docker: &impl ContainerControl,
         name: &str,
     ) -> Result<(), ClassifiedError> {
-        let label = if let Some(label) = inspect_bounded(docker, name).await? { label } else {
+        let label = if let Some(label) = inspect_bounded(docker, name).await? {
+            label
+        } else {
             // A killed owner can leave a Docker client finishing its create
             // request. Confirm absence again before forgetting its name.
             tokio::time::sleep(ABSENT_RECHECK_DELAY).await;

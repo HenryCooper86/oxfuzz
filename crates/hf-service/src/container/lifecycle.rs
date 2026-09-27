@@ -3,13 +3,13 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+#[cfg(any(feature = "harness-work-order", feature = "patch-to-proof"))]
 use chrono::Utc;
 use hf_core::error::ClassifiedError;
 use hf_core::provider::ProviderPool;
 use hf_core::runtime::RuntimeAdapter;
 use hf_guardrails::Guardrails;
-use hf_storage::{RunStatus, Store};
-use uuid::Uuid;
+use hf_storage::Store;
 
 #[cfg(feature = "semgrep-enrichment")]
 use super::acquire_semgrep_project_lease;
@@ -373,24 +373,10 @@ impl ServiceContainer {
             crate::init::user_app_dir().join("run_journal.jsonl"),
         ));
         if let Some(store) = &store {
-            for run in run_journal.interrupted() {
-                let id = match run.run_id.parse::<Uuid>() {
-                    Ok(id) => id,
-                    Err(error) => {
-                        tracing::error!(
-                            run_id = %run.run_id,
-                            %error,
-                            "cannot repair interrupted run with an invalid id"
-                        );
-                        continue;
-                    }
-                };
-                if let Err(error) = store
-                    .set_run_status(id, RunStatus::Failed, Some(Utc::now()))
-                    .await
-                {
-                    tracing::error!(run_id = %id, %error, "failed to repair interrupted run status");
-                }
+            if let Err(error) =
+                crate::recovery::reconcile_interrupted_run_statuses(store, &run_journal).await
+            {
+                tracing::error!(%error, "failed to repair interrupted run status");
             }
         }
         // Patch-to-Proof: a `running` remediation operation has no live sandbox

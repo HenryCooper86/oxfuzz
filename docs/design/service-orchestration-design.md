@@ -268,6 +268,9 @@ bounded and preserves malformed input for operator recovery instead of
 compacting ambiguous evidence away. This bounded JSONL WAL is owned directly by
 `hf-service` and is the sole recovery-state model; there is no parallel
 in-memory scope journal.
+Startup reconciliation is repeatable: it downgrades each retained row named by
+an unclosed WAL entry once, including a terminal row whose journal close was
+never confirmed. A second pass leaves an already failed row untouched.
 The WAL does not prove a container has stopped after process termination.
 `hf-runtime` separately records owned container names and checks their Docker
 state before new sandbox work. A journal dismissal only acknowledges the

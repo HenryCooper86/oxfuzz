@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 
 use hf_core::engine::EngineKind;
+use hf_core::error::ClassifiedError;
+use hf_storage::{RunStatus, Store};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -239,6 +241,42 @@ impl RunJournal {
             true
         }
     }
+}
+
+/// Mark retained runs with unclosed journal entries failed after process loss.
+///
+/// Repeating this operation leaves already failed rows untouched. An unclosed
+/// entry is not evidence that a terminal database row completed its journal
+/// close, so it is also downgraded on the first reconciliation.
+pub async fn reconcile_interrupted_run_statuses(
+    store: &Store,
+    journal: &RunJournal,
+) -> Result<usize, ClassifiedError> {
+    let mut repaired = 0;
+    for run in journal.interrupted() {
+        let id = run.run_id.parse::<Uuid>().map_err(|error| {
+            ClassifiedError::Storage(format!(
+                "interrupted run has invalid id {}: {error}",
+                run.run_id
+            ))
+        })?;
+        let retained = store
+            .get_run(id)
+            .await
+            .map_err(|error| ClassifiedError::Storage(error.to_string()))?
+            .ok_or_else(|| {
+                ClassifiedError::Storage(format!("interrupted run {id} has no retained row"))
+            })?;
+        if retained.status == RunStatus::Failed {
+            continue;
+        }
+        store
+            .set_run_status(id, RunStatus::Failed, Some(chrono::Utc::now()))
+            .await
+            .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
+        repaired += 1;
+    }
+    Ok(repaired)
 }
 
 fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
