@@ -21,7 +21,9 @@ qualification from implementation.
   does not imply configured build support. Owner: `hf-service`.
 - [ ] Publish and verify language-by-operation support, including a real Rust
   cargo-fuzz campaign in the sandbox. Go/Python discovery does not establish
-  harness support. Owner: `hf-discovery` / `hf-harness`.
+  harness support; the separate [Go](docs/design/go-native-fuzzing-design.md)
+  and [Python](docs/design/python-atheris-fuzzing-design.md) designs await
+  implementation and qualification. Owner: `hf-discovery` / `hf-harness`.
 
 ## Acceptance work
 
@@ -31,10 +33,17 @@ replace these live checks.
 
 - [ ] Repeat the [dispatch and history baseline](docs/acceptance/performance-2026-09-27.md)
   on named release-profile runners. The initial dispatch measurement is
-  release-profile, but retained-history measurements are debug-profile only;
-  the macOS 27 release build failed while loading a generated `sqlx-macros`
-  library. Keep history and campaign Stop objectives independent of dispatch.
+  release-profile, but retained-history measurements are debug-profile only.
+  The macOS 27 release build now succeeds with unstripped proc macros; the
+  retained-history release-profile baseline still needs measurement. Keep
+  history and campaign Stop objectives independent of dispatch.
   Owner: `hf-service` and test infrastructure maintainers.
+
+- [ ] Complete the [held-out effectiveness baseline](docs/acceptance/effectiveness-baseline-protocol.md).
+  Three pinned C parser candidates have curated source snapshots, and the
+  trial/report formats are tested; project approvals, frozen trials, live
+  measurements, C++/Rust breadth, and result comparisons remain open.
+  Owner: discovery, harness, coverage, and crash maintainers.
 
 - [x] Qualify benign reviewed harnesses on libFuzzer, AFL++, and honggfuzz:
   build, bounded smoke, exact-attempt promotion, campaign, corpus retention,
@@ -56,8 +65,11 @@ replace these live checks.
   repeated cycles do not replace fault injection or measured overnight acceptance.
 - [ ] Validate installed desktop applications on supported platforms with
   representative users: setup, first campaign, historical findings, corpus
-  import, keyboard navigation, and interrupted-session recovery. Measure task
-  completion and median/P95 times under comparable budgets.
+  import, keyboard navigation, and interrupted-session recovery. The
+  [macOS arm64 experimental bundle](docs/acceptance/macos-installed-candidate-2026-09-27.md)
+  has a partial install/launch/restart/provider record; the task list, other
+  platforms, signed distribution, and user measurements remain open. Measure
+  task completion and median/P95 times under comparable budgets.
 - [ ] Complete a separately scoped repository security assessment and live
   isolation tests in a disposable environment. Existing regression and
   dependency checks are not a full security assessment.
