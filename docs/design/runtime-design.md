@@ -259,6 +259,32 @@ output is accepted as retained evidence.
 
 ## 5. Failure Semantics
 
+### Planned A3 interrupted Docker ownership
+
+Each `DockerRuntime` command already uses a unique `hf-run-` name. A3 will,
+before asking Docker to create that container, durably record the name and a digest of
+its canonical approved workspace root in a root-owned runtime inventory. The
+container will receive the same workspace digest as a Docker label. A failed
+inventory write will stop the launch. The inventory will be retained until Docker
+confirms that the named container is absent; completing a client process alone
+does not justify erasing ownership evidence.
+
+On a fresh runtime instance, recovery will inspect only names from that root's
+inventory. It may remove a surviving container only when Docker reports the
+same workspace label. A missing container clears a stale inventory entry; an
+inspection failure or label mismatch remains unresolved and blocks new sandbox
+work from that root. Recovery never enumerates and removes every `hf-run-`
+container on the host, since other workspaces may be active. It waits for
+removal confirmation before reporting cleanup. An in-process dropped future
+may request best-effort removal, but its durable inventory remains until the
+next verified reconciliation. Concurrent work in the current process is not a
+startup orphan and must never be selected by reconciliation.
+
+The service WAL still identifies interrupted runs and preserves their project
+and run IDs. Dismissing one of those reminders acknowledges the interruption;
+it is not evidence that Docker stopped. Live recovery acceptance inspects the
+owned container state separately before allowing another campaign.
+
 Production runtime construction and system-readiness reporting resolve the
 same `HF_USE_DOCKER` decision. When Docker execution is explicitly disabled,
 the service installs the refusing stub runtime and diagnostics report Docker,
