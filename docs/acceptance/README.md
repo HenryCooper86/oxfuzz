@@ -34,6 +34,9 @@ The [2026-09-27 userspace attempt record](userspace-attempts-2026-09-27.md)
 retains failed exploratory outcomes without counting them as accepted samples.
 The [2026-09-27 C userspace qualification](userspace-2026-09-27.md) records ten
 passing libFuzzer, AFL++, and honggfuzz cycles on one clean candidate and image.
+The [local isolation](isolation-2026-09-27.md) and
+[owned-container recovery](runtime-recovery-2026-09-27.md) records provide
+partial A3 evidence; they do not complete the fault-soak checklist.
 
 For desktop publication, the draft release contains a hidden
 `oxfuzz-release-acceptance` JSON block. Enter the candidate commit and reviewed

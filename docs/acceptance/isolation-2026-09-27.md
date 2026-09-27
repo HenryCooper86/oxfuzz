@@ -1,8 +1,10 @@
 # Local Docker isolation probe, 2026-09-27
 
-Outcome: **two live `hf-runtime` probes passed** on a disposable macOS arm64
-workspace. This is partial A3 evidence. It does not establish recovery after a
-service process is killed, disk pressure, backup/restore, or the 12-hour soak.
+Outcome: **two initial live `hf-runtime` probes passed** on a disposable macOS
+arm64 workspace. This is partial A3 evidence. The later
+[owned-container recovery probe](runtime-recovery-2026-09-27.md) covers a helper
+process termination; full-service recovery, disk pressure, backup/restore, and
+the 12-hour soak remain separate.
 
 The production code was clean at `984f4712`; the new ignored live test had
 SHA-256 `6956077c259a57e4ae513aba0b63432761895aba4109f1fc5db4c6a126086b20`.
