@@ -35,4 +35,5 @@ Full service termination after a real campaign admission was subsequently
 qualified in the [service campaign process-loss record](service-campaign-process-loss-2026-09-27.md).
 A crash after a persisted closeout step was subsequently qualified in the
 [closeout process-loss record](closeout-process-loss-2026-09-27.md). Bounded
-artifact-write failure and the 12-hour fault soak remain open.
+output growth was qualified in the [output failure record](bounded-output-failure-2026-09-27.md).
+Actual filesystem exhaustion and the 12-hour fault soak remain open.
