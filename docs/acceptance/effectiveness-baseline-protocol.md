@@ -6,14 +6,18 @@ held-out projects, live trials, or effectiveness results have been qualified.
 Freeze a JSON cohort before collecting outcomes. Validate it with
 `python3 scripts/effectiveness_benchmark.py <cohort.json>`. The validator
 rejects unknown fields, duplicate JSON keys or IDs, unresolved trial
-references, mutable source revisions, missing source and sandbox digests, and
-invalid budgets. A passing validation means the matrix is well formed; it does
+references, unsupported project language/engine pairs, mutable source
+revisions, missing source and sandbox digests, and invalid budgets. A passing
+validation means the matrix is well formed; it does
 not approve any target or harness for execution.
 
 The top-level record has `schema_version: 1`, `cohort_id`, a 40-character
 `candidate_commit`, and nonempty `projects`, `conditions`, and `trials` arrays.
 Each project names an HTTPS `source_url`, full 40-character Git `revision`,
-license, 64-character staged-source digest, and selected function symbols.
+license, canonical `language` (`c`, `cpp`, or `rust`), 64-character staged-source
+digest, and selected function symbols. C and C++ may use any declared userspace
+engine; Rust may use libFuzzer only. Go and Python remain discovery-only until
+their campaign paths are implemented and qualified.
 Each condition fixes the engine, selection
 strategy, provider family and model ID, sanitizer, top-k cutoff, campaign
 duration, memory and CPU ceilings, model-call and dollar ceilings, and full

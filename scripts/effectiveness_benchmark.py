@@ -12,6 +12,11 @@ HEX_40 = re.compile(r"[0-9a-f]{40}\Z")
 HEX_64 = re.compile(r"[0-9a-f]{64}\Z")
 ENGINES = {"libfuzzer", "afl++", "honggfuzz"}
 STRATEGIES = {"ranked", "heuristic", "random"}
+PROJECT_ENGINES = {
+    "c": ENGINES,
+    "cpp": ENGINES,
+    "rust": {"libfuzzer"},
+}
 
 
 def record(value, name, fields):
@@ -72,9 +77,11 @@ def validate_cohort(value):
     for project in projects:
         record(project, "project", (
             "id", "source_url", "revision", "license", "source_sha256",
-            "selected_functions",
+            "language", "selected_functions",
         ))
         nonempty(project["id"], "project id")
+        if nonempty(project["language"], "project language") not in PROJECT_ENGINES:
+            raise ValueError("unsupported project language")
         if not nonempty(project["source_url"], "source_url").startswith("https://"):
             raise ValueError("source_url must use HTTPS")
         digest(project["revision"], "revision", HEX_40)
@@ -87,6 +94,7 @@ def validate_cohort(value):
         if len(functions) != len(set(functions)):
             raise ValueError("duplicate selected_function")
     project_ids = unique_ids(projects, "project")
+    languages_by_project = {project["id"]: project["language"] for project in projects}
     functions_by_project = {
         project["id"]: set(project["selected_functions"]) for project in projects
     }
@@ -115,6 +123,7 @@ def validate_cohort(value):
             raise ValueError("model_cost_budget_usd must be finite and non-negative")
         digest(condition["sandbox_image_sha256"], "sandbox_image_sha256", HEX_64)
     condition_ids = unique_ids(conditions, "condition")
+    engines_by_condition = {condition["id"]: condition["engine"] for condition in conditions}
 
     trials = nonempty_list(value["trials"], "trials")
     for trial in trials:
@@ -126,6 +135,9 @@ def validate_cohort(value):
             raise ValueError("unknown project_id")
         if nonempty(trial["condition_id"], "condition_id") not in condition_ids:
             raise ValueError("unknown condition_id")
+        engine = engines_by_condition[trial["condition_id"]]
+        if engine not in PROJECT_ENGINES[languages_by_project[trial["project_id"]]]:
+            raise ValueError("unsupported language/engine pair")
         if nonempty(trial["selected_function"], "selected_function") not in functions_by_project[trial["project_id"]]:
             raise ValueError("unknown selected_function")
         integer(trial["seed"], "seed", 0)

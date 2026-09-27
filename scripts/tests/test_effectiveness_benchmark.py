@@ -21,6 +21,7 @@ def cohort():
             "revision": COMMIT,
             "license": "MIT",
             "source_sha256": DIGEST,
+            "language": "c",
             "selected_functions": ["parse_record"],
         }],
         "conditions": [{
@@ -59,6 +60,33 @@ class CohortValidationTests(unittest.TestCase):
         value["conditions"][0]["engine"] = "aflpp"
         with self.assertRaisesRegex(ValueError, "unsupported engine"):
             validate_cohort(value)
+
+    def test_rejects_a_trial_with_an_unsupported_language_engine_pair(self):
+        value = cohort()
+        value["projects"][0]["language"] = "rust"
+        self.assertEqual(validate_cohort(value)["projects"][0]["language"], "rust")
+        value["conditions"][0]["engine"] = "afl++"
+        with self.assertRaisesRegex(ValueError, "unsupported language/engine pair"):
+            validate_cohort(value)
+
+    def test_rejects_discovery_only_languages_and_missing_language(self):
+        for language in ("go", "python", "C++", ""):
+            value = cohort()
+            value["projects"][0]["language"] = language
+            with self.subTest(language=language), self.assertRaisesRegex(ValueError, "language"):
+                validate_cohort(value)
+        value = cohort()
+        del value["projects"][0]["language"]
+        with self.assertRaisesRegex(ValueError, "language"):
+            validate_cohort(value)
+
+    def test_accepts_cpp_with_all_userspace_engines(self):
+        for engine in ("afl++", "honggfuzz", "libfuzzer"):
+            value = cohort()
+            value["projects"][0]["language"] = "cpp"
+            value["conditions"][0]["engine"] = engine
+            with self.subTest(engine=engine):
+                self.assertEqual(validate_cohort(value)["projects"][0]["language"], "cpp")
 
     def test_rejects_duplicate_trial_ids(self):
         value = cohort()
@@ -114,6 +142,7 @@ class CohortValidationTests(unittest.TestCase):
 
     def test_malformed_foreign_values_fail_as_validation_errors(self):
         for section, field, replacement in [
+            ("projects", "language", []),
             ("conditions", "engine", []),
             ("conditions", "selection_strategy", {}),
             ("trials", "project_id", []),
