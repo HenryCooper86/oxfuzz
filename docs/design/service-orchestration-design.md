@@ -269,10 +269,11 @@ compacting ambiguous evidence away. This bounded JSONL WAL is owned directly by
 `hf-service` and is the sole recovery-state model; there is no parallel
 in-memory scope journal.
 The WAL does not prove a container has stopped after process termination.
-The A3 runtime-ownership plan adds separate owned-container records and Docker
-state checks on a fresh runtime instance before new sandbox work. Until that
-is implemented, a journal dismissal only acknowledges the interrupted run;
-it cannot be treated as verified runtime cleanup.
+`hf-runtime` separately records owned container names and checks their Docker
+state before new sandbox work. A journal dismissal only acknowledges the
+interrupted run; it cannot be treated as verified runtime cleanup. Recovery
+refuses a mismatched label or unverifiable Docker inspection instead of clearing
+the runtime record.
 
 For one-time schedule creation and execution, `hf-service` requires readable
 SQLite. It loads and validates occurrence receipts before recovery planning,

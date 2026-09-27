@@ -11,6 +11,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use crate::config::RuntimeConfig;
+use crate::owned_containers::{ContainerControl, OwnedContainerRegistry};
 
 /// Maximum bytes retained independently for stdout and stderr.
 const MAX_CAPTURED_OUTPUT_BYTES: usize = 1024 * 1024;
@@ -21,6 +22,90 @@ const LINE_TRUNCATION_MARKER: &str = " [line truncated]";
 const PIPE_CHUNK_BYTES: usize = 8 * 1024;
 const MAX_STDIN_BYTES: usize = 4 * 1024 * 1024;
 const CONTAINER_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+
+const WORKSPACE_LABEL: &str = "org.oxfuzz.workspace-sha256";
+
+struct DockerContainerControl;
+
+#[async_trait::async_trait]
+impl ContainerControl for DockerContainerControl {
+    async fn inspect_workspace_label(
+        &self,
+        name: &str,
+    ) -> Result<Option<String>, hf_core::error::ClassifiedError> {
+        let mut command = crate::process_env::scrubbed_tokio_command(crate::docker_bin());
+        command
+            .args([
+                "ps",
+                "-a",
+                "--filter",
+                &format!("name=^/{name}$"),
+                "--format",
+                "{{.Names}}",
+            ])
+            .kill_on_drop(true);
+        let output = command.output().await.map_err(|error| {
+            hf_core::error::ClassifiedError::Sandbox(format!("list owned container: {error}"))
+        })?;
+        if !output.status.success() {
+            return Err(hf_core::error::ClassifiedError::Sandbox(format!(
+                "list owned container {name}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        if !String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|found| found == name)
+        {
+            return Ok(None);
+        }
+        let mut command = crate::process_env::scrubbed_tokio_command(crate::docker_bin());
+        command
+            .args([
+                "inspect",
+                "--format",
+                "{{index .Config.Labels \"org.oxfuzz.workspace-sha256\"}}",
+                name,
+            ])
+            .kill_on_drop(true);
+        let output = command.output().await.map_err(|error| {
+            hf_core::error::ClassifiedError::Sandbox(format!("inspect owned container: {error}"))
+        })?;
+        if !output.status.success() {
+            return Err(hf_core::error::ClassifiedError::Sandbox(format!(
+                "inspect owned container {name}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Ok(Some(
+            String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+        ))
+    }
+
+    async fn remove(&self, name: &str) -> Result<(), hf_core::error::ClassifiedError> {
+        let mut command = crate::process_env::scrubbed_tokio_command(crate::docker_bin());
+        command.args(["rm", "-f", name]).kill_on_drop(true);
+        let output = tokio::time::timeout(CONTAINER_TEARDOWN_TIMEOUT, command.output())
+            .await
+            .map_err(|_| {
+                hf_core::error::ClassifiedError::Sandbox(format!(
+                    "owned container {name} removal timed out"
+                ))
+            })?
+            .map_err(|error| {
+                hf_core::error::ClassifiedError::Sandbox(format!(
+                    "remove owned container {name}: {error}"
+                ))
+            })?;
+        if !output.status.success() {
+            return Err(hf_core::error::ClassifiedError::Sandbox(format!(
+                "remove owned container {name}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Ok(())
+    }
+}
 
 fn valid_pinned_image_reference(image: &str) -> bool {
     if image.is_empty()
@@ -684,9 +769,17 @@ impl DockerRuntime {
             Failed(String),
         }
 
+        let registry = OwnedContainerRegistry::new(&self.host_workspace)?;
+        registry.reconcile(&DockerContainerControl).await?;
+        let active = registry.register(container_name)?;
+        let mut owned_args = args.to_vec();
+        owned_args.insert(
+            2,
+            format!("--label={WORKSPACE_LABEL}={}", registry.workspace_digest()),
+        );
         let mut docker = crate::process_env::scrubbed_tokio_command(crate::docker_bin());
         docker
-            .args(args)
+            .args(&owned_args)
             .stdin(if stdin.is_some() {
                 Stdio::piped()
             } else {
@@ -846,6 +939,7 @@ impl DockerRuntime {
         let stdout = stdout_buf.finish(&mut forward);
         let stderr = stderr_buf.finish(&mut forward);
 
+        registry.finish(active, &DockerContainerControl).await?;
         Ok(CommandResult {
             exit_code,
             stdout,

@@ -9,6 +9,7 @@
 pub mod adapter;
 pub mod config;
 pub mod docker;
+pub mod owned_containers;
 pub mod process_env;
 
 pub use adapter::StubRuntime;

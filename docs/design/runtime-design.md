@@ -259,17 +259,18 @@ output is accepted as retained evidence.
 
 ## 5. Failure Semantics
 
-### Planned A3 interrupted Docker ownership
+### Interrupted Docker ownership
 
-Each `DockerRuntime` command already uses a unique `hf-run-` name. A3 will,
-before asking Docker to create that container, durably record the name and a digest of
-its canonical approved workspace root in a root-owned runtime inventory. The
-container will receive the same workspace digest as a Docker label. A failed
-inventory write will stop the launch. The inventory will be retained until Docker
+Each `DockerRuntime` command uses a unique `hf-run-` name. Before asking Docker
+to create that container, the runtime durably records the name and a digest of
+its canonical approved workspace root in an owner-only directory beside the
+root, outside the container mount. The container receives the same workspace
+digest as a Docker label. A failed inventory write stops the launch. The record
+is retained until Docker
 confirms that the named container is absent; completing a client process alone
 does not justify erasing ownership evidence.
 
-On a fresh runtime instance, recovery will inspect only names from that root's
+Before a new invocation, recovery inspects only names from that root's
 inventory. It may remove a surviving container only when Docker reports the
 same workspace label. A missing container clears a stale inventory entry; an
 inspection failure or label mismatch remains unresolved and blocks new sandbox
@@ -277,8 +278,15 @@ work from that root. Recovery never enumerates and removes every `hf-run-`
 container on the host, since other workspaces may be active. It waits for
 removal confirmation before reporting cleanup. An in-process dropped future
 may request best-effort removal, but its durable inventory remains until the
-next verified reconciliation. Concurrent work in the current process is not a
-startup orphan and must never be selected by reconciliation.
+next verified reconciliation. A per-record file lock distinguishes an active
+invocation in any process from an abandoned record, so concurrent work is not
+selected by reconciliation. Normal completion waits briefly for Docker's
+automatic removal; a still-present container keeps its record and fails the
+operation. If the first inspection finds no container after process loss,
+recovery waits ten seconds and checks again before clearing the record: a
+surviving Docker client might still be completing its create request. Docker
+inspection and removal have bounded deadlines; an unresponsive daemon keeps
+the record and blocks admission.
 
 The service WAL still identifies interrupted runs and preserves their project
 and run IDs. Dismissing one of those reminders acknowledges the interruption;
