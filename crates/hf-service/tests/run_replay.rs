@@ -258,6 +258,38 @@ impl hf_core::provider::ProviderPool for HarnessDraftPool {
     }
 }
 
+fn assert_retained_initial_inputs(workspace: &Path, records: &[hf_storage::RunRecord]) {
+    use sha2::{Digest, Sha256};
+
+    for record in records {
+        let run_root = workspace.join("runs").join(record.id.to_string());
+        assert_eq!(
+            std::fs::read_to_string(run_root.join("input/source-context/parser.c")).unwrap(),
+            FIXTURE,
+        );
+        let initial = run_root.join("input/corpus");
+        let mut entries = std::fs::read_dir(&initial)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        entries.sort();
+        assert!(!entries.is_empty(), "run retains its initial seeds");
+        let mut digest = Sha256::new();
+        digest.update(b"oxfuzz-run-corpus-v1\0");
+        for path in &entries {
+            let name = path.file_name().unwrap();
+            let bytes = std::fs::read(path).unwrap();
+            digest.update(Path::new("corpus").join(name).to_string_lossy().as_bytes());
+            digest.update(b"\0");
+            digest.update(&bytes);
+            digest.update(b"\0");
+            std::fs::write(run_root.join("corpus").join(name), b"engine mutation").unwrap();
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
+        assert_eq!(record.corpus_rev, Some(format!("{:x}", digest.finalize())));
+    }
+}
+
 #[tokio::test]
 async fn run_records_a_seed_and_replay_reexecutes_with_it() {
     common::install_managed_workspace("oxfuzz_run_replay_it");
@@ -368,35 +400,7 @@ async fn run_records_a_seed_and_replay_reexecutes_with_it() {
             .unwrap()
             .contains("No exact campaign profile export"));
     }
-    for record in records {
-        use sha2::{Digest, Sha256};
-
-        let run_root = workspace.join("runs").join(record.id.to_string());
-        assert_eq!(
-            std::fs::read_to_string(run_root.join("input/source-context/parser.c")).unwrap(),
-            FIXTURE,
-        );
-        let initial = run_root.join("input/corpus");
-        let mut entries = std::fs::read_dir(&initial)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .collect::<Vec<_>>();
-        entries.sort();
-        assert!(!entries.is_empty(), "run retains its initial seeds");
-        let mut digest = Sha256::new();
-        digest.update(b"oxfuzz-run-corpus-v1\0");
-        for path in &entries {
-            let name = path.file_name().unwrap();
-            let bytes = std::fs::read(path).unwrap();
-            digest.update(Path::new("corpus").join(name).to_string_lossy().as_bytes());
-            digest.update(b"\0");
-            digest.update(&bytes);
-            digest.update(b"\0");
-            std::fs::write(run_root.join("corpus").join(name), b"engine mutation").unwrap();
-            assert_eq!(std::fs::read(path).unwrap(), bytes);
-        }
-        assert_eq!(record.corpus_rev, Some(format!("{:x}", digest.finalize())));
-    }
+    assert_retained_initial_inputs(&workspace, &records);
 
     // Replay: a new run row, the same seed on the argv, a link to the original.
     let retained_workspace = workspace.join(format!("runs/{}/input/workspace", summary.run_id));
