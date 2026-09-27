@@ -52,6 +52,14 @@ class CohortValidationTests(unittest.TestCase):
     def test_accepts_complete_immutable_trial_matrix(self):
         self.assertEqual(validate_cohort(cohort())["trials"][0]["id"], "parser-ranked-1")
 
+    def test_uses_the_service_engine_identifier_for_afl_plus_plus(self):
+        value = cohort()
+        value["conditions"][0]["engine"] = "afl++"
+        self.assertEqual(validate_cohort(value)["conditions"][0]["engine"], "afl++")
+        value["conditions"][0]["engine"] = "aflpp"
+        with self.assertRaisesRegex(ValueError, "unsupported engine"):
+            validate_cohort(value)
+
     def test_rejects_duplicate_trial_ids(self):
         value = cohort()
         value["trials"].append(copy.deepcopy(value["trials"][0]))

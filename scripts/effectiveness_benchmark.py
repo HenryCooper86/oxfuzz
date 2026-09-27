@@ -10,7 +10,7 @@ from pathlib import Path
 
 HEX_40 = re.compile(r"[0-9a-f]{40}\Z")
 HEX_64 = re.compile(r"[0-9a-f]{64}\Z")
-ENGINES = {"libfuzzer", "aflpp", "honggfuzz"}
+ENGINES = {"libfuzzer", "afl++", "honggfuzz"}
 STRATEGIES = {"ranked", "heuristic", "random"}
 
 
