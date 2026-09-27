@@ -57,11 +57,13 @@ jobs:
             | Linux | `*.AppImage`, `*.deb`, `*.rpm` |
             | Windows | `*.msi`, `*-setup.exe` |
 
-            ### These builds are not signed
+            ### These builds have no trusted code signature
 
-            No code-signing certificates are configured, so the operating system
-            will warn you on first launch. This is expected, not a sign the
-            download is corrupt.
+            No organization code-signing certificates are configured. macOS
+            bundles have an ad-hoc signature but are not notarized; Windows
+            bundles are unsigned. The operating system may warn on first launch.
+            This is expected for these experimental builds and does not alone
+            indicate that the download is corrupt.
 
             - **macOS**: Gatekeeper blocks the first run. Right-click the app and
               choose **Open**, then confirm. Alternatively:

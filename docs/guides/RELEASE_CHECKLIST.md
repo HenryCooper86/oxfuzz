@@ -160,7 +160,9 @@ The script builds the frontend, produces the platform bundle, and verifies the
 macOS application signature and DMG when running on macOS. Inspect the fresh
 artifact under `target/release/bundle`; do not verify an older debug build.
 
-For local macOS QA, the script defaults to an ad-hoc signature. A public macOS
+For local macOS QA, the script defaults to an ad-hoc signature. An
+experimental distribution without a trusted identity must say clearly that no
+trusted signing or notarization is present. A trusted public macOS
 distribution requires an organization-controlled Developer ID identity and a
 separate notarization/stapling workflow. Do not describe an ad-hoc build as
 notarized or Gatekeeper-ready.

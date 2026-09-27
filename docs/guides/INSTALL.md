@@ -36,15 +36,18 @@ Prebuilt installers for each release are attached to the
 | Linux | `oxfuzz_*.AppImage`, `.deb`, `.rpm` |
 | Windows | `oxfuzz_*.msi`, `*-setup.exe` |
 
-These builds are unsigned, so the OS warns on first launch -- see the release
-notes for the per-platform steps. Docker must be installed and running before
-any fuzzing starts.
+These builds have no organization-controlled code-signing identity. macOS
+bundles have an ad-hoc signature but are not notarized; Windows bundles are
+unsigned. The OS may warn on first launch -- see the release notes for the
+per-platform steps. Docker must be installed and running before any fuzzing
+starts.
 
-Maintainers cut a release by pushing a version tag.
-`.github/workflows/release.yml` builds every platform and publishes the release
-automatically -- but only after all four builds have uploaded, so a release is
-never public while a platform is still missing. If any platform fails, the
-release stays a draft to retry or publish by hand:
+Maintainers tag a reviewed release commit. Pushing the tag opens a draft and
+builds each platform. The publication job checks source CI for that exact
+commit, all required installer assets, and reviewed userspace, sandbox, and
+installed-client acceptance references before it can publish. A failed or
+incomplete candidate stays a draft for correction and a publish-job retry;
+do not publish it manually around those checks:
 
 ```bash
 git tag v0.1.0
@@ -56,7 +59,7 @@ git push origin v0.1.0
 ```bash
 ./scripts/build-app.sh
 # App:  target/release/bundle/macos/oxfuzz.app
-# DMG:  target/release/bundle/dmg/oxfuzz_0.1.0_aarch64.dmg
+# DMG:  target/release/bundle/dmg/oxfuzz_<version>_aarch64.dmg
 ```
 
 To install a packaged build, open the `.dmg` and drag **oxfuzz** into
@@ -109,7 +112,8 @@ from the CLI build with
 `OXFUZZ_VERIFY_SEMGREP_SANDBOX=1 ./scripts/build-release.sh`.
 
 On macOS, `build-app.sh` verifies the `.app` signature and the generated DMG.
-Its default ad-hoc signature is suitable for local QA, not public distribution;
-a distributed build still needs the organization's Developer ID signing and
-notarization workflow. Use the **[release checklist](RELEASE_CHECKLIST.md)**
+Its default ad-hoc signature is suitable for local QA and clearly labeled
+experimental distribution, not a trusted macOS release. Trusted distribution
+still needs the organization's Developer ID signing and notarization workflow.
+Use the **[release checklist](RELEASE_CHECKLIST.md)**
 for the full evidence, packaging, safety, and handoff gates.
