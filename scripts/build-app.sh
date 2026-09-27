@@ -31,16 +31,13 @@ BUNDLE="target/release/bundle"
 
 # The bundle filenames embed the arch (e.g. _aarch64 vs _x64) and the OS decides
 # which bundle types Tauri emits, so discover the artifacts instead of
-# hardcoding paths. Only macOS produces a .app that needs ad-hoc signing.
+# hardcoding paths. Tauri signs the .app before packaging it into the DMG.
 APP=""
 if [[ "$OS" == "Darwin" ]]; then
   APP="$(find "$BUNDLE/macos" -maxdepth 1 -name '*.app' -print -quit 2>/dev/null || true)"
   if [[ -n "$APP" ]]; then
     echo ""
-    echo "=== Fixing code signing (ad-hoc) ==="
-    SIGNING_IDENTITY="${APPLE_SIGNING_IDENTITY:--}"
-    codesign --force --deep --sign "$SIGNING_IDENTITY" "$APP"
-    xattr -cr "$APP"
+    echo "=== Verifying app signature ==="
     codesign --verify --deep --strict --verbose=2 "$APP"
   fi
 fi
