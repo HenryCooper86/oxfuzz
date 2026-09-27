@@ -44,7 +44,8 @@ trial. Each entry has `id`, `outcome` (`completed`, `failed`, `cancelled`, or
 `function_coverage` references. A reference has a path relative to the index
 and the SHA-256 of that exact JSON file; use null for an absent measurement.
 Artifact references reject symlinks in every path component and cannot escape
-the observation directory.
+the observation directory. The reader caps each JSON input at 16 MiB while
+reading, before parsing or checking its digest.
 Generate the report with
 `python3 -m scripts.effectiveness_report <cohort.json> <observations.json>`.
 The reader checks file hashes and joins service exports by run, binary,

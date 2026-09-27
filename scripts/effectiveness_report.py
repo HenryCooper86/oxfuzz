@@ -26,10 +26,16 @@ def available(value):
     return {"status": "available", "value": value}
 
 
-def read_json(path):
-    data = path.read_bytes()
+def read_limited(path, name):
+    with path.open("rb") as source:
+        data = source.read(MAX_ARTIFACT_BYTES + 1)
     if len(data) > MAX_ARTIFACT_BYTES:
-        raise ValueError("evidence file exceeds 16 MiB")
+        raise ValueError("{} exceeds 16 MiB".format(name))
+    return data
+
+
+def read_json(path):
+    data = read_limited(path, "evidence file")
     return json.loads(data.decode("utf-8"), object_pairs_hook=no_duplicate_keys)
 
 
@@ -49,9 +55,7 @@ def read_artifact(root, reference):
         raise ValueError("artifact must be a regular file")
     if not path.resolve().is_relative_to(root.resolve()):
         raise ValueError("artifact path must stay below the observation directory")
-    data = path.read_bytes()
-    if len(data) > MAX_ARTIFACT_BYTES:
-        raise ValueError("artifact exceeds 16 MiB")
+    data = read_limited(path, "artifact")
     if hashlib.sha256(data).hexdigest() != reference["sha256"]:
         raise ValueError("artifact sha256 mismatch")
     return json.loads(data.decode("utf-8"), object_pairs_hook=no_duplicate_keys)

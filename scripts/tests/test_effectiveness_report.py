@@ -8,8 +8,11 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from scripts.effectiveness_report import assemble_report
+from scripts.effectiveness_report import (
+    MAX_ARTIFACT_BYTES, assemble_report, read_artifact, read_json,
+)
 from scripts.tests.test_effectiveness_benchmark import DIGEST, cohort
 
 
@@ -55,6 +58,44 @@ def function_coverage(count="0"):
 
 
 class ReportTests(unittest.TestCase):
+    def test_evidence_reads_do_not_load_unbounded_file_bytes(self):
+        small = self.root / "small.json"
+        small.write_text('{"ok": true}', encoding="utf-8")
+        reference = self.artifact("artifact.json", {"ok": True})
+        large = self.root / "large.json"
+        with large.open("wb") as output:
+            output.seek(MAX_ARTIFACT_BYTES)
+            output.write(b"x")
+        original_open = Path.open
+        assert_size = self.assertEqual
+
+        class CheckedReader:
+            def __init__(self, source):
+                self.source = source
+
+            def __enter__(self):
+                self.source.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self.source.__exit__(*args)
+
+            def read(self, size=-1):
+                assert_size(size, MAX_ARTIFACT_BYTES + 1)
+                return self.source.read(size)
+
+        def checked_open(path, *args, **kwargs):
+            return CheckedReader(original_open(path, *args, **kwargs))
+
+        with mock.patch.object(Path, "read_bytes", side_effect=AssertionError("unbounded read")), \
+                mock.patch.object(Path, "open", checked_open):
+            self.assertEqual(read_json(small), {"ok": True})
+            self.assertEqual(read_artifact(self.root, reference), {"ok": True})
+            with self.assertRaisesRegex(ValueError, "16 MiB"):
+                read_json(large)
+            with self.assertRaisesRegex(ValueError, "16 MiB"):
+                read_artifact(self.root, {"path": "large.json", "sha256": DIGEST})
+
     def test_documented_cli_starts_from_repository_root(self):
         root = Path(__file__).resolve().parents[2]
         result = subprocess.run(
