@@ -31,6 +31,7 @@ harness. The final Docker inventory showed no `hf-run-` containers.
 The journal test uses synthetic admission through `Store` and `RunJournal`,
 and closeout cancellation occurs within a test process. The status-write case
 is a database failure, not disk exhaustion during campaign artifact writes.
-Full service termination after a real campaign admission, a crash after a
-persisted closeout step, bounded artifact-write failure, and the 12-hour fault
-soak remain open.
+Full service termination after a real campaign admission was subsequently
+qualified in the [service campaign process-loss record](service-campaign-process-loss-2026-09-27.md).
+A crash after a persisted closeout step, bounded artifact-write failure, and
+the 12-hour fault soak remain open.
