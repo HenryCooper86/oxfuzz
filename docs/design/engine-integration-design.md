@@ -38,6 +38,25 @@ or runs a campaign; presentation layers do not select an adapter directly.
 | libFuzzer | `LibFuzzer` | `clang` / `clang++` with `-fsanitize=fuzzer` | the harness binary |
 | syzkaller | `Syzkaller` | KCOV-enabled kernel build (`make CONFIG_KCOV=y CONFIG_DEBUG_INFO=y`) | `syz-manager -config=<manager.cfg>` |
 
+honggfuzz receives an explicit `--threads` count from the resolved run CPU
+limit. Its default counts host CPUs even when Docker limits the container to
+one CPU. Its fixed-size feedback file is larger than the ordinary run-output
+file ceiling even at one thread. Smoke and campaigns therefore use bounded
+container shared memory for `--workspace`, while `--crashdir`, `--output`, and
+`--report` point to the retained run output. Both execution paths apply the
+same shared-memory and per-file limits; runtime feedback is discarded with
+the container, while findings remain durable.
+
+The pinned sandbox image applies a tracked patch to honggfuzz's
+libFuzzer-compatible driver. Its persistent loop otherwise never exits during
+a normal short campaign, so LLVM's exit writer does not produce a profile.
+When `LLVM_PROFILE_FILE` is set and both LLVM profile hooks are linked, the
+driver writes counters after each 100 completed inputs and resets those
+counters only after a successful write. The `%m` profile path merges windows
+from the same binary. Unprofiled campaigns do not call the hooks. This patch
+is verified against the pinned upstream revision and does not change the
+human-approved harness source.
+
 Syzkaller is the service-owned manager-config exception. It fuzzes syscall
 sequences against a kernel in a managed VM, not a generated single-function
 harness. Its registered adapter represents the `syz-manager -config` argv
@@ -225,6 +244,20 @@ mountpoint. Without the staged target, Docker cannot create a nested mountpoint
 inside a read-only parent and the campaign fails before the engine starts.
 Moving profile output into an unrecorded mutable workspace path would weaken
 the exact-input and read-only guarantees.
+
+The AFL++ libFuzzer-compatible driver normally keeps a persistent target
+process alive for up to `INT_MAX` inputs, so its LLVM profile runtime may not
+flush during a short campaign. For an opted-in profiled AFL++ campaign, persist
+`AFL_FUZZER_LOOPCOUNT=100` in the run environment. The driver then returns
+after at most 100 inputs, letting the target flush a raw profile before AFL++
+starts another forkserver child. Smoke uses its existing settings. Historical
+replay retains the same environment. This bounds the unflushed input window
+and costs some throughput; missing raw profiles remain explicitly unavailable.
+Profile merge and export use the LLVM version that compiled the harness:
+Ubuntu's packaged AFL++ emits LLVM 17 profiles in the pinned image, while
+libFuzzer and honggfuzz use LLVM 18. Mixing the default LLVM 18 `llvm-profdata`
+with AFL++ raw profiles fails with a version mismatch. The image smoke check
+must exercise both format versions before the image is accepted.
 
 ## Repeated userspace qualification
 

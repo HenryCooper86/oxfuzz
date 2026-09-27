@@ -43,6 +43,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Build the pinned honggfuzz 2.6 release from source (not in Ubuntu repos).
 ARG HONGGFUZZ_COMMIT=83a8415a372d84dcc69ac1e2c2f152190bcf76d1
+COPY docker/sandbox/honggfuzz-profile-flush.patch /tmp/honggfuzz-profile-flush.patch
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libbfd-dev \
     libunwind-dev \
@@ -50,8 +51,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && git -C /tmp/honggfuzz remote add origin https://github.com/google/honggfuzz.git \
     && git -C /tmp/honggfuzz fetch --depth=1 origin "${HONGGFUZZ_COMMIT}" \
     && git -C /tmp/honggfuzz checkout --detach FETCH_HEAD \
+    && git -C /tmp/honggfuzz apply --check /tmp/honggfuzz-profile-flush.patch \
+    && git -C /tmp/honggfuzz apply /tmp/honggfuzz-profile-flush.patch \
     && cd /tmp/honggfuzz && make && make install \
-    && rm -rf /tmp/honggfuzz \
+    && rm -rf /tmp/honggfuzz /tmp/honggfuzz-profile-flush.patch \
     && rm -rf /var/lib/apt/lists/*
 
 # ---------------------------------------------------------------------------

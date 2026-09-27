@@ -4,6 +4,11 @@
 
 use hf_core::engine::FuzzRunConfig;
 
+/// Bounded container shared memory for honggfuzz's fixed-size feedback file.
+pub const SHARED_MEMORY_MB: u32 = 192;
+/// Per-file ceiling that admits the feedback file and limits scratch writes.
+pub const SHARED_MEMORY_BYTES: u64 = SHARED_MEMORY_MB as u64 * 1024 * 1024;
+
 /// Construct the `honggfuzz` argument list for a fuzz run.
 ///
 /// honggfuzz has no user-specified RNG seed (its RNG is seeded from
@@ -16,20 +21,20 @@ pub fn build_run_args(cfg: &FuzzRunConfig, binary: &str, corpus: &str, out: &str
     if duration > 0 {
         args.push(format!("--run_time={duration}"));
     }
+    args.push("--threads".to_owned());
+    args.push(cfg.max_cpus.to_string());
     args.push("--input".to_owned());
     args.push(corpus.to_owned());
     args.push("--output".to_owned());
     args.push(out.to_owned());
-    // honggfuzz writes crash artifacts (`SIG*.PC.*`) and `HONGGFUZZ.REPORT.TXT`
-    // to its workspace/crashdir, which defaults to the container CWD (`/work`),
-    // NOT to `--output` (that is the new-coverage corpus dir). Triage only scans
-    // the run's `out` dir, so without these flags every honggfuzz crash lands at
-    // the workspace root and is never ingested. Point both at `out` so crashes
-    // and the report land where `hf_crash::ingest` looks for them.
+    // Runtime feedback uses bounded container shared memory. Crash artifacts
+    // and the report stay in the run output so triage can retain them.
     args.push("--workspace".to_owned());
-    args.push(out.to_owned());
+    args.push("/dev/shm".to_owned());
     args.push("--crashdir".to_owned());
     args.push(out.to_owned());
+    args.push("--report".to_owned());
+    args.push(format!("{out}/HONGGFUZZ.REPORT.TXT"));
     // `cfg.env` is deliberately absent from the argument list: both callers pass
     // the same map through `ResourceLimits.env`, which the sandbox renders onto
     // the container. An `env K=V` wrapper here would be a second home for one

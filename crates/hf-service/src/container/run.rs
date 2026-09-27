@@ -860,8 +860,11 @@ impl ServiceContainer {
             return Err(error);
         }
         record.config = Some(config.clone());
-        let mut sandbox =
-            run_sandbox_options(&artifacts, Some(sandbox_image.reference().to_owned()));
+        let mut sandbox = run_sandbox_options(
+            &artifacts,
+            Some(sandbox_image.reference().to_owned()),
+            engine,
+        );
         sandbox
             .extra_mounts
             .push(hf_core::runtime::SandboxMount::read_only(

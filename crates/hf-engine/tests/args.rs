@@ -155,8 +155,28 @@ fn honggfuzz_args_have_run_time() {
         .expect("--workspace");
     assert_eq!(
         args.get(workspace + 1).map(String::as_str),
-        Some("/work/out")
+        Some("/dev/shm")
     );
+    let report = args.iter().position(|a| a == "--report").expect("--report");
+    assert_eq!(
+        args.get(report + 1).map(String::as_str),
+        Some("/work/out/HONGGFUZZ.REPORT.TXT")
+    );
+}
+
+#[test]
+fn honggfuzz_workers_follow_the_resolved_cpu_limit() {
+    for cpus in [1, 2] {
+        let mut c = cfg(EngineKind::Honggfuzz, 10);
+        c.max_cpus = cpus;
+        let args =
+            hf_engine::honggfuzz::build_run_args(&c, "/work/fuzz_bin", "/work/corpus", "/work/out");
+        let threads = args
+            .iter()
+            .position(|arg| arg == "--threads")
+            .expect("--threads");
+        assert_eq!(args.get(threads + 1), Some(&cpus.to_string()));
+    }
 }
 
 /// `cfg.env` reaches the fuzzer through the sandbox environment, never through

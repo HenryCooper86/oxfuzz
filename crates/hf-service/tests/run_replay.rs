@@ -145,7 +145,7 @@ impl RuntimeAdapter for RecordingRuntime {
         limits: &ResourceLimits,
         opts: &SandboxOptions,
     ) -> Result<CommandResult, ClassifiedError> {
-        if cmd.first().is_some_and(|value| value == "llvm-profdata") {
+        if cmd.first().is_some_and(|value| value == "llvm-profdata-18") {
             let output = &opts
                 .extra_mounts
                 .iter()
@@ -155,7 +155,7 @@ impl RuntimeAdapter for RecordingRuntime {
             std::fs::write(output.join("merged.profdata"), "indexed profile").unwrap();
             return Ok(completed(0, "", cwd));
         }
-        if cmd.iter().any(|value| value.contains("llvm-cov export")) {
+        if cmd.iter().any(|value| value.contains("llvm-cov-18 export")) {
             let output = &opts
                 .extra_mounts
                 .iter()
@@ -185,8 +185,8 @@ impl RuntimeAdapter for RecordingRuntime {
         _cancel: &tokio_util::sync::CancellationToken,
         on_line: &LineSink<'_>,
     ) -> Result<CommandResult, ClassifiedError> {
-        if cmd.first().is_some_and(|value| value == "llvm-profdata")
-            || cmd.iter().any(|value| value.contains("llvm-cov export"))
+        if cmd.first().is_some_and(|value| value == "llvm-profdata-18")
+            || cmd.iter().any(|value| value.contains("llvm-cov-18 export"))
         {
             return self.run_command_opts(cmd, cwd, limits, opts).await;
         }

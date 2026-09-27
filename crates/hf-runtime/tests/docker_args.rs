@@ -177,6 +177,7 @@ fn build_exec_args_with_syzkaller_profile() {
         devices: vec!["/dev/kvm".to_owned()],
         workspace_read_only: true,
         max_file_size_bytes: None,
+        shm_size_mb: None,
         max_pids: None,
     };
     let args = hf_runtime::docker::build_exec_args_with(
@@ -301,6 +302,22 @@ fn build_exec_args_applies_a_per_file_write_limit() {
         "missing per-file output limit: {}",
         args.join(" ")
     );
+}
+
+#[test]
+fn build_exec_args_bounds_explicit_shared_memory() {
+    let cfg = cfg_with(limits(2048, 1));
+    let opts = hf_core::runtime::SandboxOptions {
+        shm_size_mb: Some(192),
+        ..hf_core::runtime::SandboxOptions::default()
+    };
+    let args = hf_runtime::docker::build_exec_args_with(
+        &cfg,
+        &limits(2048, 1),
+        &["honggfuzz".to_owned()],
+        &opts,
+    );
+    assert!(args.iter().any(|arg| arg == "--shm-size=192m"));
 }
 
 #[test]

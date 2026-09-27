@@ -84,6 +84,7 @@ struct SmokePolicyRuntime {
     command: std::sync::Mutex<Vec<String>>,
     limits: std::sync::Mutex<Option<ResourceLimits>>,
     image: std::sync::Mutex<Option<String>>,
+    options: std::sync::Mutex<Option<hf_core::runtime::SandboxOptions>>,
 }
 
 #[async_trait::async_trait]
@@ -113,6 +114,7 @@ impl RuntimeAdapter for SmokePolicyRuntime {
         opts: &hf_core::runtime::SandboxOptions,
     ) -> Result<CommandResult, ClassifiedError> {
         self.image.lock().unwrap().clone_from(&opts.image);
+        *self.options.lock().unwrap() = Some(opts.clone());
         self.run_command(cmd, cwd, limits).await
     }
 
@@ -411,6 +413,61 @@ async fn smoke_fuzz_uses_one_resolved_config_for_command_runtime_and_summary() {
         17 + hf_engine::runner::SANDBOX_TIMEOUT_HEADROOM_SECS
     );
     assert_eq!(smoked.smoke_run.unwrap().duration_secs, 17);
+}
+
+#[tokio::test]
+async fn honggfuzz_smoke_bounds_feedback_shared_memory() {
+    let rt = SmokePolicyRuntime::default();
+    let harness = Harness {
+        id: Uuid::new_v4(),
+        target_id: Uuid::new_v4(),
+        engine: EngineKind::Honggfuzz,
+        source: String::new(),
+        language: TargetLanguage::C,
+        build_cmd: BuildCommand {
+            compiler: "hfuzz-cc".to_owned(),
+            args: vec![],
+            output: PathBuf::from("fuzz"),
+            extra_flags: Vec::new(),
+        },
+        sanitizer: Sanitizer::Address,
+        status: HarnessStatus::Compiled,
+        smoke_run: None,
+    };
+    let cfg = FuzzRunConfig {
+        harness_id: harness.id,
+        engine: harness.engine,
+        duration: Some(std::time::Duration::from_secs(1)),
+        max_mem_mb: 2048,
+        max_cpus: 1,
+        seed_corpus: None,
+        sanitizer: harness.sanitizer,
+        env: Vec::new(),
+        extra_args: Vec::new(),
+        seed: None,
+        replay_of: None,
+        input_manifest_sha256: None,
+    };
+    let workspace = tempfile::tempdir().unwrap();
+    smoke_fuzz_in_paths_with_config(
+        harness,
+        &rt,
+        workspace.path(),
+        Path::new("runs/smoke/corpus"),
+        Path::new("runs/smoke/out"),
+        &cfg,
+    )
+    .await
+    .unwrap();
+    let options = rt.options.lock().unwrap().clone().unwrap();
+    assert_eq!(
+        options.shm_size_mb,
+        Some(hf_engine::honggfuzz::SHARED_MEMORY_MB)
+    );
+    assert_eq!(
+        options.max_file_size_bytes,
+        Some(hf_engine::honggfuzz::SHARED_MEMORY_BYTES)
+    );
 }
 
 #[tokio::test]

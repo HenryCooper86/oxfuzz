@@ -1322,6 +1322,7 @@ impl crate::ServiceContainer {
             devices: Vec::new(),
             workspace_read_only: true,
             max_file_size_bytes: Some(MAX_SEMGREP_OUTPUT_BYTES),
+            shm_size_mb: None,
             max_pids: Some(128),
         };
         let execution_started = std::time::Instant::now();

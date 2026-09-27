@@ -821,13 +821,19 @@ pub async fn smoke_fuzz_in_paths_with_config_and_sandbox_image(
         env: config.env.iter().cloned().collect(),
         ptrace: false,
     };
+    let honggfuzz = harness.engine == EngineKind::Honggfuzz;
     let sandbox = hf_core::runtime::SandboxOptions {
         extra_mounts: vec![
             hf_core::runtime::SandboxMount::writable(corpus_dir, corpus_container),
             hf_core::runtime::SandboxMount::writable(out_dir.clone(), out_container.clone()),
         ],
         workspace_read_only: true,
-        max_file_size_bytes: Some(64 * 1024 * 1024),
+        max_file_size_bytes: Some(if honggfuzz {
+            hf_engine::honggfuzz::SHARED_MEMORY_BYTES
+        } else {
+            64 * 1024 * 1024
+        }),
+        shm_size_mb: honggfuzz.then_some(hf_engine::honggfuzz::SHARED_MEMORY_MB),
         image: sandbox_image,
         ..hf_core::runtime::SandboxOptions::default()
     };

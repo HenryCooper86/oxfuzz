@@ -24,6 +24,10 @@ The smoke check also links a small C program with each advertised userspace
 compiler using the sanitizer and profile flags applied to live harnesses.
 Listing a compiler binary alone does not establish that its architecture's
 runtime libraries are installed.
+The honggfuzz run profile requests a bounded 192 MiB `/dev/shm` and a matching
+per-file ceiling for its 151 MiB runtime feedback file. Other profiles keep
+their ordinary 64 MiB per-file ceiling. The shared-memory request is explicit
+per sandbox invocation and remains under the run's memory limit.
 
 ## 2. Host Workspace Boundary
 

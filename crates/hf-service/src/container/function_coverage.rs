@@ -76,7 +76,7 @@ mod collection {
     use super::{ClassifiedError, ServiceContainer};
     use crate::container::staging::RunArtifacts;
     use hf_core::{
-        engine::FuzzRunConfig,
+        engine::{EngineKind, FuzzRunConfig},
         harness::Harness,
         runtime::{CommandTermination, ResourceLimits, SandboxMount, SandboxOptions},
     };
@@ -89,6 +89,20 @@ mod collection {
     ];
     const PROFILE_FILE: &str = "/work/function-coverage/%m.profraw";
     const MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+    pub(super) fn profile_tools(
+        engine: EngineKind,
+    ) -> Result<(&'static str, &'static str), ClassifiedError> {
+        match engine {
+            EngineKind::AflPlusPlus => Ok(("llvm-profdata-17", "llvm-cov-17")),
+            EngineKind::LibFuzzer | EngineKind::Honggfuzz => {
+                Ok(("llvm-profdata-18", "llvm-cov-18"))
+            }
+            EngineKind::Syzkaller => Err(ClassifiedError::Validation(
+                "userspace LLVM function profiles are unavailable for syzkaller".to_owned(),
+            )),
+        }
+    }
 
     pub(in crate::container) fn configure(
         config: &mut FuzzRunConfig,
@@ -111,6 +125,11 @@ mod collection {
                 }
                 .to_owned(),
             ));
+            if !smoke && config.engine == EngineKind::AflPlusPlus {
+                config
+                    .env
+                    .push(("AFL_FUZZER_LOOPCOUNT".to_owned(), "100".to_owned()));
+            }
         }
     }
 
@@ -304,8 +323,9 @@ mod collection {
                 env: std::collections::HashMap::new(),
                 ptrace: false,
             };
+            let (profdata, cov) = profile_tools(record.engine)?;
             let mut merge = vec![
-                "llvm-profdata".to_owned(),
+                profdata.to_owned(),
                 "merge".to_owned(),
                 "-sparse".to_owned(),
             ];
@@ -325,7 +345,7 @@ mod collection {
             let export = vec![
                 "sh".to_owned(),
                 "-c".to_owned(),
-                "llvm-cov export \"$1\" -instr-profile=\"$2\" > \"$3\"".to_owned(),
+                format!("{cov} export \"$1\" -instr-profile=\"$2\" > \"$3\""),
                 "oxfuzz-coverage".to_owned(),
                 artifacts.binary_container.clone(),
                 "/profiles/output/merged.profdata".to_owned(),
@@ -390,8 +410,12 @@ pub(super) const PROFILE_FLAGS: [&str; 3] = collection::FLAGS;
 
 #[cfg(all(test, feature = "proof-carrying"))]
 mod staging_tests {
-    use super::collection::stage_input_workspace;
-    use hf_core::engine::FuzzRunConfig;
+    use super::collection::{configure, profile_tools, stage_input_workspace, FLAGS};
+    use hf_core::{
+        engine::{EngineKind, FuzzRunConfig},
+        harness::{BuildCommand, Harness, HarnessStatus},
+        target::{Sanitizer, TargetLanguage},
+    };
 
     fn config(profile: bool) -> FuzzRunConfig {
         let mut config: FuzzRunConfig = serde_json::from_value(serde_json::json!({
@@ -407,6 +431,71 @@ mod staging_tests {
             ));
         }
         config
+    }
+
+    #[test]
+    fn profiled_afl_campaign_bounds_persistent_loop_to_flush_counters() {
+        let mut run_config = config(false);
+        run_config.engine = EngineKind::AflPlusPlus;
+        let harness = Harness {
+            id: uuid::Uuid::new_v4(),
+            target_id: uuid::Uuid::new_v4(),
+            engine: EngineKind::AflPlusPlus,
+            source: String::new(),
+            language: TargetLanguage::C,
+            build_cmd: BuildCommand {
+                compiler: "afl-clang-fast".to_owned(),
+                args: Vec::new(),
+                output: std::path::PathBuf::from("/work/harness"),
+                extra_flags: FLAGS.iter().map(|flag| (*flag).to_owned()).collect(),
+            },
+            sanitizer: Sanitizer::Address,
+            status: HarnessStatus::Promoted,
+            smoke_run: None,
+        };
+        configure(&mut run_config, &harness, false);
+        assert!(run_config
+            .env
+            .iter()
+            .any(|(key, value)| key == "AFL_FUZZER_LOOPCOUNT" && value == "100"));
+        assert!(run_config
+            .env
+            .iter()
+            .any(|(key, _)| key == "LLVM_PROFILE_FILE"));
+
+        let mut smoke = config(false);
+        smoke.engine = EngineKind::AflPlusPlus;
+        configure(&mut smoke, &harness, true);
+        assert!(!smoke
+            .env
+            .iter()
+            .any(|(key, _)| key == "AFL_FUZZER_LOOPCOUNT"));
+
+        let mut unprofiled = config(false);
+        unprofiled.engine = EngineKind::AflPlusPlus;
+        let mut unprofiled_harness = harness;
+        unprofiled_harness.build_cmd.extra_flags.clear();
+        configure(&mut unprofiled, &unprofiled_harness, false);
+        assert!(!unprofiled
+            .env
+            .iter()
+            .any(|(key, _)| key == "AFL_FUZZER_LOOPCOUNT"));
+    }
+
+    #[test]
+    fn profile_tools_match_each_engines_compiler_version() {
+        assert_eq!(
+            profile_tools(EngineKind::AflPlusPlus).unwrap(),
+            ("llvm-profdata-17", "llvm-cov-17")
+        );
+        assert_eq!(
+            profile_tools(EngineKind::LibFuzzer).unwrap(),
+            ("llvm-profdata-18", "llvm-cov-18")
+        );
+        assert_eq!(
+            profile_tools(EngineKind::Honggfuzz).unwrap(),
+            ("llvm-profdata-18", "llvm-cov-18")
+        );
     }
 
     #[test]

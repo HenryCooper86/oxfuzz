@@ -362,6 +362,9 @@ pub struct SandboxOptions {
     /// Optional per-file write ceiling enforced by the container runtime.
     /// Service-level aggregate monitoring complements this limit.
     pub max_file_size_bytes: Option<u64>,
+    /// Optional `/dev/shm` ceiling in MiB for an engine's disposable runtime
+    /// feedback. It remains subject to the container memory limit.
+    pub shm_size_mb: Option<u32>,
     /// Optional process-count ceiling for a specialized profile. The runtime
     /// accepts only values that tighten the configured sandbox limit.
     pub max_pids: Option<u32>,

@@ -813,7 +813,9 @@ pub(super) fn verify_staged_qualification(
 pub(super) fn run_sandbox_options(
     artifacts: &RunArtifacts,
     sandbox_image: Option<String>,
+    engine: hf_core::engine::EngineKind,
 ) -> hf_core::runtime::SandboxOptions {
+    let honggfuzz = engine == hf_core::engine::EngineKind::Honggfuzz;
     hf_core::runtime::SandboxOptions {
         extra_mounts: vec![
             hf_core::runtime::SandboxMount::writable(
@@ -826,7 +828,12 @@ pub(super) fn run_sandbox_options(
             ),
         ],
         workspace_read_only: true,
-        max_file_size_bytes: Some(64 * 1024 * 1024),
+        max_file_size_bytes: Some(if honggfuzz {
+            hf_engine::honggfuzz::SHARED_MEMORY_BYTES
+        } else {
+            64 * 1024 * 1024
+        }),
+        shm_size_mb: honggfuzz.then_some(hf_engine::honggfuzz::SHARED_MEMORY_MB),
         image: sandbox_image,
         ..hf_core::runtime::SandboxOptions::default()
     }
@@ -1175,12 +1182,33 @@ mod staging_tests {
             std::fs::read(initial.join("seed")).unwrap(),
             b"original input"
         );
-        let options = super::run_sandbox_options(&artifacts, None);
+        let options =
+            super::run_sandbox_options(&artifacts, None, hf_core::engine::EngineKind::LibFuzzer);
         assert!(options.workspace_read_only);
         assert!(options
             .extra_mounts
             .iter()
             .all(|mount| mount.read_only || !initial.starts_with(&mount.host_path)));
+    }
+
+    #[test]
+    fn honggfuzz_campaign_bounds_feedback_shared_memory() {
+        let workspace = tempfile::tempdir().unwrap();
+        let binary = workspace.path().join("fuzz_parse");
+        std::fs::write(&binary, b"approved binary").unwrap();
+        let artifacts =
+            stage_run_artifacts(workspace.path(), uuid::Uuid::new_v4(), "source", &binary).unwrap();
+        let options =
+            super::run_sandbox_options(&artifacts, None, hf_core::engine::EngineKind::Honggfuzz);
+        assert_eq!(
+            options.shm_size_mb,
+            Some(hf_engine::honggfuzz::SHARED_MEMORY_MB)
+        );
+        assert_eq!(
+            options.max_file_size_bytes,
+            Some(hf_engine::honggfuzz::SHARED_MEMORY_BYTES)
+        );
+        assert!(options.workspace_read_only);
     }
 
     #[test]
@@ -1276,7 +1304,8 @@ mod staging_tests {
                 .source,
             captured.source
         );
-        let options = super::run_sandbox_options(&artifacts, None);
+        let options =
+            super::run_sandbox_options(&artifacts, None, hf_core::engine::EngineKind::LibFuzzer);
         assert!(options
             .extra_mounts
             .iter()

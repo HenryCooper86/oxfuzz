@@ -275,6 +275,9 @@ pub fn build_exec_args_with(
     if let Some(bytes) = opts.max_file_size_bytes {
         args.push(format!("--ulimit=fsize={bytes}:{bytes}"));
     }
+    if let Some(megabytes) = opts.shm_size_mb {
+        args.push(format!("--shm-size={megabytes}m"));
+    }
 
     // Target platform for the image (e.g. an arm64 host running a linux/amd64
     // syzkaller image under emulation).
