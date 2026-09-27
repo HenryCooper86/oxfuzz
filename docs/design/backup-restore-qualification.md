@@ -28,6 +28,11 @@ unrelated SQLite writer remains active. A database row that points to a file
 being changed during the copy is refused; this procedure does not claim an
 atomic snapshot of a mutable project tree.
 
+The older-schema probe uses `sqlx` to build a real pre-0019 migration database,
+backs it up through the same script, restores it, and opens it with the current
+`Store`. That final open applies all remaining migrations and verifies the
+retained run and artifact link without inventing a historical approval.
+
 ## Acceptance
 
 - A writer can commit to the source WAL while the online database backup runs.
