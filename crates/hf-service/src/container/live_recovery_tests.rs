@@ -32,6 +32,7 @@ const APPROVAL: &str = "OXFUZZ_LIVE_APPROVAL_SHA256";
 const EVIDENCE_ROOT: &str = "OXFUZZ_LIVE_EVIDENCE_ROOT";
 const CHILD_ROOT: &str = "OXFUZZ_A3_SERVICE_CHILD_ROOT";
 const CLOSEOUT_PAUSE_STEP: &str = "OXFUZZ_A3_CLOSEOUT_PAUSE_STEP";
+const LIVE_FAULT_MODE: &str = "OXFUZZ_A3_LIVE_FAULT_MODE";
 
 pub(super) fn pause_after_closeout_record(step: crate::run_closeout::CloseoutStep) {
     if std::env::var(CLOSEOUT_PAUSE_STEP).ok().as_deref() != Some(format!("{step:?}").as_str()) {
@@ -231,6 +232,107 @@ async fn approved_campaign_survives_service_process_loss() {
 }
 
 #[tokio::test]
+#[ignore = "requires approved sources, configured provider, Docker, and sandbox image"]
+async fn approved_campaign_fails_on_bounded_output_growth() {
+    approved_sources();
+    assert!(hf_runtime::docker_daemon_ready());
+    let parent = PathBuf::from(std::env::var(EVIDENCE_ROOT).expect("private evidence root"));
+    std::fs::create_dir_all(&parent).unwrap();
+    let root = parent.join(format!("a3-output-{}", Uuid::new_v4()));
+    let workspace_root = root.join("workspace");
+    std::fs::create_dir_all(&workspace_root).unwrap();
+    let registry = OwnedContainerRegistry::new(&workspace_root).unwrap();
+    let child_log = File::create(root.join("child.log")).unwrap();
+    let mut child = OwnedChild(
+        Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "container::live_recovery_tests::live_campaign_child",
+                "--nocapture",
+            ])
+            .env(CHILD_ROOT, &root)
+            .env(LIVE_FAULT_MODE, "output_budget")
+            .stdout(Stdio::from(child_log.try_clone().unwrap()))
+            .stderr(Stdio::from(child_log))
+            .spawn()
+            .unwrap(),
+    );
+    let marker = root.join("admitted-run-id");
+    let output_marker = root.join("output-path");
+    let container_name = tokio::time::timeout(Duration::from_secs(300), async {
+        loop {
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "live campaign child exited early"
+            );
+            if marker.exists() && output_marker.exists() {
+                let running = run_containers(registry.workspace_digest(), false).await;
+                if let Some(name) = registry
+                    .pending_names()
+                    .unwrap()
+                    .into_iter()
+                    .find(|name| running.contains(name))
+                {
+                    return name;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("approved campaign never entered its owned sandbox");
+    let output = PathBuf::from(std::fs::read_to_string(output_marker).unwrap());
+    assert!(
+        std::fs::canonicalize(&output)
+            .unwrap()
+            .starts_with(std::fs::canonicalize(&workspace_root).unwrap()),
+        "fault injection must stay in the disposable workspace"
+    );
+    let mut oversized = File::create(output.join("bounded-output-probe")).unwrap();
+    let chunk = vec![b'x'; 1024 * 1024];
+    for _ in 0..65 {
+        oversized.write_all(&chunk).unwrap();
+    }
+    oversized.sync_all().unwrap();
+    tokio::time::timeout(Duration::from_secs(45), async {
+        loop {
+            if let Some(status) = child.0.try_wait().unwrap() {
+                assert!(status.success(), "output-budget child failed");
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("output budget did not stop the campaign");
+    let run_id = Uuid::parse_str(std::fs::read_to_string(marker).unwrap().trim()).unwrap();
+    let store = Store::connect(root.join("qualification.db")).await.unwrap();
+    assert_eq!(
+        store.get_run(run_id).await.unwrap().unwrap().status,
+        RunStatus::Failed
+    );
+    let journal = RunJournal::open(root.join("run_journal.jsonl"));
+    assert!(journal.interrupted().is_empty());
+    assert!(registry.pending_names().unwrap().is_empty());
+    assert!(!run_containers(registry.workspace_digest(), true)
+        .await
+        .contains(&container_name));
+    std::fs::write(
+        root.join("recovery.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "run_id": run_id,
+            "injected_bytes": 65 * 1024 * 1024,
+            "status": "failed",
+            "owned_container_name": container_name,
+            "cleanup": "verified",
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
 #[ignore = "helper for approved_campaign_survives_service_process_loss"]
 async fn live_campaign_child() {
     let Ok(root) = std::env::var(CHILD_ROOT) else {
@@ -280,7 +382,7 @@ async fn live_campaign_child() {
         .harness_promote(&project, "qualification_parse", EngineKind::LibFuzzer)
         .await
         .unwrap();
-    service
+    let result = service
         .run_fuzzer_observed(
             &project,
             "qualification_parse",
@@ -291,10 +393,31 @@ async fn live_campaign_child() {
                 let mut marker = File::create(root.join("admitted-run-id")).unwrap();
                 write!(marker, "{id}").unwrap();
                 marker.sync_all().unwrap();
+                if std::env::var(LIVE_FAULT_MODE).ok().as_deref() == Some("output_budget") {
+                    let output = target_workspace
+                        .join("runs")
+                        .join(id.to_string())
+                        .join("out");
+                    std::fs::write(
+                        root.join("output-path"),
+                        output.to_string_lossy().as_bytes(),
+                    )
+                    .unwrap();
+                }
             },
         )
-        .await
-        .expect("parent must terminate the live service before the campaign completes");
+        .await;
+    if std::env::var(LIVE_FAULT_MODE).ok().as_deref() == Some("output_budget") {
+        let error = result.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("exceeded its retained-evidence budget"),
+            "{error}"
+        );
+        return;
+    }
+    result.expect("parent must terminate the live service before the campaign completes");
     panic!("campaign completed before process-loss injection");
 }
 
