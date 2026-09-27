@@ -204,6 +204,22 @@ candidate commit.
 ## 7. Approve the release candidate
 
 - Require every pipeline job to pass on the exact candidate commit.
+- Confirm the tag resolves to that commit and the draft release contains the
+  acceptance record for the same candidate. The publish job's nonpublishing
+  inspection writes a candidate-validation summary with the successful
+  required CI gate and SHA-256 digests for both macOS DMGs, Linux
+  AppImage/deb/rpm, and Windows MSI/EXE. The release workflow refuses
+  publication when this automated check fails.
+- Review the three live records required for a desktop release: userspace
+  engine qualification, sandbox isolation, and installed-client acceptance.
+  Edit the draft release body's hidden `oxfuzz-release-acceptance` JSON block:
+  keep `candidate_commit` equal to the tag commit, list the three claims in
+  `scope`, and replace each empty `url` and `sha256` with the reviewed record's
+  HTTPS link and `sha256:<64 lowercase hexadecimal digits>`. Add a claim and
+  reference for each specialized capability advertised by this release. Rerun
+  the failed publish job after the draft has those references. Missing or
+  malformed references keep it as a draft; a valid link is not a substitute
+  for reviewing the referenced result.
 - Review the merge-request diff, dependency changes, generated artifacts, and
   unresolved discussions.
 - Record artifact names, sizes, and SHA-256 checksums.

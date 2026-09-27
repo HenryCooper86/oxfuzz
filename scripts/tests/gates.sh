@@ -147,6 +147,7 @@ gate_script_tests() {
     --start-directory scripts/tests \
     --top-level-directory scripts/tests \
     --pattern 'test_*.py'
+  node --test scripts/tests/release_candidate.test.cjs
 }
 
 gate_translation_pairing() {

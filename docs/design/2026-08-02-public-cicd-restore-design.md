@@ -179,6 +179,46 @@ developer push / PR
 git tag v* --> release.yml --> draft -> per-OS Tauri bundles -> publish
 ```
 
+### 5.1 Candidate publication validation
+
+The original three-phase release flow checks successful bundle jobs but does
+not check source CI for the candidate commit. Before opening a draft, the
+release workflow must validate a `v<workspace version>` tag ref and agreement
+among the workspace, desktop package, and Tauri versions. The tag must still
+resolve to the workflow's candidate commit when publication is attempted.
+
+The draft release body contains an editable, hidden JSON acceptance record.
+It binds the candidate commit, names the release scope, and provides a reviewed
+HTTPS evidence URL and SHA-256 digest for userspace engine qualification,
+sandbox isolation, and installed-client acceptance. The current desktop release
+requires all three; specialized capabilities add their own records before being
+claimed. Missing, malformed, mismatched, or incomplete acceptance data prevents
+publication. The operator supplies the reviewed references in the draft and
+reruns the failed publish job; automation does not invent evidence.
+
+After bundle uploads, publication waits for the latest push-triggered `ci.yml`
+run on that exact commit to complete and requires its `All gates passed` job to
+succeed. The informational coverage job does not become a release requirement.
+A newer pending run or failed required gate cannot be bypassed by an older
+success. Missing CI, API failures, and an expired wait leave the release as a
+draft. After collecting assets, the workflow rereads the latest CI run and
+required gate so a newly queued rerun cannot reuse an earlier success. The
+workflow verifies the release belongs to the tag and contains nonempty uploaded
+installers for both macOS architectures, Linux AppImage/deb/rpm, and Windows
+MSI/EXE. It records the CI
+run URL and GitHub asset SHA-256 digests in the release body before making the
+release public. A nonpublishing validation step produces the same candidate
+record for inspection; the publication step revalidates before its update.
+A bundle job's success alone is not evidence that every expected asset reached
+the release.
+
+This automated check establishes candidate source CI, installer inventory,
+and the presence and identity of required acceptance references. A reviewer
+still checks the referenced live evidence; link presence alone does not prove
+a campaign, isolation result, or installed-client walkthrough. The current
+workflow records the bundles as unsigned and not notarized; signing remains a
+separate release checklist item.
+
 `scripts/tests/gates.sh` is the one authority both CI hosts and local runs call;
 neither workflow re-lists a command.
 

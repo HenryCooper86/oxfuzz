@@ -6,8 +6,8 @@ the two cannot drift from the single source of truth.
 
 | Host | File | Gates | Purpose |
 | --- | --- | --- | --- |
-| GitHub Actions | `.github/workflows/ci.yml` | all eleven | public repository |
-| GitLab CI | `.gitlab-ci.yml` | all eleven | current OrbStack origin |
+| GitHub Actions | `.github/workflows/ci.yml` | twelve required gates; coverage is informational | public repository |
+| GitLab CI | `.gitlab-ci.yml` | twelve required gates | current OrbStack origin |
 
 `scripts/tests/gates.sh` is authoritative. Run it locally before pushing:
 
@@ -16,9 +16,11 @@ scripts/tests/gates.sh            # every gate, in ENGINEERING_PROTOCOL.md 4.5 o
 scripts/tests/gates.sh clippy test  # only the named gates
 ```
 
-The eleven gates: `fmt`, `clippy`, `check`, `check-no-default-features`,
-`test`, `doc`, `deny`, `script-tests`, `translation-pairing`, `frontend-test`,
-`frontend-lint`.
+The thirteen available gates: `fmt`, `clippy`, `check`,
+`check-no-default-features`, `check-feature-matrix`, `test`, `doc`, `deny`,
+`coverage`, `script-tests`, `translation-pairing`, `frontend-test`, and
+`frontend-lint`. GitHub runs the coverage report without including it in the
+required `gates-passed` job; GitLab does not run that informational gate.
 
 `translation-pairing` needs only a Python interpreter -- not even git -- so it
 runs beside `script-tests` rather than behind the Rust gates. A documentation
@@ -47,10 +49,25 @@ each job by name:
   step fails on `failure`, `cancelled`, and `skipped` alike.
 
 `release.yml` builds the Tauri desktop app for macOS (Apple silicon and Intel),
-Linux, and Windows when a `v*` tag is pushed, then publishes them as one GitHub
-Release. It opens a single draft, has each platform upload into it, and makes the
-release public only after every platform succeeds, so a release is never
-half-populated.
+Linux, and Windows when a `v*` tag is pushed. It first checks that the tag and
+three version manifests agree, then opens a single draft and has each platform
+upload into it. Before publication, it waits for the latest push-triggered
+`ci.yml` run on the exact tag commit and requires its `All gates passed` job to
+succeed. The informational coverage job remains informational. It checks that
+all seven required installers are uploaded, nonempty, and have SHA-256 digests.
+It records the CI
+run and asset digests in the release body. It also requires the editable draft
+acceptance record to name reviewed evidence URLs and hashes for userspace
+engines, sandbox isolation, and installed clients. Failed or unavailable CI, a
+moved tag, missing evidence, or a missing installer leaves the release as a draft.
+After adding reviewed references, rerun the failed publish job. Its first step
+inspects the candidate without publication; its second step revalidates and
+publishes.
+
+The automated publication check verifies that references and digests are present;
+it does not verify the live result behind a link. Review those items using
+the [release checklist](RELEASE_CHECKLIST.md) and the
+[acceptance record format](../acceptance/README.md).
 
 ```bash
 git tag v0.1.0 && git push origin v0.1.0

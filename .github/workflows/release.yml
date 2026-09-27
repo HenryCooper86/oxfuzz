@@ -8,12 +8,13 @@ name: Release desktop app
 # Trigger by pushing a version tag:
 #   git tag v0.1.0 && git push origin v0.1.0
 #
-# The release publishes automatically, but only once every platform has
-# uploaded. Three phases make that guarantee:
+# The release can publish after source CI, every platform bundle, and reviewed
+# acceptance records are complete for the exact candidate commit. Three
+# phases keep an incomplete candidate in draft:
 #
 #   create-release  -> opens ONE draft and hands its id to the builders
 #   bundle (matrix) -> each platform uploads into that same draft
-#   publish-release -> flips the draft public after all builders succeed
+#   publish-release -> validates CI and uploaded installers, then publishes
 #
 # Letting each builder create its own release instead would publish the moment
 # the first platform finished, leaving a public release missing the platforms
@@ -28,6 +29,7 @@ on:
 # Only the automatic token is used; no signing secrets are configured.
 permissions:
   contents: write
+  actions: read
 
 jobs:
   create-release:
@@ -36,6 +38,9 @@ jobs:
     outputs:
       release_id: ${{ steps.create.outputs.result }}
     steps:
+      - name: Check out the candidate
+        uses: actions/checkout@v7
+
       - name: Open the draft release
         uses: actions/github-script@v9
         id: create
@@ -81,13 +86,22 @@ jobs:
         with:
           result-encoding: string
           script: |
-            const tag = process.env.GITHUB_REF_NAME;
+            const { acceptanceTemplate, validateReleaseStart } = require(
+              process.env.GITHUB_WORKSPACE + '/scripts/release_candidate.cjs'
+            );
+            const { tag } = await validateReleaseStart({
+              github, context, root: process.env.GITHUB_WORKSPACE,
+            });
+            const body = process.env.RELEASE_BODY + '\n\n### Acceptance evidence\n' +
+              'Review the required live evidence, then replace the empty URLs and hashes ' +
+              'in the acceptance record below. Rerun the failed publish job afterward.\n\n' +
+              acceptanceTemplate(context.sha);
             const { data } = await github.rest.repos.createRelease({
               owner: context.repo.owner,
               repo: context.repo.repo,
               tag_name: tag,
               name: `oxfuzz ${tag}`,
-              body: process.env.RELEASE_BODY,
+              body,
               draft: true,
               prerelease: false,
             });
@@ -172,21 +186,41 @@ jobs:
 
   publish-release:
     name: Publish release
-    # Depends on the whole matrix, so this job is unreachable unless every
-    # platform uploaded. A failed platform leaves the release as a draft to
-    # publish by hand or retry -- an incomplete release is never made public.
+    # Matrix success is necessary but not sufficient: source CI for the exact
+    # tag commit and every uploaded installer are checked immediately before
+    # publication. A failed validation leaves the draft for inspection.
     needs: [create-release, bundle]
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - name: Make the release public
+      - name: Check out the candidate
+        uses: actions/checkout@v7
+
+      - name: Inspect candidate without publishing
         uses: actions/github-script@v9
         with:
           script: |
+            const { inspectReleaseCandidate } = require(
+              process.env.GITHUB_WORKSPACE + '/scripts/release_candidate.cjs'
+            );
             const releaseId = Number('${{ needs.create-release.outputs.release_id }}');
-            const { data } = await github.rest.repos.updateRelease({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              release_id: releaseId,
-              draft: false,
+            const candidate = await inspectReleaseCandidate({
+              github, context, releaseId, root: process.env.GITHUB_WORKSPACE,
             });
-            core.info(`Published ${data.html_url}`);
+            await core.summary
+              .addHeading('Release candidate validation')
+              .addRaw(candidate.body)
+              .write();
+
+      - name: Validate the candidate and publish
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const { publishReleaseCandidate } = require(
+              process.env.GITHUB_WORKSPACE + '/scripts/release_candidate.cjs'
+            );
+            const releaseId = Number('${{ needs.create-release.outputs.release_id }}');
+            const result = await publishReleaseCandidate({
+              github, context, releaseId, root: process.env.GITHUB_WORKSPACE,
+            });
+            core.info(`Published ${result.url} after CI run ${result.ciRunId}`);
