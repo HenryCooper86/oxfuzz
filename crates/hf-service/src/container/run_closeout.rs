@@ -86,6 +86,8 @@ impl ServiceContainer {
                 .record_closeout_step(run_id, &name, label, &detail)
                 .await
                 .map_err(|e| ClassifiedError::Storage(e.to_string()))?;
+            #[cfg(test)]
+            super::live_recovery_tests::pause_after_closeout_record(step);
             replace_recorded(&mut recorded, step, outcome);
         }
         Ok(report_from_recorded(

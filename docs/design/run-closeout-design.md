@@ -125,6 +125,9 @@ target leases.
 ## 7. Verification Criteria
 
 - A closeout interrupted mid-chain resumes at the first non-terminal step.
+- A service process terminated immediately after committing a step outcome
+  retains that outcome; a fresh service resumes with the next step and does
+  not execute the completed step again.
 - A run with no crashes records minimization as `Skipped` with a reason, not
   `Failed`.
 - A failed step does not prevent later steps that do not consume its output.

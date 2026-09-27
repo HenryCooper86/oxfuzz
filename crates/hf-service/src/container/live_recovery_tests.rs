@@ -8,13 +8,18 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::Utc;
 use hf_core::engine::EngineKind;
+use hf_core::engine::FuzzRunConfig;
+use hf_core::harness::{BuildCommand, Harness, HarnessStatus};
 use hf_core::runtime::{ResourceLimits, RuntimeAdapter};
-use hf_core::target::TargetLanguage;
+use hf_core::target::{
+    InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
+};
 use hf_runtime::docker::DockerRuntime;
 use hf_runtime::owned_containers::OwnedContainerRegistry;
 use hf_runtime::RuntimeConfig;
-use hf_storage::{RunStatus, Store};
+use hf_storage::{RunRecord, RunStatus, Store};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -26,6 +31,20 @@ const HARNESS: &str = include_str!("../../../../examples/qualification/harness.c
 const APPROVAL: &str = "OXFUZZ_LIVE_APPROVAL_SHA256";
 const EVIDENCE_ROOT: &str = "OXFUZZ_LIVE_EVIDENCE_ROOT";
 const CHILD_ROOT: &str = "OXFUZZ_A3_SERVICE_CHILD_ROOT";
+const CLOSEOUT_PAUSE_STEP: &str = "OXFUZZ_A3_CLOSEOUT_PAUSE_STEP";
+
+pub(super) fn pause_after_closeout_record(step: crate::run_closeout::CloseoutStep) {
+    if std::env::var(CLOSEOUT_PAUSE_STEP).ok().as_deref() != Some(format!("{step:?}").as_str()) {
+        return;
+    }
+    let root = PathBuf::from(std::env::var(CHILD_ROOT).expect("closeout child root"));
+    let mut marker = File::create(root.join("closeout-paused")).unwrap();
+    write!(marker, "{step:?}").unwrap();
+    marker.sync_all().unwrap();
+    loop {
+        std::thread::park();
+    }
+}
 
 fn approved_sources() {
     let mut hash = Sha256::new();
@@ -277,4 +296,174 @@ async fn live_campaign_child() {
         .await
         .expect("parent must terminate the live service before the campaign completes");
     panic!("campaign completed before process-loss injection");
+}
+
+#[tokio::test]
+#[ignore = "terminates an owned disposable closeout process"]
+async fn persisted_closeout_step_survives_process_loss() {
+    let parent = PathBuf::from(std::env::var(EVIDENCE_ROOT).expect("private evidence root"));
+    std::fs::create_dir_all(&parent).unwrap();
+    let root = parent.join(format!("a3-closeout-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let child_log = File::create(root.join("child.log")).unwrap();
+    let mut child = OwnedChild(
+        Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "container::live_recovery_tests::closeout_child",
+                "--nocapture",
+            ])
+            .env(CHILD_ROOT, &root)
+            .env(CLOSEOUT_PAUSE_STEP, "Triage")
+            .stdout(Stdio::from(child_log.try_clone().unwrap()))
+            .stderr(Stdio::from(child_log))
+            .spawn()
+            .unwrap(),
+    );
+    let marker = root.join("closeout-paused");
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "closeout child exited early"
+            );
+            if marker.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("closeout did not pause after its first durable step");
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), "Triage");
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+
+    let run_id =
+        Uuid::parse_str(std::fs::read_to_string(root.join("run-id")).unwrap().trim()).unwrap();
+    let store = Arc::new(Store::connect(root.join("closeout.db")).await.unwrap());
+    let before = store.closeout_steps(run_id).await.unwrap();
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].0, "Triage");
+    assert_eq!(before[0].1, "completed");
+
+    let service =
+        ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None).with_store(store.clone());
+    let report = service.close_out_run(run_id).await.unwrap();
+    assert_eq!(
+        report.resumed_at,
+        Some(crate::run_closeout::CloseoutStep::Minimize)
+    );
+    assert_eq!(store.closeout_steps(run_id).await.unwrap()[0], before[0]);
+    assert_eq!(
+        report.steps.len(),
+        crate::run_closeout::closeout_ladder().len()
+    );
+    std::fs::write(
+        root.join("recovery.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "run_id": run_id,
+            "durable_first_step": before[0],
+            "resumed_at": "Minimize",
+            "retained_steps": report.steps.len(),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "helper for persisted_closeout_step_survives_process_loss"]
+async fn closeout_child() {
+    let Ok(root) = std::env::var(CHILD_ROOT) else {
+        return;
+    };
+    let root = Path::new(&root);
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::env::set_var("HF_CONFIG_DIR", root.join("config"));
+    std::env::set_var("HF_WORKSPACE_DIR", root.join("workspace"));
+    workspace::initialize_workspace_root().unwrap();
+    let target_workspace = workspace::workspace_dir(&project, "qualification_parse");
+    std::fs::create_dir_all(target_workspace.join("out")).unwrap();
+    std::fs::write(
+        target_workspace.join("fuzz_qualification_parse"),
+        b"unused fixture",
+    )
+    .unwrap();
+    let store = Arc::new(Store::connect(root.join("closeout.db")).await.unwrap());
+    let run_id = seed_terminal_closeout_run(&store, &project).await;
+    let mut marker = File::create(root.join("run-id")).unwrap();
+    write!(marker, "{run_id}").unwrap();
+    marker.sync_all().unwrap();
+    let service = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None).with_store(store);
+    service.close_out_run(run_id).await.unwrap();
+    panic!("closeout finished before process-loss injection");
+}
+
+async fn seed_terminal_closeout_run(store: &Store, project: &Path) -> Uuid {
+    let target = TargetCandidate {
+        id: Uuid::new_v4(),
+        project_root: project.to_path_buf(),
+        language: TargetLanguage::C,
+        symbol: "qualification_parse".to_owned(),
+        kind: TargetKind::Parser,
+        location: SourceLocation {
+            file: PathBuf::from("parser.c"),
+            line: 1,
+            col: 1,
+            end_line: None,
+            end_col: None,
+        },
+        signature: None,
+        input_surface: InputSurface::Bytes,
+        complexity: 1,
+        fit_score: 1.0,
+        sanitizers: vec![Sanitizer::Address],
+        rationale: "disposable process-loss probe".to_owned(),
+        reachable_functions: Vec::new(),
+        accumulated_complexity: 0,
+    };
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    let harness = Harness {
+        id: Uuid::new_v4(),
+        target_id: target.id,
+        engine: EngineKind::LibFuzzer,
+        source: "int LLVMFuzzerTestOneInput(const unsigned char *d, unsigned long n) { return 0; }"
+            .to_owned(),
+        language: TargetLanguage::C,
+        build_cmd: BuildCommand {
+            compiler: "clang".to_owned(),
+            args: Vec::new(),
+            output: PathBuf::from("fuzz"),
+            extra_flags: Vec::new(),
+        },
+        sanitizer: Sanitizer::Address,
+        status: HarnessStatus::SmokePassed,
+        smoke_run: None,
+    };
+    store.upsert_harness(&harness).await.unwrap();
+    let mut run = RunRecord::new(
+        project.to_string_lossy(),
+        EngineKind::LibFuzzer,
+        Some(FuzzRunConfig {
+            harness_id: harness.id,
+            engine: EngineKind::LibFuzzer,
+            duration: None,
+            max_mem_mb: 256,
+            max_cpus: 1,
+            seed_corpus: None,
+            sanitizer: Sanitizer::Address,
+            env: Vec::new(),
+            extra_args: Vec::new(),
+            seed: None,
+            replay_of: None,
+            input_manifest_sha256: None,
+        }),
+        Utc::now(),
+    );
+    run.status = RunStatus::Done;
+    store.insert_run(&run).await.unwrap();
+    run.id
 }
