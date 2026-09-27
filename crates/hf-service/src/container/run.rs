@@ -822,6 +822,20 @@ impl ServiceContainer {
             }
             return Err(error);
         }
+        let previous_run_id = replay
+            .as_ref()
+            .filter(|value| value.inputs == ReplayInputs::Retained)
+            .map(|value| value.original_run_id);
+        if let Err(error) = super::retained_inputs::stage_run_mountpoints(
+            &artifacts.input_host,
+            record.id,
+            previous_run_id,
+        ) {
+            if let Some(run_root) = artifacts.output_host.parent() {
+                let _ignored_cleanup_error = std::fs::remove_dir_all(run_root);
+            }
+            return Err(error);
+        }
         #[cfg(feature = "proof-carrying")]
         if let Err(error) = super::function_coverage::stage_input_workspace(
             &config,

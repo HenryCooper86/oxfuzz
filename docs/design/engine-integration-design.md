@@ -194,6 +194,16 @@ all retained file paths, bytes, executable permissions, the exact sandbox image,
 and the complete run configuration; its SHA-256 is persisted with the config.
 File and byte budgets bound capture and verification.
 
+Before sealing a campaign manifest, stage empty `runs/<run-id>/input`,
+`runs/<run-id>/corpus`, and `runs/<run-id>/out` directories inside the captured
+execution workspace. Docker then mounts the retained input read-only and the
+run-specific corpus and output writable at targets that already exist beneath
+the read-only `/work` mount. The project-owned `runs` tree is excluded from
+capture, so these directories contain no project data. On retained replay,
+verify the old manifest first, remove only its empty runtime-owned mountpoint
+directories, and stage new ones for the replay run before sealing its new
+manifest. Unexpected content or a path conflict fails before run admission.
+
 Replay verifies the manifest, copies the retained inputs into a new run, and
 uses the retained promoted source/binary, starting corpus, dictionary, image,
 seed, arguments, environment, duration and resource settings. Current engine,

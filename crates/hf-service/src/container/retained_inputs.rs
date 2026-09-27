@@ -36,6 +36,83 @@ fn invalid(error: impl std::fmt::Display) -> ClassifiedError {
     ClassifiedError::Validation(format!("retained execution inputs: {error}"))
 }
 
+/// Create the empty targets required by run-specific mounts beneath read-only `/work`.
+pub(super) fn stage_run_mountpoints(
+    root: &Path,
+    run_id: uuid::Uuid,
+    previous_run_id: Option<uuid::Uuid>,
+) -> Result<(), ClassifiedError> {
+    let runs = root.join("workspace/runs");
+    if let Some(previous) = previous_run_id {
+        match std::fs::symlink_metadata(&runs) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(invalid(error)),
+            Ok(metadata) => {
+                if !metadata.file_type().is_dir() {
+                    return Err(invalid("retained run mountpoint is not a directory"));
+                }
+                let mut children = std::fs::read_dir(&runs).map_err(invalid)?;
+                let child = children
+                    .next()
+                    .transpose()
+                    .map_err(invalid)?
+                    .ok_or_else(|| invalid("retained run mountpoint is empty"))?;
+                let previous_name = previous.to_string();
+                if child.file_name() != std::ffi::OsStr::new(&previous_name)
+                    || children.next().is_some()
+                {
+                    return Err(invalid("retained run mountpoint has unexpected entries"));
+                }
+                let old_run = runs.join(previous_name);
+                if !std::fs::symlink_metadata(&old_run)
+                    .map_err(invalid)?
+                    .file_type()
+                    .is_dir()
+                {
+                    return Err(invalid("retained run mountpoint is not a directory"));
+                }
+                let mut found = [false; 3];
+                for entry in std::fs::read_dir(&old_run).map_err(invalid)? {
+                    let entry = entry.map_err(invalid)?;
+                    let index = match entry.file_name().to_str() {
+                        Some("input") => 0,
+                        Some("corpus") => 1,
+                        Some("out") => 2,
+                        _ => return Err(invalid("retained run mountpoint has unexpected entries")),
+                    };
+                    if !std::fs::symlink_metadata(entry.path())
+                        .map_err(invalid)?
+                        .file_type()
+                        .is_dir()
+                    {
+                        return Err(invalid("retained run mountpoint is not an empty directory"));
+                    }
+                    let mut members = std::fs::read_dir(entry.path()).map_err(invalid)?;
+                    if members.next().is_some() {
+                        return Err(invalid("retained run mountpoint is not an empty directory"));
+                    }
+                    found[index] = true;
+                }
+                if !found.iter().all(|present| *present) {
+                    return Err(invalid("retained run mountpoint is incomplete"));
+                }
+                for name in ["input", "corpus", "out"] {
+                    std::fs::remove_dir(old_run.join(name)).map_err(invalid)?;
+                }
+                std::fs::remove_dir(old_run).map_err(invalid)?;
+                std::fs::remove_dir(&runs).map_err(invalid)?;
+            }
+        }
+    }
+    std::fs::create_dir(&runs).map_err(invalid)?;
+    let run = runs.join(run_id.to_string());
+    std::fs::create_dir(&run).map_err(invalid)?;
+    for name in ["input", "corpus", "out"] {
+        std::fs::create_dir(run.join(name)).map_err(invalid)?;
+    }
+    Ok(())
+}
+
 fn mode(metadata: &std::fs::Metadata) -> u32 {
     #[cfg(unix)]
     {
@@ -324,6 +401,78 @@ mod tests {
             std::fs::read_to_string(destination.join(MANIFEST)).unwrap(),
             "project-owned file"
         );
+    }
+
+    #[test]
+    fn run_mountpoints_exist_under_the_read_only_capture_and_are_sealed() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let run_id = uuid::Uuid::new_v4();
+        stage_run_mountpoints(root.path(), run_id, None).unwrap();
+        for name in ["input", "corpus", "out"] {
+            let target = workspace.join("runs").join(run_id.to_string()).join(name);
+            assert!(target.is_dir());
+            assert_eq!(std::fs::read_dir(target).unwrap().count(), 0);
+        }
+        let mut config = config();
+        seal(root.path(), "image", &mut config).unwrap();
+        verify(root.path(), &config).unwrap();
+        std::fs::remove_dir(
+            workspace
+                .join("runs")
+                .join(run_id.to_string())
+                .join("corpus"),
+        )
+        .unwrap();
+        assert!(verify(root.path(), &config).is_err());
+    }
+
+    #[test]
+    fn replay_replaces_only_verified_empty_mountpoints() {
+        let original = tempfile::tempdir().unwrap();
+        std::fs::create_dir(original.path().join("workspace")).unwrap();
+        let old_id = uuid::Uuid::new_v4();
+        let new_id = uuid::Uuid::new_v4();
+        stage_run_mountpoints(original.path(), old_id, None).unwrap();
+        let mut config = config();
+        seal(original.path(), "image", &mut config).unwrap();
+
+        let replay = tempfile::tempdir().unwrap();
+        copy_verified(original.path(), replay.path(), &config).unwrap();
+        stage_run_mountpoints(replay.path(), new_id, Some(old_id)).unwrap();
+        assert!(!replay
+            .path()
+            .join("workspace/runs")
+            .join(old_id.to_string())
+            .exists());
+        for name in ["input", "corpus", "out"] {
+            assert!(replay
+                .path()
+                .join("workspace/runs")
+                .join(new_id.to_string())
+                .join(name)
+                .is_dir());
+        }
+        assert!(verify(replay.path(), &config).is_err());
+        seal(replay.path(), "image", &mut config).unwrap();
+        verify(replay.path(), &config).unwrap();
+    }
+
+    #[test]
+    fn replay_rejects_nonempty_retained_mountpoints_without_removing_files() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("workspace")).unwrap();
+        let old_id = uuid::Uuid::new_v4();
+        let unexpected = root
+            .path()
+            .join("workspace/runs")
+            .join(old_id.to_string())
+            .join("corpus/unexpected");
+        stage_run_mountpoints(root.path(), old_id, None).unwrap();
+        std::fs::write(&unexpected, "data").unwrap();
+        assert!(stage_run_mountpoints(root.path(), uuid::Uuid::new_v4(), Some(old_id)).is_err());
+        assert_eq!(std::fs::read_to_string(unexpected).unwrap(), "data");
     }
 
     #[test]
