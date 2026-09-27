@@ -40,8 +40,12 @@ def read_artifact(root, reference):
     relative = Path(name)
     if relative.is_absolute() or ".." in relative.parts:
         raise ValueError("artifact path must stay below the observation directory")
-    path = root / relative
-    if path.is_symlink() or not path.is_file():
+    path = root
+    for part in relative.parts:
+        path = path / part
+        if path.is_symlink():
+            raise ValueError("artifact path cannot contain a symlink")
+    if not path.is_file():
         raise ValueError("artifact must be a regular file")
     if not path.resolve().is_relative_to(root.resolve()):
         raise ValueError("artifact path must stay below the observation directory")

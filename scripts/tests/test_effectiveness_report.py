@@ -239,6 +239,18 @@ class ReportTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "artifact path"):
             assemble_report(cohort(), self.observations(reference), self.root)
 
+    def test_rejects_intermediate_symlink_even_when_it_stays_inside_evidence_root(self):
+        real_directory = self.root / "real"
+        real_directory.mkdir()
+        content = json.dumps(campaign_manifest()).encode("utf-8")
+        (real_directory / "manifest.json").write_bytes(content)
+        (self.root / "alias").symlink_to(real_directory, target_is_directory=True)
+        reference = {"path": "alias/manifest.json",
+                     "sha256": hashlib.sha256(content).hexdigest()}
+
+        with self.assertRaisesRegex(ValueError, "artifact path"):
+            assemble_report(cohort(), self.observations(reference), self.root)
+
     def test_rejects_function_counter_outside_u64(self):
         manifest = self.artifact("manifest.json", campaign_manifest())
         functions = self.artifact("functions.json", function_coverage("9" * 25))
