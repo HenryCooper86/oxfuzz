@@ -86,8 +86,15 @@ async fn web_scheduler_with_occurrence(expired: bool) -> WebRecoveryFixture {
     let recovery = hf_service::test_support::one_time_recovery_fixture(expired)
         .await
         .unwrap();
-    let app = hf_web::router::build_with_state(
+    let app = hf_web::build_with_state_and_security(
         hf_web::router::AppState::new(recovery.container()).with_scheduler(recovery.scheduler()),
+        hf_web::WebSecurityConfig::new(
+            None,
+            true,
+            Vec::new(),
+            vec![recovery.directory_path().to_path_buf()],
+        )
+        .unwrap(),
     );
     WebRecoveryFixture { recovery, app }
 }

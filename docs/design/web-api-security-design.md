@@ -81,6 +81,15 @@ nonterminal one-time occurrence receipts continue to protect their executions.
 Missing or invalid retained project ownership produces a bounded error before
 clearing begins. Trusted local history operations retain their all-project access.
 
+REST one-time recovery lists and acknowledgements authorize the validated retained
+execution parameters, including when the schedule definition is absent. Missing
+ownership evidence fails with the bounded unavailable outcome. Acknowledgements
+check retained ownership and any current definition while holding mutation admission
+through cancellation and cursor reconciliation; foreign ownership is forbidden
+before mutation. Lists preserve all-receipt health validation and expose current
+definition names only within approved roots. A cancelled receipt whose execution
+history was cleared cannot supply REST ownership from a current definition.
+
 ## 4. Public Response DTOs
 
 REST responses do not expose absolute host paths, provider credentials,
@@ -147,7 +156,7 @@ storage/internal failure is `500`. Handlers do not choose a different status
 for the same service error category.
 
 One-time recovery uses its narrower service-owned public mapping:
-`not_found` is `404`, `conflict` is `409`, `unavailable` is `503`, and
+`not_found` is `404`, `forbidden` is `403`, `conflict` is `409`, `unavailable` is `503`, and
 `internal` is `500`. Recovery error JSON includes that stable code and a
 bounded message.
 

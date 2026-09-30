@@ -282,6 +282,7 @@ fn scheduler_api_error(error: CampaignSchedulerError) -> ApiError {
 fn recovery_api_error(public: RecoveryPublicError) -> RecoveryApiError {
     let status = match public.code {
         RecoveryPublicErrorCode::NotFound => StatusCode::NOT_FOUND,
+        RecoveryPublicErrorCode::Forbidden => StatusCode::FORBIDDEN,
         RecoveryPublicErrorCode::Conflict => StatusCode::CONFLICT,
         RecoveryPublicErrorCode::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
         RecoveryPublicErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
@@ -3568,7 +3569,7 @@ async fn schedule_recovery_list(
 ) -> RecoveryApiResult<serde_json::Value> {
     let recoveries = match &state.scheduler {
         Some(scheduler) => scheduler
-            .list_one_time_recoveries()
+            .list_one_time_recoveries_within_roots(state.security.project_roots())
             .await
             .map_err(scheduler_recovery_api_error)?,
         None => Vec::new(),
@@ -3585,7 +3586,7 @@ async fn schedule_recovery_acknowledge(
         .as_ref()
         .ok_or_else(|| recovery_api_error(RecoveryPublicError::unavailable()))?;
     let recovery = scheduler
-        .acknowledge_one_time_recovery(&occurrence_id)
+        .acknowledge_one_time_recovery_within_roots(&occurrence_id, state.security.project_roots())
         .await
         .map_err(scheduler_recovery_api_error)?;
     Ok(Json(public_value(recovery)))

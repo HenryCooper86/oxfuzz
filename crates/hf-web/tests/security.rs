@@ -21,6 +21,69 @@ fn open_local_security(root: &std::path::Path) -> WebSecurityConfig {
 }
 
 #[tokio::test]
+async fn recovery_routes_deny_foreign_receipts_before_acknowledgement() {
+    let fixture = hf_service::test_support::one_time_recovery_fixture(true)
+        .await
+        .unwrap();
+    let scheduler = fixture.scheduler();
+    let foreign = tempfile::tempdir().unwrap();
+    let app = build_with_state_and_security(
+        AppState::new(fixture.container()).with_scheduler(scheduler.clone()),
+        open_local_security(foreign.path()),
+    );
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/schedule/recovery")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!([])
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/schedule/recovery/occ-web/acknowledge")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap()["code"],
+        "forbidden"
+    );
+    assert!(!String::from_utf8_lossy(&body).contains(fixture.directory_path().to_str().unwrap()));
+    assert_eq!(
+        fixture
+            .container()
+            .store()
+            .unwrap()
+            .schedule_occurrence("occ-web")
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        "running"
+    );
+    scheduler.stop().await;
+}
+
+#[tokio::test]
 async fn scheduler_history_reads_and_clear_preserve_foreign_deleted_schedule_evidence() {
     let fixture = hf_service::test_support::scheduler_history_fixture()
         .await

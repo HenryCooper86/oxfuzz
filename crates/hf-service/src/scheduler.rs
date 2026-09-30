@@ -1906,6 +1906,8 @@ pub enum CampaignSchedulerError {
 pub enum RecoveryPublicErrorCode {
     /// The requested occurrence does not exist.
     NotFound,
+    /// The occurrence or its current definition is outside approved projects.
+    Forbidden,
     /// The durable occurrence is not eligible for the requested action.
     Conflict,
     /// Required recovery persistence or journal state is unavailable.
@@ -1920,6 +1922,7 @@ impl RecoveryPublicErrorCode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::NotFound => "not_found",
+            Self::Forbidden => "forbidden",
             Self::Conflict => "conflict",
             Self::Unavailable => "unavailable",
             Self::Internal => "internal",
@@ -1968,6 +1971,10 @@ impl CampaignSchedulerError {
     #[must_use]
     pub fn into_public_recovery_error(self) -> RecoveryPublicError {
         let public = match &self {
+            Self::ProjectAccessDenied => RecoveryPublicError {
+                code: RecoveryPublicErrorCode::Forbidden,
+                message: "one-time recovery project access is denied",
+            },
             Self::OccurrenceNotFound(_) => RecoveryPublicError {
                 code: RecoveryPublicErrorCode::NotFound,
                 message: "one-time recovery occurrence was not found",
@@ -1983,9 +1990,7 @@ impl CampaignSchedulerError {
             | Self::InvalidLastFire { .. }
             | Self::DurabilityUnavailable(_)
             | Self::OccurrenceJournal(_) => RecoveryPublicError::unavailable(),
-            Self::Validation(_)
-            | Self::ProjectAccessDenied
-            | Self::RetiredScheduleRestore { .. } => RecoveryPublicError {
+            Self::Validation(_) | Self::RetiredScheduleRestore { .. } => RecoveryPublicError {
                 code: RecoveryPublicErrorCode::Internal,
                 message: "one-time recovery request failed",
             },
@@ -2031,6 +2036,18 @@ fn campaign_parameters_are_within_roots(
         ));
     }
     Ok(roots.iter().any(|root| project.starts_with(root)))
+}
+
+fn recovery_execution_is_within_roots(
+    execution: &ScheduleExecution,
+    roots: &[PathBuf],
+) -> Result<bool, CampaignSchedulerError> {
+    campaign_parameters_are_within_roots(&execution.request_summary["parameter_values"], roots)
+        .map_err(|_| {
+            CampaignSchedulerError::OccurrenceJournal(
+                "retained recovery project ownership is unavailable".to_owned(),
+            )
+        })
 }
 
 struct ScopedScheduleExecution {
@@ -2508,17 +2525,48 @@ impl CampaignScheduler {
     pub async fn list_one_time_recoveries(
         &self,
     ) -> Result<Vec<OneTimeRecoveryView>, CampaignSchedulerError> {
+        self.list_one_time_recoveries_for_scope(None).await
+    }
+
+    /// List recovery receipts whose retained execution projects are approved.
+    ///
+    /// # Errors
+    /// Returns a bounded journal error if retained ownership cannot be resolved.
+    pub async fn list_one_time_recoveries_within_roots(
+        &self,
+        roots: &[PathBuf],
+    ) -> Result<Vec<OneTimeRecoveryView>, CampaignSchedulerError> {
+        self.list_one_time_recoveries_for_scope(Some(roots)).await
+    }
+
+    async fn list_one_time_recoveries_for_scope(
+        &self,
+        roots: Option<&[PathBuf]>,
+    ) -> Result<Vec<OneTimeRecoveryView>, CampaignSchedulerError> {
         let schedules = self.manager.list_schedules().await;
         let occurrences = self.refresh_one_time_receipt_statuses(&schedules).await?;
-        let names: std::collections::HashMap<_, _> = schedules
-            .iter()
-            .map(|schedule| (schedule.id.clone(), schedule.name.clone()))
-            .collect();
+        let mut names = std::collections::HashMap::new();
+        for schedule in &schedules {
+            if let Some(roots) = roots {
+                if !schedule_is_within_roots(schedule, roots)? {
+                    continue;
+                }
+            }
+            names.insert(schedule.id.clone(), schedule.name.clone());
+        }
         let now = chrono::Utc::now();
-        let mut recoveries: Vec<_> = occurrences
+        let mut recoveries = Vec::new();
+        for occurrence in occurrences
             .into_iter()
             .filter(|occurrence| occurrence.recovery_eligible(now))
-            .map(|occurrence| OneTimeRecoveryView {
+        {
+            if let Some(roots) = roots {
+                let execution = self.retained_recovery_execution(&occurrence.id).await?;
+                if !recovery_execution_is_within_roots(&execution, roots)? {
+                    continue;
+                }
+            }
+            recoveries.push(OneTimeRecoveryView {
                 schedule_name: names.get(&occurrence.schedule_id).cloned(),
                 schedule_exists: names.contains_key(&occurrence.schedule_id),
                 occurrence_id: occurrence.id,
@@ -2527,8 +2575,8 @@ impl CampaignScheduler {
                 triggered_at: occurrence.triggered_at.to_rfc3339(),
                 state: occurrence.state.to_string(),
                 recovery_detail: occurrence.recovery_detail,
-            })
-            .collect();
+            });
+        }
         recoveries.sort_by(|left, right| {
             left.triggered_at
                 .cmp(&right.triggered_at)
@@ -2547,6 +2595,30 @@ impl CampaignScheduler {
         &self,
         occurrence_id: &str,
     ) -> Result<OneTimeRecoveryView, CampaignSchedulerError> {
+        self.acknowledge_one_time_recovery_for_scope(occurrence_id, None)
+            .await
+    }
+
+    /// Acknowledge a receipt only when retained and current projects are approved.
+    ///
+    /// # Errors
+    /// Returns access denied before mutation for foreign projects, or a journal
+    /// error if retained ownership cannot be resolved.
+    pub async fn acknowledge_one_time_recovery_within_roots(
+        &self,
+        occurrence_id: &str,
+        roots: &[PathBuf],
+    ) -> Result<OneTimeRecoveryView, CampaignSchedulerError> {
+        self.acknowledge_one_time_recovery_for_scope(occurrence_id, Some(roots))
+            .await
+    }
+
+    async fn acknowledge_one_time_recovery_for_scope(
+        &self,
+        occurrence_id: &str,
+        roots: Option<&[PathBuf]>,
+    ) -> Result<OneTimeRecoveryView, CampaignSchedulerError> {
+        let admission_guard = self.lock_schedule_mutation_admission().await;
         let occurrence = self
             .occurrences
             .get_one_time_occurrence(occurrence_id)
@@ -2554,10 +2626,25 @@ impl CampaignScheduler {
             .map_err(occurrence_journal_error)?
             .ok_or_else(|| CampaignSchedulerError::OccurrenceNotFound(occurrence_id.to_owned()))?;
 
+        let retained = if let Some(roots) = roots {
+            let execution = self.retained_recovery_execution(occurrence_id).await?;
+            if !recovery_execution_is_within_roots(&execution, roots)? {
+                return Err(CampaignSchedulerError::ProjectAccessDenied);
+            }
+            Some(execution)
+        } else {
+            None
+        };
         if let Some(schedule) = self.manager.get_schedule(&occurrence.schedule_id).await {
-            self.reject_receipts_attached_to_recurring_schedules(
+            if let Some(roots) = roots {
+                if !schedule_is_within_roots(&schedule, roots)? {
+                    return Err(CampaignSchedulerError::ProjectAccessDenied);
+                }
+            }
+            self.reject_recurring_receipts_for_admission(
                 std::slice::from_ref(&occurrence),
                 std::slice::from_ref(&schedule),
+                Some(&admission_guard),
             )
             .await?;
         }
@@ -2572,16 +2659,10 @@ impl CampaignScheduler {
             ));
         }
 
-        let mut execution = self
-            .occurrences
-            .get_one_time_execution(occurrence_id)
-            .await
-            .map_err(occurrence_journal_error)?
-            .ok_or_else(|| {
-                CampaignSchedulerError::OccurrenceJournal(
-                    "non-terminal occurrence is missing its execution".to_owned(),
-                )
-            })?;
+        let mut execution = match retained {
+            Some(execution) => execution,
+            None => self.retained_recovery_execution(occurrence_id).await?,
+        };
         let acknowledged_at = chrono::Utc::now();
         let reason = "operator acknowledged unknown prior outcome as cancelled";
         execution.status = hf_scheduler::ExecutionStatus::Cancelled;
@@ -2615,6 +2696,21 @@ impl CampaignScheduler {
             self.manager.record_one_time_acknowledgement();
         }
         self.finish_one_time_acknowledgement(&acknowledged).await
+    }
+
+    async fn retained_recovery_execution(
+        &self,
+        occurrence_id: &str,
+    ) -> Result<ScheduleExecution, CampaignSchedulerError> {
+        self.occurrences
+            .get_one_time_execution(occurrence_id)
+            .await
+            .map_err(occurrence_journal_error)?
+            .ok_or_else(|| {
+                CampaignSchedulerError::OccurrenceJournal(
+                    "occurrence is missing its retained execution".to_owned(),
+                )
+            })
     }
 
     async fn refresh_one_time_receipt_statuses(
@@ -2666,6 +2762,16 @@ impl CampaignScheduler {
         occurrences: &[OneTimeOccurrence],
         schedules: &[Schedule],
     ) -> Result<(), CampaignSchedulerError> {
+        self.reject_recurring_receipts_for_admission(occurrences, schedules, None)
+            .await
+    }
+
+    async fn reject_recurring_receipts_for_admission(
+        &self,
+        occurrences: &[OneTimeOccurrence],
+        schedules: &[Schedule],
+        admission: Option<&tokio::sync::MutexGuard<'_, ()>>,
+    ) -> Result<(), CampaignSchedulerError> {
         let mismatched_schedule_ids: HashSet<_> = occurrences
             .iter()
             .filter_map(|occurrence| {
@@ -2681,7 +2787,14 @@ impl CampaignScheduler {
         }
 
         for schedule_id in mismatched_schedule_ids {
-            self.occurrences.quarantine_schedule(&schedule_id).await?;
+            if admission.is_some() {
+                let _lease = acquire_schedule_path_lease(&self.schedules.path).await?;
+                self.occurrences
+                    .quarantine_schedule_while_leased(&schedule_id)
+                    .await?;
+            } else {
+                self.occurrences.quarantine_schedule(&schedule_id).await?;
+            }
         }
         if self.manager.one_time_block_reason().await.as_deref() != Some(JOURNAL_CORRUPT_REASON) {
             self.manager.record_corrupt_one_time_journal();
@@ -2696,7 +2809,6 @@ impl CampaignScheduler {
         &self,
         occurrence: &OneTimeOccurrence,
     ) -> Result<OneTimeRecoveryView, CampaignSchedulerError> {
-        let admission_guard = self.lock_schedule_mutation_admission().await;
         self.manager
             .mark_one_time_consumed(&occurrence.schedule_id)
             .await;
@@ -2710,7 +2822,6 @@ impl CampaignScheduler {
             self.manager.register(schedule).await;
             self.persist().await?;
         }
-        drop(admission_guard);
         Ok(self.recovery_view(occurrence).await)
     }
 
@@ -6665,6 +6776,32 @@ mod tests {
     #[tokio::test]
     async fn acknowledgement_enable_race_mutation_wins() {
         assert_mutation_wins_acknowledgement_race(RacedScheduleMutation::SetEnabled(true)).await;
+    }
+
+    #[tokio::test]
+    async fn acknowledgement_rejects_recurring_receipt_without_blocking_mutation_admission() {
+        let (fixture, scheduler) = start_mismatched_recurring(true).await;
+        let before = std::fs::read(&fixture.schedules_path).unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            scheduler.acknowledge_one_time_recovery("occ-mismatch"),
+        )
+        .await
+        .expect("acknowledgement deadlocked while quarantining a recurring receipt");
+        assert!(matches!(
+            result,
+            Err(CampaignSchedulerError::OccurrenceJournal(_))
+        ));
+        let mutation =
+            tokio::time::timeout(Duration::from_secs(2), scheduler.try_remove("recurring"))
+                .await
+                .expect("acknowledgement retained mutation admission");
+        assert!(matches!(
+            mutation,
+            Err(CampaignSchedulerError::OccurrenceJournal(_))
+        ));
+        assert_eq!(std::fs::read(&fixture.schedules_path).unwrap(), before);
+        scheduler.stop().await;
     }
 
     #[tokio::test]

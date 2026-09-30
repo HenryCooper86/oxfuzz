@@ -145,7 +145,7 @@ pub async fn one_time_recovery_fixture(
         TriggerConfig::OneTime { at: triggered_at },
         "fuzz-campaign",
     )
-    .with_params(serde_json::to_value(params)?);
+    .with_params(serde_json::to_value(&params)?);
     std::fs::write(&schedules_path, serde_json::to_vec_pretty(&vec![schedule])?)?;
 
     let pending = ScheduleExecution {
@@ -156,7 +156,10 @@ pub async fn one_time_recovery_fixture(
         completed_at: None,
         status: ExecutionStatus::Pending,
         workflow_execution_id: None,
-        request_summary: serde_json::json!({}),
+        request_summary: serde_json::json!({
+            "schedule_name": "web recovery",
+            "parameter_values": params,
+        }),
         response_summary: serde_json::json!({}),
         error_message: None,
     };
