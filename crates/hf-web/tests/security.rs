@@ -64,7 +64,7 @@ async fn schedule_definitions_and_id_mutations_stay_within_approved_roots() {
         open_local_security(approved.path()),
     );
     for (method, uri, body) in [
-        (Method::GET, "/schedule".to_owned(), "".to_owned()),
+        (Method::GET, "/schedule".to_owned(), String::new()),
         (
             Method::POST,
             "/schedule".to_owned(),
@@ -82,7 +82,7 @@ async fn schedule_definitions_and_id_mutations_stay_within_approved_roots() {
         (
             Method::DELETE,
             format!("/schedule/{}", ids[0]),
-            "".to_owned(),
+            String::new(),
         ),
     ] {
         let response = app
