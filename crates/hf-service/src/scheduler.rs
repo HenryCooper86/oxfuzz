@@ -1844,6 +1844,25 @@ pub struct CampaignScheduler {
     scheduler_workflow_dispatch_limit: usize,
     /// Late-bound crash notifier (filled by the desktop shell after setup).
     notifier: NotifierSlot,
+    /// Projects admitted before registration, retained until this process exits.
+    admitted_projects: AsyncMutex<Vec<AdmittedProject>>,
+}
+
+#[derive(PartialEq, Eq)]
+enum AdmittedProject {
+    Known(PathBuf),
+    Unavailable,
+}
+
+impl AdmittedProject {
+    fn capture(parameters: &serde_json::Value) -> Self {
+        match campaign_project(parameters) {
+            Ok(project) => Self::Known(project),
+            // Retain ownership resolution failure so later filesystem changes
+            // cannot authorize work admitted with an unknown project.
+            Err(_) => Self::Unavailable,
+        }
+    }
 }
 
 /// Durable scheduler startup or mutation error.
@@ -2024,6 +2043,11 @@ fn campaign_parameters_are_within_roots(
     parameters: &serde_json::Value,
     roots: &[PathBuf],
 ) -> Result<bool, CampaignSchedulerError> {
+    let project = campaign_project(parameters)?;
+    Ok(roots.iter().any(|root| project.starts_with(root)))
+}
+
+fn campaign_project(parameters: &serde_json::Value) -> Result<PathBuf, CampaignSchedulerError> {
     let params: CampaignParams = serde_json::from_value(parameters.clone()).map_err(|_| {
         CampaignSchedulerError::Validation("stored schedule project is invalid".to_owned())
     })?;
@@ -2035,7 +2059,25 @@ fn campaign_parameters_are_within_roots(
             "stored schedule project is not a directory".to_owned(),
         ));
     }
-    Ok(roots.iter().any(|root| project.starts_with(root)))
+    Ok(project)
+}
+
+fn authorize_campaign_parameters(
+    parameters: &serde_json::Value,
+    roots: &[PathBuf],
+) -> Result<(), CampaignSchedulerError> {
+    if campaign_parameters_are_within_roots(parameters, roots)? {
+        Ok(())
+    } else {
+        Err(CampaignSchedulerError::ProjectAccessDenied)
+    }
+}
+
+fn execution_is_nonterminal(execution: &ScheduleExecution) -> bool {
+    matches!(
+        execution.status,
+        hf_scheduler::ExecutionStatus::Pending | hf_scheduler::ExecutionStatus::Running
+    )
 }
 
 fn recovery_execution_is_within_roots(
@@ -2367,7 +2409,12 @@ impl CampaignScheduler {
                 }
             }
         }
+        let mut admitted_projects = Vec::new();
         for schedule in loaded {
+            let project = AdmittedProject::capture(&schedule.parameter_values);
+            if !admitted_projects.contains(&project) {
+                admitted_projects.push(project);
+            }
             manager.register(schedule).await;
         }
         drop(retirement);
@@ -2381,6 +2428,7 @@ impl CampaignScheduler {
             gate,
             scheduler_workflow_dispatch_limit,
             notifier,
+            admitted_projects: AsyncMutex::new(admitted_projects),
         })
     }
 
@@ -2439,6 +2487,161 @@ impl CampaignScheduler {
         self.state.try_set_max_concurrent(n)?;
         self.gate.set_limit(self.state.max_concurrent());
         Ok(())
+    }
+
+    /// Read aggregate runtime state only with authority over the shared scheduler.
+    ///
+    /// # Errors
+    /// Returns access denied or bounded unavailable-ownership errors.
+    pub async fn runtime_status_within_roots(
+        &self,
+        roots: &[PathBuf],
+    ) -> Result<CampaignSchedulerStatus, CampaignSchedulerError> {
+        let _admission = self.admit_shared_control(roots).await?;
+        Ok(self.runtime_status())
+    }
+
+    /// Read both concurrency limits only with authority over the shared scheduler.
+    ///
+    /// # Errors
+    /// Returns access denied or bounded unavailable-ownership errors.
+    pub async fn concurrency_limits_within_roots(
+        &self,
+        roots: &[PathBuf],
+    ) -> Result<CampaignConcurrencyLimits, CampaignSchedulerError> {
+        let _admission = self.admit_shared_control(roots).await?;
+        Ok(self.concurrency_limits())
+    }
+
+    /// Change arming only with authority over every admitted project and active record.
+    ///
+    /// # Errors
+    /// Returns an ownership error before changing execution authorization.
+    pub async fn set_armed_within_roots(
+        &self,
+        armed: bool,
+        roots: &[PathBuf],
+    ) -> Result<bool, CampaignSchedulerError> {
+        let _admission = self.admit_shared_control(roots).await?;
+        if armed {
+            self.arm();
+        } else {
+            self.disarm();
+        }
+        Ok(self.is_armed())
+    }
+
+    /// Persist a shared campaign limit only with authority over the scheduler.
+    ///
+    /// # Errors
+    /// Returns an ownership error before mutation, or a persistence error.
+    pub async fn try_set_max_concurrent_within_roots(
+        &self,
+        n: usize,
+        roots: &[PathBuf],
+    ) -> Result<usize, CampaignSchedulerError> {
+        let _admission = self.admit_shared_control(roots).await?;
+        self.try_set_max_concurrent(n)?;
+        Ok(self.max_concurrent())
+    }
+
+    async fn admit_shared_control(
+        &self,
+        roots: &[PathBuf],
+    ) -> Result<tokio::sync::MutexGuard<'_, ()>, CampaignSchedulerError> {
+        let admission = self.lock_schedule_mutation_admission().await;
+        for project in self.admitted_projects.lock().await.iter() {
+            match project {
+                AdmittedProject::Known(project)
+                    if roots.iter().any(|root| project.starts_with(root)) => {}
+                AdmittedProject::Known(_) => {
+                    return Err(CampaignSchedulerError::ProjectAccessDenied)
+                }
+                AdmittedProject::Unavailable => {
+                    return Err(CampaignSchedulerError::Validation(
+                        "admitted scheduler project ownership is unavailable".to_owned(),
+                    ))
+                }
+            }
+        }
+        for schedule in self.manager.list_schedules().await {
+            authorize_campaign_parameters(&schedule.parameter_values, roots)?;
+        }
+        let active: Vec<_> = {
+            let store = self.manager.execution_store().lock().await;
+            store
+                .list_recent(usize::MAX)
+                .into_iter()
+                .filter(|execution| execution_is_nonterminal(execution))
+                .cloned()
+                .collect()
+        };
+        for execution in active {
+            authorize_campaign_parameters(&execution.request_summary["parameter_values"], roots)?;
+        }
+        if let Some(store) = &self.store {
+            let mut after = None;
+            loop {
+                let page = store
+                    .nonterminal_schedule_execution_page(SCHEDULE_HISTORY_PAGE_SIZE, after.as_ref())
+                    .await
+                    .map_err(|_| {
+                        CampaignSchedulerError::History(
+                            "scheduler execution ownership is unavailable".to_owned(),
+                        )
+                    })?;
+                if page.is_empty() {
+                    break;
+                }
+                for record in &page {
+                    let execution: ScheduleExecution = serde_json::from_str(&record.data_json)
+                        .map_err(|_| {
+                            CampaignSchedulerError::History(
+                                "scheduler execution ownership is invalid".to_owned(),
+                            )
+                        })?;
+                    if !execution_is_nonterminal(&execution) {
+                        return Err(CampaignSchedulerError::History(
+                            "nonterminal scheduler execution ownership is inconsistent".to_owned(),
+                        ));
+                    }
+                    authorize_campaign_parameters(
+                        &execution.request_summary["parameter_values"],
+                        roots,
+                    )?;
+                }
+                after = page.last().cloned();
+            }
+            let occurrences = self
+                .occurrences
+                .load_one_time_occurrences()
+                .await
+                .map_err(|_| {
+                    CampaignSchedulerError::OccurrenceJournal(
+                        "scheduler occurrence ownership is unavailable".to_owned(),
+                    )
+                })?;
+            for occurrence in occurrences {
+                if matches!(
+                    occurrence.state,
+                    OneTimeOccurrenceState::Reserved | OneTimeOccurrenceState::Running
+                ) {
+                    let execution = self
+                        .retained_recovery_execution(&occurrence.id)
+                        .await
+                        .map_err(|_| {
+                            CampaignSchedulerError::OccurrenceJournal(
+                                "scheduler occurrence execution is unavailable".to_owned(),
+                            )
+                        })?;
+                    authorize_campaign_parameters(
+                        &execution.request_summary["parameter_values"],
+                        roots,
+                    )?;
+                }
+            }
+        }
+        Ok(admission)
     }
 
     /// All scheduled campaigns.
@@ -2978,9 +3181,16 @@ impl CampaignScheduler {
         &self,
         schedule: Schedule,
     ) -> Result<Schedule, CampaignSchedulerError> {
+        let _admission = self.lock_schedule_mutation_admission().await;
         self.schedules
             .ensure_schedule_identity_active(&schedule.id)
             .await?;
+        let project = AdmittedProject::capture(&schedule.parameter_values);
+        let mut admitted_projects = self.admitted_projects.lock().await;
+        if !admitted_projects.contains(&project) {
+            admitted_projects.push(project);
+        }
+        drop(admitted_projects);
         self.manager.register(schedule.clone()).await;
         if let Err(error) = self.persist().await {
             self.manager.remove(&schedule.id).await;
@@ -6776,6 +6986,229 @@ mod tests {
     #[tokio::test]
     async fn acknowledgement_enable_race_mutation_wins() {
         assert_mutation_wins_acknowledgement_race(RacedScheduleMutation::SetEnabled(true)).await;
+    }
+
+    #[tokio::test]
+    async fn shared_control_rejects_nonterminal_database_row_with_terminal_execution_json() {
+        let fixture = scheduler_fixture_with_store().await;
+        let scheduler = fixture.start().await.unwrap();
+        let mut execution = schedule_execution(
+            "mismatched",
+            "removed",
+            Utc::now(),
+            ExecutionStatus::Completed,
+        );
+        execution.request_summary = serde_json::json!({"parameter_values": fixture.params()});
+        fixture
+            .store
+            .as_ref()
+            .unwrap()
+            .upsert_schedule_execution(
+                "mismatched",
+                "removed",
+                &execution.triggered_at.to_rfc3339(),
+                "running",
+                &serde_json::to_string(&execution).unwrap(),
+            )
+            .await
+            .unwrap();
+        let roots = vec![fixture.directory.path().canonicalize().unwrap()];
+        assert!(scheduler
+            .set_armed_within_roots(true, &roots)
+            .await
+            .is_err());
+        assert!(!scheduler.is_armed());
+        scheduler.stop().await;
+    }
+
+    #[tokio::test]
+    async fn shared_controls_check_active_memory_ownership_without_live_definitions() {
+        let fixture = scheduler_fixture_without_store();
+        let scheduler = fixture.start().await.unwrap();
+        let roots = vec![fixture.directory.path().canonicalize().unwrap()];
+        let outside = tempfile::tempdir().unwrap();
+        let mut execution = schedule_execution(
+            "active-orphan",
+            "removed",
+            Utc::now(),
+            ExecutionStatus::Running,
+        );
+        let mut params = fixture.params();
+        params.project = outside.path().display().to_string();
+        execution.request_summary = serde_json::json!({"parameter_values": params});
+        scheduler
+            .manager
+            .execution_store()
+            .lock()
+            .await
+            .record(execution);
+        assert!(scheduler.list().await.is_empty());
+        assert!(matches!(
+            scheduler.set_armed_within_roots(true, &roots).await,
+            Err(CampaignSchedulerError::ProjectAccessDenied)
+        ));
+        assert!(!scheduler.is_armed());
+        scheduler
+            .manager
+            .execution_store()
+            .lock()
+            .await
+            .update("active-orphan", |execution| {
+                execution.status = ExecutionStatus::Completed;
+            });
+        assert!(scheduler
+            .set_armed_within_roots(true, &roots)
+            .await
+            .unwrap());
+        scheduler.stop().await;
+    }
+
+    #[tokio::test]
+    async fn shared_controls_require_all_admitted_projects_after_definition_removal() {
+        let fixture = scheduler_fixture_without_store();
+        let scheduler = fixture.start().await.unwrap();
+        let roots = vec![fixture.directory.path().canonicalize().unwrap()];
+        let owned = scheduler
+            .try_create(
+                "owned",
+                &fixture.params(),
+                parse_trigger("cron", "0 0 1 1 *").unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(scheduler
+            .set_armed_within_roots(true, &roots)
+            .await
+            .unwrap());
+        assert!(!scheduler
+            .set_armed_within_roots(false, &roots)
+            .await
+            .unwrap());
+        assert_eq!(
+            scheduler
+                .try_set_max_concurrent_within_roots(3, &roots)
+                .await
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            scheduler
+                .concurrency_limits_within_roots(&roots)
+                .await
+                .unwrap()
+                .active_fuzz_campaign_limit,
+            3
+        );
+        assert!(
+            !scheduler
+                .runtime_status_within_roots(&roots)
+                .await
+                .unwrap()
+                .armed
+        );
+        let outside = tempfile::tempdir().unwrap();
+        let mut params = fixture.params();
+        params.project = outside.path().display().to_string();
+        let foreign = scheduler
+            .try_create(
+                "foreign",
+                &params,
+                parse_trigger("cron", "0 0 1 1 *").unwrap(),
+            )
+            .await
+            .unwrap();
+        scheduler.try_remove(&foreign.id).await.unwrap();
+        scheduler.try_remove(&owned.id).await.unwrap();
+        scheduler.clear_history().await.unwrap();
+        assert!(matches!(
+            scheduler.set_armed_within_roots(true, &roots).await,
+            Err(CampaignSchedulerError::ProjectAccessDenied)
+        ));
+        assert!(matches!(
+            scheduler.set_armed_within_roots(false, &roots).await,
+            Err(CampaignSchedulerError::ProjectAccessDenied)
+        ));
+        assert!(matches!(
+            scheduler
+                .try_set_max_concurrent_within_roots(9, &roots)
+                .await,
+            Err(CampaignSchedulerError::ProjectAccessDenied)
+        ));
+        assert!(matches!(
+            scheduler.runtime_status_within_roots(&roots).await,
+            Err(CampaignSchedulerError::ProjectAccessDenied)
+        ));
+        assert!(matches!(
+            scheduler.concurrency_limits_within_roots(&roots).await,
+            Err(CampaignSchedulerError::ProjectAccessDenied)
+        ));
+        assert!(!scheduler.is_armed());
+        assert_eq!(scheduler.max_concurrent(), 3);
+        let all_roots = vec![roots[0].clone(), outside.path().canonicalize().unwrap()];
+        assert!(scheduler
+            .set_armed_within_roots(true, &all_roots)
+            .await
+            .unwrap());
+        scheduler.stop().await;
+    }
+
+    #[tokio::test]
+    async fn shared_control_unknown_admission_does_not_infer_ownership_later() {
+        let fixture = scheduler_fixture_without_store();
+        let scheduler = fixture.start().await.unwrap();
+        let mut params = fixture.params();
+        params.project = fixture
+            .directory
+            .path()
+            .join("missing")
+            .display()
+            .to_string();
+        let schedule = scheduler
+            .try_create(
+                "missing project",
+                &params,
+                parse_trigger("cron", "0 0 1 1 *").unwrap(),
+            )
+            .await
+            .unwrap();
+        scheduler.try_remove(&schedule.id).await.unwrap();
+        std::fs::create_dir(&params.project).unwrap();
+        let roots = vec![fixture.directory.path().canonicalize().unwrap()];
+        assert!(matches!(
+            scheduler.set_armed_within_roots(true, &roots).await,
+            Err(CampaignSchedulerError::Validation(_))
+        ));
+        assert!(!scheduler.is_armed());
+        scheduler.stop().await;
+    }
+
+    #[tokio::test]
+    async fn definition_registration_waits_for_mutation_admission() {
+        let fixture = scheduler_fixture_without_store();
+        let scheduler = Arc::new(fixture.start().await.unwrap());
+        let guard = scheduler.lock_schedule_mutation_admission().await;
+        let creating = Arc::clone(&scheduler);
+        let params = fixture.params();
+        let mut task = tokio::spawn(async move {
+            creating
+                .try_create(
+                    "future",
+                    &params,
+                    parse_trigger("cron", "0 0 1 1 *").unwrap(),
+                )
+                .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut task)
+                .await
+                .is_err(),
+            "registration bypassed mutation admission"
+        );
+        assert!(scheduler.list().await.is_empty());
+        drop(guard);
+        let schedule = task.await.unwrap().unwrap();
+        assert_eq!(scheduler.list().await[0].id, schedule.id);
+        scheduler.stop().await;
     }
 
     #[tokio::test]

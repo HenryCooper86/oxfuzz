@@ -21,6 +21,90 @@ fn open_local_security(root: &std::path::Path) -> WebSecurityConfig {
 }
 
 #[tokio::test]
+async fn shared_scheduler_controls_deny_foreign_and_removed_projects() {
+    let fixture = hf_service::test_support::one_time_recovery_fixture(true)
+        .await
+        .unwrap();
+    let scheduler = fixture.scheduler();
+    let outside = tempfile::tempdir().unwrap();
+    let app = build_with_state_and_security(
+        AppState::new(fixture.container()).with_scheduler(scheduler.clone()),
+        open_local_security(outside.path()),
+    );
+    let before = scheduler.max_concurrent();
+    for (method, uri, body) in [
+        (Method::GET, "/schedule/arm", String::new()),
+        (Method::POST, "/schedule/arm", String::new()),
+        (Method::DELETE, "/schedule/arm", String::new()),
+        (Method::GET, "/schedule/runtime", String::new()),
+        (Method::GET, "/schedule/concurrency", String::new()),
+        (Method::GET, "/schedule/concurrency/limits", String::new()),
+        (
+            Method::POST,
+            "/schedule/concurrency",
+            "{\"max_concurrent\":9}".to_owned(),
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&body).contains(fixture.directory_path().to_str().unwrap())
+        );
+        assert!(!scheduler.is_armed());
+        assert_eq!(scheduler.max_concurrent(), before);
+    }
+    scheduler.try_remove("schedule-web").await.unwrap();
+    scheduler
+        .acknowledge_one_time_recovery("occ-web")
+        .await
+        .unwrap();
+    scheduler.clear_history().await.unwrap();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/schedule/arm")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(!scheduler.is_armed());
+    let approved = build_with_state_and_security(
+        AppState::new(fixture.container()).with_scheduler(scheduler.clone()),
+        open_local_security(fixture.directory_path()),
+    );
+    let response = approved
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/schedule/arm")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(scheduler.is_armed());
+    scheduler.stop().await;
+}
+
+#[tokio::test]
 async fn recovery_routes_deny_foreign_receipts_before_acknowledgement() {
     let fixture = hf_service::test_support::one_time_recovery_fixture(true)
         .await

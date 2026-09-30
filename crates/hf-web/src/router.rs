@@ -3701,58 +3701,90 @@ async fn schedule_create(
 }
 
 /// Whether restored work is authorized to run in this process.
-async fn schedule_arm_get(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let armed = state.scheduler.as_ref().is_some_and(|s| s.is_armed());
-    Json(serde_json::json!({ "armed": armed }))
+async fn schedule_arm_get(State(state): State<AppState>) -> ApiResult<serde_json::Value> {
+    schedule_arming_response(&state, None).await
 }
 
 /// Release recovery held since start.
 ///
 /// A scheduler comes up disarmed on every process start: a restart restores
 /// what it was doing without deciding to carry on. This is that decision.
-async fn schedule_arm(State(state): State<AppState>) -> Json<serde_json::Value> {
-    if let Some(scheduler) = &state.scheduler {
-        scheduler.arm();
-    }
-    let armed = state.scheduler.as_ref().is_some_and(|s| s.is_armed());
-    Json(serde_json::json!({ "armed": armed }))
+async fn schedule_arm(State(state): State<AppState>) -> ApiResult<serde_json::Value> {
+    schedule_arming_response(&state, Some(true)).await
 }
 
 /// Withdraw authorization; recovery not yet released stays held.
-async fn schedule_disarm(State(state): State<AppState>) -> Json<serde_json::Value> {
-    if let Some(scheduler) = &state.scheduler {
-        scheduler.disarm();
-    }
-    let armed = state.scheduler.as_ref().is_some_and(|s| s.is_armed());
-    Json(serde_json::json!({ "armed": armed }))
+async fn schedule_disarm(State(state): State<AppState>) -> ApiResult<serde_json::Value> {
+    schedule_arming_response(&state, Some(false)).await
 }
 
-async fn schedule_concurrency_get(State(state): State<AppState>) -> Json<usize> {
-    Json(state.scheduler.as_ref().map_or(0, |s| s.max_concurrent()))
+async fn schedule_arming_response(
+    state: &AppState,
+    change: Option<bool>,
+) -> ApiResult<serde_json::Value> {
+    let armed = match &state.scheduler {
+        Some(scheduler) => match change {
+            Some(armed) => scheduler
+                .set_armed_within_roots(armed, state.security.project_roots())
+                .await
+                .map_err(scheduler_api_error)?,
+            None => {
+                scheduler
+                    .runtime_status_within_roots(state.security.project_roots())
+                    .await
+                    .map_err(scheduler_api_error)?
+                    .armed
+            }
+        },
+        None => false,
+    };
+    Ok(Json(serde_json::json!({ "armed": armed })))
+}
+
+async fn schedule_concurrency_get(State(state): State<AppState>) -> ApiResult<usize> {
+    let value = match &state.scheduler {
+        Some(scheduler) => {
+            scheduler
+                .concurrency_limits_within_roots(state.security.project_roots())
+                .await
+                .map_err(scheduler_api_error)?
+                .active_fuzz_campaign_limit
+        }
+        None => 0,
+    };
+    Ok(Json(value))
 }
 
 async fn schedule_runtime(
     State(state): State<AppState>,
-) -> Json<Option<hf_service::scheduler::CampaignSchedulerStatus>> {
-    Json(
-        state
-            .scheduler
-            .as_ref()
-            .map(|scheduler| scheduler.runtime_status()),
-    )
+) -> ApiResult<Option<hf_service::scheduler::CampaignSchedulerStatus>> {
+    let status = match &state.scheduler {
+        Some(scheduler) => Some(
+            scheduler
+                .runtime_status_within_roots(state.security.project_roots())
+                .await
+                .map_err(scheduler_api_error)?,
+        ),
+        None => None,
+    };
+    Ok(Json(status))
 }
 
 async fn schedule_concurrency_limits(
     State(state): State<AppState>,
-) -> Json<hf_service::scheduler::CampaignConcurrencyLimits> {
-    Json(state.scheduler.as_ref().map_or(
-        hf_service::scheduler::CampaignConcurrencyLimits {
+) -> ApiResult<hf_service::scheduler::CampaignConcurrencyLimits> {
+    let limits = match &state.scheduler {
+        Some(scheduler) => scheduler
+            .concurrency_limits_within_roots(state.security.project_roots())
+            .await
+            .map_err(scheduler_api_error)?,
+        None => hf_service::scheduler::CampaignConcurrencyLimits {
             active_fuzz_campaign_limit: 0,
             scheduler_workflow_dispatch_limit: 0,
             effective_max_concurrent_fuzz_runs: 0,
         },
-        |scheduler| scheduler.concurrency_limits(),
-    ))
+    };
+    Ok(Json(limits))
 }
 
 #[derive(Debug, Deserialize)]
@@ -3765,11 +3797,10 @@ async fn schedule_concurrency_set(
     Json(req): Json<ConcurrencyRequest>,
 ) -> ApiResult<usize> {
     let max_concurrent = match &state.scheduler {
-        Some(s) => {
-            s.try_set_max_concurrent(req.max_concurrent)
-                .map_err(scheduler_api_error)?;
-            s.max_concurrent()
-        }
+        Some(s) => s
+            .try_set_max_concurrent_within_roots(req.max_concurrent, state.security.project_roots())
+            .await
+            .map_err(scheduler_api_error)?,
         None => 0,
     };
     Ok(Json(max_concurrent))

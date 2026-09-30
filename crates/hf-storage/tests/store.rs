@@ -3993,6 +3993,45 @@ async fn schedule_executions_round_trip_and_latest_fire() {
 }
 
 #[tokio::test]
+async fn nonterminal_schedule_execution_pages_exclude_newer_terminal_history() {
+    let (store, _dir) = temp_store().await;
+    for (id, status) in [
+        ("a", "pending"),
+        ("b", "running"),
+        ("c", "completed"),
+        ("d", "failed"),
+        ("e", "cancelled"),
+        ("f", "skipped"),
+    ] {
+        store
+            .upsert_schedule_execution(id, "schedule", "2030-01-01T00:00:00Z", status, "{}")
+            .await
+            .unwrap();
+    }
+    let first = store
+        .nonterminal_schedule_execution_page(1, None)
+        .await
+        .unwrap();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].id, "b");
+    let second = store
+        .nonterminal_schedule_execution_page(1, first.first())
+        .await
+        .unwrap();
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].id, "a");
+    assert!(store
+        .nonterminal_schedule_execution_page(1, second.first())
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        store.schedule_execution_page(10, None).await.unwrap().len(),
+        6
+    );
+}
+
+#[tokio::test]
 async fn schedule_execution_pages_and_snapshot_cleanup_preserve_unselected_and_protected_rows() {
     let (store, _dir) = temp_store().await;
     for id in ["e1", "e2", "e3", "e4"] {

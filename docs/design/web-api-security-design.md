@@ -90,6 +90,17 @@ before mutation. Lists preserve all-receipt health validation and expose current
 definition names only within approved roots. A cancelled receipt whose execution
 history was cleared cannot supply REST ownership from a current definition.
 
+REST aggregate scheduler status, arming and concurrency operations require every
+project admitted during this scheduler process, every current definition and all
+retained nonterminal work to be within approved roots. The service retains each
+canonical admitted project before registration until process exit, so removed
+definitions, active history eviction and a trigger's captured definition cannot
+erase ownership. Invalid ownership fails loudly; foreign ownership denies the
+whole operation. Deleting a foreign definition does not grant aggregate control
+until a restart without foreign nonterminal evidence. Definition registration and
+scoped aggregate operations share mutation admission. Trusted local aggregate
+operations retain their current access.
+
 ## 4. Public Response DTOs
 
 REST responses do not expose absolute host paths, provider credentials,

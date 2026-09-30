@@ -30,14 +30,39 @@ impl Store {
         limit: i64,
         after: Option<&ScheduleExecutionRecord>,
     ) -> Result<Vec<ScheduleExecutionRecord>, StorageError> {
+        self.schedule_execution_page_filtered(limit, after, false)
+            .await
+    }
+
+    /// Read only persisted pending/running executions using stable pagination.
+    ///
+    /// # Errors
+    /// Returns an error when SQL or stored column decoding fails.
+    pub async fn nonterminal_schedule_execution_page(
+        &self,
+        limit: i64,
+        after: Option<&ScheduleExecutionRecord>,
+    ) -> Result<Vec<ScheduleExecutionRecord>, StorageError> {
+        self.schedule_execution_page_filtered(limit, after, true)
+            .await
+    }
+
+    async fn schedule_execution_page_filtered(
+        &self,
+        limit: i64,
+        after: Option<&ScheduleExecutionRecord>,
+        nonterminal_only: bool,
+    ) -> Result<Vec<ScheduleExecutionRecord>, StorageError> {
         let rows = sqlx::query(
             "SELECT id, triggered_at, data_json FROM schedule_executions
-             WHERE ?1 IS NULL OR triggered_at < ?1 OR (triggered_at = ?1 AND id < ?2)
+             WHERE (?1 IS NULL OR triggered_at < ?1 OR (triggered_at = ?1 AND id < ?2))
+               AND (?4 = 0 OR status IN ('pending', 'running'))
              ORDER BY triggered_at DESC, id DESC LIMIT ?3",
         )
         .bind(after.map(|record| record.triggered_at.as_str()))
         .bind(after.map(|record| record.id.as_str()))
         .bind(limit)
+        .bind(nonterminal_only)
         .fetch_all(self.pool())
         .await?;
         rows.into_iter()
