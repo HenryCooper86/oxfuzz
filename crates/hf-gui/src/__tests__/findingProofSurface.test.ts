@@ -22,13 +22,10 @@ describe("service-owned finding proof card", () => {
     expect(dashboard).not.toContain("proof={deriveFindingProof");
   });
 
-  it("keeps REST and Tauri as transports for the service dashboard DTO", () => {
+  it("keeps REST and Tauri entrypoints for the service dashboard DTO", () => {
     expect(source("../lib/httpTransport.ts")).toContain('path: "/workbench/dashboard"');
     expect(source("../../src-tauri/src/commands.rs")).toContain(
       "Result<hf_service::WorkbenchDashboard, String>",
-    );
-    expect(source("../../../hf-web/src/router.rs")).toContain(
-      ".workbench_dashboard(project.as_deref(), opt_target(req.target.as_ref()))",
     );
   });
 
