@@ -2356,7 +2356,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
- "toml 0.8.23",
+ "toml 1.1.2+spec-1.1.0",
  "tracing",
  "uuid",
 ]
@@ -2575,7 +2575,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tempfile",
  "tokio",
- "toml 0.8.23",
+ "toml 1.1.2+spec-1.1.0",
  "uuid",
 ]
 
@@ -2628,7 +2628,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.19",
- "toml 0.8.23",
+ "toml 1.1.2+spec-1.1.0",
  "tracing",
  "uuid",
 ]
@@ -2650,7 +2650,7 @@ dependencies = [
  "temp-env",
  "thiserror 2.0.19",
  "tokio",
- "toml 0.8.23",
+ "toml 1.1.2+spec-1.1.0",
  "tracing",
  "uuid",
 ]
@@ -2734,7 +2734,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tokio-util",
- "toml 0.8.23",
+ "toml 1.1.2+spec-1.1.0",
  "toml_edit 0.22.27",
  "tracing",
  "uuid",
@@ -2757,7 +2757,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
- "toml 0.8.23",
+ "toml 1.1.2+spec-1.1.0",
  "tracing",
  "uuid",
 ]
@@ -2768,7 +2768,7 @@ version = "0.5.1"
 dependencies = [
  "serde",
  "thiserror 2.0.19",
- "toml 0.8.23",
+ "toml 1.1.2+spec-1.1.0",
  "tracing",
 ]
 
@@ -2852,7 +2852,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
- "toml 0.8.23",
+ "toml 1.1.2+spec-1.1.0",
  "tower",
  "tower-http",
  "tracing",
