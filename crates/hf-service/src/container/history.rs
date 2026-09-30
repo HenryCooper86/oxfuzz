@@ -356,6 +356,34 @@ impl ServiceContainer {
         self.clear_all_runs_locked().await
     }
 
+    /// Clear terminal runs and their retained evidence for one project.
+    ///
+    /// # Errors
+    /// Returns a typed retention refusal or the existing classified failure.
+    pub async fn clear_project_runs(&self, project: &Path) -> Result<(), crate::RunHistoryError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| ClassifiedError::Validation("no database configured".to_owned()))?;
+        let identity = project_lookup_identity(project);
+        let runs: Vec<_> = store
+            .list_runs(None)
+            .await
+            .map_err(|error| ClassifiedError::Storage(error.to_string()))?
+            .into_iter()
+            .filter(|run| stored_project_matches(Path::new(&run.project_root), &identity))
+            .collect();
+        let evidence_roots = self.run_clear_evidence_roots(store, &runs).await?;
+        let run_ids: Vec<_> = runs.iter().map(|run| run.id).collect();
+        store
+            .clear_runs_by_id(&run_ids)
+            .await
+            .map_err(crate::RunHistoryError::clearing)?;
+        remove_run_evidence_roots(evidence_roots)?;
+        Ok(())
+    }
+
     async fn clear_all_runs_locked(&self) -> Result<(), crate::RunHistoryError> {
         let store = self
             .store
@@ -365,6 +393,20 @@ impl ServiceContainer {
             .list_runs(None)
             .await
             .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
+        let evidence_roots = self.run_clear_evidence_roots(store, &runs).await?;
+        store
+            .clear_all_runs()
+            .await
+            .map_err(crate::RunHistoryError::clearing)?;
+        remove_run_evidence_roots(evidence_roots)?;
+        Ok(())
+    }
+
+    async fn run_clear_evidence_roots(
+        &self,
+        store: &Store,
+        runs: &[RunRecord],
+    ) -> Result<Vec<PathBuf>, crate::RunHistoryError> {
         if runs.iter().any(|run| {
             !run_has_crash_evidence(run.status) || self.active_run_ids().contains(&run.id)
         }) {
@@ -373,29 +415,15 @@ impl ServiceContainer {
             )
             .into());
         }
-        for run in &runs {
+        let mut evidence_roots = Vec::new();
+        for run in runs {
             self.ensure_run_is_not_qualification(store, run.id).await?;
             ensure_run_not_retained_by_experiment(store, run.id).await?;
-        }
-        let mut evidence_roots = Vec::new();
-        for run in &runs {
             if let Some(root) = self.run_evidence_root_locked(store, run).await? {
                 evidence_roots.push(root);
             }
         }
-        store
-            .clear_all_runs()
-            .await
-            .map_err(crate::RunHistoryError::clearing)?;
-        for root in evidence_roots {
-            std::fs::remove_dir_all(&root).map_err(|error| {
-                ClassifiedError::Internal(format!(
-                    "remove run evidence {}: {error}",
-                    root.display()
-                ))
-            })?;
-        }
-        Ok(())
+        Ok(evidence_roots)
     }
 
     /// Runs interrupted by an app crash/quit, awaiting recovery.
@@ -704,6 +732,15 @@ async fn ensure_run_not_retained_by_experiment(
     Ok(())
 }
 
+fn remove_run_evidence_roots(roots: Vec<PathBuf>) -> Result<(), ClassifiedError> {
+    for root in roots {
+        std::fs::remove_dir_all(&root).map_err(|error| {
+            ClassifiedError::Internal(format!("remove run evidence {}: {error}", root.display()))
+        })?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod project_artifact_tests {
     use std::sync::Arc;
@@ -733,6 +770,7 @@ mod project_artifact_tests {
         );
         let mut expected_crash = None;
         let mut expected_corpus = None;
+        let mut run_ids = Vec::new();
 
         for (index, project) in [&approved, &outside].into_iter().enumerate() {
             let target = TargetCandidate {
@@ -764,8 +802,13 @@ mod project_artifact_tests {
                 None,
                 Utc::now(),
             );
-            run.status = RunStatus::Done;
+            run.status = if index == 0 {
+                RunStatus::Done
+            } else {
+                RunStatus::Pending
+            };
             store.insert_run(&run).await.unwrap();
+            run_ids.push(run.id);
             let crash = Crash {
                 id: Uuid::new_v4(),
                 run_id: run.id,
@@ -794,7 +837,7 @@ mod project_artifact_tests {
             }
         }
 
-        let service = ServiceContainer::stubbed().with_store(store);
+        let service = ServiceContainer::stubbed().with_store(Arc::clone(&store));
         let crashes = service.project_crashes(&approved).await.unwrap();
         let corpus = service.project_corpus_entries(&approved).await.unwrap();
         assert_eq!(crashes.len(), 1);
@@ -818,6 +861,10 @@ mod project_artifact_tests {
                 .len(),
             1
         );
+
+        service.clear_project_runs(&approved).await.unwrap();
+        assert!(store.get_run(run_ids[0]).await.unwrap().is_none());
+        assert!(store.get_run(run_ids[1]).await.unwrap().is_some());
     }
 }
 

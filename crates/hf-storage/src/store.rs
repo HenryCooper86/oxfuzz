@@ -2560,6 +2560,39 @@ impl Store {
         Ok(())
     }
 
+    /// Delete the specified runs and their crash rows in one transaction.
+    ///
+    /// # Errors
+    /// Returns a storage error if a run is retained, missing, or deletion fails.
+    pub async fn clear_runs_by_id(&self, run_ids: &[Uuid]) -> Result<(), StorageError> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        for run_id in run_ids {
+            let id = run_id.to_string();
+            if let Some(reference) =
+                crate::coverage_experiment_store::run_reference(&mut tx, &id).await?
+            {
+                return Err(StorageError::RunRetainedByExperiment {
+                    run_id: *run_id,
+                    experiment_id: reference.experiment_id,
+                    role: reference.role,
+                });
+            }
+            sqlx::query("DELETE FROM crashes WHERE run_id = ?1")
+                .bind(&id)
+                .execute(&mut *tx)
+                .await?;
+            let result = sqlx::query("DELETE FROM runs WHERE id = ?1")
+                .bind(&id)
+                .execute(&mut *tx)
+                .await?;
+            if result.rows_affected() != 1 {
+                return Err(StorageError::NotFound(format!("run {run_id}")));
+            }
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Remove child rows whose parent target no longer exists: harnesses,
     /// corpus entries, and crashes pointing at a `target_id` absent from
     /// `targets`. Repairs data orphaned by older partial clears (which is why

@@ -57,6 +57,8 @@ the desktop's browse-all service calls remain local-only.
 The REST artifact clear operation requires an approved project and removes only
 that project's persisted crashes and corpus entries. The desktop can retain its
 trusted-local all-project clear operation.
+The REST run-history clear operation likewise requires an approved project and
+removes only that project's terminal runs and their retained evidence.
 
 ## 4. Public Response DTOs
 

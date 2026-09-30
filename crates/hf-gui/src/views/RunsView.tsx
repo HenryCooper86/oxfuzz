@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getTransport, onDataChanged, emitDataChanged } from "../lib";
+import { getTransport, isTauriEnvironment, onDataChanged, emitDataChanged } from "../lib";
 import { formatInvokeError, formatRunHistoryError } from "../lib/invokeError";
 import { useI18n } from "../i18nContext";
 import { useProject } from "../providers/project";
@@ -34,9 +34,9 @@ const STATUS_COLOR: Record<string, string> = {
   Failed: "var(--error)",
 };
 
-// A history of every fuzz run for the active project (all projects when none
-// selected), with crash counts and durations, plus a two-run compare. Runs are
-// read from the persisted store, so the history survives restarts.
+// A history of fuzz runs for the active project, with crash counts and
+// durations, plus a two-run compare. Desktop can browse all projects when none
+// is selected. Runs are persisted, so the history survives restarts.
 type RunsViewProps = { onNavigate?: (view: ViewType) => void; focus?: { project: string; id: string } | null; onClearFocus?: () => void; onReviewFindings?: (run: RunHistoryItem) => void };
 export function RunsView(props: RunsViewProps) {
   const { activeProject } = useProject();
@@ -126,7 +126,7 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus, onReviewFindings 
   async function clearAllRuns() {
     if (!(await confirm({ title: t("runs.clearTitle"), message: t("runs.clearMsg"), danger: true, confirmLabel: t("common.clearAll") }))) return;
     try {
-      await getTransport().invoke("clear_all_runs");
+      await getTransport().invoke("clear_all_runs", isTauriEnvironment() ? undefined : { project: activeProject || undefined });
       setRuns([]);
       setSelected([]);
       emitDataChanged();

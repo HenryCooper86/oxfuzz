@@ -3168,10 +3168,13 @@ async fn delete_run(
 
 async fn clear_all_runs(
     State(state): State<AppState>,
+    Json(req): Json<ProjectRequest>,
 ) -> Result<Json<bool>, (StatusCode, Json<RunHistoryErrorResponse>)> {
+    let project = approved_project(&state, std::path::Path::new(&req.project))
+        .map_err(|(status, Json(body))| (status, Json(RunHistoryErrorResponse::Existing(body))))?;
     state
         .container
-        .clear_all_runs()
+        .clear_project_runs(&project)
         .await
         .map_err(run_history_api_error)?;
     Ok(Json(true))
