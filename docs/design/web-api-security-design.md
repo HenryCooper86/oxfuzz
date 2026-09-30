@@ -50,6 +50,8 @@ environment races.
 REST project export requires an explicit approved project. An omitted project
 must not select the service's all-project export mode, which is reserved for
 trusted local presentation.
+Run history, auto-revert audit, workbench dashboard, and harness review reads
+likewise require an explicit approved project on the REST transport.
 
 ## 4. Public Response DTOs
 

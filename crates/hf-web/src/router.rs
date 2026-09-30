@@ -2135,10 +2135,10 @@ async fn run_history(
     State(state): State<AppState>,
     Json(req): Json<WorkbenchRequest>,
 ) -> ApiResult<serde_json::Value> {
-    let project = approved_optional_project(&state, req.project.as_ref())?;
+    let project = required_approved_project(&state, req.project.as_deref())?;
     let history = state
         .container
-        .run_history(project.as_deref())
+        .run_history(Some(&project))
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(history)))
@@ -2492,11 +2492,10 @@ async fn auto_revert_events(
     State(state): State<AppState>,
     Json(req): Json<AuditRequest>,
 ) -> ApiResult<serde_json::Value> {
-    let requested = req.project.filter(|path| !path.is_empty());
-    let project = approved_optional_project(&state, requested.as_ref())?;
+    let project = required_approved_project(&state, req.project.as_deref())?;
     let events = state
         .container
-        .auto_revert_events(project.as_deref(), req.limit.unwrap_or(200))
+        .auto_revert_events(Some(&project), req.limit.unwrap_or(200))
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(events)))
@@ -2850,10 +2849,10 @@ async fn workbench_dashboard(
     State(state): State<AppState>,
     Json(req): Json<WorkbenchRequest>,
 ) -> ApiResult<serde_json::Value> {
-    let project = approved_optional_project(&state, req.project.as_ref())?;
+    let project = required_approved_project(&state, req.project.as_deref())?;
     let dashboard = state
         .container
-        .workbench_dashboard(project.as_deref(), opt_target(req.target.as_ref()))
+        .workbench_dashboard(Some(&project), opt_target(req.target.as_ref()))
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(dashboard)))
@@ -2863,10 +2862,10 @@ async fn harness_review_queue(
     State(state): State<AppState>,
     Json(req): Json<WorkbenchRequest>,
 ) -> ApiResult<serde_json::Value> {
-    let project = approved_optional_project(&state, req.project.as_ref())?;
+    let project = required_approved_project(&state, req.project.as_deref())?;
     let queue = state
         .container
-        .harness_review_queue(project.as_deref(), opt_target(req.target.as_ref()))
+        .harness_review_queue(Some(&project), opt_target(req.target.as_ref()))
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(queue)))

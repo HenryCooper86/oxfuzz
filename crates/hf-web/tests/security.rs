@@ -59,6 +59,51 @@ async fn export_requires_an_approved_project() {
     }
 }
 
+#[tokio::test]
+async fn project_scoped_read_routes_reject_unselected_and_outside_projects() {
+    let approved = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let app = build_with_state_and_security(
+        AppState::new(hf_service::ServiceContainer::stubbed()),
+        open_local_security(approved.path()),
+    );
+
+    for uri in [
+        "/runs/history",
+        "/audit/auto-revert",
+        "/workbench/dashboard",
+        "/workbench/harnesses",
+    ] {
+        for (project, expected) in [
+            (serde_json::Value::Null, StatusCode::BAD_REQUEST),
+            (
+                serde_json::json!(outside.path().to_str().unwrap()),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                serde_json::json!(approved.path().to_str().unwrap()),
+                StatusCode::OK,
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(uri)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(
+                            serde_json::json!({ "project": project }).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "{uri}");
+        }
+    }
+}
+
 #[test]
 fn remote_bind_requires_a_bearer_token() {
     let loopback_v4 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8081);
