@@ -703,6 +703,13 @@ async fn run_retention_preserves_crashes_and_explicit_cleanup_preserves_configur
         .unwrap();
     assert!(store.delete_run(&run.id.to_string()).await.is_err());
     assert!(store.clear_all_runs().await.is_err());
+    let unrelated = fixture(&store, "/other", time()).await;
+    assert!(matches!(
+        store.clear_runs_by_id(&[unrelated.id, run.id]).await,
+        Err(StorageError::RunRetainedByExperiment { run_id, experiment_id, role: CoverageExperimentRunRole::Baseline })
+            if run_id == run.id && experiment_id == p.id
+    ));
+    assert!(store.get_run(unrelated.id).await.unwrap().is_some());
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM crashes")
         .fetch_one(store.pool())
         .await

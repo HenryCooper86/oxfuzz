@@ -3929,6 +3929,18 @@ async fn corpus_deletion_is_scoped_to_the_owning_target() {
 }
 
 #[tokio::test]
+async fn scoped_run_clear_rejects_a_missing_id_without_deleting_other_runs() {
+    let (store, _dir) = temp_store().await;
+    let run = RunRecord::new("/project", EngineKind::LibFuzzer, None, Utc::now());
+    store.insert_run(&run).await.unwrap();
+    assert!(matches!(
+        store.clear_runs_by_id(&[run.id, Uuid::new_v4()]).await,
+        Err(StorageError::NotFound(_))
+    ));
+    assert!(store.get_run(run.id).await.unwrap().is_some());
+}
+
+#[tokio::test]
 async fn schedule_executions_round_trip_and_latest_fire() {
     let (store, _dir) = temp_store().await;
 
