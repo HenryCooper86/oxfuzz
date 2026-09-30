@@ -2569,19 +2569,27 @@ async fn clear_project_auto_revert_override(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-async fn all_crashes(State(state): State<AppState>) -> ApiResult<serde_json::Value> {
+async fn all_crashes(
+    State(state): State<AppState>,
+    Query(req): Query<ProjectRequest>,
+) -> ApiResult<serde_json::Value> {
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
     let crashes = state
         .container
-        .all_crashes()
+        .project_crashes(&project)
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(crashes)))
 }
 
-async fn all_corpus(State(state): State<AppState>) -> ApiResult<serde_json::Value> {
+async fn all_corpus(
+    State(state): State<AppState>,
+    Query(req): Query<ProjectRequest>,
+) -> ApiResult<serde_json::Value> {
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
     let entries = state
         .container
-        .all_corpus_entries()
+        .project_corpus_entries(&project)
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(entries)))

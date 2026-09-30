@@ -52,6 +52,8 @@ must not select the service's all-project export mode, which is reserved for
 trusted local presentation.
 Run history, auto-revert audit, workbench dashboard, and harness review reads
 likewise require an explicit approved project on the REST transport.
+Persisted crash and corpus browse reads use the approved project's target IDs;
+the desktop's browse-all service calls remain local-only.
 
 ## 4. Public Response DTOs
 

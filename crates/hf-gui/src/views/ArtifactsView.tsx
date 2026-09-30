@@ -26,13 +26,13 @@ export function ArtifactsView() {
     setLoading(true);
     setError(null);
     const t = getTransport();
+    const project = isTauriEnvironment() ? undefined : { project: activeProject || undefined };
     try {
-      // Browse-all view: read persisted artifacts from the store across every
-      // target/run. Surface a real failure rather than swallowing it into an
-      // empty state -- "the query broke" must look different from "no artifacts".
+      // Desktop browses all persisted artifacts; the browser uses the selected
+      // project. Surface a failed read rather than showing an empty state.
       const [c, k] = await Promise.all([
-        t.invoke<Crash[]>("all_crashes"),
-        t.invoke<CorpusEntry[]>("all_corpus"),
+        t.invoke<Crash[]>("all_crashes", project),
+        t.invoke<CorpusEntry[]>("all_corpus", project),
       ]);
       setCrashes(c);
       setCorpus(k);
@@ -44,7 +44,7 @@ export function ArtifactsView() {
       setScanned(true);
       setLoading(false);
     }
-  }, []);
+  }, [activeProject]);
 
   // Auto-scan on mount so the view isn't a dead "Scan" prompt.
   useEffect(() => {

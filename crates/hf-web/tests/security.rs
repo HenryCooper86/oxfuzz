@@ -104,6 +104,35 @@ async fn project_scoped_read_routes_reject_unselected_and_outside_projects() {
     }
 }
 
+#[tokio::test]
+async fn artifact_reads_require_an_approved_project() {
+    let approved = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let app = build_with_state_and_security(
+        AppState::new(hf_service::ServiceContainer::stubbed()),
+        open_local_security(approved.path()),
+    );
+
+    for uri in ["/crashes/all", "/corpus/all"] {
+        for (project, expected) in [
+            (None, StatusCode::BAD_REQUEST),
+            (Some(outside.path()), StatusCode::FORBIDDEN),
+            (Some(approved.path()), StatusCode::OK),
+        ] {
+            let uri = match project {
+                Some(project) => format!("{uri}?project={}", project.display()),
+                None => uri.to_owned(),
+            };
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "{uri}");
+        }
+    }
+}
+
 #[test]
 fn remote_bind_requires_a_bearer_token() {
     let loopback_v4 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8081);

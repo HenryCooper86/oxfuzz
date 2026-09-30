@@ -452,6 +452,23 @@ impl ServiceContainer {
         }
     }
 
+    /// Persisted crashes whose target belongs to one project.
+    pub async fn project_crashes(
+        &self,
+        project: &Path,
+    ) -> Result<Vec<hf_core::crash::Crash>, ClassifiedError> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let targets = self.project_target_ids(project).await?;
+        Ok(store
+            .list_all_crashes()
+            .await?
+            .into_iter()
+            .filter(|crash| targets.contains(&crash.target_id))
+            .collect())
+    }
+
     /// Delete a single crash reproducer by id.
     ///
     /// # Errors
@@ -478,6 +495,41 @@ impl ServiceContainer {
             Some(store) => Ok(store.list_all_corpus_entries().await?),
             None => Ok(Vec::new()),
         }
+    }
+
+    /// Persisted corpus entries whose target belongs to one project.
+    pub async fn project_corpus_entries(
+        &self,
+        project: &Path,
+    ) -> Result<Vec<hf_core::corpus::CorpusEntry>, ClassifiedError> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let targets = self.project_target_ids(project).await?;
+        Ok(store
+            .list_all_corpus_entries_with_targets()
+            .await?
+            .into_iter()
+            .filter(|(target_id, _)| targets.contains(target_id))
+            .map(|(_, entry)| entry)
+            .collect())
+    }
+
+    async fn project_target_ids(
+        &self,
+        project: &Path,
+    ) -> Result<std::collections::HashSet<Uuid>, ClassifiedError> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(std::collections::HashSet::new());
+        };
+        let identity = project_lookup_identity(project);
+        Ok(store
+            .list_all_targets()
+            .await?
+            .into_iter()
+            .filter(|target| stored_project_matches(&target.project_root, &identity))
+            .map(|target| target.id)
+            .collect())
     }
 
     /// Delete one exact persisted corpus entry and its managed file.
@@ -635,6 +687,106 @@ async fn ensure_run_not_retained_by_experiment(
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod project_artifact_tests {
+    use std::sync::Arc;
+
+    use chrono::Utc;
+    use hf_core::corpus::{CorpusEntry, CorpusSource};
+    use hf_core::crash::{Crash, CrashKind, CrashOrigin};
+    use hf_core::target::{
+        InputSurface, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
+    };
+    use hf_storage::{RunRecord, RunStatus, Store};
+    use uuid::Uuid;
+
+    use super::ServiceContainer;
+
+    #[tokio::test]
+    async fn project_artifact_reads_exclude_other_projects() {
+        let directory = tempfile::tempdir().unwrap();
+        let approved = directory.path().join("approved");
+        let outside = directory.path().join("outside");
+        std::fs::create_dir(&approved).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let store = Arc::new(
+            Store::connect(directory.path().join("records.db"))
+                .await
+                .unwrap(),
+        );
+        let mut expected_crash = None;
+        let mut expected_corpus = None;
+
+        for (index, project) in [&approved, &outside].into_iter().enumerate() {
+            let target = TargetCandidate {
+                id: Uuid::new_v4(),
+                project_root: project.clone(),
+                language: TargetLanguage::C,
+                symbol: format!("parse_{index}"),
+                kind: TargetKind::Parser,
+                location: SourceLocation {
+                    file: project.join("parser.c"),
+                    line: 1,
+                    col: 1,
+                    end_line: None,
+                    end_col: None,
+                },
+                signature: None,
+                input_surface: InputSurface::Bytes,
+                complexity: 1,
+                fit_score: 1.0,
+                sanitizers: Vec::new(),
+                rationale: "fixture".to_owned(),
+                reachable_functions: Vec::new(),
+                accumulated_complexity: 1,
+            };
+            store.upsert_target(&target, Utc::now()).await.unwrap();
+            let mut run = RunRecord::new(
+                project.to_string_lossy(),
+                hf_core::engine::EngineKind::LibFuzzer,
+                None,
+                Utc::now(),
+            );
+            run.status = RunStatus::Done;
+            store.insert_run(&run).await.unwrap();
+            let crash = Crash {
+                id: Uuid::new_v4(),
+                run_id: run.id,
+                target_id: target.id,
+                input_path: project.join("crash"),
+                stack_signature: format!("signature_{index}"),
+                kind: CrashKind::Asan,
+                summary: "fixture".to_owned(),
+                minimized: false,
+                bug_report: None,
+                casr: None,
+                origin: CrashOrigin::Unknown,
+            };
+            store.upsert_crash(&crash).await.unwrap();
+            let corpus = CorpusEntry {
+                path: project.join("seed"),
+                sha256: format!("sha_{index}"),
+                size: 1,
+                source: CorpusSource::Seed,
+                coverage_hash: None,
+            };
+            store.upsert_corpus_entry(target.id, &corpus).await.unwrap();
+            if index == 0 {
+                expected_crash = Some(crash.id);
+                expected_corpus = Some(corpus.sha256);
+            }
+        }
+
+        let service = ServiceContainer::stubbed().with_store(store);
+        let crashes = service.project_crashes(&approved).await.unwrap();
+        let corpus = service.project_corpus_entries(&approved).await.unwrap();
+        assert_eq!(crashes.len(), 1);
+        assert_eq!(crashes[0].id, expected_crash.unwrap());
+        assert_eq!(corpus.len(), 1);
+        assert_eq!(corpus[0].sha256, expected_corpus.unwrap());
+    }
 }
 
 #[cfg(test)]
