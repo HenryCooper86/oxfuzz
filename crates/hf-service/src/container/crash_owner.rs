@@ -55,9 +55,7 @@ impl ServiceContainer {
             || !stored_project_matches(&target.project_root, &requested)
         {
             return Err(ClassifiedError::Validation(format!(
-                "finding {crash_id} belongs to project {}, not {}",
-                run.project_root,
-                project.display()
+                "finding {crash_id} belongs to project outside requested scope"
             )));
         }
         if !stored_project_matches(&target.project_root, Path::new(&run.project_root)) {

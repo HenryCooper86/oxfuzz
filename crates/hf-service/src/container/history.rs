@@ -24,6 +24,16 @@ use super::{
     RunHistoryItem, ServiceContainer,
 };
 
+/// One persisted corpus entry and the target that owns it.
+#[derive(serde::Serialize)]
+pub struct ProjectCorpusEntry {
+    /// Target identity used for exact deletion.
+    pub target_id: Uuid,
+    /// Persisted corpus metadata.
+    #[serde(flatten)]
+    pub entry: hf_core::corpus::CorpusEntry,
+}
+
 impl ServiceContainer {
     /// Resolve durable metadata for routing one run's asynchronous output.
     ///
@@ -511,6 +521,21 @@ impl ServiceContainer {
         Ok(())
     }
 
+    /// Delete a crash only when its run and target belong to the project.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` for an invalid ID, ownership mismatch, or storage failure.
+    pub async fn delete_project_crash(
+        &self,
+        project: &Path,
+        crash_id: &str,
+    ) -> Result<(), ClassifiedError> {
+        let id = Uuid::parse_str(crash_id)
+            .map_err(|error| ClassifiedError::Validation(format!("bad crash id: {error}")))?;
+        self.ensure_crash_owned_by_project(project, id).await?;
+        self.delete_crash(crash_id).await
+    }
+
     /// Every corpus entry persisted to the store, across all targets.
     ///
     /// The browse-all counterpart to [`Self::corpus_list`] (which is scoped to a
@@ -530,6 +555,19 @@ impl ServiceContainer {
         &self,
         project: &Path,
     ) -> Result<Vec<hf_core::corpus::CorpusEntry>, ClassifiedError> {
+        Ok(self
+            .project_corpus_entries_with_targets(project)
+            .await?
+            .into_iter()
+            .map(|item| item.entry)
+            .collect())
+    }
+
+    /// Persisted corpus entries and target IDs for one project.
+    pub async fn project_corpus_entries_with_targets(
+        &self,
+        project: &Path,
+    ) -> Result<Vec<ProjectCorpusEntry>, ClassifiedError> {
         let Some(store) = self.store.as_ref() else {
             return Ok(Vec::new());
         };
@@ -539,7 +577,7 @@ impl ServiceContainer {
             .await?
             .into_iter()
             .filter(|(target_id, _)| targets.contains(target_id))
-            .map(|(_, entry)| entry)
+            .map(|(target_id, entry)| ProjectCorpusEntry { target_id, entry })
             .collect())
     }
 
@@ -589,26 +627,39 @@ impl ServiceContainer {
             )));
         }
 
-        let quarantined = quarantine_corpus_entry(&entry.path, sha256)?;
-        if let Err(error) = store.delete_corpus_entry(target_id, sha256).await {
-            if let Some(quarantined) = quarantined {
-                std::fs::rename(&quarantined, &entry.path).map_err(|restore_error| {
-                    ClassifiedError::Internal(format!(
-                        "delete corpus entry failed: {error}; restore failed: {restore_error}"
-                    ))
-                })?;
-            }
-            return Err(ClassifiedError::Storage(error.to_string()));
+        delete_corpus_entry_record(store, target_id, &entry).await
+    }
+
+    /// Delete one project's corpus entry using its persisted target and digest.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` for a missing target or entry, ownership
+    /// mismatch, unsafe managed file, or storage failure.
+    pub async fn delete_project_corpus_entry(
+        &self,
+        project: &Path,
+        target_id: Uuid,
+        sha256: &str,
+    ) -> Result<(), ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| ClassifiedError::Validation("no database configured".to_owned()))?;
+        if !self.project_target_ids(project).await?.contains(&target_id) {
+            return Err(ClassifiedError::Validation(format!(
+                "target {target_id} does not belong to the selected project"
+            )));
         }
-        if let Some(quarantined) = quarantined {
-            if let Err(error) = std::fs::remove_file(&quarantined) {
-                tracing::warn!(
-                    path = %quarantined.display(),
-                    "deleted corpus row but could not remove quarantined file: {error}"
-                );
-            }
-        }
-        Ok(())
+        let entry = store
+            .list_corpus_entries(target_id)
+            .await?
+            .into_iter()
+            .find(|entry| entry.sha256 == sha256)
+            .ok_or_else(|| {
+                ClassifiedError::Validation(format!("corpus entry not found: {sha256}"))
+            })?;
+        delete_corpus_entry_record(store, target_id, &entry).await
     }
 
     /// Clear every persisted crash and corpus entry (the Artifacts browser).
@@ -732,6 +783,33 @@ async fn ensure_run_not_retained_by_experiment(
     Ok(())
 }
 
+async fn delete_corpus_entry_record(
+    store: &Store,
+    target_id: Uuid,
+    entry: &hf_core::corpus::CorpusEntry,
+) -> Result<(), ClassifiedError> {
+    let quarantined = quarantine_corpus_entry(&entry.path, &entry.sha256)?;
+    if let Err(error) = store.delete_corpus_entry(target_id, &entry.sha256).await {
+        if let Some(quarantined) = quarantined {
+            std::fs::rename(&quarantined, &entry.path).map_err(|restore_error| {
+                ClassifiedError::Internal(format!(
+                    "delete corpus entry failed: {error}; restore failed: {restore_error}"
+                ))
+            })?;
+        }
+        return Err(ClassifiedError::Storage(error.to_string()));
+    }
+    if let Some(quarantined) = quarantined {
+        if let Err(error) = std::fs::remove_file(&quarantined) {
+            tracing::warn!(
+                path = %quarantined.display(),
+                "deleted corpus row but could not remove quarantined file: {error}"
+            );
+        }
+    }
+    Ok(())
+}
+
 fn remove_run_evidence_roots(roots: Vec<PathBuf>) -> Result<(), ClassifiedError> {
     for root in roots {
         std::fs::remove_dir_all(&root).map_err(|error| {
@@ -771,6 +849,7 @@ mod project_artifact_tests {
         let mut expected_crash = None;
         let mut expected_corpus = None;
         let mut run_ids = Vec::new();
+        let mut crash_records = Vec::new();
 
         for (index, project) in [&approved, &outside].into_iter().enumerate() {
             let target = TargetCandidate {
@@ -823,6 +902,7 @@ mod project_artifact_tests {
                 origin: CrashOrigin::Unknown,
             };
             store.upsert_crash(&crash).await.unwrap();
+            crash_records.push(crash.clone());
             let corpus = CorpusEntry {
                 path: project.join("seed"),
                 sha256: format!("sha_{index}"),
@@ -844,6 +924,26 @@ mod project_artifact_tests {
         assert_eq!(crashes[0].id, expected_crash.unwrap());
         assert_eq!(corpus.len(), 1);
         assert_eq!(corpus[0].sha256, expected_corpus.unwrap());
+
+        assert!(service
+            .delete_project_crash(&approved, &crash_records[1].id.to_string())
+            .await
+            .is_err());
+        assert!(store
+            .get_crash(crash_records[1].id)
+            .await
+            .unwrap()
+            .is_some());
+        service
+            .delete_project_crash(&approved, &crash_records[0].id.to_string())
+            .await
+            .unwrap();
+        assert!(store
+            .get_crash(crash_records[0].id)
+            .await
+            .unwrap()
+            .is_none());
+        store.upsert_crash(&crash_records[0]).await.unwrap();
 
         service.clear_project_artifacts(&approved).await.unwrap();
         assert!(service.project_crashes(&approved).await.unwrap().is_empty());

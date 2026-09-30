@@ -2589,7 +2589,7 @@ async fn all_corpus(
     let project = approved_project(&state, std::path::Path::new(&req.project))?;
     let entries = state
         .container
-        .project_corpus_entries(&project)
+        .project_corpus_entries_with_targets(&project)
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(entries)))
@@ -3105,6 +3105,7 @@ async fn delete_project(
 
 #[derive(Debug, Deserialize)]
 struct CrashIdRequest {
+    project: String,
     crash_id: String,
 }
 
@@ -3112,9 +3113,10 @@ async fn delete_crash(
     State(state): State<AppState>,
     Json(req): Json<CrashIdRequest>,
 ) -> ApiResult<bool> {
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
     state
         .container
-        .delete_crash(&req.crash_id)
+        .delete_project_crash(&project, &req.crash_id)
         .await
         .map_err(classified_api_error)?;
     Ok(Json(true))
@@ -3122,17 +3124,19 @@ async fn delete_crash(
 
 #[derive(Debug, Deserialize)]
 struct CorpusEntryRequest {
+    project: String,
+    target_id: uuid::Uuid,
     sha256: String,
-    path: String,
 }
 
 async fn delete_corpus_entry(
     State(state): State<AppState>,
     Json(req): Json<CorpusEntryRequest>,
 ) -> ApiResult<bool> {
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
     state
         .container
-        .delete_corpus_entry(&req.sha256, std::path::Path::new(&req.path))
+        .delete_project_corpus_entry(&project, req.target_id, &req.sha256)
         .await
         .map_err(classified_api_error)?;
     Ok(Json(true))

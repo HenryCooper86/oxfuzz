@@ -68,7 +68,9 @@ export function ArtifactsView() {
   async function deleteCrash(c: Crash) {
     if (!(await confirm({ title: t("artifacts.deleteCrashTitle"), message: t("artifacts.deleteCrashMessage", { name: c.input_path.split("/").pop() ?? "" }), danger: true, confirmLabel: t("common.delete") }))) return;
     try {
-      await getTransport().invoke("delete_crash", { crashId: c.id });
+      await getTransport().invoke("delete_crash", isTauriEnvironment()
+        ? { crashId: c.id }
+        : { crashId: c.id, project: activeProject || undefined });
       setCrashes((cs) => cs.filter((x) => x.id !== c.id));
       emitDataChanged();
     } catch (e) {
@@ -79,8 +81,10 @@ export function ArtifactsView() {
   async function deleteCorpus(e: CorpusEntry) {
     if (!(await confirm({ title: t("artifacts.deleteCorpusTitle"), message: t("artifacts.deleteCorpusMessage", { name: e.path.split("/").pop() ?? "" }), danger: true, confirmLabel: t("common.delete") }))) return;
     try {
-      await getTransport().invoke("delete_corpus_entry", { sha256: e.sha256, path: e.path });
-      setCorpus((cs) => cs.filter((x) => x.sha256 !== e.sha256 || x.path !== e.path));
+      await getTransport().invoke("delete_corpus_entry", isTauriEnvironment()
+        ? { sha256: e.sha256, path: e.path }
+        : { sha256: e.sha256, targetId: e.target_id, project: activeProject || undefined });
+      setCorpus((cs) => cs.filter((x) => x.sha256 !== e.sha256 || (e.target_id ? x.target_id !== e.target_id : x.path !== e.path)));
       emitDataChanged();
     } catch (err) {
       toast({ title: t("artifacts.deleteFailed"), description: String(err), variant: "error" });
@@ -196,7 +200,7 @@ export function ArtifactsView() {
         <Section icon={<Database size={15} style={{ color: "var(--accent)" }} />} title={t("artifacts.corpus")} count={shownCorpus.length}>
           {shownCorpus.map((e) => (
             <div
-              key={e.sha256}
+              key={`${e.target_id ?? e.path}:${e.sha256}`}
               className="surface-card flex items-center gap-3"
               style={{ padding: "var(--space-sm) var(--space-md)" }}
             >

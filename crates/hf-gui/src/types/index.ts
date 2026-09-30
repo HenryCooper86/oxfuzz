@@ -251,6 +251,7 @@ export interface SemgrepInventory {
 }
 
 export interface CorpusEntry {
+  target_id?: string;
   path: string;
   sha256: string;
   size: number;

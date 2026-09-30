@@ -59,6 +59,11 @@ that project's persisted crashes and corpus entries. The desktop can retain its
 trusted-local all-project clear operation.
 The REST run-history clear operation likewise requires an approved project and
 removes only that project's terminal runs and their retained evidence.
+Deleting one crash through REST requires an approved project, and the service
+checks the persisted crash, run, and target ownership before deleting its row.
+REST corpus browse records carry their target ID so deletion can select one
+stored entry by project, target ID, and digest. The server resolves the managed
+path from storage; browser clients do not send a redacted path back as identity.
 
 ## 4. Public Response DTOs
 

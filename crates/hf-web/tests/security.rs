@@ -201,6 +201,136 @@ async fn run_clear_requires_an_approved_project() {
     }
 }
 
+#[tokio::test]
+async fn crash_delete_requires_an_approved_project() {
+    let approved = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let app = build_with_state_and_security(
+        AppState::new(hf_service::ServiceContainer::stubbed()),
+        open_local_security(approved.path()),
+    );
+
+    for (body, expected) in [
+        (
+            serde_json::json!({ "crash_id": uuid::Uuid::new_v4() }),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            serde_json::json!({ "project": outside.path(), "crash_id": uuid::Uuid::new_v4() }),
+            StatusCode::FORBIDDEN,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/crashes/delete")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+    }
+}
+
+#[tokio::test]
+async fn corpus_delete_requires_an_approved_project() {
+    let approved = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let app = build_with_state_and_security(
+        AppState::new(hf_service::ServiceContainer::stubbed()),
+        open_local_security(approved.path()),
+    );
+
+    for (body, expected) in [
+        (
+            serde_json::json!({ "target_id": uuid::Uuid::new_v4(), "sha256": "digest" }),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            serde_json::json!({ "project": outside.path(), "target_id": uuid::Uuid::new_v4(), "sha256": "digest" }),
+            StatusCode::FORBIDDEN,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/corpus/delete-entry")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+    }
+}
+
+#[cfg(feature = "patch-to-proof")]
+#[tokio::test]
+async fn artifact_deletes_reject_foreign_records_without_exposing_their_project() {
+    let fixture = hf_service::test_support::patch_to_proof_fixture()
+        .await
+        .unwrap();
+    let approved = tempfile::tempdir().unwrap();
+    let crash = fixture
+        .container()
+        .store()
+        .unwrap()
+        .get_crash(fixture.finding_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let app = build_with_state_and_security(
+        AppState::new(fixture.container()),
+        open_local_security(approved.path()),
+    );
+
+    for (uri, body) in [
+        (
+            "/crashes/delete",
+            serde_json::json!({ "project": approved.path(), "crash_id": crash.id }),
+        ),
+        (
+            "/corpus/delete-entry",
+            serde_json::json!({ "project": approved.path(), "target_id": crash.target_id, "sha256": "seed" }),
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(uri)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&body).contains(fixture.directory_path().to_str().unwrap())
+        );
+    }
+    assert!(fixture
+        .container()
+        .store()
+        .unwrap()
+        .get_crash(crash.id)
+        .await
+        .unwrap()
+        .is_some());
+}
+
 #[test]
 fn remote_bind_requires_a_bearer_token() {
     let loopback_v4 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8081);

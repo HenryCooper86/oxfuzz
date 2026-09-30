@@ -15,8 +15,10 @@ async fn delete_corpus_entry_removes_the_managed_file_and_exact_row() {
     std::fs::write(&corpus_path, b"managed corpus input").unwrap();
     let corpus = hf_corpus::list(&corpus_dir).unwrap();
     let entry = corpus.entries.first().unwrap().clone();
-    let target_id = uuid::Uuid::new_v4();
-    let other_workspace = hf_service::workspace_dir(project.path(), "other_delete_target");
+    let target = stored_target(project.path(), "delete_target");
+    let target_id = target.id;
+    let other_project = tempfile::tempdir().unwrap();
+    let other_workspace = hf_service::workspace_dir(other_project.path(), "other_delete_target");
     let other_corpus_dir = other_workspace.join("corpus");
     std::fs::create_dir_all(&other_corpus_dir).unwrap();
     let other_path = other_corpus_dir.join("same-seed");
@@ -25,10 +27,19 @@ async fn delete_corpus_entry_removes_the_managed_file_and_exact_row() {
         .unwrap()
         .entries
         .remove(0);
-    let other_target_id = uuid::Uuid::new_v4();
+    let other_target = stored_target(other_project.path(), "other_delete_target");
+    let other_target_id = other_target.id;
 
     let db_dir = tempfile::tempdir().unwrap();
     let store = hf_storage::Store::connect(&db_dir.path().join("service.db"))
+        .await
+        .unwrap();
+    store
+        .upsert_target(&target, chrono::Utc::now())
+        .await
+        .unwrap();
+    store
+        .upsert_target(&other_target, chrono::Utc::now())
         .await
         .unwrap();
     store.upsert_corpus_entry(target_id, &entry).await.unwrap();
@@ -38,6 +49,17 @@ async fn delete_corpus_entry_removes_the_managed_file_and_exact_row() {
         .unwrap();
     let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None)
         .with_store(Arc::new(store.clone()));
+
+    let project_entries = container
+        .project_corpus_entries_with_targets(project.path())
+        .await
+        .unwrap();
+    assert_eq!(project_entries.len(), 1);
+    assert_eq!(project_entries[0].target_id, target_id);
+    assert_eq!(project_entries[0].entry.sha256, entry.sha256);
+    let browser_record = serde_json::to_value(&project_entries[0]).unwrap();
+    assert_eq!(browser_record["target_id"], target_id.to_string());
+    assert_eq!(browser_record["sha256"], entry.sha256);
 
     container
         .delete_corpus_entry(&entry.sha256, &entry.path)
@@ -59,6 +81,21 @@ async fn delete_corpus_entry_removes_the_managed_file_and_exact_row() {
             .len(),
         1
     );
+    assert!(container
+        .delete_project_corpus_entry(project.path(), other_target_id, &other_entry.sha256)
+        .await
+        .is_err());
+    assert!(other_path.is_file());
+    container
+        .delete_project_corpus_entry(other_project.path(), other_target_id, &other_entry.sha256)
+        .await
+        .unwrap();
+    assert!(!other_path.exists());
+    assert!(store
+        .list_corpus_entries(other_target_id)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 /// Redirect the fuzz workspace to a temp dir for the duration of the test
