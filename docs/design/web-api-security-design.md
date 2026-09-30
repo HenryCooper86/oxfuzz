@@ -65,6 +65,13 @@ REST corpus browse records carry their target ID so deletion can select one
 stored entry by project, target ID, and digest. The server resolves the managed
 path from storage; browser clients do not send a redacted path back as identity.
 
+Schedule definition lists and create/update/delete responses include only projects
+under the router's approved roots. Exact schedule deletion and enable/disable use
+service methods that check stored project ownership under the scheduler mutation
+admission lock before changing any definition or campaign state. Invalid persisted
+project ownership fails with a bounded error; trusted local scheduler methods
+retain their all-project access.
+
 ## 4. Public Response DTOs
 
 REST responses do not expose absolute host paths, provider credentials,

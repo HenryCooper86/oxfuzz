@@ -1849,6 +1849,9 @@ pub struct CampaignScheduler {
 /// Durable scheduler startup or mutation error.
 #[derive(Debug, thiserror::Error)]
 pub enum CampaignSchedulerError {
+    /// A scoped operation targets a project outside its approved roots.
+    #[error("schedule project is outside approved roots")]
+    ProjectAccessDenied,
     /// A schedule requests an invalid or disabled fuzzing policy value.
     #[error("invalid campaign settings: {0}")]
     Validation(String),
@@ -1980,7 +1983,9 @@ impl CampaignSchedulerError {
             | Self::InvalidLastFire { .. }
             | Self::DurabilityUnavailable(_)
             | Self::OccurrenceJournal(_) => RecoveryPublicError::unavailable(),
-            Self::Validation(_) | Self::RetiredScheduleRestore { .. } => RecoveryPublicError {
+            Self::Validation(_)
+            | Self::ProjectAccessDenied
+            | Self::RetiredScheduleRestore { .. } => RecoveryPublicError {
                 code: RecoveryPublicErrorCode::Internal,
                 message: "one-time recovery request failed",
             },
@@ -2001,6 +2006,37 @@ impl From<CampaignSchedulerError> for ClassifiedError {
             other => Self::Storage(other.to_string()),
         }
     }
+}
+
+fn schedule_is_within_roots(
+    schedule: &Schedule,
+    roots: &[PathBuf],
+) -> Result<bool, CampaignSchedulerError> {
+    let params: CampaignParams = serde_json::from_value(schedule.parameter_values.clone())
+        .map_err(|_| {
+            CampaignSchedulerError::Validation("stored schedule project is invalid".to_owned())
+        })?;
+    let project = std::fs::canonicalize(&params.project).map_err(|_| {
+        CampaignSchedulerError::Validation("stored schedule project is unavailable".to_owned())
+    })?;
+    if !project.is_dir() {
+        return Err(CampaignSchedulerError::Validation(
+            "stored schedule project is not a directory".to_owned(),
+        ));
+    }
+    Ok(roots.iter().any(|root| project.starts_with(root)))
+}
+
+fn authorize_schedule_project(
+    schedule: Option<&Schedule>,
+    roots: Option<&[PathBuf]>,
+) -> Result<(), CampaignSchedulerError> {
+    if let (Some(schedule), Some(roots)) = (schedule, roots) {
+        if !schedule_is_within_roots(schedule, roots)? {
+            return Err(CampaignSchedulerError::ProjectAccessDenied);
+        }
+    }
+    Ok(())
 }
 
 const JOURNAL_UNAVAILABLE_REASON: &str = "one-time occurrence journal is unavailable";
@@ -2346,6 +2382,25 @@ impl CampaignScheduler {
     /// Returns a history error when the configured database cannot supply the
     /// persisted last-fire cursors.
     pub async fn list_views(&self) -> Result<Vec<CampaignView>, CampaignSchedulerError> {
+        self.list_views_for_scope(None).await
+    }
+
+    /// List definitions owned by projects below the supplied canonical roots.
+    ///
+    /// # Errors
+    /// Returns a bounded validation error for invalid stored project ownership,
+    /// or the same persistence errors as [`Self::list_views`].
+    pub async fn list_views_within_roots(
+        &self,
+        roots: &[PathBuf],
+    ) -> Result<Vec<CampaignView>, CampaignSchedulerError> {
+        self.list_views_for_scope(Some(roots)).await
+    }
+
+    async fn list_views_for_scope(
+        &self,
+        roots: Option<&[PathBuf]>,
+    ) -> Result<Vec<CampaignView>, CampaignSchedulerError> {
         let schedules = self.manager.list_schedules().await;
         let fires: std::collections::HashMap<String, String> = match &self.store {
             Some(store) => store
@@ -2362,6 +2417,11 @@ impl CampaignScheduler {
         let now = chrono::Utc::now();
         let mut views = Vec::with_capacity(schedules.len());
         for schedule in &schedules {
+            if let Some(roots) = roots {
+                if !schedule_is_within_roots(schedule, roots)? {
+                    continue;
+                }
+            }
             let progress = self.state.snapshot(&schedule.id);
             let mut durability = CampaignDurabilityStatus::Ready;
             if matches!(&schedule.trigger, TriggerConfig::OneTime { .. }) {
@@ -2778,6 +2838,27 @@ impl CampaignScheduler {
     /// state-file error after restoring the in-memory schedule if the
     /// definition file cannot be replaced.
     pub async fn try_remove(&self, id: &str) -> Result<bool, CampaignSchedulerError> {
+        self.try_remove_for_scope(id, None).await
+    }
+
+    /// Remove an exact schedule only when its stored project is below an approved root.
+    ///
+    /// # Errors
+    /// Returns an ownership error before mutation, or the same persistence
+    /// errors as [`Self::try_remove`].
+    pub async fn try_remove_within_roots(
+        &self,
+        id: &str,
+        roots: &[PathBuf],
+    ) -> Result<bool, CampaignSchedulerError> {
+        self.try_remove_for_scope(id, Some(roots)).await
+    }
+
+    async fn try_remove_for_scope(
+        &self,
+        id: &str,
+        roots: Option<&[PathBuf]>,
+    ) -> Result<bool, CampaignSchedulerError> {
         #[cfg(test)]
         self.schedules.pause_direct_mutation_for_test().await;
         let _admission_guard = self.admit_schedule_mutation(id).await?;
@@ -2786,6 +2867,7 @@ impl CampaignScheduler {
             .pause_direct_mutation_admitted_for_test()
             .await;
         let previous = self.manager.get_schedule(id).await;
+        authorize_schedule_project(previous.as_ref(), roots)?;
         let removed = self.manager.remove(id).await;
         if removed {
             if let Err(error) = self.persist().await {
@@ -2821,6 +2903,30 @@ impl CampaignScheduler {
         id: &str,
         enabled: bool,
     ) -> Result<bool, CampaignSchedulerError> {
+        self.try_set_enabled_for_scope(id, enabled, None).await
+    }
+
+    /// Change an exact schedule only when its stored project is below an approved root.
+    ///
+    /// # Errors
+    /// Returns an ownership error before mutation, or the same persistence
+    /// errors as [`Self::try_set_enabled`].
+    pub async fn try_set_enabled_within_roots(
+        &self,
+        id: &str,
+        enabled: bool,
+        roots: &[PathBuf],
+    ) -> Result<bool, CampaignSchedulerError> {
+        self.try_set_enabled_for_scope(id, enabled, Some(roots))
+            .await
+    }
+
+    async fn try_set_enabled_for_scope(
+        &self,
+        id: &str,
+        enabled: bool,
+        roots: Option<&[PathBuf]>,
+    ) -> Result<bool, CampaignSchedulerError> {
         #[cfg(test)]
         self.schedules.pause_direct_mutation_for_test().await;
         let _admission_guard = self.admit_schedule_mutation(id).await?;
@@ -2829,6 +2935,7 @@ impl CampaignScheduler {
             .pause_direct_mutation_admitted_for_test()
             .await;
         let previous = self.manager.get_schedule(id).await;
+        authorize_schedule_project(previous.as_ref(), roots)?;
         let ok = if enabled {
             self.manager.resume(id).await
         } else {
@@ -2926,6 +3033,21 @@ mod tests {
     use hf_storage::ScheduleOccurrenceRecord;
 
     use super::*;
+
+    #[test]
+    fn scoped_schedule_ownership_rejects_malformed_persisted_parameters() {
+        let schedule = Schedule::new(
+            "id",
+            "campaign",
+            parse_trigger("cron", "0 0 1 1 *").unwrap(),
+            CAMPAIGN_KIND,
+        )
+        .with_params(serde_json::json!({"project": 123}));
+        let error = schedule_is_within_roots(&schedule, &[]).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("stored schedule project is invalid"));
+    }
 
     /// The dispatch scope is what lets an emitted event name the schedule that
     /// caused it; outside a scheduled dispatch there is no cascade to break.

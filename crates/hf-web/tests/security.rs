@@ -21,6 +21,139 @@ fn open_local_security(root: &std::path::Path) -> WebSecurityConfig {
 }
 
 #[tokio::test]
+async fn schedule_definitions_and_id_mutations_stay_within_approved_roots() {
+    use hf_service::scheduler::{parse_trigger, CampaignParams, CampaignScheduler};
+    use std::sync::Arc;
+
+    let approved = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let state_dir = tempfile::tempdir().unwrap();
+    let container = hf_service::ServiceContainer::stubbed();
+    let scheduler = Arc::new(
+        CampaignScheduler::try_start(
+            container.clone(),
+            state_dir.path().join("schedules.json"),
+            None,
+        )
+        .await
+        .unwrap(),
+    );
+    let mut ids = Vec::new();
+    for (name, project) in [
+        ("approved campaign", approved.path()),
+        ("foreign campaign", outside.path()),
+    ] {
+        ids.push(
+            scheduler
+                .try_create(
+                    name,
+                    &CampaignParams {
+                        project: project.display().to_string(),
+                        duration_secs: 30,
+                        ..CampaignParams::default()
+                    },
+                    parse_trigger("cron", "0 0 1 1 *").unwrap(),
+                )
+                .await
+                .unwrap()
+                .id,
+        );
+    }
+    let app = build_with_state_and_security(
+        AppState::new(container).with_scheduler(scheduler.clone()),
+        open_local_security(approved.path()),
+    );
+    for (method, uri, body) in [
+        (Method::GET, "/schedule".to_owned(), "".to_owned()),
+        (
+            Method::POST,
+            "/schedule".to_owned(),
+            serde_json::json!({
+                "name": "another approved campaign", "project": approved.path(),
+                "trigger_kind": "cron", "trigger_value": "0 0 1 1 *", "duration_secs": 30,
+            })
+            .to_string(),
+        ),
+        (
+            Method::POST,
+            format!("/schedule/{}/enabled", ids[0]),
+            "{\"enabled\":false}".to_owned(),
+        ),
+        (
+            Method::DELETE,
+            format!("/schedule/{}", ids[0]),
+            "".to_owned(),
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(!json.as_array().unwrap().is_empty());
+        assert!(json
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|view| view["id"] != ids[1]));
+        assert!(!String::from_utf8_lossy(&body).contains("foreign campaign"));
+    }
+    let before = std::fs::read(state_dir.path().join("schedules.json")).unwrap();
+    for (method, uri, body) in [
+        (
+            Method::POST,
+            format!("/schedule/{}/enabled", ids[1]),
+            "{\"enabled\":false}",
+        ),
+        (Method::DELETE, format!("/schedule/{}", ids[1]), ""),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&body).contains(outside.path().to_str().unwrap()));
+        assert_eq!(
+            std::fs::read(state_dir.path().join("schedules.json")).unwrap(),
+            before
+        );
+    }
+    assert!(
+        scheduler
+            .list()
+            .await
+            .iter()
+            .find(|s| s.id == ids[1])
+            .unwrap()
+            .enabled
+    );
+    scheduler.stop().await;
+}
+
+#[tokio::test]
 async fn export_requires_an_approved_project() {
     let approved = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();

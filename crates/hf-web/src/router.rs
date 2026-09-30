@@ -258,6 +258,12 @@ fn classified_api_error(error: impl Into<ClassifiedError>) -> ApiError {
 
 fn scheduler_api_error(error: CampaignSchedulerError) -> ApiError {
     match error {
+        CampaignSchedulerError::ProjectAccessDenied => (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "schedule project is outside approved roots".to_owned(),
+            }),
+        ),
         CampaignSchedulerError::OccurrenceNotFound(message) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse { error: message }),
@@ -3548,7 +3554,10 @@ async fn knowledge_search(
 
 async fn schedule_list(State(state): State<AppState>) -> ApiResult<serde_json::Value> {
     let views = match &state.scheduler {
-        Some(scheduler) => scheduler.list_views().await.map_err(scheduler_api_error)?,
+        Some(scheduler) => scheduler
+            .list_views_within_roots(state.security.project_roots())
+            .await
+            .map_err(scheduler_api_error)?,
         None => Vec::new(),
     };
     Ok(Json(public_value(views)))
@@ -3660,12 +3669,12 @@ async fn schedule_create(
     State(state): State<AppState>,
     Json(req): Json<ScheduleCreateRequest>,
 ) -> ApiResult<serde_json::Value> {
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
     let Some(scheduler) = &state.scheduler else {
         return Ok(Json(serde_json::json!([])));
     };
     let trigger = hf_service::scheduler::parse_trigger(&req.trigger_kind, &req.trigger_value)
         .map_err(map_err(StatusCode::BAD_REQUEST))?;
-    let project = approved_project(&state, std::path::Path::new(&req.project))?;
     let params = hf_service::scheduler::CampaignParams {
         project: project.to_string_lossy().into_owned(),
         target: req.target.filter(|t| !t.is_empty()),
@@ -3680,7 +3689,10 @@ async fn schedule_create(
         .try_create(&req.name, &params, trigger)
         .await
         .map_err(scheduler_api_error)?;
-    let views = scheduler.list_views().await.map_err(scheduler_api_error)?;
+    let views = scheduler
+        .list_views_within_roots(state.security.project_roots())
+        .await
+        .map_err(scheduler_api_error)?;
     Ok(Json(public_value(views)))
 }
 
@@ -3765,10 +3777,16 @@ async fn schedule_delete(
 ) -> ApiResult<serde_json::Value> {
     let views = match &state.scheduler {
         Some(s) => {
-            if !s.try_remove(&id).await.map_err(scheduler_api_error)? {
+            if !s
+                .try_remove_within_roots(&id, state.security.project_roots())
+                .await
+                .map_err(scheduler_api_error)?
+            {
                 return Err(missing_schedule_error(&id));
             }
-            s.list_views().await.map_err(scheduler_api_error)?
+            s.list_views_within_roots(state.security.project_roots())
+                .await
+                .map_err(scheduler_api_error)?
         }
         None => Vec::new(),
     };
@@ -3788,13 +3806,15 @@ async fn schedule_set_enabled(
     let views = match &state.scheduler {
         Some(s) => {
             if !s
-                .try_set_enabled(&id, req.enabled)
+                .try_set_enabled_within_roots(&id, req.enabled, state.security.project_roots())
                 .await
                 .map_err(scheduler_api_error)?
             {
                 return Err(missing_schedule_error(&id));
             }
-            s.list_views().await.map_err(scheduler_api_error)?
+            s.list_views_within_roots(state.security.project_roots())
+                .await
+                .map_err(scheduler_api_error)?
         }
         None => Vec::new(),
     };

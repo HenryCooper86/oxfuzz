@@ -1428,7 +1428,6 @@ async fn schedule_list_without_scheduler_returns_empty_array() {
 
 #[tokio::test]
 async fn schedule_http_list_preserves_service_preview() {
-    allow_open_dev_mode();
     let root = tempfile::tempdir().unwrap();
     let scheduler = std::sync::Arc::new(
         hf_service::scheduler::CampaignScheduler::try_start(
@@ -1455,9 +1454,11 @@ async fn schedule_http_list_preserves_service_preview() {
         .await
         .unwrap();
     let expected = serde_json::to_value(scheduler.list_views().await.unwrap()).unwrap();
-    let app = hf_web::router::build_with_state(
+    let app = hf_web::router::build_with_state_and_security(
         hf_web::router::AppState::new(hf_service::ServiceContainer::stubbed())
             .with_scheduler(scheduler.clone()),
+        hf_web::WebSecurityConfig::new(None, true, Vec::new(), vec![root.path().to_path_buf()])
+            .unwrap(),
     );
     let response = app
         .oneshot(

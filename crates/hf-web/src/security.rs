@@ -219,6 +219,10 @@ impl WebSecurityConfig {
         Ok(canonical)
     }
 
+    pub(crate) fn project_roots(&self) -> &[PathBuf] {
+        &self.project_roots
+    }
+
     pub(crate) fn approve_document(
         &self,
         project: &Path,
