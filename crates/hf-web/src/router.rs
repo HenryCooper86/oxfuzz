@@ -1125,6 +1125,21 @@ fn approved_optional_project(
         .transpose()
 }
 
+fn required_approved_project(
+    state: &AppState,
+    requested: Option<&str>,
+) -> Result<PathBuf, ApiError> {
+    let requested = requested.filter(|path| !path.is_empty()).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "project is required".to_owned(),
+            }),
+        )
+    })?;
+    approved_project(state, std::path::Path::new(requested))
+}
+
 async fn approve_run_owner(state: &AppState, run_id: &str) -> Result<(), ApiError> {
     let id = uuid::Uuid::parse_str(run_id).map_err(map_err(StatusCode::BAD_REQUEST))?;
     let owner = state
@@ -2577,10 +2592,10 @@ async fn export_project_data(
     State(state): State<AppState>,
     Json(req): Json<ExportProjectRequest>,
 ) -> ApiResult<serde_json::Value> {
-    let project = approved_optional_project(&state, req.project.as_ref())?;
+    let project = required_approved_project(&state, req.project.as_deref())?;
     let export = state
         .container
-        .export_project_data(project.as_deref())
+        .export_project_data(Some(&project))
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(export)))

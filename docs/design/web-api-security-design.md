@@ -47,6 +47,10 @@ also be a regular file below its approved project root. The policy is resolved
 once when the router is built so a request cannot alter it through process
 environment races.
 
+REST project export requires an explicit approved project. An omitted project
+must not select the service's all-project export mode, which is reserved for
+trusted local presentation.
+
 ## 4. Public Response DTOs
 
 REST responses do not expose absolute host paths, provider credentials,

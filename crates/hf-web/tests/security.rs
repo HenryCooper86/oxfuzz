@@ -20,6 +20,45 @@ fn open_local_security(root: &std::path::Path) -> WebSecurityConfig {
     .expect("valid test security config")
 }
 
+#[tokio::test]
+async fn export_requires_an_approved_project() {
+    let approved = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let app = build_with_state_and_security(
+        AppState::new(hf_service::ServiceContainer::stubbed()),
+        open_local_security(approved.path()),
+    );
+
+    for (project, expected) in [
+        (serde_json::Value::Null, StatusCode::BAD_REQUEST),
+        (serde_json::json!(""), StatusCode::BAD_REQUEST),
+        (
+            serde_json::json!(outside.path().to_str().unwrap()),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            serde_json::json!(approved.path().to_str().unwrap()),
+            StatusCode::OK,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/projects/export")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "project": project }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+    }
+}
+
 #[test]
 fn remote_bind_requires_a_bearer_token() {
     let loopback_v4 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8081);
