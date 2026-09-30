@@ -1125,6 +1125,17 @@ fn approved_optional_project(
         .transpose()
 }
 
+async fn approve_run_owner(state: &AppState, run_id: &str) -> Result<(), ApiError> {
+    let id = uuid::Uuid::parse_str(run_id).map_err(map_err(StatusCode::BAD_REQUEST))?;
+    let owner = state
+        .container
+        .run_project(id)
+        .await
+        .map_err(classified_api_error)?;
+    approved_project(state, &owner)?;
+    Ok(())
+}
+
 fn public_value<T: Serialize>(value: T) -> serde_json::Value {
     redact_public_json(serde_json::to_value(value).unwrap_or(serde_json::Value::Null))
 }
@@ -2127,6 +2138,7 @@ async fn run_coverage_series(
     State(state): State<AppState>,
     Json(req): Json<RunIdRequest>,
 ) -> ApiResult<serde_json::Value> {
+    approve_run_owner(&state, &req.run_id).await?;
     let series = state
         .container
         .run_coverage_series(&req.run_id)
@@ -2141,6 +2153,7 @@ async fn run_harness_source(
     State(state): State<AppState>,
     Json(req): Json<RunIdRequest>,
 ) -> ApiResult<String> {
+    approve_run_owner(&state, &req.run_id).await?;
     let source = state
         .container
         .run_harness_source(&req.run_id)
@@ -2153,6 +2166,7 @@ async fn revert_harness_from_run(
     State(state): State<AppState>,
     Json(req): Json<RunIdRequest>,
 ) -> ApiResult<serde_json::Value> {
+    approve_run_owner(&state, &req.run_id).await?;
     let out = state
         .container
         .revert_harness_from_run(&req.run_id)
@@ -3115,6 +3129,9 @@ async fn delete_run(
     State(state): State<AppState>,
     Json(req): Json<RunIdRequest>,
 ) -> Result<Json<bool>, (StatusCode, Json<RunHistoryErrorResponse>)> {
+    approve_run_owner(&state, &req.run_id)
+        .await
+        .map_err(|(status, Json(body))| (status, Json(RunHistoryErrorResponse::Existing(body))))?;
     state
         .container
         .delete_run(&req.run_id)
