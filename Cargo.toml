@@ -107,7 +107,7 @@ mime = "0.3"
 # Web API
 axum = { version = "0.8", features = ["multipart"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+tower-http = { version = "0.7", features = ["cors", "trace", "fs"] }
 
 # Encoding
 base64 = "0.22"
