@@ -29,6 +29,7 @@ const GEMINI_API_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 /// Google Gemini provider.
 pub struct GeminiProvider {
     client: Client,
+    response_body_limits: hf_core::provider::ResponseBodyLimits,
     api_key: String,
     base_url: String,
     custom_headers: reqwest::header::HeaderMap,
@@ -40,6 +41,7 @@ impl std::fmt::Debug for GeminiProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GeminiProvider")
             .field("client", &self.client)
+            .field("response_body_limits", &self.response_body_limits)
             .field("api_key", &"<redacted>")
             .field("base_url", &self.base_url)
             .field("custom_headers", &self.custom_headers)
@@ -49,6 +51,16 @@ impl std::fmt::Debug for GeminiProvider {
 }
 
 impl GeminiProvider {
+    /// Apply an explicitly resolved receive budget before issuing requests.
+    #[must_use]
+    pub fn with_response_body_limits(
+        mut self,
+        limits: hf_core::provider::ResponseBodyLimits,
+    ) -> Self {
+        self.response_body_limits = limits;
+        self
+    }
+
     /// Create a new Gemini provider.
     pub fn new(
         id: &str,
@@ -103,6 +115,7 @@ impl GeminiProvider {
         );
 
         Self {
+            response_body_limits: crate::response_body::resolve_default_limits(),
             client: crate::http_headers::provider_http_client(http_protocol, proxy_url)
                 .unwrap_or_else(|_| Client::new()),
             api_key,
@@ -380,7 +393,8 @@ impl LlmProvider for GeminiProvider {
         }
 
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            let error_body = response.text().await.unwrap_or_default();
+            let error_body =
+                crate::response_body::read_text(response, self.response_body_limits).await?;
             return Err(crate::error_classifier::auth_failure_to_provider_error(
                 &self.metadata.id.to_string(),
                 &error_body,
@@ -388,7 +402,8 @@ impl LlmProvider for GeminiProvider {
         }
 
         if !status.is_success() {
-            let error_body = response.text().await.unwrap_or_default();
+            let error_body =
+                crate::response_body::read_text(response, self.response_body_limits).await?;
             return Err(crate::error_classifier::http_failure_to_provider_error(
                 &self.metadata.id.to_string(),
                 status.as_u16(),
@@ -396,9 +411,8 @@ impl LlmProvider for GeminiProvider {
             ));
         }
 
-        let response_text = response.text().await.map_err(|e| ProviderError::Other {
-            message: format!("read response body: {e}"),
-        })?;
+        let response_text =
+            crate::response_body::read_text(response, self.response_body_limits).await?;
         let raw_response: serde_json::Value =
             serde_json::from_str(&response_text).map_err(|e| ProviderError::Other {
                 message: format!("parse response JSON: {e}"),
@@ -457,7 +471,8 @@ impl LlmProvider for GeminiProvider {
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(60u64);
-            let error_body = response.text().await.unwrap_or_default();
+            let error_body =
+                crate::response_body::read_text(response, self.response_body_limits).await?;
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
                 return Err(ProviderError::RateLimited {
                     provider: self.metadata.id.to_string(),

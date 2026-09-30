@@ -37,6 +37,8 @@ pub enum StandardError {
     NetworkError,
     /// Content was filtered by the provider's safety system.
     ContentFiltered,
+    /// Response body budget exceeded; do not repeat the same oversized response.
+    ResponseBodyLimitExceeded,
     /// Unclassified error.
     Unknown,
 }
@@ -65,10 +67,11 @@ impl StandardError {
             // Long backoff, clamped to max_freeze_duration_secs by the pool.
             Self::AuthenticationFailed => Some(Duration::from_hours(24)),
             Self::Unknown => Some(Duration::from_mins(1)),
-            // Not a provider issue (context window, content filter) — don't freeze.
+            // Request-specific context, content filter or response budget — do not freeze.
             // Permanent errors (key invalid, quota, balance) — freeze duration
             // is effectively infinite, handled by freeze_permanent().
             Self::ContextWindowExceeded
+            | Self::ResponseBodyLimitExceeded
             | Self::ContentFiltered
             | Self::KeyInvalid
             | Self::QuotaExhausted
@@ -94,7 +97,7 @@ impl StandardError {
 
     /// Whether this error should NOT cause a provider freeze.
     ///
-    /// Some errors (context window, content filter) are request-specific
+    /// Some errors (context window, content filter, response budget) are request-specific
     /// and don't indicate a provider problem, so they never freeze. Network
     /// errors, by contrast, are transient provider issues ([`is_transient`])
     /// with a defined [`freeze_duration`] (30s): they freeze briefly so the
@@ -103,7 +106,10 @@ impl StandardError {
     /// [`is_transient`]: Self::is_transient
     /// [`freeze_duration`]: Self::freeze_duration
     pub fn should_freeze(&self) -> bool {
-        !matches!(self, Self::ContextWindowExceeded | Self::ContentFiltered)
+        !matches!(
+            self,
+            Self::ContextWindowExceeded | Self::ContentFiltered | Self::ResponseBodyLimitExceeded
+        )
     }
 }
 
@@ -158,6 +164,7 @@ pub fn classify_provider_error(error: &hf_core::provider::ProviderError) -> Stan
                 }
             })
         }
+        ProviderError::ResponseBodyLimitExceeded { .. } => StandardError::ResponseBodyLimitExceeded,
         ProviderError::NetworkError { .. } => StandardError::NetworkError,
         ProviderError::NoProviderAvailable { .. }
         | ProviderError::Cancelled

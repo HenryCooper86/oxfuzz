@@ -31,6 +31,10 @@ pub struct EmbeddingResult {
 /// Errors from embedding operations.
 #[derive(Debug, thiserror::Error)]
 pub enum EmbeddingError {
+    /// The HTTP body exceeded the configured receive budget.
+    #[error("response body exceeds {limit_bytes} bytes")]
+    ResponseBodyLimitExceeded { limit_bytes: usize },
+
     #[error("embedding provider error: {message}")]
     ProviderError { message: String },
 

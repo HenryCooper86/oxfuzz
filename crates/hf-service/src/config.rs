@@ -41,6 +41,7 @@ struct KnowledgeRuntimeConfig {
     // OpenAI-compatible endpoint (configurable base URL covers OpenAI/Azure/
     // Ollama) so "hybrid"/"semantic" strategies run real cosine.
     embedding_enabled: bool,
+    embedding_response_body_limits: hf_core::provider::ResponseBodyLimitsConfig,
     embedding_model: String,
     embedding_dimensions: usize,
     embedding_base_url: String,
@@ -58,6 +59,7 @@ impl Default for KnowledgeRuntimeConfig {
             bm25_weight: defaults.bm25_weight,
             vector_weight: defaults.vector_weight,
             embedding_enabled: defaults.embedding_enabled,
+            embedding_response_body_limits: defaults.embedding_response_body_limits,
             embedding_model: defaults.embedding_model,
             embedding_dimensions: defaults.embedding_dimensions,
             embedding_base_url: defaults.embedding_base_url,
@@ -76,6 +78,7 @@ impl KnowledgeRuntimeConfig {
             bm25_weight: self.bm25_weight,
             vector_weight: self.vector_weight,
             embedding_enabled: self.embedding_enabled,
+            embedding_response_body_limits: self.embedding_response_body_limits,
             embedding_model: self.embedding_model.clone(),
             embedding_dimensions: self.embedding_dimensions,
             embedding_base_url: self.embedding_base_url.clone(),
@@ -2784,8 +2787,8 @@ fn render_provider_headers(body: &mut String, provider: &ProviderConfig) {
 }
 
 /// Persist the provider pool back to `providers.toml`, preserving the
-/// pool-level preamble (freeze/health/proxy settings) ahead of the provider
-/// entries. Emits every field of the full schema, with the optional
+/// pool-level values and comments regardless of their table ordering.
+/// Replaces only the provider array. Emits every field of the full schema, with the optional
 /// `[providers.headers]` table last (TOML requires sub-tables after scalars).
 ///
 /// # Errors
@@ -2799,23 +2802,21 @@ pub fn set_providers(providers: &[ProviderConfig]) -> Result<(), String> {
 
 fn set_providers_at(directory: &Path, providers: &[ProviderConfig]) -> Result<(), String> {
     let existing = read_config_from(directory, "providers")?;
-    let preamble = existing.find("[[providers]]").map_or_else(
-        || {
-            "# oxfuzz -- LLM Provider Pool Configuration\n\
-             default_freeze_duration_secs = 60\n\
-             max_freeze_duration_secs = 3600\n\
-             health_check_interval_secs = 30\n\n"
-                .to_string()
-        },
-        |idx| existing[..idx].to_string(),
-    );
-
+    let mut document: toml_edit::DocumentMut = existing
+        .parse()
+        .map_err(|error| format!("invalid provider config: {error}"))?;
     let mut body = String::new();
     for provider in providers {
         render_provider(&mut body, provider);
     }
-
-    let content = format!("{preamble}{body}");
+    let mut rendered: toml_edit::DocumentMut = body
+        .parse()
+        .map_err(|error| format!("invalid rendered provider config: {error}"))?;
+    let entries = rendered
+        .remove("providers")
+        .ok_or_else(|| "at least one provider must be configured".to_owned())?;
+    document["providers"] = entries;
+    let content = document.to_string();
     parse_provider_config(&content)?;
     std::fs::create_dir_all(directory).map_err(|e| e.to_string())?;
     write_private_config_file(&directory.join("providers.toml"), &content)
@@ -2833,6 +2834,7 @@ pub async fn test_provider(mut cfg: ProviderConfig) -> Result<String, String> {
         ..Default::default()
     };
     let provider = hf_provider::build_providers(&pool_cfg)
+        .map_err(|error| error.to_string())?
         .into_iter()
         .next()
         .ok_or_else(|| "could not construct provider from config".to_owned())?;
@@ -4365,5 +4367,64 @@ default_duration_secs = 22
             read_config_from(directory.path(), "oxfuzz").unwrap(),
             bundled_example("oxfuzz")
         );
+    }
+    #[test]
+    fn embedding_body_limits_reach_effective_knowledge_configuration() {
+        let cfg: KnowledgeRuntimeConfig = serde_json::from_value(serde_json::json!({
+            "embedding_response_body_limits": {"success_bytes": 123, "error_bytes": 45}
+        }))
+        .expect("valid embedding response budgets");
+        let effective = serde_json::to_value(cfg.effective()).unwrap();
+        assert_eq!(
+            effective["embedding_response_body_limits"]["success_bytes"],
+            123
+        );
+        assert_eq!(
+            effective["embedding_response_body_limits"]["error_bytes"],
+            45
+        );
+        assert!(
+            serde_json::from_value::<KnowledgeRuntimeConfig>(serde_json::json!({
+                "embedding_response_body_limits": {"success_bytes": 0}
+            }))
+            .is_err()
+        );
+    }
+    #[test]
+    fn provider_edits_preserve_pool_tables_after_provider_entries() {
+        for header in ["[[providers]]", "[[ providers ]]"] {
+            let directory = tempfile::tempdir().unwrap();
+            let source = format!(
+                r#"# Retain operator note.
+default_freeze_duration_secs = 17
+{header}
+id = "fixture"
+provider_type = "openai"
+model = "before"
+
+# Retain response budget note.
+[response_body_limits]
+success_bytes = 123
+error_bytes = 45
+
+[proxy.global]
+url = "http://127.0.0.1:1"
+enabled = false
+"#
+            );
+            std::fs::write(directory.path().join("providers.toml"), &source).unwrap();
+            let mut providers = parse_provider_config(&source).unwrap();
+            providers[0].model = "after".to_owned();
+            set_providers_at(directory.path(), &providers).unwrap();
+            let saved = std::fs::read_to_string(directory.path().join("providers.toml")).unwrap();
+            let config: hf_provider::ProviderPoolConfig = toml::from_str(&saved).unwrap();
+            assert_eq!(config.response_body_limits.success_bytes, 123);
+            assert_eq!(config.response_body_limits.error_bytes, 45);
+            assert_eq!(config.default_freeze_duration_secs, 17);
+            assert_eq!(config.providers[0].model, "after");
+            assert!(!config.proxy.global.unwrap().enabled);
+            assert!(saved.contains("# Retain operator note."));
+            assert!(saved.contains("# Retain response budget note."));
+        }
     }
 }

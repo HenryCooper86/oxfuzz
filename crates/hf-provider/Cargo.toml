@@ -17,6 +17,8 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 reqwest = { workspace = true }
+encoding_rs = { workspace = true }
+mime = { workspace = true }
 bytes = "1"
 
 [dev-dependencies]

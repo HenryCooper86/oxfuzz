@@ -105,6 +105,11 @@ retrieval_strategy = "hybrid" # hybrid | keyword; semantic needs embeddings
 bm25_weight = 1.0
 vector_weight = 1.0
 
+# Embedding HTTP receive budgets, including failed responses.
+[knowledge.embedding_response_body_limits]
+success_bytes = 16777216 # 1..=268435456
+error_bytes = 65536 # 1..=1048576
+
 # Session tree limits. Additional historical SessionConfig fields were removed
 # because no production lifecycle consumed them.
 [session]

@@ -214,7 +214,7 @@ fn refresh_project_snapshot(
         .lock()
         .map_err(|_| ClassifiedError::Internal("knowledge refresh lock poisoned".into()))?;
     let operation = KnowledgeOperation::acquire(project)?;
-    let embedder = build_embedder(config);
+    let embedder = build_embedder(config)?;
     indexing::refresh(&operation, config, embedder, retry_degraded)
 }
 
@@ -222,7 +222,7 @@ pub(crate) fn index_in_operation(
     operation: &KnowledgeOperation,
     config: &KnowledgeConfig,
 ) -> Result<KnowledgeStats, ClassifiedError> {
-    let embedder = build_embedder(config);
+    let embedder = build_embedder(config)?;
     index_in_operation_with_embedder(operation, config, embedder, true)
 }
 
@@ -269,20 +269,30 @@ fn docs_root_from(workspace_override: Option<OsString>) -> PathBuf {
 
 /// Build the embedding provider for a config, or `None` when embedding is
 /// disabled (the guaranteed-offline BM25-only default).
-fn build_embedder(config: &KnowledgeConfig) -> Option<Arc<dyn EmbeddingProvider>> {
+fn build_embedder(
+    config: &KnowledgeConfig,
+) -> Result<Option<Arc<dyn EmbeddingProvider>>, ClassifiedError> {
+    let limits = config
+        .embedding_response_body_limits
+        .resolve()
+        .map_err(ClassifiedError::Validation)?;
     if !config.embedding_enabled {
-        return None;
+        return Ok(None);
     }
     let api_key = if config.embedding_api_key.is_empty() {
+        // A missing or non-Unicode key environment value permits a keyless local endpoint.
         std::env::var(&config.embedding_api_key_env).unwrap_or_default()
     } else {
         config.embedding_api_key.clone()
     };
-    Some(Arc::new(hf_provider::OpenAiEmbedding::new(
-        &config.embedding_base_url,
-        &api_key,
-        &config.embedding_model,
-        config.embedding_dimensions,
+    Ok(Some(Arc::new(
+        hf_provider::OpenAiEmbedding::new(
+            &config.embedding_base_url,
+            &api_key,
+            &config.embedding_model,
+            config.embedding_dimensions,
+        )
+        .with_response_body_limits(limits),
     )))
 }
 
@@ -964,5 +974,33 @@ mod tests {
         let _guard = super::test_guard();
         let dir = tempfile::tempdir().unwrap();
         assert!(triage_related_context(dir.path(), "parse_header", "asan").is_empty());
+    }
+    #[tokio::test]
+    async fn service_embedder_consumes_configured_body_budget() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 2048];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"data\":[]}").await.unwrap();
+        });
+        let config = KnowledgeConfig {
+            embedding_enabled: true,
+            embedding_base_url: url,
+            embedding_api_key: "fixture".to_owned(),
+            embedding_response_body_limits: hf_core::provider::ResponseBodyLimitsConfig {
+                success_bytes: 8,
+                error_bytes: 8,
+            },
+            ..Default::default()
+        };
+        let embedder = build_embedder(&config).unwrap().unwrap();
+        assert!(matches!(
+            embedder.embed("hello").await,
+            Err(hf_core::embedding::EmbeddingError::ResponseBodyLimitExceeded { limit_bytes: 8 })
+        ));
+        task.await.unwrap();
     }
 }

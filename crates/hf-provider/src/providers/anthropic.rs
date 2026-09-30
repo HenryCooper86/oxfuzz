@@ -30,6 +30,7 @@ const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 /// Anthropic Messages API provider.
 pub struct AnthropicProvider {
     client: Client,
+    response_body_limits: hf_core::provider::ResponseBodyLimits,
     api_key: String,
     base_url: String,
     custom_headers: reqwest::header::HeaderMap,
@@ -41,6 +42,7 @@ impl std::fmt::Debug for AnthropicProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AnthropicProvider")
             .field("client", &self.client)
+            .field("response_body_limits", &self.response_body_limits)
             .field("api_key", &"<redacted>")
             .field("base_url", &self.base_url)
             .field("custom_headers", &self.custom_headers)
@@ -50,6 +52,16 @@ impl std::fmt::Debug for AnthropicProvider {
 }
 
 impl AnthropicProvider {
+    /// Apply an explicitly resolved receive budget before issuing requests.
+    #[must_use]
+    pub fn with_response_body_limits(
+        mut self,
+        limits: hf_core::provider::ResponseBodyLimits,
+    ) -> Self {
+        self.response_body_limits = limits;
+        self
+    }
+
     /// Create a new Anthropic provider.
     pub fn new(
         id: &str,
@@ -104,6 +116,7 @@ impl AnthropicProvider {
         );
 
         Self {
+            response_body_limits: crate::response_body::resolve_default_limits(),
             client: crate::http_headers::provider_http_client(http_protocol, proxy_url)
                 .unwrap_or_else(|_| Client::new()),
             api_key,
@@ -440,7 +453,8 @@ impl LlmProvider for AnthropicProvider {
         }
 
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            let error_body = response.text().await.unwrap_or_default();
+            let error_body =
+                crate::response_body::read_text(response, self.response_body_limits).await?;
             return Err(crate::error_classifier::auth_failure_to_provider_error(
                 &self.metadata.id.to_string(),
                 &error_body,
@@ -449,7 +463,8 @@ impl LlmProvider for AnthropicProvider {
 
         // 402 Payment Required / billing error.
         if status == reqwest::StatusCode::PAYMENT_REQUIRED {
-            let error_body = response.text().await.unwrap_or_default();
+            let error_body =
+                crate::response_body::read_text(response, self.response_body_limits).await?;
             return Err(ProviderError::QuotaExhausted {
                 provider: self.metadata.id.to_string(),
                 message: error_body,
@@ -465,7 +480,8 @@ impl LlmProvider for AnthropicProvider {
         }
 
         if !status.is_success() {
-            let error_body = response.text().await.unwrap_or_default();
+            let error_body =
+                crate::response_body::read_text(response, self.response_body_limits).await?;
             return Err(crate::error_classifier::http_failure_to_provider_error(
                 &self.metadata.id.to_string(),
                 status.as_u16(),
@@ -473,9 +489,8 @@ impl LlmProvider for AnthropicProvider {
             ));
         }
 
-        let response_text = response.text().await.map_err(|e| ProviderError::Other {
-            message: format!("read response body: {e}"),
-        })?;
+        let response_text =
+            crate::response_body::read_text(response, self.response_body_limits).await?;
         let raw_response: serde_json::Value =
             serde_json::from_str(&response_text).map_err(|e| ProviderError::Other {
                 message: format!("parse response JSON: {e}"),
@@ -605,7 +620,8 @@ impl LlmProvider for AnthropicProvider {
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(60u64);
-            let error_body = response.text().await.unwrap_or_default();
+            let error_body =
+                crate::response_body::read_text(response, self.response_body_limits).await?;
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
                 return Err(ProviderError::RateLimited {
                     provider: self.metadata.id.to_string(),

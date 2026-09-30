@@ -4,6 +4,11 @@
 //! intelligent freeze/failover, and per-provider connection pooling. Ported
 //! 1:1 from y-agent's `y-core` provider model.
 
+/// Configuration and resolved byte budgets for HTTP response bodies.
+#[path = "provider_response_limits.rs"]
+mod response_limits;
+pub use response_limits::{ResponseBodyLimits, ResponseBodyLimitsConfig};
+
 use std::pin::Pin;
 
 use async_trait::async_trait;
@@ -370,6 +375,10 @@ pub enum ProviderError {
     #[error("request cancelled")]
     Cancelled,
 
+    /// The HTTP receiver rejected a body before retaining bytes beyond its budget.
+    #[error("response body exceeds {limit_bytes} bytes")]
+    ResponseBodyLimitExceeded { limit_bytes: usize },
+
     #[error("response parse error: {message}")]
     ParseError { message: String },
 
@@ -385,7 +394,9 @@ impl ProviderError {
             Self::AuthenticationFailed { .. }
             | Self::KeyInvalid { .. }
             | Self::QuotaExhausted { .. } => ErrorSeverity::Permanent,
-            Self::NoProviderAvailable { .. } => ErrorSeverity::UserActionRequired,
+            Self::NoProviderAvailable { .. } | Self::ResponseBodyLimitExceeded { .. } => {
+                ErrorSeverity::UserActionRequired
+            }
             // All other errors are transient (rate limits, network, server, parse, etc.)
             _ => ErrorSeverity::Transient,
         }

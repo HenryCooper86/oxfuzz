@@ -11,6 +11,12 @@ max_freeze_duration_secs = 3600
 # have no automatic thaw. Values below 1 are clamped to 1.
 health_check_interval_secs = 30
 
+# Maximum collected response bytes. Chat/image adapters and health probes use
+# these budgets; successful SSE/NDJSON streams need separate streaming limits.
+[response_body_limits]
+success_bytes = 16777216 # 1..=268435456; raise explicitly for large images/batches
+error_bytes = 65536 # 1..=1048576
+
 # ==============================================================================
 # Provider Definitions
 #

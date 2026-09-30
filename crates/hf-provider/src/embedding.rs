@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone)]
 pub struct OpenAiEmbedding {
     client: reqwest::Client,
+    response_body_limits: hf_core::provider::ResponseBodyLimits,
     /// Base URL up to and including the API version (e.g.
     /// `https://api.openai.com/v1`), without a trailing `/embeddings`.
     base_url: String,
@@ -30,11 +31,22 @@ impl OpenAiEmbedding {
     pub fn new(base_url: &str, api_key: &str, model: &str, dimensions: usize) -> Self {
         Self {
             client: reqwest::Client::new(),
+            response_body_limits: crate::response_body::resolve_default_limits(),
             base_url: base_url.trim_end_matches('/').to_owned(),
             api_key: api_key.to_owned(),
             model: model.to_owned(),
             dimensions,
         }
+    }
+
+    /// Apply explicitly resolved byte budgets to embedding response reception.
+    #[must_use]
+    pub fn with_response_body_limits(
+        mut self,
+        limits: hf_core::provider::ResponseBodyLimits,
+    ) -> Self {
+        self.response_body_limits = limits;
+        self
     }
 
     fn endpoint(&self) -> String {
@@ -104,18 +116,20 @@ impl EmbeddingProvider for OpenAiEmbedding {
             })?;
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let body = crate::response_body::read_text(response, self.response_body_limits)
+                .await
+                .map_err(embedding_receive_error)?;
             return Err(EmbeddingError::ProviderError {
                 message: format!("embedding API returned {status}: {}", body.trim()),
             });
         }
+        let body = crate::response_body::read_bytes(response, self.response_body_limits)
+            .await
+            .map_err(embedding_receive_error)?;
         let parsed: EmbeddingResponse =
-            response
-                .json()
-                .await
-                .map_err(|e| EmbeddingError::ProviderError {
-                    message: format!("decode embedding response: {e}"),
-                })?;
+            serde_json::from_slice(&body).map_err(|error| EmbeddingError::ProviderError {
+                message: format!("decode embedding response: {error}"),
+            })?;
         // The API preserves input order via `index`; sort defensively so a
         // reordering proxy cannot misalign vectors with their source chunks.
         let mut data = parsed.data;
@@ -147,6 +161,17 @@ impl EmbeddingProvider for OpenAiEmbedding {
 
     fn model_name(&self) -> &str {
         &self.model
+    }
+}
+
+fn embedding_receive_error(error: hf_core::provider::ProviderError) -> EmbeddingError {
+    match error {
+        hf_core::provider::ProviderError::ResponseBodyLimitExceeded { limit_bytes } => {
+            EmbeddingError::ResponseBodyLimitExceeded { limit_bytes }
+        }
+        other => EmbeddingError::ProviderError {
+            message: other.to_string(),
+        },
     }
 }
 

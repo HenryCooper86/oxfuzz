@@ -195,7 +195,7 @@ impl ProviderPoolImpl {
     /// Returns a configuration error if no usable provider remains.
     pub fn from_config(config: &ProviderPoolConfig) -> Result<Self, ProviderPoolError> {
         config.validate()?;
-        let providers = build_providers(config);
+        let providers = build_providers(config)?;
         if providers.is_empty() {
             return Err(ProviderPoolError::Config {
                 message: "no usable providers remain after resolving enabled entries and API keys"
@@ -215,7 +215,15 @@ impl ProviderPoolImpl {
 /// This is the **single source of truth** for provider construction.
 /// Both `ProviderPoolImpl::from_config` and `ServiceContainer` must use
 /// this function to avoid behavioral divergence.
-pub fn build_providers(config: &ProviderPoolConfig) -> Vec<Arc<dyn LlmProvider>> {
+/// # Errors
+/// Rejects invalid response budgets before constructing any adapter.
+pub fn build_providers(
+    config: &ProviderPoolConfig,
+) -> Result<Vec<Arc<dyn LlmProvider>>, ProviderPoolError> {
+    let response_body_limits = config
+        .response_body_limits
+        .resolve()
+        .map_err(|message| ProviderPoolError::Config { message })?;
     let mut providers: Vec<Arc<dyn LlmProvider>> = Vec::with_capacity(config.providers.len());
 
     for cfg in &config.providers {
@@ -266,20 +274,23 @@ pub fn build_providers(config: &ProviderPoolConfig) -> Vec<Arc<dyn LlmProvider>>
         // Macro to reduce per-variant boilerplate.
         macro_rules! make_provider {
             ($ty:ty, $base:expr) => {
-                Arc::new(<$ty>::with_headers(
-                    &cfg.id,
-                    &cfg.model,
-                    api_key.clone(),
-                    $base,
-                    proxy_url.clone(),
-                    cfg.tags.clone(),
-                    capabilities.clone(),
-                    cfg.max_concurrency,
-                    cfg.context_window,
-                    tool_calling_mode,
-                    &cfg.headers,
-                    cfg.http_protocol,
-                )) as Arc<dyn LlmProvider>
+                Arc::new(
+                    <$ty>::with_headers(
+                        &cfg.id,
+                        &cfg.model,
+                        api_key.clone(),
+                        $base,
+                        proxy_url.clone(),
+                        cfg.tags.clone(),
+                        capabilities.clone(),
+                        cfg.max_concurrency,
+                        cfg.context_window,
+                        tool_calling_mode,
+                        &cfg.headers,
+                        cfg.http_protocol,
+                    )
+                    .with_response_body_limits(response_body_limits),
+                ) as Arc<dyn LlmProvider>
             };
         }
 
@@ -317,6 +328,7 @@ pub fn build_providers(config: &ProviderPoolConfig) -> Vec<Arc<dyn LlmProvider>>
                     &cfg.headers,
                     cfg.http_protocol,
                 )
+                .with_response_body_limits(response_body_limits)
                 .with_include_usage(include_usage)
                 .with_use_max_completion_tokens(use_max_completion_tokens)
                 .with_use_reasoning_effort(use_reasoning_effort),
@@ -338,6 +350,7 @@ pub fn build_providers(config: &ProviderPoolConfig) -> Vec<Arc<dyn LlmProvider>>
                     &cfg.headers,
                     cfg.http_protocol,
                 )
+                .with_response_body_limits(response_body_limits)
                 .with_include_usage(include_usage)
                 .with_use_max_completion_tokens(use_max_completion_tokens)
                 .with_azure_config(
@@ -393,7 +406,7 @@ pub fn build_providers(config: &ProviderPoolConfig) -> Vec<Arc<dyn LlmProvider>>
         }
     }
 
-    providers
+    Ok(providers)
 }
 
 impl ProviderPoolImpl {
@@ -973,6 +986,7 @@ mod tests {
     fn test_config() -> ProviderPoolConfig {
         ProviderPoolConfig {
             providers: vec![],
+            response_body_limits: hf_core::provider::ResponseBodyLimitsConfig::default(),
             proxy: crate::config::ProxyConfig::default(),
             default_freeze_duration_secs: 30,
             max_freeze_duration_secs: 3600,

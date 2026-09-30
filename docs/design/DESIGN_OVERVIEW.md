@@ -26,7 +26,7 @@ all under human-in-the-loop supervision.
 
 | Concept | Owner Crate | Contract | Design Doc |
 | --- | --- | --- | --- |
-| LLM provider pool | hf-provider | `LlmProvider`, `ProviderPool` | (none; ported from the retired y-agent prototype, documented in crate docs) |
+| LLM provider pool | hf-provider | `LlmProvider`, `ProviderPool` | [provider-response-resources.md](provider-response-resources.md); other pool behavior documented in crate docs |
 | Target discovery | hf-discovery | `TargetCandidate`, `TargetInventory` | target-discovery-design.md |
 | AI target recommendations | hf-discovery + hf-prompt + hf-service + hf-storage | `TargetAssessment`, durable `RankedDiscoveryStatus` and `RankedDiscoveryResult` | ai-target-ranking-gui-design.md + target-discovery-design.md |
 | Semgrep target enrichment | hf-discovery + hf-service | `SemgrepFinding`, `SemgrepTargetScore`, `SemgrepInventoryView` | target-discovery-design.md + service-orchestration-design.md |

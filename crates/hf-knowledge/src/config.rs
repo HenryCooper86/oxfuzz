@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeConfig {
+    /// Byte budgets for successful and failed embedding HTTP responses.
+    #[serde(default)]
+    pub embedding_response_body_limits: hf_core::provider::ResponseBodyLimitsConfig,
+
     /// Maximum tokens per L0 chunk (summary).
     #[serde(default = "default_l0_max_tokens")]
     pub l0_max_tokens: u32,
@@ -90,6 +94,7 @@ impl Default for KnowledgeConfig {
             min_similarity_threshold: default_min_similarity_threshold(),
             max_chunks_per_entry: default_max_chunks_per_entry(),
             embedding_enabled: false,
+            embedding_response_body_limits: hf_core::provider::ResponseBodyLimitsConfig::default(),
             embedding_model: default_embedding_model(),
             embedding_dimensions: default_embedding_dimensions(),
             embedding_base_url: default_embedding_base_url(),

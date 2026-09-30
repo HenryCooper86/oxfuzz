@@ -48,12 +48,23 @@ fn normalize_base_url(base_url: Option<String>) -> String {
 #[derive(Debug)]
 pub struct OllamaProvider {
     client: Client,
+    response_body_limits: hf_core::provider::ResponseBodyLimits,
     base_url: String,
     custom_headers: reqwest::header::HeaderMap,
     metadata: ProviderMetadata,
 }
 
 impl OllamaProvider {
+    /// Apply an explicitly resolved receive budget before issuing requests.
+    #[must_use]
+    pub fn with_response_body_limits(
+        mut self,
+        limits: hf_core::provider::ResponseBodyLimits,
+    ) -> Self {
+        self.response_body_limits = limits;
+        self
+    }
+
     /// Create a new Ollama provider.
     ///
     /// Ollama runs locally so no API key is needed. The `api_key` argument
@@ -135,6 +146,7 @@ impl OllamaProvider {
             .unwrap_or_else(|_| Client::new());
 
         Self {
+            response_body_limits: crate::response_body::resolve_default_limits(),
             client,
             base_url,
             custom_headers,
@@ -279,7 +291,8 @@ impl LlmProvider for OllamaProvider {
         let status = response.status();
 
         if !status.is_success() {
-            let error_body = response.text().await.unwrap_or_default();
+            let error_body =
+                crate::response_body::read_text(response, self.response_body_limits).await?;
             return Err(crate::error_classifier::http_failure_to_provider_error(
                 &self.metadata.id.to_string(),
                 status.as_u16(),
@@ -287,9 +300,8 @@ impl LlmProvider for OllamaProvider {
             ));
         }
 
-        let response_text = response.text().await.map_err(|e| ProviderError::Other {
-            message: format!("read response body: {e}"),
-        })?;
+        let response_text =
+            crate::response_body::read_text(response, self.response_body_limits).await?;
         let raw_response: serde_json::Value =
             serde_json::from_str(&response_text).map_err(|e| ProviderError::Other {
                 message: format!("parse response JSON: {e}"),
@@ -384,7 +396,8 @@ impl LlmProvider for OllamaProvider {
 
         let status = response.status();
         if !status.is_success() {
-            let error_body = response.text().await.unwrap_or_default();
+            let error_body =
+                crate::response_body::read_text(response, self.response_body_limits).await?;
             return Err(crate::error_classifier::http_failure_to_provider_error(
                 &self.metadata.id.to_string(),
                 status.as_u16(),

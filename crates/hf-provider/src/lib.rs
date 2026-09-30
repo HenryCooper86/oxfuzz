@@ -24,6 +24,7 @@ mod inter_stream_adapter;
 pub mod metrics;
 pub mod pool;
 pub mod providers;
+mod response_body;
 pub mod router;
 pub mod sse;
 mod tool_call_accumulator;

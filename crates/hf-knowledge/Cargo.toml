@@ -6,6 +6,7 @@ license.workspace = true
 description = "BM25 retrieval over chunked project source and documentation"
 
 [dependencies]
+hf-core = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

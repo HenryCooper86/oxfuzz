@@ -24,6 +24,10 @@ pub enum HttpProtocol {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderPoolConfig {
+    /// Byte budgets applied by every concrete adapter, including health probes.
+    #[serde(default)]
+    pub response_body_limits: hf_core::provider::ResponseBodyLimitsConfig,
+
     /// Individual provider configurations.
     ///
     /// Deserialized leniently: malformed `[[providers]]` blocks are skipped
@@ -452,6 +456,7 @@ impl Default for ProviderPoolConfig {
     fn default() -> Self {
         Self {
             providers: Vec::new(),
+            response_body_limits: hf_core::provider::ResponseBodyLimitsConfig::default(),
             proxy: ProxyConfig::default(),
             default_freeze_duration_secs: default_freeze_duration_secs(),
             max_freeze_duration_secs: default_max_freeze_duration_secs(),
@@ -465,6 +470,9 @@ impl Default for ProviderPoolConfig {
 impl ProviderPoolConfig {
     /// Validate the pool configuration.
     pub fn validate(&self) -> Result<(), ProviderPoolError> {
+        self.response_body_limits
+            .resolve()
+            .map_err(|message| ProviderPoolError::Config { message })?;
         if self.providers.is_empty() {
             return Err(ProviderPoolError::Config {
                 message: "at least one provider must be configured".into(),
