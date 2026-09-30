@@ -99,11 +99,20 @@ async fn observe_active(
         .assess_and_emit_campaign_health(id, Utc::now())
         .await
         .unwrap();
-    let events = service.campaign_health_events(id).await.unwrap();
-    assert!(events
-        .iter()
-        .any(|event| event.condition
-            == hf_service::campaign_health::HealthCondition::CoveragePlateau));
+    // The periodic monitor may win telemetry admission and retain the event asynchronously.
+    let events = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let events = service.campaign_health_events(id).await.unwrap();
+            if events.iter().any(|event| {
+                event.condition == hf_service::campaign_health::HealthCondition::CoveragePlateau
+            }) {
+                break events;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("periodic or explicit assessment retains the plateau event");
     assert!(events
         .iter()
         .all(|event| event.run_id == id && event.id.is_some()));
