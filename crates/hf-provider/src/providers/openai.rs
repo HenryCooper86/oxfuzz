@@ -27,6 +27,7 @@ use hf_core::types::{ProviderId, TokenUsage};
 pub struct OpenAiProvider {
     client: Client,
     response_body_limits: hf_core::provider::ResponseBodyLimits,
+    response_stream_limits: hf_core::provider::ResponseStreamLimits,
     api_key: String,
     base_url: String,
     custom_headers: reqwest::header::HeaderMap,
@@ -54,6 +55,7 @@ impl std::fmt::Debug for OpenAiProvider {
         f.debug_struct("OpenAiProvider")
             .field("client", &self.client)
             .field("response_body_limits", &self.response_body_limits)
+            .field("response_stream_limits", &self.response_stream_limits)
             .field("api_key", &"<redacted>")
             .field("base_url", &self.base_url)
             .field("custom_headers", &self.custom_headers)
@@ -73,6 +75,16 @@ impl OpenAiProvider {
         limits: hf_core::provider::ResponseBodyLimits,
     ) -> Self {
         self.response_body_limits = limits;
+        self
+    }
+
+    /// Set validated byte budgets for successful streamed responses.
+    #[must_use]
+    pub fn with_response_stream_limits(
+        mut self,
+        limits: hf_core::provider::ResponseStreamLimits,
+    ) -> Self {
+        self.response_stream_limits = limits;
         self
     }
 
@@ -131,6 +143,7 @@ impl OpenAiProvider {
 
         Self {
             response_body_limits: crate::response_body::resolve_default_limits(),
+            response_stream_limits: crate::sse::resolve_default_limits(),
             client: crate::http_headers::provider_http_client(http_protocol, proxy_url)
                 .unwrap_or_else(|_| Client::new()),
             api_key,
@@ -797,7 +810,7 @@ impl LlmProvider for OpenAiProvider {
 
         Ok(ChatStreamResponse {
             stream: crate::inter_stream_adapter::into_chat_stream(Box::pin(
-                build_openai_inter_stream(Box::pin(byte_stream)),
+                build_openai_inter_stream(Box::pin(byte_stream), self.response_stream_limits),
             )),
             raw_request,
             provider_id: None,
@@ -822,11 +835,12 @@ impl LlmProvider for OpenAiProvider {
 /// semantics.
 fn build_openai_inter_stream(
     byte_stream: crate::sse::ByteStream,
+    limits: hf_core::provider::ResponseStreamLimits,
 ) -> impl futures::Stream<Item = Result<crate::inter_stream::InterStreamEvent, ProviderError>> + Send
 {
     futures::stream::unfold(
         (
-            crate::sse::SseStreamState::new(byte_stream),
+            crate::sse::SseStreamState::new(byte_stream, limits, crate::sse::StreamFraming::Sse),
             ToolCallAccumulatorSet::default(),
             VecDeque::<InterStreamEvent>::new(),
         ),
@@ -2244,7 +2258,7 @@ mod tests {
                 .into_iter()
                 .map(|s| Ok::<_, reqwest::Error>(Bytes::from_static(s.as_bytes()))),
         );
-        super::build_openai_inter_stream(Box::pin(stream))
+        super::build_openai_inter_stream(Box::pin(stream), crate::sse::resolve_default_limits())
     }
 
     /// A garbage event in the middle of an otherwise-valid stream must be

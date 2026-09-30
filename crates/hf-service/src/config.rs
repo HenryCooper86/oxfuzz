@@ -4407,6 +4407,11 @@ model = "before"
 success_bytes = 123
 error_bytes = 45
 
+[response_stream_limits]
+wire_bytes = 678
+decoded_bytes = 789
+frame_bytes = 345
+
 [proxy.global]
 url = "http://127.0.0.1:1"
 enabled = false
@@ -4420,6 +4425,9 @@ enabled = false
             let config: hf_provider::ProviderPoolConfig = toml::from_str(&saved).unwrap();
             assert_eq!(config.response_body_limits.success_bytes, 123);
             assert_eq!(config.response_body_limits.error_bytes, 45);
+            assert_eq!(config.response_stream_limits.wire_bytes, 678);
+            assert_eq!(config.response_stream_limits.decoded_bytes, 789);
+            assert_eq!(config.response_stream_limits.frame_bytes, 345);
             assert_eq!(config.default_freeze_duration_secs, 17);
             assert_eq!(config.providers[0].model, "after");
             assert!(!config.proxy.global.unwrap().enabled);

@@ -12,10 +12,17 @@ max_freeze_duration_secs = 3600
 health_check_interval_secs = 30
 
 # Maximum collected response bytes. Chat/image adapters and health probes use
-# these budgets; successful SSE/NDJSON streams need separate streaming limits.
+# these budgets; successful SSE/NDJSON responses use the stream budgets below.
 [response_body_limits]
 success_bytes = 16777216 # 1..=268435456; raise explicitly for large images/batches
 error_bytes = 65536 # 1..=1048576
+
+# Cumulative wire/decoded UTF-8 bytes and one SSE/NDJSON frame (including delimiters).
+# A 16 MiB frame accommodates common base64 images; increase finite budgets for larger responses.
+[response_stream_limits]
+wire_bytes = 67108864 # 1..=268435456
+decoded_bytes = 67108864 # 1..=805306368
+frame_bytes = 16777216 # 1..=268435456
 
 # ==============================================================================
 # Provider Definitions

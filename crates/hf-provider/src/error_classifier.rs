@@ -39,6 +39,8 @@ pub enum StandardError {
     ContentFiltered,
     /// Response body budget exceeded; do not repeat the same oversized response.
     ResponseBodyLimitExceeded,
+    /// Successful stream exceeded a finite receive allowance.
+    ResponseStreamLimitExceeded,
     /// Unclassified error.
     Unknown,
 }
@@ -72,6 +74,7 @@ impl StandardError {
             // is effectively infinite, handled by freeze_permanent().
             Self::ContextWindowExceeded
             | Self::ResponseBodyLimitExceeded
+            | Self::ResponseStreamLimitExceeded
             | Self::ContentFiltered
             | Self::KeyInvalid
             | Self::QuotaExhausted
@@ -108,7 +111,10 @@ impl StandardError {
     pub fn should_freeze(&self) -> bool {
         !matches!(
             self,
-            Self::ContextWindowExceeded | Self::ContentFiltered | Self::ResponseBodyLimitExceeded
+            Self::ContextWindowExceeded
+                | Self::ContentFiltered
+                | Self::ResponseBodyLimitExceeded
+                | Self::ResponseStreamLimitExceeded
         )
     }
 }
@@ -165,6 +171,9 @@ pub fn classify_provider_error(error: &hf_core::provider::ProviderError) -> Stan
             })
         }
         ProviderError::ResponseBodyLimitExceeded { .. } => StandardError::ResponseBodyLimitExceeded,
+        ProviderError::ResponseStreamLimitExceeded { .. } => {
+            StandardError::ResponseStreamLimitExceeded
+        }
         ProviderError::NetworkError { .. } => StandardError::NetworkError,
         ProviderError::NoProviderAvailable { .. }
         | ProviderError::Cancelled

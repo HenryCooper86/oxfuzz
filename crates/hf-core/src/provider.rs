@@ -9,6 +9,10 @@
 mod response_limits;
 pub use response_limits::{ResponseBodyLimits, ResponseBodyLimitsConfig};
 
+#[path = "provider_stream_limits.rs"]
+mod stream_limits;
+pub use stream_limits::{ResponseStreamBudget, ResponseStreamLimits, ResponseStreamLimitsConfig};
+
 use std::pin::Pin;
 
 use async_trait::async_trait;
@@ -379,6 +383,13 @@ pub enum ProviderError {
     #[error("response body exceeds {limit_bytes} bytes")]
     ResponseBodyLimitExceeded { limit_bytes: usize },
 
+    /// The stream receiver rejected bytes before retaining them past a budget.
+    #[error("response stream {budget} exceeds {limit_bytes} bytes")]
+    ResponseStreamLimitExceeded {
+        budget: ResponseStreamBudget,
+        limit_bytes: usize,
+    },
+
     #[error("response parse error: {message}")]
     ParseError { message: String },
 
@@ -394,9 +405,9 @@ impl ProviderError {
             Self::AuthenticationFailed { .. }
             | Self::KeyInvalid { .. }
             | Self::QuotaExhausted { .. } => ErrorSeverity::Permanent,
-            Self::NoProviderAvailable { .. } | Self::ResponseBodyLimitExceeded { .. } => {
-                ErrorSeverity::UserActionRequired
-            }
+            Self::NoProviderAvailable { .. }
+            | Self::ResponseBodyLimitExceeded { .. }
+            | Self::ResponseStreamLimitExceeded { .. } => ErrorSeverity::UserActionRequired,
             // All other errors are transient (rate limits, network, server, parse, etc.)
             _ => ErrorSeverity::Transient,
         }

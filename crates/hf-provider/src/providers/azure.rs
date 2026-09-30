@@ -47,6 +47,7 @@ enum AzureEndpointMode {
 pub struct AzureOpenAiProvider {
     client: Client,
     response_body_limits: hf_core::provider::ResponseBodyLimits,
+    response_stream_limits: hf_core::provider::ResponseStreamLimits,
     api_key: String,
     endpoint_mode: AzureEndpointMode,
     endpoint_prefix: String,
@@ -64,6 +65,7 @@ impl std::fmt::Debug for AzureOpenAiProvider {
         f.debug_struct("AzureOpenAiProvider")
             .field("client", &self.client)
             .field("response_body_limits", &self.response_body_limits)
+            .field("response_stream_limits", &self.response_stream_limits)
             .field("api_key", &"<redacted>")
             .field("endpoint_mode", &self.endpoint_mode)
             .field("endpoint_prefix", &self.endpoint_prefix)
@@ -85,6 +87,16 @@ impl AzureOpenAiProvider {
         limits: hf_core::provider::ResponseBodyLimits,
     ) -> Self {
         self.response_body_limits = limits;
+        self
+    }
+
+    /// Set validated byte budgets for successful streamed responses.
+    #[must_use]
+    pub fn with_response_stream_limits(
+        mut self,
+        limits: hf_core::provider::ResponseStreamLimits,
+    ) -> Self {
+        self.response_stream_limits = limits;
         self
     }
 
@@ -146,6 +158,7 @@ impl AzureOpenAiProvider {
 
         Self {
             response_body_limits: crate::response_body::resolve_default_limits(),
+            response_stream_limits: crate::sse::resolve_default_limits(),
             client: crate::http_headers::provider_http_client(http_protocol, proxy_url)
                 .unwrap_or_else(|_| Client::new()),
             api_key,
@@ -798,7 +811,11 @@ impl LlmProvider for AzureOpenAiProvider {
 
         let inter_stream = futures::stream::unfold(
             (
-                crate::sse::SseStreamState::new(Box::pin(byte_stream)),
+                crate::sse::SseStreamState::new(
+                    Box::pin(byte_stream),
+                    self.response_stream_limits,
+                    crate::sse::StreamFraming::Sse,
+                ),
                 ToolCallAccumulatorSet::default(),
                 VecDeque::<InterStreamEvent>::new(),
             ),

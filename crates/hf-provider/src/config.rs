@@ -28,6 +28,10 @@ pub struct ProviderPoolConfig {
     #[serde(default)]
     pub response_body_limits: hf_core::provider::ResponseBodyLimitsConfig,
 
+    /// Cumulative and per-frame byte budgets for successful SSE/NDJSON responses.
+    #[serde(default)]
+    pub response_stream_limits: hf_core::provider::ResponseStreamLimitsConfig,
+
     /// Individual provider configurations.
     ///
     /// Deserialized leniently: malformed `[[providers]]` blocks are skipped
@@ -457,6 +461,7 @@ impl Default for ProviderPoolConfig {
         Self {
             providers: Vec::new(),
             response_body_limits: hf_core::provider::ResponseBodyLimitsConfig::default(),
+            response_stream_limits: hf_core::provider::ResponseStreamLimitsConfig::default(),
             proxy: ProxyConfig::default(),
             default_freeze_duration_secs: default_freeze_duration_secs(),
             max_freeze_duration_secs: default_max_freeze_duration_secs(),
@@ -471,6 +476,9 @@ impl ProviderPoolConfig {
     /// Validate the pool configuration.
     pub fn validate(&self) -> Result<(), ProviderPoolError> {
         self.response_body_limits
+            .resolve()
+            .map_err(|message| ProviderPoolError::Config { message })?;
+        self.response_stream_limits
             .resolve()
             .map_err(|message| ProviderPoolError::Config { message })?;
         if self.providers.is_empty() {

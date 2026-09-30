@@ -37,12 +37,39 @@ freeze the provider: an operator can adjust the budget or reduce response size.
 Adapters that discard a status-only rate-limit/overload response keep doing so,
 without collecting its body. Normal HTTP/network classification and concurrency cleanup remain effective.
 
-## Streaming follow-up
+## Successful streams
 
-Successful SSE/NDJSON currently requires a separate incremental receive package:
-stream-wide wire bytes, unfinished-frame storage, and repeated decoded deltas.
-HTTP body limits do not claim to address that receive path. The resource finding
-remains open until those operations are bounded and verified.
+Every successful SSE/NDJSON adapter uses a shared incremental receiver with a
+resolved `[response_stream_limits]` specification. Embeddings expose only body
+limits. The independent positive budgets are `wire_bytes` (default 67108864,
+maximum 268435456), `decoded_bytes` (default 67108864, maximum 805306368), and
+`frame_bytes` (default 16777216, maximum 268435456). Unknown fields and invalid
+values fail configuration. Direct adapters resolve defaults at construction or
+accept a validated specification explicitly; receive operations never default.
+
+The cumulative 64 MiB allowance accommodates repeated text, reasoning and tool
+argument deltas. A 16 MiB frame allowance permits common base64 image frames;
+larger deployments can raise finite budgets. Frame bytes include delimiters and
+incomplete UTF-8 bytes. Decoded bytes count UTF-8 output before extraction,
+including replacement characters; invalid bytes can consume this allowance
+faster than the wire allowance. Cumulative accounting limits retained tool
+arguments and thinking even when each frame is small.
+
+Check every transport chunk against cumulative wire bytes before decoding. Keep
+its unread portion as a Bytes slice, feed at most one complete protocol frame,
+and let the concrete parser consume it before decoding the next. Coalesced
+small frames never count as one large frame. UTF-8 split sequences are retained
+in at most three bytes; decoded text is checked before appending. No missing
+terminator can grow the unfinished frame beyond its budget.
+
+A limit violation drops receive buffers and the HTTP stream, emits one typed
+error naming only the budget and limit, and then ends. It cannot flush pending
+tool calls or turn into clean completion. Previously emitted deltas are
+provisional; this receiver does not collect an entire response atomically.
+The pool records one failed request, no successful completion, no retry/freeze,
+and releases its concurrency permits when the stream ends or drops. Transport,
+allocator, parsed JSON and event/container overhead are additional finite
+allocations; these byte budgets are not an RSS ceiling.
 
 ## Verification
 
@@ -51,3 +78,10 @@ exact/one-byte-over limits, chunked responses without Content-Length, split UTF-
 invalid-byte replacement, success/error/image JSON, all concrete backends,
 streaming handshake errors, no repeated limit failure and released permits.
 No live provider, generated harness or target is required.
+
+Successful stream fixtures additionally exercise independent wire/decoded/frame
+limits through every pool-built parser, coalesced LF/CRLF frames, unfinished
+frames, split UTF-8 and replacement expansion, repeated arguments/thinking,
+Gemini images, transport release on violation/drop, and pool permit release at
+EOF even when a completed stream object is retained. Provider edits preserve
+stream settings alongside HTTP budgets.

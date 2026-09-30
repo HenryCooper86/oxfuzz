@@ -120,6 +120,12 @@ impl Drop for ActiveRequestGuard {
 /// while mid-stream errors were still counted -- skewing the error rate).
 struct StreamMetricsState {
     stream: hf_core::provider::ChatStream,
+    // State ownership releases permits at EOF as well as on stream drop.
+    _keepalive: (
+        ActiveRequestGuard,
+        tokio::sync::OwnedSemaphorePermit,
+        Option<tokio::sync::OwnedSemaphorePermit>,
+    ),
     freeze_manager: Arc<FreezeManager>,
     metrics: crate::metrics::SharedMetrics,
     pid: ProviderId,
@@ -224,6 +230,10 @@ pub fn build_providers(
         .response_body_limits
         .resolve()
         .map_err(|message| ProviderPoolError::Config { message })?;
+    let response_stream_limits = config
+        .response_stream_limits
+        .resolve()
+        .map_err(|message| ProviderPoolError::Config { message })?;
     let mut providers: Vec<Arc<dyn LlmProvider>> = Vec::with_capacity(config.providers.len());
 
     for cfg in &config.providers {
@@ -289,7 +299,8 @@ pub fn build_providers(
                         &cfg.headers,
                         cfg.http_protocol,
                     )
-                    .with_response_body_limits(response_body_limits),
+                    .with_response_body_limits(response_body_limits)
+                    .with_response_stream_limits(response_stream_limits),
                 ) as Arc<dyn LlmProvider>
             };
         }
@@ -329,6 +340,7 @@ pub fn build_providers(
                     cfg.http_protocol,
                 )
                 .with_response_body_limits(response_body_limits)
+                .with_response_stream_limits(response_stream_limits)
                 .with_include_usage(include_usage)
                 .with_use_max_completion_tokens(use_max_completion_tokens)
                 .with_use_reasoning_effort(use_reasoning_effort),
@@ -351,6 +363,7 @@ pub fn build_providers(
                     cfg.http_protocol,
                 )
                 .with_response_body_limits(response_body_limits)
+                .with_response_stream_limits(response_stream_limits)
                 .with_include_usage(include_usage)
                 .with_use_max_completion_tokens(use_max_completion_tokens)
                 .with_azure_config(
@@ -654,10 +667,10 @@ impl ProviderPool for ProviderPoolImpl {
                 // freeze; otherwise a provider that always fails after the
                 // handshake is never frozen and failover never engages. We
                 // report the first such error once, then keep forwarding items.
-                let keepalive = (guard, permit, global_permit);
                 stream_response.stream = Box::pin(futures::stream::unfold(
                     StreamMetricsState {
                         stream: stream_response.stream,
+                        _keepalive: (guard, permit, global_permit),
                         freeze_manager: Arc::clone(&entry.freeze_manager),
                         metrics: Arc::clone(&entry.metrics),
                         pid: meta.id.clone(),
@@ -671,11 +684,6 @@ impl ProviderPool for ProviderPoolImpl {
                         recorded: false,
                     },
                     move |mut st: StreamMetricsState| {
-                        // Hold the concurrency permits + active-request guard for
-                        // the whole stream: captured by this `move` closure, they
-                        // drop (releasing the slot) when the stream ends or is
-                        // dropped.
-                        let _keepalive = &keepalive;
                         async move {
                             use futures::StreamExt;
                             match st.stream.next().await {
@@ -987,6 +995,7 @@ mod tests {
         ProviderPoolConfig {
             providers: vec![],
             response_body_limits: hf_core::provider::ResponseBodyLimitsConfig::default(),
+            response_stream_limits: hf_core::provider::ResponseStreamLimitsConfig::default(),
             proxy: crate::config::ProxyConfig::default(),
             default_freeze_duration_secs: 30,
             max_freeze_duration_secs: 3600,
