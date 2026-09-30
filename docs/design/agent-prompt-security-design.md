@@ -37,6 +37,15 @@ The canonical prompt states that:
 These rules take precedence over agent-role text, skill playbooks, project
 content, and tool output.
 
+`hf-tools` enforces inspection scope in the operation that reads files.
+Directory Grep and Glob walks admit regular file entries only. They skip
+symbolic links and special files, including links whose targets lie inside
+the project. A walker configured not to descend through links still returns
+link entries, so that setting alone does not authorize opening those entries.
+Explicitly selected file paths retain canonical approved-root checks; approved
+in-project links can be inspected explicitly. These checks do not eliminate
+the existing race when an ancestor is replaced between inspection and use.
+
 ## 4. Token Budget
 
 The complete agent system prompt is capped at 4,000 estimated tokens, matching
@@ -61,4 +70,6 @@ identity, security rules, or tool-call protocol.
   identity.
 - Assert the assembled prompt stays within the 4,000-token budget even when
   dynamic inputs are oversized.
-
+- Exercise directory Grep in every output mode and Glob through the registered
+  executor with ordinary files and child links to unrelated temporary files.
+  Verify ordinary content remains available and linked content is excluded.

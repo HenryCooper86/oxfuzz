@@ -204,8 +204,8 @@ impl GlobTool {
             }
             match result {
                 Ok(entry) => {
-                    // Skip directories -- only collect files.
-                    if entry.file_type().is_none_or(|ft| ft.is_dir()) {
+                    // Do not dereference link targets when collecting file metadata.
+                    if entry.file_type().is_none_or(|ft| !ft.is_file()) {
                         continue;
                     }
                     let path = entry.into_path();

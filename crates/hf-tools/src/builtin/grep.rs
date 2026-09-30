@@ -383,7 +383,9 @@ impl GrepTool {
                 }
                 match entry {
                     Ok(entry) => {
-                        if entry.file_type().is_none_or(|ft| ft.is_dir()) {
+                        // The walker returns links even without descending through them.
+                        // Opening those entries would bypass the search root check.
+                        if entry.file_type().is_none_or(|ft| !ft.is_file()) {
                             continue;
                         }
                         search_file(entry.path(), &mut searcher);
