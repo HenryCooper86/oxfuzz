@@ -3138,10 +3138,14 @@ async fn delete_corpus_entry(
     Ok(Json(true))
 }
 
-async fn clear_all_artifacts(State(state): State<AppState>) -> ApiResult<bool> {
+async fn clear_all_artifacts(
+    State(state): State<AppState>,
+    Json(req): Json<ProjectRequest>,
+) -> ApiResult<bool> {
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
     state
         .container
-        .clear_all_artifacts()
+        .clear_project_artifacts(&project)
         .await
         .map_err(classified_api_error)?;
     Ok(Json(true))

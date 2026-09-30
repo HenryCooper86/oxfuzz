@@ -597,6 +597,21 @@ impl ServiceContainer {
         Ok(())
     }
 
+    /// Clear persisted crash and corpus rows belonging to one project.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` on a storage failure.
+    pub async fn clear_project_artifacts(&self, project: &Path) -> Result<(), ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
+        let Some(store) = self.store.as_ref() else {
+            return Ok(());
+        };
+        let targets = self.project_target_ids(project).await?;
+        let target_ids: Vec<_> = targets.into_iter().collect();
+        store.clear_artifacts_for_targets(&target_ids).await?;
+        Ok(())
+    }
+
     /// A JSON bundle of a project's persisted fuzzing data (targets, runs,
     /// harnesses, crashes, corpus) for hand-off to other tools. Scoped by
     /// project; pass `None` to export everything.
@@ -786,6 +801,23 @@ mod project_artifact_tests {
         assert_eq!(crashes[0].id, expected_crash.unwrap());
         assert_eq!(corpus.len(), 1);
         assert_eq!(corpus[0].sha256, expected_corpus.unwrap());
+
+        service.clear_project_artifacts(&approved).await.unwrap();
+        assert!(service.project_crashes(&approved).await.unwrap().is_empty());
+        assert!(service
+            .project_corpus_entries(&approved)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(service.project_crashes(&outside).await.unwrap().len(), 1);
+        assert_eq!(
+            service
+                .project_corpus_entries(&outside)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }
 

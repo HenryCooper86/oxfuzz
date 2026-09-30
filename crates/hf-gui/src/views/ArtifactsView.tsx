@@ -90,7 +90,7 @@ export function ArtifactsView() {
   async function clearAll() {
     if (!(await confirm({ title: t("artifacts.clearAllTitle"), message: t("artifacts.clearAllMessage"), danger: true, confirmLabel: t("common.clearAll") }))) return;
     try {
-      await getTransport().invoke("clear_all_artifacts");
+      await getTransport().invoke("clear_all_artifacts", isTauriEnvironment() ? undefined : { project: activeProject || undefined });
       setCrashes([]);
       setCorpus([]);
       emitDataChanged();

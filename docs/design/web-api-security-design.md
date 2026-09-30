@@ -54,6 +54,9 @@ Run history, auto-revert audit, workbench dashboard, and harness review reads
 likewise require an explicit approved project on the REST transport.
 Persisted crash and corpus browse reads use the approved project's target IDs;
 the desktop's browse-all service calls remain local-only.
+The REST artifact clear operation requires an approved project and removes only
+that project's persisted crashes and corpus entries. The desktop can retain its
+trusted-local all-project clear operation.
 
 ## 4. Public Response DTOs
 

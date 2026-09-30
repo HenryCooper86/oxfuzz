@@ -2508,6 +2508,29 @@ impl Store {
         Ok(())
     }
 
+    /// Clear persisted artifacts for the specified target IDs in one transaction.
+    ///
+    /// # Errors
+    /// Returns a storage error on a database failure.
+    pub async fn clear_artifacts_for_targets(
+        &self,
+        target_ids: &[Uuid],
+    ) -> Result<(), StorageError> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        for target_id in target_ids {
+            sqlx::query("DELETE FROM crashes WHERE target_id = ?1")
+                .bind(target_id.to_string())
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DELETE FROM corpus_entries WHERE target_id = ?1")
+                .bind(target_id.to_string())
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Clear every persisted run and the crashes it produced (Run History).
     ///
     /// # Errors
