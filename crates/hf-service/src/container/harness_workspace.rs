@@ -11,6 +11,7 @@ use hf_core::error::ClassifiedError;
 use uuid::Uuid;
 
 use super::crash_inputs::is_regular_file;
+use super::workspace_file::replace_workspace_file;
 
 /// Reduce an untrusted `target` to the single directory component that names
 /// its workspace.
@@ -165,9 +166,14 @@ pub(super) fn build_workspace_dictionary(workspace: &Path, dict_name: &str) -> O
     if tokens.is_empty() {
         return None;
     }
-    let dict_path = workspace.join(dict_name);
-    std::fs::write(&dict_path, hf_engine::dict::render_dict(&tokens)).ok()?;
-    Some(dict_path)
+    // A dictionary is optional; a failed confined write only disables its run flag.
+    replace_workspace_file(
+        workspace,
+        Path::new(dict_name),
+        std::io::Cursor::new(hf_engine::dict::render_dict(&tokens)),
+        None,
+    )
+    .ok()
 }
 
 /// A bounded excerpt of the target's non-harness C/C++ sources, for the LLM
@@ -294,8 +300,14 @@ pub(super) fn write_current_harness_source(
 
 /// Link the active binary/source pair to its persisted qualification record.
 pub(super) fn write_current_harness_id(workspace: &Path, id: Uuid) -> Result<(), ClassifiedError> {
-    std::fs::write(workspace.join("harness.active"), id.to_string())
-        .map_err(|e| ClassifiedError::Internal(format!("write active harness id: {e}")))
+    replace_workspace_file(
+        workspace,
+        Path::new("harness.active"),
+        std::io::Cursor::new(id.to_string()),
+        None,
+    )
+    .map(|_| ())
+    .map_err(|e| ClassifiedError::Internal(format!("write active harness id: {e}")))
 }
 
 /// Atomically reactivate an already-verified historical executable.
@@ -467,17 +479,27 @@ fn stage_file(root: &Path, path: &Path, workspace: &Path, staged: &mut usize) {
         tracing::warn!("skipping {} from outside the project root", path.display());
         return;
     };
-    let dest = workspace.join(relative);
-    if let Some(parent) = dest.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
+    let source = match std::fs::File::open(path) {
+        Ok(source) => source,
+        Err(error) => {
             tracing::warn!(
-                "failed to create staging directory {}: {e}",
-                parent.display()
+                "failed to open source {} for staging: {error}",
+                path.display()
             );
             return;
         }
-    }
-    if let Err(e) = std::fs::copy(path, &dest) {
+    };
+    let permissions = match source.metadata() {
+        Ok(metadata) => metadata.permissions(),
+        Err(error) => {
+            tracing::warn!(
+                "failed to inspect source {} for staging: {error}",
+                path.display()
+            );
+            return;
+        }
+    };
+    if let Err(e) = replace_workspace_file(workspace, relative, source, Some(permissions)) {
         tracing::warn!(
             "failed to copy source {} into workspace: {e}",
             path.display()
@@ -848,5 +870,126 @@ mod c_staging_tests {
                 "staged {skipped}, which is build output or version control"
             );
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod sandbox_link_tests {
+    use super::{build_workspace_dictionary, copy_project_sources, write_current_harness_id};
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    #[test]
+    fn active_marker_replaces_a_sandbox_link_without_writing_its_target() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(outside.path(), "unchanged").unwrap();
+        symlink(outside.path(), workspace.path().join("harness.active")).unwrap();
+
+        let id = uuid::Uuid::new_v4();
+        write_current_harness_id(workspace.path(), id).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(outside.path()).unwrap(),
+            "unchanged"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("harness.active")).unwrap(),
+            id.to_string()
+        );
+    }
+
+    #[test]
+    fn restaging_replaces_a_sandbox_link_without_writing_its_target() {
+        let project = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(outside.path(), "unchanged").unwrap();
+        std::fs::write(
+            project.path().join("parse.c"),
+            "int parse(void) { return 1; }",
+        )
+        .unwrap();
+        symlink(outside.path(), workspace.path().join("parse.c")).unwrap();
+
+        copy_project_sources(project.path(), workspace.path());
+
+        assert_eq!(
+            std::fs::read_to_string(outside.path()).unwrap(),
+            "unchanged"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("parse.c")).unwrap(),
+            "int parse(void) { return 1; }"
+        );
+    }
+
+    #[test]
+    fn restaging_refuses_a_sandbox_link_in_a_parent_directory() {
+        let project = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join("src")).unwrap();
+        std::fs::write(
+            project.path().join("src/parse.c"),
+            "int parse(void) { return 1; }",
+        )
+        .unwrap();
+        symlink(outside.path(), workspace.path().join("src")).unwrap();
+
+        copy_project_sources(project.path(), workspace.path());
+
+        assert!(!outside.path().join("parse.c").exists());
+    }
+
+    #[test]
+    fn dictionary_replaces_a_sandbox_link_without_writing_its_target() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(outside.path(), "unchanged").unwrap();
+        std::fs::write(
+            workspace.path().join("parse.c"),
+            "int parse(void) { return strcmp(input, \"MAGIC\"); }",
+        )
+        .unwrap();
+        symlink(outside.path(), workspace.path().join("fuzzer.dict")).unwrap();
+
+        let dictionary = build_workspace_dictionary(workspace.path(), "fuzzer.dict").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(outside.path()).unwrap(),
+            "unchanged"
+        );
+        assert!(std::fs::read_to_string(dictionary)
+            .unwrap()
+            .contains("MAGIC"));
+    }
+
+    #[test]
+    fn staged_inputs_remain_readable_by_the_sandbox_user() {
+        let project = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let source = project.path().join("parse.c");
+        std::fs::write(
+            &source,
+            "int parse(void) { return strcmp(input, \"MAGIC\"); }",
+        )
+        .unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let private_source = project.path().join("private.c");
+        std::fs::write(&private_source, "int private(void) { return 1; }").unwrap();
+        std::fs::set_permissions(&private_source, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        copy_project_sources(project.path(), workspace.path());
+        let dictionary = build_workspace_dictionary(workspace.path(), "fuzzer.dict").unwrap();
+
+        for path in [workspace.path().join("parse.c"), dictionary] {
+            let mode = std::fs::metadata(path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o444, 0o444);
+        }
+        let private_mode = std::fs::metadata(workspace.path().join("private.c"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(private_mode & 0o777, 0o600);
     }
 }

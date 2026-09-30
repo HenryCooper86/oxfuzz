@@ -60,6 +60,7 @@ mod triage;
 #[cfg(feature = "unreached-surface")]
 mod unreached_surface;
 mod workspace;
+mod workspace_file;
 
 #[cfg(feature = "native-analysis")]
 pub use discovery::AnalyzedInventory;
