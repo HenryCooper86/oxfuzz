@@ -2,6 +2,8 @@
 
 pub mod coverage_experiments;
 mod retained_campaign;
+mod scheduler_history;
+pub use scheduler_history::{scheduler_history_fixture, SchedulerHistoryTestFixture};
 
 use std::error::Error;
 use std::path::{Path, PathBuf};

@@ -3993,6 +3993,130 @@ async fn schedule_executions_round_trip_and_latest_fire() {
 }
 
 #[tokio::test]
+async fn schedule_execution_pages_and_snapshot_cleanup_preserve_unselected_and_protected_rows() {
+    let (store, _dir) = temp_store().await;
+    for id in ["e1", "e2", "e3", "e4"] {
+        store
+            .upsert_schedule_execution(
+                id,
+                "s",
+                "2026-07-01T01:00:00+00:00",
+                "completed",
+                r#"{"v":1}"#,
+            )
+            .await
+            .unwrap();
+    }
+    let first = store.schedule_execution_page(2, None).await.unwrap();
+    assert_eq!(
+        first.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+        ["e4", "e3"]
+    );
+    let second = store
+        .schedule_execution_page(2, first.last())
+        .await
+        .unwrap();
+    assert_eq!(
+        second.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+        ["e2", "e1"]
+    );
+    assert!(store
+        .schedule_execution_page(2, second.last())
+        .await
+        .unwrap()
+        .is_empty());
+    let receipt = new_occurrence("protected-occ", "protected-schedule", "protected-execution");
+    store.reserve_schedule_occurrence(&receipt).await.unwrap();
+    let records = store.schedule_execution_page(10, None).await.unwrap();
+    let protected = records
+        .iter()
+        .find(|r| r.id == "protected-execution")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        store
+            .clear_schedule_execution_records(&[first[0].clone(), protected])
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(!store
+        .schedule_execution_page(10, None)
+        .await
+        .unwrap()
+        .iter()
+        .any(|r| r.id == "e4"));
+    assert!(store
+        .schedule_execution_page(10, None)
+        .await
+        .unwrap()
+        .iter()
+        .any(|r| r.id == "e1"));
+    assert!(store
+        .schedule_execution_page(10, None)
+        .await
+        .unwrap()
+        .iter()
+        .any(|r| r.id == "protected-execution"));
+    assert_eq!(
+        store.clear_schedule_execution_records(&[]).await.unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn changed_or_missing_execution_snapshot_rolls_back_prior_cleanup() {
+    let (store, _dir) = temp_store().await;
+    for id in ["e1", "e2"] {
+        store
+            .upsert_schedule_execution(
+                id,
+                "s",
+                "2026-07-01T01:00:00+00:00",
+                "completed",
+                r#"{"v":1}"#,
+            )
+            .await
+            .unwrap();
+    }
+    let records = store.schedule_execution_page(10, None).await.unwrap();
+    store
+        .upsert_schedule_execution(
+            "e1",
+            "s",
+            "2026-07-01T01:00:00+00:00",
+            "completed",
+            r#"{"v":2}"#,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        store.clear_schedule_execution_records(&records).await,
+        Err(hf_storage::StorageError::InvalidData(_))
+    ));
+    assert!(store
+        .schedule_execution_page(10, None)
+        .await
+        .unwrap()
+        .iter()
+        .any(|r| r.id == "e2"));
+    sqlx::query("DELETE FROM schedule_executions WHERE id = 'e1'")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    assert!(matches!(
+        store.clear_schedule_execution_records(&records).await,
+        Err(hf_storage::StorageError::NotFound(_))
+    ));
+    assert!(store
+        .schedule_execution_page(10, None)
+        .await
+        .unwrap()
+        .iter()
+        .any(|r| r.id == "e2"));
+}
+
+#[tokio::test]
 async fn occurrence_reservation_commits_receipt_and_pending_execution_together() {
     let (store, _dir) = temp_store().await;
     let new = new_occurrence("occ-1", "schedule-1", "exec-1");

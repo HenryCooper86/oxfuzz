@@ -40,9 +40,9 @@ use hf_scheduler::{
     ScheduleExecution, SchedulerManager, SchedulerPersistence, TriggerConfig,
 };
 use hf_storage::{
-    NewScheduleOccurrence, ScheduleOccurrenceAcknowledgement, ScheduleOccurrenceInspection,
-    ScheduleOccurrenceRecord, ScheduleOccurrenceReservation, ScheduleOccurrenceTransition,
-    ScheduleOccurrenceTransitionResult, StorageError, Store,
+    NewScheduleOccurrence, ScheduleExecutionRecord, ScheduleOccurrenceAcknowledgement,
+    ScheduleOccurrenceInspection, ScheduleOccurrenceRecord, ScheduleOccurrenceReservation,
+    ScheduleOccurrenceTransition, ScheduleOccurrenceTransitionResult, StorageError, Store,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as AsyncMutex;
@@ -2012,10 +2012,16 @@ fn schedule_is_within_roots(
     schedule: &Schedule,
     roots: &[PathBuf],
 ) -> Result<bool, CampaignSchedulerError> {
-    let params: CampaignParams = serde_json::from_value(schedule.parameter_values.clone())
-        .map_err(|_| {
-            CampaignSchedulerError::Validation("stored schedule project is invalid".to_owned())
-        })?;
+    campaign_parameters_are_within_roots(&schedule.parameter_values, roots)
+}
+
+fn campaign_parameters_are_within_roots(
+    parameters: &serde_json::Value,
+    roots: &[PathBuf],
+) -> Result<bool, CampaignSchedulerError> {
+    let params: CampaignParams = serde_json::from_value(parameters.clone()).map_err(|_| {
+        CampaignSchedulerError::Validation("stored schedule project is invalid".to_owned())
+    })?;
     let project = std::fs::canonicalize(&params.project).map_err(|_| {
         CampaignSchedulerError::Validation("stored schedule project is unavailable".to_owned())
     })?;
@@ -2025,6 +2031,55 @@ fn schedule_is_within_roots(
         ));
     }
     Ok(roots.iter().any(|root| project.starts_with(root)))
+}
+
+struct ScopedScheduleExecution {
+    record: ScheduleExecutionRecord,
+    execution: ScheduleExecution,
+}
+
+// Page size bounds individual database reads; the caller controls the visible count.
+const SCHEDULE_HISTORY_PAGE_SIZE: i64 = 128;
+
+async fn scoped_schedule_executions(
+    store: &Store,
+    roots: &[PathBuf],
+    limit: Option<usize>,
+) -> Result<Vec<ScopedScheduleExecution>, CampaignSchedulerError> {
+    let mut selected = Vec::new();
+    if limit == Some(0) {
+        return Ok(selected);
+    }
+    let mut after = None;
+    loop {
+        let page = store
+            .schedule_execution_page(SCHEDULE_HISTORY_PAGE_SIZE, after.as_ref())
+            .await
+            .map_err(|_| {
+                CampaignSchedulerError::History("execution history is unavailable".to_owned())
+            })?;
+        if page.is_empty() {
+            return Ok(selected);
+        }
+        after = page.last().cloned();
+        for record in page {
+            let execution: ScheduleExecution =
+                serde_json::from_str(&record.data_json).map_err(|_| {
+                    CampaignSchedulerError::History(
+                        "stored schedule execution is invalid".to_owned(),
+                    )
+                })?;
+            if campaign_parameters_are_within_roots(
+                &execution.request_summary["parameter_values"],
+                roots,
+            )? {
+                selected.push(ScopedScheduleExecution { record, execution });
+                if limit == Some(selected.len()) {
+                    return Ok(selected);
+                }
+            }
+        }
+    }
 }
 
 fn authorize_schedule_project(
@@ -2697,22 +2752,68 @@ impl CampaignScheduler {
                 })
                 .collect();
         }
-        // In-memory fallback (no database configured).
-        let schedules = self.manager.list_schedules().await;
-        let names: std::collections::HashMap<String, String> = schedules
-            .iter()
-            .map(|s| (s.id.clone(), s.name.clone()))
+        self.memory_execution_views(limit, None).await
+    }
+
+    /// Read retained execution history only for projects below canonical approved roots.
+    ///
+    /// The visible limit applies after project authorization, including for deleted schedules.
+    ///
+    /// # Errors
+    /// Returns bounded errors for invalid retained ownership or unreadable history.
+    pub async fn recent_executions_within_roots(
+        &self,
+        limit: usize,
+        roots: &[PathBuf],
+    ) -> Result<Vec<ExecutionView>, CampaignSchedulerError> {
+        if let Some(store) = &self.store {
+            return scoped_schedule_executions(store, roots, Some(limit))
+                .await
+                .map(|rows| {
+                    rows.iter()
+                        .map(|row| view_of_execution(&row.execution, ""))
+                        .collect()
+                });
+        }
+        self.memory_execution_views(limit, Some(roots)).await
+    }
+
+    async fn memory_execution_views(
+        &self,
+        limit: usize,
+        roots: Option<&[PathBuf]>,
+    ) -> Result<Vec<ExecutionView>, CampaignSchedulerError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let names: std::collections::HashMap<String, String> = self
+            .manager
+            .list_schedules()
+            .await
+            .into_iter()
+            .map(|schedule| (schedule.id, schedule.name))
             .collect();
-        let mut all = Vec::new();
-        for schedule in &schedules {
-            for ex in self.manager.execution_history(&schedule.id).await {
-                let name = names.get(&ex.schedule_id).map_or("", String::as_str);
-                all.push(view_of_execution(&ex, name));
+        let executions: Vec<_> = {
+            let store = self.manager.execution_store().lock().await;
+            store.list_recent(usize::MAX).into_iter().cloned().collect()
+        };
+        let mut views = Vec::new();
+        for execution in executions {
+            if let Some(roots) = roots {
+                if !campaign_parameters_are_within_roots(
+                    &execution.request_summary["parameter_values"],
+                    roots,
+                )? {
+                    continue;
+                }
+            }
+            let name = names.get(&execution.schedule_id).map_or("", String::as_str);
+            views.push(view_of_execution(&execution, name));
+            if views.len() == limit {
+                break;
             }
         }
-        all.sort_by(|a, b| b.triggered_at.cmp(&a.triggered_at));
-        all.truncate(limit);
-        Ok(all)
+        Ok(views)
     }
 
     /// Create + register + persist a new campaign schedule.
@@ -2816,6 +2917,36 @@ impl CampaignScheduler {
             .clear_schedule_executions()
             .await
             .map_err(|error| CampaignSchedulerError::History(error.to_string()))
+    }
+
+    /// Clear retained history only for projects below canonical approved roots.
+    ///
+    /// Nonterminal one-time receipts remain protected, and changed snapshots
+    /// abort the whole deletion transaction.
+    ///
+    /// # Errors
+    /// Returns bounded errors for missing ownership or a failed snapshot deletion.
+    pub async fn clear_history_within_roots(
+        &self,
+        roots: &[PathBuf],
+    ) -> Result<u64, CampaignSchedulerError> {
+        let Some(store) = &self.store else {
+            return Ok(0);
+        };
+        let records: Vec<_> = scoped_schedule_executions(store, roots, None)
+            .await?
+            .into_iter()
+            .map(|row| row.record)
+            .collect();
+        store
+            .clear_schedule_execution_records(&records)
+            .await
+            .map_err(|_| {
+                CampaignSchedulerError::History(
+                    "execution history changed or could not be cleared; retry the operation"
+                        .to_owned(),
+                )
+            })
     }
 
     /// Remove a schedule by id, discarding its rotation/budget state so a
@@ -3033,6 +3164,66 @@ mod tests {
     use hf_storage::ScheduleOccurrenceRecord;
 
     use super::*;
+
+    #[tokio::test]
+    async fn scoped_memory_history_uses_retained_parameters_after_schedule_removal() {
+        let directory = tempfile::tempdir().unwrap();
+        let approved = directory.path().join("approved");
+        let foreign = directory.path().join("foreign");
+        std::fs::create_dir(&approved).unwrap();
+        std::fs::create_dir(&foreign).unwrap();
+        let scheduler = CampaignScheduler::try_start(
+            ServiceContainer::stubbed(),
+            directory.path().join("schedules.json"),
+            None,
+        )
+        .await
+        .unwrap();
+        for (id, project, seconds) in [("approved", &approved, 1), ("foreign", &foreign, 2)] {
+            let mut execution = schedule_execution(
+                id,
+                "removed-schedule",
+                Utc::now() + chrono::Duration::seconds(seconds),
+                ExecutionStatus::Completed,
+            );
+            execution.request_summary = serde_json::json!({
+                "schedule_name": id,
+                "parameter_values": CampaignParams { project: project.display().to_string(), duration_secs: 30, ..CampaignParams::default() },
+            });
+            scheduler
+                .manager
+                .execution_store()
+                .lock()
+                .await
+                .record(execution);
+        }
+        let roots = vec![approved.canonicalize().unwrap()];
+        let history = scheduler
+            .recent_executions_within_roots(1, &roots)
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].execution_id, "approved");
+        assert_eq!(
+            scheduler.recent_executions(1).await.unwrap()[0].execution_id,
+            "foreign"
+        );
+        assert!(scheduler
+            .recent_executions_within_roots(0, &roots)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(scheduler
+            .recent_executions_within_roots(10, &[])
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            scheduler.clear_history_within_roots(&roots).await.unwrap(),
+            0
+        );
+        scheduler.stop().await;
+    }
 
     #[test]
     fn scoped_schedule_ownership_rejects_malformed_persisted_parameters() {

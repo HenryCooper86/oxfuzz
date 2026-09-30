@@ -72,6 +72,15 @@ admission lock before changing any definition or campaign state. Invalid persist
 project ownership fails with a bounded error; trusted local scheduler methods
 retain their all-project access.
 
+REST scheduler history reads and clearing authorize the project retained in each
+execution's request parameters, including after its schedule definition is removed.
+The service reads bounded pages and applies the requested visible count after
+project filtering. Clearing compares the authorized stored JSON snapshot inside
+the deletion transaction and fails if a selected record disappeared or changed;
+nonterminal one-time occurrence receipts continue to protect their executions.
+Missing or invalid retained project ownership produces a bounded error before
+clearing begins. Trusted local history operations retain their all-project access.
+
 ## 4. Public Response DTOs
 
 REST responses do not expose absolute host paths, provider credentials,

@@ -3603,7 +3603,7 @@ async fn schedule_history(
 ) -> ApiResult<serde_json::Value> {
     let views = match &state.scheduler {
         Some(scheduler) => scheduler
-            .recent_executions(q.limit.unwrap_or(20))
+            .recent_executions_within_roots(q.limit.unwrap_or(20), state.security.project_roots())
             .await
             .map_err(scheduler_api_error)?,
         None => Vec::new(),
@@ -3613,7 +3613,10 @@ async fn schedule_history(
 
 async fn schedule_history_clear(State(state): State<AppState>) -> ApiResult<u64> {
     let cleared = match &state.scheduler {
-        Some(s) => s.clear_history().await.map_err(scheduler_api_error)?,
+        Some(s) => s
+            .clear_history_within_roots(state.security.project_roots())
+            .await
+            .map_err(scheduler_api_error)?,
         None => 0,
     };
     Ok(Json(cleared))

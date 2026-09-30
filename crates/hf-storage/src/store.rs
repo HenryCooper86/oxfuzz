@@ -3322,16 +3322,9 @@ impl Store {
     /// # Errors
     /// Returns an error on a SQL failure.
     pub async fn clear_schedule_executions(&self) -> Result<u64, StorageError> {
-        let result = sqlx::query(
-            "DELETE FROM schedule_executions
-             WHERE id NOT IN (
-                 SELECT execution_id
-                 FROM schedule_occurrences
-                 WHERE state IN ('reserved', 'running')
-             )",
-        )
-        .execute(&self.pool)
-        .await?;
+        let result = sqlx::query(crate::schedule_execution_store::DELETE_CLEARABLE_EXECUTIONS)
+            .execute(&self.pool)
+            .await?;
         Ok(result.rows_affected())
     }
 
