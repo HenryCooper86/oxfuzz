@@ -30,6 +30,9 @@ claims that these records may qualify. Run every generated harness through
 The [2026-09-27 performance record](performance-2026-09-27.md) provides a
 sanitized example for a no-harness benchmark, with raw samples and separate
 executor and history claims.
+The [2026-10-01 hosted diagnostics](performance-2026-10-01.md) retain complete
+Linux x64, macOS arm64, and Windows x64 release-profile bundles; stable-runner
+variance and live campaign Stop remain separate work.
 The [held-out effectiveness protocol](effectiveness-baseline-protocol.md)
 defines a frozen cohort format; it has no live trial results yet.
 The [C parser candidate record](held-out-cohort-candidates-2026-09-27.md)

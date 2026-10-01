@@ -31,11 +31,13 @@ Use the [capability acceptance checklist](docs/guides/CAPABILITY_ACCEPTANCE.md)
 to record results for pinned revisions and environments. Controlled tests do not
 replace these live checks.
 
-- [ ] Repeat the [dispatch and history baseline](docs/acceptance/performance-2026-09-27.md)
-  on additional named release-profile runners. The macOS arm64 release-profile
-  dispatch and retained-history baselines are recorded; cross-platform
-  measurements remain open. Keep history and campaign Stop objectives
-  independent of dispatch.
+- [x] Record additional named release-profile dispatch and history runners.
+  The [Linux x64, macOS arm64, and Windows x64 hosted diagnostics](docs/acceptance/performance-2026-10-01.md)
+  retain raw samples, actual runner identities, and recomputed summaries.
+  These shared-runner observations do not establish stable timing objectives.
+- [ ] Repeat measurements on stable runners to characterize variance and set
+  environment-specific history objectives. Keep campaign Stop and end-to-end
+  agent/provider measurements independent of executor dispatch.
   Owner: `hf-service` and test infrastructure maintainers.
 
 - [ ] Complete the [held-out effectiveness baseline](docs/acceptance/effectiveness-baseline-protocol.md).

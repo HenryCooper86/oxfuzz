@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "candidate_commit": "b72fb5c1760af14ca14bd0fde9a69092624ffe15",
+  "runner": "gha-linux-ubuntu24-x64-diagnostic",
+  "workflow_run_id": 36826934757,
+  "workflow_run_attempt": 1,
+  "runner_os": "Linux",
+  "runner_arch": "X64",
+  "runner_name": "GitHub Actions 1000005321",
+  "image_os": "ubuntu24",
+  "image_version": "20260920.314.1"
+}

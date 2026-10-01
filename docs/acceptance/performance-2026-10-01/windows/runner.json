@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "candidate_commit": "b72fb5c1760af14ca14bd0fde9a69092624ffe15",
+  "runner": "gha-windows2025-x64-diagnostic",
+  "workflow_run_id": 36826934757,
+  "workflow_run_attempt": 1,
+  "runner_os": "Windows",
+  "runner_arch": "X64",
+  "runner_name": "GitHub Actions 1000005322",
+  "image_os": "win25-vs2026",
+  "image_version": "20260925.250.1"
+}
