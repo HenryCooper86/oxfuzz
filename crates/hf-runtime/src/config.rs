@@ -181,9 +181,19 @@ async fn capture_probe(
     if std::time::Instant::now() >= deadline {
         return None;
     }
+    let mut cmd = cmd;
+    #[cfg(windows)]
+    let pipe = match windows_probe_stdout(&mut cmd) {
+        Ok(pipe) => pipe,
+        Err(error) => {
+            tracing::warn!(%error, "Cannot initialize readiness probe stdout");
+            return None;
+        }
+    };
+    #[cfg(not(windows))]
+    cmd.stdout(std::process::Stdio::piped());
     let mut child = match tokio::process::Command::from(cmd)
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
         .spawn()
@@ -196,11 +206,18 @@ async fn capture_probe(
     };
     let capture = async {
         let mut stdout = Vec::new();
+        #[cfg(windows)]
+        let mut pipe = pipe;
+        #[cfg(not(windows))]
         let mut pipe = child.stdout.take();
         let read = async {
-            if let Some(pipe) = pipe.as_mut() {
-                pipe.read_to_end(&mut stdout).await?;
-            }
+            #[cfg(windows)]
+            pipe.connect().await?;
+            #[cfg(not(windows))]
+            let pipe = pipe
+                .as_mut()
+                .ok_or_else(|| std::io::Error::other("Readiness probe stdout pipe is missing"))?;
+            pipe.read_to_end(&mut stdout).await?;
             Ok::<_, std::io::Error>(stdout)
         };
         tokio::try_join!(child.wait(), read)
@@ -227,6 +244,24 @@ async fn capture_probe(
         }
     }
     None
+}
+
+#[cfg(windows)]
+fn windows_probe_stdout(
+    command: &mut std::process::Command,
+) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+    use tokio::net::windows::named_pipe::ServerOptions;
+
+    let name = format!(r"\\.\pipe\oxfuzz-readiness-{}", uuid::Uuid::new_v4());
+    let pipe = ServerOptions::new()
+        .access_outbound(false)
+        .first_pipe_instance(true)
+        .max_instances(1)
+        .reject_remote_clients(true)
+        .create(&name)?;
+    let writer = std::fs::OpenOptions::new().write(true).open(&name)?;
+    command.stdout(writer);
+    Ok(pipe)
 }
 
 /// Whether the Docker daemon is actually reachable. `docker info` only

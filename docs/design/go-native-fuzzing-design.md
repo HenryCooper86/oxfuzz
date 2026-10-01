@@ -57,8 +57,9 @@ function. Compile diagnostics may drive a bounded repair attempt, but a new
 source digest needs a new independent model review.
 
 All compilation, review, smoke, promotion, campaign, replay, and crash
-reproduction retain the existing service lifecycle. After a successful
-in-sandbox `go test -c -o <run-owned-binary>` compile, independent model review
+reproduction retain the existing service lifecycle. Before any generated target/test build, independent model source review and
+exact human source approval are required. After a successful in-sandbox
+`go test -c -fuzz=^<FuzzXxx>$ -o <run-owned-binary> .` compile, independent model review
 cites the exact test source and binary/build-input digests. An operator
 approves the exact attempt before
 smoke execution and explicitly promotes the smoke-qualified attempt before a
@@ -70,7 +71,23 @@ skipping unrelated tests, and keeping parallelism within the resolved CPU
 ceiling. Verify direct-binary fuzzing behavior with the pinned Go version before
 shipping; if it cannot preserve Go's corpus and failure behavior, revise this
 design before implementation. Retain the actual test binary identity and full
-argv.
+argv. Plain `go test -c` does not enable fuzz instrumentation: the versioned
+[Go 1.26.5 test builder](https://github.com/golang/go/blob/go1.26.5/src/cmd/go/internal/test/test.go)
+and [Go 1.27.1 test builder](https://github.com/golang/go/blob/go1.27.1/src/cmd/go/internal/test/test.go)
+set instrumentation only when the fuzz selector is present. Compilation keeps
+`-c`, so this selector does not authorize test execution. Bound or disable
+`-test.fuzzminimizetime` explicitly; its 60-second default must not silently
+extend the resolved operation duration.
+
+The direct binary
+[cache/coordinator flags](https://github.com/golang/go/blob/go1.27.1/src/testing/fuzz.go)
+are internal Go interfaces. Pin and qualify their cache and corpus behavior
+before depending on them. The [inert control sources](../../examples/qualification/go/README.md)
+prepare this prerequisite. Their recorded exact digest has human source approval
+as of 2026-10-01; exact-source model review and build/run results remain pending.
+The existing sandbox Go 1.26.5 pin serves Syzkaller and does not qualify Go
+native fuzzing. User demand on 2026-10-01 selects Go before Python; the
+independent-module fixed-budget acceptance requirement remains.
 
 Go keeps its regression corpus in `testdata/fuzz/<FuzzXxx>` and additional
 interesting inputs in the fuzz cache. The service inventories both run-owned

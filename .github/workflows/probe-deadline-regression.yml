@@ -19,5 +19,5 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: readiness-probe
-      - name: Test inherited stdout deadline
-        run: ./scripts/cargo-test-filtered.sh -p hf-runtime --lib config::tests::run_bounded_times_out_when_descendant_retains_stdout -- --exact
+      - name: Test readiness probe capture
+        run: ./scripts/cargo-test-filtered.sh -p hf-runtime --lib config::tests::run_bounded

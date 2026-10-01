@@ -324,7 +324,11 @@ remain governed by the inventory rules above.
 
 An owned worker thread runs the asynchronous process capture and joins before
 returning, so calls made inside an existing Tokio runtime do not nest a runtime
-on the caller thread. The absolute deadline starts before worker setup. Spawn,
+on the caller thread. Windows uses a unique local named pipe with overlapped
+I/O for stdout, one server instance and no remote clients. Its connect and read
+are inside the capture deadline; cancellation drops the reader without leaving
+a blocking-pool read for runtime shutdown to await. Unix uses the asynchronous
+child stdout pipe. The absolute deadline starts before worker setup. Spawn,
 worker setup, capture, and teardown errors are diagnosed rather than silently
 accepted as successful output. The existing executable discovery/version probes
 are separate from these daemon/image queries; this change does not give the
