@@ -1017,6 +1017,108 @@ mod workspace_tests {
             .unwrap();
     }
 
+    struct FileLockWakeObserver {
+        file: std::sync::Mutex<std::fs::File>,
+        unlocked_on_wake: std::sync::atomic::AtomicBool,
+    }
+
+    impl std::task::Wake for FileLockWakeObserver {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &std::sync::Arc<Self>) {
+            let file = self.file.lock().unwrap();
+            match file.try_lock() {
+                Ok(()) => {
+                    file.unlock().unwrap();
+                    self.unlocked_on_wake
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {}
+                Err(error) => panic!("inspect file lock at handoff: {error}"),
+            }
+        }
+    }
+
+    fn assert_file_released_at_handoff(
+        waiter: impl std::future::Future,
+        lease: impl Sized,
+        file: std::fs::File,
+        _retained_handle: std::fs::File,
+    ) {
+        let observer = std::sync::Arc::new(FileLockWakeObserver {
+            file: std::sync::Mutex::new(file),
+            unlocked_on_wake: std::sync::atomic::AtomicBool::new(false),
+        });
+        let waker = std::task::Waker::from(observer.clone());
+        let mut context = std::task::Context::from_waker(&waker);
+        let mut waiter = std::pin::pin!(waiter);
+        assert!(std::future::Future::poll(waiter.as_mut(), &mut context).is_pending());
+        drop(lease);
+        assert!(
+            observer
+                .unlocked_on_wake
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "a queued waiter must observe the advisory lock already released when awakened"
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_cleanup_releases_file_lock_before_waking_operation() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = prepare_managed_workspace_root(&parent.path().join("workspace")).unwrap();
+        let container = ServiceContainer::stubbed();
+        let cleanup = ServiceContainer::try_acquire_workspace_cleanup(&root).unwrap();
+        let retained_handle = cleanup.system_guard.try_clone().unwrap();
+        assert_file_released_at_handoff(
+            container.acquire_workspace_operation_at(&root),
+            cleanup,
+            workspace_lock_file(&root).unwrap(),
+            retained_handle,
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_operation_releases_file_lock_before_waking_exclusive_waiter() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = prepare_managed_workspace_root(&parent.path().join("workspace")).unwrap();
+        let container = ServiceContainer::stubbed();
+        let operation = container
+            .acquire_workspace_operation_at(&root)
+            .await
+            .unwrap();
+        let (_, gate) = super::workspace_operation_gate(&root).unwrap();
+        let retained_handle = operation.system_guard.try_clone().unwrap();
+        assert_file_released_at_handoff(
+            gate.write_owned(),
+            operation,
+            workspace_lock_file(&root).unwrap(),
+            retained_handle,
+        );
+    }
+
+    #[tokio::test]
+    async fn target_revision_releases_file_lock_before_waking_next_revision() {
+        let parent = tempfile::tempdir().unwrap();
+        let workspace = parent.path().join("target");
+        std::fs::create_dir(&workspace).unwrap();
+        let (_, gate) = super::target_revision_gate(&workspace).unwrap();
+        let file = target_revision_lock_file(&workspace).unwrap();
+        file.try_lock().unwrap();
+        let revision = super::super::TargetRevisionLease {
+            _process_guard: gate.clone().lock_owned().await,
+            system_guard: file,
+        };
+        let retained_handle = revision.system_guard.try_clone().unwrap();
+        assert_file_released_at_handoff(
+            gate.lock_owned(),
+            revision,
+            target_revision_lock_file(&workspace).unwrap(),
+            retained_handle,
+        );
+    }
+
     #[test]
     fn workspace_file_lease_blocks_cleanup_without_the_process_gate() {
         let parent = tempfile::tempdir().unwrap();

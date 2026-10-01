@@ -251,6 +251,12 @@ cleanup requires the exclusive lease. Cleanup fails busy if an operation is
 already active, including the pre-registration window before a run appears in
 the cancellation registry; an operation arriving after cleanup began cannot
 enter and either waits on the process-local gate or fails busy on the file gate.
+Combined workspace and target revision leases explicitly unlock the advisory
+file before releasing the process guard on completion or cancellation. Releasing the process
+guard wakes queued local callers, so the file lock must already be available
+when they resume. Unlock failure is logged; the file still closes before the
+process guard as an operating-system cleanup fallback. Cross-process contention
+still fails busy.
 Cleanup then deletes only a canonical, non-symlink workspace root whose
 versioned ownership manifest names that exact path.
 Environment overrides cannot authorize deletion of filesystem, home,

@@ -136,22 +136,50 @@ pub(crate) const WORKSPACE_CLEANUP_BUSY_MESSAGE: &str =
     "workspace cannot be cleared while another workspace operation is active";
 pub(crate) const EXACT_DOCKER_IMAGE_REV_PREFIX: &str = "docker-image-id-sha256:";
 
+// Fields drop in declaration order: close the advisory lock before releasing
+// the process guard, which can immediately wake the next local waiter.
 pub(crate) struct WorkspaceOperationLease {
+    system_guard: File,
     _process_guard: tokio::sync::OwnedRwLockReadGuard<()>,
-    _system_guard: File,
 }
 
 pub(crate) struct WorkspaceCleanupLease {
+    system_guard: File,
     _process_guard: tokio::sync::OwnedRwLockWriteGuard<()>,
-    _system_guard: File,
 }
 
 /// Exclusive ownership of one target's active harness revision. The lock order
 /// is workspace-operation first, then target-revision, so root cleanup cannot
 /// deadlock against compile, review, smoke, promotion, or revert.
 pub(crate) struct TargetRevisionLease {
+    system_guard: File,
     _process_guard: tokio::sync::OwnedMutexGuard<()>,
-    _system_guard: File,
+}
+
+fn unlock_advisory_file(file: &File) {
+    if let Err(error) = file.unlock() {
+        // A destructor cannot return this error. The file still closes before
+        // the process guard releases, retaining OS cleanup as a fallback.
+        tracing::warn!(%error, "explicit advisory file unlock failed; falling back to close");
+    }
+}
+
+impl Drop for WorkspaceOperationLease {
+    fn drop(&mut self) {
+        unlock_advisory_file(&self.system_guard);
+    }
+}
+
+impl Drop for WorkspaceCleanupLease {
+    fn drop(&mut self) {
+        unlock_advisory_file(&self.system_guard);
+    }
+}
+
+impl Drop for TargetRevisionLease {
+    fn drop(&mut self) {
+        unlock_advisory_file(&self.system_guard);
+    }
 }
 
 #[cfg(feature = "harness-work-order")]
@@ -922,7 +950,7 @@ impl ServiceContainer {
             .map_err(|error| workspace_lock_error(error, false))?;
         Ok(WorkspaceOperationLease {
             _process_guard: process_guard,
-            _system_guard: system_guard,
+            system_guard,
         })
     }
 
@@ -962,7 +990,7 @@ impl ServiceContainer {
             .map_err(|error| workspace_lock_error(error, true))?;
         Ok(TargetRevisionLease {
             _process_guard: process_guard,
-            _system_guard: system_guard,
+            system_guard,
         })
     }
 
@@ -981,7 +1009,7 @@ impl ServiceContainer {
             .map_err(|error| workspace_lock_error(error, false))?;
         Ok(WorkspaceOperationLease {
             _process_guard: process_guard,
-            _system_guard: system_guard,
+            system_guard,
         })
     }
 
@@ -1001,7 +1029,7 @@ impl ServiceContainer {
             .map_err(|error| workspace_lock_error(error, true))?;
         Ok(WorkspaceCleanupLease {
             _process_guard: process_guard,
-            _system_guard: system_guard,
+            system_guard,
         })
     }
 
