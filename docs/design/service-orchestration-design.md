@@ -296,7 +296,17 @@ cannot overwrite unknown damaged evidence; recurring schedules still execute
 from their in-memory definitions. Recovery acknowledgement serializes cursor
 reconciliation with direct remove and enable/disable, then re-reads and updates
 only the current definition; it never recreates a removed schedule or restores
-a stale enabled value. The service maps recovery failures to stable public
+a stale enabled value.
+
+Schedule-file mutations acquire the per-path process mutex before the
+advisory file lock. Completion and cancellation explicitly unlock the file
+while retaining the process mutex, before waking a queued local waiter.
+Unlock failure is logged; file close precedes process-mutex release as an
+operating-system fallback. External contenders retain the existing bounded
+polling and timeout policy. Workspace and schedule leases use the same
+service-owned advisory-unlock helper.
+
+The service maps recovery failures to stable public
 `not_found`, `conflict`, `unavailable`, or `internal` codes and bounded messages.
 REST, Tauri, and CLI never format the underlying path-, SQL-, OS-, or
 stored-JSON-bearing error directly.

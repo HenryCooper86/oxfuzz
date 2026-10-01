@@ -6,6 +6,8 @@
 //! ensures every build / fuzz run goes through `hf-runtime` sandboxing
 //! (Engineering Protocol 2.12).
 
+use crate::advisory_lock::unlock_advisory_file;
+
 #[cfg(feature = "ai-target-ranking")]
 mod ai_target_ranking;
 pub(crate) mod build_context;
@@ -154,14 +156,6 @@ pub(crate) struct WorkspaceCleanupLease {
 pub(crate) struct TargetRevisionLease {
     system_guard: File,
     _process_guard: tokio::sync::OwnedMutexGuard<()>,
-}
-
-fn unlock_advisory_file(file: &File) {
-    if let Err(error) = file.unlock() {
-        // A destructor cannot return this error. The file still closes before
-        // the process guard releases, retaining OS cleanup as a fallback.
-        tracing::warn!(%error, "explicit advisory file unlock failed; falling back to close");
-    }
 }
 
 impl Drop for WorkspaceOperationLease {

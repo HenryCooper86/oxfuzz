@@ -8,6 +8,7 @@
 //! business logic out of presentation crates (Engineering Protocol 2.9) and routing every
 //! build/run through `hf-runtime` sandboxing (Engineering Protocol 2.12).
 
+mod advisory_lock;
 pub mod agent;
 #[cfg(feature = "automotive-scapy")]
 pub mod automotive;

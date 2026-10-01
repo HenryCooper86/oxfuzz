@@ -255,8 +255,14 @@ impl RetirementFaults {
 }
 
 pub(crate) struct SchedulePathLease {
+    file: File,
     _process: tokio::sync::OwnedMutexGuard<()>,
-    _file: File,
+}
+
+impl Drop for SchedulePathLease {
+    fn drop(&mut self) {
+        crate::advisory_lock::unlock_advisory_file(&self.file);
+    }
 }
 
 static PROCESS_PATH_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<tokio::sync::Mutex<()>>>>> =
@@ -340,7 +346,7 @@ async fn acquire_schedule_path_lease_with_timeout(
     }
     Ok(SchedulePathLease {
         _process: process_guard,
-        _file: file,
+        file,
     })
 }
 
@@ -1908,6 +1914,59 @@ mod tests {
         acquire_schedule_path_lease_with_timeout(&schedule_path, Duration::from_secs(1))
             .await
             .unwrap();
+    }
+
+    struct ScheduleLockWakeObserver {
+        file: Mutex<File>,
+        unlocked_on_wake: std::sync::atomic::AtomicBool,
+    }
+
+    impl std::task::Wake for ScheduleLockWakeObserver {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            let file = self.file.lock().unwrap();
+            match file.try_lock() {
+                Ok(()) => {
+                    file.unlock().unwrap();
+                    self.unlocked_on_wake
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                Err(TryLockError::WouldBlock) => {}
+                Err(error) => panic!("inspect schedule lock at handoff: {error}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn schedule_path_lease_releases_file_before_waking_next_waiter() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("schedules.json");
+        let lease = acquire_schedule_path_lease(&path).await.unwrap();
+        let _retained_handle = lease.file.try_clone().unwrap();
+        let observer = Arc::new(ScheduleLockWakeObserver {
+            file: Mutex::new(
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(schedule_lock_path(&path))
+                    .unwrap(),
+            ),
+            unlocked_on_wake: std::sync::atomic::AtomicBool::new(false),
+        });
+        let waker = std::task::Waker::from(observer.clone());
+        let mut context = std::task::Context::from_waker(&waker);
+        let mut waiter = std::pin::pin!(acquire_schedule_path_lease(&path));
+        assert!(std::future::Future::poll(waiter.as_mut(), &mut context).is_pending());
+        drop(lease);
+        assert!(
+            observer
+                .unlocked_on_wake
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "the next local schedule waiter must observe the advisory lock released when awakened"
+        );
     }
 
     #[tokio::test]
