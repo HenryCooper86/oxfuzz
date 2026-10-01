@@ -63,8 +63,10 @@ cooperative point. Search and walk errors propagate instead of returning
 misleading successful partial output. Source scope and link policies remain
 those of the existing inspection tools. NUL bytes do not reclassify a file or
 renumber its matching records; otherwise a later page could lose ordinary
-files that earlier continuation offsets had counted after that file. Matching
-non-UTF-8 text fails explicitly. Read failures return errors.
+files that earlier continuation offsets had counted after that file. In content
+mode, a matching record that is not valid UTF-8 returns an error. Count and
+file-list modes do not apply that content-encoding check. Read failures return
+errors.
 
 
 ## Verification
