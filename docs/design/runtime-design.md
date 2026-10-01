@@ -311,6 +311,29 @@ observe further bounded lines, but retained buffers never grow without limit
 and include a truncation marker when data was discarded. A single unterminated
 line is bounded as well, so malformed output cannot bypass the cap.
 
+### Host readiness queries
+
+Docker daemon/image/toolchain queries keep their synchronous public API. Their
+existing per-query deadline covers both child completion and stdout EOF. Output
+is drained while the child runs; a full pipe must not prevent a successful
+query. An inherited stdout handle held by a descendant must not extend capture
+past that deadline. Timeout or capture failure closes the pipe and kills and
+reaps the owned CLI child before returning unavailable. This does not assert
+that killing a Docker client stops a container; execution ownership and recovery
+remain governed by the inventory rules above.
+
+An owned worker thread runs the asynchronous process capture and joins before
+returning, so calls made inside an existing Tokio runtime do not nest a runtime
+on the caller thread. Windows uses a unique local named pipe with overlapped
+I/O for stdout, one server instance and no remote clients. Its connect and read
+are inside the capture deadline; cancellation drops the reader without leaving
+a blocking-pool read for runtime shutdown to await. Unix uses the asynchronous
+child stdout pipe. The absolute deadline starts before worker setup. Spawn,
+worker setup, capture, and teardown errors are diagnosed rather than silently
+accepted as successful output. The existing executable discovery/version probes
+are separate from these daemon/image queries; this change does not give the
+entire readiness operation a shared deadline.
+
 ## 6. Tests
 
 - Pure argument tests cover resource, network, capability, device, and mount
@@ -318,6 +341,10 @@ line is bounded as well, so malformed output cannot bypass the cap.
 - Filesystem tests prove outside-root paths, parent traversal, and symlink
   escapes are rejected before Docker or host I/O is attempted.
 - Mocked process tests cover timeout/cancellation status and bounded output.
+- Trusted test subprocesses cover stdout larger than the pipe buffer, a
+  descendant retaining stdout after parent exit, and synchronous query calls
+  inside an existing Tokio runtime. They use owned temporary markers and finite
+  fixture lifetimes; no Docker or generated target is executed.
 - Service contract tests prove every build and run uses `hf-runtime`, the
   promoted-revision gate, digest verification, run-scoped evidence, and the
   read-only execution mount profile.

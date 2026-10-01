@@ -142,43 +142,126 @@ const DOCKER_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// spawned or exceeds `timeout` (the child is killed and reaped). Readiness
 /// probes use this so a wedged daemon surfaces as "not ready" instead of an
 /// unbounded hang.
-fn run_bounded(cmd: &mut std::process::Command, timeout: Duration) -> Option<std::process::Output> {
-    use std::io::Read;
-    let mut child = cmd
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
+fn run_bounded(cmd: std::process::Command, timeout: Duration) -> Option<std::process::Output> {
     let deadline = std::time::Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => {
-                // The process exited; draining the small probe stdout cannot
-                // block (probes emit a few lines at most, so the pipe buffer
-                // never fills while we poll).
-                let mut stdout = Vec::new();
-                if let Some(mut pipe) = child.stdout.take() {
-                    let _ = pipe.read_to_end(&mut stdout);
+    let worker = match std::thread::Builder::new()
+        .name("hf-readiness-probe".to_owned())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    tracing::warn!(%error, "Cannot initialize readiness probe worker");
+                    return None;
                 }
-                let status = child.wait().ok()?;
-                return Some(std::process::Output {
-                    status,
-                    stdout,
-                    stderr: Vec::new(),
-                });
-            }
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            // Past the deadline, or the wait itself failed: kill and reap.
-            Ok(None) | Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
+            };
+            runtime.block_on(capture_probe(cmd, deadline))
+        }) {
+        Ok(worker) => worker,
+        Err(error) => {
+            tracing::warn!(%error, "Cannot start readiness probe worker");
+            return None;
+        }
+    };
+    if let Ok(output) = worker.join() {
+        output
+    } else {
+        tracing::warn!("Readiness probe worker panicked");
+        None
+    }
+}
+
+async fn capture_probe(
+    cmd: std::process::Command,
+    deadline: std::time::Instant,
+) -> Option<std::process::Output> {
+    use tokio::io::AsyncReadExt;
+    if std::time::Instant::now() >= deadline {
+        return None;
+    }
+    let mut cmd = cmd;
+    #[cfg(windows)]
+    let pipe = match windows_probe_stdout(&mut cmd) {
+        Ok(pipe) => pipe,
+        Err(error) => {
+            tracing::warn!(%error, "Cannot initialize readiness probe stdout");
+            return None;
+        }
+    };
+    #[cfg(not(windows))]
+    cmd.stdout(std::process::Stdio::piped());
+    let mut child = match tokio::process::Command::from(cmd)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            tracing::debug!(%error, "Cannot spawn readiness probe");
+            return None;
+        }
+    };
+    let capture = async {
+        let mut stdout = Vec::new();
+        #[cfg(windows)]
+        let mut pipe = pipe;
+        #[cfg(not(windows))]
+        let mut pipe = child.stdout.take();
+        let read = async {
+            #[cfg(windows)]
+            pipe.connect().await?;
+            #[cfg(not(windows))]
+            let pipe = pipe
+                .as_mut()
+                .ok_or_else(|| std::io::Error::other("Readiness probe stdout pipe is missing"))?;
+            pipe.read_to_end(&mut stdout).await?;
+            Ok::<_, std::io::Error>(stdout)
+        };
+        tokio::try_join!(child.wait(), read)
+    };
+    match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), capture).await {
+        Ok(Ok((status, stdout))) => {
+            return Some(std::process::Output {
+                status,
+                stdout,
+                stderr: Vec::new(),
+            });
+        }
+        Ok(Err(error)) => tracing::warn!(%error, "Cannot capture readiness probe output"),
+        Err(_) => tracing::debug!("Readiness probe exceeded its deadline"),
+    }
+    // The cancelled capture has closed stdout. A reaped child has no process id;
+    // otherwise kill() waits for the owned CLI child before this worker returns.
+    if child.id().is_some() {
+        if let Err(error) = child.kill().await {
+            tracing::warn!(%error, "Cannot kill readiness probe child");
+            if let Err(error) = child.wait().await {
+                tracing::warn!(%error, "Cannot reap readiness probe child");
             }
         }
     }
+    None
+}
+
+#[cfg(windows)]
+fn windows_probe_stdout(
+    command: &mut std::process::Command,
+) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+    use tokio::net::windows::named_pipe::ServerOptions;
+
+    let name = format!(r"\\.\pipe\oxfuzz-readiness-{}", uuid::Uuid::new_v4());
+    let pipe = ServerOptions::new()
+        .access_outbound(false)
+        .first_pipe_instance(true)
+        .max_instances(1)
+        .reject_remote_clients(true)
+        .create(&name)?;
+    let writer = std::fs::OpenOptions::new().write(true).open(&name)?;
+    command.stdout(writer);
+    Ok(pipe)
 }
 
 /// Whether the Docker daemon is actually reachable. `docker info` only
@@ -187,15 +270,9 @@ fn run_bounded(cmd: &mut std::process::Command, timeout: Duration) -> Option<std
 /// `DOCKER_PROBE_TIMEOUT`: a wedged daemon reports not-ready.
 #[must_use]
 pub fn docker_daemon_ready() -> bool {
-    run_bounded(
-        crate::process_env::scrubbed_command(docker_bin()).args([
-            "info",
-            "--format",
-            "{{.ServerVersion}}",
-        ]),
-        DOCKER_PROBE_TIMEOUT,
-    )
-    .is_some_and(|o| o.status.success())
+    let mut command = crate::process_env::scrubbed_command(docker_bin());
+    command.args(["info", "--format", "{{.ServerVersion}}"]);
+    run_bounded(command, DOCKER_PROBE_TIMEOUT).is_some_and(|o| o.status.success())
 }
 
 /// Whether the sandbox image is loaded locally.
@@ -210,27 +287,24 @@ pub fn sandbox_image_present() -> bool {
 /// callers pass a validated pinned reference.
 #[must_use]
 pub fn image_present(image: &str) -> bool {
-    run_bounded(
-        crate::process_env::scrubbed_command(docker_bin()).args(["image", "inspect", image]),
-        DOCKER_PROBE_TIMEOUT,
-    )
-    .is_some_and(|o| o.status.success())
+    let mut command = crate::process_env::scrubbed_command(docker_bin());
+    command.args(["image", "inspect", image]);
+    run_bounded(command, DOCKER_PROBE_TIMEOUT).is_some_and(|o| o.status.success())
 }
 
 /// The architecture the loaded sandbox image was built for ("amd64"/"arm64"),
 /// or `None` when the image is absent.
 #[must_use]
 pub fn sandbox_image_arch() -> Option<String> {
-    let out = run_bounded(
-        crate::process_env::scrubbed_command(docker_bin()).args([
-            "image",
-            "inspect",
-            "--format",
-            "{{.Architecture}}",
-            SANDBOX_IMAGE,
-        ]),
-        DOCKER_PROBE_TIMEOUT,
-    )?;
+    let mut command = crate::process_env::scrubbed_command(docker_bin());
+    command.args([
+        "image",
+        "inspect",
+        "--format",
+        "{{.Architecture}}",
+        SANDBOX_IMAGE,
+    ]);
+    let out = run_bounded(command, DOCKER_PROBE_TIMEOUT)?;
     if !out.status.success() {
         return None;
     }
@@ -267,11 +341,9 @@ impl SandboxEngines {
 /// loaded image. Reject malformed output so callers never mistake a mutable
 /// name for immutable provenance.
 pub(crate) fn image_id(image: &str) -> Option<String> {
-    let out = run_bounded(
-        crate::process_env::scrubbed_command(docker_bin())
-            .args(["image", "inspect", "--format", "{{.Id}}", image]),
-        DOCKER_PROBE_TIMEOUT,
-    )?;
+    let mut command = crate::process_env::scrubbed_command(docker_bin());
+    command.args(["image", "inspect", "--format", "{{.Id}}", image]);
+    let out = run_bounded(command, DOCKER_PROBE_TIMEOUT)?;
     if !out.status.success() {
         return None;
     }
@@ -307,19 +379,18 @@ fn engines_from_probe_output(found: &str) -> SandboxEngines {
 /// Run a one-shot container that reports which engine binaries exist in the
 /// image. All-false if the run fails.
 fn probe_sandbox_engines() -> SandboxEngines {
-    let out = run_bounded(
-        crate::process_env::scrubbed_command(docker_bin()).args([
-            "run",
-            "--rm",
-            "--entrypoint",
-            "sh",
-            SANDBOX_IMAGE,
-            "-c",
-            "for b in clang afl-fuzz honggfuzz syz-manager; do \
+    let mut command = crate::process_env::scrubbed_command(docker_bin());
+    command.args([
+        "run",
+        "--rm",
+        "--entrypoint",
+        "sh",
+        SANDBOX_IMAGE,
+        "-c",
+        "for b in clang afl-fuzz honggfuzz syz-manager; do \
              command -v \"$b\" >/dev/null 2>&1 && echo \"$b\"; done",
-        ]),
-        DOCKER_PROBE_TIMEOUT,
-    );
+    ]);
+    let out = run_bounded(command, DOCKER_PROBE_TIMEOUT);
     match out {
         Some(out) if out.status.success() => {
             engines_from_probe_output(&String::from_utf8_lossy(&out.stdout))
@@ -466,7 +537,7 @@ mod tests {
 
     #[test]
     fn run_bounded_captures_stdout_and_success() {
-        let out = run_bounded(&mut shell_command("echo ready"), Duration::from_secs(5))
+        let out = run_bounded(shell_command("echo ready"), Duration::from_secs(5))
             .expect("fast command completes");
         assert!(out.status.success());
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ready");
@@ -474,7 +545,7 @@ mod tests {
 
     #[test]
     fn run_bounded_reports_a_failing_exit() {
-        let out = run_bounded(&mut shell_command("exit 1"), Duration::from_secs(5))
+        let out = run_bounded(shell_command("exit 1"), Duration::from_secs(5))
             .expect("failed command still returns its output");
         assert!(!out.status.success());
     }
@@ -482,7 +553,7 @@ mod tests {
     #[test]
     fn run_bounded_kills_a_wedged_command_instead_of_hanging() {
         let start = Instant::now();
-        let out = run_bounded(&mut long_running_command(), Duration::from_millis(200));
+        let out = run_bounded(long_running_command(), Duration::from_millis(200));
         assert!(out.is_none(), "a wedged command yields no output");
         assert!(
             start.elapsed() < Duration::from_secs(5),
@@ -493,10 +564,119 @@ mod tests {
     #[test]
     fn run_bounded_missing_binary_is_none() {
         assert!(run_bounded(
-            &mut std::process::Command::new("definitely-not-a-real-binary-hf"),
+            std::process::Command::new("definitely-not-a-real-binary-hf"),
             Duration::from_secs(1),
         )
         .is_none());
+    }
+
+    fn pipe_fixture_command(root: &std::path::Path, role: &str) -> std::process::Command {
+        let mut command =
+            crate::process_env::scrubbed_command(std::env::current_exe().expect("test executable"));
+        command
+            .args([
+                "--ignored",
+                "--exact",
+                "config::tests::probe_pipe_fixture",
+                "--nocapture",
+            ])
+            .env("HF_PROBE_FIXTURE_ROOT", root)
+            .env("HF_PROBE_FIXTURE_ROLE", role);
+        command
+    }
+
+    fn wait_for_marker(path: &std::path::Path) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if path.is_file() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture; selected exactly by the deadline regression"]
+    fn probe_pipe_fixture() {
+        let root = std::path::PathBuf::from(
+            std::env::var_os("HF_PROBE_FIXTURE_ROOT").expect("owned fixture directory"),
+        );
+        match std::env::var("HF_PROBE_FIXTURE_ROLE")
+            .expect("fixture role")
+            .as_str()
+        {
+            "parent" => {
+                let holder = pipe_fixture_command(&root, "holder")
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::inherit())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .expect("start pipe holder");
+                // The holder deliberately outlives this parent. Its bounded lifetime
+                // and owned stop/done markers let the calling test await cleanup.
+                drop(holder);
+                assert!(wait_for_marker(&root.join("ready")), "holder started");
+                std::process::exit(0);
+            }
+            "holder" => {
+                std::fs::write(root.join("ready"), b"ready").expect("ready marker");
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !root.join("stop").is_file() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                std::fs::write(root.join("done"), b"done").expect("done marker");
+                std::process::exit(0);
+            }
+            "output" => {
+                use std::io::Write;
+                let mut stdout = std::io::stdout().lock();
+                stdout
+                    .write_all(&vec![b'x'; 256 * 1024])
+                    .expect("large probe output");
+                stdout.flush().expect("flush output");
+                std::process::exit(0);
+            }
+            role => panic!("unknown fixture role: {role}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_bounded_times_out_when_descendant_retains_stdout() {
+        let root = tempfile::tempdir().expect("owned fixture directory");
+        let start = Instant::now();
+        let out = run_bounded(
+            pipe_fixture_command(root.path(), "parent"),
+            Duration::from_secs(2),
+        );
+        let elapsed = start.elapsed();
+        std::fs::write(root.path().join("stop"), b"stop").expect("stop pipe holder");
+        let stopped = wait_for_marker(&root.path().join("done"));
+        assert!(
+            root.path().join("ready").is_file(),
+            "holder actually started"
+        );
+        assert!(stopped, "fixture holder acknowledged cleanup");
+        assert!(
+            out.is_none(),
+            "stdout must finish within the probe deadline"
+        );
+        assert!(
+            elapsed < Duration::from_secs(4),
+            "probe returned before the holder's fallback exit"
+        );
+    }
+
+    #[test]
+    fn run_bounded_drains_stdout_while_child_is_running() {
+        let root = tempfile::tempdir().expect("owned fixture directory");
+        let out = run_bounded(
+            pipe_fixture_command(root.path(), "output"),
+            Duration::from_secs(2),
+        )
+        .expect("output larger than the pipe buffer completes");
+        assert!(out.status.success());
+        assert!(out.stdout.ends_with(&vec![b'x'; 256 * 1024]));
     }
 
     #[test]
