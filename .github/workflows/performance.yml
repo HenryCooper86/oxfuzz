@@ -1,0 +1,122 @@
+name: Performance diagnostics
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: performance-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  measure:
+    name: ${{ matrix.runner }}
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            runner: gha-linux-ubuntu24-x64-diagnostic
+          - os: windows-2025
+            runner: gha-windows2025-x64-diagnostic
+          - os: macos-26
+            runner: gha-macos26-arm64-diagnostic
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_RELEASE_STRIP: none
+      OXFUZZ_PERFORMANCE_RUNNER: ${{ matrix.runner }}
+    steps:
+      - name: Check out the dispatch commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Admit the exact successful source-CI candidate
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const { inspectPerformanceCandidate } = require('./scripts/performance_candidate.cjs');
+            const receipt = await inspectPerformanceCandidate({ github, context });
+            const directory = path.join(process.env.RUNNER_TEMP, 'oxfuzz-performance');
+            for (const [variable, value] of Object.entries({
+              CARGO_TARGET_DIR: path.join(process.env.RUNNER_TEMP, 'oxfuzz-performance-target'),
+              OXFUZZ_PERFORMANCE_DIRECTORY: directory,
+              OXFUZZ_DISPATCH_REPORT: path.join(directory, 'dispatch.json'),
+              OXFUZZ_HISTORY_REPORT: path.join(directory, 'history.json'),
+            })) core.exportVariable(variable, value);
+            fs.mkdirSync(directory, { recursive: true });
+            fs.writeFileSync(path.join(directory, 'source-ci.json'), JSON.stringify(receipt, null, 2));
+
+      - name: Provision the pinned toolchain
+        run: rustup show active-toolchain
+
+      # No Rust cache: unrelated debug artifacts consume space and do not
+      # qualify the isolated release-profile build used for these reports.
+      - name: Record the actual runner image
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const fields = {
+              runner_os: 'RUNNER_OS', runner_arch: 'RUNNER_ARCH', runner_name: 'RUNNER_NAME',
+              image_os: 'ImageOS', image_version: 'ImageVersion',
+            };
+            const record = {
+              schema_version: 1, candidate_commit: context.sha,
+              runner: process.env.OXFUZZ_PERFORMANCE_RUNNER,
+              workflow_run_id: context.runId,
+              workflow_run_attempt: Number(process.env.GITHUB_RUN_ATTEMPT),
+            };
+            for (const [field, variable] of Object.entries(fields)) {
+              const value = process.env[variable];
+              if (!value?.trim()) throw new Error(`Runner image identity is missing: ${variable}`);
+              record[field] = value;
+            }
+            fs.writeFileSync(path.join(process.env.OXFUZZ_PERFORMANCE_DIRECTORY, 'runner.json'),
+              JSON.stringify(record, null, 2));
+
+      - name: Compile both selected measurements
+        run: bash scripts/performance_measurements.sh prepare
+
+      - name: Recheck the same source-CI run and attempt
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const { recheckPerformanceCandidate } = require('./scripts/performance_candidate.cjs');
+            const receipt = JSON.parse(fs.readFileSync(
+              path.join(process.env.OXFUZZ_PERFORMANCE_DIRECTORY, 'source-ci.json'), 'utf8'));
+            await recheckPerformanceCandidate({ github, context, receipt });
+
+      - name: Collect sequential diagnostic samples
+        run: bash scripts/performance_measurements.sh measure
+
+      - name: Validate the complete diagnostic bundle
+        run: |
+          python3 -m scripts.check_performance_bundle \
+            --directory "$OXFUZZ_PERFORMANCE_DIRECTORY" \
+            --revision "$GITHUB_SHA" --runner "$OXFUZZ_PERFORMANCE_RUNNER" \
+            --max-report-bytes 1048576
+
+      - name: Retain available diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-${{ matrix.runner }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/oxfuzz-performance/*.json
+          if-no-files-found: warn
+          retention-days: 14

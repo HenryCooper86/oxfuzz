@@ -51,13 +51,27 @@ function ciRun(overrides = {}) {
   };
 }
 
+function gateJob(overrides = {}) {
+  return { name: 'All gates passed', status: 'completed', conclusion: 'success',
+    run_id: 7, run_attempt: 1, head_sha: SHA, ...overrides };
+}
+
 function fakeGithub({
   runs = [[ciRun()]], release = {}, releaseAssets = assets(), tagCommit = SHA,
-  jobs = [{ name: 'All gates passed', status: 'completed', conclusion: 'success' }],
-  jobsByRun = {},
+  jobs = [gateJob()],
+  jobsByRun = {}, jobsByRead = {}, afterJobs,
 } = {}) {
   let ciReads = 0;
+  let jobReads = 0;
   const updates = [];
+  function readJobs({ run_id, per_page, attempt_number }) {
+    assert.ok([7, 8].includes(run_id));
+    assert.equal(per_page, 100);
+    assert.equal(attempt_number, 1);
+    const result = jobsByRead[++jobReads] ?? jobsByRun[run_id] ?? jobs;
+    afterJobs?.(jobReads);
+    return { data: { jobs: result } };
+  }
   const github = {
     rest: {
       repos: {
@@ -84,12 +98,7 @@ function fakeGithub({
           if (entry instanceof Error) throw entry;
           return { data: { workflow_runs: entry } };
         },
-        listJobsForWorkflowRun: async ({ run_id, per_page, filter }) => {
-          assert.ok([7, 8].includes(run_id));
-          assert.equal(per_page, 100);
-          assert.equal(filter, 'latest');
-          return { data: { jobs: jobsByRun[run_id] ?? jobs } };
-        },
+        listJobsForWorkflowRunAttempt: async args => readJobs(args),
       },
     },
     paginate: async (_method, { release_id }) => {
@@ -201,7 +210,7 @@ test('waits for a pending CI run on the candidate commit', () => withCandidate(a
     [ciRun()],
   ] });
   await run(root, fake);
-  assert.equal(fake.ciReads(), 4);
+  assert.ok(fake.ciReads() > 1);
   assert.equal(fake.updates.length, 1);
 }));
 
@@ -242,6 +251,14 @@ test('rejects missing CI and a failed CI run', () => withCandidate(async root =>
     ] },
   ]) {
     const fake = fakeGithub(fixture);
+    await assert.rejects(run(root, fake), /CI/);
+    assert.equal(fake.updates.length, 0);
+  }
+}));
+
+test('a non-successful workflow stays draft even if its aggregate job reports success', () => withCandidate(async root => {
+  for (const conclusion of ['failure', 'cancelled', 'skipped', 'timed_out', 'neutral', 'action_required', null]) {
+    const fake = fakeGithub({ runs: [[ciRun({ conclusion })]] });
     await assert.rejects(run(root, fake), /CI/);
     assert.equal(fake.updates.length, 0);
   }
@@ -295,4 +312,24 @@ test('GitHub API errors keep the release draft', () => withCandidate(async root 
   fake.github.rest.actions.listWorkflowRuns = async () => { throw new Error('API unavailable'); };
   await assert.rejects(run(root, fake), /API unavailable/);
   assert.equal(fake.updates.length, 0);
+}));
+
+
+test('publication refuses foreign aggregate identity in its final check', () => withCandidate(async root => {
+  for (const change of [{ run_id: 8 }, { run_attempt: 2 }, { head_sha: 'b'.repeat(40) }]) {
+    const fake = fakeGithub({ jobsByRead: { 3: [gateJob(change)] } });
+    await assert.rejects(run(root, fake), /CI/);
+    assert.equal(fake.updates.length, 0);
+  }
+}));
+
+test('publication refuses a CI rerun or replacement during its final job query', () => withCandidate(async root => {
+  for (const change of [{ run_attempt: 2 }, { id: 8, run_number: 8 }, { conclusion: 'failure' }]) {
+    const runs = [[ciRun()]];
+    const fake = fakeGithub({ runs, afterJobs: count => {
+      if (count === 3) runs.push([ciRun(change)]);
+    } });
+    await assert.rejects(run(root, fake), /CI/);
+    assert.equal(fake.updates.length, 0);
+  }
 }));

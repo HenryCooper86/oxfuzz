@@ -64,6 +64,56 @@ On macOS 27, set `CARGO_PROFILE_RELEASE_STRIP=none` for a release-profile
 history run, as the desktop build does, so the system loader can load Rust
 proc-macro libraries.
 
+## Opt-in cross-platform diagnostics
+
+A manual GitHub workflow on main may collect diagnostic release-profile
+samples on named Ubuntu 24.04, Windows 2025 and macOS 26 runners. These labels
+are listed in the [GitHub runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
+The runner image version and architecture are retained for each run; a hosted
+runner label alone does not establish stable timing or an enforced SLO.
+After main's source CI succeeds, dispatch
+`gh workflow run performance.yml --ref main`. The workflow records its exact
+dispatch commit; a later main push is a different candidate. Download each
+platform's artifact before its 14-day retention expires and recompute the
+summary with `python3 -m scripts.check_performance_bundle --directory <bundle>
+--revision <commit> --runner <recorded-runner> --max-report-bytes 1048576`.
+
+The workflow pins checkout to its dispatch commit and requires the newest
+main push of source CI for that exact commit to be completed and successful,
+including the successful `All gates passed` job. Release and diagnostic
+admission share this decision. A pending, failed, cancelled, missing or
+wrong-commit result refuses measurement. Recheck the same CI run/attempt after
+compilation and before measuring; a changed or rerun candidate needs a fresh
+diagnostic dispatch.
+Query aggregate jobs for the explicit inspected attempt, check their run,
+attempt and source identity, then reread the latest candidate after the job
+query. Separate API observations cannot provide atomicity against later
+GitHub changes, but evidence from different attempts must never be combined.
+
+Compile both selected tools before collecting samples. Only the dispatch
+benchmark and the exact ignored `profile_retained_multi_target_finding_queue`
+test may run; no ignored live harness test is selected. Run measurements
+sequentially, without concurrent builds. Use the release profile and
+`CARGO_PROFILE_RELEASE_STRIP=none`; bound each platform job to 90 minutes and
+two compiler jobs. Toolchains use the repository pin. Reports and build output
+remain outside the checkout so identity checks see a clean source tree.
+
+Retain the CI admission record, runner image identity, raw dispatch/history
+samples and a checked summary together as a short-lived workflow artifact.
+Report validation must bind both raw reports to the admitted commit and named
+runner, require the release profile, and reuse their existing sample validators.
+A positive report-byte allowance is resolved by the CLI before reading JSON.
+Malformed or incomplete data is a failed measurement; a high diagnostic P95
+is a recorded result, not a noisy shared-runner timing gate. Preserve available
+reports on failed jobs without calling an incomplete bundle accepted.
+
+The workflow uses read-only repository/Actions permissions and no provider or
+signing secret. Checkout does not persist its token. No release, installed
+client, live fuzzer, provider, target or generated harness is exercised.
+Publishing a sanitized acceptance record requires inspecting the retained
+samples and observed outcomes. Dedicated-runner variance and cross-platform
+operational qualification remain separate work.
+
 ## Rejected alternatives
 
 - Timing only a mock function omits registry lookup and schema validation.

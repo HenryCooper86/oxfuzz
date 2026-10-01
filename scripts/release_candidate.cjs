@@ -3,15 +3,11 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-const CI_WORKFLOW = 'ci.yml';
-const CI_POLL_MS = 30_000;
-const CI_MAX_POLLS = 60;
+const { CI_MAX_POLLS, waitForCandidateCi, requireSameLatestCi } = require('./source_ci.cjs');
 const REQUIRED_CLAIMS = ['userspace_engines', 'sandbox_isolation', 'installed_clients'];
 const OPTIONAL_CLAIMS = [
   'syzkaller', 'automotive_virtual_lab', 'automotive_physical_lab', 'finding_publication',
 ];
-
-const pause = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 
 function candidateVersion(root, tag) {
   if (!/^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(tag)) {
@@ -43,13 +39,6 @@ async function validateReleaseStart({ github, context, root }) {
     throw new Error(`release tag ${tag} no longer points to candidate commit ${sha}`);
   }
   return { tag, version, sha };
-}
-
-function newestPushRun(runs, sha) {
-  return runs
-    .filter(run => run.head_sha === sha && run.event === 'push')
-    .sort((left, right) =>
-      right.run_number - left.run_number || right.run_attempt - left.run_attempt)[0];
 }
 
 function acceptanceTemplate(sha) {
@@ -95,49 +84,6 @@ function checkedAcceptance(body, sha) {
   return record;
 }
 
-async function latestCandidateRun(github, repo, sha) {
-  const { data } = await github.rest.actions.listWorkflowRuns({
-    ...repo, workflow_id: CI_WORKFLOW, head_sha: sha, per_page: 100,
-  });
-  return newestPushRun(data.workflow_runs, sha);
-}
-
-async function requirePassedGate(github, repo, run) {
-  const { data: result } = await github.rest.actions.listJobsForWorkflowRun({
-    ...repo, run_id: run.id, per_page: 100, filter: 'latest',
-  });
-  const gates = result.jobs.filter(job => job.name === 'All gates passed');
-  if (gates.length !== 1 || gates[0].status !== 'completed' || gates[0].conclusion !== 'success') {
-    throw new Error(`candidate CI required gate failed or is missing in run ${run.id}`);
-  }
-}
-
-async function waitForCandidateCi({ github, repo, sha, attempts = CI_MAX_POLLS, sleep = pause }) {
-  if (!Number.isInteger(attempts) || attempts < 1) {
-    throw new Error('CI poll count must be positive');
-  }
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const run = await latestCandidateRun(github, repo, sha);
-    if (run?.status === 'completed') {
-      await requirePassedGate(github, repo, run);
-      return run;
-    }
-    if (attempt + 1 < attempts) {
-      await sleep(CI_POLL_MS);
-    }
-  }
-  throw new Error(`candidate CI did not complete successfully for ${sha}`);
-}
-
-async function requireSameLatestCi(github, repo, sha, expected) {
-  const current = await latestCandidateRun(github, repo, sha);
-  if (!current || current.id !== expected.id || current.run_attempt !== expected.run_attempt ||
-      current.status !== 'completed') {
-    throw new Error('candidate CI changed after validation; review the latest run before publishing');
-  }
-  await requirePassedGate(github, repo, current);
-}
-
 function requiredAssetNames(version) {
   return [
     `oxfuzz_${version}_aarch64.dmg`,
@@ -168,7 +114,7 @@ function checkedAssets(assets, version) {
 }
 
 async function inspectReleaseCandidate({
-  github, context, releaseId, root, attempts = CI_MAX_POLLS, sleep = pause,
+  github, context, releaseId, root, attempts = CI_MAX_POLLS, sleep,
 }) {
   const { tag, version, sha } = await validateReleaseStart({ github, context, root });
   const repo = context.repo;
