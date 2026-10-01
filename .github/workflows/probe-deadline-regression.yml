@@ -1,0 +1,23 @@
+name: Readiness probe regression
+on:
+  push:
+    branches: [codex/probe-deadline-regression]
+permissions:
+  contents: read
+jobs:
+  windows:
+    name: Windows inherited stdout regression
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - name: Provision pinned Rust
+        run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: readiness-probe
+      - name: Test inherited stdout deadline
+        run: ./scripts/cargo-test-filtered.sh -p hf-runtime --lib config::tests::run_bounded_times_out_when_descendant_retains_stdout -- --exact
