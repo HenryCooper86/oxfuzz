@@ -114,7 +114,7 @@ jobs:
 
       - name: Retain available diagnostic evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: performance-${{ matrix.runner }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/oxfuzz-performance/*.json
