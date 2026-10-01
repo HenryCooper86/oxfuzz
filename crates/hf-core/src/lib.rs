@@ -34,6 +34,7 @@ pub mod embedding;
 pub mod engine;
 pub mod error;
 pub mod exec;
+pub mod grep_limits;
 pub mod harness;
 pub mod provider;
 pub mod retired_engine;

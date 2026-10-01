@@ -207,7 +207,10 @@ impl ServiceContainer {
             None => registry.default_agent(),
         };
         let backend: Arc<dyn AgentBackend> = Arc::new(self.clone());
-        let agent = Agent::with_definition(backend, request.project, definition);
+        let grep_limits =
+            crate::config::resolve_grep_limits().map_err(ClassifiedError::Validation)?;
+        let agent = Agent::with_definition(backend, request.project, definition)
+            .with_grep_limits(grep_limits);
         let answer = agent.run_turn(history, &request.message, sink).await?;
 
         if let Some(id) = &request.session {

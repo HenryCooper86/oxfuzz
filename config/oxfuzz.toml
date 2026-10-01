@@ -122,3 +122,9 @@ history_retention_limit = 100
 # Allowed names for explicitly saved CMake definitions; no values are injected.
 [build_profiles]
 allowed_cmake_options = ["BUILD_SHARED_LIBS", "BUILD_TESTING"]
+
+# Finite source-search allowances; see grep-resources.md for their meaning.
+[grep]
+output_bytes = 10000
+heap_bytes = 16777216
+timeout_secs = 30

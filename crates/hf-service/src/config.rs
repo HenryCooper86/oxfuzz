@@ -953,6 +953,7 @@ struct OxfuzzRuntimeConfig {
     auto_revert_enabled: bool,
     auto_revert_threshold_pct: f64,
     auto_revert_notify_only: bool,
+    grep: hf_core::grep_limits::GrepLimitsConfig,
     fuzzing: FuzzingSettings,
     build_profiles: BuildProfileSettings,
     campaign_health: CampaignHealthSettings,
@@ -972,6 +973,7 @@ impl Default for OxfuzzRuntimeConfig {
             auto_revert_enabled: false,
             auto_revert_threshold_pct: DEFAULT_AUTO_REVERT_THRESHOLD_PCT,
             auto_revert_notify_only: false,
+            grep: hf_core::grep_limits::GrepLimitsConfig::default(),
             fuzzing: FuzzingSettings::default(),
             build_profiles: BuildProfileSettings::default(),
             campaign_health: CampaignHealthSettings::default(),
@@ -998,6 +1000,7 @@ impl OxfuzzRuntimeConfig {
                     .to_owned(),
             );
         }
+        self.grep.resolve()?;
         self.fuzzing.validate()?;
         self.build_profiles.validate()?;
         self.campaign_health.validate()?;
@@ -1019,6 +1022,19 @@ fn parse_oxfuzz_runtime_config(raw: &str) -> Result<OxfuzzRuntimeConfig, String>
         toml::from_str(raw).map_err(|error| format!("invalid oxfuzz config: {error}"))?;
     config.validate()?;
     Ok(config)
+}
+
+/// Read and resolve Grep allowances for the next chat turn.
+///
+/// # Errors
+/// Returns configuration read and validation errors without default fallback.
+pub fn resolve_grep_limits() -> Result<hf_core::grep_limits::GrepLimits, String> {
+    resolve_grep_limits_at(&config_dir())
+}
+
+fn resolve_grep_limits_at(directory: &Path) -> Result<hf_core::grep_limits::GrepLimits, String> {
+    let raw = read_config_from(directory, "oxfuzz")?;
+    parse_oxfuzz_runtime_config(&raw)?.grep.resolve()
 }
 
 fn effective_runtime_config() -> OxfuzzRuntimeConfig {
@@ -4040,6 +4056,7 @@ default_duration_secs = 22
             "coverage_stagnation_secs",
             "coverage_stagnation_stop_windows",
             "fuzzing",
+            "grep",
             "knowledge",
             "scheduler",
             "session",
@@ -4434,5 +4451,49 @@ enabled = false
             assert!(saved.contains("# Retain operator note."));
             assert!(saved.contains("# Retain response budget note."));
         }
+    }
+}
+
+#[cfg(test)]
+mod grep_configuration_tests {
+    use super::*;
+
+    #[test]
+    fn grep_settings_are_accepted_and_invalid_settings_fail_load() {
+        assert!(parse_oxfuzz_runtime_config(
+            "[grep]\noutput_bytes=123\nheap_bytes=4096\ntimeout_secs=2\n"
+        )
+        .is_ok());
+        for raw in [
+            "[grep]\noutput_bytes=0",
+            "[grep]\nheap_bytes=0",
+            "[grep]\ntimeout_secs=301",
+            "[grep]\nunknown=1",
+        ] {
+            assert!(parse_oxfuzz_runtime_config(raw).is_err(), "{raw}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod grep_resolution_tests {
+    #[test]
+    fn on_disk_grep_configuration_is_consumed_and_errors_are_propagated() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("oxfuzz.toml");
+        std::fs::write(
+            &file,
+            "[grep]\noutput_bytes=123\nheap_bytes=4096\ntimeout_secs=2\n",
+        )
+        .unwrap();
+        let limits = super::resolve_grep_limits_at(directory.path()).unwrap();
+        assert_eq!(limits.output_bytes(), 123);
+        assert_eq!(limits.heap_bytes(), 4096);
+        assert_eq!(limits.timeout_secs(), 2);
+        std::fs::write(&file, "[grep]\noutput_bytes=0\n").unwrap();
+        assert!(super::resolve_grep_limits_at(directory.path()).is_err());
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        assert!(super::resolve_grep_limits_at(directory.path()).is_err());
     }
 }

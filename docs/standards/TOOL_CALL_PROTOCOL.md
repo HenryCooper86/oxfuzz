@@ -39,7 +39,9 @@ pub trait Tool: Send + Sync {
 `KnowledgeSearch` is registered by `hf-agent` with its `AgentBackend`, so all
 four advertised tools have executable registry entries. The registry assembly
 test in `hf-agent::agent_tools` enforces exact parity between this catalog and
-the executable surface.
+the executable surface. Grep uses finite configured reader/result allowances
+and reports partial observed totals and continuation in its persisted result
+content; see [Grep resources](../design/grep-resources.md).
 
 Discovery, harness generation, harness build, fuzzing, crash triage, corpus
 mutation, scheduling, and sub-agent delegation are service-domain actions.

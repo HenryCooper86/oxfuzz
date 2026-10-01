@@ -43,6 +43,7 @@ pub const INSPECTION_CATALOG: &str = "\
 /// Build the inspection-tool registry (read-only file/search tools).
 pub async fn build_inspection_registry(
     backend: Arc<dyn crate::AgentBackend>,
+    grep_limits: hf_core::grep_limits::GrepLimits,
 ) -> Arc<ToolRegistryImpl> {
     let registry = ToolRegistryImpl::new(ToolRegistryConfig::default());
     let tools: Vec<(Arc<dyn Tool>, ToolDefinition)> = vec![
@@ -55,7 +56,7 @@ pub async fn build_inspection_registry(
             glob::GlobTool::tool_definition(),
         ),
         (
-            Arc::new(grep::GrepTool::new()),
+            Arc::new(grep::GrepTool::new().with_limits(grep_limits)),
             grep::GrepTool::tool_definition(),
         ),
         (
@@ -271,7 +272,13 @@ mod tests {
         let path = dir.path().join("target.c");
         std::fs::write(&path, "int parse_value(const char *s) { return 0; }").unwrap();
 
-        let registry = build_inspection_registry(test_backend()).await;
+        let registry = build_inspection_registry(
+            test_backend(),
+            hf_core::grep_limits::GrepLimitsConfig::default()
+                .resolve()
+                .unwrap(),
+        )
+        .await;
         let args = serde_json::json!({ "path": path.to_str().unwrap() });
         let out = dispatch_inspection(&registry, "FileRead", &args, dir.path().to_str()).await;
 
@@ -283,7 +290,13 @@ mod tests {
 
     #[tokio::test]
     async fn registry_registers_all_inspection_tools() {
-        let registry = build_inspection_registry(test_backend()).await;
+        let registry = build_inspection_registry(
+            test_backend(),
+            hf_core::grep_limits::GrepLimitsConfig::default()
+                .resolve()
+                .unwrap(),
+        )
+        .await;
         assert_eq!(registry.len().await, INSPECTION_TOOLS.len());
 
         let advertised = INSPECTION_CATALOG
@@ -305,7 +318,13 @@ mod tests {
 
     #[tokio::test]
     async fn active_inspection_surface_does_not_advertise_tool_search() {
-        let registry = build_inspection_registry(test_backend()).await;
+        let registry = build_inspection_registry(
+            test_backend(),
+            hf_core::grep_limits::GrepLimitsConfig::default()
+                .resolve()
+                .unwrap(),
+        )
+        .await;
 
         assert!(!INSPECTION_TOOLS.contains(&"ToolSearch"));
         assert!(!INSPECTION_CATALOG.contains("ToolSearch"));
@@ -324,7 +343,13 @@ mod tests {
         )
         .unwrap();
 
-        let registry = build_inspection_registry(test_backend()).await;
+        let registry = build_inspection_registry(
+            test_backend(),
+            hf_core::grep_limits::GrepLimitsConfig::default()
+                .resolve()
+                .unwrap(),
+        )
+        .await;
         let args = serde_json::json!({ "query": "copy_chunk" });
         // working_dir carries the project root, exactly as the agent passes it.
         let out =

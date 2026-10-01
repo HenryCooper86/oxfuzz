@@ -113,6 +113,7 @@ pub struct Agent {
     definition: AgentDefinition,
     max_iterations: usize,
     registry: OnceCell<Arc<ToolRegistryImpl>>,
+    grep_limits: hf_core::grep_limits::GrepLimits,
     /// How many delegation hops deep this agent is. The orchestrator runs at 0
     /// and may delegate to specialists (depth 1); specialists cannot delegate
     /// further, which bounds fan-out and prevents delegation cycles.
@@ -180,6 +181,9 @@ impl Agent {
     }
 
     /// Create an agent driven by a specific [`AgentDefinition`].
+    ///
+    /// # Panics
+    /// Panics if compiled default Grep allowances are invalid.
     #[must_use]
     pub fn with_definition(
         backend: Arc<dyn AgentBackend>,
@@ -193,10 +197,21 @@ impl Agent {
             definition,
             max_iterations,
             registry: OnceCell::new(),
+            grep_limits: hf_core::grep_limits::GrepLimitsConfig::default()
+                .resolve()
+                .expect("valid Grep defaults"),
             spill: std::sync::OnceLock::new(),
             delegation_depth: 0,
             reminders: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
+    }
+
+    /// Set inspection allowances and invalidate the registry using the old snapshot.
+    #[must_use]
+    pub fn with_grep_limits(mut self, limits: hf_core::grep_limits::GrepLimits) -> Self {
+        self.grep_limits = limits;
+        self.registry = OnceCell::new();
+        self
     }
 
     /// Set this agent's delegation depth (used when spawned as a sub-agent).
@@ -522,7 +537,9 @@ impl Agent {
                         let backend = Arc::clone(&self.backend);
                         let registry = self
                             .registry
-                            .get_or_init(|| agent_tools::build_inspection_registry(backend))
+                            .get_or_init(|| {
+                                agent_tools::build_inspection_registry(backend, self.grep_limits)
+                            })
                             .await;
                         agent_tools::dispatch_inspection(registry, &tool, &args, Some(wd)).await
                     }
@@ -635,6 +652,7 @@ impl Agent {
         }
         let sub =
             Agent::with_definition(Arc::clone(&self.backend), self.project.clone(), definition)
+                .with_grep_limits(self.grep_limits)
                 .at_delegation_depth(self.delegation_depth + 1);
         // Box the recursive turn: an async fn that awaits itself needs indirection.
         let run = Box::pin(sub.run_turn(Vec::new(), task, &NullSink));

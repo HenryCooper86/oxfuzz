@@ -986,3 +986,79 @@ fn walk_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     }
     found
 }
+
+#[tokio::test]
+async fn inspection_uses_new_grep_snapshot_after_registry_was_initialized() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("text"), "needle long content\n").unwrap();
+    let pool = Arc::new(ScriptedPool::new(vec![
+        r#"{"tool":"Grep","args":{"pattern":"needle","output_mode":"content"}}"#,
+        r#"{"final":"first"}"#,
+        r#"{"tool":"Grep","args":{"pattern":"needle","output_mode":"content"}}"#,
+        r#"{"final":"second"}"#,
+    ]));
+    let agent = Agent::new(
+        TestBackend::new(Some(pool)),
+        Some(project.path().to_owned()),
+    );
+    agent
+        .run_turn(vec![], "search", &CollectingSink::new())
+        .await
+        .unwrap();
+    let agent = agent.with_grep_limits(
+        hf_core::grep_limits::GrepLimitsConfig {
+            output_bytes: 8,
+            ..Default::default()
+        }
+        .resolve()
+        .unwrap(),
+    );
+    let sink = CollectingSink::new();
+    agent.run_turn(vec![], "search", &sink).await.unwrap();
+    let events = sink.events().await;
+    let summary = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolResult { name, summary } if name == "Grep" => Some(summary),
+            _ => None,
+        })
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_str(summary).unwrap();
+    assert!(result["content"].as_str().unwrap().len() <= 8);
+    assert_eq!(result["truncated"], true);
+    assert_eq!(result["totalsComplete"], false);
+}
+
+#[tokio::test]
+async fn delegated_inspection_inherits_finite_grep_limits_and_feedback() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("text"), "needle content\n").unwrap();
+    let pool = Arc::new(ScriptedPool::new(vec![
+        r#"{"tool":"delegate","args":{"agent":"target-scout","task":"search"}}"#,
+        r#"{"tool":"Grep","args":{"pattern":"needle","output_mode":"content"}}"#,
+        r#"{"final":"child finished"}"#,
+        r#"{"final":"parent finished"}"#,
+    ]));
+    let agent = Agent::new(
+        TestBackend::new(Some(pool.clone())),
+        Some(project.path().to_owned()),
+    )
+    .with_grep_limits(
+        hf_core::grep_limits::GrepLimitsConfig {
+            output_bytes: 8,
+            ..Default::default()
+        }
+        .resolve()
+        .unwrap(),
+    );
+    agent
+        .run_turn(vec![], "delegate search", &CollectingSink::new())
+        .await
+        .unwrap();
+    let requests = pool.requests.lock().await;
+    let feedback = &requests[2].messages.last().unwrap().content;
+    assert!(feedback.contains("\"truncated\":true"));
+    assert!(feedback.contains("\"totalsComplete\":false"));
+    assert!(feedback.contains("\"nextOffset\":1"));
+    assert!(!feedback.contains("needle content"));
+}

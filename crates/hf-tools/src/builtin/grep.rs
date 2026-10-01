@@ -8,15 +8,17 @@
 
 use std::collections::HashSet;
 
+use std::io::{self, Read};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use grep_matcher::Matcher;
 use grep_regex::RegexMatcherBuilder;
-use grep_searcher::sinks::UTF8;
-use grep_searcher::{Searcher, SearcherBuilder};
+use grep_searcher::{MmapChoice, Searcher, SearcherBuilder, Sink, SinkContext, SinkMatch};
+use hf_core::grep_limits::GrepLimits;
 use ignore::overrides::OverrideBuilder;
 use ignore::types::TypesBuilder;
 use ignore::WalkBuilder;
@@ -29,14 +31,8 @@ use hf_core::types::ToolName;
 
 use super::path_utils::{resolve_read_path, DropGuard};
 
-/// Maximum result size in characters returned to the LLM.
-const MAX_RESULT_SIZE_CHARS: usize = 10_000;
-
 /// Default `head_limit` when unspecified.
 const DEFAULT_HEAD_LIMIT: u64 = 250;
-
-/// Default timeout for the search (seconds).
-const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
 /// Built-in Grep tool for file content searching.
 ///
@@ -44,14 +40,32 @@ const DEFAULT_TIMEOUT_SECS: u64 = 30;
 /// Uses ripgrep library crates for fast, in-process file content searching.
 pub struct GrepTool {
     def: ToolDefinition,
+    limits: hf_core::grep_limits::GrepLimits,
+    #[cfg(test)]
+    worker_observer: Option<Arc<cancellation_tests::SearchObserver>>,
 }
 
 impl GrepTool {
     /// Create a new `GrepTool`.
+    ///
+    /// # Panics
+    /// Panics if compiled default allowances are invalid.
     pub fn new() -> Self {
         Self {
             def: Self::tool_definition(),
+            #[cfg(test)]
+            worker_observer: None,
+            limits: hf_core::grep_limits::GrepLimitsConfig::default()
+                .resolve()
+                .expect("valid Grep defaults"),
         }
+    }
+
+    /// Apply a validated deployment snapshot.
+    #[must_use]
+    pub fn with_limits(mut self, limits: hf_core::grep_limits::GrepLimits) -> Self {
+        self.limits = limits;
+        self
     }
 
     /// The tool definition for `Grep`.
@@ -91,23 +105,27 @@ impl GrepTool {
                     "output_mode": {
                         "type": "string",
                         "enum": ["content", "files_with_matches", "count"],
-                        "description": "Output mode: \"content\" shows matching lines (supports -A/-B/-C context, -n line numbers, head_limit), \"files_with_matches\" shows file paths (supports head_limit), \"count\" shows match counts (supports head_limit). Defaults to \"files_with_matches\"."
+                        "description": "Output mode: \"content\" shows matching records (supports -n line numbers, head_limit; context options are reserved and ignored), \"files_with_matches\" shows file paths (supports head_limit), \"count\" shows match counts (supports head_limit). Defaults to \"files_with_matches\"."
                     },
                     "-B": {
-                        "type": "number",
-                        "description": "Number of lines to show before each match (rg -B). Requires output_mode: \"content\", ignored otherwise."
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Reserved context option; matching-record output ignores context events."
                     },
                     "-A": {
-                        "type": "number",
-                        "description": "Number of lines to show after each match (rg -A). Requires output_mode: \"content\", ignored otherwise."
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Reserved context option; matching-record output ignores context events."
                     },
                     "-C": {
-                        "type": "number",
-                        "description": "Alias for context."
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Reserved context option; matching-record output ignores context events."
                     },
                     "context": {
-                        "type": "number",
-                        "description": "Number of lines to show before and after each match (rg -C). Requires output_mode: \"content\", ignored otherwise."
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Reserved context option; matching-record output ignores context events."
                     },
                     "-n": {
                         "type": "boolean",
@@ -122,11 +140,13 @@ impl GrepTool {
                         "description": "File type to search (rg --type). Common types: js, py, rust, go, java, etc. More efficient than include for standard file types."
                     },
                     "head_limit": {
-                        "type": "number",
-                        "description": "Limit output to first N lines/entries, equivalent to \"| head -N\". Works across all output modes: content (limits output lines), files_with_matches (limits file paths), count (limits count entries). Defaults to 250 when unspecified. Pass 0 for unlimited (use sparingly -- large result sets waste context)."
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Limit output to first N lines/entries, equivalent to \"| head -N\". Works across all output modes: content (limits output lines), files_with_matches (limits file paths), count (limits count entries). Defaults to 250 when unspecified. Pass 0 for no entry limit; the finite result byte allowance still applies."
                     },
                     "offset": {
-                        "type": "number",
+                        "type": "integer",
+                        "minimum": 0,
                         "description": "Skip first N lines/entries before applying head_limit, equivalent to \"| tail -n +N | head -N\". Works across all output modes. Defaults to 0."
                     },
                     "multiline": {
@@ -164,6 +184,12 @@ impl GrepTool {
                         "type": "integer",
                         "description": "Total number of matches (count mode only)"
                     },
+                    "truncated": { "type": "boolean", "description": "A page or byte allowance stopped output." },
+                    "hasMore": { "type": "boolean", "description": "More entries or omitted record text may exist." },
+                    "totalsComplete": { "type": "boolean", "description": "The whole search completed; otherwise totals are observed only." },
+                    "numReturned": { "type": "integer" },
+                    "nextOffset": { "type": "integer", "description": "Offset after consumed returned records; truncated content consumes its record." },
+                    "limitingReason": { "type": ["string", "null"], "enum": ["head_limit", "output_bytes", null] },
                     "appliedLimit": {
                         "type": "integer",
                         "description": "The head_limit applied, if any"
@@ -181,227 +207,119 @@ impl GrepTool {
         }
     }
 
-    /// Apply offset and `head_limit` to output lines.
-    fn apply_pagination(lines: Vec<&str>, offset: u64, limit: u64) -> (Vec<String>, bool) {
-        let offset = offset as usize;
-        let total = lines.len();
-
-        let after_offset: Vec<&str> = lines.into_iter().skip(offset).collect();
-
-        if limit == 0 {
-            // Unlimited.
-            let result: Vec<String> = after_offset
-                .iter()
-                .map(std::string::ToString::to_string)
-                .collect();
-            (result, false)
-        } else {
-            let limit = limit as usize;
-            let truncated = after_offset.len() > limit;
-            // `offset`/`limit` come from LLM-supplied JSON (unbounded u64), so add
-            // saturating to avoid an overflow panic near usize::MAX.
-            let result: Vec<String> = after_offset
-                .into_iter()
-                .take(limit)
-                .map(std::string::ToString::to_string)
-                .collect();
-            (result, truncated || total > offset.saturating_add(limit))
-        }
-    }
-
-    /// Truncate content string to fit within the character budget.
-    fn truncate_content(content: &str) -> (String, bool) {
-        if content.len() <= MAX_RESULT_SIZE_CHARS {
-            (content.to_string(), false)
-        } else {
-            // Find a safe char boundary.
-            let mut end = MAX_RESULT_SIZE_CHARS;
-            while end > 0 && !content.is_char_boundary(end) {
-                end -= 1;
-            }
-            let truncated = &content[..end];
-            (
-                format!(
-                    "{truncated}\n\n[output truncated: {} chars total, showing first {end}]",
-                    content.len()
-                ),
-                true,
-            )
-        }
-    }
-
-    /// Execute the grep search using ripgrep library crates.
-    ///
-    /// Returns raw output lines appropriate for the given mode.
     fn execute_search(
         params: &SearchParams,
-        cancelled: &AtomicBool,
-    ) -> Result<Vec<String>, ToolError> {
+        control: &SearchControl<'_>,
+    ) -> Result<SearchPage, ToolError> {
         let search_path = Path::new(&params.search_path);
-
-        // Build regex matcher.
-        let matcher = {
-            let mut builder = RegexMatcherBuilder::new();
-            if params.case_insensitive {
-                builder.case_insensitive(true);
-            }
-            if params.multiline {
-                builder.multi_line(true).dot_matches_new_line(true);
-            }
-            builder
-                .build(&params.pattern)
-                .map_err(|e| ToolError::RuntimeError {
-                    name: "Grep".into(),
-                    message: format!("invalid regex pattern '{}': {e}", params.pattern),
-                })?
-        };
-
-        // Build directory walker.
-        let mut walk_builder = WalkBuilder::new(search_path);
-        walk_builder
-            .hidden(false) // show hidden files (equivalent to --hidden)
-            .standard_filters(false); // disable all ignore filters (equivalent to --no-ignore)
-
-        // Apply glob filter if specified.
-        if let Some(ref glob) = params.glob_filter {
-            let mut override_builder = OverrideBuilder::new(search_path);
-            override_builder
-                .add(glob)
-                .map_err(|e| ToolError::RuntimeError {
-                    name: "Grep".into(),
-                    message: format!("invalid glob filter '{glob}': {e}"),
-                })?;
-            let overrides = override_builder
-                .build()
-                .map_err(|e| ToolError::RuntimeError {
-                    name: "Grep".into(),
-                    message: format!("failed to build glob filter: {e}"),
-                })?;
-            walk_builder.overrides(overrides);
-        }
-
-        // Apply file type filter if specified.
-        if let Some(ref file_type) = params.type_filter {
-            let mut types_builder = TypesBuilder::new();
-            types_builder.add_defaults();
-            types_builder.select(file_type);
-            let types = types_builder.build().map_err(|e| ToolError::RuntimeError {
-                name: "Grep".into(),
-                message: format!("invalid file type '{file_type}': {e}"),
-            })?;
-            walk_builder.types(types);
-        }
-
-        // Build searcher with context settings.
-        let mut searcher_builder = SearcherBuilder::new();
+        let mut matcher_builder = RegexMatcherBuilder::new();
+        matcher_builder.case_insensitive(params.case_insensitive);
         if params.multiline {
-            searcher_builder.multi_line(true);
+            matcher_builder.multi_line(true).dot_matches_new_line(true);
         }
+        let matcher = matcher_builder
+            .build(&params.pattern)
+            .map_err(|_| search_error("invalid regex pattern"))?;
+        let mut walk_builder = WalkBuilder::new(search_path);
+        walk_builder.hidden(false).standard_filters(false);
+        if let Some(glob) = &params.glob_filter {
+            let mut builder = OverrideBuilder::new(search_path);
+            builder
+                .add(glob)
+                .map_err(|_| search_error("invalid glob filter"))?;
+            walk_builder.overrides(
+                builder
+                    .build()
+                    .map_err(|_| search_error("invalid glob filter"))?,
+            );
+        }
+        if let Some(file_type) = &params.type_filter {
+            let mut builder = TypesBuilder::new();
+            builder.add_defaults().select(file_type);
+            walk_builder.types(
+                builder
+                    .build()
+                    .map_err(|_| search_error("invalid file type"))?,
+            );
+        }
+        let mut builder = SearcherBuilder::new();
+        builder
+            .multi_line(params.multiline)
+            .line_number(params.show_line_numbers)
+            .heap_limit(Some(params.limits.heap_bytes()))
+            .memory_map(MmapChoice::never());
         if params.mode == "content" {
-            searcher_builder.line_number(params.show_line_numbers);
-            if let Some(c) = params.context {
-                searcher_builder.before_context(c as usize);
-                searcher_builder.after_context(c as usize);
-            } else {
-                if let Some(b) = params.before_context {
-                    searcher_builder.before_context(b as usize);
-                }
-                if let Some(a) = params.after_context {
-                    searcher_builder.after_context(a as usize);
-                }
-            }
+            let context_limit = params.limits.heap_bytes() as u64;
+            let before = params
+                .context
+                .or(params.before_context)
+                .unwrap_or(0)
+                .min(context_limit);
+            let after = params
+                .context
+                .or(params.after_context)
+                .unwrap_or(0)
+                .min(context_limit);
+            builder
+                .before_context(before as usize)
+                .after_context(after as usize);
         }
-
-        let results: Mutex<Vec<String>> = Mutex::new(Vec::new());
-
-        // Search a single file, returns whether it had matches.
-        let search_file = |path: &Path, searcher: &mut Searcher| -> bool {
-            let mut file_had_match = false;
-            match &params.mode[..] {
-                "files_with_matches" => {
-                    let sink = UTF8(|_line_num, _line| {
-                        file_had_match = true;
-                        Ok(false) // stop after first match
-                    });
-                    let _ = searcher.search_path(&matcher, path, sink);
-                    if file_had_match {
-                        if let Ok(mut r) = results.lock() {
-                            r.push(path.to_string_lossy().to_string());
-                        }
-                    }
-                }
-                "count" => {
-                    let mut count: u64 = 0;
-                    let sink = UTF8(|_line_num, line| {
-                        let mut line_count: u64 = 0;
-                        let _ = matcher.find_iter(line.as_bytes(), |_m| {
-                            line_count += 1;
-                            true
-                        });
-                        count += line_count;
-                        file_had_match = true;
-                        Ok(true)
-                    });
-                    let _ = searcher.search_path(&matcher, path, sink);
-                    if count > 0 {
-                        if let Ok(mut r) = results.lock() {
-                            r.push(format!("{}:{count}", path.to_string_lossy()));
-                        }
-                    }
-                }
-                _ => {
-                    // "content" mode
-                    let path_str = path.to_string_lossy().to_string();
-                    let sink = UTF8(|line_num, line| {
-                        file_had_match = true;
-                        let formatted = if params.show_line_numbers {
-                            format!("{path_str}:{line_num}:{}", line.trim_end_matches('\n'))
-                        } else {
-                            format!("{path_str}:{}", line.trim_end_matches('\n'))
-                        };
-                        if let Ok(mut r) = results.lock() {
-                            r.push(formatted);
-                        }
-                        Ok(true)
-                    });
-                    let _ = searcher.search_path(&matcher, path, sink);
-                }
+        let mut searcher = builder.build();
+        let mut page = SearchPage::new(params);
+        let mut search_file = |path: &Path| -> Result<bool, ToolError> {
+            control
+                .check()
+                .map_err(|error| control.tool_error(&error, params.limits))?;
+            let file = std::fs::File::open(path)
+                .map_err(|_| search_error("failed to open search file"))?;
+            let reader = SearchReader {
+                inner: file,
+                control,
+            };
+            let path = path.to_string_lossy();
+            let mut sink = MatchSink {
+                params,
+                matcher: &matcher,
+                page: &mut page,
+                control,
+                path: &path,
+                count: 0,
+            };
+            searcher
+                .search_reader(&matcher, reader, &mut sink)
+                .map_err(|error| control.tool_error(&error, params.limits))?;
+            let count = sink.count;
+            if params.mode == "count" && count > 0 {
+                page.matches = page.matches.saturating_add(count);
+                page.observed = page.observed.saturating_add(1);
+                let count = count.to_string();
+                page.retain(&[&path, ":", &count], &path, true)
+                    .map_err(|error| control.tool_error(&error, params.limits))?;
             }
-            file_had_match
+            Ok(page.stopped)
         };
-
-        // If the search path is a single file, search it directly.
         if search_path.is_file() {
-            let mut searcher = searcher_builder.build();
-            search_file(search_path, &mut searcher);
+            search_file(search_path)?;
         } else {
-            // Walk directory and search each file.
-            let mut searcher = searcher_builder.build();
             for entry in walk_builder.build() {
-                if cancelled.load(Ordering::Relaxed) {
-                    return Err(ToolError::Cancelled);
+                control
+                    .check()
+                    .map_err(|error| control.tool_error(&error, params.limits))?;
+                let entry =
+                    entry.map_err(|_| search_error("failed to traverse search directory"))?;
+                // Directory enumeration excludes links and special files; explicit in-root links remain permitted.
+                if entry.file_type().is_none_or(|kind| !kind.is_file()) {
+                    continue;
                 }
-                match entry {
-                    Ok(entry) => {
-                        // The walker returns links even without descending through them.
-                        // Opening those entries would bypass the search root check.
-                        if entry.file_type().is_none_or(|ft| !ft.is_file()) {
-                            continue;
-                        }
-                        search_file(entry.path(), &mut searcher);
-                    }
-                    Err(e) => {
-                        tracing::debug!("Grep walk error (skipping): {e}");
-                    }
+                if search_file(entry.path())? {
+                    break;
                 }
             }
         }
-
-        let output = results.into_inner().map_err(|e| ToolError::RuntimeError {
-            name: "Grep".into(),
-            message: format!("failed to collect results: {e}"),
-        })?;
-        Ok(output)
+        control
+            .check()
+            .map_err(|error| control.tool_error(&error, params.limits))?;
+        Ok(page)
     }
 }
 
@@ -418,6 +336,271 @@ struct SearchParams {
     context: Option<u64>,
     before_context: Option<u64>,
     after_context: Option<u64>,
+    offset: u64,
+    head_limit: u64,
+    limits: GrepLimits,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchRequest {
+    pattern: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default = "default_mode", rename = "output_mode")]
+    mode: String,
+    #[serde(default, rename = "-i")]
+    case_insensitive: bool,
+    #[serde(default)]
+    multiline: bool,
+    #[serde(default, rename = "Glob")]
+    glob_filter: Option<String>,
+    #[serde(default, rename = "type")]
+    type_filter: Option<String>,
+    #[serde(default = "show_line_numbers", rename = "-n")]
+    show_line_numbers: bool,
+    #[serde(default)]
+    context: Option<u64>,
+    #[serde(default, rename = "-C")]
+    context_alias: Option<u64>,
+    #[serde(default, rename = "-B")]
+    before_context: Option<u64>,
+    #[serde(default, rename = "-A")]
+    after_context: Option<u64>,
+    #[serde(default)]
+    offset: u64,
+    #[serde(default = "default_head_limit")]
+    head_limit: u64,
+}
+fn default_mode() -> String {
+    "files_with_matches".into()
+}
+const fn show_line_numbers() -> bool {
+    true
+}
+const fn default_head_limit() -> u64 {
+    DEFAULT_HEAD_LIMIT
+}
+
+fn search_error(message: &str) -> ToolError {
+    ToolError::RuntimeError {
+        name: "Grep".into(),
+        message: message.into(),
+    }
+}
+
+struct SearchControl<'a> {
+    cancelled: &'a AtomicBool,
+    deadline: Instant,
+    #[cfg(test)]
+    observer: Option<Arc<cancellation_tests::SearchObserver>>,
+}
+impl SearchControl<'_> {
+    fn check(&self) -> io::Result<()> {
+        if self.cancelled.load(Ordering::Relaxed) || Instant::now() >= self.deadline {
+            // Interrupted would be retried by buffered readers.
+            return Err(io::Error::other("search interrupted"));
+        }
+        Ok(())
+    }
+    fn tool_error(&self, error: &io::Error, limits: GrepLimits) -> ToolError {
+        if Instant::now() >= self.deadline {
+            ToolError::Timeout {
+                timeout_secs: limits.timeout_secs(),
+            }
+        } else if self.cancelled.load(Ordering::Relaxed) {
+            ToolError::Cancelled
+        } else {
+            search_error(&format!("search failed: {error}"))
+        }
+    }
+}
+struct SearchReader<'a, R> {
+    inner: R,
+    control: &'a SearchControl<'a>,
+}
+impl<R: Read> Read for SearchReader<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.control.check()?;
+        #[cfg(test)]
+        if let Some(observer) = &self.control.observer {
+            observer.pause_before_read();
+        }
+        self.inner.read(buffer)
+    }
+}
+
+struct SearchPage {
+    mode: String,
+    output: String,
+    filenames: Vec<String>,
+    represented_files: HashSet<String>,
+    observed: u64,
+    matches: u64,
+    returned: u64,
+    used_bytes: usize,
+    budget: usize,
+    offset: u64,
+    head_limit: u64,
+    stopped: bool,
+    limiting_reason: Option<&'static str>,
+}
+impl SearchPage {
+    fn new(params: &SearchParams) -> Self {
+        Self {
+            mode: params.mode.clone(),
+            output: String::new(),
+            filenames: Vec::new(),
+            represented_files: HashSet::new(),
+            observed: 0,
+            matches: 0,
+            returned: 0,
+            used_bytes: 0,
+            budget: params.limits.output_bytes(),
+            offset: params.offset,
+            head_limit: params.head_limit,
+            stopped: false,
+            limiting_reason: None,
+        }
+    }
+    fn stop(&mut self, reason: &'static str) -> bool {
+        self.stopped = true;
+        self.limiting_reason = Some(reason);
+        false
+    }
+    fn retain(&mut self, parts: &[&str], path: &str, atomic: bool) -> io::Result<bool> {
+        if self.observed <= self.offset {
+            return Ok(true);
+        }
+        if self.head_limit != 0 && self.returned >= self.head_limit {
+            return Ok(self.stop("head_limit"));
+        }
+        let separator = usize::from(self.returned > 0);
+        let length = parts
+            .iter()
+            .fold(0usize, |total, part| total.saturating_add(part.len()));
+        let remaining = self.budget - self.used_bytes;
+        if atomic && length.saturating_add(separator) > remaining {
+            if length > self.budget {
+                return Err(io::Error::other(
+                    "result entry exceeds output_bytes; raise the allowance or narrow the query",
+                ));
+            }
+            return Ok(self.stop("output_bytes"));
+        }
+        if remaining <= separator {
+            return Ok(self.stop("output_bytes"));
+        }
+        if separator > 0 && self.mode != "files_with_matches" {
+            self.output.push('\n');
+        }
+        let mut available = remaining - separator;
+        let mut retained = String::new();
+        for part in parts {
+            let mut end = part.len().min(available);
+            while !part.is_char_boundary(end) {
+                end -= 1;
+            }
+            retained.push_str(&part[..end]);
+            available -= end;
+            if end < part.len() {
+                break;
+            }
+        }
+        self.used_bytes += retained.len() + separator;
+        self.returned = self.returned.saturating_add(1);
+        if self.mode == "files_with_matches" {
+            self.filenames.push(retained);
+        } else {
+            self.output.push_str(&retained);
+        }
+        if self.mode == "content" {
+            self.represented_files.insert(path.to_owned());
+        }
+        if length > remaining - separator {
+            return Ok(self.stop("output_bytes"));
+        }
+        Ok(true)
+    }
+    fn into_content(self) -> serde_json::Value {
+        let mut content = serde_json::json!({
+            "mode": self.mode, "numFiles": if self.mode == "content" { self.represented_files.len() as u64 } else { self.observed },
+            "appliedLimit":self.head_limit, "appliedOffset":self.offset,
+            "truncated":self.stopped, "hasMore":self.stopped, "totalsComplete":!self.stopped,
+            "numReturned":self.returned, "nextOffset":self.offset.saturating_add(self.returned), "limitingReason":self.limiting_reason,
+        });
+        if self.mode == "files_with_matches" {
+            content["filenames"] = serde_json::json!(self.filenames);
+        } else {
+            content["content"] = serde_json::json!(self.output);
+        }
+        if self.mode == "content" {
+            content["numLines"] = serde_json::json!(self.observed);
+        }
+        if self.mode == "count" {
+            content["numMatches"] = serde_json::json!(self.matches);
+        }
+        content
+    }
+}
+
+struct MatchSink<'a> {
+    params: &'a SearchParams,
+    matcher: &'a grep_regex::RegexMatcher,
+    page: &'a mut SearchPage,
+    control: &'a SearchControl<'a>,
+    path: &'a str,
+    count: u64,
+}
+impl Sink for MatchSink<'_> {
+    type Error = io::Error;
+    fn matched(&mut self, _: &Searcher, matched: &SinkMatch<'_>) -> io::Result<bool> {
+        self.control.check()?;
+        match self.params.mode.as_str() {
+            "files_with_matches" => {
+                self.page.observed = self.page.observed.saturating_add(1);
+                self.page.retain(&[self.path], self.path, true)?;
+                Ok(false)
+            }
+            "count" => {
+                let mut interrupted = false;
+                self.matcher
+                    .find_iter(matched.bytes(), |_| {
+                        if self.control.check().is_err() {
+                            interrupted = true;
+                            return false;
+                        }
+                        self.count = self.count.saturating_add(1);
+                        true
+                    })
+                    .map_err(|_| io::Error::other("failed to count matches"))?;
+                if interrupted {
+                    self.control.check()?;
+                }
+                Ok(true)
+            }
+            _ => {
+                let line = std::str::from_utf8(matched.bytes())
+                    .map_err(|_| io::Error::other("matching text is not UTF-8"))?
+                    .trim_end_matches('\n');
+                self.page.observed = self.page.observed.saturating_add(1);
+                if self.params.show_line_numbers {
+                    let number = matched
+                        .line_number()
+                        .expect("line numbers enabled")
+                        .to_string();
+                    self.page
+                        .retain(&[self.path, ":", &number, ":", line], self.path, false)
+                } else {
+                    self.page.retain(&[self.path, ":", line], self.path, false)
+                }
+            }
+        }
+    }
+    fn context(&mut self, _: &Searcher, _: &SinkContext<'_>) -> io::Result<bool> {
+        self.control.check()?;
+        Ok(!self.page.stopped)
+    }
 }
 
 impl Default for GrepTool {
@@ -429,221 +612,299 @@ impl Default for GrepTool {
 #[async_trait]
 impl Tool for GrepTool {
     async fn execute(&self, input: ToolInput) -> Result<ToolOutput, ToolError> {
-        let pattern = input
-            .arguments
-            .get("pattern")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::ValidationError {
-                message: "'pattern' is required".into(),
-            })?
-            .to_string();
-
-        let search_path_arg = input
-            .arguments
-            .get("path")
-            .and_then(|v| v.as_str())
-            .filter(|value| !value.is_empty());
+        for key in ["head_limit", "offset", "-B", "-A", "-C", "context"] {
+            if input
+                .arguments
+                .get(key)
+                .is_some_and(|value| value.as_u64().is_none())
+            {
+                return Err(ToolError::ValidationError {
+                    message: format!("{key} must be a nonnegative integer"),
+                });
+            }
+        }
+        let request: SearchRequest =
+            serde_json::from_value(input.arguments).map_err(|_| ToolError::ValidationError {
+                message: "invalid Grep arguments; numeric values must be nonnegative integers"
+                    .into(),
+            })?;
+        if !["content", "count", "files_with_matches"].contains(&request.mode.as_str()) {
+            return Err(ToolError::ValidationError {
+                message: "invalid Grep output_mode".into(),
+            });
+        }
         let search_path = resolve_read_path(
             "Grep",
-            search_path_arg,
+            request.path.as_deref().filter(|path| !path.is_empty()),
             input.working_dir.as_deref(),
             &input.additional_read_dirs,
         )?
         .to_string_lossy()
-        .to_string();
-
-        let mode = input
-            .arguments
-            .get("output_mode")
-            .and_then(|v| v.as_str())
-            .unwrap_or("files_with_matches")
-            .to_string();
-
-        let head_limit = input
-            .arguments
-            .get("head_limit")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(DEFAULT_HEAD_LIMIT);
-
-        let offset = input
-            .arguments
-            .get("offset")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-
-        let case_insensitive = input
-            .arguments
-            .get("-i")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-
-        let multiline = input
-            .arguments
-            .get("multiline")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-
-        let show_line_numbers = input
-            .arguments
-            .get("-n")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true);
-
-        let glob_filter = input
-            .arguments
-            .get("Glob")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-
-        let type_filter = input
-            .arguments
-            .get("type")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-
-        let ctx_lines = input
-            .arguments
-            .get("context")
-            .or_else(|| input.arguments.get("-C"))
-            .and_then(serde_json::Value::as_u64);
-
-        let before_context = input
-            .arguments
-            .get("-B")
-            .and_then(serde_json::Value::as_u64);
-
-        let after_context = input
-            .arguments
-            .get("-A")
-            .and_then(serde_json::Value::as_u64);
-
+        .into_owned();
         let params = SearchParams {
-            pattern,
-            search_path: search_path.clone(),
-            mode: mode.clone(),
-            case_insensitive,
-            multiline,
-            glob_filter,
-            type_filter,
-            show_line_numbers,
-            context: ctx_lines,
-            before_context,
-            after_context,
+            pattern: request.pattern,
+            search_path,
+            mode: request.mode,
+            case_insensitive: request.case_insensitive,
+            multiline: request.multiline,
+            glob_filter: request.glob_filter,
+            type_filter: request.type_filter,
+            show_line_numbers: request.show_line_numbers,
+            context: request.context.or(request.context_alias),
+            before_context: request.before_context,
+            after_context: request.after_context,
+            offset: request.offset,
+            head_limit: request.head_limit,
+            limits: self.limits,
         };
-
-        tracing::debug!(
-            "Grep tool: pattern={:?}, mode={mode}, search_path={search_path:?}, \
-             head_limit={head_limit}, offset={offset}",
-            params.pattern
-        );
-
-        // Execute search in a blocking task with timeout.
-        // The AtomicBool is set when this future is dropped (e.g. by
-        // tokio::select! on a CancellationToken) so the blocking thread
-        // stops iterating promptly instead of running to completion.
-        let timeout = std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS);
+        let timeout = Duration::from_secs(self.limits.timeout_secs());
+        let deadline = Instant::now() + timeout;
         let cancelled = Arc::new(AtomicBool::new(false));
-        let cancelled_clone = Arc::clone(&cancelled);
+        let worker_cancelled = Arc::clone(&cancelled);
         let guard = DropGuard(Some(cancelled));
-        let raw_lines = tokio::time::timeout(
+        #[cfg(test)]
+        let observer = self.worker_observer.clone();
+        let page = tokio::time::timeout(
             timeout,
-            tokio::task::spawn_blocking(move || Self::execute_search(&params, &cancelled_clone)),
+            tokio::task::spawn_blocking(move || {
+                let control = SearchControl {
+                    cancelled: &worker_cancelled,
+                    deadline,
+                    #[cfg(test)]
+                    observer,
+                };
+                let result = Self::execute_search(&params, &control);
+                #[cfg(test)]
+                if let Some(observer) = &control.observer {
+                    observer
+                        .worker_finished(worker_cancelled.load(Ordering::Relaxed), result.is_ok());
+                }
+                result
+            }),
         )
         .await
         .map_err(|_| ToolError::Timeout {
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
+            timeout_secs: self.limits.timeout_secs(),
         })?
-        .map_err(|e| ToolError::RuntimeError {
-            name: "Grep".into(),
-            message: format!("search task failed: {e}"),
-        })??;
+        .map_err(|_| search_error("search worker failed"))??;
         drop(guard);
-
-        // Format the result based on output mode.
-        match mode.as_str() {
-            "files_with_matches" => {
-                let num_files = raw_lines.len();
-                let line_refs: Vec<&str> = raw_lines.iter().map(String::as_str).collect();
-                let (paginated, _truncated) = Self::apply_pagination(line_refs, offset, head_limit);
-                let filenames = paginated;
-
-                Ok(ToolOutput {
-                    success: true,
-                    content: serde_json::json!({
-                        "mode": "files_with_matches",
-                        "numFiles": num_files,
-                        "filenames": filenames,
-                        "appliedLimit": head_limit,
-                        "appliedOffset": offset,
-                    }),
-                    warnings: vec![],
-                    metadata: serde_json::json!({}),
-                })
-            }
-            "count" => {
-                // raw_lines format: "path:count" per line.
-                let total_matches: u64 = raw_lines
-                    .iter()
-                    .filter_map(|line| {
-                        line.rsplit_once(':')
-                            .and_then(|(_, c)| c.parse::<u64>().ok())
-                    })
-                    .sum();
-                let num_files = raw_lines.len();
-
-                let line_refs: Vec<&str> = raw_lines.iter().map(String::as_str).collect();
-                let (paginated, _truncated) = Self::apply_pagination(line_refs, offset, head_limit);
-                let content = paginated.join("\n");
-                let (content, _) = Self::truncate_content(&content);
-
-                Ok(ToolOutput {
-                    success: true,
-                    content: serde_json::json!({
-                        "mode": "count",
-                        "numFiles": num_files,
-                        "numMatches": total_matches,
-                        "content": content,
-                        "appliedLimit": head_limit,
-                        "appliedOffset": offset,
-                    }),
-                    warnings: vec![],
-                    metadata: serde_json::json!({}),
-                })
-            }
-            _ => {
-                // "content" mode -- raw matched lines.
-                let total_lines = raw_lines.len();
-                let line_refs: Vec<&str> = raw_lines.iter().map(String::as_str).collect();
-                let (paginated, _truncated) = Self::apply_pagination(line_refs, offset, head_limit);
-                let content = paginated.join("\n");
-                let (content, _) = Self::truncate_content(&content);
-
-                // Count unique files from output (lines that match "path:line:content").
-                let num_files = paginated
-                    .iter()
-                    .filter_map(|line| line.split_once(':').map(|(f, _)| f))
-                    .collect::<HashSet<_>>()
-                    .len();
-
-                Ok(ToolOutput {
-                    success: true,
-                    content: serde_json::json!({
-                        "mode": "content",
-                        "numFiles": num_files,
-                        "numLines": total_lines,
-                        "content": content,
-                        "appliedLimit": head_limit,
-                        "appliedOffset": offset,
-                    }),
-                    warnings: vec![],
-                    metadata: serde_json::json!({}),
-                })
-            }
-        }
+        Ok(ToolOutput {
+            success: true,
+            content: page.into_content(),
+            warnings: vec![],
+            metadata: serde_json::json!({}),
+        })
     }
 
     fn definition(&self) -> &ToolDefinition {
         &self.def
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    use std::io::Read;
+    pub(super) struct SearchObserver {
+        started: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        resume: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+        finished: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<(bool, bool)>>>,
+    }
+
+    impl SearchObserver {
+        pub(super) fn pause_before_read(&self) {
+            if let Some(started) = self.started.lock().unwrap().take() {
+                started.send(()).unwrap();
+                self.resume
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap();
+            }
+        }
+        pub(super) fn worker_finished(&self, cancelled: bool, succeeded: bool) {
+            self.finished
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap()
+                .send((cancelled, succeeded))
+                .unwrap();
+        }
+    }
+
+    async fn exercise_executor_worker_exit(caller_drop: bool) {
+        use crate::{ToolExecutor, ToolRegistryConfig, ToolRegistryImpl};
+        use hf_core::types::SessionId;
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("source.txt"), "needle\n").unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+        let observer = Arc::new(SearchObserver {
+            started: std::sync::Mutex::new(Some(started_tx)),
+            resume: std::sync::Mutex::new(resume_rx),
+            finished: std::sync::Mutex::new(Some(finished_tx)),
+        });
+        let mut tool = GrepTool::new().with_limits(
+            hf_core::grep_limits::GrepLimitsConfig {
+                timeout_secs: if caller_drop { 30 } else { 2 },
+                ..Default::default()
+            }
+            .resolve()
+            .unwrap(),
+        );
+        tool.worker_observer = Some(observer);
+        let registry = Arc::new(ToolRegistryImpl::new(ToolRegistryConfig::default()));
+        let definition = tool.definition().clone();
+        registry
+            .register_tool(Arc::new(tool), definition)
+            .await
+            .unwrap();
+        let working_dir = project.path().display().to_string();
+        let pending = tokio::spawn(async move {
+            ToolExecutor::new().execute(&registry, &ToolName::from_string("Grep"), ToolInput {
+                call_id:"worker-exit".into(), name:ToolName::from_string("Grep"),
+                arguments:serde_json::json!({"pattern":"needle","path":"source.txt","output_mode":"content"}),
+                session_id:SessionId::new(), working_dir:Some(working_dir), additional_read_dirs:vec![], command_runner:None,
+            }).await
+        });
+        tokio::time::timeout(Duration::from_secs(5), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        if caller_drop {
+            pending.abort();
+            assert!(pending.await.unwrap_err().is_cancelled());
+        } else {
+            let error = tokio::time::timeout(Duration::from_secs(4), pending)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err();
+            assert!(error.to_string().contains("timed out"), "{error}");
+        }
+        resume_tx.send(()).unwrap();
+        let (cancelled, succeeded) = tokio::time::timeout(Duration::from_secs(5), finished_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            cancelled,
+            "the dropped executor future did not signal its worker"
+        );
+        assert!(
+            !succeeded,
+            "the worker continued its file search after cancellation"
+        );
+    }
+
+    #[tokio::test]
+    async fn executor_caller_drop_stops_single_file_worker() {
+        exercise_executor_worker_exit(true).await;
+    }
+
+    #[tokio::test]
+    async fn executor_timeout_stops_single_file_worker() {
+        exercise_executor_worker_exit(false).await;
+    }
+
+    #[test]
+    fn buffered_matches_observe_cancellation_in_every_mode() {
+        struct CancelOnRead<'a>(&'a AtomicBool, usize);
+        impl Read for CancelOnRead<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                let bytes = b"needle needle\nneedle\n";
+                let count = buffer.len().min(bytes.len() - self.1);
+                buffer[..count].copy_from_slice(&bytes[self.1..self.1 + count]);
+                self.1 += count;
+                if self.1 == bytes.len() {
+                    self.0.store(true, Ordering::Relaxed);
+                }
+                Ok(count)
+            }
+        }
+        for mode in ["content", "count", "files_with_matches"] {
+            let cancelled = AtomicBool::new(false);
+            let control = SearchControl {
+                cancelled: &cancelled,
+                deadline: Instant::now() + Duration::from_secs(1),
+                observer: None,
+            };
+            let params = SearchParams {
+                pattern: "needle".into(),
+                search_path: "text".into(),
+                mode: mode.into(),
+                case_insensitive: false,
+                multiline: false,
+                glob_filter: None,
+                type_filter: None,
+                show_line_numbers: true,
+                context: None,
+                before_context: None,
+                after_context: None,
+                offset: 0,
+                head_limit: 0,
+                limits: hf_core::grep_limits::GrepLimitsConfig::default()
+                    .resolve()
+                    .unwrap(),
+            };
+            let mut page = SearchPage::new(&params);
+            let matcher = RegexMatcherBuilder::new().build("needle").unwrap();
+            let mut sink = MatchSink {
+                params: &params,
+                matcher: &matcher,
+                page: &mut page,
+                control: &control,
+                path: "text",
+                count: 0,
+            };
+            let result = SearcherBuilder::new().build().search_reader(
+                &matcher,
+                SearchReader {
+                    inner: CancelOnRead(&cancelled, 0),
+                    control: &control,
+                },
+                &mut sink,
+            );
+            assert!(result.is_err(), "{mode}");
+            assert_eq!(sink.count, 0);
+            assert_eq!(page.observed, 0);
+        }
+    }
+
+    #[test]
+    fn reader_checks_cancellation_and_deadline_before_touching_input() {
+        struct MustNotRead;
+        impl Read for MustNotRead {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                panic!("underlying read reached");
+            }
+        }
+        let cancelled = AtomicBool::new(true);
+        let control = SearchControl {
+            cancelled: &cancelled,
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(1),
+            observer: None,
+        };
+        assert!(SearchReader {
+            inner: MustNotRead,
+            control: &control
+        }
+        .read(&mut [0; 1])
+        .is_err());
+        cancelled.store(false, Ordering::Relaxed);
+        let expired = SearchControl {
+            cancelled: &cancelled,
+            deadline: std::time::Instant::now(),
+            observer: None,
+        };
+        assert!(SearchReader {
+            inner: MustNotRead,
+            control: &expired
+        }
+        .read(&mut [0; 1])
+        .is_err());
     }
 }
 
@@ -818,29 +1079,5 @@ mod tests {
             .and_then(serde_json::Value::as_u64);
         assert_eq!(before, Some(3));
         assert_eq!(after, Some(5));
-    }
-
-    #[test]
-    fn test_apply_pagination() {
-        let lines = vec!["a", "b", "c", "d", "e"];
-        let (result, truncated) = GrepTool::apply_pagination(lines, 1, 2);
-        assert_eq!(result, vec!["b", "c"]);
-        assert!(truncated);
-    }
-
-    #[test]
-    fn test_apply_pagination_no_limit() {
-        let lines = vec!["a", "b", "c"];
-        let (result, truncated) = GrepTool::apply_pagination(lines, 0, 0);
-        assert_eq!(result, vec!["a", "b", "c"]);
-        assert!(!truncated);
-    }
-
-    #[test]
-    fn test_truncate_content_short() {
-        let s = "short";
-        let (result, truncated) = GrepTool::truncate_content(s);
-        assert_eq!(result, "short");
-        assert!(!truncated);
     }
 }

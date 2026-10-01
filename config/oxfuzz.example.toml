@@ -127,3 +127,12 @@ history_retention_limit = 100
 # Allowed names for explicitly saved CMake definitions; no values are injected.
 [build_profiles]
 allowed_cmake_options = ["BUILD_SHARED_LIBS", "BUILD_TESTING"]
+
+# Finite allowances for source inspection. Positive values are required.
+[grep]
+# Retained text/filenames, 1..=1048576 bytes; JSON metadata is additional.
+output_bytes = 10000
+# Reader buffer, 1..=268435456 bytes; not a file-size or RSS allowance.
+heap_bytes = 16777216
+# Cooperative cancellation, 1..=300 seconds.
+timeout_secs = 30
