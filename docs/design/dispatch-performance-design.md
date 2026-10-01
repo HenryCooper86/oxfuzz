@@ -48,6 +48,8 @@ Criterion provides repeatable benchmark execution; a small result checker
 validates sample count and computes exact quantiles from retained observations.
 Parser tests reject missing, nonfinite, or mismatched samples before any timing
 claim is published.
+Concurrency and target/run counts require JSON integers; boolean and
+floating-point identities cannot be substituted for the declared cases.
 
 The first clean-revision result and its raw samples are in the
 [2026-09-27 performance record](../acceptance/performance-2026-09-27.md).

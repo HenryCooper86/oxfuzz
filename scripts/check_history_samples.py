@@ -43,6 +43,8 @@ def summarize(document):
     for case in cases:
         if not isinstance(case, dict):
             raise ValueError("history sample case is not an object")
+        if any(type(case.get(field)) is not int for field in ("targets", "runs")):
+            raise ValueError("history size identifiers must be JSON integers")
         size = (case.get("targets"), case.get("runs"))
         if size not in SIZES or size in seen:
             raise ValueError("history sample size is unknown or duplicated")

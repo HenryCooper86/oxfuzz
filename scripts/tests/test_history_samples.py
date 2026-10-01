@@ -69,6 +69,15 @@ class HistorySampleTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     history.summarize(case)
 
+    def test_size_identifiers_require_json_integers(self) -> None:
+        for field in ("targets", "runs"):
+            for value in (float(document()["cases"][0][field]), True, "161", [161]):
+                source = document()
+                source["cases"][0][field] = value
+                with self.subTest(field=field, value=value):
+                    with self.assertRaises(ValueError):
+                        history.summarize(source)
+
 
 if __name__ == "__main__":
     unittest.main()

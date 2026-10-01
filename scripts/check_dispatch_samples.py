@@ -40,6 +40,8 @@ def summarize(document):
     for case in cases:
         if not isinstance(case, dict):
             raise ValueError("dispatch sample case is not an object")
+        if type(case.get("concurrency")) is not int:
+            raise ValueError("dispatch concurrency must be a JSON integer")
         identity = (case.get("decision"), case.get("concurrency"))
         if identity not in expected or identity in seen:
             raise ValueError("dispatch sample case is unknown or duplicated")

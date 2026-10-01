@@ -68,6 +68,14 @@ class DispatchSampleTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     samples.summarize(source)
 
+    def test_concurrency_identity_requires_a_json_integer(self) -> None:
+        for value in (True, 1.0, "1", [1]):
+            source = document()
+            source["cases"][0]["concurrency"] = value
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    samples.summarize(source)
+
 
 if __name__ == "__main__":
     unittest.main()

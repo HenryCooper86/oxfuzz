@@ -74,6 +74,15 @@ class PerformanceBundleTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     bundle.summarize(*reports, revision=SHA, runner=RUNNER)
 
+    def test_bundle_denies_boolean_or_float_sample_identities(self):
+        for index, field, value in ((0, "concurrency", True), (0, "concurrency", 1.0),
+                                    (1, "targets", 161.0), (1, "runs", 3200.0)):
+            reports = documents()
+            reports[index]["cases"][0][field] = value
+            with self.subTest(index=index, field=field):
+                with self.assertRaises(ValueError):
+                    bundle.summarize(*reports, revision=SHA, runner=RUNNER)
+
     def test_loading_is_bounded_before_json_decoding_and_hashes_exact_bytes(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "report.json"
