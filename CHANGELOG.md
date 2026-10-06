@@ -9,6 +9,42 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ## Unreleased
 
+## 0.6.0 - 2026-10-07
+
+### Added
+
+- Intra-target parallel fuzzing through the run CPU allocation. An allocation
+  above one runs libFuzzer fork mode (`-fork=N`); honggfuzz continues to map
+  it to `--threads`. `oxfuzz run --cpus N` requests a per-run allocation
+  validated against `fuzzing.sandbox.max_cpus`, and an omitted request keeps
+  the configured allocation. AFL++ still runs a single instance per run.
+
+### Improved
+
+- The terminal quick start works as documented: the CLI guides now state that
+  harness smoke runs and fuzzer launches read their approval consent from
+  `HF_AUTO_APPROVE` / `HF_GUARDRAILS` (Safety Model, Getting Started, CLI
+  Reference, both READMEs). The desktop app continues to approve through its
+  dialog.
+- The CLI reference documents `repro`, `arm`, `providers`, `policy`, `trust`,
+  `unreached`, and `attribution`, matches the actual `agent`, `ingest`, and
+  `session` signatures, and no longer lists `session list` or implies CLI
+  syzkaller campaigns. `oxfuzz init` is no longer described as creating
+  `.env`.
+- The example PR fuzz workflow states that the CI gate requires an already
+  promoted harness and its retained database/workspace state on the runner;
+  it does not draft a harness.
+
+### Upgrade notes and limitations
+
+- A deployment that raises `fuzzing.sandbox.max_cpus` above one now runs
+  libFuzzer campaigns in fork mode, which continues after crashes and exits
+  at the time budget. Single-CPU allocations keep the previous
+  single-process behavior and argv. Replays restore the CPU allocation
+  recorded with the original run, subject to current policy ceilings.
+- No persisted-format or configuration migration is required; historical run
+  rows replay unchanged.
+
 ## 0.5.1 - 2026-09-15
 
 ### Improved
