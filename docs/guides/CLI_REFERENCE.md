@@ -33,7 +33,25 @@ api_key_env = "OPENAI_API_KEY"
 you keep local values in `.env`, export them before launching the process (for
 example, `set -a; source .env; set +a` in a POSIX shell).
 
-### 3. Qualify and review a retained harness
+### 3. Authorize execution before the first run
+
+Compiling or running a generated harness and launching a fuzzer are high-risk
+actions. The default guardrail policy requires approval for them, and the CLI
+approval gate reads the environment instead of prompting: export
+`HF_AUTO_APPROVE=1` in the shell that launches `oxfuzz` once you have decided
+to trust what will run.
+
+```bash
+export HF_AUTO_APPROVE=1
+```
+
+`HF_GUARDRAILS=permissive` instead auto-approves every action with an audit
+trail; reserve it for trusted local loops. The desktop app asks for approval
+through an interactive dialog and does not read these variables. See
+`.env.example` for the full variable reference and the
+[Safety Model](SAFETY_MODEL.md) for the reasoning.
+
+### 4. Qualify and review a retained harness
 
 ```bash
 # Discover and rank targets in a project
@@ -66,7 +84,7 @@ considers at most 64 targets in batches of 16, and leaves every original
 `fit_score` unchanged. The desktop Discover screen runs this assessment
 automatically after its initial scan and displays the three factors directly.
 
-### 4. Run and inspect the campaign
+### 5. Run and inspect the campaign
 
 ```bash
 # Work Order runs always use the complete selector returned by the retained order.
@@ -131,6 +149,7 @@ Binary Tool integration is outside this release's scope.
 | `run . --replay <run UUID>` | Replay a retained run with its recorded engine, duration, and deterministic seed under current policy. The positional `.` is ignored in replay mode; the retained run resolves its original project. |
 | `campaign <project> --target <sym> --engine <e>` | Run and triage a bounded campaign using an already smoke-qualified, human-promoted harness. |
 | `health --run <run UUID>` | Assess retained campaign health. This read-only command never stops, restarts, or resizes the run. |
+| `trust --run <run UUID>` | Audit which claims about a finished run its retained evidence supports. Read-only; starts no build, run, or coverage measurement. |
 | `closeout --run <run UUID>` | Explicitly run or resume the seven retained terminal closeout steps. Successful/skipped steps remain retained; failed or dependency-blocked work can be retried. |
 | `triage <project> --target <sym>` | Ingest, dedup, classify (CASR), and draft reports for crashes. |
 | `corpus <project> --target <sym> --op seed\|llmseed\|grow\|prune\|cprune\|survival\|regen\|minimize\|absorb\|concolic\|import\|list [--from <dir>]` | Manage the corpus. `prune` removes byte duplicates; `cprune`, `survival`, `regen`, `minimize`, and optional `concolic` have the distinct execution/provider requirements below; `import` requires `--from`. |
@@ -139,21 +158,29 @@ Binary Tool integration is outside this release's scope.
 | `build history <project> [--limit N] [--json]` | Read retained diagnosis and build output. |
 | `build run <project> --expected-profile-sha256 <digest> [--json]` | Execute the exact reviewed profile in the sandbox and reject a stale profile digest. |
 | `coverage <project> --target <sym>` | Summarize line/region/function coverage. |
+| `unreached <project> [--lang c]` | Rank entry points that no retained coverage measurement has ever covered. Reads cached measurements; never triggers one. |
+| `attribution <project> [--lang c]` | Attribute every discovered target against retained coverage and order the result for the next harness: untouched first, partial frontier next, saturated last. |
 | `regress <project> --target <sym>` | Re-run the known crash reproducers to verify they still (or no longer) crash. |
 | `ci <project> --target <sym> --engine <e> [--sarif out.sarif]` | CI gate: seed, run, triage, and export SARIF; exits non-zero when crashes are found. |
 | `sarif <project> --target <sym> --out results.sarif` | Export triaged crashes as a SARIF report for code scanning. |
 | `defectdojo <project> --target <sym>` | Push triaged crashes to DefectDojo as findings. |
-| `ingest <project> <file>` | Ingest a document (PDF/Office/HTML) into the knowledge base. |
+| `repro <project> --target <sym> [--engine <e>] [--lang c] [--crash <id>] [--out <dir>]` | Bundle a crash reproducer (harness, input, and `REPRODUCE.md`) for handoff outside oxfuzz. Defaults to the first crash and `oxfuzz_repro`. |
+| `ingest <project> --file <file>` | Ingest a document (PDF/Office/HTML) into the knowledge base. |
 | `knowledge index\|search <project> [query]` | Index a project for search, or run a full-text (BM25) query over it. |
-| `agent <project> "<message>"` | Drive the conversational agent from the terminal. |
+| `agent "<message>" [--project <dir>] [--agent <id>]` | Drive the conversational agent from the terminal. Requires an LLM provider. |
 | `schedule list\|create\|history\|recovery list\|recovery acknowledge <occurrence-id>\|... ` | Manage scheduled headless fuzzing campaigns and acknowledge an ambiguous one-time occurrence as cancelled. |
-| `session list\|history\|new\|... ` | Manage chat sessions and their checkpoints. |
+| `session new\|history\|checkpoints\|branches\|rollback ...` | Manage chat sessions and their per-turn checkpoints. |
 | `report <project> --target <sym> --out report.md [--report-lang en\|zh]` | Render a full Markdown campaign report. `--report-lang zh` writes it in Simplified Chinese; file paths, stack frames, symbol names, crash signatures, engine and sanitizer names and all figures stay verbatim. |
 | `export [project] --output evidence.json` | Export a reproducibility bundle containing scoped targets, runs, harnesses, crashes, corpus, and filesystem evidence. |
 | `serve --host 127.0.0.1 --port 8081` | Start the REST + SSE API (`hf-web`). Non-loopback hosts require `HF_WEB_TOKEN`. |
+| `arm [--url <url>] [--off\|--status]` | Grant, withdraw, or report the execution authorization a restarted server needs before its scheduler resumes restored or missed work. |
+| `providers thaw <id>` | Thaw a frozen provider after a verifying health check. |
+| `policy decisions [--limit N]` | List recorded guardrail authorization decisions, newest first. |
 | `tui <project>` | Browse the target inventory and copy accurate next-step commands. |
 
-Engines: `afl++`, `honggfuzz`, `libfuzzer`, `syzkaller`.
+Userspace engines for `harness`, `run`, and `campaign`: `afl++`, `honggfuzz`,
+`libfuzzer`. `syzkaller` fuzzes kernel images from the trusted-local desktop
+workflow; the CLI harness and run commands do not accept it.
 
 ### Harness Work Order commands
 

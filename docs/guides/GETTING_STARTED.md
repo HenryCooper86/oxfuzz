@@ -208,6 +208,9 @@ campaign looks like this:
 
 ```bash
 oxfuzz doctor
+# Harness smoke runs and fuzzer launches are approval-gated; the CLI reads
+# that consent from the environment. Export this once you trust what will run.
+export HF_AUTO_APPROVE=1
 oxfuzz discover /path/to/project --lang c --rank
 oxfuzz harness /path/to/project --target parse_value \
   --engine libfuzzer --promote

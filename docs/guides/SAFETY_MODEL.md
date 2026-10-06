@@ -17,3 +17,19 @@ Defense in depth, non-negotiable:
 
 **Generated harnesses are never run on the host. Human approval authorizes a
 sandboxed run of the exact promoted revision; it never weakens isolation.**
+
+## How approval reaches the gate
+
+The desktop app asks through an interactive dialog. The CLI and `serve`
+processes read consent from the environment instead (`.env.example` documents
+every variable):
+
+- `HF_AUTO_APPROVE=1` -- with the default guardrail policy, approves the
+  high-risk actions (harness compile, harness run, fuzzer launch) for an
+  unattended process. Leave it unset until you have decided to trust the
+  reviewed harness.
+- `HF_GUARDRAILS=permissive` -- auto-approves every action with an audit
+  trail. For trusted local loops only.
+- `HF_USE_DOCKER=0` -- forces the non-executing stub runtime; every build and
+  fuzz run then fails closed instead of leaving the sandbox. There is no
+  configuration that runs a harness on the host.

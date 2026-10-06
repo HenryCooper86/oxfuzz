@@ -70,8 +70,9 @@ git clone <your-oxfuzz-remote> && cd oxfuzz
 cargo build --release                 # binary: target/release/oxfuzz
 ./scripts/build-sandbox.sh            # build and verify the fuzzing sandbox image
 
-oxfuzz init                           # scaffold config/*.toml + .env
+oxfuzz init                           # scaffold config/*.toml + create the database
 # then configure at least one LLM provider: config/providers.toml + HF_PROVIDER_API_KEY
+# and authorize execution once you trust what will run: export HF_AUTO_APPROVE=1
 
 oxfuzz discover <project> --lang c --rank
 oxfuzz work-order export <project> --target <symbol> --lang c \
@@ -92,8 +93,12 @@ qualification attempt you reviewed; rerunning `oxfuzz harness` would generate a
 new draft rather than approve the previous source.
 
 Docker must be installed and running, and at least one LLM provider configured.
-See **[Install & Build](docs/guides/INSTALL.md)** and
-**[Configuration](docs/guides/CONFIGURATION.md)** for the full setup.
+Harness compilation and fuzzer launches are approval-gated high-risk actions:
+the CLI reads that consent from the environment (`HF_AUTO_APPROVE=1`, or
+`HF_GUARDRAILS=permissive` for trusted loops); the desktop app asks in a
+dialog. See the [Safety Model](docs/guides/SAFETY_MODEL.md),
+[Install & Build](docs/guides/INSTALL.md), and
+[Configuration](docs/guides/CONFIGURATION.md) for the full setup.
 
 ## The reviewed demo
 

@@ -57,8 +57,9 @@ git clone <your-oxfuzz-remote> && cd oxfuzz
 cargo build --release                 # 二进制：target/release/oxfuzz
 ./scripts/build-sandbox.sh            # 构建并验证模糊测试沙箱镜像
 
-oxfuzz init                           # 生成 config/*.toml + .env
+oxfuzz init                           # 生成 config/*.toml 并创建数据库
 # 然后至少配置一个 LLM 提供方：config/providers.toml + HF_PROVIDER_API_KEY
+# 并在你信任将要运行的内容后授权执行：export HF_AUTO_APPROVE=1
 
 oxfuzz discover <project> --lang c --rank
 oxfuzz work-order export <project> --target <symbol> --lang c \
@@ -74,8 +75,13 @@ oxfuzz run <project> --target <relative-file>::<symbol> \
 oxfuzz triage <project> --target <relative-file>::<symbol>
 ```
 
-Docker 必须已安装并正在运行，且至少配置一个 LLM 提供方。完整搭建见
-**[安装与构建](docs/guides/INSTALL.md)** 与 **[配置](docs/guides/CONFIGURATION.md)**。
+Docker 必须已安装并正在运行，且至少配置一个 LLM 提供方。harness 编译与
+模糊测试启动属于需要审批的高风险操作：CLI 从环境变量读取该授权
+（`HF_AUTO_APPROVE=1`，可信本地循环可用 `HF_GUARDRAILS=permissive`），
+桌面应用则通过对话框询问。参见
+**[安全模型](docs/guides/SAFETY_MODEL.md)**、
+**[安装与构建](docs/guides/INSTALL.md)** 与
+**[配置](docs/guides/CONFIGURATION.md)** 了解完整搭建。
 
 ## 带人工评审的演示
 
