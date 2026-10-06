@@ -292,6 +292,7 @@ fn write_draft_bundle_atomic(
             &temporary.join("REMEDIATION.md"),
             render_summary(handoff).as_bytes(),
         )?;
+        #[cfg(unix)]
         sync_directory(&temporary)?;
         if std::fs::symlink_metadata(destination).is_ok() {
             return Err(ClassifiedError::Validation(format!(
@@ -305,6 +306,7 @@ fn write_draft_bundle_atomic(
                 destination.display()
             ))
         })?;
+        #[cfg(unix)]
         sync_directory(parent)?;
         Ok(destination.to_path_buf())
     })();
@@ -339,6 +341,9 @@ fn write_new(path: &Path, contents: &[u8]) -> Result<(), ClassifiedError> {
     })
 }
 
+/// Directory fsync is a POSIX durability idiom: `File::open` on a directory
+/// is refused on Windows, and rename durability is filesystem-managed there.
+/// The call sites compile the sync out on non-Unix platforms.
 #[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<(), ClassifiedError> {
     std::fs::File::open(path)
@@ -349,11 +354,6 @@ fn sync_directory(path: &Path) -> Result<(), ClassifiedError> {
                 path.display()
             ))
         })
-}
-
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> Result<(), ClassifiedError> {
-    Ok(())
 }
 
 fn render_summary(handoff: &RemediationHandoff) -> String {

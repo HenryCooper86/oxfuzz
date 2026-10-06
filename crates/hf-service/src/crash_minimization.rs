@@ -61,9 +61,13 @@ impl MinimizationRun {
                 ))
             })?;
         }
-        sync_parent(self.final_path.parent().ok_or_else(|| {
-            ClassifiedError::Internal("minimized crash has no parent directory".to_owned())
-        })?)?;
+        #[cfg(unix)]
+        {
+            let parent = self.final_path.parent().ok_or_else(|| {
+                ClassifiedError::Internal("minimized crash has no parent directory".to_owned())
+            })?;
+            sync_parent(parent)?;
+        }
         validate_output(&self.final_path)?;
         self.published = true;
         Ok(self.final_path.clone())
@@ -279,6 +283,10 @@ fn validate_output(path: &Path) -> Result<(), ClassifiedError> {
 }
 
 #[cfg(unix)]
+/// Directory fsync is a POSIX durability idiom: `File::open` on a directory
+/// is refused on Windows, and rename durability is filesystem-managed there.
+/// The call site compiles the sync out on non-Unix platforms.
+#[cfg(unix)]
 fn sync_parent(parent: &Path) -> Result<(), ClassifiedError> {
     std::fs::File::open(parent)
         .and_then(|directory| directory.sync_all())
@@ -288,12 +296,4 @@ fn sync_parent(parent: &Path) -> Result<(), ClassifiedError> {
                 parent.display()
             ))
         })
-}
-
-// Directory fsync is a POSIX durability idiom: `File::open` on a directory is
-// refused on Windows, and rename durability is filesystem-managed there
-// (mirrors recovery.rs and campaign_state.rs).
-#[cfg(not(unix))]
-fn sync_parent(_parent: &Path) -> Result<(), ClassifiedError> {
-    Ok(())
 }

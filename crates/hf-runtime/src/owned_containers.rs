@@ -123,6 +123,7 @@ impl OwnedContainerRegistry {
             .ok_or_else(|| sandbox_error("approved workspace has no parent directory"))?;
         let directory = parent.join(format!(".oxfuzz-runtime-{workspace_digest}"));
         checked_directory(&directory)?;
+        #[cfg(unix)]
         sync_directory(parent)?;
         Ok(Self {
             directory,
@@ -157,6 +158,7 @@ impl OwnedContainerRegistry {
         file.write_all(&encoded)
             .and_then(|()| file.sync_all())
             .map_err(|error| sandbox_error(format!("sync owned container record: {error}")))?;
+        #[cfg(unix)]
         sync_directory(&self.directory)?;
         Ok(ActiveContainer { _file: file, path })
     }
@@ -300,15 +302,18 @@ async fn inspect_bounded(
 fn remove_record(path: &Path) -> Result<(), ClassifiedError> {
     fs::remove_file(path)
         .map_err(|error| sandbox_error(format!("remove owned container record: {error}")))?;
-    sync_directory(path.parent().expect("record has parent"))
+    #[cfg(unix)]
+    sync_directory(path.parent().expect("record has parent"))?;
+    Ok(())
 }
 
+/// Durably commit an inventory directory mutation. Unix syncs the directory
+/// entry so a crash cannot lose a just-created or just-removed record; other
+/// platforms have no directory-handle sync and rely on the filesystem's own
+/// crash consistency, so the call sites compile it out there.
+#[cfg(unix)]
 fn sync_directory(directory: &Path) -> Result<(), ClassifiedError> {
-    #[cfg(unix)]
     File::open(directory)
         .and_then(|file| file.sync_all())
-        .map_err(|error| sandbox_error(format!("sync runtime inventory: {error}")))?;
-    #[cfg(not(unix))]
-    let _ = directory;
-    Ok(())
+        .map_err(|error| sandbox_error(format!("sync runtime inventory: {error}")))
 }

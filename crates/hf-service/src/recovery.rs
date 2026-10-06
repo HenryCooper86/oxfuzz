@@ -461,7 +461,11 @@ fn append_wal(path: &Path, event: &RunEvent) -> io::Result<()> {
     }
     file.write_all(&line)?;
     file.sync_all()?;
-    sync_parent_directory(parent)
+    #[cfg(unix)]
+    {
+        sync_parent_directory(parent)?;
+    }
+    Ok(())
 }
 
 fn ensure_append_capacity(path: &Path, append_bytes: usize) -> io::Result<()> {
@@ -520,7 +524,11 @@ fn compact_wal<'a>(path: &Path, events: impl Iterator<Item = &'a RunEvent>) -> i
         file.write_all(&body)?;
         file.sync_all()?;
         std::fs::rename(&temporary, path)?;
-        sync_parent_directory(parent)
+        #[cfg(unix)]
+        {
+            sync_parent_directory(parent)?;
+        }
+        Ok(())
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temporary);
@@ -541,14 +549,12 @@ fn parent_directory(path: &Path) -> &Path {
         .unwrap_or_else(|| Path::new("."))
 }
 
+/// Directory fsync is a POSIX durability idiom: `File::open` on a directory
+/// is refused on Windows, and rename durability is filesystem-managed there.
+/// The call sites compile the sync out on non-Unix platforms.
 #[cfg(unix)]
 fn sync_parent_directory(parent: &Path) -> io::Result<()> {
     File::open(parent)?.sync_all()
-}
-
-#[cfg(not(unix))]
-fn sync_parent_directory(_parent: &Path) -> io::Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]
