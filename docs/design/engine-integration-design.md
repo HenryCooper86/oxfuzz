@@ -68,9 +68,20 @@ after a child crash (artifacts still land through `-artifact_prefix`), and
 stops at `-max_total_time`. An allocation of one keeps the historical
 single-process argv unchanged, because fork mode is a different execution
 model even at N=1; the flag is emitted before `extra_args` so a caller can
-override it. AFL++ currently runs one `afl-fuzz` instance regardless of the
-allocation; primary/secondary orchestration is recorded as open work in the
-project backlog.
+override it. An AFL++ allocation above one is orchestrated as N `afl-fuzz`
+instances sharing one output tree: the primary runs under `-M main` with the
+recorded RNG seed, and secondaries run under `-S sK`; every instance reads
+the same staged corpus and keeps its own queue under the shared output tree,
+which AFL++ syncs between instances. (The `-i -` resume form is not used:
+staging always creates a fresh output tree, where a secondary has no own
+queue to resume.) Every instance carries
+the time budget and dictionary; a `bash -c` coordinator propagates a
+cooperative Stop to all instances, logs each worker's exit status, and exits
+with the primary's status, with
+the sandbox wall-clock cap as the hard backstop. Smoke qualification stays
+single-instance by design: a bounded qualification probe measures whether
+the harness executes, not throughput, and must not change argv semantics
+when an operator raises the ceiling.
 
 Syzkaller is the service-owned manager-config exception. It fuzzes syscall
 sequences against a kernel in a managed VM, not a generated single-function
@@ -153,9 +164,14 @@ change one phase without changing its contract tests.
 
 ### 5.2 AFL++ Terminal Statistics
 
-AFL++ terminal metrics come from the exact run-owned
-`<run-output>/default/fuzzer_stats` file, not from UI/log text on stdout. The
-engine API bounds the file to 64 KiB, rejects symlinked/non-regular paths, and
+AFL++ terminal metrics come from the exact run-owned `fuzzer_stats`
+snapshots under the run output, not from UI/log text on stdout. A
+single-instance run owns `<run-output>/default/fuzzer_stats`; a multi-worker
+run owns one snapshot per instance directory (`<run-output>/<instance>/`),
+aggregated run-wide by summing `execs_per_sec` and `saved_crashes` and
+maximizing `edges_found` and `total_edges`, since instances share one
+coverage bitmap but not one execution stream. The
+engine API bounds each file to 64 KiB, rejects symlinked/non-regular paths, and
 parses only the exact keys `execs_per_sec`, `edges_found`, `total_edges`, and
 `saved_crashes`. Unknown keys are ignored; malformed values for a recognized
 key fail that snapshot rather than being reported as zero.

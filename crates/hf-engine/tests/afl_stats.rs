@@ -66,6 +66,38 @@ fn reader_uses_only_the_run_owned_default_instance() {
 }
 
 #[test]
+fn reader_aggregates_every_instance_snapshot_run_wide() {
+    let run_output = tempfile::tempdir().unwrap();
+    for (instance, stats) in [
+        (
+            "main",
+            "execs_per_sec : 100\nedges_found : 40\ntotal_edges : 128\nsaved_crashes : 2\n",
+        ),
+        (
+            "s1",
+            "execs_per_sec : 60\nedges_found : 45\ntotal_edges : 128\nsaved_crashes : 1\n",
+        ),
+        (
+            "s2",
+            "execs_per_sec : 40\nedges_found : 30\ntotal_edges : 100\nsaved_crashes : 0\n",
+        ),
+    ] {
+        fs::create_dir(run_output.path().join(instance)).unwrap();
+        fs::write(run_output.path().join(instance).join("fuzzer_stats"), stats).unwrap();
+    }
+
+    let stats = read_fuzzer_stats(run_output.path())
+        .expect("safe run-owned statistics")
+        .expect("statistics file exists");
+    // Throughput and saved crashes are per-instance execution streams: sum.
+    assert_eq!(stats.execs_per_sec, Some(200.0));
+    assert_eq!(stats.saved_crashes, Some(3));
+    // The instances share one coverage bitmap: run-wide edges are the max.
+    assert_eq!(stats.edges_found, Some(45));
+    assert_eq!(stats.total_edges, Some(128));
+}
+
+#[test]
 fn reader_reports_missing_snapshot_without_fabricating_stats() {
     let run_output = tempfile::tempdir().unwrap();
     fs::create_dir(run_output.path().join("default")).unwrap();

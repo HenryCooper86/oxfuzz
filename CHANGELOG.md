@@ -9,6 +9,21 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ## Unreleased
 
+### Added
+
+- AFL++ intra-target parallel fuzzing. A CPU allocation above one now runs a
+  sandboxed primary/secondary coordinator (one `-M main` and N-1 `-S`
+  instances sharing the run output tree); terminal statistics aggregate every
+  instance's `fuzzer_stats` (throughput and saved crashes summed, edges
+  maximized). Single-CPU allocations keep the previous single-instance argv.
+
+### Fixed
+
+- Harness smoke qualification stays single-instance regardless of the
+  operator CPU ceiling, so raising `fuzzing.sandbox.max_cpus` (which puts
+  campaign libFuzzer runs into fork mode and orchestrates AFL++ instances)
+  no longer changes the qualification argv or its exit-code evidence.
+
 ## 0.6.0 - 2026-10-07
 
 ### Added

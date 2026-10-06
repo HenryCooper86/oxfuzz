@@ -122,6 +122,80 @@ fn afl_input_delivery_is_identical_across_lifecycle_builders() {
 }
 
 #[test]
+fn afl_single_cpu_keeps_the_single_instance_argv() {
+    let c = cfg(EngineKind::AflPlusPlus, 3600);
+    let args = hf_engine::afl::build_run_args(&c, "/work/fuzz_bin", "/work/corpus", "/work/out");
+    assert_eq!(
+        args.iter().map(String::as_str).collect::<Vec<_>>(),
+        vec![
+            "afl-fuzz",
+            "-i",
+            "/work/corpus",
+            "-o",
+            "/work/out",
+            "-V",
+            "3600",
+            "--",
+            "/work/fuzz_bin",
+            "@@",
+        ],
+        "one CPU must keep the single-instance argv byte-identical"
+    );
+}
+
+#[test]
+fn afl_multi_cpu_orchestrates_primary_and_secondaries() {
+    let mut c = cfg(EngineKind::AflPlusPlus, 300);
+    c.max_cpus = 3;
+    c.seed = Some(42);
+    c.extra_args = vec!["-x".to_owned(), "/work/fuzzer.dict".to_owned()];
+    let args = hf_engine::afl::build_run_args(&c, "/work/fuzz_bin", "/work/corpus", "/work/out");
+
+    assert_eq!(args.first().map(String::as_str), Some("bash"));
+    assert_eq!(args.get(1).map(String::as_str), Some("-c"));
+    let script = args.get(2).expect("coordinator script").as_str();
+
+    // One primary, N-1 secondaries, all sharing one output tree. Every
+    // instance reads the same staged corpus (staging always builds a fresh
+    // output tree; the `-i -` resume form has no own queue to resume there
+    // and fails AFL's output-directory setup).
+    assert_eq!(script.matches("-M main").count(), 1, "{script}");
+    assert_eq!(script.matches("-S s1").count(), 1, "{script}");
+    assert_eq!(script.matches("-S s2").count(), 1, "{script}");
+    assert_eq!(script.matches("-i '/work/corpus'").count(), 3, "{script}");
+    // Only the primary pins the recorded RNG seed.
+    assert_eq!(script.matches("-s 42").count(), 1, "{script}");
+    // Every instance carries the time budget, the dictionary, and the
+    // generated harness's file-input contract.
+    assert_eq!(script.matches("-V 300").count(), 3, "{script}");
+    assert_eq!(
+        script.matches("'-x' '/work/fuzzer.dict'").count(),
+        3,
+        "{script}"
+    );
+    assert_eq!(
+        script.matches("-- '/work/fuzz_bin' @@").count(),
+        3,
+        "{script}"
+    );
+    // A cooperative Stop must reach every instance so AFL can flush
+    // fuzzer_stats, the wrapper must log each worker's exit, and it must
+    // exit with the primary's status.
+    assert!(
+        script.contains("trap 'kill -TERM $(jobs -p) 2>/dev/null' TERM INT"),
+        "coordinator must forward TERM/INT: {script}"
+    );
+    assert!(
+        script.contains("afl-worker $job exited $?"),
+        "coordinator must surface worker exit statuses: {script}"
+    );
+    assert!(
+        script.contains("wait \"$primary\"") && script.contains("exit \"$status\""),
+        "coordinator must propagate the primary exit status: {script}"
+    );
+}
+
+#[test]
 fn honggfuzz_args_have_run_time() {
     let c = cfg(EngineKind::Honggfuzz, 3600);
     let args =

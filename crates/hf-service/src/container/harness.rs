@@ -1220,20 +1220,7 @@ impl ServiceContainer {
 
         // Allocate the run identity before execution so its immutable inputs and
         // every finding are owned by one durable evidence directory.
-        let mut smoke_config = FuzzRunConfig {
-            harness_id: harness.id,
-            engine: resolved.engine,
-            duration: Some(std::time::Duration::from_secs(resolved.duration_secs)),
-            max_mem_mb: resolved.max_mem_mb,
-            max_cpus: resolved.max_cpus,
-            seed_corpus: Some(workspace.join("corpus")),
-            sanitizer: harness.sanitizer,
-            env: Vec::new(),
-            extra_args: Vec::new(),
-            seed: None,
-            replay_of: None,
-            input_manifest_sha256: None,
-        };
+        let mut smoke_config = smoke_qualification_config(&harness, resolved, workspace.as_path());
         let mut smoke_record = RunRecord::new(
             project.to_string_lossy().to_string(),
             engine,
@@ -2047,6 +2034,83 @@ const MAX_ACCEPTED_EXAMPLES: usize = 2;
 pub(super) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest as _;
     hex::encode(sha2::Sha256::digest(bytes))
+}
+
+/// Build the run configuration for harness smoke qualification.
+///
+/// Smoke is a bounded qualification probe over the exact reviewed source, not
+/// a throughput campaign: it runs exactly one engine instance regardless of
+/// the operator's CPU allocation, so raising `fuzzing.sandbox.max_cpus`
+/// (which puts campaign libFuzzer runs into fork mode and orchestrates AFL++
+/// primaries and secondaries) never changes the qualification argv or its
+/// exit-code evidence.
+fn smoke_qualification_config(
+    harness: &Harness,
+    resolved: crate::config::ResolvedFuzzingRun,
+    workspace: &Path,
+) -> FuzzRunConfig {
+    FuzzRunConfig {
+        harness_id: harness.id,
+        engine: resolved.engine,
+        duration: Some(std::time::Duration::from_secs(resolved.duration_secs)),
+        max_mem_mb: resolved.max_mem_mb,
+        max_cpus: 1,
+        seed_corpus: Some(workspace.join("corpus")),
+        sanitizer: harness.sanitizer,
+        env: Vec::new(),
+        extra_args: Vec::new(),
+        seed: None,
+        replay_of: None,
+        input_manifest_sha256: None,
+    }
+}
+
+#[cfg(test)]
+mod smoke_config_tests {
+    use super::smoke_qualification_config;
+    use crate::config::ResolvedFuzzingRun;
+    use hf_core::engine::EngineKind;
+    use hf_core::harness::{BuildCommand, Harness, HarnessStatus};
+    use hf_core::target::{Sanitizer, TargetLanguage};
+    use uuid::Uuid;
+
+    fn harness() -> Harness {
+        Harness {
+            id: Uuid::new_v4(),
+            target_id: Uuid::new_v4(),
+            engine: EngineKind::AflPlusPlus,
+            source: "int LLVMFuzzerTestOneInput(...)".to_owned(),
+            language: TargetLanguage::C,
+            build_cmd: BuildCommand {
+                compiler: "afl-clang-fast".to_owned(),
+                args: Vec::new(),
+                output: "fuzz_bin".into(),
+                extra_flags: Vec::new(),
+            },
+            sanitizer: Sanitizer::Address,
+            status: HarnessStatus::Draft,
+            smoke_run: None,
+        }
+    }
+
+    #[test]
+    fn smoke_qualification_stays_single_instance_under_a_raised_ceiling() {
+        let resolved = ResolvedFuzzingRun {
+            engine: EngineKind::AflPlusPlus,
+            duration_secs: 60,
+            max_mem_mb: 2048,
+            max_cpus: 8,
+        };
+        let config =
+            smoke_qualification_config(&harness(), resolved, std::path::Path::new("/work"));
+        // The allocation is pinned: a raised ceiling must not put the
+        // qualification probe into multi-instance mode.
+        assert_eq!(config.max_cpus, 1);
+        // The rest of the resolved policy still applies.
+        assert_eq!(config.max_mem_mb, 2048);
+        assert_eq!(config.duration, Some(std::time::Duration::from_secs(60)));
+        assert_eq!(config.engine, EngineKind::AflPlusPlus);
+    }
 }
 
 #[cfg(test)]
