@@ -50,10 +50,13 @@ validate every existing parent with `symlink_metadata` before accepting a
 cold-start output path, then repeat containment checks when accessing it.
 Include paths may refer to safe sibling directories inside the complete project.
 
-Supported saved build systems are CMake and plain Make. Autotools, Meson, Bazel,
-custom Make targets, arbitrary environment variables, and dependency installation
-are unsupported in Phase 6. Reject CMake definitions on a Make profile rather
-than saving ignored settings. Definitions are sorted by name and validated:
+Supported saved build systems are CMake, plain Make, Meson, and Autotools.
+Bazel, custom Make targets, arbitrary environment variables, and dependency
+installation are unsupported; Cargo needs no profile. Profiles for plain
+Make, Meson, and Autotools cannot carry definitions (the definition field,
+allowlist, and validation are CMake's `-D` model). Reject CMake definitions
+on those profiles rather than saving ignored settings. Definitions are
+sorted by name and validated:
 
 - Names match `[A-Z][A-Z0-9_]{0,63}` and occur in the validated
   `[build_profiles].allowed_cmake_options` configuration list.
@@ -126,12 +129,15 @@ Use fixed argv: `pkg-config --exists <module>` for modules. Command lookup uses
 the script is constant, the validated name is a positional argument, and the
 command being located is not executed. Do not interpolate a name into shell
 source. CMake requires `cmake`; Make requires `mkdir`, `make`, and `bear`;
+Meson requires `meson`; Autotools requires `autoreconf`, `make`, and `bear`;
 module probes additionally require `pkg-config`.
 
-Phase 6 adds Bear to the pinned sandbox image alongside existing Make, CMake,
-Ninja, and pkg-config. Release image checks cover `bear --version`,
-`cmake --version`, `make --version`, and `pkg-config --version`. CMake and plain
-Make plans are supported only when those required tools are available; other
+Phase 6 added Bear to the pinned sandbox image alongside existing Make, CMake,
+Ninja, and pkg-config; Meson and Autotools toolchains (`meson`, `autoconf`,
+`automake`, `libtool`) joined at image 0.2.0. Release image checks cover
+`bear --version`, `cmake --version`, `make --version`, and
+`pkg-config --version`. CMake, plain Make, Meson, and Autotools plans are
+supported only when those required tools are available; other
 build systems remain unsupported even if a particular image contains a tool.
 
 ## 5. Service API and Operator Flow
@@ -219,7 +225,25 @@ mkdir -p -- ../../build/parser
 bear --output ../../build/parser/compile_commands.json -- make -B
 ```
 
-The CMake plan configures without compiling the whole project. Bear observes
+for Meson (setup writes the compile database into the build directory; no
+project build runs):
+
+```text
+meson setup ../../build/parser
+```
+
+or, for Autotools (in-tree configure, then the forced Make build recorded
+by Bear):
+
+```text
+autoreconf -i
+./configure
+bear --output ../../build/parser/compile_commands.json -- make -B
+```
+
+The CMake plan configures without compiling the whole project. The Meson
+plan configures only; Meson writes `compile_commands.json` during setup.
+Bear observes
 the forced plain Make build. `<definitions>` denotes the sorted validated
 argument tokens, never literal shell expansion. No plan step uses a shell.
 

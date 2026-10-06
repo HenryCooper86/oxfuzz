@@ -982,6 +982,26 @@ mod build_surface_tests {
     use super::*;
 
     #[test]
+    fn profile_set_accepts_every_supported_build_system() {
+        for system in ["cmake", "make", "meson", "autotools"] {
+            let parsed = Cli::try_parse_from([
+                "oxfuzz",
+                "build",
+                "profile",
+                "set",
+                "/project",
+                "--component-root",
+                ".",
+                "--build-system",
+                system,
+                "--compile-database-path",
+                "build/compile_commands.json",
+            ]);
+            assert!(parsed.is_ok(), "rejected --build-system {system}");
+        }
+    }
+
+    #[test]
     fn build_commands_accept_explicit_reviewed_inputs() {
         for args in [
             vec!["oxfuzz", "build", "diagnose", "/project", "--json"],
@@ -1103,6 +1123,8 @@ pub(crate) enum BuildProfileCommand {
 pub(crate) enum ProfileSystemArg {
     Cmake,
     Make,
+    Meson,
+    Autotools,
 }
 
 #[cfg(all(test, not(feature = "build-doctor")))]

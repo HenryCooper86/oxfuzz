@@ -25,6 +25,8 @@ pub enum ProfileBuildSystem {
     #[serde(rename = "cmake")]
     CMake,
     Make,
+    Meson,
+    Autotools,
 }
 
 /// Dependency probe kinds, ordered for canonical serialization.

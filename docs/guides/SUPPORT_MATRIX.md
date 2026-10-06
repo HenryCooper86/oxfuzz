@@ -36,8 +36,10 @@ Additional operation limits:
   unavailable for syzkaller and refuses the operation on Windows. Broader
   platform availability requires secure retained-artifact reading and its own
   acceptance record.
-- Build Doctor's configured project-build support covers CMake and plain Make.
-  It detects other systems without claiming a configured build for them.
+- Build Doctor's configured project-build support covers CMake, plain Make,
+  Meson, and Autotools (sandbox image 0.2.0 or later). Generated-header
+  staging, dependency fetching, and Bazel remain unsupported; it detects
+  those conditions without claiming a configured build for them.
 
 For userspace C/C++/Rust, source discovery and the guarded build/smoke,
 campaign, corpus, replay, and triage operations have cross-platform code and

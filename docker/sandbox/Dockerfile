@@ -11,12 +11,14 @@ ARG UBUNTU_IMAGE=ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c0
 FROM ${UBUNTU_IMAGE}
 
 LABEL org.opencontainers.image.title="oxfuzz sandbox" \
-      org.opencontainers.image.version="0.1.0" \
+      org.opencontainers.image.version="0.2.0" \
       org.opencontainers.image.source="https://github.com/HenryCooper86/oxfuzz"
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install clang, build tools, AFL++, libFuzzer dev, and clang runtime (asan/fuzzer).
+# meson + autoconf/automake/libtool cover the Meson and Autotools build profiles
+# alongside CMake and plain Make (docs/design/build-doctor-design.md).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     clang \
     llvm \
@@ -25,6 +27,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     make \
     cmake \
     ninja-build \
+    meson \
+    autoconf \
+    automake \
+    libtool \
     git \
     wget \
     ca-certificates \

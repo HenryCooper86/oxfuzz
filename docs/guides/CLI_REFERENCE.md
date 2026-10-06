@@ -259,7 +259,9 @@ remain unavailable when current workspace files cannot establish them.
 
 ### Build profiles
 
-Build profiles support only `cmake` and `make`. A set operation is explicit:
+Build profiles support `cmake`, `make`, `meson`, and `autotools`. Meson and
+Autotools profiles carry no definitions (the `--define` allowlist is CMake's
+`-D` model). A set operation is explicit:
 
 ```bash
 oxfuzz build profile set /path/to/project \

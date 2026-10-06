@@ -11,11 +11,23 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ### Added
 
+- Meson and Autotools build profiles. A component with `meson.build` or
+  autotools markers (`configure.ac`, `configure.in`, `Makefile.am`) can now
+  save, diagnose, and execute a configured build profile like CMake and
+  plain Make: `meson setup` writes the compile database; `autoreconf -i`,
+  `./configure`, and a Bear-recorded forced Make build produce it. Both
+  plans were verified live in the rebuilt sandbox image.
 - AFL++ intra-target parallel fuzzing. A CPU allocation above one now runs a
   sandboxed primary/secondary coordinator (one `-M main` and N-1 `-S`
   instances sharing the run output tree); terminal statistics aggregate every
   instance's `fuzzer_stats` (throughput and saved crashes summed, edges
   maximized). Single-CPU allocations keep the previous single-instance argv.
+
+### Changed
+
+- The fuzzing sandbox image is now `oxfuzz/fuzz-sandbox:0.2.0` (adds meson,
+  autoconf, automake, libtool). Rebuild it with
+  `./scripts/build-sandbox.sh`; image overrides must also move to 0.2.0.
 
 ### Fixed
 

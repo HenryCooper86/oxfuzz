@@ -129,7 +129,10 @@ pub(super) fn detected(project: &Path, component: &str) -> Vec<BuildSystemEviden
             continue;
         }
         let status = match build_system {
-            BuildSystem::CMake | BuildSystem::Make => DetectedBuildStatus::Supported,
+            BuildSystem::CMake
+            | BuildSystem::Make
+            | BuildSystem::Meson
+            | BuildSystem::Autotools => DetectedBuildStatus::Supported,
             BuildSystem::Cargo => DetectedBuildStatus::NotNeeded,
             _ => DetectedBuildStatus::UnsupportedInImage,
         };

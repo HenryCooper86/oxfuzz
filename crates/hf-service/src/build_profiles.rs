@@ -133,8 +133,14 @@ fn validate_options(
     settings: &BuildProfileSettings,
 ) -> Result<(), ClassifiedError> {
     settings.validate().map_err(ClassifiedError::Validation)?;
-    if system == ProfileBuildSystem::Make && !definitions.is_empty() {
-        return Err(invalid("Make profiles cannot contain CMake definitions"));
+    if matches!(
+        system,
+        ProfileBuildSystem::Make | ProfileBuildSystem::Meson | ProfileBuildSystem::Autotools
+    ) && !definitions.is_empty()
+    {
+        return Err(invalid(
+            "only CMake profiles can contain definitions; Make, Meson, and Autotools profiles cannot",
+        ));
     }
     for (name, value) in definitions {
         if !valid_cmake_option_name(name) || !settings.allowed_cmake_options.contains(name) {
@@ -250,6 +256,8 @@ fn select_marker(
     let selected = match system {
         ProfileBuildSystem::CMake => hf_storage::DetectedBuildSystem::CMake,
         ProfileBuildSystem::Make => hf_storage::DetectedBuildSystem::Make,
+        ProfileBuildSystem::Meson => hf_storage::DetectedBuildSystem::Meson,
+        ProfileBuildSystem::Autotools => hf_storage::DetectedBuildSystem::Autotools,
     };
     for (detected, markers) in BUILD_SYSTEM_MARKERS {
         for marker in markers {

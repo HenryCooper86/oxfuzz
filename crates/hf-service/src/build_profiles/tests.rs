@@ -172,6 +172,113 @@ fn options_require_allowed_names_and_safe_exact_values() {
 }
 
 #[test]
+fn meson_and_autotools_profiles_accept_their_markers_but_reject_definitions() {
+    for (system, marker, content) in [
+        (
+            ProfileBuildSystem::Meson,
+            "meson.build",
+            "project('demo', 'c')\n",
+        ),
+        (
+            ProfileBuildSystem::Autotools,
+            "configure.ac",
+            "AC_INIT([demo], [1.0])\n",
+        ),
+    ] {
+        let (project, mut request) = fixture();
+        request.component_root = ".".to_owned();
+        request.build_system = system;
+        std::fs::remove_file(project.path().join("components/parser/CMakeLists.txt")).unwrap();
+        std::fs::write(project.path().join(marker), content).unwrap();
+        let profile = normalize(&request).unwrap();
+        assert_eq!(profile.marker_path, marker);
+        request
+            .cmake_definitions
+            .insert("BUILD_TESTING".to_owned(), "OFF".to_owned());
+        assert!(
+            normalize(&request).is_err(),
+            "{system:?} profiles cannot carry CMake definitions"
+        );
+    }
+}
+
+#[test]
+fn meson_and_autotools_plans_derive_output_from_selected_database() {
+    for (system, marker, content) in [
+        (
+            ProfileBuildSystem::Meson,
+            "meson.build",
+            "project('demo', 'c')\n",
+        ),
+        (
+            ProfileBuildSystem::Autotools,
+            "configure.ac",
+            "AC_INIT([demo], [1.0])\n",
+        ),
+    ] {
+        let (project, mut request) = fixture();
+        request.component_root = ".".to_owned();
+        request.build_system = system;
+        std::fs::remove_file(project.path().join("components/parser/CMakeLists.txt")).unwrap();
+        std::fs::write(project.path().join(marker), content).unwrap();
+        let profile = normalize(&request).unwrap();
+
+        let plan = profile_build_plan(&profile);
+        match system {
+            ProfileBuildSystem::Meson => {
+                assert_eq!(plan.steps.len(), 1);
+                assert_eq!(plan.steps[0].argv, ["meson", "setup", "build/parser"]);
+                assert_eq!(plan.steps[0].working_dir, ".");
+                assert_eq!(
+                    required_build_dependencies(&profile),
+                    [BuildDependency {
+                        kind: BuildDependencyKind::Command,
+                        name: "meson".to_owned(),
+                    }]
+                );
+            }
+            ProfileBuildSystem::Autotools => {
+                assert_eq!(plan.steps.len(), 3);
+                assert_eq!(plan.steps[0].argv, ["autoreconf", "-i"]);
+                assert_eq!(plan.steps[1].argv, ["./configure"]);
+                assert_eq!(
+                    plan.steps[2].argv,
+                    [
+                        "bear",
+                        "--output",
+                        "build/parser/compile_commands.json",
+                        "--",
+                        "make",
+                        "-B"
+                    ]
+                );
+                for step in &plan.steps {
+                    assert_eq!(step.working_dir, ".");
+                }
+                assert_eq!(
+                    required_build_dependencies(&profile),
+                    [
+                        BuildDependency {
+                            kind: BuildDependencyKind::Command,
+                            name: "autoreconf".to_owned(),
+                        },
+                        BuildDependency {
+                            kind: BuildDependencyKind::Command,
+                            name: "bear".to_owned(),
+                        },
+                        BuildDependency {
+                            kind: BuildDependencyKind::Command,
+                            name: "make".to_owned(),
+                        },
+                    ]
+                );
+            }
+            ProfileBuildSystem::CMake | ProfileBuildSystem::Make => unreachable!(),
+        }
+    }
+}
+
+#[test]
 fn make_rejects_cmake_definitions() {
     let (project, mut request) = fixture();
     request.component_root = ".".to_owned();

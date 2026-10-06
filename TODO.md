@@ -16,9 +16,12 @@ qualification from implementation.
   readable in history; [ten normal C-fixture cycles](docs/acceptance/userspace-2026-09-27.md)
   passed on libFuzzer, AFL++, and honggfuzz. Broader real-project usefulness is
   separate acceptance work. Owner: `hf-service`.
-- [ ] Broader project builds: extend measured onboarding beyond CMake and plain
-  Make, including generated headers and dependencies. Detecting a build system
-  does not imply configured build support. Owner: `hf-service`.
+- [x] Broader project builds: Meson and Autotools join CMake and plain Make
+  as supported, saved, executable build profiles (sandbox image 0.2.0),
+  each plan verified live in the image. Still open on this item: staging
+  generated headers into harness compiles, dependency handling (builds stay
+  network-disabled by design), Bazel, and per-system definitions beyond
+  CMake's `-D` model. Owner: `hf-service`.
 - [ ] Publish and verify language-by-operation support, including a real Rust
   cargo-fuzz campaign in the sandbox. Go/Python discovery does not establish
   harness support; the separate [Go](docs/design/go-native-fuzzing-design.md)

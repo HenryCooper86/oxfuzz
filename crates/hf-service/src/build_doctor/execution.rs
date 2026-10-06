@@ -60,6 +60,8 @@ impl crate::ServiceContainer {
                         build_system: match profile.build_system {
                             ProfileBuildSystem::CMake => "cmake",
                             ProfileBuildSystem::Make => "make",
+                            ProfileBuildSystem::Meson => "meson",
+                            ProfileBuildSystem::Autotools => "autotools",
                         }
                         .into(),
                     },

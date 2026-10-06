@@ -359,18 +359,20 @@ fn several_markers_report_several_systems_in_specificity_order() {
     assert_eq!(found[1].build_system, BuildSystem::Make);
 }
 #[test]
-fn cmake_and_plain_make_are_supported_systems() {
-    for marker in ["CMakeLists.txt", "Makefile"] {
+fn configured_build_systems_are_supported() {
+    for marker in ["CMakeLists.txt", "Makefile", "meson.build", "configure.ac"] {
         let dir = project(&[marker]);
         assert_eq!(
             detect_build_systems(dir.path())[0].status,
-            BuildSystemStatus::Supported
+            BuildSystemStatus::Supported,
+            "marker {marker}"
         );
     }
 }
 #[test]
 fn unsupported_systems_do_not_claim_a_tool_is_missing_without_a_probe() {
-    for marker in ["configure.ac", "meson.build", "WORKSPACE"] {
+    {
+        let marker = "WORKSPACE";
         let dir = project(&[marker]);
         let found = detect_build_systems(dir.path());
         assert_eq!(found[0].status, BuildSystemStatus::UnsupportedInImage);

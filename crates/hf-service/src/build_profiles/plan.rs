@@ -11,6 +11,8 @@ pub(crate) fn required_build_dependencies(profile: &BuildProfileView) -> Vec<Bui
     let commands = match profile.build_system {
         ProfileBuildSystem::CMake => &["cmake"][..],
         ProfileBuildSystem::Make => &["mkdir", "make", "bear"][..],
+        ProfileBuildSystem::Meson => &["meson"][..],
+        ProfileBuildSystem::Autotools => &["autoreconf", "make", "bear"][..],
     };
     let needs_pkg_config = dependencies
         .iter()
@@ -68,6 +70,40 @@ pub(crate) fn profile_build_plan(profile: &BuildProfileView) -> BuildPlanEvidenc
                     output_dir.to_owned(),
                 ],
                 "Create the selected compile database output directory",
+            ),
+            step(
+                vec![
+                    "bear".to_owned(),
+                    "--output".to_owned(),
+                    output,
+                    "--".to_owned(),
+                    "make".to_owned(),
+                    "-B".to_owned(),
+                ],
+                "Record the forced Make build in the selected compile database",
+            ),
+        ],
+        // Meson writes compile_commands.json during setup, so configuring is
+        // enough; no project build runs for the database.
+        ProfileBuildSystem::Meson => vec![step(
+            vec![
+                "meson".to_owned(),
+                "setup".to_owned(),
+                output_dir.to_owned(),
+            ],
+            "Set up the Meson build directory so Meson writes the selected compile database",
+        )],
+        // In-tree configure keeps the plan independent of whether the
+        // component ships a generated configure script: autoreconf produces
+        // one from the autoconf sources when it is absent.
+        ProfileBuildSystem::Autotools => vec![
+            step(
+                vec!["autoreconf".to_owned(), "-i".to_owned()],
+                "Generate or refresh the configure script from the autoconf sources",
+            ),
+            step(
+                vec!["./configure".to_owned()],
+                "Configure the component in-tree for the recorded Make build",
             ),
             step(
                 vec![
