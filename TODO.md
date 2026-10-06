@@ -18,9 +18,12 @@ qualification from implementation.
   separate acceptance work. Owner: `hf-service`.
 - [x] Broader project builds: Meson and Autotools join CMake and plain Make
   as supported, saved, executable build profiles (sandbox image 0.2.0),
-  each plan verified live in the image. Still open on this item: staging
-  generated headers into harness compiles, dependency handling (builds stay
-  network-disabled by design), Bazel, and per-system definitions beyond
+  each plan verified live in the image; a successful build now publishes the
+  build tree's generated headers and database-referenced generated sources
+  alongside the compile database, and harness staging carries them into the
+  sandbox workspace (verified live: a `configure_file` header compiles into
+  the harness build). Still open on this item: dependency handling (builds
+  stay network-disabled by design), Bazel, and per-system definitions beyond
   CMake's `-D` model. Owner: `hf-service`.
 - [ ] Publish and verify language-by-operation support, including a real Rust
   cargo-fuzz campaign in the sandbox. Go/Python discovery does not establish

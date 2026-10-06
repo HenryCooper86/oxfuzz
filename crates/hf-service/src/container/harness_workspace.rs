@@ -401,6 +401,131 @@ pub fn copy_project_sources(project: &Path, workspace: &Path) {
 /// Source and header extensions staged for a C/C++ build.
 const STAGED_SOURCE_EXTENSIONS: [&str; 6] = ["c", "h", "cc", "cpp", "cxx", "hpp"];
 
+/// Header suffixes accepted from the configured build directory. Generated
+/// sources are staged only when the compile database references them (see
+/// [`stage_generated_build_inputs`]).
+const GENERATED_HEADER_EXTENSIONS: [&str; 6] = ["h", "hh", "hpp", "hxx", "inc", "inl"];
+
+/// Stage the configured build's generated inputs into a harness workspace.
+///
+/// Out-of-tree build systems write generated headers (and sometimes generated
+/// sources) into the build directory, which project staging skips by name; the
+/// compile database's own `-I` flags already point there as staged `/work`
+/// paths, so the flags resolve as soon as the files exist at the same
+/// project-relative layout. Headers are staged by suffix from the database's
+/// directory; sources are staged only when a database entry references them,
+/// because a build directory also holds the build system's probe sources
+/// (`CMake`'s `CompilerId`, each with its own `main`) that must never enter the
+/// single-link harness compile. Returns the number of staged files.
+///
+/// # Errors
+/// Returns `ClassifiedError` when the database lies outside the project, is
+/// unreadable or malformed, or a referenced generated source is not a regular
+/// file. Every failure fails closed rather than staging a partial tree.
+pub fn stage_generated_build_inputs(
+    project: &Path,
+    database: &Path,
+    workspace: &Path,
+) -> Result<usize, ClassifiedError> {
+    let build_dir = database.parent().ok_or_else(|| {
+        ClassifiedError::Validation("compile database has no parent directory".to_owned())
+    })?;
+    let build_rel = build_dir.strip_prefix(project).map_err(|_| {
+        ClassifiedError::Validation(
+            "configured compile database lies outside the project".to_owned(),
+        )
+    })?;
+    let json = super::build_context::read_compile_database_text(database)?;
+    let entries = hf_discovery::build_context::parse_compile_database(&json)
+        .map_err(|error| ClassifiedError::Validation(error.to_string()))?;
+
+    // Project staging skips the build directory by name, so its workspace
+    // counterpart does not exist yet; the staged-file writer requires it.
+    std::fs::create_dir_all(workspace.join(build_rel)).map_err(|error| {
+        ClassifiedError::Internal(format!(
+            "create staged build directory {}: {error}",
+            workspace.join(build_rel).display()
+        ))
+    })?;
+    let mut staged = 0_usize;
+    stage_tree(
+        build_dir,
+        build_dir,
+        &workspace.join(build_rel),
+        &|path| {
+            path.extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| GENERATED_HEADER_EXTENSIONS.contains(&extension))
+        },
+        &mut staged,
+    );
+    for entry in &entries {
+        let Some(file) = database_file_in_project(&entry.file, project) else {
+            continue;
+        };
+        if !file.starts_with(build_dir) {
+            continue;
+        }
+        let Ok(relative) = file.strip_prefix(project) else {
+            continue;
+        };
+        if relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            continue;
+        }
+        stage_one_generated_source(&file, &workspace.join(relative), &mut staged)?;
+    }
+    Ok(staged)
+}
+
+/// Resolve a database entry's translation unit onto the caller's project.
+///
+/// A database produced inside the sandbox records the container mount root
+/// (`/work`); a normalized database records host paths. Both forms resolve
+/// against the same project layout, so the entry is accepted when it already
+/// lies under the project or maps from the container root onto it.
+fn database_file_in_project(file: &Path, project: &Path) -> Option<PathBuf> {
+    if let Ok(relative) = file.strip_prefix("/work") {
+        return Some(project.join(relative));
+    }
+    file.starts_with(project).then(|| file.to_path_buf())
+}
+
+/// Copy one database-referenced generated source at its project-relative path.
+fn stage_one_generated_source(
+    source: &Path,
+    destination: &Path,
+    staged: &mut usize,
+) -> Result<(), ClassifiedError> {
+    let metadata = std::fs::symlink_metadata(source).map_err(|error| {
+        ClassifiedError::Validation(format!(
+            "inspect generated source {}: {error}",
+            source.display()
+        ))
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(ClassifiedError::Validation(format!(
+            "generated source {} is not a regular file",
+            source.display()
+        )));
+    }
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            ClassifiedError::Internal(format!("mkdir generated source parent: {error}"))
+        })?;
+    }
+    std::fs::copy(source, destination).map_err(|error| {
+        ClassifiedError::Internal(format!(
+            "stage generated source {}: {error}",
+            source.display()
+        ))
+    })?;
+    *staged += 1;
+    Ok(())
+}
+
 /// Directory names never staged: version control, build output, and fetched
 /// dependencies. Compiling a stale copy out of `build/` is worse than not
 /// finding the source at all, because the resulting crash points at code the
@@ -875,7 +1000,10 @@ mod c_staging_tests {
 
 #[cfg(all(test, unix))]
 mod sandbox_link_tests {
-    use super::{build_workspace_dictionary, copy_project_sources, write_current_harness_id};
+    use super::{
+        build_workspace_dictionary, copy_project_sources, stage_generated_build_inputs,
+        write_current_harness_id,
+    };
     use std::os::unix::fs::{symlink, PermissionsExt};
 
     #[test]
@@ -991,5 +1119,134 @@ mod sandbox_link_tests {
             .permissions()
             .mode();
         assert_eq!(private_mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn stages_generated_headers_and_referenced_sources_from_the_build_dir() {
+        let project = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let build = project.path().join("build/parser");
+        std::fs::create_dir_all(build.join("gen")).unwrap();
+        std::fs::write(project.path().join("lib.c"), "int f(void);\n").unwrap();
+        std::fs::write(build.join("gen/config.h"), "#define VERSION 1\n").unwrap();
+        std::fs::write(build.join("gen/parser.c"), "int f(void) { return 0; }\n").unwrap();
+        // Build-system probe sources have their own main() and are never
+        // referenced by the project database; staging one would break the
+        // single-link harness compile with a duplicate main.
+        std::fs::write(build.join("probe.c"), "int main(void) { return 0; }\n").unwrap();
+        std::fs::write(build.join("CMakeCache.txt"), "junk\n").unwrap();
+        std::fs::write(build.join("libdemo.a"), "junk\n").unwrap();
+        let database = build.join("compile_commands.json");
+        std::fs::write(
+            &database,
+            serde_json::json!([
+                {
+                    "directory": build,
+                    "file": project.path().join("lib.c"),
+                    "arguments": ["cc", "-I", build, "-c", project.path().join("lib.c")]
+                },
+                {
+                    "directory": build,
+                    "file": build.join("gen/parser.c"),
+                    "arguments": ["cc", "-I", build, "-c", build.join("gen/parser.c")]
+                }
+            ])
+            .to_string(),
+        )
+        .unwrap();
+
+        let staged = stage_generated_build_inputs(project.path(), &database, workspace.path())
+            .expect("stage generated build inputs");
+
+        // The header lands at its project-relative layout so the database's
+        // own -I flags resolve without new plumbing.
+        assert!(workspace.path().join("build/parser/gen/config.h").is_file());
+        // The database-referenced generated source is staged; the unreferenced
+        // probe source and artifacts are not.
+        assert!(workspace.path().join("build/parser/gen/parser.c").is_file());
+        assert!(!workspace.path().join("build/parser/probe.c").exists());
+        assert!(!workspace
+            .path()
+            .join("build/parser/CMakeCache.txt")
+            .exists());
+        assert!(!workspace.path().join("build/parser/libdemo.a").exists());
+        assert_eq!(staged, 2);
+    }
+
+    #[test]
+    fn generated_input_staging_resolves_container_mount_paths() {
+        // A database produced inside the sandbox records /work paths; its
+        // generated-source entries must still stage against the project.
+        let project = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let build = project.path().join("build");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(build.join("gen.c"), "int f(void) { return 0; }\n").unwrap();
+        let database = build.join("compile_commands.json");
+        std::fs::write(
+            &database,
+            serde_json::json!([
+                {
+                    "directory": "/work",
+                    "file": "/work/build/gen.c",
+                    "arguments": ["cc", "-I/work/build", "-c", "/work/build/gen.c"]
+                }
+            ])
+            .to_string(),
+        )
+        .unwrap();
+
+        let staged = stage_generated_build_inputs(project.path(), &database, workspace.path())
+            .expect("stage generated build inputs");
+
+        assert!(workspace.path().join("build/gen.c").is_file());
+        assert_eq!(staged, 1);
+    }
+
+    #[test]
+    fn generated_input_staging_rejects_databases_outside_the_project() {
+        let project = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let foreign = tempfile::tempdir().unwrap();
+        let database = foreign.path().join("compile_commands.json");
+        std::fs::write(&database, "[]").unwrap();
+        assert!(
+            stage_generated_build_inputs(project.path(), &database, workspace.path()).is_err(),
+            "a database outside the project must not drive staging"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generated_input_staging_refuses_symlinked_referenced_sources() {
+        let project = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let build = project.path().join("build");
+        std::fs::create_dir_all(&build).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(
+            outside.path().join("evil.c"),
+            "int main(void) { return 0; }\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(outside.path().join("evil.c"), build.join("gen.c")).unwrap();
+        let database = build.join("compile_commands.json");
+        std::fs::write(
+            &database,
+            serde_json::json!([
+                {
+                    "directory": &build,
+                    "file": build.join("gen.c"),
+                    "arguments": ["cc", "-c", build.join("gen.c")]
+                }
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        assert!(
+            stage_generated_build_inputs(project.path(), &database, workspace.path()).is_err(),
+            "a symlinked referenced source must fail closed"
+        );
+        assert!(!workspace.path().join("build/gen.c").exists());
     }
 }

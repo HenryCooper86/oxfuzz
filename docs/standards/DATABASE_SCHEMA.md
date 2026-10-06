@@ -1135,7 +1135,7 @@ rows reference a digest value, not this mutable row through a foreign key.
 | --- | --- | --- |
 | `project_root` | `TEXT PRIMARY KEY` | canonical project root; configuration identity |
 | `component_root` | `TEXT NOT NULL` | normalized UTF-8 project-relative component directory; `.` is the root |
-| `build_system` | `TEXT NOT NULL CHECK (build_system IN ('cmake', 'make'))` | supported saved system |
+| `build_system` | `TEXT NOT NULL CHECK (build_system IN ('cmake', 'make', 'meson', 'autotools'))` | supported saved system |
 | `compile_database_path` | `TEXT NOT NULL` | normalized project-relative path ending in `compile_commands.json` |
 | `cmake_definitions_json` | `TEXT NOT NULL` | canonical sorted definition map; valid JSON, at most 65,536 UTF-8 bytes |
 | `dependencies_json` | `TEXT NOT NULL` | canonical sorted unique typed dependency array; valid JSON, at most 65,536 UTF-8 bytes |

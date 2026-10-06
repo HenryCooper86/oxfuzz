@@ -266,6 +266,13 @@ Mapped path suffixes must be relative: reject an additional slash/backslash root
 UNC/verbatim prefix, or Windows drive designator after the execution prefix.
 Ordinary relative suffixes are joined using native host path separators. A rejected
 suffix makes the artifact invalid and preserves any previously published database.
+
+Publication writes the normalized database to the project, then publishes the
+build tree's generated inputs from the same staging copy: headers by suffix
+from the database's directory and the database-referenced generated sources
+(the same set `stage_generated_build_inputs` selects, including `/work`-rooted
+entries), at their project-relative layout. A publish failure fails the build
+rather than leaving a database whose generated includes cannot resolve.
 The shared parser decodes command-form quotes and escapes without executing or
 expanding shell content, following the [JSON Compilation Database format](https://clang.llvm.org/docs/JSONCompilationDatabase.html).
 Publication converts those decoded tokens into an `arguments` array and removes

@@ -373,7 +373,7 @@ impl ServiceContainer {
         // Pre-flight: stage the patched build tree and revalidate every
         // immutable binding digest. Any mismatch fails closed before a single
         // sandbox command runs.
-        if let Err(error) = stage_build_tree(&context).await {
+        if let Err(error) = stage_build_tree(self, &context).await {
             return self
                 .finish_inconclusive(
                     &store,
@@ -904,7 +904,16 @@ async fn load_verification_context(
 /// operation-owned directory, prove every immutable binding digest still
 /// matches, and write the approved harness source and patch for the build
 /// stage. Any mismatch fails closed before a single sandbox command runs.
-async fn stage_build_tree(context: &VerificationContext) -> Result<(), ClassifiedError> {
+async fn stage_build_tree(
+    container: &crate::container::ServiceContainer,
+    context: &VerificationContext,
+) -> Result<(), ClassifiedError> {
+    // Stage generated build inputs first so the patched rebuild compiles the
+    // same tree the original run did; the source-revision digest below then
+    // covers authored sources and generated inputs identically.
+    container
+        .stage_generated_build_inputs_for_project(&context.project_root, &context.build_dir)
+        .await?;
     let build_dir = context.build_dir.clone();
     let project_root = context.project_root.clone();
     let sandbox_digest = context.binding.sandbox_image_sha256.clone();

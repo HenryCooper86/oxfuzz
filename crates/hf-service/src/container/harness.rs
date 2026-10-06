@@ -871,6 +871,8 @@ impl ServiceContainer {
         std::fs::create_dir_all(&workspace)
             .map_err(|e| ClassifiedError::Internal(format!("mkdir: {e}")))?;
         copy_project_sources(project, &workspace);
+        self.stage_generated_build_inputs_for_project(project, &workspace)
+            .await?;
 
         let mut build_cmd = hf_harness::build_command(engine, lang, &harness_binary_name(target));
         let target_id = self.resolve_target_id(project, target, lang).await?;
@@ -958,6 +960,8 @@ impl ServiceContainer {
         std::fs::create_dir_all(&workspace)
             .map_err(|e| ClassifiedError::Internal(format!("mkdir: {e}")))?;
         copy_project_sources(project, &workspace);
+        self.stage_generated_build_inputs_for_project(project, &workspace)
+            .await?;
 
         let source = self
             .draft_harness_source(project, &candidate, engine)
@@ -1908,6 +1912,8 @@ impl ServiceContainer {
         std::fs::create_dir_all(&workspace)
             .map_err(|e| ClassifiedError::Internal(format!("mkdir: {e}")))?;
         copy_project_sources(project, &workspace);
+        self.stage_generated_build_inputs_for_project(project, &workspace)
+            .await?;
 
         // The deterministic baseline first, then independent model drafts. The
         // drafts differ by sampling, not by prompt, so a losing candidate is

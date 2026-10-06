@@ -11,6 +11,15 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ### Added
 
+- Generated build inputs reach harness compiles. A successful configured
+  build publishes the build tree's generated headers (by suffix) and the
+  database-referenced generated sources alongside the compile database, and
+  harness workspace staging carries them into the sandbox at their
+  project-relative layout, where the database's own include flags resolve
+  them. Unreferenced build-dir sources (build-system probe files with their
+  own `main`) are deliberately never staged. Verified live: a Meson project
+  whose target includes a `configure_file`-generated header now compiles a
+  harness; previously the compile failed with a missing include.
 - Meson and Autotools build profiles. A component with `meson.build` or
   autotools markers (`configure.ac`, `configure.in`, `Makefile.am`) can now
   save, diagnose, and execute a configured build profile like CMake and
@@ -28,6 +37,18 @@ Versions match the release commits that bump `Cargo.toml`.
 - The fuzzing sandbox image is now `oxfuzz/fuzz-sandbox:0.2.0` (adds meson,
   autoconf, automake, libtool). Rebuild it with
   `./scripts/build-sandbox.sh`; image overrides must also move to 0.2.0.
+- Migration `0037_build_profile_systems.sql` widens the saved build-system
+  constraint to Meson and Autotools; existing profiles keep their identities
+  and digests.
+
+### Upgrade notes and limitations
+
+- Staged generated build inputs are part of the workspace's C/C++ build
+  inputs, so run source-revision digests cover them from this version on.
+  Patch-to-Proof replays of runs retained before this change may fail the
+  staged-source pre-flight for projects whose build directory holds such
+  files; re-run the campaign to refresh the retained digest. A working LLM
+  review provider remains mandatory for harness qualification.
 
 ### Fixed
 

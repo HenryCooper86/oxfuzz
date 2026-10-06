@@ -290,6 +290,17 @@ impl crate::ServiceContainer {
             return Err(error);
         }
         publish_compile_database(root, &profile.compile_database_path, &normalized)?;
+        // Publish the build tree's generated inputs alongside the database:
+        // harness compiles resolve the database's `-I` flags against the
+        // project, and the generated headers and referenced sources only
+        // exist in this staging copy. Fail the build rather than publishing a
+        // database whose includes cannot resolve.
+        if let Err(error) =
+            crate::container::stage_generated_build_inputs(&staging, &artifact, root)
+        {
+            fail(evidence, BuildTerminalStatus::ArtifactInvalid, &error);
+            return Ok(None);
+        }
         evidence.profile_state = BuildProfileState::Ready;
         Ok(Some(context))
     }

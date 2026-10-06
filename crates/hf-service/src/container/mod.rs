@@ -67,7 +67,9 @@ mod workspace_file;
 #[cfg(feature = "native-analysis")]
 pub use discovery::AnalyzedInventory;
 pub use guards::AgentTurnGuard;
-pub use harness_workspace::{copy_project_sources, generate_target_seeds};
+pub use harness_workspace::{
+    copy_project_sources, generate_target_seeds, stage_generated_build_inputs,
+};
 pub(crate) use workspace::ensure_workspace_directory;
 pub use workspace::{
     initialize_workspace_root, project_workspace_dir, workspace_dir, workspace_root,

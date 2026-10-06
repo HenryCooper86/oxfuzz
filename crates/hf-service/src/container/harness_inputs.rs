@@ -82,6 +82,36 @@ impl ServiceContainer {
         }
     }
 
+    /// Stage the configured build's generated inputs into a harness workspace.
+    ///
+    /// A no-op when the project has no selected compile database, so callers
+    /// can run it unconditionally after `copy_project_sources`.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` when the database exists but cannot be read
+    /// or its generated inputs cannot be staged (fail closed, never partial).
+    pub(crate) async fn stage_generated_build_inputs_for_project(
+        &self,
+        project: &Path,
+        workspace: &Path,
+    ) -> Result<(), ClassifiedError> {
+        let root = canonical_project_root(project)?;
+        let profile = self.configured_build_profile(&root).await?;
+        let Some(database) = selected_database(&root, profile.as_ref())? else {
+            return Ok(());
+        };
+        let staged =
+            super::harness_workspace::stage_generated_build_inputs(&root, &database, workspace)?;
+        if staged > 0 {
+            tracing::info!(
+                staged,
+                database = %database.display(),
+                "staged generated build inputs into the harness workspace"
+            );
+        }
+        Ok(())
+    }
+
     async fn require_retained_build_diagnosis(
         &self,
         profile: &BuildProfileView,
