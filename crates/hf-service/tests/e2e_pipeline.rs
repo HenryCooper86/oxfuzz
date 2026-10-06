@@ -403,7 +403,14 @@ async fn discover_harness_run_triage_end_to_end() {
     // 3. Bounded campaign: the stub engine writes a crash artifact; the run is
     // recorded with its termination and metrics.
     let summary = container
-        .run_fuzzer(&project, "parse_value", EngineKind::LibFuzzer, 60, &|_| {})
+        .run_fuzzer(
+            &project,
+            "parse_value",
+            EngineKind::LibFuzzer,
+            60,
+            None,
+            &|_| {},
+        )
         .await
         .unwrap();
     assert_eq!(summary.termination, CommandTermination::Completed);
@@ -555,7 +562,14 @@ async fn full_pipeline_minimizes_the_crash_it_found() {
         .unwrap();
 
     let summary = container
-        .run_fuzzer(&project, "parse_value", EngineKind::LibFuzzer, 1, &|_| {})
+        .run_fuzzer(
+            &project,
+            "parse_value",
+            EngineKind::LibFuzzer,
+            1,
+            None,
+            &|_| {},
+        )
         .await
         .unwrap();
     assert_eq!(summary.crashes, 1);

@@ -207,8 +207,9 @@ fn require_fuzzing_harness_engine(
 fn resolve_fuzzing_run(
     engine: EngineKind,
     duration_secs: u64,
+    requested_cpus: Option<u32>,
 ) -> Result<crate::config::ResolvedFuzzingRun, ClassifiedError> {
-    crate::config::resolve_fuzzing_run(Some(engine), Some(duration_secs))
+    crate::config::resolve_fuzzing_run(Some(engine), Some(duration_secs), requested_cpus)
         .map_err(|error| fuzzing_policy_error(&error))
 }
 

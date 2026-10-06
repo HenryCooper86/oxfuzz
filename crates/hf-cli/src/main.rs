@@ -119,6 +119,7 @@ async fn main() -> anyhow::Result<()> {
             engine,
             lang,
             duration,
+            cpus,
             replay,
         }) => {
             cmd_run(
@@ -127,6 +128,7 @@ async fn main() -> anyhow::Result<()> {
                 engine.as_deref(),
                 &lang,
                 duration.as_deref(),
+                cpus,
                 replay.as_deref(),
             )
             .await?;

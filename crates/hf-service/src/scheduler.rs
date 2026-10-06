@@ -1140,7 +1140,7 @@ fn validate_campaign_fuzzing_policy(params: &CampaignParams) -> Result<(), Campa
                 .map_err(CampaignSchedulerError::Validation)?,
         )
     };
-    crate::config::resolve_fuzzing_run(engine, Some(params.duration_secs))
+    crate::config::resolve_fuzzing_run(engine, Some(params.duration_secs), None)
         .map(|_| ())
         .map_err(CampaignSchedulerError::Validation)
 }

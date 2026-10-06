@@ -47,7 +47,11 @@ default_engine = "libfuzzer"
 default_duration_secs = 60
 
 # Resource limits for harness-based fuzzing campaigns. The service rejects a
-# requested duration above this ceiling instead of silently clamping it.
+# requested duration or CPU allocation above this ceiling instead of silently
+# clamping it. max_cpus is also the engine worker count: libFuzzer runs
+# `-fork=N` and honggfuzz `--threads N` for an allocation above one (AFL++
+# still runs a single instance); `oxfuzz run --cpus N` requests a per-run
+# allocation within this ceiling.
 [fuzzing.sandbox]
 max_mem_mb = 2048
 max_cpus = 1

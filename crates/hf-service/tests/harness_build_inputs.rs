@@ -577,6 +577,7 @@ async fn changed_configured_inputs_block_shared_lifecycle_and_rebuild_restores_e
                 "parse_entry",
                 EngineKind::LibFuzzer,
                 1,
+                None,
                 &|_| {},
             )
             .await;
@@ -958,6 +959,7 @@ async fn final_direct_and_corpus_image_resolution_cannot_select_a_moved_tag() {
                     "parse_entry",
                     EngineKind::LibFuzzer,
                     1,
+                    None,
                     &|_| {},
                 )
                 .await
@@ -1095,6 +1097,7 @@ async fn image_change_after_run_reservation_is_retained_failed_before_engine_dis
             "parse_entry",
             EngineKind::LibFuzzer,
             1,
+            None,
             &|_| {},
             &|id| {
                 *reserved.lock().unwrap() = Some(id);

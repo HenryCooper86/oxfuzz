@@ -245,6 +245,54 @@ fn engine_args_leave_the_environment_to_the_sandbox() {
 }
 
 #[test]
+fn libfuzzer_fork_follows_the_resolved_cpu_allocation() {
+    // One CPU keeps the historical single-process argv: fork mode is a
+    // different execution model even at N=1 (parent-coordinated children,
+    // crash-resistant continuation), so the default allocation must not
+    // opt a run into it.
+    let single = cfg(EngineKind::LibFuzzer, 3600);
+    let args = hf_engine::libfuzzer::build_run_args(
+        &single,
+        "/work/fuzz_bin",
+        "/work/corpus",
+        "/work/out",
+    );
+    assert!(
+        !args.iter().any(|arg| arg.starts_with("-fork=")),
+        "one CPU must keep the single-process argv: {args:?}"
+    );
+
+    // An allocation above one becomes libFuzzer's own multi-process mode.
+    let mut parallel = cfg(EngineKind::LibFuzzer, 3600);
+    parallel.max_cpus = 4;
+    let args = hf_engine::libfuzzer::build_run_args(
+        &parallel,
+        "/work/fuzz_bin",
+        "/work/corpus",
+        "/work/out",
+    );
+    assert!(
+        args.contains(&"-fork=4".to_owned()),
+        "a 4-CPU allocation must run libFuzzer fork mode: {args:?}"
+    );
+
+    // Overridable: a caller's extra_args wins (libFuzzer takes the last one).
+    parallel.extra_args.push("-fork=2".to_owned());
+    let overridden = hf_engine::libfuzzer::build_run_args(
+        &parallel,
+        "/work/fuzz_bin",
+        "/work/corpus",
+        "/work/out",
+    );
+    let default_at = overridden.iter().position(|a| a == "-fork=4");
+    let override_at = overridden.iter().position(|a| a == "-fork=2");
+    assert!(
+        matches!((default_at, override_at), (Some(d), Some(o)) if d < o),
+        "an override must appear after the default so it wins: {overridden:?}"
+    );
+}
+
+#[test]
 fn extra_args_are_appended() {
     let mut c = cfg(EngineKind::LibFuzzer, 60);
     c.extra_args.push("-dict=/work/json.dict".to_owned());

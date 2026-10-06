@@ -83,8 +83,12 @@ replace these live checks.
 
 - Source-revision bisection and regression-range investigation for reproducible
   findings.
-- Intra-target engine workers, with measured multi-core efficiency alongside
-  existing portfolio concurrency.
+- Intra-target engine workers through the run CPU allocation are implemented
+  for libFuzzer (`-fork=N`) and honggfuzz (`--threads`), with
+  `oxfuzz run --cpus N` requesting a per-run allocation validated against
+  `fuzzing.sandbox.max_cpus`. Still open: AFL++ primary/secondary
+  orchestration (one instance runs regardless of the allocation today) and
+  measured multi-core efficiency alongside existing portfolio concurrency.
 - Agent token events after a native function-calling design makes partial
   responses useful. Provider streaming already exists; the current JSON tool
   protocol needs a complete response before dispatch.

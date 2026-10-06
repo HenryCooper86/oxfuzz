@@ -209,6 +209,7 @@ async fn approved_campaign_survives_service_process_loss() {
             "qualification_parse",
             EngineKind::LibFuzzer,
             10,
+            None,
             &|_| {},
         )
         .await
@@ -388,6 +389,7 @@ async fn live_campaign_child() {
             "qualification_parse",
             EngineKind::LibFuzzer,
             120,
+            None,
             &|_| {},
             &|id| {
                 let mut marker = File::create(root.join("admitted-run-id")).unwrap();

@@ -224,6 +224,7 @@ async fn imported_source_reaches_retained_health_closeout_and_explicit_experimen
                     "alternate.c::parse_packet",
                     EngineKind::LibFuzzer,
                     60,
+                    None,
                     &on_progress,
                     &on_started,
                 )

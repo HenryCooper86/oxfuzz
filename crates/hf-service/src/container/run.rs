@@ -1319,7 +1319,7 @@ impl ServiceContainer {
         let started = std::time::Instant::now();
         let project_root = canonical_project_root(project)?;
         let project = project_root.as_path();
-        let resolved = resolve_fuzzing_run(engine, duration_secs)?;
+        let resolved = resolve_fuzzing_run(engine, duration_secs, None)?;
         let engine = resolved.engine;
         // 1. Choose a target: the caller's, else the top-ranked candidate.
         let inv = self.discover(project, lang).await?;
@@ -1461,7 +1461,7 @@ impl ServiceContainer {
         on_progress: Arc<dyn Fn(Uuid, FuzzProgress) + Send + Sync + 'static>,
         on_status: Arc<dyn Fn(Uuid, RunLifecycleStatus) + Send + Sync + 'static>,
     ) -> Result<Uuid, ClassifiedError> {
-        let resolved = resolve_fuzzing_run(engine, duration_secs)?;
+        let resolved = resolve_fuzzing_run(engine, duration_secs, None)?;
         self.start_run_launch(
             RunLaunch {
                 project,
@@ -1699,9 +1699,10 @@ impl ServiceContainer {
         target: &str,
         engine: EngineKind,
         duration_secs: u64,
+        requested_cpus: Option<u32>,
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
     ) -> Result<RunSummary, ClassifiedError> {
-        let resolved = resolve_fuzzing_run(engine, duration_secs)?;
+        let resolved = resolve_fuzzing_run(engine, duration_secs, requested_cpus)?;
         self.run_fuzzer_with_started(project, target, resolved, on_progress, &|_| {}, None)
             .await
     }
@@ -1717,10 +1718,11 @@ impl ServiceContainer {
         target: &str,
         engine: EngineKind,
         duration_secs: u64,
+        requested_cpus: Option<u32>,
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
         on_started: &(dyn Fn(Uuid) + Send + Sync),
     ) -> Result<RunSummary, ClassifiedError> {
-        let resolved = resolve_fuzzing_run(engine, duration_secs)?;
+        let resolved = resolve_fuzzing_run(engine, duration_secs, requested_cpus)?;
         self.run_fuzzer_with_started(project, target, resolved, on_progress, on_started, None)
             .await
     }
@@ -1872,6 +1874,7 @@ impl ServiceContainer {
         let mut resolved = resolve_fuzzing_run(
             original.engine,
             config.duration.map_or(3600, |duration| duration.as_secs()),
+            None,
         )?;
         if config.max_mem_mb > resolved.max_mem_mb || config.max_cpus > resolved.max_cpus {
             return Err(ClassifiedError::Validation(
@@ -2047,7 +2050,7 @@ impl ServiceContainer {
         use std::sync::atomic::{AtomicU64, Ordering};
         let _workspace_operation = self.acquire_workspace_operation().await?;
 
-        let resolved = resolve_fuzzing_run(EngineKind::Syzkaller, opts.duration_secs)?;
+        let resolved = resolve_fuzzing_run(EngineKind::Syzkaller, opts.duration_secs, None)?;
         let duration_secs = resolved.duration_secs;
         #[cfg(feature = "campaign-health")]
         let campaign_health_settings = crate::config::effective_campaign_health_settings()
@@ -2817,7 +2820,7 @@ mod allocation_preparation_tests {
             service.prepare_userspace_run(
                 root.path(),
                 "parse",
-                resolve_fuzzing_run(EngineKind::LibFuzzer, 10).unwrap(),
+                resolve_fuzzing_run(EngineKind::LibFuzzer, 10, None).unwrap(),
                 &harness,
                 root.path(),
                 root.path().join("corpus"),
@@ -2877,7 +2880,7 @@ mod allocation_preparation_tests {
                 .prepare_userspace_run(
                     root.path(),
                     "parse",
-                    resolve_fuzzing_run(EngineKind::LibFuzzer, 11).unwrap(),
+                    resolve_fuzzing_run(EngineKind::LibFuzzer, 11, None).unwrap(),
                     &harness,
                     root.path(),
                     root.path().join("corpus"),
@@ -2898,7 +2901,7 @@ mod allocation_preparation_tests {
                 .prepare_userspace_run(
                     root.path(),
                     "parse",
-                    resolve_fuzzing_run(EngineKind::LibFuzzer, 10).unwrap(),
+                    resolve_fuzzing_run(EngineKind::LibFuzzer, 10, None).unwrap(),
                     &harness,
                     root.path(),
                     root.path().join("corpus"),
@@ -2910,7 +2913,7 @@ mod allocation_preparation_tests {
                 .prepare_userspace_run(
                     root.path(),
                     "parse",
-                    resolve_fuzzing_run(EngineKind::LibFuzzer, 10).unwrap(),
+                    resolve_fuzzing_run(EngineKind::LibFuzzer, 10, None).unwrap(),
                     &harness,
                     root.path(),
                     root.path().join("corpus"),

@@ -39,7 +39,7 @@ impl ServiceContainer {
         let policy = crate::config::effective_fuzzing_settings()
             .map_err(|_| CoverageExperimentError::field(C::InvalidRequest, "fuzzing_policy"))?;
         let resolved = policy
-            .resolve(Some(baseline.engine), Some(request.duration_secs))
+            .resolve(Some(baseline.engine), Some(request.duration_secs), None)
             .map_err(|_| CoverageExperimentError::field(C::InvalidRequest, "fuzzing_policy"))?;
         if resolved.duration_secs != request.duration_secs
             || baseline.duration_secs != request.duration_secs

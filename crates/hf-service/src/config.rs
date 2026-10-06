@@ -761,15 +761,18 @@ impl FuzzingSettings {
         Ok(())
     }
 
-    /// Resolve a requested engine and duration against this policy.
+    /// Resolve a requested engine, duration, and CPU allocation against this
+    /// policy.
     ///
     /// # Errors
-    /// Returns an error when the policy is invalid, the engine is disabled, or
-    /// the duration is zero or above the configured ceiling.
+    /// Returns an error when the policy is invalid, the engine is disabled,
+    /// the duration is zero or above the configured ceiling, or the requested
+    /// CPU allocation is zero or above the configured ceiling.
     pub fn resolve(
         &self,
         engine: Option<EngineKind>,
         duration_secs: Option<u64>,
+        requested_cpus: Option<u32>,
     ) -> Result<ResolvedFuzzingRun, String> {
         self.validate()?;
         let enabled = self.enabled_engine_set()?;
@@ -793,11 +796,21 @@ impl FuzzingSettings {
                 self.sandbox.max_duration_secs
             ));
         }
+        let max_cpus = requested_cpus.unwrap_or(self.sandbox.max_cpus);
+        if max_cpus == 0 {
+            return Err("fuzzing cpu allocation must be greater than zero".to_owned());
+        }
+        if max_cpus > self.sandbox.max_cpus {
+            return Err(format!(
+                "fuzzing cpu allocation {max_cpus} exceeds the configured maximum of {}",
+                self.sandbox.max_cpus
+            ));
+        }
         Ok(ResolvedFuzzingRun {
             engine,
             duration_secs,
             max_mem_mb: self.sandbox.max_mem_mb,
-            max_cpus: self.sandbox.max_cpus,
+            max_cpus,
         })
     }
 
@@ -817,7 +830,7 @@ impl FuzzingSettings {
         internal_budget_secs: u64,
     ) -> Result<ResolvedFuzzingRun, String> {
         let clamped = internal_budget_secs.min(self.sandbox.max_duration_secs);
-        self.resolve(Some(engine), Some(clamped))
+        self.resolve(Some(engine), Some(clamped), None)
     }
 
     /// Check that an engine is enabled without resolving run-specific values.
@@ -825,7 +838,7 @@ impl FuzzingSettings {
     /// # Errors
     /// Returns an error for an invalid policy or a disabled engine.
     pub fn require_engine(&self, engine: EngineKind) -> Result<(), String> {
-        self.resolve(Some(engine), None).map(|_| ())
+        self.resolve(Some(engine), None, None).map(|_| ())
     }
 
     /// Resolve an enabled engine that can build a harness for `language`.
@@ -1139,12 +1152,14 @@ pub fn effective_automotive_settings() -> Result<AutomotiveSettings, String> {
 /// Resolve the next fuzz run from the current persisted operator policy.
 ///
 /// # Errors
-/// Returns an error for an invalid policy, disabled engine, or invalid duration.
+/// Returns an error for an invalid policy, disabled engine, invalid duration,
+/// or a CPU request outside `(0, sandbox.max_cpus]`.
 pub fn resolve_fuzzing_run(
     engine: Option<EngineKind>,
     duration_secs: Option<u64>,
+    requested_cpus: Option<u32>,
 ) -> Result<ResolvedFuzzingRun, String> {
-    effective_fuzzing_settings()?.resolve(engine, duration_secs)
+    effective_fuzzing_settings()?.resolve(engine, duration_secs, requested_cpus)
 }
 
 /// Resolve a fixed internal maintenance budget from the current persisted
@@ -3643,7 +3658,11 @@ product_name = "old-product"
         assert_eq!(config.knowledge.l2_max_tokens, 123);
         let run = config
             .fuzzing
-            .resolve(Some(hf_core::engine::EngineKind::AflPlusPlus), Some(90))
+            .resolve(
+                Some(hf_core::engine::EngineKind::AflPlusPlus),
+                Some(90),
+                None,
+            )
             .expect("enabled engine and bounded duration should resolve");
         assert_eq!(run.engine, hf_core::engine::EngineKind::AflPlusPlus);
         assert_eq!(run.duration_secs, 90);
@@ -3920,7 +3939,7 @@ default_duration_secs = 22
         };
 
         let resolved = settings
-            .resolve(None, None)
+            .resolve(None, None, None)
             .expect("defaults should resolve");
         assert_eq!(resolved.engine, hf_core::engine::EngineKind::Honggfuzz);
         assert_eq!(resolved.duration_secs, 30);
@@ -3928,13 +3947,46 @@ default_duration_secs = 22
         assert_eq!(resolved.max_cpus, 1);
 
         assert!(settings
-            .resolve(Some(hf_core::engine::EngineKind::LibFuzzer), Some(30))
+            .resolve(Some(hf_core::engine::EngineKind::LibFuzzer), Some(30), None)
             .unwrap_err()
             .contains("disabled"));
         assert!(settings
-            .resolve(Some(hf_core::engine::EngineKind::Honggfuzz), Some(61))
+            .resolve(Some(hf_core::engine::EngineKind::Honggfuzz), Some(61), None)
             .unwrap_err()
             .contains("maximum"));
+    }
+
+    #[test]
+    fn fuzzing_policy_resolves_the_requested_cpu_allocation() {
+        let settings = FuzzingSettings {
+            sandbox: FuzzingSandboxSettings {
+                max_cpus: 8,
+                ..FuzzingSandboxSettings::default()
+            },
+            ..FuzzingSettings::default()
+        };
+
+        // No request keeps the configured allocation (existing behavior).
+        let resolved = settings
+            .resolve(None, None, None)
+            .expect("defaults should resolve");
+        assert_eq!(resolved.max_cpus, 8);
+
+        // A within-ceiling request is honored.
+        let requested = settings
+            .resolve(None, None, Some(4))
+            .expect("within-ceiling cpu request should resolve");
+        assert_eq!(requested.max_cpus, 4);
+
+        // Zero and over-ceiling requests fail loud, mirroring duration.
+        assert!(settings
+            .resolve(None, None, Some(0))
+            .unwrap_err()
+            .contains("greater than zero"));
+        assert!(settings
+            .resolve(None, None, Some(9))
+            .unwrap_err()
+            .contains("exceeds the configured maximum"));
     }
 
     #[test]
@@ -3954,7 +4006,7 @@ default_duration_secs = 22
 
         // The operator-requested path still rejects over-ceiling durations.
         assert!(settings
-            .resolve(Some(hf_core::engine::EngineKind::LibFuzzer), Some(60))
+            .resolve(Some(hf_core::engine::EngineKind::LibFuzzer), Some(60), None)
             .unwrap_err()
             .contains("maximum"));
 

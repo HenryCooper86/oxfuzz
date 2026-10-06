@@ -38,6 +38,16 @@ pub fn build_run_args(cfg: &FuzzRunConfig, binary: &str, corpus: &str, out: &str
     // dictionary. Placed before `extra_args` so a caller can override with
     // `-use_value_profile=0` (libFuzzer takes the last occurrence).
     args.push("-use_value_profile=1".to_owned());
+    // An allocation above one runs libFuzzer's own multi-process mode: the
+    // parent coordinates N children over the shared corpus directory,
+    // continues after a child crash (artifacts still land through
+    // `-artifact_prefix`), and stops at `-max_total_time`. One CPU keeps the
+    // historical single-process argv, because fork mode is a different
+    // execution model even at N=1. Like the flag above, emitted before
+    // `extra_args` so a caller can override it.
+    if cfg.max_cpus > 1 {
+        args.push(format!("-fork={}", cfg.max_cpus));
+    }
     args.push(corpus.to_owned());
     // `cfg.env` is deliberately absent from the argument list: both callers pass
     // the same map through `ResourceLimits.env`, which the sandbox renders onto

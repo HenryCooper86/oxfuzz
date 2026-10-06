@@ -356,7 +356,7 @@ impl ServiceContainer {
                     .transpose()?;
                 let requested_duration = args.get("duration_secs").and_then(Value::as_u64);
                 let resolved =
-                    crate::config::resolve_fuzzing_run(requested_engine, requested_duration)
+                    crate::config::resolve_fuzzing_run(requested_engine, requested_duration, None)
                         .map_err(ClassifiedError::Validation)?;
                 let summary = self
                     .run_fuzzer(
@@ -364,6 +364,7 @@ impl ServiceContainer {
                         target,
                         resolved.engine,
                         resolved.duration_secs,
+                        None,
                         &|_| {},
                     )
                     .await?;

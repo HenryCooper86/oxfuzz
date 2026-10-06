@@ -145,7 +145,7 @@ Binary Tool integration is outside this release's scope.
 | `discover <project> --lang c [--rank] [--ai auto\|require\|off] [--semgrep]` | Scan a project; `--rank` requests service-owned AI assessment, and `--semgrep` explicitly adds separate C/C++ enrichment. |
 | `harness <project> --target <sym> --engine <e> [--draft-only] [--repair N] [--refine] [--promote]` | Write, compile (optionally auto-repair or coverage-refine), and smoke-qualify a newly generated harness. Without `--promote`, review the output; rerunning creates another draft. Use the retained Work Order flow below when approval must name a previously reviewed source. |
 | `work-order export\|import\|list\|submissions\|qualify\|rank\|promote ...` | Manage immutable external harness packets, submissions, qualification attempts, deterministic ranking, and exact-attempt promotion. |
-| `run <project> --target <sym> --engine <e> --duration 60m` | Run a sandboxed campaign with the active promoted harness (Ctrl-C cancels cooperatively). A file-qualified selector is `<relative-file>::<complete-symbol>`; a retained Work Order run always uses that complete selector. |
+| `run <project> --target <sym> --engine <e> --duration 60m [--cpus N]` | Run a sandboxed campaign with the active promoted harness (Ctrl-C cancels cooperatively). A file-qualified selector is `<relative-file>::<complete-symbol>`; a retained Work Order run always uses that complete selector. `--cpus N` requests a per-run CPU allocation within the configured `fuzzing.sandbox.max_cpus` ceiling; an allocation above one runs libFuzzer fork mode (`-fork=N`) and honggfuzz `--threads N` (AFL++ runs a single instance). |
 | `run . --replay <run UUID>` | Replay a retained run with its recorded engine, duration, and deterministic seed under current policy. The positional `.` is ignored in replay mode; the retained run resolves its original project. |
 | `campaign <project> --target <sym> --engine <e>` | Run and triage a bounded campaign using an already smoke-qualified, human-promoted harness. |
 | `health --run <run UUID>` | Assess retained campaign health. This read-only command never stops, restarts, or resizes the run. |
@@ -221,7 +221,9 @@ not prove valid credentials or connectivity. A pool with no constructed provider
 `--engine`. Ordinary `doctor` keeps its general any-engine readiness check.
 
 For normal `run`, an omitted `--duration` uses `fuzzing.default_duration_secs`.
-The CLI resolves engine and duration policy before storage bootstrap or seed
+An omitted `--cpus` uses the configured `fuzzing.sandbox.max_cpus`
+allocation; a request above that ceiling fails before seed preparation. The
+CLI resolves engine, duration, and CPU policy before storage bootstrap or seed
 preparation. The service rechecks policy when launching the campaign.
 
 Export returns a content-addressed work-order ID. Import returns an immutable

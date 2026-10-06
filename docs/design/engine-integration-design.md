@@ -57,6 +57,21 @@ from the same binary. Unprofiled campaigns do not call the hooks. This patch
 is verified against the pinned upstream revision and does not change the
 human-approved harness source.
 
+### 3.1 CPU Allocation and Intra-Target Parallelism
+
+`max_cpus` is the run's CPU allocation, not only a ceiling: the sandbox
+container is capped at that many CPUs and the selected engine is expected to
+use them. honggfuzz maps the allocation to `--threads`. libFuzzer maps an
+allocation above one to `-fork=N`, its own multi-process mode: the parent
+process coordinates N children over the shared corpus directory, continues
+after a child crash (artifacts still land through `-artifact_prefix`), and
+stops at `-max_total_time`. An allocation of one keeps the historical
+single-process argv unchanged, because fork mode is a different execution
+model even at N=1; the flag is emitted before `extra_args` so a caller can
+override it. AFL++ currently runs one `afl-fuzz` instance regardless of the
+allocation; primary/secondary orchestration is recorded as open work in the
+project backlog.
+
 Syzkaller is the service-owned manager-config exception. It fuzzes syscall
 sequences against a kernel in a managed VM, not a generated single-function
 harness. Its registered adapter represents the `syz-manager -config` argv
@@ -85,8 +100,10 @@ pub struct FuzzRunConfig {
 
 Before constructing this value, `hf-service` resolves the effective fuzzing
 policy. It rejects engines outside the configured allowed set and durations
-outside `(0, max_duration_secs]`, then copies the configured memory and CPU
-limits into the run configuration. Presentation defaults are advisory only;
+outside `(0, max_duration_secs]`, accepts an optional per-run CPU request
+within `(0, sandbox.max_cpus]`, then copies the configured memory and the
+requested-or-configured CPU allocation into the run configuration.
+Presentation defaults are advisory only;
 the service preflight is the authoritative enforcement boundary for direct,
 scheduled, agent, CLI, REST, and desktop runs.
 
@@ -170,6 +187,8 @@ typed evidence rather than adapting one contract into the other.
 ## 8. Tests
 
 - Unit: each adapter constructs the correct CLI args from a `FuzzRunConfig`.
+- Unit: the libFuzzer adapter emits `-fork=N` only for a CPU allocation above
+  one, positioned before `extra_args`.
 - Integration: a mocked engine run streams progress and emits a fake crash.
 - Service contract: disabled engines and excessive durations fail before run
   reservation, while accepted runs persist the resolved resource limits.

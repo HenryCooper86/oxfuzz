@@ -85,6 +85,7 @@ impl ServiceContainer {
             request.target,
             request.engine,
             request.duration_secs,
+            None,
             on_progress,
         )
         .await?;

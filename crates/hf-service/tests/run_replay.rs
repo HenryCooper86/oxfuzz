@@ -345,7 +345,14 @@ async fn run_records_a_seed_and_replay_reexecutes_with_it() {
     )
     .unwrap();
     let summary = container
-        .run_fuzzer(&project, "parse_value", EngineKind::LibFuzzer, 60, &|_| {})
+        .run_fuzzer(
+            &project,
+            "parse_value",
+            EngineKind::LibFuzzer,
+            60,
+            None,
+            &|_| {},
+        )
         .await
         .unwrap();
     let run = store.get_run(summary.run_id).await.unwrap().unwrap();

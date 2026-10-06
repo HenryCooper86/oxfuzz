@@ -292,7 +292,14 @@ async fn engines_share_one_canonical_corpus_and_absorbed_crashes() {
     // Run A (libFuzzer): its in-place discovery merges back into the canonical
     // root after the run.
     let run_a = container
-        .run_fuzzer(&project, "parse_value", EngineKind::LibFuzzer, 60, &|_| {})
+        .run_fuzzer(
+            &project,
+            "parse_value",
+            EngineKind::LibFuzzer,
+            60,
+            None,
+            &|_| {},
+        )
         .await
         .unwrap();
     assert!(
@@ -310,6 +317,7 @@ async fn engines_share_one_canonical_corpus_and_absorbed_crashes() {
             "parse_value",
             EngineKind::AflPlusPlus,
             60,
+            None,
             &|_| {},
         )
         .await
@@ -353,7 +361,14 @@ async fn engines_share_one_canonical_corpus_and_absorbed_crashes() {
     // survivor from engine B's run and engine B's queue discovery both feed it.
     promote_for_engine(&container, &project, EngineKind::LibFuzzer).await;
     let run_c = container
-        .run_fuzzer(&project, "parse_value", EngineKind::LibFuzzer, 60, &|_| {})
+        .run_fuzzer(
+            &project,
+            "parse_value",
+            EngineKind::LibFuzzer,
+            60,
+            None,
+            &|_| {},
+        )
         .await
         .unwrap();
     let staged_c = workspace

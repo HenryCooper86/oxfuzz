@@ -584,6 +584,7 @@ mod tests {
                         engine,
                         lang,
                         duration,
+                        cpus,
                         replay,
                     }),
                 ) => {
@@ -592,6 +593,7 @@ mod tests {
                     assert_eq!(engine.as_deref(), Some("libfuzzer"));
                     assert_eq!(lang, "cpp");
                     assert_eq!(duration.as_deref(), Some("300s"));
+                    assert!(cpus.is_none());
                     assert!(replay.is_none());
                 }
                 (

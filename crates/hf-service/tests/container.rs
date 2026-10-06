@@ -429,6 +429,7 @@ async fn admitted_runtime_failure_awaits_final_health_without_replacing_the_erro
                     target,
                     hf_core::engine::EngineKind::LibFuzzer,
                     60,
+                    None,
                     &|_| {},
                 )
                 .await
@@ -601,6 +602,7 @@ async fn cancel_run_stops_an_in_flight_fuzz_run() {
                     target,
                     hf_core::engine::EngineKind::LibFuzzer,
                     60,
+                    None,
                     &|_| {},
                 )
                 .await
@@ -774,6 +776,7 @@ async fn terminal_status_write_failure_still_awaits_monitor_cleanup() {
                     target,
                     hf_core::engine::EngineKind::LibFuzzer,
                     60,
+                    None,
                     &|_| {},
                 )
                 .await
@@ -960,6 +963,7 @@ async fn a_wall_clock_killed_run_persists_the_coverage_it_measured() {
             target,
             hf_core::engine::EngineKind::LibFuzzer,
             60,
+            None,
             &|_| {},
         )
         .await
@@ -1188,6 +1192,7 @@ async fn completed_run_merges_discoveries_without_writable_live_corpus() {
             target,
             hf_core::engine::EngineKind::LibFuzzer,
             1,
+            None,
             &|_| {},
         )
         .await
@@ -1618,6 +1623,7 @@ async fn corpus_minimize_uses_the_promoted_revision_and_an_isolated_snapshot() {
     let resolved = hf_service::config::resolve_fuzzing_run(
         Some(hf_core::engine::EngineKind::LibFuzzer),
         Some(300),
+        None,
     )
     .unwrap();
     let limits = runtime.minimize_limits.lock().unwrap().clone().unwrap();

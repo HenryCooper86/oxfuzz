@@ -2018,6 +2018,7 @@ pub async fn run_fuzzer(
             &target,
             engine_kind,
             duration,
+            None,
             &(on_progress),
             &(on_started),
         )

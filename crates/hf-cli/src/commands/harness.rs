@@ -173,6 +173,7 @@ pub(crate) async fn cmd_run(
     engine: Option<&str>,
     lang: &str,
     duration: Option<&str>,
+    requested_cpus: Option<u32>,
     replay: Option<&str>,
 ) -> anyhow::Result<()> {
     let on_progress = |p: FuzzProgress| match p {
@@ -210,9 +211,12 @@ pub(crate) async fn cmd_run(
         // invalid `--lang` is rejected up front rather than silently ignored.
         parse_lang(lang)?;
         let requested_duration = duration.map(parse_duration).transpose()?;
-        let resolved =
-            hf_service::config::resolve_fuzzing_run(Some(engine_kind), requested_duration)
-                .map_err(anyhow::Error::msg)?;
+        let resolved = hf_service::config::resolve_fuzzing_run(
+            Some(engine_kind),
+            requested_duration,
+            requested_cpus,
+        )
+        .map_err(anyhow::Error::msg)?;
         let duration_secs = resolved.duration_secs;
         let container = std::sync::Arc::new(ServiceContainer::bootstrap().await);
         // Ensure a seed corpus exists before running. A failure here is not fatal
@@ -231,7 +235,14 @@ pub(crate) async fn cmd_run(
             let target = target.to_owned();
             tokio::spawn(async move {
                 container
-                    .run_fuzzer(&project, &target, engine_kind, duration_secs, &on_progress)
+                    .run_fuzzer(
+                        &project,
+                        &target,
+                        engine_kind,
+                        duration_secs,
+                        requested_cpus,
+                        &on_progress,
+                    )
                     .await
             })
         };

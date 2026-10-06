@@ -232,6 +232,11 @@ pub(crate) struct RunArgs {
     /// Duration (e.g. 60m). Defaults to the configured fuzzing duration.
     #[arg(long)]
     pub(crate) duration: Option<String>,
+    /// CPU allocation for this run (engine workers where the engine supports
+    /// them). Must not exceed the configured `fuzzing.sandbox.max_cpus`;
+    /// omitted means the configured allocation.
+    #[arg(long)]
+    pub(crate) cpus: Option<u32>,
     /// Replay a persisted run with its recorded engine, duration, and
     /// deterministic seed.
     #[arg(long)]
