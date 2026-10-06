@@ -84,8 +84,20 @@ The direct binary
 are internal Go interfaces. Pin and qualify their cache and corpus behavior
 before depending on them. The [inert control sources](../../examples/qualification/go/README.md)
 prepare this prerequisite. Their recorded exact digest has human source approval
-as of 2026-10-01; exact-source model review and build/run results remain pending.
-The existing sandbox Go 1.26.5 pin serves Syzkaller and does not qualify Go
+as of 2026-10-01; the sources then received an independent exact-source model
+review, a compile-only instrumented build, and on 2026-10-06 a bounded
+single-trial control per module executed through `hf-runtime`
+(spare-capacity regression passed; the
+benign module completed normally; the known-defect module retained a crash
+corpus file that replayed identically through the exact compiled binary).
+Verified on the pinned Go 1.26.5 image: `-test.fuzz` requires
+`-test.fuzzcachedir` (`testing.go` refuses the run otherwise), a failing input
+is written to `testdata/fuzz/<FuzzXxx>` relative to the process working
+directory through the coordinator's corpus directory, worker count follows
+`-test.parallel` (default `GOMAXPROCS`), and `-test.fuzzminimizetime=0`
+disables minimization so the crasher is retained immediately. These are
+single-host linux/arm64 observations, not five-trial acceptance. The existing
+sandbox Go 1.26.5 pin serves Syzkaller and does not qualify Go
 native fuzzing. User demand on 2026-10-01 selects Go before Python; the
 independent-module fixed-budget acceptance requirement remains.
 

@@ -1,10 +1,18 @@
 # Go toolchain control candidates
 
-Status: prepared source only. These fixtures have not been compiled or run.
-Exact human source approval was received on 2026-10-01 for the digest below.
-Independent exact-source model review and sandbox qualification remain pending.
-These are candidates for the Go direct-test-binary prerequisite, not evidence
-of an implemented Go service workflow or held-out effectiveness.
+Status: bounded control executed; qualification and Go support remain pending.
+Exact human source approval was received on 2026-10-01 for the digest below,
+followed by an independent exact-source model review and a compile-only
+instrumented build of both modules through `hf-runtime` on 2026-10-01. On
+2026-10-06 the bounded control ran under the same pinned image: the
+spare-capacity regression passed, one trial per module terminated within its
+five-second cap with at most two workers and minimization disabled, the
+known-defect trial retained an actual Go crash corpus file, and that file
+replayed identically through the exact compiled binary in a separate
+sandboxed operation. Evidence is retained in the private qualification store.
+This is the direct-test-binary prerequisite only, not evidence of an
+implemented Go service workflow, five-trial acceptance, or held-out
+effectiveness.
 
 The benign module uses an exported single-string function and checks its
 field-count result. The independent known-defect module uses an exported
@@ -12,7 +20,7 @@ single-`[]byte` function with a deliberately absent length check. Its valid
 initial seeds must pass; input `[]byte{2, 'A'}` must panic inside `ParseFrame`,
 even when its backing array has spare capacity. Direct indexing intentionally
 checks logical input length. `TestParseFramePanicsWithSpareCapacity` records
-this requirement; it has not been executed.
+this requirement; it passed in the bounded 2026-10-06 control.
 Both modules use only the standard library, have no initialization hooks,
 external dependencies, cgo, unsafe code, filesystem/network/subprocess access,
 or explicit heap allocations in the selected functions. Fuzz inputs reach
