@@ -353,7 +353,7 @@ impl ServiceContainer {
                 return Some(cached);
             }
         }
-        let json = self.run_coverage_export(&workspace).await?;
+        let json = self.run_coverage_export(project, &workspace).await?;
         if let Ok(mut map) = export_cache().lock() {
             map.insert(cache_key, (signature, json.clone()));
         }
@@ -367,7 +367,24 @@ impl ServiceContainer {
     /// The caller holds the workspace-operation guard and has verified a harness
     /// exists. Prefer [`Self::coverage_export_json_cached`], which adds the
     /// guard, harness check, and per-signature cache.
-    async fn run_coverage_export(&self, workspace: &Path) -> Option<String> {
+    async fn run_coverage_export(&self, project: &Path, workspace: &Path) -> Option<String> {
+        // The pipeline compiles the staged sources and executes the result, so
+        // it is an execution and needs the approval the smoke path requires
+        // before it runs a harness. Enforced in this operation rather than in a
+        // caller, so refinement, blocker exploration, and every transport reach
+        // the same decision.
+        //
+        // A denial reaches the caller as an unavailable measurement, because the
+        // coverage readers return `Option` and carry no denial reason. The
+        // warning keeps the reason reachable instead of dropping it; refusing to
+        // dispatch is the safety-relevant half.
+        if let Err(error) = self
+            .authorize_recorded(Action::RunHarness, "coverage_measurement", Some(project))
+            .await
+        {
+            tracing::warn!(%error, "coverage measurement refused by the approval gate");
+            return None;
+        }
         let pipeline = "clang -g -O1 -fsanitize=fuzzer -fprofile-instr-generate \
              -fcoverage-mapping *.c -o fuzz_cov 2>/dev/null \
              && LLVM_PROFILE_FILE=cov.profraw ./fuzz_cov -runs=0 corpus 2>/dev/null; \

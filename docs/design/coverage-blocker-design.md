@@ -43,6 +43,15 @@ The retained per-target `reachable_functions` set is deliberately not used here.
 It is a set, not a graph, and bounded to 64 entries, so it cannot produce a path
 and cannot establish absence.
 
+Obtaining the export compiles the staged sources and executes the result, so it
+is gated as an execution rather than as a read: the service authorizes
+`RunHarness` in the operation that dispatches the pipeline, which means
+refinement, blocker exploration, and every transport reach the same decision.
+A refusal leaves the measurement unavailable instead of running harness code
+that no gate approved. These readers return an optional measurement, so they
+report unavailable rather than the denial reason; the refusal and its reason are
+logged at the point of denial.
+
 ## 4. Blockers
 
 A blocker is a function that appears in the uncovered regions and is not in the

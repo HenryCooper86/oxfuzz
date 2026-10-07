@@ -143,3 +143,36 @@ async fn an_unknown_target_is_refused_rather_than_explored_as_empty() {
         "the refusal names the target: {error}"
     );
 }
+
+#[tokio::test]
+async fn a_denied_coverage_measurement_never_dispatches_the_pipeline() {
+    isolate_workspace();
+    let project = write_sample_project();
+    let workspace = hf_service::workspace_dir(project.path(), "parse_entry");
+    std::fs::create_dir_all(&workspace).unwrap();
+    // A staged harness source is the pipeline's only precondition, so a denial
+    // is the only thing between this state and compiling and executing it.
+    std::fs::write(
+        workspace.join("harness.c"),
+        "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }\n",
+    )
+    .unwrap();
+
+    let runtime = CountingRuntime::new();
+    let container = ServiceContainer::new(runtime.clone(), None).with_guardrails(
+        hf_guardrails::Guardrails::new(
+            hf_guardrails::GuardrailPolicy::default(),
+            Arc::new(hf_guardrails::DenyAll),
+        ),
+    );
+
+    container
+        .coverage_functions(project.path(), "parse_entry")
+        .await;
+
+    assert_eq!(
+        runtime.calls.load(Ordering::SeqCst),
+        0,
+        "a denied measurement must not compile or execute the staged harness"
+    );
+}
