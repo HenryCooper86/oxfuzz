@@ -164,7 +164,13 @@ async fn smoke_budget_clamps_to_the_operator_ceiling_and_drives_runtime_and_pers
             .expect("smoke command uses the resolved duration");
         assert!(command.iter().any(|arg| arg == "-max_total_time=60"));
         assert_eq!(limits.max_mem_mb, 3584);
-        assert_eq!(limits.max_cpus, 4);
+        // Smoke is a bounded qualification probe, not a throughput campaign: it
+        // runs exactly one engine instance whatever the operator allocates, so a
+        // raised `fuzzing.sandbox.max_cpus` must not put it into multi-instance
+        // mode or change its exit-code evidence. The memory ceiling above still
+        // tracks the policy, which is what makes this a per-field rule rather
+        // than a blanket one. See `smoke_qualification_config`.
+        assert_eq!(limits.max_cpus, 1);
         // The fuzzer's own budget is 60s; the sandbox wall-clock is granted
         // headroom so a non-crashing harness that runs the full budget is not
         // killed at the cap before its activity is measured.
@@ -191,5 +197,7 @@ async fn smoke_budget_clamps_to_the_operator_ceiling_and_drives_runtime_and_pers
         .find(|config| config.duration == Some(std::time::Duration::from_mins(1)))
         .expect("the unclamped smoke run is persisted with its 60-second budget");
     assert_eq!(full_config.max_mem_mb, 3584);
-    assert_eq!(full_config.max_cpus, 4);
+    // The persisted record carries the same single-instance allocation the
+    // sandbox received, so history cannot imply a wider smoke run than ran.
+    assert_eq!(full_config.max_cpus, 1);
 }
