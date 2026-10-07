@@ -16,7 +16,8 @@ A harness is acceptable only if it satisfies all of:
 5. **Independent LLM review passes before execution** -- the exact source is
    judged to exercise the target with fuzzer input and avoid unsafe side effects;
    missing or malformed review fails closed.
-6. **Smoke fuzz passes** -- 60s run, no crash on empty input, execs/sec > 0.
+6. **Smoke fuzz passes** -- 60s run, no crash on empty input, execs/sec > 0, and
+   the selected target function was entered when that run retained a profile.
 
 ## 2. Static Rules
 
@@ -112,6 +113,25 @@ later campaign recompute the active source/executable digests and fail closed
 if either differs from the qualified pair. A crash during smoke is useful
 evidence but is not a clean pass and cannot be promoted. Only an explicit human
 action moves a clean `SmokePassed` revision to `Promoted`.
+
+Promotion also requires target-exercise evidence from that exact smoke run, read
+through the retained function profile. When the run retained one, the selected
+target symbol must carry a positive counter, matched by containment because
+LLVM reports mangled C++ symbols. A measured run that never entered the target
+cannot be promoted however clean its other evidence: it compiled and burned
+cycles without exercising target code, which is the one failure the compiler,
+the review, and the crash count cannot see. Promotion is a single check reached
+by every transport, so a direct REST, desktop, or work-order caller cannot skip
+it.
+
+That evidence exists only when the operator enabled
+`fuzzing.collect_function_coverage`, which defaults off because instrumentation
+adds campaign overhead. A run that retained no profile is therefore reported as
+unverified rather than failed, and is not treated as proof that the harness
+missed the target. Making the evidence mandatory needs a qualification build
+separate from the campaign binary; until then the check is enforced wherever the
+evidence exists. A revision whose smoke evidence names no run cannot be checked
+at all, and is refused.
 
 Work-order ranking retains the smoke verdict order `Pass`, `Suspect`, `Fail`,
 then absent. A crash-bearing `Fail` is not a clean smoke result and is ineligible

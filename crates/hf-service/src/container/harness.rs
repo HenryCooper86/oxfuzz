@@ -1475,6 +1475,41 @@ impl ServiceContainer {
         .await
     }
 
+    /// Refuse promotion when the exact smoke run's retained profile shows the
+    /// harness never entered its selected target.
+    ///
+    /// A run whose profile was not retained is unverified rather than failed:
+    /// `fuzzing.collect_function_coverage` is an operator choice that defaults
+    /// off because instrumentation adds campaign overhead, so an unmeasured run
+    /// is not evidence that the harness missed the target.
+    ///
+    /// # Errors
+    /// Rejects a revision with no smoke run identity, and rejects a measured run
+    /// that never entered the target.
+    async fn require_smoke_target_entry(
+        &self,
+        target: &str,
+        run_id: Option<Uuid>,
+    ) -> Result<(), ClassifiedError> {
+        let run_id = run_id.ok_or_else(|| {
+            ClassifiedError::Validation(format!(
+                "harness '{target}' cannot be promoted: its smoke evidence names no run, \
+                 so target entry cannot be checked. Smoke the revision again."
+            ))
+        })?;
+        match self.target_entry_evidence(target, run_id).await? {
+            super::function_coverage::TargetEntryEvidence::Entered
+            | super::function_coverage::TargetEntryEvidence::Unverified => Ok(()),
+            super::function_coverage::TargetEntryEvidence::NotEntered => {
+                Err(ClassifiedError::Validation(format!(
+                    "harness '{target}' cannot be promoted: its smoke profile shows the target \
+                     function was never entered, so the run measured no target code. Make the \
+                     harness call the target with fuzz input, then smoke the new revision."
+                )))
+            }
+        }
+    }
+
     async fn harness_promote_locked(
         &self,
         project: &Path,
@@ -1510,6 +1545,8 @@ impl ServiceContainer {
                 "harness '{target}' cannot be promoted until a crash-free smoke run passes"
             )));
         }
+        self.require_smoke_target_entry(target, smoke.run_id)
+            .await?;
         let (_, source_sha256, binary_sha256) = qualification_evidence(&harness)?;
         let source_sha256 = source_sha256.to_owned();
         let binary_sha256 = binary_sha256.to_owned();
@@ -1545,7 +1582,10 @@ impl ServiceContainer {
                 "known-findings approval requires at least one smoke crash".into(),
             ));
         }
+        let smoke_run_id = smoke.run_id;
         self.verify_harness_qualification_locked(project, target, &harness)
+            .await?;
+        self.require_smoke_target_entry(target, smoke_run_id)
             .await?;
         let (_, source_sha256, binary_sha256) = qualification_evidence(&harness)?;
         let source_sha256 = source_sha256.to_owned();

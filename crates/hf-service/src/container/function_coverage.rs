@@ -32,6 +32,30 @@ pub enum RunFunctionCoverage {
     },
 }
 
+/// Whether one run's retained profile shows the selected target symbol entered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::container) enum TargetEntryEvidence {
+    /// The profile carries a positive counter for the target symbol.
+    Entered,
+    /// The profile was read and the target symbol was never entered.
+    NotEntered,
+    /// No profile was retained, so entry is unverified rather than absent.
+    /// Instrumentation is an operator choice, so an unmeasured run says nothing
+    /// about whether the harness reached the target.
+    Unverified,
+}
+
+/// LLVM reports mangled C++ symbols, so a target is matched by containment.
+fn names_target(function: &str, target: &str) -> bool {
+    function.contains(target)
+}
+
+/// Counters are decimal strings so a browser client keeps the full LLVM range;
+/// an unparseable value is not a positive observation.
+fn counter_is_positive(count: &str) -> bool {
+    count.trim().parse::<u128>().is_ok_and(|value| value > 0)
+}
+
 impl ServiceContainer {
     /// Read retained function measurements without rebuilding or executing a harness.
     ///
@@ -68,6 +92,30 @@ impl ServiceContainer {
             .collect();
         Ok(RunFunctionCoverage::Available { observed_functions, run_id, binary_sha256: record.binary_sha256, export_sha256: record.export_sha256, functions,
             limitation: "Positive counters show observed entry. Zero counters do not prove non-entry: interrupted workers may not flush profiles, and uninstrumented libraries are excluded." })
+    }
+
+    /// Whether one run's retained profile shows the selected target entered.
+    ///
+    /// # Errors
+    /// Rejects a missing run or storage failures.
+    pub(in crate::container) async fn target_entry_evidence(
+        &self,
+        target: &str,
+        run_id: Uuid,
+    ) -> Result<TargetEntryEvidence, ClassifiedError> {
+        Ok(match self.run_function_coverage(run_id).await? {
+            RunFunctionCoverage::Unavailable { .. } => TargetEntryEvidence::Unverified,
+            RunFunctionCoverage::Available { functions, .. } => {
+                let entered = functions.iter().any(|function| {
+                    names_target(&function.name, target) && counter_is_positive(&function.count)
+                });
+                if entered {
+                    TargetEntryEvidence::Entered
+                } else {
+                    TargetEntryEvidence::NotEntered
+                }
+            }
+        })
     }
 }
 
@@ -549,5 +597,32 @@ mod staging_tests {
         let root = tempfile::tempdir().unwrap();
         stage_input_workspace(&config(false), root.path(), false).unwrap();
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+}
+
+#[cfg(test)]
+mod target_entry_tests {
+    use super::{counter_is_positive, names_target};
+
+    #[test]
+    fn a_mangled_cpp_symbol_still_names_its_target() {
+        // llvm-cov reports the mangled symbol, so equality would never match a
+        // C++ target and every C++ harness would look unentered.
+        assert!(names_target("_Z11parse_entryPKhm", "parse_entry"));
+        assert!(names_target("parse_entry", "parse_entry"));
+        assert!(!names_target("parse_entry_extra", "unrelated"));
+    }
+
+    #[test]
+    fn only_a_parseable_positive_counter_is_an_observation() {
+        assert!(counter_is_positive("1"));
+        assert!(counter_is_positive(
+            "340282366920938463463374607431768211455"
+        ));
+        // Absence of entry, and values this reader cannot interpret, are both
+        // "not observed" rather than a positive observation.
+        assert!(!counter_is_positive("0"));
+        assert!(!counter_is_positive(""));
+        assert!(!counter_is_positive("not-a-number"));
     }
 }

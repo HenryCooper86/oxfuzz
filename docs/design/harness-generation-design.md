@@ -89,6 +89,13 @@ pub struct Harness {
    as source/binary digests. Mismatches fail closed and require rebuild and
    requalification. Campaign admission performs this check before seed-provider
    calls or corpus mutation; the final fuzzer executor repeats it for all callers.
+   Promotion also requires target-exercise evidence from the exact smoke run:
+   when that run retained a function profile, the selected target symbol must
+   carry a positive counter. A measured run that never entered the target is
+   refused, because compiling, passing review, and running without a crash are
+   all satisfiable by a harness that never calls the target. A run that retained
+   no profile is unverified rather than failed, since
+   `fuzzing.collect_function_coverage` defaults off to avoid campaign overhead.
 
 ### 3.1 One Captured Input Set per Compile Attempt
 

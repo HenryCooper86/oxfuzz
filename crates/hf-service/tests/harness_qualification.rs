@@ -396,6 +396,138 @@ async fn smoke_updates_the_compiled_revision_and_promotion_is_explicit() {
 }
 
 #[tokio::test]
+async fn promotion_is_refused_when_the_smoke_profile_never_entered_the_target() {
+    let (project, store, container) = qualified_fixture().await;
+    let source = "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }";
+
+    container
+        .harness_compile(
+            source.to_owned(),
+            project.path(),
+            EngineKind::LibFuzzer,
+            "parse_entry",
+            TargetLanguage::C,
+        )
+        .await
+        .unwrap();
+    container
+        .harness_smoke(
+            project.path(),
+            "parse_entry",
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+        )
+        .await
+        .unwrap();
+
+    // The harness ran and the binary was measured, but the selected symbol was
+    // never entered: it burned cycles without fuzzing the target.
+    seed_function_coverage(
+        &store,
+        &sole_smoke_run(&store, project.path()).await,
+        &[("LLVMFuzzerTestOneInput", 4_096), ("parse_entry", 0)],
+    )
+    .await;
+
+    let refused = container
+        .harness_promote(project.path(), "parse_entry", EngineKind::LibFuzzer)
+        .await;
+    let error = refused.expect_err("a harness that never entered the target must not promote");
+    assert!(error.to_string().contains("parse_entry"), "{error}");
+}
+
+#[tokio::test]
+async fn promotion_succeeds_when_the_smoke_profile_entered_the_target() {
+    let (project, store, container) = qualified_fixture().await;
+    let source = "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }";
+
+    container
+        .harness_compile(
+            source.to_owned(),
+            project.path(),
+            EngineKind::LibFuzzer,
+            "parse_entry",
+            TargetLanguage::C,
+        )
+        .await
+        .unwrap();
+    container
+        .harness_smoke(
+            project.path(),
+            "parse_entry",
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+        )
+        .await
+        .unwrap();
+
+    seed_function_coverage(
+        &store,
+        &sole_smoke_run(&store, project.path()).await,
+        &[("LLVMFuzzerTestOneInput", 4_096), ("parse_entry", 37)],
+    )
+    .await;
+
+    let promoted = container
+        .harness_promote(project.path(), "parse_entry", EngineKind::LibFuzzer)
+        .await
+        .expect("positive target entry must promote");
+    assert_eq!(promoted.status, HarnessStatus::Promoted);
+}
+
+/// The fixture's only run is the smoke run under qualification.
+async fn sole_smoke_run(store: &hf_storage::Store, project: &Path) -> hf_storage::RunRecord {
+    let project_root = std::fs::canonicalize(project).unwrap();
+    let runs = store
+        .list_runs(Some(&project_root.to_string_lossy()))
+        .await
+        .unwrap();
+    assert_eq!(runs.len(), 1, "the fixture records exactly one smoke run");
+    runs.into_iter().next().unwrap()
+}
+
+/// Retain a function-coverage record the way the collection path would, so the
+/// store's own export-digest and run-identity checks apply to the seed.
+async fn seed_function_coverage(
+    store: &hf_storage::Store,
+    run: &hf_storage::RunRecord,
+    functions: &[(&str, u64)],
+) {
+    let export_json = serde_json::json!({
+        "data": [{
+            "functions": functions
+                .iter()
+                .map(|(name, count)| serde_json::json!({
+                    "name": name,
+                    "count": count,
+                    "filenames": ["/work/parse.c"],
+                }))
+                .collect::<Vec<_>>(),
+        }],
+    })
+    .to_string();
+    let record = hf_storage::RunFunctionCoverageRecord {
+        run_id: run.id,
+        binary_sha256: run
+            .binary_rev
+            .clone()
+            .expect("a smoke run retains its binary digest"),
+        sandbox_rev: run
+            .sandbox_rev
+            .clone()
+            .expect("a smoke run retains its image identity"),
+        profile_sha256: "ab".repeat(32),
+        export_sha256: format!("{:x}", sha2::Sha256::digest(export_json.as_bytes())),
+        export_json,
+        collected_at: chrono::Utc::now(),
+    };
+    store
+        .record_run_function_coverage(&record)
+        .await
+        .expect("the seeded record must satisfy the store's own validation");
+}
+
+#[tokio::test]
 async fn promotion_rejects_a_binary_changed_after_smoke_qualification() {
     let (project, _store, container) = qualified_fixture().await;
     container
