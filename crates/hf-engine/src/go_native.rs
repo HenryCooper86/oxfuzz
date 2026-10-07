@@ -12,7 +12,7 @@ use hf_core::engine::FuzzRunConfig;
 /// `binary` is the compiled `go test -c` binary for the package owning the
 /// fuzz target, staged under the name `fuzz_<Symbol>.test` where `<Symbol>`
 /// is the exact exported Go function under test; the fuzz test is named
-/// `Fuzz<Symbol>` (see [`go_symbol_from_binary_name`]). The fixed flags
+/// `Fuzz<Symbol>`. The fixed flags
 /// select exactly that one test. An explicit duration becomes
 /// `-test.fuzztime=<N>s`; without one the fuzzer runs until stopped and the
 /// sandbox wall-clock cap bounds it, the same contract as the other engines.
