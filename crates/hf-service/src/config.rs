@@ -182,7 +182,14 @@ pub struct FuzzingSettings {
 impl Default for FuzzingSettings {
     fn default() -> Self {
         Self {
-            collect_function_coverage: false,
+            // Collecting is the default because it is what lets promotion prove
+            // a harness entered its target. The documented cost is about 4% of
+            // fuzzing throughput
+            // (docs/acceptance/instrumentation-overhead-2026-10-07.md), and a
+            // build without the owning feature cannot collect at all, so the
+            // default follows the feature rather than promising evidence the
+            // binary cannot produce.
+            collect_function_coverage: cfg!(feature = "proof-carrying"),
             enabled_engines: all_engine_ids(),
             default_engine: EngineKind::LibFuzzer.as_str().to_owned(),
             default_duration_secs: 60,
@@ -3921,6 +3928,26 @@ default_duration_secs = 22
             parse_oxfuzz_runtime_config(raw).expect("semantic + embedding_enabled must parse");
         assert_eq!(parsed.knowledge.retrieval_strategy, "semantic");
         assert!(parsed.knowledge.embedding_enabled);
+    }
+
+    #[test]
+    fn function_coverage_collection_is_on_where_it_can_be_collected() {
+        // Promotion proves target entry from the retained profile, so a build
+        // that can collect must collect by default or the gate has nothing to
+        // read. A build without the owning feature cannot collect, and must not
+        // default to a value its own validation rejects.
+        assert_eq!(
+            FuzzingSettings::default().collect_function_coverage,
+            cfg!(feature = "proof-carrying"),
+        );
+        // A config that says nothing about collection resolves to the same
+        // default, so the shipped template and an absent section agree.
+        let parsed = parse_oxfuzz_runtime_config("[fuzzing]\ndefault_duration_secs = 30\n")
+            .expect("a config without a coverage setting is valid");
+        assert_eq!(
+            parsed.fuzzing.collect_function_coverage,
+            cfg!(feature = "proof-carrying"),
+        );
     }
 
     #[test]

@@ -283,9 +283,16 @@ or today's corpus; historical replay reports their absence.
 # Run-attributed function evidence
 
 The `proof-carrying` implementation may collect source-function counters from
-the actual C/C++ campaign executable. The operator opts in with
-`fuzzing.collect_function_coverage`; its default is false because instrumentation
-adds overhead. Enabling it without the owning feature fails configuration load.
+the actual C/C++ campaign executable. The operator controls it with
+`fuzzing.collect_function_coverage`, which defaults to whether the owning feature
+is built. Collection is on by default because promotion proves a harness entered
+its target from this profile, so a build that can collect and does not leaves a
+C/C++ promotion unverifiable. Instrumentation costs about 4% of fuzzing
+throughput, measured on the qualification fixture
+(`docs/acceptance/instrumentation-overhead-2026-10-07.md`); an operator who wants
+that back turns collection off and accepts an unverified promotion, until a
+qualification build separate from the campaign binary removes the tradeoff.
+Enabling it without the owning feature fails configuration load.
 New C/C++ compilation adds Clang's profile-generation and coverage-mapping flags
 to the retained build inputs before compilation and qualification. Existing
 uninstrumented binaries are not relabeled or rebuilt during measurement.

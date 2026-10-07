@@ -22,8 +22,10 @@ before work starts. Syzkaller uses its separate kernel campaign path. Every
 generated harness requires independent review, human promotion, and
 `hf-runtime` sandboxing. Promotion also requires the selected target function to
 have been entered when the smoke run retained a function profile; a run that
-retained none is reported as unverified rather than as entry, because
-`fuzzing.collect_function_coverage` defaults off to avoid campaign overhead.
+retained none is reported as unverified rather than as entry. C/C++ compilation
+collects that profile by default, at a measured cost of about 4% of fuzzing
+throughput, because otherwise a C/C++ promotion carries no target-exercise
+evidence.
 
 Additional operation limits:
 

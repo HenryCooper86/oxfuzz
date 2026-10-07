@@ -40,8 +40,14 @@ auto_revert_notify_only = false
 # before every new harness operation or campaign. A Settings save therefore
 # affects the next operation without changing a campaign already in flight.
 [fuzzing]
-# Instrument new C/C++ harnesses; adds overhead and requires requalification.
-collect_function_coverage = false
+# Instrument new C/C++ harnesses for run-attributed function counters. On by
+# default, because promotion proves the harness entered its target from this
+# profile and a C/C++ promotion cannot be checked without one. Measured cost is
+# about 4% of fuzzing throughput
+# (docs/acceptance/instrumentation-overhead-2026-10-07.md). Requires the
+# proof-carrying feature; enabling it in a build without that feature fails
+# configuration load. Changing it requires requalification.
+collect_function_coverage = true
 enabled_engines = ["libfuzzer", "afl++", "honggfuzz", "syzkaller"]
 default_engine = "libfuzzer"
 default_duration_secs = 60

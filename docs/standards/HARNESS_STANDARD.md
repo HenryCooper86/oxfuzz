@@ -124,14 +124,16 @@ the review, and the crash count cannot see. Promotion is a single check reached
 by every transport, so a direct REST, desktop, or work-order caller cannot skip
 it.
 
-That evidence exists only when the operator enabled
-`fuzzing.collect_function_coverage`, which defaults off because instrumentation
-adds campaign overhead. A run that retained no profile is therefore reported as
-unverified rather than failed, and is not treated as proof that the harness
-missed the target. Making the evidence mandatory needs a qualification build
-separate from the campaign binary; until then the check is enforced wherever the
-evidence exists. A revision whose smoke evidence names no run cannot be checked
-at all, and is refused.
+That evidence exists only when the operator left
+`fuzzing.collect_function_coverage` enabled. It defaults to whether the
+`proof-carrying` feature is built, because promotion reads it and a build that
+can collect should not leave a C/C++ promotion unverifiable; instrumentation
+costs about 4% of fuzzing throughput, measured on the qualification fixture. An
+operator who turns collection off gets a promotion with no target-exercise
+evidence, which the gate reports as unverified rather than as entry. Making the
+evidence unconditional needs a qualification build separate from the campaign
+binary; until then the check is enforced wherever the evidence exists. A revision
+whose smoke evidence names no run cannot be checked at all, and is refused.
 
 Work-order ranking retains the smoke verdict order `Pass`, `Suspect`, `Fail`,
 then absent. A crash-bearing `Fail` is not a clean smoke result and is ineligible

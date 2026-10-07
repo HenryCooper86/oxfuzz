@@ -94,8 +94,10 @@ pub struct Harness {
    carry a positive counter. A measured run that never entered the target is
    refused, because compiling, passing review, and running without a crash are
    all satisfiable by a harness that never calls the target. A run that retained
-   no profile is unverified rather than failed, since
-   `fuzzing.collect_function_coverage` defaults off to avoid campaign overhead.
+   no profile is unverified rather than failed;
+   `fuzzing.collect_function_coverage` defaults to whether the `proof-carrying`
+   feature is built, at a measured cost of about 4% of fuzzing throughput, so
+   disabling it trades target-exercise evidence for that throughput.
 
 ### 3.1 One Captured Input Set per Compile Attempt
 
