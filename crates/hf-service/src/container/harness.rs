@@ -1236,12 +1236,56 @@ impl ServiceContainer {
         smoke_config.seed = Some(hf_engine::seed::derive_run_seed(smoke_record.id));
         #[cfg(feature = "proof-carrying")]
         super::function_coverage::configure(&mut smoke_config, &harness, true);
-        smoke_record.config = Some(smoke_config.clone());
         smoke_record.kind = RunKind::Smoke;
         let sandbox_image = resolve_run_sandbox_image(self.runtime.as_ref()).await?;
         self.verify_harness_dispatch_image(project, &harness, Some(sandbox_image.reference()))
             .await?;
         let artifacts = stage_run_artifacts(&workspace, smoke_record.id, &harness.source, &binary)?;
+        // A qualification run retains the same immutable inputs a campaign does,
+        // because collection verifies that manifest to attribute the profile
+        // export to an exact binary and image. Without it a smoke run cannot
+        // produce the target-entry evidence promotion reads, and the gate that
+        // requires that evidence can never fire.
+        #[cfg(feature = "proof-carrying")]
+        if let Err(error) = (|| -> Result<(), ClassifiedError> {
+            super::function_coverage::relocate_profiles_to_run_output(
+                &mut smoke_config,
+                &artifacts.output_relative,
+            );
+            // The engine writes the profile into this directory, so it has to
+            // exist before the run: LLVM creates the file, not its parents.
+            super::workspace::ensure_workspace_directory(
+                &artifacts.output_host,
+                Path::new("function-coverage/raw"),
+            )?;
+            // A campaign stages its retained input workspace before this point;
+            // a qualification run does not, so create the root the reserved
+            // mountpoint lives under.
+            let input_workspace = artifacts.input_host.join("workspace");
+            std::fs::create_dir_all(&input_workspace).map_err(|error| {
+                ClassifiedError::Internal(format!(
+                    "create qualification input workspace {}: {error}",
+                    input_workspace.display()
+                ))
+            })?;
+            super::function_coverage::stage_input_workspace(
+                &smoke_config,
+                &input_workspace,
+                false,
+            )?;
+            super::retained_inputs::seal(
+                &artifacts.input_host,
+                sandbox_image.reference(),
+                &mut smoke_config,
+            )
+        })() {
+            if let Some(run_root) = artifacts.output_host.parent() {
+                // Best-effort removal of staging not referenced by a persisted run.
+                let _ = std::fs::remove_dir_all(run_root);
+            }
+            return Err(error);
+        }
+        smoke_record.config = Some(smoke_config.clone());
         let context = match captured_run_context_digests(
             &artifacts.source_context_host,
             &artifacts.initial_corpus_host,
@@ -1376,6 +1420,18 @@ impl ServiceContainer {
                 "smoke corpus/output exceeded its retained-evidence budget".to_owned(),
             ));
         }
+        // Collect the qualification profile now that the run has finished, so
+        // promotion reads target-entry evidence from the smoke run itself rather
+        // than from a campaign that has not happened yet. A failure here is
+        // journaled by the collector and leaves the run unverified, which the
+        // promotion gate then reports instead of silently passing.
+        #[cfg(feature = "proof-carrying")]
+        self.close_function_coverage(
+            &smoke_record,
+            &artifacts,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
         let Some(summary) = smoked.smoke_run.as_mut() else {
             let _ = store
                 .set_run_status(smoke_record.id, RunStatus::Failed, Some(Utc::now()))

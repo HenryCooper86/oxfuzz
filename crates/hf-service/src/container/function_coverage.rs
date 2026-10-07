@@ -168,15 +168,9 @@ mod collection {
                 .iter()
                 .any(|value| value == flag)
         }) {
-            config.env.push((
-                "LLVM_PROFILE_FILE".to_owned(),
-                if smoke {
-                    "/tmp/oxfuzz-smoke-%m.profraw"
-                } else {
-                    PROFILE_FILE
-                }
-                .to_owned(),
-            ));
+            config
+                .env
+                .push(("LLVM_PROFILE_FILE".to_owned(), PROFILE_FILE.to_owned()));
             if !smoke && config.engine == EngineKind::AflPlusPlus {
                 config
                     .env
@@ -185,11 +179,40 @@ mod collection {
         }
     }
 
-    fn requested(config: &FuzzRunConfig) -> bool {
+    /// Move this run's raw profile into its own writable output directory.
+    ///
+    /// A campaign mounts `/work/function-coverage` through [`prepare`], but a
+    /// qualification run builds its sandbox in `hf-harness`, which mounts only
+    /// the run's output directory writable and keeps the workspace read-only.
+    /// Writing under that directory puts the profile on the host at
+    /// `function-coverage/raw/`, where [`ServiceContainer::collect_run_function_coverage`]
+    /// reads it, and needs no second mount.
+    ///
+    /// [`prepare`]: Self::prepare
+    /// [`ServiceContainer::collect_run_function_coverage`]: super::ServiceContainer::collect_run_function_coverage
+    pub(in crate::container) fn relocate_profiles_to_run_output(
+        config: &mut FuzzRunConfig,
+        output_relative: &Path,
+    ) {
+        let directory = hf_core::runtime::posix_relative(output_relative);
+        let value = format!("/work/{directory}/function-coverage/raw/%m.profraw");
+        for (key, existing) in &mut config.env {
+            if key == "LLVM_PROFILE_FILE" {
+                *existing = value;
+                return;
+            }
+        }
+    }
+
+    /// Whether this run asked for raw function profiles, wherever it writes them.
+    ///
+    /// The directory differs between a campaign and a qualification run, so this
+    /// matches on the owned directory rather than on one exact path.
+    pub(super) fn requested(config: &FuzzRunConfig) -> bool {
         config
             .env
             .iter()
-            .any(|(key, value)| key == "LLVM_PROFILE_FILE" && value == PROFILE_FILE)
+            .any(|(key, value)| key == "LLVM_PROFILE_FILE" && value.contains("function-coverage"))
     }
 
     pub(in crate::container) fn stage_input_workspace(
@@ -456,7 +479,9 @@ mod collection {
 }
 
 #[cfg(feature = "proof-carrying")]
-pub(super) use collection::{configure, prepare, stage_input_workspace};
+pub(super) use collection::{
+    configure, prepare, relocate_profiles_to_run_output, stage_input_workspace,
+};
 #[cfg(feature = "proof-carrying")]
 pub(super) const PROFILE_FLAGS: [&str; 3] = collection::FLAGS;
 
@@ -624,5 +649,77 @@ mod target_entry_tests {
         assert!(!counter_is_positive("0"));
         assert!(!counter_is_positive(""));
         assert!(!counter_is_positive("not-a-number"));
+    }
+}
+
+#[cfg(all(test, feature = "proof-carrying"))]
+mod relocation_tests {
+    use super::collection::relocate_profiles_to_run_output;
+    use hf_core::engine::{EngineKind, FuzzRunConfig};
+    use std::path::Path;
+    use uuid::Uuid;
+
+    fn smoked_config() -> FuzzRunConfig {
+        FuzzRunConfig {
+            harness_id: Uuid::new_v4(),
+            engine: EngineKind::LibFuzzer,
+            duration: Some(std::time::Duration::from_secs(60)),
+            max_mem_mb: 2048,
+            max_cpus: 1,
+            seed_corpus: None,
+            sanitizer: hf_core::target::Sanitizer::Address,
+            env: vec![(
+                "LLVM_PROFILE_FILE".to_owned(),
+                "/work/function-coverage/%m.profraw".to_owned(),
+            )],
+            extra_args: Vec::new(),
+            seed: None,
+            replay_of: None,
+            input_manifest_sha256: None,
+        }
+    }
+
+    fn profile_of(config: &FuzzRunConfig) -> String {
+        config
+            .env
+            .iter()
+            .find(|(key, _)| key == "LLVM_PROFILE_FILE")
+            .map(|(_, value)| value.clone())
+            .expect("the config names a profile file")
+    }
+
+    #[test]
+    fn a_qualification_profile_moves_under_the_run_output_directory() {
+        let mut config = smoked_config();
+
+        relocate_profiles_to_run_output(&mut config, Path::new("runs/abc/out"));
+
+        // The campaign path is unwritable during qualification: the smoke
+        // sandbox keeps the workspace read-only and mounts only this directory.
+        assert_eq!(
+            profile_of(&config),
+            "/work/runs/abc/out/function-coverage/raw/%m.profraw"
+        );
+    }
+
+    #[test]
+    fn the_collector_recognizes_a_relocated_profile() {
+        let mut config = smoked_config();
+        relocate_profiles_to_run_output(&mut config, Path::new("runs/abc/out"));
+
+        // `requested` gates staging and collection, so if it stopped matching a
+        // relocated path the run would silently produce no evidence at all.
+        assert!(super::collection::requested(&config));
+    }
+
+    #[test]
+    fn relocation_leaves_a_config_without_a_profile_alone() {
+        let mut config = smoked_config();
+        config.env.clear();
+
+        relocate_profiles_to_run_output(&mut config, Path::new("runs/abc/out"));
+
+        assert!(config.env.is_empty());
+        assert!(!super::collection::requested(&config));
     }
 }

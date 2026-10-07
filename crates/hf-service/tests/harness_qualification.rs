@@ -759,3 +759,55 @@ async fn unsupported_harness_languages_fail_before_the_compiler() {
         assert!(error.to_string().contains("not supported"));
     }
 }
+
+#[tokio::test]
+async fn a_smoke_run_requests_a_profile_it_can_actually_retain() {
+    let (project, store, container) = qualified_fixture().await;
+    let source = "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }";
+
+    container
+        .harness_compile(
+            source.to_owned(),
+            project.path(),
+            EngineKind::LibFuzzer,
+            "parse_entry",
+            TargetLanguage::C,
+        )
+        .await
+        .unwrap();
+    container
+        .harness_smoke(
+            project.path(),
+            "parse_entry",
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+        )
+        .await
+        .unwrap();
+
+    let run = sole_smoke_run(&store, project.path()).await;
+    let config = run.config.as_ref().expect("a smoke run retains its config");
+    let harness = store
+        .get_harness(config.harness_id)
+        .await
+        .unwrap()
+        .expect("the smoke run names its harness");
+
+    // Whether collection is on is deployment configuration, and this fixture
+    // resolves the ambient config, so the path logic is pinned by unit tests in
+    // `function_coverage::relocation_tests` instead. What is asserted here is
+    // the part that must hold either way: the qualification run leaves a
+    // writable directory for a profile inside its own run-scoped output.
+    //
+    // Producing the record itself needs the profiling toolchain, so a stub
+    // runtime cannot close that link; the acceptance records cover it.
+    let _ = harness;
+    let workspace = hf_service::workspace_dir(project.path(), "parse_entry");
+    let raw = workspace
+        .join(run.evidence_dir.as_deref().expect("runs are run-scoped"))
+        .join("function-coverage/raw");
+    assert!(
+        raw.is_dir(),
+        "the profile directory must exist before the run: llvm creates the file, not its parents"
+    );
+}
