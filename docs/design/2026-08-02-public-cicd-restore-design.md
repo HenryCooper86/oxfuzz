@@ -146,7 +146,9 @@ runner appears in the project's CI settings. The helper is invoked by the user
 - **README badges.** A badge row under the title: GitHub Actions CI status
   (`HenryCooper86/oxfuzz` `ci.yml`) and MIT license. Added to both the English
   and Chinese header regions so the bilingual README stays symmetric.
-- **`.github/dependabot.yml`.** Weekly update PRs for three ecosystems:
+- **`.github/dependabot.yml`.** Weekly update PRs for three ecosystems.
+  (Removed 2026-10-07: dependency updates are deliberate, manually reviewed
+  changes in this project, not automated PRs.)
   `cargo` (root workspace), `npm` (`crates/hf-gui`), and `github-actions`
   (`/`). Grouped minor/patch updates to limit PR noise; open-PR limit set.
 - **`.github/ISSUE_TEMPLATE/`.** `bug_report.md` and `feature_request.md` plus
@@ -232,7 +234,8 @@ neither workflow re-lists a command.
   parse) so a malformed workflow is caught before push.
 - **Action-version check.** For every `uses:`, confirm the pinned major is the
   current released major before commit.
-- **Dependabot config validity.** Validate `dependabot.yml` against the schema
+- **Dependabot config validity.** Validate `dependabot.yml` against the
+  schema (obsolete with the 2026-10-07 removal of Dependabot version updates)
   (parseable, all three ecosystems present with valid directories).
 - **No secret is required by `ci.yml`.** Confirm the workflow references no
   secret (only the opt-in `fuzz.yml.example` needs `HF_PROVIDER_API_KEY`).
