@@ -84,7 +84,11 @@ fn isolate_workspace() {
     common::install_managed_workspace("oxfuzz_qualification_it");
 }
 
-struct QualifyingRuntime;
+struct QualifyingRuntime {
+    /// Entry count the double reports for the target, so a test can ask for a
+    /// measured miss instead of a measured entry.
+    entry_count: u64,
+}
 
 #[async_trait::async_trait]
 impl RuntimeAdapter for QualifyingRuntime {
@@ -103,7 +107,7 @@ impl RuntimeAdapter for QualifyingRuntime {
     ) -> Result<CommandResult, hf_core::error::ClassifiedError> {
         // Leave the host-side artifacts the real collection path reads, so this
         // double exercises collection instead of bypassing it.
-        hf_test_utils::function_coverage::satisfy_function_coverage(cmd, cwd, 64);
+        hf_test_utils::function_coverage::satisfy_function_coverage(cmd, cwd, self.entry_count);
         std::fs::create_dir_all(cwd).unwrap();
         std::fs::write(cwd.join("fuzz_parse_entry"), b"mock compiled harness").unwrap();
         Ok(CommandResult {
@@ -115,6 +119,27 @@ impl RuntimeAdapter for QualifyingRuntime {
         })
     }
 
+    async fn run_command_streaming_opts(
+        &self,
+        cmd: &[String],
+        cwd: &Path,
+        limits: &ResourceLimits,
+        opts: &hf_core::runtime::SandboxOptions,
+        cancel: &tokio_util::sync::CancellationToken,
+        on_line: &hf_core::runtime::LineSink<'_>,
+    ) -> Result<CommandResult, hf_core::error::ClassifiedError> {
+        // The profiling tooling names container paths, so its host targets come
+        // from the mounts rather than from the working directory.
+        hf_test_utils::function_coverage::satisfy_function_coverage_with_mounts(
+            cmd,
+            opts,
+            "parse_entry",
+            self.entry_count,
+        );
+        self.run_command_streaming(cmd, cwd, limits, cancel, on_line)
+            .await
+    }
+
     async fn run_command_streaming(
         &self,
         cmd: &[String],
@@ -123,7 +148,7 @@ impl RuntimeAdapter for QualifyingRuntime {
         _cancel: &tokio_util::sync::CancellationToken,
         _on_line: &hf_core::runtime::LineSink<'_>,
     ) -> Result<CommandResult, hf_core::error::ClassifiedError> {
-        hf_test_utils::function_coverage::satisfy_function_coverage(cmd, cwd, 64);
+        hf_test_utils::function_coverage::satisfy_function_coverage(cmd, cwd, self.entry_count);
         Ok(CommandResult {
             exit_code: 0,
             stdout: String::new(),
@@ -151,6 +176,13 @@ impl RuntimeAdapter for QualifyingRuntime {
 }
 
 async fn qualified_fixture() -> (tempfile::TempDir, Arc<hf_storage::Store>, ServiceContainer) {
+    qualified_fixture_with_entry_count(64).await
+}
+
+/// The same fixture, reporting `entry_count` entries of the selected target.
+async fn qualified_fixture_with_entry_count(
+    entry_count: u64,
+) -> (tempfile::TempDir, Arc<hf_storage::Store>, ServiceContainer) {
     isolate_workspace();
     let project = tempfile::tempdir().unwrap();
     // Own the config directory: which settings are in force decides whether a
@@ -178,7 +210,7 @@ async fn qualified_fixture() -> (tempfile::TempDir, Arc<hf_storage::Store>, Serv
             .unwrap(),
     );
     let container = ServiceContainer::new(
-        Arc::new(QualifyingRuntime),
+        Arc::new(QualifyingRuntime { entry_count }),
         Some(Arc::new(FixedReviewPool::new(APPROVING_REVIEW))),
     )
     .with_store(Arc::clone(&store));
@@ -188,7 +220,8 @@ async fn qualified_fixture() -> (tempfile::TempDir, Arc<hf_storage::Store>, Serv
 #[tokio::test]
 async fn smoke_without_a_required_llm_review_is_refused() {
     let (project, store, _approved_container) = qualified_fixture().await;
-    let container = ServiceContainer::new(Arc::new(QualifyingRuntime), None).with_store(store);
+    let container = ServiceContainer::new(Arc::new(QualifyingRuntime { entry_count: 64 }), None)
+        .with_store(store);
     let source = "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }";
     container
         .harness_compile(
@@ -415,7 +448,9 @@ async fn smoke_updates_the_compiled_revision_and_promotion_is_explicit() {
 
 #[tokio::test]
 async fn promotion_is_refused_when_the_smoke_profile_never_entered_the_target() {
-    let (project, store, container) = qualified_fixture().await;
+    // A measured run that never entered the target: it burned cycles without
+    // fuzzing anything, which is the failure the gate exists to catch.
+    let (project, _store, container) = qualified_fixture_with_entry_count(0).await;
     let source = "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }";
 
     container
@@ -437,15 +472,6 @@ async fn promotion_is_refused_when_the_smoke_profile_never_entered_the_target() 
         )
         .await
         .unwrap();
-
-    // The harness ran and the binary was measured, but the selected symbol was
-    // never entered: it burned cycles without fuzzing the target.
-    seed_function_coverage(
-        &store,
-        &sole_smoke_run(&store, project.path()).await,
-        &[("LLVMFuzzerTestOneInput", 4_096), ("parse_entry", 0)],
-    )
-    .await;
 
     let refused = container
         .harness_promote(project.path(), "parse_entry", EngineKind::LibFuzzer)
@@ -456,7 +482,7 @@ async fn promotion_is_refused_when_the_smoke_profile_never_entered_the_target() 
 
 #[tokio::test]
 async fn promotion_succeeds_when_the_smoke_profile_entered_the_target() {
-    let (project, store, container) = qualified_fixture().await;
+    let (project, _store, container) = qualified_fixture_with_entry_count(37).await;
     let source = "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }";
 
     container
@@ -478,13 +504,6 @@ async fn promotion_succeeds_when_the_smoke_profile_entered_the_target() {
         )
         .await
         .unwrap();
-
-    seed_function_coverage(
-        &store,
-        &sole_smoke_run(&store, project.path()).await,
-        &[("LLVMFuzzerTestOneInput", 4_096), ("parse_entry", 37)],
-    )
-    .await;
 
     let promoted = container
         .harness_promote(project.path(), "parse_entry", EngineKind::LibFuzzer)
@@ -502,47 +521,6 @@ async fn sole_smoke_run(store: &hf_storage::Store, project: &Path) -> hf_storage
         .unwrap();
     assert_eq!(runs.len(), 1, "the fixture records exactly one smoke run");
     runs.into_iter().next().unwrap()
-}
-
-/// Retain a function-coverage record the way the collection path would, so the
-/// store's own export-digest and run-identity checks apply to the seed.
-async fn seed_function_coverage(
-    store: &hf_storage::Store,
-    run: &hf_storage::RunRecord,
-    functions: &[(&str, u64)],
-) {
-    let export_json = serde_json::json!({
-        "data": [{
-            "functions": functions
-                .iter()
-                .map(|(name, count)| serde_json::json!({
-                    "name": name,
-                    "count": count,
-                    "filenames": ["/work/parse.c"],
-                }))
-                .collect::<Vec<_>>(),
-        }],
-    })
-    .to_string();
-    let record = hf_storage::RunFunctionCoverageRecord {
-        run_id: run.id,
-        binary_sha256: run
-            .binary_rev
-            .clone()
-            .expect("a smoke run retains its binary digest"),
-        sandbox_rev: run
-            .sandbox_rev
-            .clone()
-            .expect("a smoke run retains its image identity"),
-        profile_sha256: "ab".repeat(32),
-        export_sha256: format!("{:x}", sha2::Sha256::digest(export_json.as_bytes())),
-        export_json,
-        collected_at: chrono::Utc::now(),
-    };
-    store
-        .record_run_function_coverage(&record)
-        .await
-        .expect("the seeded record must satisfy the store's own validation");
 }
 
 #[tokio::test]
@@ -831,9 +809,6 @@ async fn a_smoke_run_requests_a_profile_it_can_actually_retain() {
 }
 
 #[tokio::test]
-#[ignore = "known gap: a qualification run still retains no profile, so promotion cannot read \
-            target-entry evidence. Reproduces the last unclosed link of the promotion gate; \
-            see .claude/plans/2026-10-07-promotion-target-exercise-gate.md"]
 async fn a_smoke_run_retains_the_profile_promotion_reads() {
     let (project, store, container) = qualified_fixture().await;
     let source = "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }";
@@ -881,10 +856,7 @@ async fn a_smoke_run_retains_the_profile_promotion_reads() {
         harness.build_cmd.extra_flags
     );
     assert!(
-        config
-            .env
-            .iter()
-            .any(|(key, _)| key == "LLVM_PROFILE_FILE"),
+        config.env.iter().any(|(key, _)| key == "LLVM_PROFILE_FILE"),
         "layer 2, run does not ask for a profile: {:?}",
         config.env
     );

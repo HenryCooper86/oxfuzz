@@ -15,11 +15,64 @@
 //! Call it from a stub's `RuntimeAdapter::run_command`. The trait's other three
 //! command methods default to delegating to that one.
 
+use hf_core::runtime::SandboxOptions;
 use std::path::{Path, PathBuf};
 
 /// Engine binary names are `fuzz_<symbol>` or `fuzz_<symbol>_<engine>`.
 const BINARY_PREFIX: &str = "fuzz_";
 const ENGINE_SUFFIXES: [&str; 5] = ["libfuzzer", "afl++", "aflplusplus", "honggfuzz", "syz"];
+
+/// Write the host-side artifacts for a command dispatched with sandbox options.
+///
+/// Use this from `RuntimeAdapter::run_command_streaming_opts` and
+/// `run_command_opts`. It maps the container paths the command names back to
+/// their host paths through `extra_mounts`, which is the only place that mapping
+/// exists: the profiling tooling is handed `/profiles/output/export.json` and
+/// the host directory behind it is decided by the caller, so inferring it from
+/// the working directory writes the file somewhere collection never looks.
+pub fn satisfy_function_coverage_with_mounts(
+    cmd: &[String],
+    opts: &SandboxOptions,
+    symbol: &str,
+    count: u64,
+) {
+    let Some(program) = cmd.first() else {
+        return;
+    };
+    if program.starts_with("llvm-profdata") {
+        // `merge ... -o <index>`; command order is fixed by the caller.
+        if let Some(host) = cmd
+            .windows(2)
+            .find(|pair| pair[0] == "-o")
+            .and_then(|pair| host_path(&pair[1], opts))
+        {
+            write_host(&host, &[0u8; 32]);
+        }
+    } else if program == "sh" {
+        // The export is a redirect, so its target is the command's last
+        // argument rather than a named option.
+        if let Some(host) = cmd.last().and_then(|value| host_path(value, opts)) {
+            write_host(&host, exported_function(symbol, count).as_bytes());
+        }
+    }
+}
+
+/// The host path a container path resolves to, when a mount covers it.
+fn host_path(container: &str, opts: &SandboxOptions) -> Option<PathBuf> {
+    opts.extra_mounts.iter().find_map(|mount| {
+        let tail = container.strip_prefix(&mount.container_path)?;
+        if !tail.is_empty() && !tail.starts_with('/') {
+            return None;
+        }
+        Some(mount.host_path.join(tail.trim_start_matches('/')))
+    })
+}
+
+/// Write a file, creating nothing: a mount root that does not exist is a
+/// fixture mistake and must not be papered over.
+fn write_host(path: &Path, bytes: &[u8]) {
+    let _ = std::fs::write(path, bytes);
+}
 
 /// Write the host-side artifacts collection reads for one command.
 ///
