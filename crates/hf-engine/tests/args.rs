@@ -386,3 +386,44 @@ fn extra_args_are_appended() {
         "extra_args must be appended: {joined}"
     );
 }
+
+#[test]
+fn go_native_drives_the_compiled_test_binary_with_fixed_flags() {
+    let mut c = cfg(EngineKind::GoNative, 300);
+    c.max_cpus = 4;
+    let args = hf_engine::go_native::build_run_args(
+        &c,
+        "/work/fuzz_ParseRecord.test",
+        "/work/corpus",
+        "/work/out",
+    );
+    assert_eq!(
+        args.iter().map(String::as_str).collect::<Vec<_>>(),
+        vec![
+            "/work/fuzz_ParseRecord.test",
+            "-test.run=^FuzzParseRecord$",
+            "-test.fuzz=^FuzzParseRecord$",
+            "-test.fuzztime=300s",
+            "-test.parallel=4",
+            "/work/corpus",
+        ],
+        "{args:?}"
+    );
+}
+
+#[test]
+fn go_native_single_cpu_omits_parallel_and_zero_duration_omits_fuzztime() {
+    let c = cfg(EngineKind::GoNative, 0);
+    let args =
+        hf_engine::go_native::build_run_args(&c, "/work/fuzz_T.test", "/work/corpus", "/work/out");
+    assert_eq!(
+        args.iter().map(String::as_str).collect::<Vec<_>>(),
+        vec![
+            "/work/fuzz_T.test",
+            "-test.run=^FuzzT$",
+            "-test.fuzz=^FuzzT$",
+            "/work/corpus",
+        ],
+        "the sandbox wall-clock cap bounds an unbounded run: {args:?}"
+    );
+}

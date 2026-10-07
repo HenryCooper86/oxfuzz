@@ -19,6 +19,10 @@ pub enum EngineKind {
     LibFuzzer,
     /// Google's coverage-guided OS kernel fuzzer (syscall sequences).
     Syzkaller,
+    /// Go's native coverage-guided fuzzer, driven through the compiled
+    /// `go test -c` binary. An admission-gated capability outside
+    /// [`EngineKind::ALL`]: not enabled unless a deployment lists it.
+    GoNative,
 }
 
 impl Serialize for EngineKind {
@@ -62,7 +66,10 @@ pub struct EngineArtifacts {
 }
 
 impl EngineKind {
-    /// Every active fuzzing engine in canonical presentation order.
+    /// Every active fuzzing engine in canonical presentation order. This is
+    /// also the default `enabled_engines` set, so admission-gated capabilities
+    /// (Go native fuzzing) deliberately stay out of it: a deployment lists
+    /// them explicitly.
     pub const ALL: [Self; 4] = [
         Self::LibFuzzer,
         Self::AflPlusPlus,
@@ -80,6 +87,7 @@ impl EngineKind {
             Self::Honggfuzz => "honggfuzz",
             Self::LibFuzzer => "libfuzzer",
             Self::Syzkaller => "syzkaller",
+            Self::GoNative => "go-native",
         }
     }
 
@@ -131,6 +139,20 @@ impl EngineKind {
                     requires_corpus_directory: false,
                 },
             },
+            Self::GoNative => EngineCapabilities {
+                telemetry: EngineTelemetry {
+                    supports_live_stats: true,
+                    // The `new interesting` cumulative total is a coverage
+                    // proxy, persisted as edges like the other engines.
+                    supports_coverage: true,
+                },
+                artifacts: EngineArtifacts {
+                    // Go's fuzzer minimizes failing inputs itself during the
+                    // run; there is no external raw-binary minimizer.
+                    supports_crash_minimization: false,
+                    requires_corpus_directory: true,
+                },
+            },
         }
     }
 
@@ -146,6 +168,7 @@ impl EngineKind {
             // the single source of truth on `TargetLanguage`.
             Self::LibFuzzer => language.libfuzzer_compatible(),
             Self::Syzkaller => false,
+            Self::GoNative => matches!(language, crate::target::TargetLanguage::Go),
         }
     }
 }
@@ -169,9 +192,10 @@ impl std::str::FromStr for EngineKind {
             "honggfuzz" | "hfuzz" => Ok(Self::Honggfuzz),
             "libfuzzer" | "libfuzz" | "lf" => Ok(Self::LibFuzzer),
             "syzkaller" | "syz" => Ok(Self::Syzkaller),
+            "go-native" | "gonative" | "go" => Ok(Self::GoNative),
             other => Err(format!(
                 "unknown fuzzing engine '{other}' (expected one of: \
-                 afl++, honggfuzz, libfuzzer, syzkaller)"
+                 afl++, honggfuzz, libfuzzer, syzkaller, go-native)"
             )),
         }
     }
@@ -268,7 +292,7 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "unknown fuzzing engine 'not-an-engine' (expected one of: \
-             afl++, honggfuzz, libfuzzer, syzkaller)"
+             afl++, honggfuzz, libfuzzer, syzkaller, go-native)"
         );
     }
 
@@ -360,5 +384,24 @@ mod tests {
                 "{engine:?} has no built-in crash minimizer"
             );
         }
+    }
+
+    #[test]
+    fn go_native_parses_but_is_not_a_default_engine() {
+        let parsed: EngineKind = "go-native".parse().unwrap();
+        assert_eq!(parsed, EngineKind::GoNative);
+        assert_eq!(parsed.as_str(), "go-native");
+        // The capability is opt-in: default enabled-engine lists exclude it.
+        assert!(
+            !EngineKind::ALL.contains(&EngineKind::GoNative),
+            "go-native must not be enabled by default"
+        );
+    }
+
+    #[test]
+    fn go_native_supports_go_and_only_go() {
+        assert!(EngineKind::GoNative.supports_language(crate::target::TargetLanguage::Go));
+        assert!(!EngineKind::GoNative.supports_language(crate::target::TargetLanguage::C));
+        assert!(!EngineKind::GoNative.supports_language(crate::target::TargetLanguage::Rust));
     }
 }

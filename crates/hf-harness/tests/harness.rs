@@ -665,7 +665,8 @@ async fn smoke_fuzz_rejects_libfuzzer_inited_without_execs() {
 #[test]
 fn build_command_for_libfuzzer_has_fuzzer_flag() {
     let cmd =
-        hf_harness::build_command(EngineKind::LibFuzzer, TargetLanguage::C, "fuzz_parse_value");
+        hf_harness::build_command(EngineKind::LibFuzzer, TargetLanguage::C, "fuzz_parse_value")
+            .unwrap();
     assert!(cmd.args.contains(&"-fsanitize=fuzzer".to_owned()));
 }
 
@@ -675,7 +676,8 @@ fn build_command_for_afl_uses_afl_compiler() {
         EngineKind::AflPlusPlus,
         TargetLanguage::C,
         "fuzz_parse_value",
-    );
+    )
+    .unwrap();
     assert!(cmd.compiler.contains("afl"));
     assert!(
         cmd.args.contains(&"-fsanitize=fuzzer".to_owned()),

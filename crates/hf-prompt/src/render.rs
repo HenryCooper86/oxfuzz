@@ -575,6 +575,9 @@ fn engine_entry_point(engine: EngineKind) -> &'static str {
         EngineKind::Syzkaller => {
             "kernel syscall fuzzing -- no per-function harness; uses syzlang descriptions"
         }
+        EngineKind::GoNative => {
+            "func FuzzXxx(f *testing.F) // adjacent _test.go calling the exported target"
+        }
     }
 }
 
@@ -584,6 +587,7 @@ fn engine_name(engine: EngineKind) -> &'static str {
         EngineKind::AflPlusPlus => "AFL++",
         EngineKind::Honggfuzz => "honggfuzz",
         EngineKind::Syzkaller => "syzkaller (kernel)",
+        EngineKind::GoNative => "Go native fuzzing",
     }
 }
 

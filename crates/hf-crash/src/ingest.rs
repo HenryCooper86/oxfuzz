@@ -318,7 +318,12 @@ fn collect_artifacts(run_dir: &Path, mode: IngestMode) -> Result<BoundedPaths, C
             IngestMode::Legacy => is_libfuzzer_crash(name) || is_honggfuzz_crash(name),
             IngestMode::Engine(EngineKind::Honggfuzz) => is_honggfuzz_crash(name),
             IngestMode::Engine(EngineKind::LibFuzzer) => is_libfuzzer_crash(name),
-            IngestMode::Engine(EngineKind::AflPlusPlus | EngineKind::Syzkaller) => false,
+            // Flat ingestion stays empty for AFL++ (nested instance dirs),
+            // syzkaller (per-bug directories), and Go's fuzzer (its own
+            // layout, to be defined from the qualified control evidence).
+            IngestMode::Engine(
+                EngineKind::AflPlusPlus | EngineKind::Syzkaller | EngineKind::GoNative,
+            ) => false,
         })?;
     }
 

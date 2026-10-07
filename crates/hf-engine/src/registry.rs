@@ -62,6 +62,11 @@ impl_adapter!(
     EngineKind::Syzkaller,
     crate::syzkaller::build_run_args
 );
+impl_adapter!(
+    crate::go_native::GoNative,
+    EngineKind::GoNative,
+    crate::go_native::build_run_args
+);
 
 /// Return the adapter for an engine kind.
 #[must_use]
@@ -71,5 +76,6 @@ pub fn adapter_for(kind: EngineKind) -> Box<dyn EngineAdapter> {
         EngineKind::AflPlusPlus => Box::new(crate::afl::AflPlusPlus),
         EngineKind::Honggfuzz => Box::new(crate::honggfuzz::Honggfuzz),
         EngineKind::Syzkaller => Box::new(crate::syzkaller::Syzkaller),
+        EngineKind::GoNative => Box::new(crate::go_native::GoNative),
     }
 }

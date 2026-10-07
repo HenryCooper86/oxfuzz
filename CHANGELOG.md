@@ -11,6 +11,13 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ### Added
 
+- Go native fuzzing engine foundation: an admission-gated `go-native`
+  engine kind (valid in `enabled_engines` policy lists, never enabled by
+  default), the compiled-test-binary run adapter matching the qualified
+  direct-binary control, and Go native fuzzer status/failure parsing.
+  The Go service workflow (harness generation, staging, build, campaigns)
+  is not implemented yet; the support matrix keeps Go at discovery-only
+  until that lands and is qualified.
 - libFuzzer fork-mode run summaries report the campaign's aggregate
   throughput (cumulative counter over elapsed time) instead of only the
   parent's current-window rate, which dipped between child restarts;

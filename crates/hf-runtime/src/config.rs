@@ -332,7 +332,10 @@ impl SandboxEngines {
             EngineKind::LibFuzzer => 0,
             EngineKind::AflPlusPlus => 1,
             EngineKind::Honggfuzz => 2,
-            EngineKind::Syzkaller => 3,
+            // Go native fuzzing shares the image's pinned Go toolchain with
+            // syzkaller until the Go design's dedicated image candidate gives
+            // it its own recorded identity and probe slot.
+            EngineKind::Syzkaller | EngineKind::GoNative => 3,
         }]
     }
 }

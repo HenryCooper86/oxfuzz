@@ -9,6 +9,7 @@
 
 pub mod afl;
 pub mod dict;
+pub mod go_native;
 pub mod honggfuzz;
 pub mod libfuzzer;
 pub mod progress;

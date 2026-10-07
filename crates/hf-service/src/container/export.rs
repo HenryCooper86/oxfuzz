@@ -294,7 +294,7 @@ impl ServiceContainer {
             .iter()
             .filter(|path| !is_header_path(path))
             .collect();
-        let build = hf_harness::build_command(engine, lang, "fuzz_bin");
+        let build = hf_harness::build_command(engine, lang, "fuzz_bin")?;
         let build_command = format!(
             "{} {} {} {} -o {}",
             build.compiler,

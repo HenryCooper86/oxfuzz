@@ -198,3 +198,56 @@ fn sub_second_fork_lines_produce_no_unstable_aggregate() {
         "{events:?}"
     );
 }
+
+#[test]
+fn go_native_status_lines_report_rate_and_coverage_total() {
+    let events = parse_progress_events(
+        "fuzz: elapsed: 3s, execs: 12345 (4115/sec), new interesting: 5 (total: 8)",
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, FuzzProgress::ExecsPerSec(r) if (*r - 4115.0).abs() < 0.5)),
+        "{events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, FuzzProgress::EdgesCovered(8))),
+        "the cumulative interesting-input total is the coverage proxy: {events:?}"
+    );
+    // The cumulative execution counter must not be mistaken for a rate.
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, FuzzProgress::ExecsPerSec(r) if (*r - 12345.0).abs() < 0.5)),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn go_native_baseline_lines_report_nothing() {
+    let events =
+        parse_progress_events("fuzz: elapsed: 0s, gathering baseline coverage: 0/3 completed");
+    assert!(events.is_empty(), "{events:?}");
+}
+
+#[test]
+fn go_native_failures_are_finding_signals() {
+    for line in [
+        "--- FAIL: FuzzParseFrame (0.00s)",
+        "    fuzz_test.go:12: panic: runtime error: index out of range",
+        "fuzz: elapsed: 1s, minimizing 8-byte input to 3 bytes",
+        "fuzz: failing input written to testdata/fuzz/FuzzParseFrame/4e6c",
+    ] {
+        assert!(hf_engine::progress::line_reports_finding(line), "{line}");
+    }
+    // Passing tests and normal status lines are not findings.
+    for line in [
+        "--- PASS: FuzzParseFrame (0.01s)",
+        "fuzz: elapsed: 3s, execs: 12345 (4115/sec), new interesting: 5 (total: 8)",
+        "PASS",
+    ] {
+        assert!(!hf_engine::progress::line_reports_finding(line), "{line}");
+    }
+}

@@ -500,7 +500,7 @@ impl ServiceContainer {
                 ),
             }
         }
-        Ok(heuristic_draft(candidate, engine).source)
+        Ok(heuristic_draft(candidate, engine)?.source)
     }
 
     /// Accepted examples for one draft: previously promoted harnesses of this
@@ -642,7 +642,7 @@ impl ServiceContainer {
                 }
             }
             let mut build_cmd =
-                hf_harness::build_command(engine, lang, &harness_binary_name(target));
+                hf_harness::build_command(engine, lang, &harness_binary_name(target))?;
             build_cmd.output = PathBuf::from(harness_binary_name(target));
             let captured = self
                 .capture_harness_build_inputs(&candidate.project_root, lang, true)
@@ -786,7 +786,7 @@ impl ServiceContainer {
             .clone();
 
         if policy == AiPolicy::Off {
-            return Ok(heuristic_draft(&candidate, engine));
+            return heuristic_draft(&candidate, engine);
         }
         let Some(pool) = self.provider_pool() else {
             if policy == AiPolicy::Require {
@@ -798,7 +798,7 @@ impl ServiceContainer {
             }
             // No LLM configured: generate a heuristic draft so the GUI still
             // produces something useful.
-            return Ok(heuristic_draft(&candidate, engine));
+            return heuristic_draft(&candidate, engine);
         };
         {
             let provider = LlmProviderBridge::new(pool)
@@ -832,7 +832,7 @@ impl ServiceContainer {
                         "LLM harness draft for '{target}' failed ({e}); \
                          falling back to heuristic draft"
                     );
-                    Ok(heuristic_draft(&candidate, engine))
+                    heuristic_draft(&candidate, engine)
                 }
             }
         }
@@ -874,7 +874,7 @@ impl ServiceContainer {
         self.stage_generated_build_inputs_for_project(project, &workspace)
             .await?;
 
-        let mut build_cmd = hf_harness::build_command(engine, lang, &harness_binary_name(target));
+        let mut build_cmd = hf_harness::build_command(engine, lang, &harness_binary_name(target))?;
         let target_id = self.resolve_target_id(project, target, lang).await?;
         let captured = self
             .capture_harness_build_inputs(project, lang, true)
@@ -1921,7 +1921,7 @@ impl ServiceContainer {
         let mut sources: Vec<(CandidateOrigin, String)> = Vec::with_capacity(req.candidates);
         sources.push((
             CandidateOrigin::Heuristic,
-            heuristic_draft(&candidate, req.engine).source,
+            heuristic_draft(&candidate, req.engine)?.source,
         ));
         for _ in 1..req.candidates {
             sources.push((
@@ -2373,7 +2373,8 @@ mod exact_qualification_tests {
                     EngineKind::LibFuzzer,
                     TargetLanguage::C,
                     &harness_binary_name(TARGET),
-                ),
+                )
+                .unwrap(),
                 sanitizer: Sanitizer::Address,
                 status: HarnessStatus::Compiled,
                 smoke_run: None,

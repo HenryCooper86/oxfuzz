@@ -2281,7 +2281,10 @@ impl hf_core::provider::LlmProvider for LlmProviderBridge {
 // ---------------------------------------------------------------------------
 
 /// Generate a heuristic harness draft when no LLM provider is configured.
-fn heuristic_draft(candidate: &TargetCandidate, engine: EngineKind) -> HarnessDraft {
+fn heuristic_draft(
+    candidate: &TargetCandidate,
+    engine: EngineKind,
+) -> Result<HarnessDraft, ClassifiedError> {
     let includes = generate_includes(candidate);
     let forward_decl = generate_forward_decl(&candidate.symbol, candidate.signature.as_deref());
     let body = generate_harness_body(&candidate.symbol, candidate.signature.as_deref());
@@ -2319,7 +2322,7 @@ fn heuristic_draft(candidate: &TargetCandidate, engine: EngineKind) -> HarnessDr
         body = body,
         linkage = linkage,
     );
-    HarnessDraft {
+    Ok(HarnessDraft {
         target_id: candidate.id,
         engine,
         source,
@@ -2328,9 +2331,9 @@ fn heuristic_draft(candidate: &TargetCandidate, engine: EngineKind) -> HarnessDr
             engine,
             candidate.language,
             &harness_binary_name(&candidate.symbol),
-        ),
+        )?,
         generator: hf_core::harness::DraftGenerator::Heuristic,
-    }
+    })
 }
 
 fn engine_label(engine: EngineKind) -> &'static str {
@@ -2339,6 +2342,7 @@ fn engine_label(engine: EngineKind) -> &'static str {
         EngineKind::AflPlusPlus => "AFL++",
         EngineKind::Honggfuzz => "honggfuzz",
         EngineKind::Syzkaller => "syzkaller",
+        EngineKind::GoNative => "Go native fuzzing",
     }
 }
 
@@ -2538,7 +2542,8 @@ mod heuristic_harness_tests {
         let cpp = super::heuristic_draft(
             &candidate(hf_core::target::TargetLanguage::Cpp),
             hf_core::engine::EngineKind::LibFuzzer,
-        );
+        )
+        .unwrap();
         assert!(
             cpp.source
                 .contains("extern \"C\" int LLVMFuzzerTestOneInput"),
@@ -2549,7 +2554,8 @@ mod heuristic_harness_tests {
         let c = super::heuristic_draft(
             &candidate(hf_core::target::TargetLanguage::C),
             hf_core::engine::EngineKind::LibFuzzer,
-        );
+        )
+        .unwrap();
         assert!(
             c.source.contains("int LLVMFuzzerTestOneInput") && !c.source.contains("extern \"C\""),
             "a C harness needs no linkage specifier: {}",

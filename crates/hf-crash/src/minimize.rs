@@ -41,6 +41,7 @@ pub fn build_minimize_args(
         // - honggfuzz has no inline minimizer.
         // - syzkaller uses `syz-repro` on the crash log, driven separately from
         //   a harness binary.
-        EngineKind::Honggfuzz | EngineKind::Syzkaller => None,
+        // - Go's native fuzzer minimizes failing inputs itself during the run.
+        EngineKind::Honggfuzz | EngineKind::Syzkaller | EngineKind::GoNative => None,
     }
 }

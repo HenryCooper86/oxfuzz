@@ -258,7 +258,7 @@ pub fn dict_run_args(engine: EngineKind, container_path: &str) -> Vec<String> {
         EngineKind::AflPlusPlus => vec!["-x".to_owned(), container_path.to_owned()],
         // honggfuzz takes `-w <file>`.
         EngineKind::Honggfuzz => vec!["-w".to_owned(), container_path.to_owned()],
-        EngineKind::Syzkaller => Vec::new(),
+        EngineKind::Syzkaller | EngineKind::GoNative => Vec::new(),
     }
 }
 

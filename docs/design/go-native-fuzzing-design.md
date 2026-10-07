@@ -1,6 +1,11 @@
 # Go Native Fuzzing Design
 
-Status: **planned, not implemented**. Owners: `hf-service` for admission and
+Status: **implementation started**. The engine foundation is implemented and
+tested (`EngineKind::GoNative` admission-gated outside the default engine
+set, the direct-test-binary run adapter, and Go status/failure parsing);
+the service workflow -- harness generation, Go staging and build, smoke,
+campaigns, artifact ingestion, and live qualification -- is not implemented.
+Owners: `hf-service` for admission and
 workflow, `hf-harness` for generated test source, `hf-engine` for Go progress
 and artifact parsing, and `hf-runtime` for every process. This design does not
 change Go's discovery-only entry in the support matrix.

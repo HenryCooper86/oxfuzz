@@ -81,7 +81,7 @@ pub async fn draft_with_examples(
         engine,
         source,
         rationale: String::new(),
-        build_cmd: build_command(engine, target.language, &format!("fuzz_{}", target.symbol)),
+        build_cmd: build_command(engine, target.language, &format!("fuzz_{}", target.symbol))?,
         generator: hf_core::harness::DraftGenerator::Llm,
     })
 }
@@ -122,7 +122,7 @@ pub async fn repair(
         engine,
         source,
         rationale: "repair".to_owned(),
-        build_cmd: build_command(engine, target.language, &format!("fuzz_{}", target.symbol)),
+        build_cmd: build_command(engine, target.language, &format!("fuzz_{}", target.symbol))?,
         generator: hf_core::harness::DraftGenerator::Llm,
     })
 }
@@ -152,7 +152,7 @@ pub async fn refine(
         engine,
         source,
         rationale: "refine".to_owned(),
-        build_cmd: build_command(engine, target.language, &format!("fuzz_{}", target.symbol)),
+        build_cmd: build_command(engine, target.language, &format!("fuzz_{}", target.symbol))?,
         generator: hf_core::harness::DraftGenerator::Llm,
     })
 }
@@ -994,6 +994,12 @@ fn smoke_command(
              kernel image, not a userspace harness binary"
                 .to_owned(),
         )),
+        EngineKind::GoNative => Ok(hf_engine::go_native::build_run_args(
+            &single_instance,
+            binary,
+            corpus,
+            out,
+        )),
     }
 }
 
@@ -1035,10 +1041,13 @@ fn smoke_cfg(harness: &Harness) -> hf_core::engine::FuzzRunConfig {
 /// the requested engine, since that is the only supported Rust fuzzing backend;
 /// the produced libFuzzer binary is then driven by the libFuzzer run path. C/C++
 /// targets use the engine-correct instrumenting compiler.
-#[must_use]
-pub fn build_command(engine: EngineKind, lang: TargetLanguage, output_name: &str) -> BuildCommand {
+pub fn build_command(
+    engine: EngineKind,
+    lang: TargetLanguage,
+    output_name: &str,
+) -> Result<BuildCommand, ClassifiedError> {
     if lang == TargetLanguage::Rust {
-        return BuildCommand {
+        return Ok(BuildCommand {
             compiler: "cargo".to_owned(),
             args: vec![
                 "fuzz".to_owned(),
@@ -1047,7 +1056,21 @@ pub fn build_command(engine: EngineKind, lang: TargetLanguage, output_name: &str
             ],
             output: PathBuf::from(output_name),
             extra_flags: Vec::new(),
-        };
+        });
+    }
+    if lang == TargetLanguage::Go {
+        // The fixed Go compile argv (`go test -c -fuzz=^Fuzz<Symbol>$` with
+        // offline module inputs) needs the discovered symbol and the staged
+        // module tree; it ships with the Go service workflow increment, and a
+        // plain `go test -c` would silently build without fuzz
+        // instrumentation, which the design forbids.
+        let _ = engine;
+        return Err(ClassifiedError::Harness(
+            "Go native harness builds are not implemented yet: the fixed compile argv needs the \
+             discovered symbol and offline module inputs \
+             (docs/design/go-native-fuzzing-design.md)"
+                .to_owned(),
+        ));
     }
     // C++ harnesses/targets must be compiled and, crucially, LINKED with the
     // C++ compiler driver so the C++ standard library is pulled in; the C
@@ -1056,7 +1079,13 @@ pub fn build_command(engine: EngineKind, lang: TargetLanguage, output_name: &str
     // source-level harness repair can fix.
     let is_cpp = lang == TargetLanguage::Cpp;
     match engine {
-        EngineKind::LibFuzzer => BuildCommand {
+        // Admission rejects this combination earlier (supports_language); the
+        // constructor still refuses it rather than emitting a C build command
+        // for a Go engine.
+        EngineKind::GoNative => Err(ClassifiedError::Harness(
+            "the go-native engine builds only Go targets".to_owned(),
+        )),
+        EngineKind::LibFuzzer => Ok(BuildCommand {
             compiler: if is_cpp { "clang++" } else { "clang" }.to_owned(),
             args: vec![
                 "-fsanitize=fuzzer".to_owned(),
@@ -1065,8 +1094,8 @@ pub fn build_command(engine: EngineKind, lang: TargetLanguage, output_name: &str
             ],
             output: PathBuf::from(output_name),
             extra_flags: Vec::new(),
-        },
-        EngineKind::AflPlusPlus => BuildCommand {
+        }),
+        EngineKind::AflPlusPlus => Ok(BuildCommand {
             compiler: if is_cpp {
                 "afl-clang-fast++"
             } else {
@@ -1080,21 +1109,21 @@ pub fn build_command(engine: EngineKind, lang: TargetLanguage, output_name: &str
             ],
             output: PathBuf::from(output_name),
             extra_flags: Vec::new(),
-        },
-        EngineKind::Honggfuzz => BuildCommand {
+        }),
+        EngineKind::Honggfuzz => Ok(BuildCommand {
             compiler: if is_cpp { "hfuzz-c++" } else { "hfuzz-cc" }.to_owned(),
             args: vec!["-fsanitize=address".to_owned(), "-g".to_owned()],
             output: PathBuf::from(output_name),
             extra_flags: Vec::new(),
-        },
+        }),
         // syzkaller fuzzes a kernel built with coverage instrumentation rather
         // than a per-function harness binary; this represents the kernel build.
-        EngineKind::Syzkaller => BuildCommand {
+        EngineKind::Syzkaller => Ok(BuildCommand {
             compiler: "make".to_owned(),
             args: vec!["CONFIG_KCOV=y".to_owned(), "CONFIG_DEBUG_INFO=y".to_owned()],
             output: PathBuf::from(output_name),
             extra_flags: Vec::new(),
-        },
+        }),
     }
 }
 
@@ -1713,7 +1742,7 @@ mod tests {
             engine: EngineKind::LibFuzzer,
             source: "int LLVMFuzzerTestOneInput(const uint8_t*d,size_t n){return 0;}".to_owned(),
             language: TargetLanguage::C,
-            build_cmd: build_command(EngineKind::LibFuzzer, TargetLanguage::C, "fuzz_t"),
+            build_cmd: build_command(EngineKind::LibFuzzer, TargetLanguage::C, "fuzz_t").unwrap(),
             sanitizer: hf_core::target::Sanitizer::Address,
             status: HarnessStatus::Draft,
             smoke_run: None,
@@ -1934,24 +1963,34 @@ mod tests {
     fn build_command_cpp_uses_cpp_compiler_driver() {
         // C++ targets must link the C++ stdlib, which requires the ++ drivers.
         assert_eq!(
-            build_command(EngineKind::LibFuzzer, TargetLanguage::Cpp, "fuzz_t").compiler,
+            build_command(EngineKind::LibFuzzer, TargetLanguage::Cpp, "fuzz_t")
+                .unwrap()
+                .compiler,
             "clang++"
         );
         assert_eq!(
-            build_command(EngineKind::AflPlusPlus, TargetLanguage::Cpp, "fuzz_t").compiler,
+            build_command(EngineKind::AflPlusPlus, TargetLanguage::Cpp, "fuzz_t")
+                .unwrap()
+                .compiler,
             "afl-clang-fast++"
         );
         assert_eq!(
-            build_command(EngineKind::Honggfuzz, TargetLanguage::Cpp, "fuzz_t").compiler,
+            build_command(EngineKind::Honggfuzz, TargetLanguage::Cpp, "fuzz_t")
+                .unwrap()
+                .compiler,
             "hfuzz-c++"
         );
         // C targets keep the C drivers.
         assert_eq!(
-            build_command(EngineKind::LibFuzzer, TargetLanguage::C, "fuzz_t").compiler,
+            build_command(EngineKind::LibFuzzer, TargetLanguage::C, "fuzz_t")
+                .unwrap()
+                .compiler,
             "clang"
         );
         assert_eq!(
-            build_command(EngineKind::Honggfuzz, TargetLanguage::C, "fuzz_t").compiler,
+            build_command(EngineKind::Honggfuzz, TargetLanguage::C, "fuzz_t")
+                .unwrap()
+                .compiler,
             "hfuzz-cc"
         );
     }

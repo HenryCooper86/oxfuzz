@@ -32,7 +32,12 @@ qualification from implementation.
   support matrix publishes the language-by-operation status. Multi-cycle,
   crash-rediscovery, and other-platform Rust acceptance remain open.
   Go/Python discovery does not establish
-  harness support; the separate [Go](docs/design/go-native-fuzzing-design.md)
+  harness support. Go implementation status: the engine foundation landed
+  (admission-gated `go-native` engine kind outside the default set, the
+  direct-test-binary run adapter, Go status/failure parsing); the service
+  workflow (harness generation, Go staging/build, smoke, campaigns,
+  artifact ingestion) and live qualification remain. The separate
+  [Go](docs/design/go-native-fuzzing-design.md)
   and [Python](docs/design/python-atheris-fuzzing-design.md) designs await
   implementation and qualification. Owner: `hf-discovery` / `hf-harness`.
 

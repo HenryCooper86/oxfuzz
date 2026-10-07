@@ -101,6 +101,10 @@ mod collection {
             EngineKind::Syzkaller => Err(ClassifiedError::Validation(
                 "userspace LLVM function profiles are unavailable for syzkaller".to_owned(),
             )),
+            // Go's native coverage counters are not LLVM profiles.
+            EngineKind::GoNative => Err(ClassifiedError::Validation(
+                "userspace LLVM function profiles are unavailable for Go native fuzzing".to_owned(),
+            )),
         }
     }
 

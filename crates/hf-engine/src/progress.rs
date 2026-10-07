@@ -51,6 +51,12 @@ pub fn parse_syzkaller_status(line: &str) -> Option<(u64, u64, u64)> {
 #[must_use]
 pub fn parse_progress_events(line: &str) -> Vec<FuzzProgress> {
     let lower = line.to_ascii_lowercase();
+    // Go native status lines carry a cumulative execution counter whose raw
+    // number must not be mistaken for a rate, so they are consumed whole
+    // before the generic extraction runs.
+    if let Some(events) = go_native_status_events(line, &lower) {
+        return events;
+    }
     let mut events = Vec::new();
     if let Some(edges) = edges_from_line(line) {
         events.push(FuzzProgress::EdgesCovered(edges));
@@ -136,6 +142,48 @@ fn is_finding_signal(lower: &str) -> bool {
         || lower.contains("detected memory leak")
         || lower.contains("deadly signal")
         || lower.contains("test unit written")
+        // Go native fuzzing: a failing fuzz test, a saved failing input, the
+        // fuzzer minimizing a failing input, or a Go panic. `--- fail:` is
+        // anchored with its leading dashes so `--- pass:` and ordinary
+        // "failed" prose do not match.
+        || lower.contains("--- fail:")
+        || lower.contains("failing input")
+        || lower.contains("minimizing")
+        || lower.contains("panic:")
+}
+
+/// Extract events from a Go native fuzzer status line.
+///
+/// The steady-state line is `fuzz: elapsed: 3s, execs: 12345 (4115/sec),
+/// new interesting: 5 (total: 8)`: the parenthesized value is the current
+/// rate and the `new interesting` cumulative total is the coverage proxy.
+/// Baseline-coverage and minimization lines carry no rate and are not status
+/// events (minimization is a finding signal). Returns `None` for any other
+/// line, including lines from the other engines.
+fn go_native_status_events(line: &str, lower: &str) -> Option<Vec<FuzzProgress>> {
+    let rest = lower.strip_prefix("fuzz: elapsed:")?;
+    if !(rest.contains("execs:") && rest.contains("/sec)")) {
+        return None;
+    }
+    let mut events = Vec::new();
+    // The line carries two parenthesized groups -- the rate `(4115/sec)` and
+    // the coverage total `(total: 8)` -- so anchor on `/sec)` and scan back
+    // to its opening parenthesis rather than taking the last group.
+    if let Some(sec_at) = lower.find("/sec)") {
+        if let Some(open) = line[..sec_at].rfind('(') {
+            if let Ok(rate) = line[open + 1..sec_at].trim().parse::<f64>() {
+                events.push(FuzzProgress::ExecsPerSec(rate));
+            }
+        }
+    }
+    if let Some(total_at) = lower.find("(total: ") {
+        let after = &lower[total_at + "(total: ".len()..];
+        let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+        if let Ok(total) = digits.parse::<u64>() {
+            events.push(FuzzProgress::EdgesCovered(total));
+        }
+    }
+    Some(events)
 }
 
 /// Parse a full stdout buffer into a list of progress events.

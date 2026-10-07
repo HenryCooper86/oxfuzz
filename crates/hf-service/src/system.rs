@@ -169,7 +169,7 @@ fn assess_fuzzing_preflight(
         EngineKind::AflPlusPlus => status.aflplusplus,
         EngineKind::Honggfuzz => status.honggfuzz,
         EngineKind::LibFuzzer => status.libfuzzer,
-        EngineKind::Syzkaller => status.syzkaller,
+        EngineKind::Syzkaller | EngineKind::GoNative => status.syzkaller,
     };
     if !engine_ready.is_ready() {
         problems.push(format!(
