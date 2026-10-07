@@ -72,7 +72,10 @@ exit-time LeakSanitizer report leaks a single-process run of the same
 binary does not have; fork runs therefore pass `-detect_leaks=0` and the
 runner sets `ASAN_OPTIONS=detect_leaks=0` (an operator-provided
 `ASAN_OPTIONS` wins outright), while single-process runs keep leak
-detection on and `leak-*` artifacts remain an ingested bug class. An allocation of one keeps the historical
+detection on and `leak-*` artifacts remain an ingested bug class. A fork
+run's retained throughput is the larger of the printed window rate and the
+cumulative-counter-over-elapsed aggregate parsed from fork status lines,
+because the window rate dips between child restarts. An allocation of one keeps the historical
 single-process argv unchanged, because fork mode is a different execution
 model even at N=1; the flag is emitted before `extra_args` so a caller can
 override it. An AFL++ allocation above one is orchestrated as N `afl-fuzz`

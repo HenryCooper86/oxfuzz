@@ -11,6 +11,10 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ### Added
 
+- libFuzzer fork-mode run summaries report the campaign's aggregate
+  throughput (cumulative counter over elapsed time) instead of only the
+  parent's current-window rate, which dipped between child restarts;
+  verified live at 2.32M execs/s where the window rate read ~0.7M.
 - First live Rust cargo-fuzz campaign qualification: one complete cycle
   (sandboxed offline build via the vendored dependency, provider review,
   smoke, promotion, campaign with a 644 ms addressed Stop, and retained-input

@@ -104,10 +104,10 @@ replace these live checks.
   shared macOS runner (2026-10-07, trivial three-line C target): libFuzzer
   `-fork=4` sustained ~2.1M execs/s aggregate versus ~1.0M execs/s
   single-process (~2.1x; job-restart overhead bounds it below 4x), measured
-  from the engine's cumulative counter. The run summary's reported exec/s
-  is the per-line window rate and underreports fork-mode aggregate
-  throughput; parsing the cumulative counter is an open reporting
-  refinement, as is a stable-runner measurement.
+  from the engine's cumulative counter. The run summary now derives the
+  aggregate from fork-mode cumulative counters (`#N ... time: Ts` lines),
+  verified live at 2,315,721 execs/sec on the same fixture where the window
+  rate reported ~700k. A stable-runner measurement remains open.
 - Agent token events after a native function-calling design makes partial
   responses useful. Provider streaming already exists; the current JSON tool
   protocol needs a complete response before dispatch.

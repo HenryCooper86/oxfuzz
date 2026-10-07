@@ -58,10 +58,39 @@ pub fn parse_progress_events(line: &str) -> Vec<FuzzProgress> {
     if let Some(eps) = execs_from_line(line) {
         events.push(FuzzProgress::ExecsPerSec(eps));
     }
+    if let Some(aggregate) = fork_aggregate_execs(line) {
+        events.push(FuzzProgress::ExecsPerSec(aggregate));
+    }
     if is_finding_signal(&lower) {
         events.push(FuzzProgress::CrashesFound(1));
     }
     events
+}
+
+/// Derive the true aggregate execution rate from a libFuzzer fork-mode
+/// status line.
+///
+/// A fork-mode line carries the cumulative counter and elapsed time
+/// (`#37851418: cov: 60 ... exec/s: 695057 ... time: 18s`), while the printed
+/// `exec/s` is the parent's current-window rate, which dips between child
+/// restarts and underreports the campaign's aggregate throughput. The
+/// counter-over-elapsed candidate lets the run's max-aggregation retain the
+/// larger, honest number. Single-process pulse lines carry no `time:` field
+/// and are unaffected.
+fn fork_aggregate_execs(line: &str) -> Option<f64> {
+    let rest = line.strip_prefix('#')?;
+    let colon = rest.find(':')?;
+    let total: f64 = rest[..colon].trim().parse().ok()?;
+    if total <= 0.0 {
+        return None;
+    }
+    let lower = line.to_ascii_lowercase();
+    let time_at = lower.find("time:")?;
+    let after = lower[time_at + "time:".len()..].trim_start();
+    let seconds: String = after.chars().take_while(char::is_ascii_digit).collect();
+    let seconds: f64 = seconds.parse().ok()?;
+    // Sub-second elapsed times produce unstable rates.
+    (seconds >= 1.0).then_some(total / seconds)
 }
 
 /// Whether a raw engine-stdout line reports an individual crash/finding event.

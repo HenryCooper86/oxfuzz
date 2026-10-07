@@ -1,7 +1,7 @@
 //! Tests for progress and coverage parsing.
 
 use hf_core::engine::FuzzProgress;
-use hf_engine::progress::parse_progress;
+use hf_engine::progress::{parse_progress, parse_progress_events};
 
 #[test]
 fn parse_libfuzzer_execs_line() {
@@ -145,6 +145,55 @@ fn throughput_before_execs_label_does_not_read_later_counters() {
     assert!(
         events.iter().any(|event| matches!(event,
             FuzzProgress::ExecsPerSec(rate) if (*rate - 5000.0).abs() < f64::EPSILON
+        )),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn fork_mode_status_line_reports_the_aggregate_rate() {
+    // The printed exec/s is the parent's current-window rate; the cumulative
+    // counter over elapsed time is the campaign's aggregate throughput.
+    let events = parse_progress_events(
+        "#37851418: cov: 60 ft: 60 corp: 38 exec/s: 695057 oom/timeout/crash: 0/0/0 time: 18s job: 9 dft_time: 0",
+    );
+    let rates: Vec<f64> = events
+        .iter()
+        .filter_map(|event| match event {
+            FuzzProgress::ExecsPerSec(rate) => Some(*rate),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        rates.iter().any(|rate| (*rate - 2_102_856.6).abs() < 1.0),
+        "expected the 37851418/18s aggregate among {rates:?}"
+    );
+    assert!(
+        rates.contains(&695_057.0),
+        "the window rate stays available: {rates:?}"
+    );
+}
+
+#[test]
+fn single_process_pulse_lines_carry_no_aggregate_candidate() {
+    let events = parse_progress_events("#2048: pulse cov: 6 exec/s: 1000");
+    let rates: Vec<f64> = events
+        .iter()
+        .filter_map(|event| match event {
+            FuzzProgress::ExecsPerSec(rate) => Some(*rate),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rates, vec![1000.0], "no time: field means no aggregate");
+}
+
+#[test]
+fn sub_second_fork_lines_produce_no_unstable_aggregate() {
+    let events = parse_progress_events("#5000: cov: 10 exec/s: 9000 time: 0s job: 1");
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            FuzzProgress::ExecsPerSec(rate) if *rate > 9000.0
         )),
         "{events:?}"
     );
