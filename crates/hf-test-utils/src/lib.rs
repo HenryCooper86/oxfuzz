@@ -3,6 +3,7 @@
 
 pub mod assert_helpers;
 pub mod fixtures;
+pub mod function_coverage;
 mod harness_review;
 pub mod mock_provider;
 pub mod mock_storage;

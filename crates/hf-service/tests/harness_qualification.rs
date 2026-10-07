@@ -97,10 +97,13 @@ impl RuntimeAdapter for QualifyingRuntime {
 
     async fn run_command(
         &self,
-        _cmd: &[String],
+        cmd: &[String],
         cwd: &Path,
         _limits: &ResourceLimits,
     ) -> Result<CommandResult, hf_core::error::ClassifiedError> {
+        // Leave the host-side artifacts the real collection path reads, so this
+        // double exercises collection instead of bypassing it.
+        hf_test_utils::function_coverage::satisfy_function_coverage(cmd, cwd, 64);
         std::fs::create_dir_all(cwd).unwrap();
         std::fs::write(cwd.join("fuzz_parse_entry"), b"mock compiled harness").unwrap();
         Ok(CommandResult {
@@ -114,12 +117,13 @@ impl RuntimeAdapter for QualifyingRuntime {
 
     async fn run_command_streaming(
         &self,
-        _cmd: &[String],
+        cmd: &[String],
         cwd: &Path,
         _limits: &ResourceLimits,
         _cancel: &tokio_util::sync::CancellationToken,
         _on_line: &hf_core::runtime::LineSink<'_>,
     ) -> Result<CommandResult, hf_core::error::ClassifiedError> {
+        hf_test_utils::function_coverage::satisfy_function_coverage(cmd, cwd, 64);
         Ok(CommandResult {
             exit_code: 0,
             stdout: String::new(),
@@ -149,6 +153,20 @@ impl RuntimeAdapter for QualifyingRuntime {
 async fn qualified_fixture() -> (tempfile::TempDir, Arc<hf_storage::Store>, ServiceContainer) {
     isolate_workspace();
     let project = tempfile::tempdir().unwrap();
+    // Own the config directory: which settings are in force decides whether a
+    // harness is instrumented at all, so a fixture reading the ambient config
+    // changes behaviour with the developer's checkout. Collection is on here
+    // because the qualification profile is what promotion reads.
+    let config = project.path().join("config");
+    std::env::set_var("HF_CONFIG_DIR", &config);
+    hf_service::config::write_config(
+        "oxfuzz",
+        "[fuzzing]\ncollect_function_coverage = true\n\
+         enabled_engines = [\"libfuzzer\", \"afl++\", \"honggfuzz\", \"syzkaller\"]\n\
+         default_engine = \"libfuzzer\"\ndefault_duration_secs = 60\n\
+         [fuzzing.sandbox]\nmax_mem_mb = 2048\nmax_cpus = 1\nmax_duration_secs = 600\n",
+    )
+    .unwrap();
     std::fs::write(
         project.path().join("parse.c"),
         "#include <stddef.h>\nint parse_entry(const unsigned char *data, size_t size) { return size && data[0]; }\n",
@@ -809,5 +827,52 @@ async fn a_smoke_run_requests_a_profile_it_can_actually_retain() {
     assert!(
         raw.is_dir(),
         "the profile directory must exist before the run: llvm creates the file, not its parents"
+    );
+}
+
+#[tokio::test]
+#[ignore = "known gap: a qualification run still retains no profile, so promotion cannot read \
+            target-entry evidence. Reproduces the last unclosed link of the promotion gate; \
+            see .claude/plans/2026-10-07-promotion-target-exercise-gate.md"]
+async fn a_smoke_run_retains_the_profile_promotion_reads() {
+    let (project, store, container) = qualified_fixture().await;
+    let source = "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }";
+
+    container
+        .harness_compile(
+            source.to_owned(),
+            project.path(),
+            EngineKind::LibFuzzer,
+            "parse_entry",
+            TargetLanguage::C,
+        )
+        .await
+        .unwrap();
+    container
+        .harness_smoke(
+            project.path(),
+            "parse_entry",
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+        )
+        .await
+        .unwrap();
+
+    // The whole point of the qualification profile: promotion reads it, and
+    // before this existed nothing ever wrote one for a smoke run, so the
+    // target-entry gate could not fire.
+    let run = sole_smoke_run(&store, project.path()).await;
+    let coverage = container
+        .run_function_coverage(run.id)
+        .await
+        .expect("reading the qualification profile must not fail");
+    let hf_service::RunFunctionCoverage::Available { functions, .. } = coverage else {
+        panic!("a qualification run must retain the profile promotion reads: {coverage:?}");
+    };
+    assert!(
+        functions
+            .iter()
+            .any(|function| function.name == "parse_entry" && function.count != "0"),
+        "the retained profile must attribute entry to the selected target: {functions:?}"
     );
 }
