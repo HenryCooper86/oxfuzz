@@ -204,11 +204,21 @@ impl EngineRunner {
         let max_duration_secs = cfg.duration.map_or(DEFAULT_RUN_SECS, |d| {
             d.as_secs().saturating_add(SANDBOX_TIMEOUT_HEADROOM_SECS)
         });
+        let mut env: std::collections::HashMap<String, String> = cfg.env.iter().cloned().collect();
+        // libFuzzer fork-mode children run the exit-time LeakSanitizer, which
+        // misreports the forked snapshot of the parent's heap as leaked (the
+        // adapter also passes `-detect_leaks=0`). An operator-provided
+        // ASAN_OPTIONS wins outright: merging sanitizer options we cannot
+        // interpret would silently change what the operator asked to measure.
+        if engine == EngineKind::LibFuzzer && cfg.max_cpus > 1 && !env.contains_key("ASAN_OPTIONS")
+        {
+            env.insert("ASAN_OPTIONS".to_owned(), "detect_leaks=0".to_owned());
+        }
         let limits = hf_core::runtime::ResourceLimits {
             max_mem_mb: cfg.max_mem_mb,
             max_cpus: cfg.max_cpus,
             max_duration_secs,
-            env: cfg.env.iter().cloned().collect(),
+            env,
             ptrace: false,
         };
 

@@ -94,9 +94,15 @@ replace these live checks.
   (`--threads`), and AFL++ (a sandboxed primary/secondary coordinator, with
   run-wide `fuzzer_stats` aggregation), plus `oxfuzz run --cpus N` requesting
   a per-run allocation validated against `fuzzing.sandbox.max_cpus`. Still
-  open: measured multi-core efficiency and a retained multi-worker campaign
-  acceptance record alongside existing portfolio concurrency (the coordinator
-  has a direct sandbox-level engine check only).
+  open: a retained multi-worker campaign acceptance record alongside
+  existing portfolio concurrency. Informal efficiency measurement on a
+  shared macOS runner (2026-10-07, trivial three-line C target): libFuzzer
+  `-fork=4` sustained ~2.1M execs/s aggregate versus ~1.0M execs/s
+  single-process (~2.1x; job-restart overhead bounds it below 4x), measured
+  from the engine's cumulative counter. The run summary's reported exec/s
+  is the per-line window rate and underreports fork-mode aggregate
+  throughput; parsing the cumulative counter is an open reporting
+  refinement, as is a stable-runner measurement.
 - Agent token events after a native function-calling design makes partial
   responses useful. Provider streaming already exists; the current JSON tool
   protocol needs a complete response before dispatch.

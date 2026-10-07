@@ -335,6 +335,10 @@ fn libfuzzer_fork_follows_the_resolved_cpu_allocation() {
         !args.iter().any(|arg| arg.starts_with("-fork=")),
         "one CPU must keep the single-process argv: {args:?}"
     );
+    assert!(
+        !args.iter().any(|arg| arg == "-detect_leaks=0"),
+        "single-process runs keep leak detection on: {args:?}"
+    );
 
     // An allocation above one becomes libFuzzer's own multi-process mode.
     let mut parallel = cfg(EngineKind::LibFuzzer, 3600);
@@ -348,6 +352,10 @@ fn libfuzzer_fork_follows_the_resolved_cpu_allocation() {
     assert!(
         args.contains(&"-fork=4".to_owned()),
         "a 4-CPU allocation must run libFuzzer fork mode: {args:?}"
+    );
+    assert!(
+        args.contains(&"-detect_leaks=0".to_owned()),
+        "fork children misreport the forked heap snapshot as leaked; leak detection must be off in fork mode: {args:?}"
     );
 
     // Overridable: a caller's extra_args wins (libFuzzer takes the last one).

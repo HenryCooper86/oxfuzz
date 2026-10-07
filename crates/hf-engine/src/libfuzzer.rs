@@ -47,6 +47,15 @@ pub fn build_run_args(cfg: &FuzzRunConfig, binary: &str, corpus: &str, out: &str
     // `extra_args` so a caller can override it.
     if cfg.max_cpus > 1 {
         args.push(format!("-fork={}", cfg.max_cpus));
+        // Fork children misreport leaks: after fork(2), heap chunks held only
+        // by the parent's other threads are unreachable in the child, so both
+        // libFuzzer's in-loop check and the exit-time LeakSanitizer report
+        // leaks a single-process run of the same binary does not have. Leak
+        // detection stays ON for single-process runs, where leak findings are
+        // real and triage ingests `leak-*` artifacts. The exit-time check
+        // additionally needs ASAN_OPTIONS in the sandbox environment; the
+        // runner sets it for fork runs.
+        args.push("-detect_leaks=0".to_owned());
     }
     args.push(corpus.to_owned());
     // `cfg.env` is deliberately absent from the argument list: both callers pass

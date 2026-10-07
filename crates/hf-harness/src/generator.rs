@@ -954,6 +954,11 @@ fn validate_smoke_config(
 /// (reusing the real `hf-engine` adapter argument builders so smoke matches the
 /// production run). Syzkaller has no userspace-harness smoke run.
 ///
+/// Smoke is a bounded qualification probe, not a throughput campaign: it runs
+/// exactly one engine instance regardless of the CPU allocation, so a raised
+/// allocation (libFuzzer fork mode, the AFL++ coordinator, honggfuzz threads)
+/// never changes the qualification argv or its exit-code evidence.
+///
 /// # Errors
 /// Returns `ClassifiedError::Harness` for engines that cannot be smoke-fuzzed
 /// (currently syzkaller).
@@ -965,14 +970,24 @@ fn smoke_command(
     config: &hf_core::engine::FuzzRunConfig,
     duration_secs: u64,
 ) -> Result<Vec<String>, ClassifiedError> {
+    let mut single_instance = config.clone();
+    single_instance.max_cpus = 1;
     match engine {
         EngineKind::LibFuzzer => Ok(vec![
             binary.to_owned(),
             format!("-max_total_time={duration_secs}"),
         ]),
-        EngineKind::AflPlusPlus => Ok(hf_engine::afl::build_run_args(config, binary, corpus, out)),
+        EngineKind::AflPlusPlus => Ok(hf_engine::afl::build_run_args(
+            &single_instance,
+            binary,
+            corpus,
+            out,
+        )),
         EngineKind::Honggfuzz => Ok(hf_engine::honggfuzz::build_run_args(
-            config, binary, corpus, out,
+            &single_instance,
+            binary,
+            corpus,
+            out,
         )),
         EngineKind::Syzkaller => Err(ClassifiedError::Harness(
             "smoke fuzz does not apply to syzkaller: it fuzzes an instrumented \
@@ -1198,7 +1213,10 @@ fn source_filename(lang: TargetLanguage) -> &'static str {
 /// `corpus` and `out` hold attacker-controlled bytes, which may carry a source
 /// file's name; compiling one would build the fuzzer's own input. `fuzz` is the
 /// generated cargo-fuzz scaffold.
-const NON_SOURCE_DIRS: [&str; 3] = ["corpus", "out", "fuzz"];
+// `runs` holds retained per-run evidence including `input/source-context`
+// copies of the project sources; compiling those alongside the staged sources
+// duplicates every target symbol after the first campaign.
+const NON_SOURCE_DIRS: [&str; 4] = ["corpus", "out", "fuzz", "runs"];
 
 /// Cap on extra translation units handed to one compile. A project past this is
 /// not something a single-command harness build links.
@@ -2087,6 +2105,24 @@ Iterations : 12345
         assert!(!listed.contains("harness.c"), "{listed}");
         assert!(!listed.contains("symcc_driver.c"), "{listed}");
         assert!(listed.contains("/work/'real.c'"), "{listed}");
+    }
+
+    #[test]
+    fn listed_sources_exclude_retained_run_source_context() {
+        // After any campaign, the workspace holds runs/<id>/input/source-context
+        // copies of the project sources; compiling them alongside the staged
+        // sources duplicates every target symbol.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("parse.c"), "int parse(void){return 0;}").unwrap();
+        let retained = dir
+            .path()
+            .join("runs/00000000-0000-0000-0000-000000000000/input/source-context");
+        std::fs::create_dir_all(&retained).unwrap();
+        std::fs::write(retained.join("parse.c"), "int parse(void){return 0;}").unwrap();
+
+        let listed = list_c_files(dir.path(), "/work", &["harness.c"]);
+
+        assert_eq!(listed, "/work/'parse.c'", "{listed}");
     }
 
     #[test]

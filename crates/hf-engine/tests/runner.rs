@@ -57,6 +57,126 @@ fn run_config(engine: EngineKind, duration_secs: u64) -> FuzzRunConfig {
     }
 }
 
+/// Captures the resource limits the runner applied, so tests can assert the
+/// sandbox environment a run receives.
+struct LimitCapturingRuntime {
+    limits: std::sync::Mutex<Option<ResourceLimits>>,
+}
+
+#[async_trait::async_trait]
+impl RuntimeAdapter for LimitCapturingRuntime {
+    async fn run_command(
+        &self,
+        _cmd: &[String],
+        cwd: &Path,
+        limits: &ResourceLimits,
+    ) -> Result<CommandResult, ClassifiedError> {
+        *self.limits.lock().unwrap() = Some(limits.clone());
+        Ok(CommandResult {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            workspace: cwd.to_path_buf(),
+            termination: CommandTermination::Completed,
+        })
+    }
+    async fn write_file(&self, _path: &Path, _content: &str) -> Result<(), ClassifiedError> {
+        Ok(())
+    }
+    async fn read_file(&self, _path: &Path) -> Result<String, ClassifiedError> {
+        Ok(String::new())
+    }
+}
+
+#[tokio::test]
+async fn libfuzzer_fork_runs_disable_the_exit_time_leak_sanitizer() {
+    let runtime = LimitCapturingRuntime {
+        limits: std::sync::Mutex::new(None),
+    };
+    let mut cfg = run_config(EngineKind::LibFuzzer, 10);
+    cfg.max_cpus = 4;
+    EngineRunner::new()
+        .run(
+            EngineKind::LibFuzzer,
+            &cfg,
+            "/work/h",
+            "/work/corpus",
+            "/work/out",
+            &runtime,
+            Path::new("/work"),
+        )
+        .await
+        .expect("fork run completes");
+    let limits = runtime
+        .limits
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("captured limits");
+    assert_eq!(
+        limits.env.get("ASAN_OPTIONS").map(String::as_str),
+        Some("detect_leaks=0"),
+        "fork children run the exit-time LeakSanitizer and misreport the forked heap snapshot: {limits:?}"
+    );
+
+    // Single-process runs keep the environment untouched: leak findings are
+    // real there and triage ingests leak artifacts.
+    let runtime = LimitCapturingRuntime {
+        limits: std::sync::Mutex::new(None),
+    };
+    let cfg = run_config(EngineKind::LibFuzzer, 10);
+    EngineRunner::new()
+        .run(
+            EngineKind::LibFuzzer,
+            &cfg,
+            "/work/h",
+            "/work/corpus",
+            "/work/out",
+            &runtime,
+            Path::new("/work"),
+        )
+        .await
+        .expect("single-process run completes");
+    let limits = runtime
+        .limits
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("captured limits");
+    assert!(!limits.env.contains_key("ASAN_OPTIONS"));
+
+    // An operator-provided ASAN_OPTIONS wins outright.
+    let runtime = LimitCapturingRuntime {
+        limits: std::sync::Mutex::new(None),
+    };
+    let mut cfg = run_config(EngineKind::LibFuzzer, 10);
+    cfg.max_cpus = 4;
+    cfg.env
+        .push(("ASAN_OPTIONS".to_owned(), "abort_on_error=1".to_owned()));
+    EngineRunner::new()
+        .run(
+            EngineKind::LibFuzzer,
+            &cfg,
+            "/work/h",
+            "/work/corpus",
+            "/work/out",
+            &runtime,
+            Path::new("/work"),
+        )
+        .await
+        .expect("fork run completes");
+    let limits = runtime
+        .limits
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("captured limits");
+    assert_eq!(
+        limits.env.get("ASAN_OPTIONS").map(String::as_str),
+        Some("abort_on_error=1")
+    );
+}
+
 #[tokio::test]
 async fn runner_libfuzzer_parses_progress_and_coverage() {
     let rt = MockRuntime {

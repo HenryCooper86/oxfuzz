@@ -52,6 +52,14 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ### Fixed
 
+- libFuzzer fork-mode runs no longer report phantom leaks: fork children
+  misreport the forked snapshot of the parent's heap as leaked, so fork runs
+  now pass `-detect_leaks=0` and set `ASAN_OPTIONS=detect_leaks=0` (an
+  operator-provided `ASAN_OPTIONS` wins outright). Single-process runs keep
+  leak detection on and `leak-*` artifacts remain ingested findings.
+- Harness compiles no longer link the source-context copies retained under
+  `runs/` in the target workspace, which duplicated every target symbol and
+  failed every harness rebuild after the workspace's first campaign.
 - Harness smoke qualification stays single-instance regardless of the
   operator CPU ceiling, so raising `fuzzing.sandbox.max_cpus` (which puts
   campaign libFuzzer runs into fork mode and orchestrates AFL++ instances)

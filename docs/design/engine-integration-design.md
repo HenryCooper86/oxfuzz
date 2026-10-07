@@ -65,7 +65,14 @@ use them. honggfuzz maps the allocation to `--threads`. libFuzzer maps an
 allocation above one to `-fork=N`, its own multi-process mode: the parent
 process coordinates N children over the shared corpus directory, continues
 after a child crash (artifacts still land through `-artifact_prefix`), and
-stops at `-max_total_time`. An allocation of one keeps the historical
+stops at `-max_total_time`. Fork children cannot keep leak detection on:
+after fork(2), heap chunks held only by the parent's other threads are
+unreachable in the child, so both libFuzzer's in-loop check and the
+exit-time LeakSanitizer report leaks a single-process run of the same
+binary does not have; fork runs therefore pass `-detect_leaks=0` and the
+runner sets `ASAN_OPTIONS=detect_leaks=0` (an operator-provided
+`ASAN_OPTIONS` wins outright), while single-process runs keep leak
+detection on and `leak-*` artifacts remain an ingested bug class. An allocation of one keeps the historical
 single-process argv unchanged, because fork mode is a different execution
 model even at N=1; the flag is emitted before `extra_args` so a caller can
 override it. An AFL++ allocation above one is orchestrated as N `afl-fuzz`
