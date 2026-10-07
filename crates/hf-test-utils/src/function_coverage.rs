@@ -30,12 +30,7 @@ const ENGINE_SUFFIXES: [&str; 5] = ["libfuzzer", "afl++", "aflplusplus", "honggf
 /// exists: the profiling tooling is handed `/profiles/output/export.json` and
 /// the host directory behind it is decided by the caller, so inferring it from
 /// the working directory writes the file somewhere collection never looks.
-pub fn satisfy_function_coverage_with_mounts(
-    cmd: &[String],
-    opts: &SandboxOptions,
-    symbol: &str,
-    count: u64,
-) {
+pub fn satisfy_function_coverage_with_mounts(cmd: &[String], opts: &SandboxOptions, count: u64) {
     let Some(program) = cmd.first() else {
         return;
     };
@@ -52,9 +47,38 @@ pub fn satisfy_function_coverage_with_mounts(
         // The export is a redirect, so its target is the command's last
         // argument rather than a named option.
         if let Some(host) = cmd.last().and_then(|value| host_path(value, opts)) {
-            write_host(&host, exported_function(symbol, count).as_bytes());
+            if let Some(symbol) = target_symbol_from_mounts(opts) {
+                write_host(&host, exported_function(&symbol, count).as_bytes());
+            }
         }
     }
+}
+
+/// The target symbol a run belongs to, read from where its output is mounted.
+///
+/// A workspace is `<root>/<project>/<target>` and holds a `runs` directory, so
+/// the symbol is the name of the nearest ancestor of the mounted output that
+/// contains one. Walking for that property rather than counting path components
+/// avoids depending on the run layout: the output mount sits at
+/// `<workspace>/runs/<id>/out/function-coverage/export`, which is five levels
+/// below the workspace, and a fixed depth that is off by one silently names the
+/// wrong symbol instead of failing.
+///
+/// Names are sanitized on disk, so a symbol containing characters outside the
+/// sanitizer's set will not round trip; no test target does.
+fn target_symbol_from_mounts(opts: &SandboxOptions) -> Option<String> {
+    let mount = opts
+        .extra_mounts
+        .iter()
+        .find(|mount| mount.container_path == "/profiles/output")?;
+    let mut current = mount.host_path.as_path();
+    while let Some(parent) = current.parent() {
+        if parent.join("runs").is_dir() {
+            return parent.file_name()?.to_str().map(str::to_owned);
+        }
+        current = parent;
+    }
+    None
 }
 
 /// The host path a container path resolves to, when a mount covers it.

@@ -133,7 +133,6 @@ impl RuntimeAdapter for QualifyingRuntime {
         hf_test_utils::function_coverage::satisfy_function_coverage_with_mounts(
             cmd,
             opts,
-            "parse_entry",
             self.entry_count,
         );
         self.run_command_streaming(cmd, cwd, limits, cancel, on_line)
