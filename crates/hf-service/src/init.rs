@@ -112,6 +112,34 @@ fn db_path() -> PathBuf {
     PathBuf::from(std::env::var("HF_DB_PATH").unwrap_or_else(|_| "data/oxfuzz.db".to_owned()))
 }
 
+/// Config templates compiled into the binary, one per [`CONFIG_SECTIONS`] entry.
+///
+/// An installed binary ships no repository `config/` tree, so `init` cannot copy
+/// a template it cannot find. The repository `config/*.example.toml` files stay
+/// the single source of truth -- these are read at build time -- and an on-disk
+/// template still wins at runtime, so a developer editing the repository copy
+/// sees that edit.
+///
+/// [`CONFIG_SECTIONS`]: crate::config::CONFIG_SECTIONS
+const EMBEDDED_TEMPLATES: &[(&str, &str)] = &[
+    (
+        "oxfuzz",
+        include_str!("../../../config/oxfuzz.example.toml"),
+    ),
+    (
+        "providers",
+        include_str!("../../../config/providers.example.toml"),
+    ),
+    (
+        "defectdojo",
+        include_str!("../../../config/defectdojo.example.toml"),
+    ),
+    (
+        "issue_tracker",
+        include_str!("../../../config/issue_tracker.example.toml"),
+    ),
+];
+
 /// Initialize a workspace: materialize any missing config files from their
 /// `*.example.toml` templates and create + migrate the database.
 ///
@@ -135,21 +163,25 @@ pub async fn init_at(config_dir: &Path, db_path: &Path) -> Result<InitReport, Cl
         .map_err(|e| ClassifiedError::Internal(format!("create config dir: {e}")))?;
 
     let mut created = Vec::new();
-    let entries = std::fs::read_dir(config_dir)
-        .map_err(|e| ClassifiedError::Internal(format!("read config dir: {e}")))?;
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        let Some(stem) = name.strip_suffix(".example.toml") else {
-            continue;
+    for section in crate::config::CONFIG_SECTIONS {
+        let Some((_, embedded)) = EMBEDDED_TEMPLATES.iter().find(|(name, _)| name == section)
+        else {
+            return Err(ClassifiedError::Internal(format!(
+                "no embedded template for config section {section}"
+            )));
         };
-        if crate::config::validated_section(stem).is_err() {
-            continue;
+        let template = config_dir.join(format!("{section}.example.toml"));
+        let target = config_dir.join(format!("{section}.toml"));
+        // A source checkout keeps its templates on disk, so a local edit is
+        // honored; an installed binary has none and uses the embedded copy.
+        let written = if template.is_file() {
+            crate::config::copy_private_config_if_missing(&template, &target)
+        } else {
+            crate::config::write_private_config_if_missing(embedded, &target)
         }
-        let target = config_dir.join(format!("{stem}.toml"));
-        if crate::config::copy_private_config_if_missing(&entry.path(), &target)
-            .map_err(|e| ClassifiedError::Internal(format!("create {name}: {e}")))?
-        {
-            created.push(format!("{stem}.toml"));
+        .map_err(|e| ClassifiedError::Internal(format!("create {section}.toml: {e}")))?;
+        if written {
+            created.push(format!("{section}.toml"));
         }
     }
     crate::config::secure_config_directory(config_dir)
@@ -199,8 +231,69 @@ mod tests {
 
         let report = init_at(&config_dir, &database).await.unwrap();
 
-        assert_eq!(report.created_configs, ["providers.toml"]);
+        // Every declared section is materialized even though the on-disk
+        // template set covers only one of them, and the stray template is not a
+        // declared section so it is never materialized.
+        let expected: Vec<String> = crate::config::CONFIG_SECTIONS
+            .iter()
+            .map(|section| format!("{section}.toml"))
+            .collect();
+        assert_eq!(report.created_configs, expected);
         assert!(config_dir.join("providers.toml").is_file());
         assert!(!config_dir.join("session.toml").exists());
+    }
+
+    #[tokio::test]
+    async fn init_prefers_an_on_disk_template_over_the_embedded_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join("config");
+        let database = dir.path().join("data.db");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("providers.example.toml"), "local = true\n").unwrap();
+
+        init_at(&config_dir, &database).await.unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(config_dir.join("providers.toml")).unwrap(),
+            "local = true\n"
+        );
+    }
+
+    #[test]
+    fn embedded_templates_cover_exactly_the_declared_config_sections() {
+        let embedded: Vec<&str> = EMBEDDED_TEMPLATES.iter().map(|(name, _)| *name).collect();
+
+        assert_eq!(embedded, crate::config::CONFIG_SECTIONS);
+        for (section, template) in EMBEDDED_TEMPLATES {
+            assert!(
+                !template.trim().is_empty(),
+                "section {section} has an empty embedded template"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn init_materializes_embedded_templates_when_the_directory_has_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join("config");
+        let database = dir.path().join("data.db");
+        assert!(!config_dir.exists());
+
+        let report = init_at(&config_dir, &database).await.unwrap();
+
+        // An installed binary has no `config/` tree to copy from, so an empty
+        // directory must still yield every declared section.
+        let expected: Vec<String> = crate::config::CONFIG_SECTIONS
+            .iter()
+            .map(|section| format!("{section}.toml"))
+            .collect();
+        assert_eq!(report.created_configs, expected);
+        for (section, template) in EMBEDDED_TEMPLATES {
+            assert_eq!(
+                std::fs::read_to_string(config_dir.join(format!("{section}.toml"))).unwrap(),
+                *template,
+                "section {section} must match the repository template"
+            );
+        }
     }
 }

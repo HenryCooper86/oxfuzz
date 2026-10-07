@@ -2502,11 +2502,33 @@ pub(crate) fn write_private_config_file(path: &Path, content: &str) -> Result<()
     Ok(())
 }
 
-/// Copy a config into place exactly once with private permissions.
+/// Write a config into place exactly once with private permissions.
 ///
 /// A fully written temporary inode is persisted without replacement, making
 /// creation atomic and non-clobbering: a concurrent creator or pre-existing
 /// symlink yields `Ok(false)` instead of being overwritten or followed.
+pub fn write_private_config_if_missing(content: &str, destination: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(destination) {
+        Ok(_) => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.to_string()),
+    }
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    match private_temporary_file(parent, content)?.persist_noclobber(destination) {
+        Ok(_) => Ok(true),
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => Err(error.error.to_string()),
+    }
+}
+
+/// Copy a config into place exactly once with private permissions.
+///
+/// The destination is checked before the source is read, so an already
+/// initialized workspace performs no source I/O. [`write_private_config_if_missing`]
+/// repeats that check because it is the race-safe authority.
 pub fn copy_private_config_if_missing(source: &Path, destination: &Path) -> Result<bool, String> {
     match std::fs::symlink_metadata(destination) {
         Ok(_) => return Ok(false),
@@ -2520,15 +2542,7 @@ pub fn copy_private_config_if_missing(source: &Path, destination: &Path) -> Resu
         ));
     }
     let content = std::fs::read_to_string(source).map_err(|error| error.to_string())?;
-    let parent = destination
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    match private_temporary_file(parent, &content)?.persist_noclobber(destination) {
-        Ok(_) => Ok(true),
-        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
-        Err(error) => Err(error.error.to_string()),
-    }
+    write_private_config_if_missing(&content, destination)
 }
 
 /// Validate real TOML config files and tighten them to owner-only on Unix.
