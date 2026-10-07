@@ -43,8 +43,12 @@ cargo fmt --all
 cargo clippy --fix --allow-dirty --workspace -- -D warnings
 cargo clippy --workspace -- -D warnings
 cargo check --workspace
+cargo test --workspace
 cargo doc --workspace --no-deps
 ```
+
+A failing test is a blocker to fix, not a pre-existing condition to work
+around. Never reach green by deleting, ignoring, or weakening a test.
 
 Run Rust tests through the required output filter. The repository wrapper keeps
 the command consistent:
@@ -63,8 +67,10 @@ npm --prefix crates/hf-gui run lint
 ```
 
 Use `./scripts/tests/gates.sh` for the full local gate set, or
-`./scripts/tests/gates.sh <gate>` for one of `fmt`, `clippy`, `check`, `test`,
-`doc`, `deny`, `script-tests`, `frontend-test`, `frontend-lint`.
+`./scripts/tests/gates.sh <gate>` for one of `fmt`, `clippy`, `check`,
+`check-no-default-features`, `check-feature-matrix`, `test`, `feature-behavior`,
+`doc`, `deny`, `coverage`, `performance`, `script-tests`,
+`translation-pairing`, `frontend-test`, `frontend-lint`.
 
 The same gates run in CI, so a green local run predicts a green pipeline.
 `.gitlab-ci.yml` is the merge gate on this remote; `.github/workflows/ci.yml`
