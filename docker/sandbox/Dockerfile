@@ -159,6 +159,22 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     && rustup component add --toolchain "${RUST_NIGHTLY}" llvm-tools-preview \
     && cargo install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
 
+# Vendor the fuzz-target dependency that cargo-fuzz-generated projects declare
+# (libfuzzer-sys and its transitive crates), with a crates.io source
+# replacement in the global cargo config: harness builds run with networking
+# disabled, so dependency resolution must be fully local. Exact versions are
+# pinned by this image build; the probe project exists only to compute the
+# vendor set and is removed afterwards.
+RUN mkdir -p /opt/vendor-probe/src \
+    && printf '[package]\nname = "vendor-probe"\nversion = "0.0.0"\nedition = "2021"\n\n[dependencies]\nlibfuzzer-sys = "0.4"\n' \
+        > /opt/vendor-probe/Cargo.toml \
+    && printf 'pub fn probe() {}\n' > /opt/vendor-probe/src/lib.rs \
+    && cd /opt/vendor-probe \
+    && cargo vendor /opt/rust/vendor > /tmp/vendor-config.toml \
+    && { cat /tmp/vendor-config.toml; printf '[net]\noffline = true\n'; } \
+        >> "${CARGO_HOME}/config.toml" \
+    && rm -rf /opt/vendor-probe /tmp/vendor-config.toml
+
 # Fail the image build when any advertised toolchain is absent.
 # honggfuzz 2.6 exposes help, but intentionally has no version flag.
 RUN clang --version \

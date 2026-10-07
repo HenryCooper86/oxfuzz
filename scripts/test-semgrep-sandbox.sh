@@ -12,7 +12,7 @@ fi
 cd "$repository_root"
 
 readonly REPOSITORY_ROOT="$repository_root"
-readonly IMAGE="${OXFUZZ_SANDBOX_IMAGE:-oxfuzz/fuzz-sandbox:0.2.0}"
+readonly IMAGE="${OXFUZZ_SANDBOX_IMAGE:-oxfuzz/fuzz-sandbox:0.2.1}"
 readonly SEMGREP_VERSION="1.169.0"
 readonly RULES_COMMIT="4d66ecf30bfb1809a984085f2c86a8c3915bfc71"
 readonly RULES_TREE_SHA256="b7b7a88a780c5f7cfe8ce7afc05af84165419e35aa0b1ef7fb553f58667fa613"

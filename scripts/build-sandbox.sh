@@ -5,7 +5,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-IMAGE="${OXFUZZ_SANDBOX_IMAGE:-oxfuzz/fuzz-sandbox:0.2.0}"
+IMAGE="${OXFUZZ_SANDBOX_IMAGE:-oxfuzz/fuzz-sandbox:0.2.1}"
 if [[ "$IMAGE" == "latest" || "$IMAGE" == *":latest" ]]; then
     echo "OXFUZZ_SANDBOX_IMAGE must use an explicit version tag" >&2
     exit 1

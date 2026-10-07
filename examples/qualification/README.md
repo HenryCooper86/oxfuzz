@@ -28,7 +28,7 @@ test or a synthetic approval.
 After approval, set `OXFUZZ_LIVE_EVIDENCE_ROOT` to a durable disposable directory
 and run the ignored `cancellation_live` test with the repository's test-output
 filter. A configured review provider, Docker, and the local
-`oxfuzz/fuzz-sandbox:0.2.0` image are required. No host harness execution occurs.
+`oxfuzz/fuzz-sandbox:0.2.1` image are required. No host harness execution occurs.
 
 Each of libFuzzer, AFL++, and honggfuzz compiles in `hf-runtime`, completes a
 10-second smoke, promotes that harness revision, starts a 10-second campaign,

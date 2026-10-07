@@ -41,7 +41,7 @@ fn body() -> EvidenceManifestBody {
         binary_sha256: digest('c'),
         comparison_context_sha256: digest('d'),
         corpus_sha256: digest('e'),
-        sandbox_image: "oxfuzz/fuzz-sandbox:0.2.0".to_owned(),
+        sandbox_image: "oxfuzz/fuzz-sandbox:0.2.1".to_owned(),
         sandbox_image_sha256: digest('f'),
         approval: EvidenceApproval {
             approval_id: Uuid::from_u128(3),

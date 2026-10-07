@@ -20,7 +20,7 @@ fn limits(max_mem_mb: u64, max_cpus: u32) -> ResourceLimits {
 
 fn cfg_with(default_limits: ResourceLimits) -> RuntimeConfig {
     RuntimeConfig {
-        image: "oxfuzz/fuzz-sandbox:0.2.0".to_owned(),
+        image: "oxfuzz/fuzz-sandbox:0.2.1".to_owned(),
         container_workspace: "/work".to_owned(),
         default_limits,
         max_pids: 512,
@@ -36,7 +36,7 @@ fn build_exec_args_includes_image_and_command() {
         &["clang".to_owned(), "--version".to_owned()],
     );
     let joined = args.join(" ");
-    assert!(joined.contains("oxfuzz/fuzz-sandbox:0.2.0"));
+    assert!(joined.contains("oxfuzz/fuzz-sandbox:0.2.1"));
     assert!(joined.contains("clang"));
     assert!(joined.contains("--version"));
 }
@@ -443,5 +443,5 @@ fn specialized_sandbox_profile_can_select_a_pinned_sidecar_image() {
     let joined = args.join(" ");
 
     assert!(joined.contains("oxfuzz/scapy-automotive:2.7.0"));
-    assert!(!joined.contains("oxfuzz/fuzz-sandbox:0.2.0"));
+    assert!(!joined.contains("oxfuzz/fuzz-sandbox:0.2.1"));
 }

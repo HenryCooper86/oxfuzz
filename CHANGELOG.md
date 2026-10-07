@@ -34,9 +34,11 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ### Changed
 
-- The fuzzing sandbox image is now `oxfuzz/fuzz-sandbox:0.2.0` (adds meson,
-  autoconf, automake, libtool). Rebuild it with
-  `./scripts/build-sandbox.sh`; image overrides must also move to 0.2.0.
+- The fuzzing sandbox image is now `oxfuzz/fuzz-sandbox:0.2.1` (0.2.0 added
+  meson, autoconf, automake, libtool; 0.2.1 vendors `libfuzzer-sys` with a
+  crates.io source replacement so cargo-fuzz harness builds resolve their
+  fuzzing dependency fully offline). Rebuild it with
+  `./scripts/build-sandbox.sh`; image overrides must also move to 0.2.1.
 - Migration `0037_build_profile_systems.sql` widens the saved build-system
   constraint to Meson and Autotools; existing profiles keep their identities
   and digests.
