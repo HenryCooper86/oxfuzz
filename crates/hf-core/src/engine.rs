@@ -77,6 +77,21 @@ impl EngineKind {
         Self::Syzkaller,
     ];
 
+    /// The engine ids a default deployment can run, rendered for a
+    /// user-facing message.
+    ///
+    /// Membership comes from [`Self::ALL`], so an admission-gated engine (Go
+    /// native fuzzing) stays parseable for a deployment that opts in without
+    /// being advertised to everyone else. The ids are listed in lexical order,
+    /// which keeps the message stable when the canonical declaration order
+    /// changes.
+    #[must_use]
+    pub fn advertised_ids() -> String {
+        let mut ids = Self::ALL.map(Self::as_str);
+        ids.sort_unstable();
+        ids.join(", ")
+    }
+
     /// The canonical id used on the wire, in configs, and on the command line.
     /// Round-trips through [`std::str::FromStr`], so a value handed to a frontend
     /// comes back parseable.
@@ -183,8 +198,8 @@ impl std::str::FromStr for EngineKind {
         let trimmed = s.trim();
         if crate::retired_engine::is_retired_engine_id(trimmed) {
             return Err(format!(
-                "fuzzing engine '{trimmed}' has been retired; choose one of: \
-                 afl++, honggfuzz, libfuzzer, syzkaller"
+                "fuzzing engine '{trimmed}' has been retired; choose one of: {}",
+                Self::advertised_ids()
             ));
         }
         match trimmed.to_ascii_lowercase().as_str() {
@@ -194,8 +209,8 @@ impl std::str::FromStr for EngineKind {
             "syzkaller" | "syz" => Ok(Self::Syzkaller),
             "go-native" | "gonative" | "go" => Ok(Self::GoNative),
             other => Err(format!(
-                "unknown fuzzing engine '{other}' (expected one of: \
-                 afl++, honggfuzz, libfuzzer, syzkaller, go-native)"
+                "unknown fuzzing engine '{other}' (expected one of: {})",
+                Self::advertised_ids()
             )),
         }
     }
@@ -292,7 +307,23 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "unknown fuzzing engine 'not-an-engine' (expected one of: \
-             afl++, honggfuzz, libfuzzer, syzkaller, go-native)"
+             afl++, honggfuzz, libfuzzer, syzkaller)"
+        );
+    }
+
+    #[test]
+    fn advertised_engine_ids_name_every_default_engine_and_no_gated_one() {
+        let advertised = EngineKind::advertised_ids();
+
+        for engine in EngineKind::ALL {
+            assert!(advertised.contains(engine.as_str()), "{advertised}");
+        }
+        // Go native fuzzing parses for a deployment that opts in, but a
+        // user-facing message must not offer an engine the default set cannot
+        // run.
+        assert!(
+            !advertised.contains(EngineKind::GoNative.as_str()),
+            "{advertised}"
         );
     }
 
@@ -318,15 +349,13 @@ mod tests {
         for value in values {
             let error = value.parse::<EngineKind>().unwrap_err();
             assert!(error.contains("has been retired"), "{error}");
-            assert!(
-                error.contains("afl++, honggfuzz, libfuzzer, syzkaller"),
-                "{error}"
-            );
+            assert!(error.contains(&EngineKind::advertised_ids()), "{error}");
         }
-        assert!("not-an-engine"
-            .parse::<EngineKind>()
-            .unwrap_err()
-            .contains("unknown fuzzing engine"));
+        // Both engine errors render one advertised list, so a new engine cannot
+        // reach only one of them.
+        let unknown = "not-an-engine".parse::<EngineKind>().unwrap_err();
+        assert!(unknown.contains("unknown fuzzing engine"), "{unknown}");
+        assert!(unknown.contains(&EngineKind::advertised_ids()), "{unknown}");
     }
 
     #[test]
