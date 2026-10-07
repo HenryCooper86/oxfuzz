@@ -25,8 +25,13 @@ qualification from implementation.
   the harness build). Still open on this item: dependency handling (builds
   stay network-disabled by design), Bazel, and per-system definitions beyond
   CMake's `-D` model. Owner: `hf-service`.
-- [ ] Publish and verify language-by-operation support, including a real Rust
-  cargo-fuzz campaign in the sandbox. Go/Python discovery does not establish
+- [x] Publish and verify language-by-operation support, including a real Rust
+  cargo-fuzz campaign in the sandbox: [one complete live cycle
+  passed](docs/acceptance/rust-2026-10-07.md) (offline vendored build,
+  provider review, smoke, promotion, campaign, 644 ms Stop, replay) and the
+  support matrix publishes the language-by-operation status. Multi-cycle,
+  crash-rediscovery, and other-platform Rust acceptance remain open.
+  Go/Python discovery does not establish
   harness support; the separate [Go](docs/design/go-native-fuzzing-design.md)
   and [Python](docs/design/python-atheris-fuzzing-design.md) designs await
   implementation and qualification. Owner: `hf-discovery` / `hf-harness`.

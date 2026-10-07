@@ -11,6 +11,10 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ### Added
 
+- First live Rust cargo-fuzz campaign qualification: one complete cycle
+  (sandboxed offline build via the vendored dependency, provider review,
+  smoke, promotion, campaign with a 644 ms addressed Stop, and retained-input
+  replay) passed on macOS arm64; see the acceptance record.
 - Generated build inputs reach harness compiles. A successful configured
   build publishes the build tree's generated headers (by suffix) and the
   database-referenced generated sources alongside the compile database, and
