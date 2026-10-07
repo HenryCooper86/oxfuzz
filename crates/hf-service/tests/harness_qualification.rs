@@ -862,6 +862,45 @@ async fn a_smoke_run_retains_the_profile_promotion_reads() {
     // before this existed nothing ever wrote one for a smoke run, so the
     // target-entry gate could not fire.
     let run = sole_smoke_run(&store, project.path()).await;
+
+    // Localise the layer before asserting the outcome: an uninstrumented harness
+    // and an unwritten profile both end as the same unavailable measurement.
+    let config = run.config.as_ref().expect("a smoke run retains its config");
+    let harness = store
+        .get_harness(config.harness_id)
+        .await
+        .unwrap()
+        .expect("the smoke run names its harness");
+    assert!(
+        harness
+            .build_cmd
+            .extra_flags
+            .iter()
+            .any(|flag| flag == "-fprofile-instr-generate"),
+        "layer 1, instrumentation: {:?}",
+        harness.build_cmd.extra_flags
+    );
+    assert!(
+        config
+            .env
+            .iter()
+            .any(|(key, _)| key == "LLVM_PROFILE_FILE"),
+        "layer 2, run does not ask for a profile: {:?}",
+        config.env
+    );
+
+    let workspace = hf_service::workspace_dir(project.path(), "parse_entry");
+    let raw = workspace
+        .join(run.evidence_dir.as_deref().expect("runs are run-scoped"))
+        .join("function-coverage/raw");
+    assert!(
+        std::fs::read_dir(&raw)
+            .map(|entries| entries.count() > 0)
+            .unwrap_or(false),
+        "layer 3, no raw profile reached the host at {}",
+        raw.display()
+    );
+
     let coverage = container
         .run_function_coverage(run.id)
         .await

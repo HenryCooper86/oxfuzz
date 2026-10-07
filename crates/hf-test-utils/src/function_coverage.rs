@@ -57,12 +57,36 @@ pub fn satisfy_function_coverage(cmd: &[String], cwd: &Path, count: u64) {
 }
 
 /// The run output directories a command could be attributed to.
+///
+/// The engine run is dispatched with the workspace as its working directory,
+/// but the profiling tooling is dispatched with the retained input workspace
+/// (`<workspace>/runs/<id>/input/workspace`), which is three levels below it. So
+/// the run root is found by walking up rather than by assuming one depth; a
+/// fixed depth silently writes nothing for the tooling and the collection then
+/// fails with no explanation.
 fn run_output_dirs(cwd: &Path) -> Vec<PathBuf> {
+    const MAX_DEPTH: usize = 6;
+    let mut current = Some(cwd);
+    for _ in 0..MAX_DEPTH {
+        let Some(directory) = current else {
+            break;
+        };
+        let outputs = outputs_under(&directory.join("runs"));
+        if !outputs.is_empty() {
+            return outputs;
+        }
+        current = directory.parent();
+    }
+    Vec::new()
+}
+
+/// Every `runs/<id>/out` directory under a run root.
+fn outputs_under(runs: &Path) -> Vec<PathBuf> {
     let mut outputs = Vec::new();
-    let Ok(runs) = std::fs::read_dir(cwd.join("runs")) else {
+    let Ok(entries) = std::fs::read_dir(runs) else {
         return outputs;
     };
-    for run in runs.flatten() {
+    for run in entries.flatten() {
         let output = run.path().join("out");
         if output.is_dir() {
             outputs.push(output);
