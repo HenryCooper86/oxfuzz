@@ -73,7 +73,7 @@ impl ServiceContainer {
         request: CiGateRequest<'_>,
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
     ) -> Result<CiGateOutcome, ClassifiedError> {
-        let ci = self.clone().with_guardrails(Guardrails::permissive());
+        let ci = self.clone().with_guardrails(Guardrails::from_env());
         let seed_warning = ci
             .generate_seeds(request.project, request.target)
             .await

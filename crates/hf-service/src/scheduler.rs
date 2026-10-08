@@ -2231,7 +2231,7 @@ impl CampaignScheduler {
         // (crash found, run terminated) into this manager's event bridge.
         container.bind_scheduler_events(&manager);
         let dispatcher = Arc::new(FuzzCampaignDispatcher {
-            container: container.with_guardrails(Guardrails::permissive()),
+            container: container.with_guardrails(Guardrails::from_env()),
             state: Arc::clone(&state),
             gate: Arc::clone(&gate),
             notifier: Arc::clone(&notifier),

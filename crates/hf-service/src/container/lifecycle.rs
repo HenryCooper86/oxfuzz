@@ -83,6 +83,12 @@ async fn recover_harness_work_order_attempts(store: Option<&Arc<Store>>) -> bool
 
 impl ServiceContainer {
     /// Create a new `ServiceContainer` without persistence.
+    ///
+    /// This is the test and embedded constructor, and it is permissive: every
+    /// production caller builds its container through [`Self::bootstrap`],
+    /// which resolves guardrails from the environment and fails closed. Do not
+    /// reach for this constructor in a shipped path to obtain execution without
+    /// an approval gate; that is exactly the silent default it must not become.
     #[must_use]
     pub fn new(
         runtime: Arc<dyn RuntimeAdapter>,

@@ -17,6 +17,9 @@ fn isolate() {
         let root = tempfile::tempdir().unwrap().keep();
         std::env::set_var("HF_CONFIG_DIR", root.join("config"));
         std::env::set_var("HF_WORKSPACE_DIR", root.join("workspace"));
+        // Scheduler campaigns run through the env-gated dispatcher, and these
+        // fixtures exercise scheduling, not the approval gate.
+        std::env::set_var("HF_AUTO_APPROVE", "1");
         hf_service::initialize_workspace_root().unwrap();
         root
     });
