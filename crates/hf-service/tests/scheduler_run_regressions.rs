@@ -66,11 +66,32 @@ impl RuntimeAdapter for TestRuntime {
     }
     async fn run_command(
         &self,
-        _cmd: &[String],
+        cmd: &[String],
         cwd: &Path,
         _limits: &hf_core::runtime::ResourceLimits,
     ) -> Result<CommandResult, ClassifiedError> {
+        hf_test_utils::function_coverage::satisfy_function_coverage(cmd, cwd, 64);
         Ok(completed(cwd, CommandTermination::Completed))
+    }
+
+    /// This runtime blocks until cancelled, which is the campaign shape under
+    /// test. Collection dispatches profiling tooling with a token nothing
+    /// cancels, so routing the tooling here would hang the run instead of
+    /// failing it; the tooling is answered directly.
+    async fn run_command_streaming_opts(
+        &self,
+        cmd: &[String],
+        cwd: &Path,
+        limits: &hf_core::runtime::ResourceLimits,
+        opts: &hf_core::runtime::SandboxOptions,
+        cancel: &tokio_util::sync::CancellationToken,
+        on_line: &hf_core::runtime::LineSink<'_>,
+    ) -> Result<CommandResult, ClassifiedError> {
+        if hf_test_utils::function_coverage::satisfy_function_coverage_with_mounts(cmd, opts, 64) {
+            return Ok(completed(cwd, CommandTermination::Completed));
+        }
+        self.run_command_streaming(cmd, cwd, limits, cancel, on_line)
+            .await
     }
     async fn run_command_streaming(
         &self,

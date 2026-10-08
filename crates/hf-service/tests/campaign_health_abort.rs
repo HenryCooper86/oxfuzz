@@ -24,10 +24,11 @@ impl RuntimeAdapter for BlockingRuntime {
 
     async fn run_command(
         &self,
-        _cmd: &[String],
+        cmd: &[String],
         cwd: &std::path::Path,
         _limits: &ResourceLimits,
     ) -> Result<CommandResult, ClassifiedError> {
+        hf_test_utils::function_coverage::satisfy_function_coverage(cmd, cwd, 64);
         Ok(CommandResult {
             exit_code: 0,
             stdout: "DONE exec/s: 64".to_owned(),
@@ -35,6 +36,28 @@ impl RuntimeAdapter for BlockingRuntime {
             workspace: cwd.to_path_buf(),
             termination: CommandTermination::Completed,
         })
+    }
+
+    async fn run_command_streaming_opts(
+        &self,
+        cmd: &[String],
+        cwd: &std::path::Path,
+        limits: &ResourceLimits,
+        opts: &hf_core::runtime::SandboxOptions,
+        cancel: &tokio_util::sync::CancellationToken,
+        on_line: &LineSink<'_>,
+    ) -> Result<CommandResult, ClassifiedError> {
+        if hf_test_utils::function_coverage::satisfy_function_coverage_with_mounts(cmd, opts, 64) {
+            return Ok(CommandResult {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                workspace: cwd.to_path_buf(),
+                termination: CommandTermination::Completed,
+            });
+        }
+        self.run_command_streaming(cmd, cwd, limits, cancel, on_line)
+            .await
     }
 
     async fn run_command_streaming(

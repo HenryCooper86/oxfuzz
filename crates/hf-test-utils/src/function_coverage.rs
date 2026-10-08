@@ -24,15 +24,25 @@ const ENGINE_SUFFIXES: [&str; 5] = ["libfuzzer", "afl++", "aflplusplus", "honggf
 
 /// Write the host-side artifacts for a command dispatched with sandbox options.
 ///
+/// Returns whether the command was profiling tooling that this handled, so a
+/// stub whose command path blocks until cancellation can return instead of
+/// routing the tooling into that path. Collection cancels nothing here: it
+/// passes a fresh token, so a blocking stub deadlocks the run rather than
+/// failing it, and the symptom is a test that never finishes.
+///
 /// Use this from `RuntimeAdapter::run_command_streaming_opts` and
 /// `run_command_opts`. It maps the container paths the command names back to
 /// their host paths through `extra_mounts`, which is the only place that mapping
 /// exists: the profiling tooling is handed `/profiles/output/export.json` and
 /// the host directory behind it is decided by the caller, so inferring it from
 /// the working directory writes the file somewhere collection never looks.
-pub fn satisfy_function_coverage_with_mounts(cmd: &[String], opts: &SandboxOptions, count: u64) {
+pub fn satisfy_function_coverage_with_mounts(
+    cmd: &[String],
+    opts: &SandboxOptions,
+    count: u64,
+) -> bool {
     let Some(program) = cmd.first() else {
-        return;
+        return false;
     };
     if program.starts_with("llvm-profdata") {
         // `merge ... -o <index>`; command order is fixed by the caller.
@@ -43,6 +53,7 @@ pub fn satisfy_function_coverage_with_mounts(cmd: &[String], opts: &SandboxOptio
         {
             write_host(&host, &[0u8; 32]);
         }
+        true
     } else if program == "sh" {
         // The export is a redirect, so its target is the command's last
         // argument rather than a named option.
@@ -51,6 +62,9 @@ pub fn satisfy_function_coverage_with_mounts(cmd: &[String], opts: &SandboxOptio
                 write_host(&host, exported_function(&symbol, count).as_bytes());
             }
         }
+        true
+    } else {
+        false
     }
 }
 

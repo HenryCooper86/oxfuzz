@@ -49,12 +49,38 @@ impl hf_core::runtime::RuntimeAdapter for SurvivalRuntime {
         Ok(Some(hf_test_utils::immutable_test_image()?))
     }
 
+    async fn run_command_streaming_opts(
+        &self,
+        cmd: &[String],
+        cwd: &std::path::Path,
+        limits: &hf_core::runtime::ResourceLimits,
+        opts: &hf_core::runtime::SandboxOptions,
+        cancel: &tokio_util::sync::CancellationToken,
+        on_line: &hf_core::runtime::LineSink<'_>,
+    ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
+        // Profiling tooling names container paths, so its host targets come from
+        // the mounts; collection dispatches it with a token nothing cancels, so
+        // it must be answered here rather than routed into a blocking path.
+        if hf_test_utils::function_coverage::satisfy_function_coverage_with_mounts(cmd, opts, 64) {
+            return Ok(hf_core::runtime::CommandResult {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                workspace: cwd.to_path_buf(),
+                termination: hf_core::runtime::CommandTermination::Completed,
+            });
+        }
+        self.run_command_streaming(cmd, cwd, limits, cancel, on_line)
+            .await
+    }
+
     async fn run_command(
         &self,
         cmd: &[String],
         cwd: &std::path::Path,
         _limits: &hf_core::runtime::ResourceLimits,
     ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
+        hf_test_utils::function_coverage::satisfy_function_coverage(cmd, cwd, 64);
         let is_showmap = cmd.first().is_some_and(|command| command == "afl-showmap");
         if !is_showmap {
             return Ok(hf_core::runtime::CommandResult {
