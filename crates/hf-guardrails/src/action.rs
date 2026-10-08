@@ -23,6 +23,10 @@ pub enum Action {
     CompileHarness,
     /// Execute a compiled harness binary (smoke fuzz) in the sandbox.
     RunHarness,
+    /// Promote a smoke-qualified harness to the state every campaign admits.
+    /// This is the transition that unlocks execution, so it carries the same
+    /// risk as running a harness even though it performs no sandbox work itself.
+    PromoteHarness,
     /// Launch a fuzzing campaign that runs untrusted code under an engine.
     RunFuzzer {
         /// The fuzzing engine.
@@ -120,6 +124,7 @@ impl Action {
             Action::DraftHarness => "draft_harness",
             Action::CompileHarness => "compile_harness",
             Action::RunHarness => "run_harness",
+            Action::PromoteHarness => "promote_harness",
             Action::RunFuzzer { .. } => "run_fuzzer",
             Action::RunConcolic { .. } => "run_concolic",
             Action::VerifyRemediation { .. } => "verify_remediation",
@@ -147,6 +152,7 @@ impl Action {
             Action::DraftHarness => "draft harness".to_owned(),
             Action::CompileHarness => "compile harness in sandbox".to_owned(),
             Action::RunHarness => "run harness (smoke fuzz)".to_owned(),
+            Action::PromoteHarness => "promote harness".to_owned(),
             Action::RunFuzzer {
                 engine,
                 duration_secs,
@@ -205,6 +211,7 @@ impl Action {
             | Action::AutomotiveOffline { .. }
             | Action::AgentTool { .. } => RiskTier::Medium,
             Action::RunHarness
+            | Action::PromoteHarness
             | Action::RunFuzzer { .. }
             | Action::RunConcolic { .. }
             | Action::VerifyRemediation { .. }

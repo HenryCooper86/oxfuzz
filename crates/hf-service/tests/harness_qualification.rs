@@ -886,3 +886,44 @@ async fn a_smoke_run_retains_the_profile_promotion_reads() {
         "the retained profile must attribute entry to the selected target: {functions:?}"
     );
 }
+
+#[tokio::test]
+async fn promotion_is_refused_when_the_gate_denies_it() {
+    let (project, _store, container) = qualified_fixture().await;
+    let source = "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }";
+
+    container
+        .harness_compile(
+            source.to_owned(),
+            project.path(),
+            EngineKind::LibFuzzer,
+            "parse_entry",
+            TargetLanguage::C,
+        )
+        .await
+        .unwrap();
+    container
+        .harness_smoke(
+            project.path(),
+            "parse_entry",
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+        )
+        .await
+        .unwrap();
+
+    // The harness is fully qualified; the only thing between it and promotion is
+    // the approval gate, which promotion must now consult.
+    let denied = container.with_guardrails(hf_guardrails::Guardrails::new(
+        hf_guardrails::GuardrailPolicy::default(),
+        Arc::new(hf_guardrails::DenyAll),
+    ));
+
+    let refused = denied
+        .harness_promote(project.path(), "parse_entry", EngineKind::LibFuzzer)
+        .await;
+    assert!(
+        refused.is_err(),
+        "promotion must be refused when the gate denies it"
+    );
+}

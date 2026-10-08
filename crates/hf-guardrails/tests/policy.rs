@@ -163,6 +163,8 @@ fn action_kinds_are_stable_snake_case_audit_labels() {
     assert_eq!(Action::DraftHarness.kind(), "draft_harness");
     assert_eq!(Action::CompileHarness.kind(), "compile_harness");
     assert_eq!(Action::RunHarness.kind(), "run_harness");
+    assert_eq!(Action::PromoteHarness.kind(), "promote_harness");
+    assert_eq!(Action::PromoteHarness.label(), "promote harness");
     assert_eq!(run_fuzzer().kind(), "run_fuzzer");
     assert_eq!(run_concolic().kind(), "run_concolic");
     assert_eq!(

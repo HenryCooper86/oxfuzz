@@ -1573,6 +1573,8 @@ impl ServiceContainer {
         engine: EngineKind,
         expected: Option<ExactPromotion<'_>>,
     ) -> Result<Harness, ClassifiedError> {
+        self.authorize_recorded(Action::PromoteHarness, "harness_promote", Some(project))
+            .await?;
         let harness = self.active_harness_locked(project, target, engine).await?;
         require_expected_promotion(&harness, expected)?;
         let smoke = harness.smoke_run.as_ref().ok_or_else(|| {
@@ -1629,6 +1631,12 @@ impl ServiceContainer {
     ) -> Result<Harness, ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
         let _target_revision = self.acquire_target_revision(project, target).await?;
+        self.authorize_recorded(
+            Action::PromoteHarness,
+            "harness_promote_with_findings",
+            Some(project),
+        )
+        .await?;
         let mut harness = self.active_harness_locked(project, target, engine).await?;
         let smoke = harness.smoke_run.as_ref().ok_or_else(|| {
             ClassifiedError::Validation("run smoke qualification before approving findings".into())

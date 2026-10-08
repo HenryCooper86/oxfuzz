@@ -299,15 +299,16 @@ pub enum RuntimeError {
 // Trait
 // ---------------------------------------------------------------------------
 
-/// Adapter for isolated code execution.
+/// Legacy adapter for isolated code execution.
 ///
-/// Three implementations exist:
-/// - `DockerRuntime`: Container-based isolation (primary for untrusted code)
-/// - `NativeRuntime`: bubblewrap sandbox (lightweight, for trusted tools)
-/// - `SshRuntime`: Remote execution (for distributed scenarios)
-///
-/// Tools declare their [`RuntimeCapability`] requirements; the runtime
-/// enforces them through a 7-layer security model.
+/// This trait predates the runtime contract the service actually uses,
+/// [`crate::runtime::RuntimeAdapter`], which `hf-runtime` implements with a
+/// Docker runtime and a fail-closed stub. This trait has no implementors: the
+/// `DockerRuntime`, `NativeRuntime`, and `SshRuntime` names a prior version of
+/// this comment described do not exist, and Docker is the only execution
+/// backend. [`RuntimeBackend`] and [`RuntimeCapability`] remain in use by
+/// `hf-prompt` and `hf-agent` for prompt and tool selection, but the execution
+/// half of this module is superseded.
 #[async_trait]
 pub trait RuntimeAdapter: Send + Sync {
     /// Human-readable name identifying this runtime backend.
