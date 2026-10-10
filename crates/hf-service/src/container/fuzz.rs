@@ -34,8 +34,9 @@ use crate::verification::VerdictLevel;
 pub const FUZZ_PIPELINE_REPAIRS: usize = 2;
 
 /// Operator request for the onboarding pipeline. Every field is explicit:
-/// `target: None` auto-picks the highest-fit candidate the engine can drive,
-/// and `lang: None` scans every supported language instead of defaulting one.
+/// `target: None` auto-picks the highest-fit candidate with a working harness
+/// path (`TargetLanguage::harnessable`) that the engine can drive, and
+/// `lang: None` scans every discoverable language instead of defaulting one.
 pub struct FuzzRequest<'a> {
     /// Project root path.
     pub project: &'a Path,
@@ -77,7 +78,7 @@ pub struct FuzzRequest<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FuzzStage {
     /// Scanning the project and picking a target. `lang: None` means the scan
-    /// covers every supported language.
+    /// covers every discoverable language.
     Discover {
         /// The requested language, or `None` for auto-detection.
         lang: Option<TargetLanguage>,
@@ -391,6 +392,13 @@ impl ServiceContainer {
                     candidates.len()
                 ))
             })?;
+            if !candidate.language.harnessable() {
+                return Err(ClassifiedError::Validation(format!(
+                    "harness generation is not yet available for {} targets; harnessable languages: {}",
+                    candidate.language.as_str(),
+                    TargetLanguage::harnessable_ids()
+                )));
+            }
             if !engine.supports_language(candidate.language) {
                 return Err(ClassifiedError::Validation(format!(
                     "engine '{}' cannot drive a {:?} harness for '{target}'; \
@@ -403,10 +411,15 @@ impl ServiceContainer {
             return Ok((candidate.symbol.clone(), candidate.language));
         }
         // Auto-pick is a deterministic fit-score sort over the candidates the
-        // chosen engine can actually drive (same rule as `run_campaign`).
+        // pipeline can actually fuzz: the language must have a working harness
+        // build path (the single `TargetLanguage::harnessable` predicate --
+        // discovery scans more languages than it can harness) and the chosen
+        // engine must drive it (same rule as `run_campaign`).
         let mut drivable: Vec<&TargetCandidate> = candidates
             .iter()
-            .filter(|candidate| engine.supports_language(candidate.language))
+            .filter(|candidate| {
+                candidate.language.harnessable() && engine.supports_language(candidate.language)
+            })
             .collect();
         drivable.sort_by(|a, b| {
             b.fit_score
@@ -418,6 +431,24 @@ impl ServiceContainer {
                 return Err(ClassifiedError::Validation(
                     "no fuzzable targets discovered in the project".to_owned(),
                 ));
+            }
+            if !candidates
+                .iter()
+                .any(|candidate| candidate.language.harnessable())
+            {
+                let mut languages: Vec<&str> = candidates
+                    .iter()
+                    .map(|candidate| candidate.language.as_str())
+                    .collect();
+                languages.sort_unstable();
+                languages.dedup();
+                return Err(ClassifiedError::Validation(format!(
+                    "discovered {} candidate(s), but harness generation is not yet available for \
+                     their language(s) ({}); harnessable languages: {}",
+                    candidates.len(),
+                    languages.join(", "),
+                    TargetLanguage::harnessable_ids()
+                )));
             }
             return Err(ClassifiedError::Validation(format!(
                 "discovered {} candidate(s), but engine '{}' cannot drive any of their languages",

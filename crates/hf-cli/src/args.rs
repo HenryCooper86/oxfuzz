@@ -195,7 +195,8 @@ pub(crate) struct HarnessArgs {
     /// handoff.
     #[arg(long)]
     pub(crate) engine: String,
-    /// Target language (c, cpp, rust, go, python). Defaults to c.
+    /// Target language. Defaults to c. Only languages with a harness path
+    /// (c, cpp, rust) are accepted; go and python are discovery-only.
     #[arg(long, default_value = "c")]
     pub(crate) lang: String,
     #[command(flatten)]
@@ -342,7 +343,8 @@ pub(crate) struct CampaignArgs {
     /// Fuzzing engine.
     #[arg(long, default_value = "libfuzzer")]
     pub(crate) engine: String,
-    /// Target language (c, cpp, rust, go, python). Defaults to c.
+    /// Target language. Defaults to c. Only languages with a harness path
+    /// (c, cpp, rust) can run a campaign; go and python are discovery-only.
     #[arg(long, default_value = "c")]
     pub(crate) lang: String,
     /// Per-iteration fuzz duration in seconds.
@@ -394,14 +396,15 @@ pub(crate) struct FuzzArgs {
     /// Project root path.
     pub(crate) project: PathBuf,
     /// Target symbol. Omit to auto-pick the highest-fit candidate the engine
-    /// can drive.
+    /// can drive; languages without a harness path (go, python) are never
+    /// auto-picked.
     #[arg(long)]
     pub(crate) target: Option<String>,
     /// Fuzzing engine.
     #[arg(long, default_value = "libfuzzer")]
     pub(crate) engine: String,
     /// Target language (c, cpp, rust, go, python). Omit to scan every
-    /// supported language and let the picked candidate carry its own.
+    /// discoverable language and let the picked candidate carry its own.
     #[arg(long)]
     pub(crate) lang: Option<String>,
     /// Per-iteration fuzz duration in seconds.

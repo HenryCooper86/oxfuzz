@@ -413,6 +413,140 @@ async fn fuzz_stops_at_promotion_when_the_operator_denies_it() {
     );
 }
 
+/// A project holding a C parser AND a higher-scoring Go parser. The Go
+/// candidate tops the fit ranking, so auto-pick proves the harnessability
+/// filter by still choosing the C target.
+fn mixed_c_and_go_project(dir: &tempfile::TempDir) -> std::path::PathBuf {
+    let project = dir.path().join("mixedproj");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("parse.c"),
+        "#include <stddef.h>\n#include <stdint.h>\n\
+         int parse_entry(const uint8_t *data, size_t size){ return size>0 && data[0]=='A'; }\n",
+    )
+    .unwrap();
+    // The control flow raises the Go candidate's complexity (and with it the
+    // fit score) above the C parser's: exclusion by language, not by score.
+    std::fs::write(
+        project.join("parser.go"),
+        "package parser\n\nfunc ParsePacket(data []byte, offset int) bool {\n\
+         \tif len(data) > offset {\n\t\treturn data[0] == 'A'\n\t}\n\treturn false\n}\n",
+    )
+    .unwrap();
+    project
+}
+
+/// A project whose only candidates are Go (discovery-only today).
+fn go_only_project(dir: &tempfile::TempDir) -> std::path::PathBuf {
+    let project = dir.path().join("goproj");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("parser.go"),
+        "package parser\n\nfunc ParsePacket(data []byte, offset int) bool {\n\treturn len(data) > offset\n}\n",
+    )
+    .unwrap();
+    project
+}
+
+#[tokio::test]
+async fn fuzz_auto_pick_excludes_a_higher_scoring_not_yet_harnessable_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let _workspace_root = common::install_managed_workspace("oxfuzz_fuzz_pipeline_it");
+    let project = mixed_c_and_go_project(&dir);
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("fuzz.db"))
+            .await
+            .unwrap(),
+    );
+    let container = pipeline_container(&store);
+
+    let outcome = container
+        .fuzz_onboard(
+            FuzzRequest {
+                project: &project,
+                target: None,
+                engine: EngineKind::LibFuzzer,
+                lang: None, // auto-detect: the Go candidate outscores the C one
+                duration_secs: 1,
+                iterations: 1,
+                timeout_ms: None,
+                resume: None,
+                review_bypass: hf_service::HarnessReviewBypass::NotRequested,
+                fresh: false,
+                sanitizer: None,
+            },
+            &noop_stage(),
+            &noop_progress(),
+        )
+        .await
+        .expect("the pipeline runs on the harnessable C target");
+
+    assert_eq!(
+        outcome.target, "parse_entry",
+        "the Go candidate outranks it on fit but has no harness path"
+    );
+    assert_eq!(outcome.lang, TargetLanguage::C);
+}
+
+#[tokio::test]
+async fn fuzz_on_a_go_only_project_fails_at_discovery_naming_the_harnessable_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let _workspace_root = common::install_managed_workspace("oxfuzz_fuzz_pipeline_it");
+    let project = go_only_project(&dir);
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("fuzz.db"))
+            .await
+            .unwrap(),
+    );
+    let container = pipeline_container(&store);
+    let log = StageLog::default();
+    let on_stage = log.sink();
+
+    let error = container
+        .fuzz_onboard(
+            FuzzRequest {
+                project: &project,
+                target: None,
+                engine: EngineKind::LibFuzzer,
+                lang: None,
+                duration_secs: 1,
+                iterations: 1,
+                timeout_ms: None,
+                resume: None,
+                review_bypass: hf_service::HarnessReviewBypass::NotRequested,
+                fresh: false,
+                sanitizer: None,
+            },
+            &on_stage,
+            &noop_progress(),
+        )
+        .await
+        .expect_err("a project with only discovery-only targets cannot be fuzzed");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("discover"),
+        "the failing stage is named: {message}"
+    );
+    assert!(
+        message.contains("discovered 1 candidate(s)"),
+        "the discovery result is reported, not hidden: {message}"
+    );
+    assert!(
+        message.contains("not yet available for their language(s) (go)"),
+        "the capability gap is named: {message}"
+    );
+    assert!(
+        message.contains("harnessable languages: c, cpp, rust"),
+        "the supported set is named: {message}"
+    );
+    assert_eq!(
+        log.stages(),
+        vec![FuzzStage::Discover { lang: None }],
+        "the pipeline stopped at discovery: no later stage was announced"
+    );
+}
+
 #[tokio::test]
 async fn fuzz_fails_loud_when_discovery_finds_no_candidates() {
     let dir = tempfile::tempdir().unwrap();

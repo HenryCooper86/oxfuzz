@@ -129,6 +129,17 @@ considers at most 64 targets in batches of 16, and leaves every original
 `fit_score` unchanged. The desktop Discover screen runs this assessment
 automatically after its initial scan and displays the three factors directly.
 
+Discovery scans more languages than the harness pipeline can build. Every
+candidate carries a derived `harnessable` flag from the single
+`TargetLanguage::harnessable` predicate (C, C++, and Rust today). A scan of a
+discovery-only language (`--lang go`, `--lang python`) still runs and persists
+its inventory, but each candidate is marked `"harnessable": false` and stderr
+notes that harness generation is not yet available for that language, naming
+the supported set. Harness draft/compile/generate, `oxfuzz fuzz` target
+auto-selection, and `oxfuzz campaign` enforce the same predicate, so a
+discovery-only target fails with that message at the harness boundary rather
+than at a late build step.
+
 ### 5. Run and inspect the campaign
 
 ```bash
@@ -187,7 +198,7 @@ Binary Tool integration is outside this release's scope.
 | --- | --- |
 | `init` | Scaffold config from templates into the resolved config directory (see Quick Start) and create/migrate the database. |
 | `doctor [--engine <e> [--duration <d>] [--require-provider]] [--build-image] [--json]` | Probe Docker and bundled engines. When the sandbox image is missing, the output names how to build it (`oxfuzz doctor --build-image`, `scripts/build-sandbox.sh`, or the canonical `docker build` command; JSON carries it as `sandbox_image_remedy`). `--build-image` runs that build from the source checkout's `docker/sandbox/Dockerfile` -- the same build the desktop app runs on first launch -- then re-probes; it fails loud when Docker is unavailable or no source checkout is found. With `--engine`, enforce selected-engine availability and run policy; optionally require provider configuration. Exit non-zero on failure. |
-| `discover <project> --lang c [--rank] [--ai auto\|require\|off] [--semgrep]` | Scan a project; `--rank` requests service-owned AI assessment, and `--semgrep` explicitly adds separate C/C++ enrichment. |
+| `discover <project> --lang c [--rank] [--ai auto\|require\|off] [--semgrep]` | Scan a project; `--rank` requests service-owned AI assessment, and `--semgrep` explicitly adds separate C/C++ enrichment. Every candidate carries a derived `harnessable` flag; a discovery-only language (`go`, `python`) still scans and persists its inventory but marks each candidate `false` with a note naming the supported set. |
 | `harness <project> --target <sym> --engine <e> [--draft-only] [--repair N] [--refine] [--promote] [--no-llm-review] [--sanitizer address\|undefined]` | Write, compile (optionally auto-repair or coverage-refine), and smoke-qualify a newly generated harness. Smoke requires the independent LLM pre-execution review; with no provider configured it fails closed unless you pass `--no-llm-review` (or set `harness.allow_unreviewed_smoke = true`), which persists a marked bypass record and an audit row -- without the model review, only the lexical lint and your own promotion decision check the harness. Without `--promote`, review the output; rerunning creates another draft. Use the retained Work Order flow below when approval must name a previously reviewed source. |
 | `work-order export\|import\|list\|submissions\|qualify\|rank\|promote ...` | Manage immutable external harness packets, submissions, qualification attempts, deterministic ranking, and exact-attempt promotion. |
 | `run <project> --target <sym> --engine <e> --duration 60m [--cpus N] [--timeout-ms N] [--resume] [--sanitizer address\|undefined]` | Run a sandboxed campaign with the active promoted harness (Ctrl-C cancels cooperatively). A file-qualified selector is `<relative-file>::<complete-symbol>`; a retained Work Order run always uses that complete selector. `--cpus N` requests a per-run CPU allocation within the configured `fuzzing.sandbox.max_cpus` ceiling; an allocation above one runs libFuzzer fork mode (`-fork=N`) and honggfuzz `--threads N` (AFL++ runs a single instance). `--timeout-ms N` overrides the per-input timeout for this run. `--resume` (AFL++ only) continues the most recent compatible AFL++ session instead of cold-starting; see "AFL++ session resume" below. `--sanitizer` asserts the promoted harness's build sanitizer (mismatch fails before any engine starts); see "Sanitizer selection" below. |
@@ -249,9 +260,11 @@ each step starts:
 ```
 
 Each stage is the operation the standalone commands run: target discovery
-(`--target` picks one explicitly, otherwise the highest-fit candidate the
-engine can drive wins; `--lang` pins the language, otherwise every supported
-language is scanned and the picked candidate carries its own), harness
+(`--target` picks one explicitly, otherwise the highest-fit candidate with a
+working harness path that the engine can drive wins -- discovery-only
+languages, Go and Python today, are never auto-selected; `--lang` pins the
+language, otherwise every supported language is scanned and the picked
+candidate carries its own), harness
 generation with the auto-repair loop, smoke qualification behind the
 pre-execution review, and the same bounded campaign `oxfuzz campaign` runs,
 with the same throttled live status line. `campaign` itself is unchanged and

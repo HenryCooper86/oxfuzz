@@ -98,6 +98,15 @@ Versions match the release commits that bump `Cargo.toml`.
   fired. The comparison now excludes service-assigned run-scoped environment
   destinations (and documents why the per-run seed was never part of it);
   the persisted run config keeps them verbatim.
+- Discovery no longer reads as harnessable for languages without a harness
+  build path. `oxfuzz discover --lang go|python` still scans and persists its
+  inventory, but every candidate carries a derived `harnessable` flag and
+  stderr names the supported set (`c, cpp, rust`). Harness
+  draft/compile/generate/refine, `oxfuzz fuzz` target auto-selection (which
+  previously could pick a Go target when the admission-gated `go-native`
+  engine was enabled, failing later at the unimplemented build), and
+  `oxfuzz campaign` all enforce the single `TargetLanguage::harnessable`
+  predicate with one message naming the language and the supported set.
 
 ## 0.6.0 - 2026-10-07
 

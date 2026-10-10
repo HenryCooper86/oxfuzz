@@ -1,11 +1,53 @@
-use hf_service::ServiceContainer;
-#[cfg(feature = "semgrep-enrichment")]
-use hf_service::TargetLanguage;
+use hf_service::{ServiceContainer, TargetLanguage};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::args::AiOption;
 use crate::parse::parse_lang;
+
+/// The operator note for a scanned language with no harness build path yet:
+/// discovery still inventories it, but no harness can be generated, so the
+/// output must say so rather than read as a ranked to-do list. `None` for
+/// harnessable languages. Goes to stderr so stdout stays pure JSON.
+fn harnessability_note(language: TargetLanguage) -> Option<String> {
+    if language.harnessable() {
+        return None;
+    }
+    Some(format!(
+        "note: harness generation is not yet available for {} targets; candidates are marked \
+         \"harnessable\": false and `oxfuzz fuzz` never auto-selects them \
+         (harnessable languages: {})",
+        language.as_str(),
+        TargetLanguage::harnessable_ids()
+    ))
+}
+
+/// Mark every candidate in a serialized discovery payload with the derived
+/// `harnessable` flag: top-level `candidates` for a plain inventory, nested
+/// `inventory.candidates` for ranked advice. A `discover` invocation scans
+/// exactly one language, so one flag value marks the whole payload; it derives
+/// from `TargetLanguage::harnessable`, never from the persisted rows.
+fn mark_candidates_harnessable(payload: &mut serde_json::Value, language: TargetLanguage) {
+    fn mark(candidates: &mut [serde_json::Value], flag: &serde_json::Value) {
+        for candidate in candidates {
+            candidate["harnessable"] = flag.clone();
+        }
+    }
+    let flag = serde_json::Value::Bool(language.harnessable());
+    if let Some(candidates) = payload
+        .get_mut("candidates")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        mark(candidates, &flag);
+    }
+    if let Some(candidates) = payload
+        .get_mut("inventory")
+        .and_then(|inventory| inventory.get_mut("candidates"))
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        mark(candidates, &flag);
+    }
+}
 
 #[cfg(not(feature = "semgrep-enrichment"))]
 pub(crate) async fn cmd_discover(
@@ -26,18 +68,24 @@ pub(crate) async fn cmd_discover(
     };
     #[cfg(not(feature = "native-analysis"))]
     let inv = container.discover(&project, lang).await?;
+    if let Some(note) = harnessability_note(lang) {
+        eprintln!("{note}");
+    }
     if rank {
         #[cfg(feature = "ai-target-ranking")]
-        let (ranked, note) = rank_inventory(&container, inv, lang, ai).await?;
+        let (mut ranked, note) = rank_inventory(&container, inv, lang, ai).await?;
         #[cfg(not(feature = "ai-target-ranking"))]
-        let (ranked, note) = rank_inventory(&container, &inv, lang, ai)?;
+        let (mut ranked, note) = rank_inventory(&container, &inv, lang, ai)?;
         if let Some(note) = note {
             eprintln!("{note}");
         }
+        mark_candidates_harnessable(&mut ranked, lang);
         println!("{}", serde_json::to_string_pretty(&ranked)?);
         return Ok(());
     }
-    println!("{}", serde_json::to_string_pretty(&inv)?);
+    let mut value = serde_json::to_value(&inv)?;
+    mark_candidates_harnessable(&mut value, lang);
+    println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
 }
 
@@ -455,6 +503,9 @@ where
     };
     #[cfg(not(feature = "native-analysis"))]
     let mut inventory = service.discover_targets(&project, language).await?;
+    if let Some(note) = harnessability_note(language) {
+        output.stderr_line(note);
+    }
     let mut advice = None;
     if rank {
         let ranked = service.rank_targets(inventory, language, ai).await?;
@@ -466,9 +517,14 @@ where
         advice = Some(ranked);
     }
     if !semgrep {
-        output.stdout_line(match advice {
-            Some(ranked) => serde_json::to_string_pretty(&ranked_advice_value(&ranked)?)?,
-            None => serde_json::to_string_pretty(&inventory)?,
+        output.stdout_line(if let Some(ranked) = advice {
+            let mut value = ranked_advice_value(&ranked)?;
+            mark_candidates_harnessable(&mut value, language);
+            serde_json::to_string_pretty(&value)?
+        } else {
+            let mut value = serde_json::to_value(&inventory)?;
+            mark_candidates_harnessable(&mut value, language);
+            serde_json::to_string_pretty(&value)?
         });
         return Ok(());
     }
@@ -678,6 +734,161 @@ mod semgrep_cli_tests {
     }
 
     #[test]
+    fn harnessability_note_covers_exactly_the_discovery_only_languages() {
+        for language in [TargetLanguage::C, TargetLanguage::Cpp, TargetLanguage::Rust] {
+            assert!(
+                super::harnessability_note(language).is_none(),
+                "{language:?} has a working harness path"
+            );
+        }
+        for (language, id) in [
+            (TargetLanguage::Go, "go"),
+            (TargetLanguage::Python, "python"),
+        ] {
+            let note = super::harnessability_note(language)
+                .expect("a discovery-only language gets a note");
+            assert!(
+                note.contains(&format!("not yet available for {id}")),
+                "the language is named: {note}"
+            );
+            assert!(
+                note.contains("c, cpp, rust"),
+                "the supported set is named: {note}"
+            );
+        }
+    }
+
+    #[test]
+    fn mark_candidates_harnessable_marks_plain_and_ranked_payloads() {
+        // The plain inventory payload carries `candidates` at the top level;
+        // the ranked advice payload nests them under `inventory`.
+        let mut plain = serde_json::json!({"project_root": "/p", "candidates": [{"symbol": "a"}, {"symbol": "b"}], "call_graph": {}});
+        super::mark_candidates_harnessable(&mut plain, TargetLanguage::Go);
+        assert_eq!(plain["candidates"][0]["harnessable"], false);
+        assert_eq!(plain["candidates"][1]["harnessable"], false);
+
+        let mut ranked =
+            serde_json::json!({"inventory": {"candidates": [{"symbol": "a"}]}, "assessments": []});
+        super::mark_candidates_harnessable(&mut ranked, TargetLanguage::C);
+        assert_eq!(ranked["inventory"]["candidates"][0]["harnessable"], true);
+    }
+
+    fn go_inventory_with_candidate(project: &str) -> TargetInventory {
+        serde_json::from_value(serde_json::json!({
+            "project_root": project,
+            "candidates": [
+                {"id": Uuid::from_u128(7), "project_root": project, "language": "Go", "symbol": "ParsePacket", "kind": "Parser", "location": {"file": "parser.go", "line": 3, "col": 1}, "signature": null, "input_surface": "Bytes", "complexity": 2, "fit_score": 0.85, "sanitizers": [], "rationale": ""}
+            ],
+            "call_graph": {}
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn discover_marks_a_not_yet_harnessable_language_and_notes_it() {
+        let mut service = FakeDiscoverService::new(TargetLanguage::Go, Vec::new());
+        service.discovered = go_inventory_with_candidate("/tmp/project");
+        let mut output = RecordingOutput::default();
+
+        run_discover_command(
+            &service,
+            PathBuf::from("/tmp/project"),
+            TargetLanguage::Go,
+            false,
+            AiOption::Auto,
+            false,
+            &mut output,
+            pending_signal(),
+            immediate_delay,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            output.stderr.iter().any(|line| line
+                .contains("harness generation is not yet available for go")
+                && line.contains("c, cpp, rust")),
+            "the note names the language and the supported set: {:?}",
+            output.stderr
+        );
+        let json: serde_json::Value = serde_json::from_str(&output.stdout[0]).unwrap();
+        assert_eq!(json["candidates"][0]["symbol"], "ParsePacket");
+        assert_eq!(
+            json["candidates"][0]["harnessable"], false,
+            "the candidate is marked as not harnessable"
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_marks_a_harnessable_language_without_a_note() {
+        let mut service = FakeDiscoverService::new(TargetLanguage::C, Vec::new());
+        service.discovered = serde_json::from_value(serde_json::json!({
+            "project_root": "/tmp/project",
+            "candidates": [
+                {"id": Uuid::from_u128(9), "project_root": "/tmp/project", "language": "C", "symbol": "parse", "kind": "Parser", "location": {"file": "src/a.c", "line": 1, "col": 1}, "signature": null, "input_surface": "Bytes", "complexity": 3, "fit_score": 0.9, "sanitizers": [], "rationale": ""}
+            ],
+            "call_graph": {}
+        }))
+        .unwrap();
+        let mut output = RecordingOutput::default();
+
+        run_discover_command(
+            &service,
+            PathBuf::from("/tmp/project"),
+            TargetLanguage::C,
+            false,
+            AiOption::Auto,
+            false,
+            &mut output,
+            pending_signal(),
+            immediate_delay,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            output.stderr.is_empty(),
+            "a harnessable language gets no note: {:?}",
+            output.stderr
+        );
+        let json: serde_json::Value = serde_json::from_str(&output.stdout[0]).unwrap();
+        assert_eq!(json["candidates"][0]["harnessable"], true);
+    }
+
+    #[tokio::test]
+    async fn discover_rank_marks_candidates_inside_the_ranked_inventory() {
+        let mut service = FakeDiscoverService::new(TargetLanguage::Go, Vec::new());
+        service.provider_available = false;
+        service.discovered = go_inventory_with_candidate("/tmp/project");
+        let mut output = RecordingOutput::default();
+
+        run_discover_command(
+            &service,
+            PathBuf::from("/tmp/project"),
+            TargetLanguage::Go,
+            true,
+            AiOption::Auto,
+            false,
+            &mut output,
+            pending_signal(),
+            immediate_delay,
+        )
+        .await
+        .unwrap();
+
+        let json: serde_json::Value = serde_json::from_str(&output.stdout[0]).unwrap();
+        assert_eq!(json["inventory"]["candidates"][0]["harnessable"], false);
+        assert!(
+            output
+                .stderr
+                .iter()
+                .any(|line| line.contains("not yet available for go")),
+            "the note accompanies the ranked output too: {:?}",
+            output.stderr
+        );
+    }
+
+    #[test]
     fn ranked_json_labels_assessed_and_scan_only_candidates() {
         let first = Uuid::from_u128(1);
         let second = Uuid::from_u128(2);
@@ -751,9 +962,8 @@ mod semgrep_cli_tests {
     }
 
     #[tokio::test]
-    async fn discover_without_semgrep_preserves_the_existing_inventory_output() {
+    async fn discover_without_semgrep_renders_the_exact_inventory_payload() {
         let service = FakeDiscoverService::new(TargetLanguage::C, Vec::new());
-        let expected = serde_json::to_string_pretty(&service.discovered).unwrap();
         let mut output = RecordingOutput::default();
 
         run_discover_command(
@@ -771,7 +981,10 @@ mod semgrep_cli_tests {
         .unwrap();
 
         assert_eq!(service.event_names(), ["discover"]);
-        assert_eq!(output.stdout, [expected]);
+        // The stdout payload is exactly the inventory (the harnessability
+        // marker only adds per-candidate flags; there are no candidates here).
+        let actual: serde_json::Value = serde_json::from_str(&output.stdout[0]).unwrap();
+        assert_eq!(actual, serde_json::to_value(&service.discovered).unwrap());
         assert!(output.stderr.is_empty());
     }
 

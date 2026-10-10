@@ -1055,6 +1055,12 @@ fn smoke_cfg(harness: &Harness) -> hf_core::engine::FuzzRunConfig {
 
 /// Construct a build command for an engine + language + sanitizer.
 ///
+/// Harnessability is a language capability, checked before any engine- or
+/// sanitizer-specific construction (Engineering Protocol 2.19): a
+/// discovered-but-unsupported language (Go, Python today) fails here with its
+/// name and the supported set from `TargetLanguage::harnessable`, never
+/// falling through to a C-style build the admission checks happened to skip.
+///
 /// Rust targets are always built with cargo-fuzz (libfuzzer-sys), regardless of
 /// the requested engine, since that is the only supported Rust fuzzing backend;
 /// the produced libFuzzer binary is then driven by the libFuzzer run path. C/C++
@@ -1083,6 +1089,13 @@ pub fn build_command(
     output_name: &str,
     sanitizer: hf_core::target::Sanitizer,
 ) -> Result<BuildCommand, ClassifiedError> {
+    if !lang.harnessable() {
+        return Err(ClassifiedError::Harness(format!(
+            "harness generation is not yet available for {} targets; harnessable languages: {}",
+            lang.as_str(),
+            TargetLanguage::harnessable_ids(),
+        )));
+    }
     if lang == TargetLanguage::Rust {
         if sanitizer != hf_core::target::Sanitizer::Address {
             return Err(ClassifiedError::Harness(format!(
@@ -1103,20 +1116,6 @@ pub fn build_command(
             output: PathBuf::from(output_name),
             extra_flags: Vec::new(),
         });
-    }
-    if lang == TargetLanguage::Go {
-        // The fixed Go compile argv (`go test -c -fuzz=^Fuzz<Symbol>$` with
-        // offline module inputs) needs the discovered symbol and the staged
-        // module tree; it ships with the Go service workflow increment, and a
-        // plain `go test -c` would silently build without fuzz
-        // instrumentation, which the design forbids.
-        let _ = engine;
-        return Err(ClassifiedError::Harness(
-            "Go native harness builds are not implemented yet: the fixed compile argv needs the \
-             discovered symbol and offline module inputs \
-             (docs/design/go-native-fuzzing-design.md)"
-                .to_owned(),
-        ));
     }
     // C++ harnesses/targets must be compiled and, crucially, LINKED with the
     // C++ compiler driver so the C++ standard library is pulled in; the C
@@ -2076,6 +2075,52 @@ mod tests {
             30 + hf_engine::runner::SANDBOX_TIMEOUT_HEADROOM_SECS
         );
         assert_eq!(smoke_sandbox_duration(u64::MAX), u64::MAX, "saturates");
+    }
+
+    #[test]
+    fn build_command_rejects_languages_without_a_harness_path() {
+        use hf_core::target::Sanitizer;
+        // Go and Python are discovery-only today: the constructor refuses them
+        // for every engine (Engineering Protocol 2.19), naming the language and
+        // the supported set. Before the gate, Python fell through to a C clang
+        // build command.
+        for engine in [
+            EngineKind::LibFuzzer,
+            EngineKind::AflPlusPlus,
+            EngineKind::Honggfuzz,
+            EngineKind::GoNative,
+            EngineKind::Syzkaller,
+        ] {
+            for lang in [TargetLanguage::Go, TargetLanguage::Python] {
+                let error = build_command(engine, lang, "fuzz_t", Sanitizer::Address).unwrap_err();
+                let message = error.to_string();
+                assert!(
+                    message.contains(&format!(
+                        "harness generation is not yet available for {} targets",
+                        lang.as_str()
+                    )),
+                    "{message}"
+                );
+                assert!(
+                    message.contains("harnessable languages: c, cpp, rust"),
+                    "{message}"
+                );
+            }
+        }
+        // The engine-mismatch guard is unchanged for a harnessable language.
+        let error = build_command(
+            EngineKind::GoNative,
+            TargetLanguage::C,
+            "fuzz_t",
+            Sanitizer::Address,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("the go-native engine builds only Go targets"),
+            "{error}"
+        );
     }
 
     #[test]

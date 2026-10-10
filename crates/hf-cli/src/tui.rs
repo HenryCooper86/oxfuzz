@@ -103,7 +103,8 @@ impl Tui {
                         }
                         KeyCode::Char('r') => {
                             if let Some(c) = app.inventory.ranked().get(app.selected) {
-                                app.log.push(run_guidance(&app.project, &c.symbol));
+                                app.log
+                                    .push(run_guidance(&app.project, c.language, &c.symbol));
                             }
                         }
                         KeyCode::Down if !app.inventory.candidates.is_empty() => {
@@ -179,6 +180,14 @@ impl Tui {
                     candidate.location.file.display(),
                     candidate.location.line
                 )),
+                Line::from(format!(
+                    "Harness path: {}",
+                    if candidate.language.harnessable() {
+                        "supported"
+                    } else {
+                        "discovery only (no harness build yet)"
+                    }
+                )),
                 Line::from(format!("Input surface: {:?}", candidate.input_surface)),
                 Line::from(format!("Complexity: {}", candidate.complexity)),
                 Line::from(format!(
@@ -205,7 +214,20 @@ impl Tui {
     }
 }
 
-fn run_guidance(project: &Path, symbol: &str) -> String {
+/// The next-step line for the selected target. A language without a harness
+/// build path gets the truth instead of a run command: the target is a
+/// discovery finding only, and `oxfuzz run` could never drive it.
+fn run_guidance(project: &Path, language: TargetLanguage, symbol: &str) -> String {
+    if !language.harnessable() {
+        return format!(
+            "No run command exists for {} yet: harness generation is not yet available for {} \
+             targets (harnessable languages: {}). The target stays in the inventory for when \
+             support lands.",
+            language.as_str(),
+            language.as_str(),
+            TargetLanguage::harnessable_ids(),
+        );
+    }
     format!(
         "Run an already promoted harness with: oxfuzz run {} --target {symbol} --engine libfuzzer",
         project.display()
@@ -232,13 +254,33 @@ fn restore_terminal(mut terminal: TerminalType) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::run_guidance;
+    use hf_service::TargetLanguage;
     use std::path::Path;
 
     #[test]
     fn target_browser_guidance_does_not_invent_a_provider_requirement() {
-        let guidance = run_guidance(Path::new("/tmp/project"), "parse_packet");
+        let guidance = run_guidance(Path::new("/tmp/project"), TargetLanguage::C, "parse_packet");
         assert!(guidance.contains("oxfuzz run"));
         assert!(guidance.contains("parse_packet"));
         assert!(!guidance.to_ascii_lowercase().contains("provider"));
+    }
+
+    #[test]
+    fn target_browser_guidance_never_runs_a_not_yet_harnessable_language() {
+        for language in [TargetLanguage::Go, TargetLanguage::Python] {
+            let guidance = run_guidance(Path::new("/tmp/project"), language, "ParsePacket");
+            assert!(
+                !guidance.contains("oxfuzz run"),
+                "no run command exists for {language:?} yet: {guidance}"
+            );
+            assert!(
+                guidance.contains(language.as_str()),
+                "the language is named: {guidance}"
+            );
+            assert!(
+                guidance.contains("c, cpp, rust"),
+                "the supported set is named: {guidance}"
+            );
+        }
     }
 }

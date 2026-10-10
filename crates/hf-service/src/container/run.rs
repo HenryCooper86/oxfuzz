@@ -1571,6 +1571,18 @@ impl ServiceContainer {
         limits: CampaignRunLimits,
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
     ) -> Result<CampaignOutcome, ClassifiedError> {
+        // A language without a harness build path can never have the promoted
+        // harness a campaign requires; refuse before target selection so the
+        // failure names the capability gap rather than "compile the harness
+        // first" for a target that can never compile (Engineering Protocol
+        // 2.16).
+        if !lang.harnessable() {
+            return Err(ClassifiedError::Validation(format!(
+                "harness generation is not yet available for {} targets; harnessable languages: {}",
+                lang.as_str(),
+                TargetLanguage::harnessable_ids()
+            )));
+        }
         let started = std::time::Instant::now();
         let project_root = canonical_project_root(project)?;
         let project = project_root.as_path();

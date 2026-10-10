@@ -19,6 +19,14 @@ The lexical scanners are intentionally conservative: a missed multi-line
 signature is a lost candidate, never a wrong one. They extract no call edges,
 so their candidates carry no reachability annotation.
 
+The scan inventory deliberately covers more languages than the harness
+pipeline can build. `TargetLanguage::harnessable` (hf-core) is the single
+predicate for the latter: C, C++, and Rust today; Go and Python scan and
+persist candidates but have no harness build path until their respective
+designs land (`docs/design/go-native-fuzzing-design.md`,
+`docs/design/python-atheris-fuzzing-design.md`). Harness authoring operations
+and `oxfuzz fuzz` target auto-selection enforce that predicate directly.
+
 ## 2. TargetKind
 
 | Variant | Description | Example |

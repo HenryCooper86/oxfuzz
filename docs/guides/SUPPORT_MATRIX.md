@@ -27,6 +27,16 @@ collects that profile by default, at a measured cost of about 4% of fuzzing
 throughput, because otherwise a C/C++ promotion carries no target-exercise
 evidence.
 
+Discovery inventories more languages than the harness pipeline can build, and
+the distinction is one predicate: `TargetLanguage::harnessable` (hf-core). C,
+C++, and Rust are harnessable today; Go and Python are discovery-only until
+the go-native and Atheris designs land. `oxfuzz discover` marks every candidate
+with a derived `harnessable` flag and notes the supported set when the scanned
+language has no harness path. Harness draft/compile/generate, `oxfuzz fuzz`
+target auto-selection, and `oxfuzz campaign` enforce the same predicate in the
+operation itself, so a discovery-only target fails loud at that boundary --
+naming the language and the supported set -- rather than at a late build step.
+
 Sanitizer selection (`--sanitizer`, `[fuzzing] default_sanitizer`): C and C++
 harnesses build with AddressSanitizer (`address`, the default) or
 UndefinedBehaviorSanitizer (`undefined`, halt-on-error) under all three

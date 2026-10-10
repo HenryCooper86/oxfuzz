@@ -762,7 +762,17 @@ async fn unsupported_harness_languages_fail_before_the_compiler() {
             )
             .await
             .expect_err("unsupported harness language must fail closed");
-        assert!(error.to_string().contains("not supported"));
+        // The denial names the language and the harnessable set (the single
+        // `TargetLanguage::harnessable` predicate), not just "not supported".
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!(
+                "harness generation is not yet available for {} targets",
+                language.as_str()
+            )),
+            "{message}"
+        );
+        assert!(message.contains("c, cpp, rust"), "{message}");
     }
 }
 

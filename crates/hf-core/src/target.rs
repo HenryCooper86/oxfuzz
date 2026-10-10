@@ -63,10 +63,50 @@ impl TargetLanguage {
     pub const fn libfuzzer_compatible(self) -> bool {
         matches!(self, Self::C | Self::Cpp | Self::Rust)
     }
+
+    /// Every language with a working harness build path, in canonical
+    /// presentation order. Membership must agree with [`Self::harnessable`];
+    /// the pair exists so the predicate stays `const` while the set is
+    /// iterable for user-facing messages.
+    pub const HARNESSABLE: &[Self] = &[Self::C, Self::Cpp, Self::Rust];
+
+    /// Whether the harness pipeline can draft, build, and qualify a harness
+    /// for this language today.
+    ///
+    /// This is the single source of truth for the discovery-vs-harnessing
+    /// distinction (Engineering Protocol 2.18): discovery scans every variant,
+    /// but Go stays `false` until the go-native build path ships (its run
+    /// adapter exists; the fixed `go test -c` compile argv is not implemented
+    /// -- docs/design/go-native-fuzzing-design.md), and Python until the
+    /// Atheris design lands (docs/design/python-atheris-fuzzing-design.md).
+    /// Harness authoring operations enforce this predicate directly, so a
+    /// discovered-but-unsupported target fails with its language and the
+    /// supported set rather than at a late build step.
+    ///
+    /// Distinct from [`Self::libfuzzer_compatible`]: the two coincide today
+    /// because every harnessable language builds a libFuzzer binary, but a
+    /// future non-libFuzzer harness path (go-native) flips only this one.
+    #[must_use]
+    pub const fn harnessable(self) -> bool {
+        matches!(self, Self::C | Self::Cpp | Self::Rust)
+    }
+
+    /// The canonical ids of the harnessable languages, rendered for
+    /// user-facing messages (e.g. "c, cpp, rust"). Membership comes from
+    /// [`Self::HARNESSABLE`], mirroring [`crate::engine::EngineKind::advertised_ids`].
+    #[must_use]
+    pub fn harnessable_ids() -> String {
+        Self::HARNESSABLE
+            .iter()
+            .map(|language| language.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 /// Per-language facts the fuzzing pipeline dispatches on: source extensions, the
-/// harness filename, and whether the language compiles to a libFuzzer binary.
+/// harness filename, whether the language compiles to a libFuzzer binary, and
+/// whether a harness can be built for it at all.
 ///
 /// Centralizing these makes [`TargetLanguage`] the single source of truth,
 /// replacing the `match TargetLanguage` arms that were scattered across the
@@ -80,6 +120,9 @@ pub trait LanguageBackend {
     /// Whether a target in this language compiles to a libFuzzer binary, so the
     /// libFuzzer can drive it.
     fn libfuzzer_compatible(&self) -> bool;
+    /// Whether the harness pipeline can draft, build, and qualify a harness
+    /// for this language today.
+    fn harnessable(&self) -> bool;
 }
 
 impl LanguageBackend for TargetLanguage {
@@ -93,6 +136,10 @@ impl LanguageBackend for TargetLanguage {
 
     fn libfuzzer_compatible(&self) -> bool {
         (*self).libfuzzer_compatible()
+    }
+
+    fn harnessable(&self) -> bool {
+        (*self).harnessable()
     }
 }
 
@@ -319,6 +366,7 @@ mod tests {
                 LanguageBackend::libfuzzer_compatible(&lang),
                 lang.libfuzzer_compatible()
             );
+            assert_eq!(LanguageBackend::harnessable(&lang), lang.harnessable());
             // The harness filename carries a matching extension.
             let ext = lang.harness_filename().rsplit('.').next().unwrap();
             assert!(lang.extensions().contains(&ext), "{lang:?} harness ext");
@@ -343,6 +391,36 @@ mod tests {
     fn relative_file_keeps_an_already_relative_path() {
         let c = candidate("/proj", "src/a.c");
         assert_eq!(c.relative_file(), "src/a.c");
+    }
+
+    #[test]
+    fn harnessable_marks_only_languages_with_a_working_harness_build() {
+        for (lang, expected) in [
+            (TargetLanguage::C, true),
+            (TargetLanguage::Cpp, true),
+            (TargetLanguage::Rust, true),
+            (TargetLanguage::Go, false),
+            (TargetLanguage::Python, false),
+        ] {
+            assert_eq!(lang.harnessable(), expected, "{lang:?}");
+        }
+        // The rendered supported set is derived from the same predicate, so a
+        // language that becomes harnessable joins every user-facing message at
+        // once.
+        assert_eq!(TargetLanguage::harnessable_ids(), "c, cpp, rust");
+        for lang in [
+            TargetLanguage::C,
+            TargetLanguage::Cpp,
+            TargetLanguage::Rust,
+            TargetLanguage::Go,
+            TargetLanguage::Python,
+        ] {
+            assert_eq!(
+                TargetLanguage::HARNESSABLE.contains(&lang),
+                lang.harnessable(),
+                "{lang:?}"
+            );
+        }
     }
 
     #[test]

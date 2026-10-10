@@ -199,10 +199,23 @@ fn fuzzing_policy_error(error: &str) -> ClassifiedError {
     ClassifiedError::Validation(format!("invalid fuzzing settings: {error}"))
 }
 
+/// Harness-authoring admission: the language must have a working harness
+/// build path (the single `TargetLanguage::harnessable` predicate) and the
+/// requested engine must be enabled and able to drive it (operator policy).
+/// The capability check runs first so a discovery-only language (Go, Python)
+/// fails with its own name and the supported set rather than an engine-policy
+/// message no engine choice could fix.
 fn require_fuzzing_harness_engine(
     engine: EngineKind,
     language: TargetLanguage,
 ) -> Result<(), ClassifiedError> {
+    if !language.harnessable() {
+        return Err(ClassifiedError::Validation(format!(
+            "harness generation is not yet available for {} targets; harnessable languages: {}",
+            language.as_str(),
+            TargetLanguage::harnessable_ids()
+        )));
+    }
     crate::config::resolve_harness_engine(Some(engine), language)
         .map(|_| ())
         .map_err(|error| fuzzing_policy_error(&error))

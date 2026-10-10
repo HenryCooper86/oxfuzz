@@ -937,8 +937,8 @@ impl ServiceContainer {
         policy: AiPolicy,
         sanitizer: Option<Sanitizer>,
     ) -> Result<HarnessDraft, ClassifiedError> {
-        self.admit_harness_build(project, lang).await?;
         require_fuzzing_harness_engine(engine, lang)?;
+        self.admit_harness_build(project, lang).await?;
         self.authorize_recorded(Action::DraftHarness, "harness_draft", Some(project))
             .await?;
         let sanitizer = crate::config::resolve_build_sanitizer(sanitizer)
@@ -1026,10 +1026,10 @@ impl ServiceContainer {
         sanitizer: Option<Sanitizer>,
     ) -> Result<CompileOutcome, ClassifiedError> {
         self.compilation_store()?;
+        require_fuzzing_harness_engine(engine, lang)?;
         self.admit_harness_build(project, lang).await?;
         let _workspace_operation = self.acquire_workspace_operation().await?;
         let _target_revision = self.acquire_target_revision(project, target).await?;
-        require_fuzzing_harness_engine(engine, lang)?;
         self.authorize_recorded(Action::CompileHarness, "harness_compile", Some(project))
             .await?;
         let sanitizer = crate::config::resolve_build_sanitizer(sanitizer)
@@ -1125,9 +1125,9 @@ impl ServiceContainer {
         sanitizer: Option<Sanitizer>,
     ) -> Result<HarnessGenOutcome, ClassifiedError> {
         self.compilation_store()?;
+        require_fuzzing_harness_engine(engine, lang)?;
         self.admit_harness_build(project, lang).await?;
         let _workspace_operation = self.acquire_workspace_operation().await?;
-        require_fuzzing_harness_engine(engine, lang)?;
         self.authorize_recorded(Action::CompileHarness, "harness_generate", Some(project))
             .await?;
         let sanitizer = crate::config::resolve_build_sanitizer(sanitizer)
@@ -1188,9 +1188,9 @@ impl ServiceContainer {
         max_repairs: usize,
     ) -> Result<HarnessGenOutcome, ClassifiedError> {
         self.compilation_store()?;
+        require_fuzzing_harness_engine(engine, lang)?;
         self.admit_harness_build(project, lang).await?;
         let _workspace_operation = self.acquire_workspace_operation().await?;
-        require_fuzzing_harness_engine(engine, lang)?;
         self.authorize_recorded(Action::CompileHarness, "harness_refine", Some(project))
             .await?;
         let inv = self.discover(project, lang).await?;
@@ -2242,8 +2242,8 @@ impl ServiceContainer {
         }
         let project = std::path::Path::new(&req.project);
         self.compilation_store()?;
-        self.admit_harness_build(project, req.lang).await?;
         require_fuzzing_harness_engine(req.engine, req.lang)?;
+        self.admit_harness_build(project, req.lang).await?;
         self.authorize_recorded(Action::CompileHarness, "harness_tournament", Some(project))
             .await?;
 
