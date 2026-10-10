@@ -329,6 +329,33 @@ pub(crate) enum RunsOp {
         /// Run UUID, or an unambiguous prefix of one.
         id: String,
     },
+    /// Compare two runs' retained covered edge sets: exact counts of edges
+    /// only the baseline covered (lost), only the other covered (gained),
+    /// shared, and in the union, plus a capped sample of the lost/gained edge
+    /// ids. Both runs need a captured edge set: AFL++ campaign runs capture
+    /// one at run end and at closeout; `runs capture-edges` captures one on
+    /// demand while the run's retained corpus and binary are still staged.
+    #[cfg(feature = "run-closeout")]
+    Diff {
+        /// Baseline run UUID, or an unambiguous prefix of one.
+        a: String,
+        /// Run to compare against the baseline (UUID or prefix).
+        b: String,
+        /// Emit the service-owned report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Capture a terminal AFL++ campaign run's covered edge set now, by
+    /// replaying its retained corpus through afl-showmap in the sandbox. A run
+    /// that already retains a set is reported without re-measurement.
+    #[cfg(feature = "run-closeout")]
+    CaptureEdges {
+        /// Run UUID, or an unambiguous prefix of one.
+        id: String,
+        /// Emit the service-owned capture view as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Run an approved campaign: discover -> require promoted harness -> seed
@@ -1503,6 +1530,45 @@ mod runs_cli_tests {
         assert!(Cli::try_parse_from(["oxfuzz", "runs"]).is_err());
         assert!(Cli::try_parse_from(["oxfuzz", "runs", "status"]).is_err());
         assert!(Cli::try_parse_from(["oxfuzz", "runs", "stop"]).is_err());
+    }
+
+    #[cfg(feature = "run-closeout")]
+    #[test]
+    fn runs_diff_and_capture_edges_parse() {
+        let diff = Cli::try_parse_from(["oxfuzz", "runs", "diff", "a1b2c3d4", "e5f6a7b8"]).unwrap();
+        let Commands::Runs(crate::args::RunsArgs {
+            op: RunsOp::Diff { a, b, json },
+        }) = diff.command
+        else {
+            panic!("expected runs diff");
+        };
+        assert_eq!(a, "a1b2c3d4");
+        assert_eq!(b, "e5f6a7b8");
+        assert!(!json);
+
+        let diff_json =
+            Cli::try_parse_from(["oxfuzz", "runs", "diff", "a1b2c3d4", "e5f6a7b8", "--json"])
+                .unwrap();
+        assert!(matches!(
+            diff_json.command,
+            Commands::Runs(crate::args::RunsArgs {
+                op: RunsOp::Diff { json: true, .. }
+            })
+        ));
+
+        let capture =
+            Cli::try_parse_from(["oxfuzz", "runs", "capture-edges", "a1b2c3d4", "--json"]).unwrap();
+        let Commands::Runs(crate::args::RunsArgs {
+            op: RunsOp::CaptureEdges { id, json },
+        }) = capture.command
+        else {
+            panic!("expected runs capture-edges");
+        };
+        assert_eq!(id, "a1b2c3d4");
+        assert!(json);
+
+        assert!(Cli::try_parse_from(["oxfuzz", "runs", "diff", "only-one"]).is_err());
+        assert!(Cli::try_parse_from(["oxfuzz", "runs", "capture-edges"]).is_err());
     }
 }
 

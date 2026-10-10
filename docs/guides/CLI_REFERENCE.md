@@ -206,6 +206,8 @@ Binary Tool integration is outside this release's scope.
 | `runs list [--project <path>] [--active] [--limit N] [--json]` | List persisted runs, newest first: short id, target, engine, status, start, duration, crashes. |
 | `runs status <run-id-or-prefix> [--json]` | Show one run's full record plus its latest persisted live telemetry, when any was retained. |
 | `runs stop <run-id-or-prefix>` | Cooperatively cancel a run owned by this process; exits non-zero with the reason otherwise. |
+| `runs diff <run-a> <run-b> [--json]` | Exact edge-set diff between two runs' retained coverage: counts of edges only a covered (lost), only b covered (gained), shared, and union, plus capped id samples. See "Edge-set capture and diffs" below. |
+| `runs capture-edges <run-id-or-prefix> [--json]` | Capture a terminal AFL++ campaign run's covered edge set on demand (replays its retained corpus through afl-showmap in the sandbox); a run that already retains one is reported without re-measurement. |
 | `campaign <project> --target <sym> --engine <e> [--timeout-ms N] [--resume] [--sanitizer address\|undefined]` | Run and triage a bounded campaign using an already smoke-qualified, human-promoted harness. Prints an iteration marker per iteration plus the same throttled live status line as `run`; raw engine output lines stay internal to the campaign. `--timeout-ms N` applies the per-input timeout to every iteration. `--resume` (AFL++ only) applies to every iteration: iteration N continues the output tree iteration N-1 produced. `--sanitizer` asserts the promoted harness's build sanitizer for every iteration. |
 | `fuzz <project> [--target <sym>] [--engine <e>] [--lang <l>] [--duration-secs N] [--iterations N] [--timeout-ms N] [--resume] [--sanitizer address\|undefined] [--ai auto\|require\|off] [--no-llm-review] [--fresh] [--json]` | One-command onboarding: discover -> harness -> smoke -> promote -> campaign in a single invocation. The only pause is the human promotion gate; a denial stops the pipeline before any campaign. Reuses an already-promoted harness for the same target/engine unless `--fresh` is given. `--resume` (AFL++ only) forwards to the campaign stage. `--sanitizer` selects the build sanitizer for a fresh harness and re-qualifies rather than reusing a promoted harness built with the other sanitizer. |
 | `health --run <run UUID>` | Assess retained campaign health. This read-only command never stops, restarts, or resizes the run. |
@@ -345,6 +347,35 @@ telemetry snapshot, refreshed on the health-assessment cadence (30 seconds by
 default) for health assessment rather than progress rendering; `runs status`
 already surfaces it. A faithful attach needs a persisted progress journal or
 a cross-process broadcast channel, which is a separate design.
+
+### Edge-set capture and diffs
+
+```bash
+oxfuzz runs capture-edges <run-id-or-prefix> [--json]
+oxfuzz runs diff <run-a> <run-b> [--json]
+```
+
+A terminal AFL++ campaign run retains its *covered edge set*: the union of
+AFL coverage-map offsets its run-local corpus (`runs/<id>/corpus`, seeds plus
+the queue entries the engine discovered) exercises, replayed through
+`afl-showmap` against the run's exact staged binary under its recorded sandbox
+image. Capture is best-effort at run end (a failure is journaled and never
+fails the run) and runs again as the `edge_set` step of `oxfuzz closeout`;
+`runs capture-edges` captures on demand while the run's retained corpus and
+binary are still staged. The retained set is immutable (a 64 KiB bitmap in
+the database) and is never re-measured for a run that already has one.
+libFuzzer, honggfuzz, and Rust runs have no AFL map (their harnesses are not
+AFL-instrumented), so capture skips them with the reason named.
+
+`runs diff <a> <b>` answers "run B lost which edges that run A had": exact
+counts of edges only a covered, only b covered, shared, and the union, plus a
+capped (ascending, at most 64) sample of the lost/gained edge ids; `--json`
+carries the full capped report. A diff between runs of different projects or
+a run with no captured set exits non-zero and names the remedy. AFL assigns
+edge ids per build, so when the two runs measured different harness binaries
+the report carries `same_binary: false` and prints the caveat: the counts
+still answer how much the covered set moved, but id-level samples may reflect
+id reassignment rather than coverage change.
 
 ### Harness Work Order commands
 
@@ -498,7 +529,8 @@ VM is alive.
 
 `oxfuzz closeout --run <UUID>` operates only on a terminal, harness-backed
 campaign and resumes at unfinished work. The retained steps are triage,
-minimize, corpus absorb, coverage, blockers, disposition, and trust report.
+minimize, corpus absorb, coverage, blockers, edge set, disposition, and trust
+report.
 Opening Run History in the desktop app is read-only; the CLI command itself is
 the explicit execution request. Historical source coverage and blocker results
 remain unavailable when current workspace files cannot establish them.

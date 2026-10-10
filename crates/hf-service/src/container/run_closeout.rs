@@ -248,6 +248,7 @@ impl ServiceContainer {
             CloseoutStep::Blockers => StepOutcome::Skipped {
                 reason: "exact run-bound coverage blockers are unavailable; use current-workspace blocker analysis separately".to_owned(),
             },
+            CloseoutStep::EdgeSet => self.closeout_edge_set(run_id, &scope.target).await,
             CloseoutStep::Disposition => self.closeout_disposition(project, run_id).await,
             CloseoutStep::TrustReport => match self.campaign_trust_report(run_id).await {
                 Ok(report) => StepOutcome::Completed {

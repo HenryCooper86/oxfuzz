@@ -11,6 +11,7 @@ const STEPS: CloseoutStep[] = [
   "corpus_absorb",
   "coverage",
   "blockers",
+  "edge_set",
   "disposition",
   "trust_report",
 ];

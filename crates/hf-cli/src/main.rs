@@ -38,6 +38,8 @@ use crate::commands::fuzz::cmd_fuzz;
 #[cfg(feature = "unreached-surface")]
 use crate::commands::harness::{cmd_attribution, cmd_unreached};
 use crate::commands::harness::{cmd_corpus, cmd_harness, cmd_run, cmd_triage};
+#[cfg(feature = "run-closeout")]
+use crate::commands::runs::{cmd_runs_capture_edges, cmd_runs_diff};
 use crate::commands::runs::{cmd_runs_list, cmd_runs_status, cmd_runs_stop};
 use crate::commands::system::{
     cmd_agent, cmd_arm, cmd_doctor, cmd_export, cmd_knowledge, cmd_policy, cmd_providers,
@@ -195,6 +197,10 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
             } => cmd_runs_list(project, active, json, limit).await?,
             args::RunsOp::Status { id, json } => cmd_runs_status(&id, json).await?,
             args::RunsOp::Stop { id } => cmd_runs_stop(&id).await?,
+            #[cfg(feature = "run-closeout")]
+            args::RunsOp::Diff { a, b, json } => cmd_runs_diff(&a, &b, json).await?,
+            #[cfg(feature = "run-closeout")]
+            args::RunsOp::CaptureEdges { id, json } => cmd_runs_capture_edges(&id, json).await?,
         },
         Commands::Campaign(args::CampaignArgs {
             project,

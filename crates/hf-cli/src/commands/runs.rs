@@ -236,12 +236,92 @@ pub(crate) async fn cmd_runs_stop(id: &str) -> anyhow::Result<()> {
     }
 }
 
+/// Render the edge-set diff as decided by `hf-service`: exact counts first,
+/// then the capped id samples, then the cross-binary caveat (Engineering
+/// Protocol 2.9).
+#[cfg(feature = "run-closeout")]
+pub(crate) fn edge_diff_lines(report: &hf_service::CoverageDiffReport) -> Vec<String> {
+    let sample = |ids: &[u64], total: u64| -> String {
+        let listed = ids
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        if total > ids.len() as u64 {
+            format!("{listed} (first {} of {total})", ids.len())
+        } else {
+            listed
+        }
+    };
+    let mut lines = vec![
+        format!(
+            "edge diff: {} -> {}",
+            short_run_id(&report.run_a.to_string()),
+            short_run_id(&report.run_b.to_string())
+        ),
+        format!(
+            "  run a: {} edges, run b: {} edges, common: {}, union: {}",
+            report.edges_a, report.edges_b, report.common, report.union
+        ),
+        format!("  only in a (lost): {}", report.only_a),
+        format!("    {}", sample(&report.only_a_sample, report.only_a)),
+        format!("  only in b (gained): {}", report.only_b),
+        format!("    {}", sample(&report.only_b_sample, report.only_b)),
+    ];
+    if !report.same_binary {
+        lines.push(
+            "  note: the runs measured different binaries; AFL edge ids are assigned per build, \
+             so id-level differences may reflect reassignment rather than coverage change"
+                .to_owned(),
+        );
+    }
+    lines
+}
+
+#[cfg(feature = "run-closeout")]
+pub(crate) async fn cmd_runs_diff(a: &str, b: &str, json: bool) -> anyhow::Result<()> {
+    let container = crate::approval::bootstrap().await;
+    let run_a = container.resolve_run_id(a).await?;
+    let run_b = container.resolve_run_id(b).await?;
+    let report = container.coverage_diff(run_a, run_b).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    for line in edge_diff_lines(&report) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+#[cfg(feature = "run-closeout")]
+pub(crate) async fn cmd_runs_capture_edges(id: &str, json: bool) -> anyhow::Result<()> {
+    let container = crate::approval::bootstrap().await;
+    let run_id = container.resolve_run_id(id).await?;
+    let capture = container.capture_run_edge_set(run_id).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&capture)?);
+        return Ok(());
+    }
+    if capture.already_retained {
+        println!(
+            "run {} already retains an edge set: {} edges from {} inputs (captured {})",
+            capture.run_id, capture.edges, capture.inputs, capture.collected_at
+        );
+    } else {
+        println!(
+            "captured edge set for run {}: {} edges from {} inputs",
+            capture.run_id, capture.edges, capture.inputs
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use hf_service::RunTelemetryView;
 
     use super::*;
-
     fn history_item(id: &str, status: &str) -> RunHistoryItem {
         RunHistoryItem {
             id: id.to_owned(),
@@ -391,5 +471,53 @@ mod tests {
         assert!(!text.contains("ended:"));
         assert!(!text.contains("harness:"));
         assert!(!text.contains("telemetry:"));
+    }
+}
+
+#[cfg(all(test, feature = "run-closeout"))]
+mod edge_diff_render_tests {
+    use super::edge_diff_lines;
+
+    fn report(same_binary: bool) -> hf_service::CoverageDiffReport {
+        hf_service::CoverageDiffReport {
+            run_a: uuid::Uuid::from_u128(0xaaaa),
+            run_b: uuid::Uuid::from_u128(0xbbbb),
+            same_binary,
+            edges_a: 3,
+            edges_b: 2,
+            only_a: 2,
+            only_b: 1,
+            common: 1,
+            union: 4,
+            only_a_sample: vec![1, 2],
+            only_b_sample: vec![4],
+            sample_cap: 64,
+        }
+    }
+
+    #[test]
+    fn diff_lines_render_counts_samples_and_direction() {
+        let text = edge_diff_lines(&report(true)).join("\n");
+
+        assert!(text.contains("edge diff:"), "{text}");
+        assert!(
+            text.contains("run a: 3 edges, run b: 2 edges, common: 1, union: 4"),
+            "{text}"
+        );
+        assert!(text.contains("only in a (lost): 2"), "{text}");
+        assert!(text.contains("1, 2"), "{text}");
+        assert!(text.contains("only in b (gained): 1"), "{text}");
+        assert!(!text.contains("different binaries"), "{text}");
+    }
+
+    #[test]
+    fn diff_lines_note_a_binary_change_and_mark_truncated_samples() {
+        let mut report = report(false);
+        report.only_a = 500;
+        report.only_a_sample = (0..64).collect();
+        let text = edge_diff_lines(&report).join("\n");
+
+        assert!(text.contains("different binaries"), "{text}");
+        assert!(text.contains("first 64 of 500"), "{text}");
     }
 }

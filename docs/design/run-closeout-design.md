@@ -4,12 +4,16 @@ Status: **implemented**. Owner: `hf-service`, over retained SQLite closeout reco
 
 ## 1. Goal
 
-After a run ends, seven closeout decisions should be retained: triage,
+After a run ends, eight closeout decisions should be retained: triage,
 minimization, corpus absorption, exact coverage availability, blocker evidence
-availability, disposition derivation, and a trust report. The steps that can be
-bound to the run compose existing service operations. Coverage and blocker
-steps explicitly retain that evidence as unavailable until exact run-bound
-source coverage exists.
+availability, edge-set capture, disposition derivation, and a trust report. The
+steps that can be bound to the run compose existing service operations.
+Coverage and blocker steps explicitly retain that evidence as unavailable until
+exact run-bound source coverage exists. The edge-set step captures the run's
+covered AFL map offsets by replaying its retained run-local corpus through
+`afl-showmap` against its staged binary; it consumes no other step's output,
+reuses a set retained at run end or on demand, and skips runs whose binaries
+carry no AFL map.
 
 Closeout runs that chain once per run, records what each step did, and can be
 resumed.
@@ -71,8 +75,13 @@ Fixed, by data dependency:
    run.
 5. **blockers** -- likewise reports unavailable without exact run-bound source
    coverage and directs the operator to current-workspace analysis.
-6. **disposition** -- consumes triage output and any remediation records.
-7. **trust report** -- consumes every prior step and is therefore last.
+6. **edge set** -- retains the run's covered AFL map offsets (measured by
+   replaying the run-local corpus through `afl-showmap`), reusing the set when
+   one was already captured at run end or on demand. It consumes nothing, so a
+   failed triage or absorb never blocks it; a run without an AFL-instrumented
+   binary or with its staged corpus gone skips with the reason.
+7. **disposition** -- consumes triage output and any remediation records.
+8. **trust report** -- consumes every prior step and is therefore last.
 
 The trust report is last on purpose: it audits the closeout that produced it,
 so a step that failed appears as an `Unavailable` gate rather than being
@@ -116,7 +125,11 @@ target leases.
 - **Running closeout automatically at run end** -- closeout performs sandboxed
   work, and starting sandboxed work without an approval surface contradicts
   ENGINEERING_PROTOCOL.md 2.12. Closeout is offered when a run ends; it is invoked
-  deliberately.
+  deliberately. Evidence collection that is part of the run's own authorized
+  execution is a different thing and stays at run end: the edge-set replay and
+  the terminal function-coverage export run under the run's own sandbox
+  profile and approval scope, best-effort, and are journaled rather than
+  failing the run.
 - **Adding new analysis inside closeout** -- closeout composes; any new analysis
   is its own subsystem with its own design.
 - **A single combined result document** -- each step already persists its own
@@ -141,3 +154,6 @@ target leases.
 - Legacy coverage and blocker completions are read as unavailable, and an
   explicit resume refreshes trust without replaying current-workspace evidence.
 - Re-running a completed closeout is a no-op that reports the retained result.
+- An AFL++ run with staged corpus evidence records its covered edge set exactly
+  once; a later pass reports the retained set without re-measuring, and a run
+  whose binary carries no AFL map skips the step with the engine named.

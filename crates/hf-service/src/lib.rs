@@ -189,6 +189,8 @@ pub use container::{
     SchedulableTarget, SeedEntry, SeedRegenerationOutcome, SeedSurvivalReport, ServiceContainer,
     SystemSnapshot, SyzkallerRunOpts, SyzkallerSummary, FUZZ_PIPELINE_REPAIRS,
 };
+#[cfg(feature = "run-closeout")]
+pub use container::{CoverageDiffReport, RunEdgeSetCapture};
 #[cfg(feature = "ai-target-ranking")]
 pub use container::{RankedDiscoveryResult, RankedDiscoveryStatus, RankedInventoryAdvice};
 #[cfg(feature = "coverage-blockers")]

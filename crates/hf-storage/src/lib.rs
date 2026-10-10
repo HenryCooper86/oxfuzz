@@ -12,6 +12,8 @@ pub use ai_ranking_store::{
 };
 mod run_function_coverage;
 pub use run_function_coverage::RunFunctionCoverageRecord;
+mod run_edge_sets;
+pub use run_edge_sets::RunEdgeSetRecord;
 mod coverage_experiment_store;
 pub use coverage_experiment_store::*;
 mod store;

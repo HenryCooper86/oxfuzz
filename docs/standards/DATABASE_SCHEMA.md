@@ -84,6 +84,30 @@ must match in the insertion transaction. Identical retries are idempotent;
 different evidence for the same run is rejected. Absence means unavailable, not
 zero coverage. Raw profiles and the indexed profile remain in run-owned output.
 
+### `run_edge_sets`
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `run_id` | `TEXT PRIMARY KEY` | references runs(id), cascading deletion |
+| `binary_sha256` | `TEXT NOT NULL` | owning campaign executable digest |
+| `sandbox_rev` | `TEXT NOT NULL` | owning campaign image identity |
+| `inputs` | `INTEGER NOT NULL` | corpus inputs replayed to build the set |
+| `edge_count` | `INTEGER NOT NULL` | covered offsets; equals the bitmap popcount |
+| `edge_map` | `BLOB NOT NULL` | fixed 65,536-byte bitmap; bit `i` marks map offset `i` covered |
+| `collected_at` | `TEXT NOT NULL` | RFC 3339 collection time |
+
+Migration `0038_run_edge_sets.sql` retains one immutable covered edge set per
+run: the union of AFL coverage-map offsets the run's retained corpus
+exercises, replayed through `afl-showmap` against the run's exact staged
+binary at run closeout (or on demand). Edge id presence only; hit-count
+buckets are folded away. The owning run's executable and image must match in
+the insertion transaction. Identical retries are idempotent; different
+evidence for the same run is rejected. Absence means unavailable, not zero
+coverage. The bitmap bounds every row to 65,536 bytes (524,288 addressable
+offsets; AFL's default instrumented map is 65,536 entries), and a measured
+map offset beyond that capacity fails capture rather than silently dropping
+coverage.
+
 ### `automotive_operations`
 
 | column | SQLite declaration | notes |
@@ -715,7 +739,7 @@ restart, and a finished run is exactly what closeout operates on.
 | column | SQLite declaration | notes |
 | --- | --- | --- |
 | `run_id` | `TEXT NOT NULL` | the run being closed out |
-| `step` | `TEXT NOT NULL` | Triage/Minimize/CorpusAbsorb/Coverage/Blockers/Disposition/TrustReport |
+| `step` | `TEXT NOT NULL` | Triage/Minimize/CorpusAbsorb/Coverage/Blockers/EdgeSet/Disposition/TrustReport |
 | `outcome` | `TEXT NOT NULL` | `completed`, `skipped`, or `failed` |
 | `detail` | `TEXT NOT NULL DEFAULT ''` | what it produced, why it was skipped, or what went wrong |
 | `recorded_at` | `TEXT NOT NULL` | RFC3339 write time |
@@ -1296,6 +1320,8 @@ bounded deterministic history, and both cleanup operations.
 | `0034_run_function_coverage.sql` | retains per-function coverage evidence for a run |
 | `0035_ai_target_ranking.sql` | creates progressive discovery operations and durable AI prompt batches |
 | `0036_ai_rank_resolved_model.sql` | records the resolved provider model for each AI batch |
+| `0037_build_profile_systems.sql` | widens saved build profiles to Meson and Autotools by rebuilding the profile table's system check |
+| `0038_run_edge_sets.sql` | retains one immutable, bounded per-run covered edge set (64 KiB AFL map bitmap) for exact run-to-run edge diffs |
 
 ## 7. Read failure contract
 

@@ -11,6 +11,20 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ### Added
 
+- Edge-set diff between runs. A terminal AFL++ campaign now retains its
+  covered edge set — the union of AFL coverage-map offsets its run-local
+  corpus exercises, replayed through `afl-showmap` against the run's exact
+  staged binary under its recorded sandbox image — as an immutable 64 KiB
+  bitmap (migration 0038), captured best-effort at run end and as the new
+  `edge_set` closeout step. `oxfuzz runs diff <run-a> <run-b>` answers
+  "run B lost which edges that run A had" with exact only/lost, gained,
+  common, and union counts plus capped id samples (`--json` for the full
+  capped report), and flags cross-binary diffs, where per-build edge id
+  assignment makes id samples advisory. `oxfuzz runs capture-edges <run-id>`
+  captures a set on demand while the run's retained corpus and binary are
+  still staged; a run that already retains one is reported without
+  re-measurement. libFuzzer, honggfuzz, and Rust runs carry no AFL map, so
+  capture skips them with the reason named.
 - Interactive CLI approval gate. On a terminal (stdin and stderr both TTYs),
   a high-risk action now prompts `[y]es/[n]o/[a]lways` -- approve once, deny,
   or allow that action kind for the rest of the process -- instead of

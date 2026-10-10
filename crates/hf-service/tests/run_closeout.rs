@@ -52,9 +52,25 @@ fn the_ladder_is_ordered_by_data_dependency() {
             CloseoutStep::CorpusAbsorb,
             CloseoutStep::Coverage,
             CloseoutStep::Blockers,
+            CloseoutStep::EdgeSet,
             CloseoutStep::Disposition,
             CloseoutStep::TrustReport,
         ]
+    );
+}
+
+#[test]
+fn edge_set_capture_consumes_nothing_so_a_failed_step_never_blocks_it() {
+    let done = [
+        failed(CloseoutStep::Triage),
+        failed(CloseoutStep::Coverage),
+        failed(CloseoutStep::CorpusAbsorb),
+    ];
+
+    assert_eq!(
+        blocked_by(CloseoutStep::EdgeSet, &done),
+        None,
+        "capture measures the run's own retained corpus, independent of triage and coverage"
     );
 }
 
@@ -90,6 +106,7 @@ fn an_interrupted_closeout_resumes_at_the_first_non_terminal_step() {
         pending_steps(&done),
         vec![
             CloseoutStep::Blockers,
+            CloseoutStep::EdgeSet,
             CloseoutStep::Disposition,
             CloseoutStep::TrustReport,
         ]

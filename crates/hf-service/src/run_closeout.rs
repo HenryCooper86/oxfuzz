@@ -1,10 +1,10 @@
 //! Service-owned run closeout ladder.
 //!
-//! After a run ends, seven things should happen: triage, minimization, corpus
-//! absorption, coverage measurement, blocker exploration, disposition
-//! derivation, and a trust report. Each already exists and each is invoked
-//! separately, so a finished run sits half-analyzed until someone remembers the
-//! next command.
+//! After a run ends, eight things should happen: triage, minimization, corpus
+//! absorption, coverage measurement, blocker exploration, edge-set capture,
+//! disposition derivation, and a trust report. Each already exists and each is
+//! invoked separately, so a finished run sits half-analyzed until someone
+//! remembers the next command.
 //!
 //! See `docs/design/run-closeout-design.md`.
 //!
@@ -32,6 +32,8 @@ pub enum CloseoutStep {
     Coverage,
     /// Rank uncovered blockers from that measurement.
     Blockers,
+    /// Capture the run's covered edge set from its retained corpus.
+    EdgeSet,
     /// Derive a disposition for each retained crash.
     Disposition,
     /// Audit which claims the closeout's own evidence licenses.
@@ -128,6 +130,7 @@ pub fn closeout_ladder() -> Vec<CloseoutStep> {
         CloseoutStep::CorpusAbsorb,
         CloseoutStep::Coverage,
         CloseoutStep::Blockers,
+        CloseoutStep::EdgeSet,
         CloseoutStep::Disposition,
         CloseoutStep::TrustReport,
     ]
@@ -137,10 +140,12 @@ pub fn closeout_ladder() -> Vec<CloseoutStep> {
 ///
 /// The trust report deliberately consumes nothing: it must run even when every
 /// earlier step failed, so those failures surface as unavailable gates.
+/// Edge-set capture consumes nothing either: it measures the run's own
+/// retained corpus, so a failed triage or absorb never blocks it.
 #[must_use]
 pub fn consumes(step: CloseoutStep) -> &'static [CloseoutStep] {
     match step {
-        CloseoutStep::Triage | CloseoutStep::TrustReport => &[],
+        CloseoutStep::Triage | CloseoutStep::EdgeSet | CloseoutStep::TrustReport => &[],
         CloseoutStep::Minimize | CloseoutStep::CorpusAbsorb | CloseoutStep::Disposition => {
             &[CloseoutStep::Triage]
         }

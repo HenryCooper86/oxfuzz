@@ -86,13 +86,19 @@ impl RuntimeAdapter for AflSessionRuntime {
 
     async fn run_command(
         &self,
-        _cmd: &[String],
+        cmd: &[String],
         cwd: &Path,
         _limits: &ResourceLimits,
     ) -> Result<CommandResult, hf_core::error::ClassifiedError> {
+        // Run-end edge-set capture replays the run corpus through afl-showmap.
+        let stdout = if cmd.first().is_some_and(|command| command == "afl-showmap") {
+            "7:1\n9:1\n".to_owned()
+        } else {
+            "DONE exec/s: 64".to_owned()
+        };
         Ok(CommandResult {
             exit_code: 0,
-            stdout: "DONE exec/s: 64".to_owned(),
+            stdout,
             stderr: String::new(),
             workspace: cwd.to_path_buf(),
             termination: CommandTermination::Completed,
@@ -245,6 +251,44 @@ async fn afl_project(
         .await
         .expect("operator promotes harness");
     (dir, project, store, container, runtime)
+}
+
+#[cfg(feature = "run-closeout")]
+#[tokio::test]
+async fn run_end_captures_the_runs_covered_edge_set() {
+    let (_dir, project, store, container, _runtime) =
+        afl_project("oxfuzz_afl_resume_edges", false).await;
+    // Give the run corpus one input so capture has something to replay.
+    let workspace = hf_service::workspace_dir(&project, TARGET);
+    std::fs::create_dir_all(workspace.join("corpus")).unwrap();
+    std::fs::write(workspace.join("corpus/seed-a"), b"seed a").unwrap();
+    let sink = |_: hf_service::FuzzProgress| {};
+
+    let summary = container
+        .run_fuzzer(
+            &project,
+            TARGET,
+            EngineKind::AflPlusPlus,
+            1,
+            None,
+            None,
+            None,
+            None,
+            &sink,
+        )
+        .await
+        .expect("run");
+
+    let retained = store
+        .run_edge_set(summary.run_id)
+        .await
+        .unwrap()
+        .expect("run-end capture retained the run's edge set");
+    assert_eq!(
+        retained.edge_count, 2,
+        "the fixture map covers edges 7 and 9"
+    );
+    assert!(retained.inputs >= 1);
 }
 
 #[tokio::test]

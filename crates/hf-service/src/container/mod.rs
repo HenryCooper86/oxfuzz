@@ -28,6 +28,8 @@ use coverage_feedback::CoverageFeedback;
 mod crash_inputs;
 mod crash_owner;
 mod discovery;
+#[cfg(feature = "run-closeout")]
+mod edge_sets;
 mod export;
 #[cfg(feature = "triage-disposition")]
 mod finding_review;
@@ -53,6 +55,8 @@ mod run;
 pub(crate) use run::CampaignRunLimits;
 pub use run::{ReplayInputs, ReplayReview};
 mod function_coverage;
+#[cfg(feature = "run-closeout")]
+pub use edge_sets::{CoverageDiffReport, RunEdgeSetCapture};
 mod retained_inputs;
 pub use function_coverage::RunFunctionCoverage;
 #[cfg(feature = "run-closeout")]

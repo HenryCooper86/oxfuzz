@@ -1312,6 +1312,10 @@ impl ServiceContainer {
         #[cfg(feature = "proof-carrying")]
         self.close_function_coverage(&run_record, &artifacts, &cancel)
             .await;
+        // Best-effort edge-set capture for AFL++ runs: journaled on failure,
+        // never fails the run; closeout or `runs capture-edges` can retry.
+        #[cfg(feature = "run-closeout")]
+        self.close_run_edge_set(&run_record, target).await;
 
         // Summarize from the parsed events. Live streaming already forwarded
         // them to `on_progress`, so do not re-emit here.

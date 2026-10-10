@@ -66,6 +66,26 @@ pub fn coverage_hash(showmap_stdout: &str) -> Option<String> {
     Some(format!("cov:{hash:016x}"))
 }
 
+/// Fold one input's `afl-showmap` output into a run's edge set: every printed
+/// edge id marks its coverage-map offset covered. The hit-count bucket is
+/// deliberately dropped -- the set answers which edges a run covered, not how
+/// often ([`coverage_hash`] keeps bucket sensitivity for corpus pruning).
+/// Unparseable lines are skipped, matching [`coverage_tuples`].
+///
+/// # Errors
+/// Returns `ClassifiedError::Validation` when an edge id exceeds
+/// [`hf_core::coverage::EDGE_SET_CAPACITY`]: storing it would silently drop
+/// coverage from every diff over the set.
+pub fn fold_showmap_into_edge_set(
+    set: &mut hf_core::coverage::EdgeSet,
+    showmap_stdout: &str,
+) -> Result<(), hf_core::error::ClassifiedError> {
+    for (edge, _bucket) in coverage_tuples(showmap_stdout) {
+        set.set(edge)?;
+    }
+    Ok(())
+}
+
 /// Whether one seed input gets past a harness's entry validation, judged by
 /// comparing its coverage tuples against the empty input's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -246,5 +266,37 @@ mod tests {
         // The empty input itself produced no tuples; covering anything at all
         // got further than it did.
         assert_eq!(classify_seed_survival("1:1\n", ""), SeedSurvival::Survives);
+    }
+
+    #[test]
+    fn folding_showmap_output_marks_exactly_the_printed_edges() {
+        let mut set = hf_core::coverage::EdgeSet::new();
+        fold_showmap_into_edge_set(&mut set, "000001:1\n000042:9\n000002:3\n").unwrap();
+        assert!(set.contains(1));
+        assert!(set.contains(42));
+        assert!(set.contains(2));
+        assert!(!set.contains(3));
+        assert_eq!(set.count(), 3);
+    }
+
+    #[test]
+    fn folding_ignores_unparseable_lines_and_accumulates_across_inputs() {
+        let mut set = hf_core::coverage::EdgeSet::new();
+        fold_showmap_into_edge_set(&mut set, "garbage line\n5:1\n").unwrap();
+        fold_showmap_into_edge_set(&mut set, "5:4\n7:1\n").unwrap();
+        assert_eq!(set.count(), 2);
+        assert!(set.contains(5));
+        assert!(set.contains(7));
+    }
+
+    #[test]
+    fn folding_an_edge_beyond_the_map_capacity_fails() {
+        let mut set = hf_core::coverage::EdgeSet::new();
+        let oversized = format!("{}:1\n", hf_core::coverage::EDGE_SET_CAPACITY + 1);
+        let error = fold_showmap_into_edge_set(&mut set, &oversized).unwrap_err();
+        assert!(
+            error.to_string().contains("exceeds the edge-set capacity"),
+            "{error}"
+        );
     }
 }

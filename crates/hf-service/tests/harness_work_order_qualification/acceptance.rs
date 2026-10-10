@@ -124,6 +124,33 @@ async fn observe_active(
     (id, serde_json::to_value(events).unwrap())
 }
 
+/// A terminal closeout covers every ladder step: source coverage and blockers
+/// stay skipped (unavailable), and a libFuzzer run skips edge-set capture
+/// naming its engine — a binary without an AFL map has nothing to measure.
+async fn assert_terminal_closeout(
+    service: &ServiceContainer,
+    run_id: Uuid,
+) -> hf_service::CloseoutReport {
+    let closeout = service.close_out_run(run_id).await.unwrap();
+    assert_eq!(closeout.run_id, run_id);
+    assert_eq!(closeout.steps.len(), 8);
+    assert!(
+        closeout.steps.iter().all(|step| step.outcome.is_terminal()),
+        "{closeout:?}"
+    );
+    assert!(closeout
+        .steps
+        .iter()
+        .any(|step| step.step == CloseoutStep::Coverage
+            && matches!(step.outcome, StepOutcome::Skipped { .. })));
+    assert!(closeout
+        .steps
+        .iter()
+        .any(|step| step.step == CloseoutStep::EdgeSet
+            && matches!(step.outcome, StepOutcome::Skipped { .. })));
+    closeout
+}
+
 async fn assert_qualified_review(fixture: &QualificationFixture, harness_id: Uuid) {
     let review = fixture
         .service
@@ -266,18 +293,7 @@ async fn imported_source_reaches_retained_health_closeout_and_explicit_experimen
         fixture.runtime.calls.load(Ordering::SeqCst),
         calls_before_read
     );
-    let closeout = service.close_out_run(first.run_id).await.unwrap();
-    assert_eq!(closeout.run_id, first.run_id);
-    assert_eq!(closeout.steps.len(), 7);
-    assert!(
-        closeout.steps.iter().all(|step| step.outcome.is_terminal()),
-        "{closeout:?}"
-    );
-    assert!(closeout
-        .steps
-        .iter()
-        .any(|step| step.step == CloseoutStep::Coverage
-            && matches!(step.outcome, StepOutcome::Skipped { .. })));
+    let closeout = assert_terminal_closeout(&service, first.run_id).await;
     let crashes = fixture
         .store
         .list_crashes_by_run(first.run_id)
