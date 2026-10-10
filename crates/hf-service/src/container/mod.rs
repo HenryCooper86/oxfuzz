@@ -1904,6 +1904,23 @@ fn auto_revert_decision(
     (drop_pct >= threshold_pct).then_some(drop_pct)
 }
 
+/// Persisted run-environment keys whose values the service assigns per run.
+/// `LLVM_PROFILE_FILE` names where this run's own raw profile lands -- a
+/// campaign's shared profile mount or the qualification run's output
+/// directory -- so the value routes evidence and never describes the
+/// experimental setup. Comparability excludes these keys; the persisted run
+/// config keeps them verbatim (Engineering Protocol 2.13). One home serves
+/// both the boolean check and the grouping key (Engineering Protocol 2.18).
+const RUN_SCOPED_ENV_KEYS: &[&str] = &[function_coverage::PROFILE_ENV_KEY];
+
+/// The run environment as the comparability contract sees it: the persisted
+/// entries minus the run-scoped destinations named by [`RUN_SCOPED_ENV_KEYS`].
+fn comparison_env(env: &[(String, String)]) -> Vec<&(String, String)> {
+    env.iter()
+        .filter(|(key, _)| !RUN_SCOPED_ENV_KEYS.contains(&key.as_str()))
+        .collect()
+}
+
 /// Whether two run configurations produce coverage measurements that are safe
 /// to compare for an automatic harness rollback.
 ///
@@ -1912,6 +1929,20 @@ fn auto_revert_decision(
 /// corpus location, environment, engine arguments, and the separately
 /// persisted comparison context must match; otherwise a lower edge count can
 /// be caused by the experimental setup rather than the new harness.
+///
+/// Two parts of the persisted config are deliberately not compared:
+///
+/// - The seed: every fresh run derives a unique seed from its run id, so
+///   comparing seeds would make every pair of runs incomparable and the
+///   policy could never fire. The revision gate in [`auto_revert_decision`]
+///   attributes a coverage change to the harness, treating seed randomness as
+///   run-to-run noise.
+/// - Run-scoped environment destinations ([`RUN_SCOPED_ENV_KEYS`]): a profile
+///   path names where this run's evidence lands, not the experiment. The
+///   entry's presence is equally insignificant: whether a run retained a
+///   function profile does not change the edge coverage its engine measured,
+///   and the profile-instrumented binary identity is already outside this
+///   check with the harness id.
 fn auto_revert_baseline_compatible(previous: &FuzzRunConfig, current: &FuzzRunConfig) -> bool {
     previous.engine == current.engine
         && previous.duration == current.duration
@@ -1920,13 +1951,16 @@ fn auto_revert_baseline_compatible(previous: &FuzzRunConfig, current: &FuzzRunCo
         && previous.input_timeout == current.input_timeout
         && previous.seed_corpus == current.seed_corpus
         && previous.sanitizer == current.sanitizer
-        && previous.env == current.env
+        && comparison_env(&previous.env) == comparison_env(&current.env)
         && previous.extra_args == current.extra_args
 }
 
 /// Stable opaque key for grouping comparable coverage experiments in
 /// presentation layers. The harness id is excluded so revision A/B results for
-/// the same target and execution context share a key.
+/// the same target and execution context share a key, and the environment is
+/// reduced by [`comparison_env`] so run-scoped destinations cannot split a
+/// group. The seed is excluded for the same reason the boolean check excludes
+/// it: it is unique per run by design.
 fn auto_revert_comparison_key(
     target_id: Uuid,
     config: &FuzzRunConfig,
@@ -1943,7 +1977,7 @@ fn auto_revert_comparison_key(
         "input_timeout": config.input_timeout,
         "seed_corpus": config.seed_corpus,
         "sanitizer": config.sanitizer,
-        "env": config.env,
+        "env": comparison_env(&config.env),
         "extra_args": config.extra_args,
         "context_rev": context_rev,
     });
@@ -2933,6 +2967,87 @@ mod auto_revert_tests {
         assert!(
             !auto_revert_baseline_compatible(&baseline, &current),
             "a different per-input timeout is a different experimental setup"
+        );
+    }
+
+    #[test]
+    fn run_scoped_profile_destinations_do_not_defeat_comparability() {
+        let target = Uuid::new_v4();
+        let mut baseline = config(EngineKind::LibFuzzer, 60);
+        baseline.env.push((
+            "LLVM_PROFILE_FILE".to_owned(),
+            "/work/function-coverage/%m.profraw".to_owned(),
+        ));
+        // A qualification-derived config relocates the profile under its own
+        // run output directory; the destination routes this run's evidence and
+        // says nothing about the experimental setup.
+        let mut current = baseline.clone();
+        current.harness_id = Uuid::new_v4();
+        for (key, value) in &mut current.env {
+            if key == "LLVM_PROFILE_FILE" {
+                *value = format!(
+                    "/work/runs/{}/out/function-coverage/raw/%m.profraw",
+                    Uuid::new_v4()
+                );
+            }
+        }
+        assert!(
+            auto_revert_baseline_compatible(&baseline, &current),
+            "a per-run profile destination must not split comparable runs"
+        );
+        assert_eq!(
+            auto_revert_comparison_key(target, &baseline, "context-a"),
+            auto_revert_comparison_key(target, &current, "context-a"),
+            "run-scoped profile destinations must share one comparison key"
+        );
+    }
+
+    #[test]
+    fn profile_collection_presence_does_not_split_baselines() {
+        // A harness built before function-coverage collection existed (or with
+        // it configured off) carries no profile entry at all. Whether a run
+        // retains a function profile changes where evidence lands, never the
+        // measured experiment, so presence alone must not split baselines.
+        let baseline = config(EngineKind::LibFuzzer, 60);
+        let mut current = baseline.clone();
+        current.harness_id = Uuid::new_v4();
+        current.env.push((
+            "LLVM_PROFILE_FILE".to_owned(),
+            "/work/function-coverage/%m.profraw".to_owned(),
+        ));
+        assert!(auto_revert_baseline_compatible(&baseline, &current));
+    }
+
+    #[test]
+    fn operator_environment_differences_still_break_comparability() {
+        let target = Uuid::new_v4();
+        let baseline = config(EngineKind::LibFuzzer, 60);
+        let mut current = baseline.clone();
+        current.env.clear();
+        current.env.push(("MODE".to_owned(), "relaxed".to_owned()));
+        assert!(!auto_revert_baseline_compatible(&baseline, &current));
+        assert_ne!(
+            auto_revert_comparison_key(target, &baseline, "context-a"),
+            auto_revert_comparison_key(target, &current, "context-a")
+        );
+    }
+
+    #[test]
+    fn per_run_seeds_do_not_affect_comparability() {
+        // Every fresh run derives a unique seed from its run id, so comparing
+        // seeds would make every pair of runs incomparable and auto-revert
+        // could never fire. The revision gate in `auto_revert_decision`
+        // attributes a coverage change to the harness; seed randomness is
+        // run-to-run noise, not a setup difference.
+        let target = Uuid::new_v4();
+        let mut baseline = config(EngineKind::LibFuzzer, 60);
+        baseline.seed = Some(7);
+        let mut current = baseline.clone();
+        current.seed = Some(42);
+        assert!(auto_revert_baseline_compatible(&baseline, &current));
+        assert_eq!(
+            auto_revert_comparison_key(target, &baseline, "context-a"),
+            auto_revert_comparison_key(target, &current, "context-a")
         );
     }
 

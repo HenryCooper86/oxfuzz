@@ -353,6 +353,17 @@ qualification, cross-engine, cross-budget, failed, cancelled, unattributed,
 same-revision, and legacy runs without complete provenance are not rollback
 baselines. Baseline search continues past ineligible or same-revision runs.
 
+Two parts of the persisted run config are deliberately outside the
+comparison. The seed is unique per run by design (derived from the run id), so
+comparing it would make every pair incomparable; the revision gate attributes
+a coverage change to the harness and treats seed randomness as run-to-run
+noise. And the environment comparison excludes service-assigned run-scoped
+destinations (`LLVM_PROFILE_FILE`, whose value names where this run's own raw
+profile lands): they route evidence, they do not describe the experiment, and
+their per-run values would otherwise silently disable every comparison. The
+persisted run config keeps those entries verbatim; only the comparison ignores
+them.
+
 Restoring a historical run reactivates the exact persisted source and staged
 binary only after both digests are verified against that run and its promoted
 harness qualification. It never recompiles historical text and transfers old
@@ -720,7 +731,8 @@ loaded chunk cannot satisfy the startup budget.
 - Integration: end-to-end loop with mocked LLM and mocked engine.
 - Regression: failed harness builds preserve the active revision.
 - Regression: auto-revert baselines reject target, engine, budget, sanitizer,
-  corpus, environment, and argument mismatches.
+  corpus, environment, and argument mismatches, while run-scoped profile
+  destinations and per-run seeds never split a baseline.
 - Regression: target rediscovery preserves the original target id and all
   harness/corpus/crash attribution.
 - Regression: reports, exports, regression replay, and corpus absorption ignore

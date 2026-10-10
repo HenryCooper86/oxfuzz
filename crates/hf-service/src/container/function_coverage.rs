@@ -5,6 +5,19 @@ use uuid::Uuid;
 
 use super::ServiceContainer;
 
+/// Environment variable naming the raw LLVM profile destination.
+///
+/// The service assigns the value per run -- a campaign's shared profile mount,
+/// or the qualification run's own output directory -- so it routes this run's
+/// evidence and never describes the experimental setup. The value stays
+/// verbatim in the persisted run config (Engineering Protocol 2.13), and the
+/// auto-revert comparability check excludes the key through
+/// [`super::RUN_SCOPED_ENV_KEYS`].
+///
+/// The literal is load-bearing: it names a key inside persisted run configs
+/// and sealed input manifests, so changing it changes a durable format.
+pub(super) const PROFILE_ENV_KEY: &str = "LLVM_PROFILE_FILE";
+
 /// Decimal counters preserve the full LLVM integer range in browser clients.
 #[derive(Debug, serde::Serialize)]
 pub struct FunctionMeasurement {
@@ -121,7 +134,7 @@ impl ServiceContainer {
 
 #[cfg(feature = "proof-carrying")]
 mod collection {
-    use super::{ClassifiedError, ServiceContainer};
+    use super::{ClassifiedError, ServiceContainer, PROFILE_ENV_KEY};
     use crate::container::staging::RunArtifacts;
     use hf_core::{
         engine::{EngineKind, FuzzRunConfig},
@@ -170,7 +183,7 @@ mod collection {
         }) {
             config
                 .env
-                .push(("LLVM_PROFILE_FILE".to_owned(), PROFILE_FILE.to_owned()));
+                .push((PROFILE_ENV_KEY.to_owned(), PROFILE_FILE.to_owned()));
             if !smoke && config.engine == EngineKind::AflPlusPlus {
                 config
                     .env
@@ -197,7 +210,7 @@ mod collection {
         let directory = hf_core::runtime::posix_relative(output_relative);
         let value = format!("/work/{directory}/function-coverage/raw/%m.profraw");
         for (key, existing) in &mut config.env {
-            if key == "LLVM_PROFILE_FILE" {
+            if key == PROFILE_ENV_KEY {
                 *existing = value;
                 return;
             }
@@ -212,7 +225,7 @@ mod collection {
         config
             .env
             .iter()
-            .any(|(key, value)| key == "LLVM_PROFILE_FILE" && value.contains("function-coverage"))
+            .any(|(key, value)| key == PROFILE_ENV_KEY && value.contains("function-coverage"))
     }
 
     pub(in crate::container) fn stage_input_workspace(

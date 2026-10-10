@@ -2691,22 +2691,25 @@ mod exact_qualification_tests {
         ServiceContainer::workspace_environment_test_gate()
     }
 
-    /// Pin config to a private directory with function-coverage collection off.
+    /// Pin config to a private directory with function-coverage collection ON.
     ///
     /// The auto-revert fixture stages its historical harness by hand but
-    /// compiles the replacement through the real compile path, so their
-    /// smoke-run configs are only baseline-compatible when no per-run
-    /// `LLVM_PROFILE_FILE` entry lands in the persisted run environment.
-    /// Neither the checked-in example config (`collect_function_coverage =
-    /// true`) nor a developer's per-user config may leak in here.
-    fn install_test_config() {
+    /// compiles the replacement through the real compile path, so the
+    /// replacement's smoke-run config carries a per-run relocated
+    /// `LLVM_PROFILE_FILE` destination while the historical one carries none.
+    /// Keeping collection on proves the comparability check ignores that
+    /// run-scoped difference: neither the checked-in example config
+    /// (`collect_function_coverage = true`) nor a developer's per-user config
+    /// may change the outcome, but the pinned `true` makes the regression
+    /// deterministic instead of host-dependent.
+    fn install_coverage_test_config() {
         static DIR: OnceLock<PathBuf> = OnceLock::new();
         let dir = DIR.get_or_init(|| {
             let dir = std::env::temp_dir().join(format!("oxfuzz-exact-config-{}", Uuid::new_v4()));
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(
                 dir.join("oxfuzz.toml"),
-                "[fuzzing]\ncollect_function_coverage = false\n",
+                "[fuzzing]\ncollect_function_coverage = true\n",
             )
             .unwrap();
             dir
@@ -3428,7 +3431,11 @@ mod exact_qualification_tests {
     #[tokio::test]
     async fn normal_auto_revert_completes_after_a_queued_workspace_cleanup() {
         let _gate = qualification_test_gate().lock().await;
-        install_test_config();
+        // Function-coverage collection stays ON: the replacement's smoke-run
+        // config carries a per-run relocated `LLVM_PROFILE_FILE` destination
+        // while the historical one carries none. The revert below proves the
+        // comparability check reaches its decision point regardless.
+        install_coverage_test_config();
         let (project, store, container, _runtime, historical) = promoted_fixture().await;
         let active =
             install_different_promoted_revision(&project, &store, &container, &historical).await;
@@ -3449,6 +3456,23 @@ mod exact_qualification_tests {
             now - chrono::Duration::seconds(1),
         )
         .await;
+        // Non-vacuous fixture: with collection on, the replacement's campaign
+        // config carries its smoke run's relocated `LLVM_PROFILE_FILE`
+        // destination while the historical one carries no profile entry. The
+        // verbatim environments differ; only the comparability contract may
+        // call them the same experiment.
+        let baseline_env = &baseline.config.as_ref().unwrap().env;
+        let current_env = &current.config.as_ref().unwrap().env;
+        assert!(
+            current_env
+                .iter()
+                .any(|(key, _)| key == super::super::function_coverage::PROFILE_ENV_KEY),
+            "the replacement run must persist a profile destination: {current_env:?}"
+        );
+        assert_ne!(
+            baseline_env, current_env,
+            "the fixture must exercise the run-scoped environment difference"
+        );
         container
             .set_project_auto_revert_override(project.path(), true, 20.0, false)
             .await

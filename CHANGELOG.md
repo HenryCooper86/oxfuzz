@@ -90,6 +90,14 @@ Versions match the release commits that bump `Cargo.toml`.
   operator CPU ceiling, so raising `fuzzing.sandbox.max_cpus` (which puts
   campaign libFuzzer runs into fork mode and orchestrates AFL++ instances)
   no longer changes the qualification argv or its exit-code evidence.
+- Coverage-regression auto-revert fires again with
+  `fuzzing.collect_function_coverage = true`. The comparability check and the
+  run-history comparison key compared the persisted run environment verbatim,
+  and the service injects a per-run `LLVM_PROFILE_FILE` profile destination
+  into it, so no two runs ever compared equal and the policy silently never
+  fired. The comparison now excludes service-assigned run-scoped environment
+  destinations (and documents why the per-run seed was never part of it);
+  the persisted run config keeps them verbatim.
 
 ## 0.6.0 - 2026-10-07
 

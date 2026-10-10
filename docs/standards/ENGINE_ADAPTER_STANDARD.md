@@ -230,6 +230,13 @@ comparability gate refuses `DifferentSanitizer`, and the AFL++ resume donor
 match keys on the staged binary's SHA-256 (a sanitizer change produces a
 different binary, so a UBSan run never resumes an ASan session tree).
 
+The environment comparison in the auto-revert baseline check and comparison
+key ignores service-assigned run-scoped destinations (`LLVM_PROFILE_FILE`):
+their values differ per run by construction, while an operator-set environment
+difference still makes two runs incomparable. The per-run seed is not part of
+either comparison; the revision gate, not the seed, attributes a coverage
+change to the harness.
+
 ## 4. Progress Streaming
 
 For userspace runs, `EngineRunner` forwards `FuzzProgress` events as a run
