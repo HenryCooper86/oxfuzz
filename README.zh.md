@@ -59,8 +59,15 @@ cargo build --release                 # 二进制：target/release/oxfuzz
 
 oxfuzz init                           # 生成 config/*.toml 并创建数据库
 # 然后至少配置一个 LLM 提供方：config/providers.toml + HF_PROVIDER_API_KEY
-# 并在你信任将要运行的内容后授权执行：export HF_AUTO_APPROVE=1
+# 在终端中执行会按操作逐项请求审批（y/n/always）；无人值守运行时：export HF_AUTO_APPROVE=1
 
+oxfuzz fuzz <project>                 # 发现 -> harness -> smoke -> 提升 -> campaign，
+                                      # 只在审批提示处暂停
+```
+
+逐步执行、让每个产物都处于你显式控制之下的流程如下：
+
+```bash
 oxfuzz discover <project> --lang c --rank
 oxfuzz work-order export <project> --target <symbol> --lang c \
   --engine libfuzzer --out work-order.md
@@ -76,7 +83,9 @@ oxfuzz triage <project> --target <relative-file>::<symbol>
 ```
 
 Docker 必须已安装并正在运行，且至少配置一个 LLM 提供方。harness 编译与
-模糊测试启动属于需要审批的高风险操作：CLI 从环境变量读取该授权
+模糊测试启动属于需要审批的高风险操作：在终端中 CLI 会按操作逐项询问
+（`[y]es` 仅此一次、`[n]o` 拒绝、`[a]lways` 本次会话内允许该类操作）；
+管道或 CI 等非终端环境不会提示，而是从环境变量读取授权
 （`HF_AUTO_APPROVE=1`，可信本地循环可用 `HF_GUARDRAILS=permissive`），
 桌面应用则通过对话框询问。参见
 **[安全模型](docs/guides/SAFETY_MODEL.md)**、

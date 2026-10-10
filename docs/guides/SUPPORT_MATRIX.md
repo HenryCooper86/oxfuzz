@@ -27,6 +27,19 @@ collects that profile by default, at a measured cost of about 4% of fuzzing
 throughput, because otherwise a C/C++ promotion carries no target-exercise
 evidence.
 
+Sanitizer selection (`--sanitizer`, `[fuzzing] default_sanitizer`): C and C++
+harnesses build with AddressSanitizer (`address`, the default) or
+UndefinedBehaviorSanitizer (`undefined`, halt-on-error) under all three
+userspace engines; the per-engine flag mapping and its toolchain evidence live
+in
+[ENGINE_ADAPTER_STANDARD.md](../standards/ENGINE_ADAPTER_STANDARD.md#35-sanitizer-selection).
+Rust targets build AddressSanitizer-only (cargo-fuzz/libfuzzer-sys has no
+UBSan path) and reject any other selection. `memory`, `thread`, and `none`
+are rejected everywhere: MSan needs a fully instrumented libc/userspace the
+sandbox does not have, TSan data-race reports do not map onto the crash-triage
+pipeline, and a sanitizer-less build has no sanitizer evidence to classify.
+Syzkaller kernel builds take no userspace sanitizer selection.
+
 Additional operation limits:
 
 - Crash ingestion and deduplication are implemented for userspace engines;

@@ -352,6 +352,15 @@ usage, and strict structured opinion. Negative valid decisions remain
 auditable; missing, malformed, incomplete, or oversized responses are not
 accepted as review evidence and execution fails closed.
 
+When the operator explicitly bypasses the review (`--no-llm-review` or
+`harness.allow_unreviewed_smoke = true`), the row instead carries the marked
+bypass evidence, bound to the same digests:
+`{"schema_version": 1, "verdict": "bypassed", "reviewer": "none",
+"target": ..., "bypass_source": "cli_flag" | "config", "rationale": ...}`.
+A bypassed record satisfies the review-existence check for execution but
+remains distinguishable on every audit and approval surface; it never
+overrides a persisted negative model verdict and never promotes a harness.
+
 | column | SQLite declaration | notes |
 | --- | --- | --- |
 | `harness_id` | `TEXT PRIMARY KEY` | exact compiled harness revision |

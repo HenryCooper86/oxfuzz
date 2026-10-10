@@ -203,14 +203,35 @@ does not establish that a patch fixes the issue.
 
 ## Prefer the terminal? (optional)
 
-Everything above is also available as a command-line tool, `oxfuzz`. A full
-campaign looks like this:
+Everything above is also available as a command-line tool, `oxfuzz`. The fast
+path is one command:
 
 ```bash
 oxfuzz doctor
-# Harness smoke runs and fuzzer launches are approval-gated; the CLI reads
-# that consent from the environment. Export this once you trust what will run.
-export HF_AUTO_APPROVE=1
+oxfuzz fuzz /path/to/project
+```
+
+If `doctor` reports the sandbox image as missing, it prints the exact remedy;
+`oxfuzz doctor --build-image` builds the image for you from a source checkout
+(the same build the app runs on its first launch).
+
+The CLI reads its configuration from the per-user config directory once it
+holds config files (the app's Settings writes there); `--config <dir>` or the
+`HF_CONFIG_DIR` environment variable overrides that, and inside a source
+checkout the checkout's own `config/` is used with a one-line stderr warning
+naming the binding. See the [Configuration reference](CONFIGURATION.md) for
+the full resolution order.
+
+`fuzz` runs the whole pipeline -- discover, harness generation, sandboxed
+compile and smoke qualification, your promotion approval, then a bounded
+campaign -- pausing only at the approval prompts. Re-running it on a project
+whose target already has a promoted harness reuses that revision; `--fresh`
+forces a full re-qualification.
+
+To inspect or drive each step yourself, the same stages are also separate
+commands:
+
+```bash
 oxfuzz discover /path/to/project --lang c --rank
 oxfuzz harness /path/to/project --target parse_value \
   --engine libfuzzer --promote
@@ -218,6 +239,12 @@ oxfuzz run /path/to/project --target parse_value \
   --engine libfuzzer --duration 30m
 oxfuzz triage /path/to/project --target parse_value
 ```
+
+Harness smoke runs and fuzzer launches are approval-gated. On a terminal the
+CLI asks per action -- `[y]es` approves once, `[n]o` denies, and `[a]lways`
+approves that action kind for the rest of the invocation -- so no environment
+setup is needed for interactive use. Piped or CI runs never prompt; export
+`HF_AUTO_APPROVE=1` there once you trust what will run.
 
 See the [CLI Reference](CLI_REFERENCE.md) for the full command reference.
 

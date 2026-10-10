@@ -11,6 +11,15 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ### Added
 
+- Interactive CLI approval gate. On a terminal (stdin and stderr both TTYs),
+  a high-risk action now prompts `[y]es/[n]o/[a]lways` -- approve once, deny,
+  or allow that action kind for the rest of the process -- instead of
+  requiring `HF_AUTO_APPROVE=1` exported up front. Empty, unrecognized, or
+  missing input denies (fail closed); every outcome is echoed to the
+  transcript and persisted in the policy audit trail. Piped/CI/headless runs
+  never prompt and never block on input: they keep the environment policy
+  (`HF_AUTO_APPROVE`, `HF_GUARDRAILS=permissive`), which also still approves
+  without prompting on a terminal. `oxfuzz serve` is unchanged.
 - Go native fuzzing engine foundation: an admission-gated `go-native`
   engine kind (valid in `enabled_engines` policy lists, never enabled by
   default), the compiled-test-binary run adapter matching the qualified

@@ -20,9 +20,14 @@ cd oxfuzz
 cargo build --release
 # Binary: target/release/oxfuzz
 
-# Build and verify the versioned sandbox toolchain.
+# Build and verify the versioned sandbox toolchain. Equivalent:
+# target/release/oxfuzz doctor --build-image
 ./scripts/build-sandbox.sh
 ```
+
+The CLI resolves its config directory in a documented order (`--config`,
+`HF_CONFIG_DIR`, the per-user config dir, then the enclosing source tree with
+a stderr warning); see [the Configuration reference](CONFIGURATION.md#config-directory-resolution).
 
 ### Download a prebuilt app
 

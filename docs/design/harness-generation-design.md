@@ -67,7 +67,12 @@ pub struct Harness {
    response id, exact source and compiled-binary digests, and review time are persisted. Missing
    provider, provider failure, malformed output, a source larger than the review
    ceiling, or a negative verdict fails closed. A draft/model generation call is
-   not its own independent review.
+   not its own independent review. The one exception is the explicit operator
+   opt-out (`--no-llm-review` per invocation, or `harness.allow_unreviewed_smoke`
+   per deployment): the step then persists a marked bypass record
+   (`verdict: "bypassed"`, `reviewer: "none"`) bound to the same digests, writes
+   a policy audit row per qualification, and never satisfies the human
+   promotion gate by itself.
 4. **Smoke fuzz** -- after the LLM review passes, reload the exact harness and
    recheck its build inputs before authorization, run allocation, image
    resolution, or staging. Request a 60-second run with a tiny seed corpus; before

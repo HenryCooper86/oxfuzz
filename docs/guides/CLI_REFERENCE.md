@@ -11,9 +11,27 @@ oxfuzz init
 oxfuzz doctor
 ```
 
-This materializes the supported `config/*.example.toml` templates and creates
-the database. Environment overrides remain explicit in `.env.example`; `init`
-does not create or modify `.env`.
+This materializes the supported `*.example.toml` templates and creates the
+database. `init` prints the config directory it wrote to. Every command
+resolves that directory in the same order:
+
+1. `--config <dir>` (a global flag, accepted before or after the subcommand),
+2. the `HF_CONFIG_DIR` environment variable,
+3. the per-user config dir, when it already holds config files
+   (`~/Library/Application Support/oxfuzz/config` on macOS,
+   `$XDG_DATA_HOME/oxfuzz/config` or `~/.local/share/oxfuzz/config` on Linux,
+   `%APPDATA%\oxfuzz\config` on Windows),
+4. the enclosing source tree's `config/`, found by walking up from the current
+   directory (kept for development). A walk-up binding prints a one-line
+   stderr warning naming the directory and the `HF_CONFIG_DIR` override, so
+   running the CLI inside an unrelated Rust project that has a `config/`
+   directory never binds that project's files silently.
+
+A `--config`/`HF_CONFIG_DIR` value naming an existing non-directory fails at
+startup with the exact problem; a directory that does not exist yet is created
+on demand (this is how `init` and the test fixtures use it). Environment
+overrides remain explicit in `.env.example`; `init` does not create or modify
+`.env`.
 
 ### 2. Configure at least one LLM provider
 
@@ -33,23 +51,50 @@ api_key_env = "OPENAI_API_KEY"
 you keep local values in `.env`, export them before launching the process (for
 example, `set -a; source .env; set +a` in a POSIX shell).
 
+Offline / no-key operation: without a provider, drafting falls back to the
+heuristic template, but smoke qualification still requires the independent LLM
+pre-execution review and fails closed. To qualify harnesses anyway, pass
+`--no-llm-review` to `oxfuzz harness` per invocation (or set
+`harness.allow_unreviewed_smoke = true` in `oxfuzz.toml` for the deployment).
+Every bypass is persisted as a marked review record and a policy audit row;
+promotion still requires human approval.
+
 ### 3. Authorize execution before the first run
 
 Compiling or running a generated harness and launching a fuzzer are high-risk
-actions. The default guardrail policy requires approval for them, and the CLI
-approval gate reads the environment instead of prompting: export
-`HF_AUTO_APPROVE=1` in the shell that launches `oxfuzz` once you have decided
-to trust what will run.
+actions. The default guardrail policy requires approval for them. On a terminal
+(stdin and stderr both TTYs) the CLI asks per action:
+
+```text
+[approval] High-risk action 'run libfuzzer for 1800s' requires approval [y]es/[n]o/[a]lways:
+```
+
+- `y` approves that one request; the next one asks again.
+- `n` denies it. An empty answer, end of input, or anything unrecognized also
+  denies -- the prompt fails closed.
+- `a` approves and allows that action kind (`run_fuzzer`, `run_harness`, ...)
+  for the rest of the process. The memory is per kind and per invocation; it
+  is never persisted.
+
+Every outcome is echoed to the transcript (`[approval] approved: ...` /
+`[approval] denied: ...`) and persisted in the policy audit trail (`oxfuzz
+policy decisions`).
+
+When stdin or stderr is not a terminal -- a pipe, CI, or any headless launch --
+the CLI never prompts and never blocks on input. Approval then comes from the
+environment, as before:
 
 ```bash
 export HF_AUTO_APPROVE=1
 ```
 
+`HF_AUTO_APPROVE=1` also approves without prompting on a terminal.
 `HF_GUARDRAILS=permissive` instead auto-approves every action with an audit
-trail; reserve it for trusted local loops. The desktop app asks for approval
-through an interactive dialog and does not read these variables. See
-`.env.example` for the full variable reference and the
-[Safety Model](SAFETY_MODEL.md) for the reasoning.
+trail; reserve it for trusted local loops. `oxfuzz serve` always uses the
+environment policy: a server's approvals cannot come from its own terminal.
+The desktop app asks for approval through an interactive dialog and does not
+read these variables. See `.env.example` for the full variable reference and
+the [Safety Model](SAFETY_MODEL.md) for the reasoning.
 
 ### 4. Qualify and review a retained harness
 
@@ -140,14 +185,18 @@ Binary Tool integration is outside this release's scope.
 
 | Command | What it does |
 | --- | --- |
-| `init` | Scaffold config from templates and create/migrate the database. |
-| `doctor [--engine <e> [--duration <d>] [--require-provider]] [--json]` | Probe Docker and bundled engines. With `--engine`, enforce selected-engine availability and run policy; optionally require provider configuration. Exit non-zero on failure. |
+| `init` | Scaffold config from templates into the resolved config directory (see Quick Start) and create/migrate the database. |
+| `doctor [--engine <e> [--duration <d>] [--require-provider]] [--build-image] [--json]` | Probe Docker and bundled engines. When the sandbox image is missing, the output names how to build it (`oxfuzz doctor --build-image`, `scripts/build-sandbox.sh`, or the canonical `docker build` command; JSON carries it as `sandbox_image_remedy`). `--build-image` runs that build from the source checkout's `docker/sandbox/Dockerfile` -- the same build the desktop app runs on first launch -- then re-probes; it fails loud when Docker is unavailable or no source checkout is found. With `--engine`, enforce selected-engine availability and run policy; optionally require provider configuration. Exit non-zero on failure. |
 | `discover <project> --lang c [--rank] [--ai auto\|require\|off] [--semgrep]` | Scan a project; `--rank` requests service-owned AI assessment, and `--semgrep` explicitly adds separate C/C++ enrichment. |
-| `harness <project> --target <sym> --engine <e> [--draft-only] [--repair N] [--refine] [--promote]` | Write, compile (optionally auto-repair or coverage-refine), and smoke-qualify a newly generated harness. Without `--promote`, review the output; rerunning creates another draft. Use the retained Work Order flow below when approval must name a previously reviewed source. |
+| `harness <project> --target <sym> --engine <e> [--draft-only] [--repair N] [--refine] [--promote] [--no-llm-review] [--sanitizer address\|undefined]` | Write, compile (optionally auto-repair or coverage-refine), and smoke-qualify a newly generated harness. Smoke requires the independent LLM pre-execution review; with no provider configured it fails closed unless you pass `--no-llm-review` (or set `harness.allow_unreviewed_smoke = true`), which persists a marked bypass record and an audit row -- without the model review, only the lexical lint and your own promotion decision check the harness. Without `--promote`, review the output; rerunning creates another draft. Use the retained Work Order flow below when approval must name a previously reviewed source. |
 | `work-order export\|import\|list\|submissions\|qualify\|rank\|promote ...` | Manage immutable external harness packets, submissions, qualification attempts, deterministic ranking, and exact-attempt promotion. |
-| `run <project> --target <sym> --engine <e> --duration 60m [--cpus N]` | Run a sandboxed campaign with the active promoted harness (Ctrl-C cancels cooperatively). A file-qualified selector is `<relative-file>::<complete-symbol>`; a retained Work Order run always uses that complete selector. `--cpus N` requests a per-run CPU allocation within the configured `fuzzing.sandbox.max_cpus` ceiling; an allocation above one runs libFuzzer fork mode (`-fork=N`) and honggfuzz `--threads N` (AFL++ runs a single instance). |
-| `run . --replay <run UUID>` | Replay a retained run with its recorded engine, duration, and deterministic seed under current policy. The positional `.` is ignored in replay mode; the retained run resolves its original project. |
-| `campaign <project> --target <sym> --engine <e>` | Run and triage a bounded campaign using an already smoke-qualified, human-promoted harness. |
+| `run <project> --target <sym> --engine <e> --duration 60m [--cpus N] [--timeout-ms N] [--resume] [--sanitizer address\|undefined]` | Run a sandboxed campaign with the active promoted harness (Ctrl-C cancels cooperatively). A file-qualified selector is `<relative-file>::<complete-symbol>`; a retained Work Order run always uses that complete selector. `--cpus N` requests a per-run CPU allocation within the configured `fuzzing.sandbox.max_cpus` ceiling; an allocation above one runs libFuzzer fork mode (`-fork=N`) and honggfuzz `--threads N` (AFL++ runs a single instance). `--timeout-ms N` overrides the per-input timeout for this run. `--resume` (AFL++ only) continues the most recent compatible AFL++ session instead of cold-starting; see "AFL++ session resume" below. `--sanitizer` asserts the promoted harness's build sanitizer (mismatch fails before any engine starts); see "Sanitizer selection" below. |
+| `run . --replay <run UUID>` | Replay a retained run with its recorded engine, duration, per-input timeout, and deterministic seed under current policy. The positional `.` is ignored in replay mode; the retained run resolves its original project. `--timeout-ms` and `--sanitizer` do not combine with `--replay`: the recorded timeout and sanitizer replay exactly. |
+| `runs list [--project <path>] [--active] [--limit N] [--json]` | List persisted runs, newest first: short id, target, engine, status, start, duration, crashes. |
+| `runs status <run-id-or-prefix> [--json]` | Show one run's full record plus its latest persisted live telemetry, when any was retained. |
+| `runs stop <run-id-or-prefix>` | Cooperatively cancel a run owned by this process; exits non-zero with the reason otherwise. |
+| `campaign <project> --target <sym> --engine <e> [--timeout-ms N] [--resume] [--sanitizer address\|undefined]` | Run and triage a bounded campaign using an already smoke-qualified, human-promoted harness. Prints an iteration marker per iteration plus the same throttled live status line as `run`; raw engine output lines stay internal to the campaign. `--timeout-ms N` applies the per-input timeout to every iteration. `--resume` (AFL++ only) applies to every iteration: iteration N continues the output tree iteration N-1 produced. `--sanitizer` asserts the promoted harness's build sanitizer for every iteration. |
+| `fuzz <project> [--target <sym>] [--engine <e>] [--lang <l>] [--duration-secs N] [--iterations N] [--timeout-ms N] [--resume] [--sanitizer address\|undefined] [--ai auto\|require\|off] [--no-llm-review] [--fresh] [--json]` | One-command onboarding: discover -> harness -> smoke -> promote -> campaign in a single invocation. The only pause is the human promotion gate; a denial stops the pipeline before any campaign. Reuses an already-promoted harness for the same target/engine unless `--fresh` is given. `--resume` (AFL++ only) forwards to the campaign stage. `--sanitizer` selects the build sanitizer for a fresh harness and re-qualifies rather than reusing a promoted harness built with the other sanitizer. |
 | `health --run <run UUID>` | Assess retained campaign health. This read-only command never stops, restarts, or resizes the run. |
 | `trust --run <run UUID>` | Audit which claims about a finished run its retained evidence supports. Read-only; starts no build, run, or coverage measurement. |
 | `closeout --run <run UUID>` | Explicitly run or resume the seven retained terminal closeout steps. Successful/skipped steps remain retained; failed or dependency-blocked work can be retried. |
@@ -181,6 +230,108 @@ Binary Tool integration is outside this release's scope.
 Userspace engines for `harness`, `run`, and `campaign`: `afl++`, `honggfuzz`,
 `libfuzzer`. `syzkaller` fuzzes kernel images from the trusted-local desktop
 workflow; the CLI harness and run commands do not accept it.
+
+### One-command onboarding (`oxfuzz fuzz`)
+
+```bash
+oxfuzz fuzz /path/to/project
+```
+
+`fuzz` runs the whole pipeline in one invocation, printing a stage header as
+each step starts:
+
+```text
+--- [1/5] discover: scanning /path/to/project (language: auto-detect) ---
+--- [2/5] harness: drafting and compiling 'parse_value' for libfuzzer (auto-repair up to 2x) ---
+--- [3/5] smoke: qualifying 'parse_value' ---
+--- [4/5] promote: 'parse_value' needs your approval ---
+--- [5/5] campaign: 3 iteration(s) x 60s on 'parse_value' (libfuzzer) ---
+```
+
+Each stage is the operation the standalone commands run: target discovery
+(`--target` picks one explicitly, otherwise the highest-fit candidate the
+engine can drive wins; `--lang` pins the language, otherwise every supported
+language is scanned and the picked candidate carries its own), harness
+generation with the auto-repair loop, smoke qualification behind the
+pre-execution review, and the same bounded campaign `oxfuzz campaign` runs,
+with the same throttled live status line. `campaign` itself is unchanged and
+still requires a pre-promoted harness.
+
+Promotion is the pipeline's human gate and is never skipped for a fresh
+harness: on a terminal it asks `[y]es/[n]o/[a]lways`, and a denial stops the
+pipeline before any campaign -- nothing is promoted and no fuzzer runs. For
+unattended runs, export `HF_AUTO_APPROVE=1`.
+
+Re-running `fuzz` on a target that already has a promoted harness for the
+chosen engine reuses that exact revision -- no re-draft, no re-smoke, no
+re-approval -- so the command is idempotent once a project is onboarded.
+`--fresh` forces a full re-qualification (new draft, new review, new approval).
+
+A failure at any stage exits non-zero and names the stage plus a remediation
+(for example, a harness that still does not compile after the repair loop
+suggests `--ai require` or the manual work-order flow). `--ai` governs every
+model call in the pipeline (harness drafting, campaign seed generation, the
+run dictionary, triage reports); `--no-llm-review` is the same audited
+smoke-review bypass as on `oxfuzz harness`; `--json` prints the pipeline
+outcome as JSON on stdout and moves stage headers and live progress to
+stderr.
+
+### Live run status
+
+`run` and `campaign` print a throttled afl-fuzz-style status line (at most one
+per second) as the engine reports stats:
+
+```text
+execs=128934 exec/s=842 edges=1523 corpus=91 cycles=2 stability=100.0% crashes=0 hangs=0 last_find=14s
+```
+
+Only fields the engine reports are printed. `execs` and `corpus` come from
+all three userspace engines (honggfuzz via its Iterations and Corpus Size
+ticks); `edges` comes from libFuzzer and AFL++ (honggfuzz reports no edge
+count); `cycles`, `stability`, `last_find`, and `uptime` come from AFL++'s
+`fuzzer_stats` (polled from the bind-mounted output tree about every 2 seconds
+and re-read once at run close); honggfuzz `hangs` comes from its Timeouts
+tick. `crashes` counts crash signal events as they stream in. Engine log
+lines print unthrottled in `run`; `campaign` prints only iteration markers,
+the status line, and crash markers.
+
+### Run lifecycle (list, status, stop)
+
+```bash
+oxfuzz runs list [--project /path/to/project] [--active] [--limit 20] [--json]
+oxfuzz runs status <run-id-or-prefix> [--json]
+oxfuzz runs stop <run-id-or-prefix>
+```
+
+`runs list` reads the same persisted history as the web Run History view and
+prints it newest first: short id (the first eight characters, accepted as the
+id argument by the other two commands whenever the prefix is unambiguous),
+target, engine, status, start time, duration, and crash count. `--active`
+keeps only runs still in flight (pending or running).
+
+`runs status` prints the full persisted record for one run — both revisions,
+evidence directory, requested budget, terminal edges/execs/crash count — plus
+the latest retained live telemetry snapshot when the campaign-health monitor
+persisted one (observation time, edges, current/mean/peak throughput, free
+disk). A running run's terminal metrics stay absent until it closes; the
+telemetry snapshot is what is durable mid-run.
+
+`runs stop` requests cooperative cancellation through the same service
+operation as the REST `POST /runs/{id}/cancel`. Cancellation is an in-process
+signal to the run's cancellation token, so a one-shot CLI process can stop
+only a run that process owns; for a run owned by a server or another CLI/TUI
+the command exits non-zero and names the owning-process recourse instead of
+pretending to signal anything. Unknown, ambiguous, and already-terminal ids
+also exit non-zero with the reason.
+
+There is deliberately no `runs attach`: the progress event stream (engine
+stats snapshots, log lines, crash markers) is delivered only to in-process
+subscribers of the owning process, and the run row's metrics persist only at
+termination. The one cross-process mid-run record is the campaign-health
+telemetry snapshot, refreshed on the health-assessment cadence (30 seconds by
+default) for health assessment rather than progress rendering; `runs status`
+already surfaces it. A faithful attach needs a persisted progress journal or
+a cross-process broadcast channel, which is a separate design.
 
 ### Harness Work Order commands
 
@@ -218,13 +369,95 @@ returns `ready`, named `problems`, the selected engine, system probes, and
 configuration is checked without contacting a model; a configured provider does
 not prove valid credentials or connectivity. A pool with no constructed providers
 (for example, all API-key variables missing or empty) fails preflight. Duration and provider flags require
-`--engine`. Ordinary `doctor` keeps its general any-engine readiness check.
+`--engine`. Ordinary `doctor` keeps its general any-engine readiness check, and
+its JSON gains `sandbox_image_remedy` (a one-line build instruction) whenever
+the sandbox image is missing.
 
 For normal `run`, an omitted `--duration` uses `fuzzing.default_duration_secs`.
 An omitted `--cpus` uses the configured `fuzzing.sandbox.max_cpus`
 allocation; a request above that ceiling fails before seed preparation. The
 CLI resolves engine, duration, and CPU policy before storage bootstrap or seed
 preparation. The service rechecks policy when launching the campaign.
+
+### Per-input timeout
+
+Every campaign run carries an explicit per-input timeout: one input running
+longer is a hang finding instead of a wedged run. An omitted `--timeout-ms`
+uses `fuzzing.default_timeout_ms` (default 1000 ms); both are validated to
+`1..=3600000` and a rejected value fails before any run starts. The unit is
+milliseconds because AFL++ takes `-t` in ms; libFuzzer `-timeout=<s>` and
+honggfuzz `--timeout=<s>` take whole seconds, so a sub-second budget rounds
+up, never to zero. The resolved value is persisted with the run configuration,
+so `run --replay` re-executes it exactly, and an explicit timeout is never
+silently overridden by engine `extra_args` (it is emitted last, and all three
+userspace engines apply the last occurrence of a repeated flag).
+
+Hang findings surface in the live status line (`hangs=N`: AFL++ `saved_hangs`,
+honggfuzz `Timeouts`) and in the run summary (`hangs (per-input timeouts): N`),
+which additionally counts libFuzzer's `timeout-*` artifacts. Syzkaller has no
+per-input timeout knob; a wedged kernel campaign is bounded by the sandbox
+wall-clock cap only.
+
+### Sanitizer selection
+
+C/C++ harnesses build with AddressSanitizer by default; `--sanitizer
+undefined` builds them with UndefinedBehaviorSanitizer instead (halt-on-error:
+a finding aborts the process so the engine records a crash). UBSan catches a
+bug class ASan misses -- signed overflow, invalid shifts, misalignment, null
+dereference -- so practitioners run both. The sanitizer is baked into the
+harness binary: the harness revision records it, and a run always records the
+harness's own sanitizer in its persisted run configuration, so replays,
+auto-revert baselines, change-impact comparisons, and AFL++ resume donors
+never mix sanitizers.
+
+- `oxfuzz harness --sanitizer undefined` builds (and `fuzz --sanitizer
+  undefined` builds and qualifies) a UBSan harness; the configured
+  `[fuzzing] default_sanitizer` (default `address`) applies when no flag is
+  given.
+- `oxfuzz run --sanitizer undefined` and `campaign --sanitizer undefined`
+  ASSERT the promoted harness was built with that sanitizer: a mismatch fails
+  before any engine starts and names the rebuild command. With no flag, the
+  run uses whatever the promoted harness was built with. `--sanitizer` does
+  not combine with `run --replay` (a replay re-executes the recorded
+  configuration exactly) or with `harness --refine` (refinement keeps the
+  active revision's build sanitizer).
+- Rust targets build AddressSanitizer-only (cargo-fuzz/libfuzzer-sys has no
+  UBSan path); a non-`address` selection fails before any drafting or build.
+- `memory`, `thread`, and `none` are rejected with the reason; the sandbox
+  toolchain cannot honor them (see `docs/standards/ENGINE_ADAPTER_STANDARD.md`
+  3.5 for the per-engine flag mapping and evidence).
+
+### AFL++ session resume
+
+By default every AFL++ run cold-starts: staging builds a fresh output tree,
+so an interrupted run's queue cycle position, favored bookkeeping, and cycle
+counts are lost (its queue *inputs* survive -- closeout absorbs them into the
+retained corpus -- but the AFL-internal state does not).
+
+`--resume` (on `run`, `campaign`, and `fuzz`) opts into session continuation.
+A resumed run copies the most recent compatible output tree into its own
+fresh staging directory and launches `afl-fuzz` with `AFL_AUTORESUME=1`, so
+every prior instance directory resumes in place and any instance added by a
+larger `--cpus` allocation cold-starts from the staged corpus. Compatible
+means: same target workspace, AFL++ campaign kind, terminal status, and the
+exact same harness binary (the staged binary's SHA-256 must match -- a
+recompiled harness cold-starts). With no compatible prior tree the run
+cold-starts and journals that fact; a donor tree over the 32 MiB copy ceiling
+is a loud error, not a silent cold start.
+
+Resume is AFL++-only: requesting it for another engine fails at policy
+resolution. `run --replay` never resumes -- a replay re-executes the retained
+inputs exactly, so it conflicts with `--resume` at the flag level. The
+deployment-wide default is `[fuzzing] default_resume` (off); the flag
+overrides it per invocation, and scheduled campaigns and the web/desktop
+launch follow the configured default. Hand-rolled resume flags are rejected:
+the AFL adapter refuses `-i -`/`-i-` in engine extra args, and the runner
+refuses a hand-set `AFL_AUTORESUME` in the run environment -- the typed
+`resume` setting is the only source of resume truth.
+
+A resumed tree is the new run's own evidence: closeout reads its
+`fuzzer_stats`, absorbs its queue, and ingests crash artifacts (prior
+sessions' crashes included) through the same deduplicated triage path.
 
 Export returns a content-addressed work-order ID. Import returns an immutable
 submission UUID and records provenance; source must be a nonempty regular,

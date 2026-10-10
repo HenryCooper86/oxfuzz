@@ -72,8 +72,17 @@ cargo build --release                 # binary: target/release/oxfuzz
 
 oxfuzz init                           # scaffold config/*.toml + create the database
 # then configure at least one LLM provider: config/providers.toml + HF_PROVIDER_API_KEY
-# and authorize execution once you trust what will run: export HF_AUTO_APPROVE=1
+# execution asks for approval per action on the terminal (y/n/always); for
+# unattended runs: export HF_AUTO_APPROVE=1
 
+oxfuzz fuzz <project>                 # discover -> harness -> smoke -> promote -> campaign,
+                                      # pausing only at the approval prompts
+```
+
+The reviewed, step-by-step flow keeps every artifact under your explicit
+control instead:
+
+```bash
 oxfuzz discover <project> --lang c --rank
 oxfuzz work-order export <project> --target <symbol> --lang c \
   --engine libfuzzer --out work-order.md
@@ -94,9 +103,11 @@ new draft rather than approve the previous source.
 
 Docker must be installed and running, and at least one LLM provider configured.
 Harness compilation and fuzzer launches are approval-gated high-risk actions:
-the CLI reads that consent from the environment (`HF_AUTO_APPROVE=1`, or
-`HF_GUARDRAILS=permissive` for trusted loops); the desktop app asks in a
-dialog. See the [Safety Model](docs/guides/SAFETY_MODEL.md),
+on a terminal the CLI asks per action (`[y]es` once, `[n]o`, or `[a]lways` for
+that action kind this session); piped or CI runs never prompt and read consent
+from the environment instead (`HF_AUTO_APPROVE=1`, or `HF_GUARDRAILS=permissive`
+for trusted loops); the desktop app asks in a dialog. See the
+[Safety Model](docs/guides/SAFETY_MODEL.md),
 [Install & Build](docs/guides/INSTALL.md), and
 [Configuration](docs/guides/CONFIGURATION.md) for the full setup.
 
