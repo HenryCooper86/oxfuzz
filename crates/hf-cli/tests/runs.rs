@@ -1,5 +1,5 @@
 //! Binary-level smoke tests for the `runs` command group against a seeded
-//! SQLite store. No Docker, no live engines: runs exist only as durable rows,
+//! `SQLite` store. No Docker, no live engines: runs exist only as durable rows,
 //! exactly the state a headless operator inspects after the fact.
 
 use std::path::{Path, PathBuf};

@@ -178,13 +178,13 @@ mod tests {
     #[test]
     fn stage_headers_name_the_stage_target_and_engine() {
         let project = std::path::Path::new("/proj");
-        let discover = render_stage(&project, &FuzzStage::Discover { lang: None });
+        let discover = render_stage(project, &FuzzStage::Discover { lang: None });
         assert!(discover.contains("discover"), "{discover}");
         assert!(discover.contains("auto-detect"), "{discover}");
         assert!(discover.contains("/proj"), "{discover}");
 
         let discover = render_stage(
-            &project,
+            project,
             &FuzzStage::Discover {
                 lang: Some(TargetLanguage::C),
             },
@@ -192,7 +192,7 @@ mod tests {
         assert!(discover.contains("language: c"), "{discover}");
 
         let fresh = render_stage(
-            &project,
+            project,
             &FuzzStage::Harness {
                 target: "parse_entry".to_owned(),
                 engine: EngineKind::LibFuzzer,
@@ -204,7 +204,7 @@ mod tests {
         assert!(!fresh.contains("reusing"), "{fresh}");
 
         let reused = render_stage(
-            &project,
+            project,
             &FuzzStage::Harness {
                 target: "parse_entry".to_owned(),
                 engine: EngineKind::LibFuzzer,
@@ -214,7 +214,7 @@ mod tests {
         assert!(reused.contains("reusing"), "{reused}");
 
         let promote = render_stage(
-            &project,
+            project,
             &FuzzStage::Promote {
                 target: "parse_entry".to_owned(),
                 engine: EngineKind::LibFuzzer,
@@ -223,7 +223,7 @@ mod tests {
         assert!(promote.contains("approval"), "{promote}");
 
         let campaign = render_stage(
-            &project,
+            project,
             &FuzzStage::Campaign {
                 target: "parse_entry".to_owned(),
                 engine: EngineKind::AflPlusPlus,

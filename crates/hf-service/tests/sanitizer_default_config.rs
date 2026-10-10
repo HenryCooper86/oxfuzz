@@ -282,8 +282,8 @@ async fn promoted_sanitizer(store: &Arc<hf_storage::Store>, project: &Path) -> S
 
 #[tokio::test]
 async fn the_configured_default_sanitizer_applies_to_new_builds() {
-    let (_dir, store, container, runtime) = fixture("default_sanitizer = \"undefined\"").await;
-    let project = _dir.path().join("proj");
+    let (dir, store, container, runtime) = fixture("default_sanitizer = \"undefined\"").await;
+    let project = dir.path().join("proj");
 
     qualify(&container, &project, None).await;
 
@@ -303,8 +303,8 @@ async fn the_configured_default_sanitizer_applies_to_new_builds() {
 
 #[tokio::test]
 async fn an_explicit_build_request_overrides_the_configured_default() {
-    let (_dir, store, container, runtime) = fixture("default_sanitizer = \"undefined\"").await;
-    let project = _dir.path().join("proj");
+    let (dir, store, container, runtime) = fixture("default_sanitizer = \"undefined\"").await;
+    let project = dir.path().join("proj");
 
     qualify(&container, &project, Some(Sanitizer::Address)).await;
 

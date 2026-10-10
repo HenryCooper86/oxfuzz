@@ -179,15 +179,15 @@ async fn libfuzzer_fork_runs_disable_the_exit_time_leak_sanitizer() {
     );
 }
 
-/// A UBSan build still aborts on a finding (the binary is compiled
+/// A `UBSan` build still aborts on a finding (the binary is compiled
 /// `-fno-sanitize-recover=undefined`), but its default report carries no stack
 /// frames, which the dedup signature feeds on. For the direct libFuzzer run the
 /// runner adds `UBSAN_OPTIONS=print_stacktrace=1` unless the operator set
-/// UBSAN_OPTIONS outright.
+/// `UBSAN_OPTIONS` outright.
 ///
-/// The runner must NEVER set UBSAN_OPTIONS for AFL++ or honggfuzz: both engines
+/// The runner must NEVER set `UBSAN_OPTIONS` for AFL++ or honggfuzz: both engines
 /// auto-configure `abort_on_error` when they detect sanitizer instrumentation,
-/// and a preset UBSAN_OPTIONS suppresses that, turning the UBSan `Die()` (exit
+/// and a preset `UBSAN_OPTIONS` suppresses that, turning the `UBSan` `Die()` (exit
 /// code 1, no signal) into a non-crash those signal-based engines never save.
 /// Verified against the pinned sandbox image (AFL++ 4.09c, honggfuzz 2.6).
 #[tokio::test]

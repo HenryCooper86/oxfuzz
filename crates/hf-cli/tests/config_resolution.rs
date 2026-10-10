@@ -1,8 +1,8 @@
 //! Binary-level tests for config directory resolution: precedence across
 //! `--config` / `HF_CONFIG_DIR` / the per-user config dir / the source-tree
 //! walk-up, the walk-up stderr warning, and fail-loud validation of explicit
-//! overrides. Uses the standard isolation pattern: private HOME, HF_DB_PATH,
-//! HF_WORKSPACE_DIR, HF_USE_DOCKER=0.
+//! overrides. Uses the standard isolation pattern: private HOME, `HF_DB_PATH`,
+//! `HF_WORKSPACE_DIR`, `HF_USE_DOCKER=0`.
 
 use std::path::PathBuf;
 use std::process::{Command, Output};

@@ -282,8 +282,8 @@ async fn promoted_sanitizer(store: &Arc<hf_storage::Store>, project: &Path) -> S
 
 #[tokio::test]
 async fn requested_ubsan_reaches_the_build_script_and_the_run_identity() {
-    let (_dir, store, container, runtime) = fixture("").await;
-    let project = _dir.path().join("proj");
+    let (dir, store, container, runtime) = fixture("").await;
+    let project = dir.path().join("proj");
 
     qualify(&container, &project, Some(Sanitizer::Undefined)).await;
 
@@ -335,8 +335,8 @@ async fn requested_ubsan_reaches_the_build_script_and_the_run_identity() {
 
 #[tokio::test]
 async fn run_with_a_mismatched_sanitizer_request_fails_loud() {
-    let (_dir, store, container, _runtime) = fixture("").await;
-    let project = _dir.path().join("proj");
+    let (dir, store, container, _runtime) = fixture("").await;
+    let project = dir.path().join("proj");
     qualify(&container, &project, Some(Sanitizer::Undefined)).await;
 
     let error = container
@@ -370,8 +370,8 @@ async fn run_with_a_mismatched_sanitizer_request_fails_loud() {
 
 #[tokio::test]
 async fn unselectable_sanitizers_fail_loud_at_build_resolution() {
-    let (_dir, _store, container, _runtime) = fixture("").await;
-    let project = _dir.path().join("proj");
+    let (dir, _store, container, _runtime) = fixture("").await;
+    let project = dir.path().join("proj");
     let source =
         "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return 0; }";
 
@@ -418,8 +418,8 @@ async fn unselectable_sanitizers_fail_loud_at_build_resolution() {
 
 #[tokio::test]
 async fn rust_targets_reject_a_non_address_sanitizer_loudly() {
-    let (_dir, store, container, runtime) = fixture("").await;
-    let project = _dir.path().join("proj");
+    let (dir, store, container, runtime) = fixture("").await;
+    let project = dir.path().join("proj");
     let commands_before = runtime.commands.lock().unwrap().len();
 
     let error = container
@@ -449,8 +449,8 @@ async fn rust_targets_reject_a_non_address_sanitizer_loudly() {
 
 #[tokio::test]
 async fn fuzz_redrafts_when_the_promoted_harness_has_a_different_sanitizer() {
-    let (_dir, store, container, _runtime) = fixture("").await;
-    let project = _dir.path().join("proj");
+    let (dir, store, container, _runtime) = fixture("").await;
+    let project = dir.path().join("proj");
     let request = |sanitizer| hf_service::FuzzRequest {
         project: &project,
         target: Some("parse_value"),

@@ -131,7 +131,7 @@ fn syzkaller_does_not_ingest_userspace_artifacts() {
 /// a `SUMMARY: UndefinedBehaviorSanitizer:` line (captured verbatim from a
 /// `-fsanitize=undefined -fno-sanitize-recover=undefined` build in the pinned
 /// sandbox image). The ingester must classify the finding as `Ubsan` -- ahead
-/// of any ASan tokens -- so the dedup signature keeps the bug class distinct
+/// of any `ASan` tokens -- so the dedup signature keeps the bug class distinct
 /// from a memory error at the same call site.
 #[test]
 fn ubsan_variant_run_ingests_as_ubsan() {

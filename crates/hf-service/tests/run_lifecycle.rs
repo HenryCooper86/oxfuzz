@@ -1,6 +1,6 @@
 //! Run lifecycle read/control operations backing the CLI `runs` commands:
 //! id resolution (full UUID or unambiguous prefix) and the single-run detail
-//! view. Uses a real SQLite store; no Docker, no live engines.
+//! view. Uses a real `SQLite` store; no Docker, no live engines.
 
 use std::sync::Arc;
 

@@ -592,7 +592,7 @@ mod tests {
         assert_eq!(
             encoded,
             json!({"Stats": {
-                "execs_total": 128934,
+                "execs_total": 128_934,
                 "execs_per_sec": 842.0,
                 "edges_covered": 1523,
                 "cycles_done": 2,
@@ -625,7 +625,7 @@ mod tests {
             json!({"Stats": {"execs_per_sec": 43690.0}})
         );
         let decoded: FuzzProgress =
-            serde_json::from_value(json!({"Stats": {"execs_total": 128934}})).unwrap();
+            serde_json::from_value(json!({"Stats": {"execs_total": 128_934}})).unwrap();
         match decoded {
             FuzzProgress::Stats(stats) => {
                 assert_eq!(stats.execs_total, Some(128_934));
