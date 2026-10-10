@@ -251,3 +251,128 @@ fn go_native_failures_are_finding_signals() {
         assert!(!hf_engine::progress::line_reports_finding(line), "{line}");
     }
 }
+
+/// Extract the single stats snapshot from an event stream, if present.
+fn stats_event(events: &[FuzzProgress]) -> Option<hf_core::engine::EngineStats> {
+    events.iter().find_map(|event| match event {
+        FuzzProgress::Stats(stats) => Some(stats.clone()),
+        _ => None,
+    })
+}
+
+#[test]
+fn libfuzzer_pulse_line_yields_a_full_stats_snapshot() {
+    // A captured single-process pulse line: counter, coverage, corpus, rate.
+    let events = parse_progress_events(
+        "#131072 pulse cov: 58 ft: 406 corp: 215/64Kb lim: 4096 exec/s: 43690 rss: 546Mb",
+    );
+    let stats = stats_event(&events).expect("a pulse line carries a stats snapshot");
+    assert_eq!(stats.execs_total, Some(131_072));
+    assert_eq!(stats.edges_covered, Some(58));
+    assert_eq!(stats.corpus_count, Some(215));
+    assert_eq!(stats.execs_per_sec, Some(43_690.0));
+    assert_eq!(stats.cycles_done, None, "libFuzzer has no queue cycles");
+    // The dedicated scalar events keep flowing for aggregation.
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, FuzzProgress::EdgesCovered(58))));
+}
+
+#[test]
+fn libfuzzer_new_and_inited_lines_yield_stats_snapshots() {
+    let new_line = parse_progress_events(
+        "#262144 NEW    cov: 60 ft: 420 corp: 216/65Kb lim: 4096 exec/s: 52428 rss: 549Mb L: 31/4096 MS: 2 Shuffle-ChangeUnits-",
+    );
+    let stats = stats_event(&new_line).expect("a NEW line carries a stats snapshot");
+    assert_eq!(stats.execs_total, Some(262_144));
+    assert_eq!(stats.edges_covered, Some(60));
+    assert_eq!(stats.corpus_count, Some(216));
+
+    let inited = parse_progress_events("#2\tINITED cov: 10 ft: 11 corp: 1/3b exec/s: 0 rss: 32Mb");
+    let stats = stats_event(&inited).expect("an INITED line carries a stats snapshot");
+    assert_eq!(stats.execs_total, Some(2));
+    assert_eq!(stats.edges_covered, Some(10));
+    assert_eq!(stats.corpus_count, Some(1));
+    assert_eq!(stats.execs_per_sec, Some(0.0));
+}
+
+#[test]
+fn libfuzzer_fork_mode_line_includes_uptime() {
+    let events = parse_progress_events(
+        "#37851418: cov: 60 ft: 60 corp: 38 exec/s: 695057 oom/timeout/crash: 0/0/0 time: 18s job: 9 dft_time: 0",
+    );
+    let stats = stats_event(&events).expect("a fork-mode status line carries a stats snapshot");
+    assert_eq!(stats.execs_total, Some(37_851_418));
+    assert_eq!(stats.edges_covered, Some(60));
+    assert_eq!(stats.corpus_count, Some(38));
+    assert_eq!(stats.execs_per_sec, Some(695_057.0));
+    // The standalone `time:` field is the run's uptime; `dft_time:` must not
+    // be misread for it.
+    assert_eq!(stats.uptime_secs, Some(18));
+}
+
+#[test]
+fn libfuzzer_final_stat_lines_yield_terminal_counters() {
+    let total = parse_progress_events("stat::number_of_executed_units: 128934");
+    let stats = stats_event(&total).expect("the final unit count is a stats snapshot");
+    assert_eq!(stats.execs_total, Some(128_934));
+    assert_eq!(stats.execs_per_sec, None);
+
+    let rate = parse_progress_events("stat::average_exec_per_sec: 842");
+    let stats = stats_event(&rate).expect("the final average rate is a stats snapshot");
+    assert_eq!(stats.execs_per_sec, Some(842.0));
+    assert_eq!(stats.execs_total, None);
+}
+
+#[test]
+fn lines_without_stats_fields_yield_no_snapshot() {
+    for line in [
+        // A libFuzzer NEW_FUNC line has a `#N` counter but no stats fields.
+        "#7\tNEW_FUNC[1/2]: 0xdeadbeef in parse_value /src/parser.c:12",
+        // A bare comment marker.
+        "#42",
+        // Plain engine prose.
+        "INFO: Seed: 1234",
+        "DONE",
+    ] {
+        let events = parse_progress_events(line);
+        assert!(
+            stats_event(&events).is_none(),
+            "{line:?} must not produce a stats snapshot: {events:?}"
+        );
+    }
+}
+
+#[test]
+fn honggfuzz_status_lines_yield_stats_snapshots() {
+    let iterations = parse_progress_events("  Iterations : 136534 [mode: 'DYNAMIC']");
+    let stats = stats_event(&iterations).expect("Iterations carries execs_total");
+    assert_eq!(stats.execs_total, Some(136_534));
+    assert_eq!(stats.execs_per_sec, None);
+
+    let corpus = parse_progress_events("  Corpus Size : 91");
+    let stats = stats_event(&corpus).expect("Corpus Size carries corpus_count");
+    assert_eq!(stats.corpus_count, Some(91));
+
+    let timeouts = parse_progress_events("  Timeouts : 2 [10 seconds]");
+    let stats = stats_event(&timeouts).expect("Timeouts carries hangs");
+    assert_eq!(stats.hangs, Some(2));
+}
+
+#[test]
+fn honggfuzz_counter_and_speed_lines_keep_their_scalar_only_events() {
+    // Crash counters come from ingesting the crash directory, not the status
+    // tick, and Speed/Coverage already emit their dedicated scalar events;
+    // none of these lines may additionally emit a stats snapshot.
+    for line in [
+        "Crashes : 7 (unique: 3, blacklist: 0, verified: 0)",
+        "Speed : 246/sec [avg: 246]",
+        "Coverage : edge: 123/4567 [2%] pc: 0 cmp: 0",
+    ] {
+        let events = parse_progress_events(line);
+        assert!(
+            stats_event(&events).is_none(),
+            "{line:?} must not produce a stats snapshot: {events:?}"
+        );
+    }
+}

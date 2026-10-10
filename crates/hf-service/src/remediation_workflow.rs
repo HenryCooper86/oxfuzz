@@ -19,7 +19,6 @@ use hf_core::harness::Harness;
 use hf_core::runtime::{
     CommandResult, CommandTermination, ResourceLimits, RuntimeAdapter, SandboxOptions,
 };
-use hf_core::target::Sanitizer;
 use hf_crash::remediation::{
     RemediationBinding, RemediationHandoff, RemediationStatus, RemediationVerificationSpec,
     SandboxVerificationEvidence, VerificationStageEvidence, VerificationStageStatus,
@@ -710,18 +709,12 @@ fn resource_limits(spec: &RemediationVerificationSpec, timeout_secs: u64) -> Res
     }
 }
 
-fn sanitizer_flag(sanitizer: Sanitizer) -> &'static str {
-    match sanitizer {
-        Sanitizer::None => "",
-        Sanitizer::Address => "address",
-        Sanitizer::Undefined => "undefined",
-        Sanitizer::Memory => "memory",
-        Sanitizer::Thread => "thread",
-    }
-}
-
 /// Render the in-container compile command for the approved harness against the
-/// staged (patched) sources. The harness source is staged as `harness.c`; every
+/// staged (patched) sources. The command rebuilds the harness exactly as its
+/// revision was built: `build_cmd.args` carry the recorded sanitizer flags
+/// (including `-fno-sanitize-recover=undefined` for a `UBSan` build, without
+/// which the patched binary would recover past the very finding the proof is
+/// about). The harness source is staged as `harness.c`; every
 /// other staged C/C++ source file is compiled in alongside it so the harness
 /// links the patched target it exercises.
 fn compile_command(harness: &Harness, build_dir: &Path) -> String {
@@ -742,13 +735,11 @@ fn compile_command(harness: &Harness, build_dir: &Path) -> String {
             sources.push(name);
         }
     }
-    let flag = sanitizer_flag(harness.sanitizer);
-    let fsanitize = if flag.is_empty() {
-        "-fsanitize=fuzzer".to_owned()
-    } else {
-        format!("-fsanitize=fuzzer,{flag}")
-    };
-    let mut command = format!("{} {fsanitize}", harness.build_cmd.compiler);
+    let mut command = harness.build_cmd.compiler.clone();
+    for arg in &harness.build_cmd.args {
+        command.push(' ');
+        command.push_str(arg);
+    }
     for flag in &harness.build_cmd.extra_flags {
         command.push(' ');
         command.push_str(flag);

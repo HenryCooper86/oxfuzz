@@ -431,8 +431,10 @@ fn build_app_state() -> Result<AppState, String> {
 /// bundle built into `target/`), so Settings edits (written under Application
 /// Support) would be silently ignored. Pinning `HF_CONFIG_DIR` + `HF_DB_PATH`
 /// here makes reads and writes align on the per-user directory in every launch
-/// mode. Explicit env overrides are respected. The CLI/web do not run this, so
-/// they keep using `<repo>/config` for development.
+/// mode. Explicit env overrides are respected. The CLI/web do not run this:
+/// they resolve the per-user config dir themselves once it holds live config
+/// files, and otherwise fall back to `<repo>/config` in a source checkout
+/// (with a stderr warning naming the binding).
 ///
 /// On first run the per-user config is seeded from `<repo>/config` when present,
 /// so a developer's existing providers carry over into the GUI.
@@ -456,6 +458,10 @@ fn pin_user_data_dirs() -> Result<(), String> {
     if std::env::var_os("HF_DB_PATH").is_none() {
         std::env::set_var("HF_DB_PATH", data.join("oxfuzz.db"));
     }
+    // Fail at launch when an explicit config override names a path that is not
+    // a directory, rather than degrading into I/O errors on first use
+    // (Engineering Protocol 2.16).
+    hf_service::config_resolution().map_err(|error| error.to_string())?;
     Ok(())
 }
 

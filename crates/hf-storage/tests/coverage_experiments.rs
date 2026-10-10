@@ -95,6 +95,8 @@ async fn fixture(store: &Store, project: &str, start: DateTime<Utc>) -> RunRecor
         seed: Some(u64::MAX),
         replay_of: None,
         input_manifest_sha256: None,
+        input_timeout: None,
+        resume: false,
     };
     let mut run = RunRecord::new(project, harness.engine, Some(config), start);
     run.status = RunStatus::Done;

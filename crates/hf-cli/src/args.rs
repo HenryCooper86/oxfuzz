@@ -19,6 +19,11 @@ pub(crate) enum AiOption {
 #[derive(Parser)]
 #[command(name = "oxfuzz", version, about)]
 pub(crate) struct Cli {
+    /// Read configuration from this directory, ahead of `HF_CONFIG_DIR`, the
+    /// per-user config dir, and the enclosing source tree. `oxfuzz init`
+    /// materializes fresh config files into it.
+    #[arg(long, global = true, value_name = "DIR")]
+    pub(crate) config: Option<PathBuf>,
     #[command(subcommand)]
     pub(crate) command: Commands,
 }
@@ -37,9 +42,14 @@ pub(crate) enum Commands {
     Harness(HarnessArgs),
     /// Run a fuzz campaign.
     Run(RunArgs),
+    /// List, inspect, and stop fuzz runs.
+    Runs(RunsArgs),
     /// Run an approved campaign: discover -> require promoted harness -> seed
     /// -> run -> triage, end to end.
     Campaign(CampaignArgs),
+    /// Point-and-go onboarding: discover -> harness -> smoke -> promote
+    /// (human approval) -> campaign, in one command.
+    Fuzz(FuzzArgs),
     /// Triage crashes from a run.
     Triage(TriageArgs),
     /// Manage the fuzzing corpus for a target.
@@ -130,6 +140,12 @@ pub(crate) struct DoctorArgs {
     /// Require configured model access without contacting a provider.
     #[arg(long, requires = "engine")]
     pub(crate) require_provider: bool,
+    /// Build the sandbox image from the source checkout's
+    /// `docker/sandbox/Dockerfile` (the same build the desktop app runs on
+    /// first launch), then re-probe. Fails loud when Docker is unavailable or
+    /// no source checkout is found.
+    #[arg(long, conflicts_with = "engine")]
+    pub(crate) build_image: bool,
     /// Emit the service-owned status as JSON.
     #[arg(long)]
     pub(crate) json: bool,
@@ -201,6 +217,20 @@ pub(crate) struct HarnessArgs {
     /// persisted smoke run.
     #[arg(long)]
     pub(crate) promote: bool,
+    /// Smoke-qualify WITHOUT the independent LLM pre-execution review, for
+    /// offline work or hosts without a provider key. The bypass is persisted
+    /// as a marked review record and a guardrail audit row, and human
+    /// promotion is still required; without the model review, only the
+    /// 13-rule lexical lint and your own approval stand between the generated
+    /// harness and the sandbox. See `docs/guides/SAFETY_MODEL.md`.
+    #[arg(long)]
+    pub(crate) no_llm_review: bool,
+    /// Sanitizer for the built harness: `address` (default) or `undefined`
+    /// (`UBSan`, halt-on-error). Baked into the harness binary; runs over the
+    /// promoted harness record its sanitizer. Overrides the configured
+    /// `fuzzing.default_sanitizer` for this build.
+    #[arg(long)]
+    pub(crate) sanitizer: Option<String>,
 }
 
 /// Controls for emitting harness drafts without execution.
@@ -237,10 +267,67 @@ pub(crate) struct RunArgs {
     /// omitted means the configured allocation.
     #[arg(long)]
     pub(crate) cpus: Option<u32>,
+    /// Per-input timeout in milliseconds: one input running longer is a hang
+    /// finding (AFL++ `-t`, libFuzzer `-timeout`, honggfuzz `--timeout`).
+    /// Overrides the configured `fuzzing.default_timeout_ms` for this run.
+    #[arg(long, conflicts_with = "replay")]
+    pub(crate) timeout_ms: Option<u64>,
+    /// AFL++ only: continue the most recent compatible AFL++ session (same
+    /// target and harness binary) instead of cold-starting -- the prior output
+    /// tree is copied into this run's staging and afl-fuzz resumes it in place
+    /// (`AFL_AUTORESUME`). With no prior session this run cold-starts.
+    /// Overrides the configured `fuzzing.default_resume`.
+    #[arg(long, conflicts_with = "replay")]
+    pub(crate) resume: bool,
+    /// Assert the sanitizer the promoted harness was built with
+    /// (`address`|`undefined`): a mismatch fails before any engine starts,
+    /// telling you to rebuild the harness with that sanitizer. Omitted means
+    /// unconstrained -- the run records the harness's own sanitizer.
+    #[arg(long, conflicts_with = "replay")]
+    pub(crate) sanitizer: Option<String>,
     /// Replay a persisted run with its recorded engine, duration, and
     /// deterministic seed.
     #[arg(long)]
     pub(crate) replay: Option<String>,
+}
+
+/// List, inspect, and stop fuzz runs.
+#[derive(clap::Args)]
+pub(crate) struct RunsArgs {
+    #[command(subcommand)]
+    pub(crate) op: RunsOp,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum RunsOp {
+    /// List persisted runs, newest first.
+    List {
+        /// Restrict the listing to this project root.
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// Show only runs still in flight (pending or running).
+        #[arg(long)]
+        active: bool,
+        /// Emit the service-owned rows as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Maximum number of rows to print.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Show one run's full record and latest persisted metrics.
+    Status {
+        /// Run UUID, or an unambiguous prefix of one.
+        id: String,
+        /// Emit the service-owned detail view as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Cooperatively cancel a running run owned by this process.
+    Stop {
+        /// Run UUID, or an unambiguous prefix of one.
+        id: String,
+    },
 }
 
 /// Run an approved campaign: discover -> require promoted harness -> seed
@@ -261,6 +348,24 @@ pub(crate) struct CampaignArgs {
     /// Per-iteration fuzz duration in seconds.
     #[arg(long, default_value_t = 60)]
     pub(crate) duration_secs: u64,
+    /// Per-input timeout in milliseconds for each campaign iteration: one
+    /// input running longer is a hang finding (AFL++ `-t`, libFuzzer
+    /// `-timeout`, honggfuzz `--timeout`). Overrides the configured
+    /// `fuzzing.default_timeout_ms`.
+    #[arg(long)]
+    pub(crate) timeout_ms: Option<u64>,
+    /// AFL++ only: continue the most recent compatible AFL++ session (same
+    /// target and harness binary) instead of cold-starting. Applies to every
+    /// iteration: iteration N continues the output tree iteration N-1
+    /// produced. Overrides the configured `fuzzing.default_resume`.
+    #[arg(long)]
+    pub(crate) resume: bool,
+    /// Assert the sanitizer the promoted harness was built with
+    /// (`address`|`undefined`): a mismatch fails before any iteration starts.
+    /// Omitted means unconstrained -- each iteration records the harness's own
+    /// sanitizer.
+    #[arg(long)]
+    pub(crate) sanitizer: Option<String>,
     /// Max run -> triage iterations.
     #[arg(long, default_value_t = 3)]
     pub(crate) iterations: usize,
@@ -273,6 +378,88 @@ pub(crate) struct CampaignArgs {
     /// a step, since each one warns and continues by design.
     #[arg(long, value_enum, default_value_t = AiOption::Auto)]
     pub(crate) ai: AiOption,
+}
+
+/// Point-and-go onboarding: discover -> harness -> smoke -> promote -> campaign.
+///
+/// One command runs the whole pipeline. The only pause is the human promotion
+/// gate: after the harness is drafted, compiled, and smoke-qualified, promoting
+/// it asks for approval (on a terminal, an interactive y/n/always prompt), and
+/// a denial stops the pipeline before any campaign -- `oxfuzz fuzz` never falls
+/// back to running an un-promoted harness. Re-running on a project whose target
+/// already has a promoted harness for the engine reuses that revision (no
+/// re-draft, no re-approval) unless `--fresh` forces a full re-qualification.
+#[derive(clap::Args)]
+pub(crate) struct FuzzArgs {
+    /// Project root path.
+    pub(crate) project: PathBuf,
+    /// Target symbol. Omit to auto-pick the highest-fit candidate the engine
+    /// can drive.
+    #[arg(long)]
+    pub(crate) target: Option<String>,
+    /// Fuzzing engine.
+    #[arg(long, default_value = "libfuzzer")]
+    pub(crate) engine: String,
+    /// Target language (c, cpp, rust, go, python). Omit to scan every
+    /// supported language and let the picked candidate carry its own.
+    #[arg(long)]
+    pub(crate) lang: Option<String>,
+    /// Per-iteration fuzz duration in seconds.
+    #[arg(long, default_value_t = 60)]
+    pub(crate) duration_secs: u64,
+    /// Max run -> triage iterations.
+    #[arg(long, default_value_t = 3)]
+    pub(crate) iterations: usize,
+    /// Per-input timeout in milliseconds for each campaign iteration: one
+    /// input running longer is a hang finding (AFL++ `-t`, libFuzzer
+    /// `-timeout`, honggfuzz `--timeout`). Overrides the configured
+    /// `fuzzing.default_timeout_ms`.
+    #[arg(long)]
+    pub(crate) timeout_ms: Option<u64>,
+    /// Sanitizer for a freshly built harness, and the asserted sanitizer of a
+    /// reused promoted one: `address` (default) or `undefined` (`UBSan`,
+    /// halt-on-error). A promoted harness built with the other sanitizer is
+    /// not reused -- the pipeline drafts and qualifies a fresh revision.
+    /// Overrides the configured `fuzzing.default_sanitizer` for this pipeline.
+    #[arg(long)]
+    pub(crate) sanitizer: Option<String>,
+    /// How the pipeline may use the model: harness drafting, campaign seed
+    /// generation, the run dictionary, and triage bug reports. (Target
+    /// auto-pick is a deterministic fit-score sort, not a model call.)
+    /// `off` calls no model at all; `require` refuses to start when none is
+    /// configured or all are frozen, but cannot promise a mid-run outage did
+    /// not degrade a step, since each one warns and continues by design.
+    #[arg(long, value_enum, default_value_t = AiOption::Auto)]
+    pub(crate) ai: AiOption,
+    #[command(flatten)]
+    pub(crate) switches: FuzzSwitchArgs,
+    /// Emit the pipeline outcome as JSON on stdout; stage headers and the live
+    /// status line move to stderr so stdout stays machine-readable.
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+/// The behavior switches of the onboarding pipeline (`oxfuzz fuzz`), grouped
+/// so the command surface stays readable.
+#[derive(clap::Args)]
+pub(crate) struct FuzzSwitchArgs {
+    /// Smoke-qualify WITHOUT the independent LLM pre-execution review, for
+    /// offline work or hosts without a provider key. The bypass is persisted
+    /// as a marked review record and a guardrail audit row, and human
+    /// promotion is still required; without the model review, only the
+    /// 13-rule lexical lint and your own approval stand between the generated
+    /// harness and the sandbox. See `docs/guides/SAFETY_MODEL.md`.
+    #[arg(long)]
+    pub(crate) no_llm_review: bool,
+    /// Re-draft and re-qualify even when a promoted harness for the chosen
+    /// target and engine already exists.
+    #[arg(long)]
+    pub(crate) fresh: bool,
+    /// AFL++ only: continue the most recent compatible AFL++ session (same
+    /// target and harness binary) instead of cold-starting. Applies to every
+    /// campaign iteration. Overrides the configured `fuzzing.default_resume`.
+    #[arg(long)]
+    pub(crate) resume: bool,
 }
 
 /// Triage crashes from a run.
@@ -861,10 +1048,41 @@ pub(crate) enum PolicyOp {
 }
 
 #[cfg(test)]
-mod harness_help_tests {
-    use clap::CommandFactory as _;
+mod config_flag_tests {
+    use clap::Parser as _;
 
     use super::Cli;
+
+    #[test]
+    fn config_flag_is_global_on_both_sides_of_a_subcommand() {
+        let before = Cli::try_parse_from(["oxfuzz", "--config", "/conf", "runs", "list"]).unwrap();
+        assert_eq!(
+            before.config.as_deref(),
+            Some(std::path::Path::new("/conf"))
+        );
+
+        let after = Cli::try_parse_from(["oxfuzz", "runs", "list", "--config", "/conf"]).unwrap();
+        assert_eq!(after.config.as_deref(), Some(std::path::Path::new("/conf")));
+    }
+
+    #[test]
+    fn config_flag_defaults_to_none() {
+        let parsed = Cli::try_parse_from(["oxfuzz", "runs", "list"]).unwrap();
+        assert_eq!(parsed.config, None);
+    }
+
+    #[test]
+    fn config_flag_requires_a_value() {
+        assert!(Cli::try_parse_from(["oxfuzz", "--config"]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod harness_help_tests {
+    use clap::CommandFactory as _;
+    use clap::Parser as _;
+
+    use super::{Cli, Commands};
 
     #[test]
     fn generated_harness_help_lists_only_userspace_engines() {
@@ -883,6 +1101,57 @@ mod harness_help_tests {
         assert!(help.contains("local desktop application"), "{help}");
         assert!(help.contains("kernel-campaign workflow"), "{help}");
         assert!(help.contains("operator approval"), "{help}");
+    }
+
+    #[test]
+    fn harness_help_names_the_bypass_flag_and_its_residual_risk() {
+        let mut command = Cli::command();
+        let harness = command
+            .find_subcommand_mut("harness")
+            .expect("harness subcommand");
+        let help = harness.render_long_help().to_string();
+
+        assert!(help.contains("--no-llm-review"), "{help}");
+        // The flag help must carry the risk: what still checks the harness,
+        // and that promotion stays human.
+        assert!(help.contains("lint"), "{help}");
+        assert!(help.contains("promotion"), "{help}");
+    }
+
+    #[test]
+    fn the_review_bypass_flag_defaults_off_and_parses_explicitly() {
+        let parsed = Cli::try_parse_from([
+            "oxfuzz",
+            "harness",
+            "/p",
+            "--target",
+            "t",
+            "--engine",
+            "libfuzzer",
+            "--no-llm-review",
+        ])
+        .unwrap();
+        let Commands::Harness(crate::args::HarnessArgs { no_llm_review, .. }) = parsed.command
+        else {
+            panic!("expected harness");
+        };
+        assert!(no_llm_review);
+
+        let parsed = Cli::try_parse_from([
+            "oxfuzz",
+            "harness",
+            "/p",
+            "--target",
+            "t",
+            "--engine",
+            "libfuzzer",
+        ])
+        .unwrap();
+        let Commands::Harness(crate::args::HarnessArgs { no_llm_review, .. }) = parsed.command
+        else {
+            panic!("expected harness");
+        };
+        assert!(!no_llm_review, "the bypass is never the default");
     }
 }
 
@@ -1136,6 +1405,471 @@ mod build_read_feature_off_tests {
             Cli::try_parse_from(["oxfuzz", "build", "profile", "show", "/project", "--json"])
                 .is_ok()
         );
+    }
+}
+
+#[cfg(test)]
+mod runs_cli_tests {
+    use clap::Parser as _;
+
+    use super::{Cli, Commands, RunsOp};
+
+    #[test]
+    fn runs_list_parses_defaults_and_all_filters() {
+        let bare = Cli::try_parse_from(["oxfuzz", "runs", "list"]).unwrap();
+        let Commands::Runs(crate::args::RunsArgs {
+            op:
+                RunsOp::List {
+                    project,
+                    active,
+                    json,
+                    limit,
+                },
+        }) = bare.command
+        else {
+            panic!("expected runs list");
+        };
+        assert!(project.is_none());
+        assert!(!active);
+        assert!(!json);
+        assert_eq!(limit, 20);
+
+        let filtered = Cli::try_parse_from([
+            "oxfuzz",
+            "runs",
+            "list",
+            "--project",
+            "/p",
+            "--active",
+            "--json",
+            "--limit",
+            "5",
+        ])
+        .unwrap();
+        let Commands::Runs(crate::args::RunsArgs {
+            op:
+                RunsOp::List {
+                    project,
+                    active,
+                    json,
+                    limit,
+                },
+        }) = filtered.command
+        else {
+            panic!("expected runs list");
+        };
+        assert_eq!(project.as_deref(), Some(std::path::Path::new("/p")));
+        assert!(active);
+        assert!(json);
+        assert_eq!(limit, 5);
+    }
+
+    #[test]
+    fn runs_status_and_stop_take_a_run_id() {
+        let status = Cli::try_parse_from(["oxfuzz", "runs", "status", "a1b2c3d4"]).unwrap();
+        let Commands::Runs(crate::args::RunsArgs {
+            op: RunsOp::Status { id, json },
+        }) = status.command
+        else {
+            panic!("expected runs status");
+        };
+        assert_eq!(id, "a1b2c3d4");
+        assert!(!json);
+
+        let status_json =
+            Cli::try_parse_from(["oxfuzz", "runs", "status", "a1b2c3d4", "--json"]).unwrap();
+        assert!(matches!(
+            status_json.command,
+            Commands::Runs(crate::args::RunsArgs {
+                op: RunsOp::Status { json: true, .. }
+            })
+        ));
+
+        let stop = Cli::try_parse_from(["oxfuzz", "runs", "stop", "a1b2c3d4"]).unwrap();
+        let Commands::Runs(crate::args::RunsArgs {
+            op: RunsOp::Stop { id },
+        }) = stop.command
+        else {
+            panic!("expected runs stop");
+        };
+        assert_eq!(id, "a1b2c3d4");
+    }
+
+    #[test]
+    fn runs_requires_a_subcommand() {
+        assert!(Cli::try_parse_from(["oxfuzz", "runs"]).is_err());
+        assert!(Cli::try_parse_from(["oxfuzz", "runs", "status"]).is_err());
+        assert!(Cli::try_parse_from(["oxfuzz", "runs", "stop"]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod fuzz_cli_tests {
+    use clap::Parser as _;
+
+    use super::{AiOption, Cli, Commands};
+
+    #[test]
+    fn fuzz_parses_with_only_a_project_and_sensible_defaults() {
+        let parsed = Cli::try_parse_from(["oxfuzz", "fuzz", "/p"]).unwrap();
+        let Commands::Fuzz(crate::args::FuzzArgs {
+            project,
+            target,
+            engine,
+            lang,
+            duration_secs,
+            iterations,
+            timeout_ms,
+            sanitizer,
+            ai,
+            switches:
+                crate::args::FuzzSwitchArgs {
+                    no_llm_review,
+                    fresh,
+                    resume,
+                },
+            json,
+        }) = parsed.command
+        else {
+            panic!("expected fuzz");
+        };
+        assert_eq!(project, std::path::PathBuf::from("/p"));
+        assert_eq!(target, None, "no target: the pipeline auto-picks");
+        assert_eq!(engine, "libfuzzer");
+        assert_eq!(lang, None, "no lang: the pipeline auto-detects");
+        assert_eq!(duration_secs, 60);
+        assert_eq!(iterations, 3);
+        assert_eq!(timeout_ms, None);
+        assert_eq!(sanitizer, None, "no flag: the config default applies");
+        assert!(!resume, "resume is opt-in");
+        assert_eq!(ai, AiOption::Auto);
+        assert!(!no_llm_review, "the review bypass is never the default");
+        assert!(!fresh, "reuse is the default; --fresh opts out");
+        assert!(!json);
+    }
+
+    #[test]
+    fn fuzz_parses_every_flag() {
+        let parsed = Cli::try_parse_from([
+            "oxfuzz",
+            "fuzz",
+            "/p",
+            "--target",
+            "parse_entry",
+            "--engine",
+            "afl++",
+            "--lang",
+            "c",
+            "--duration-secs",
+            "120",
+            "--iterations",
+            "5",
+            "--timeout-ms",
+            "250",
+            "--sanitizer",
+            "undefined",
+            "--ai",
+            "require",
+            "--no-llm-review",
+            "--fresh",
+            "--json",
+        ])
+        .unwrap();
+        let Commands::Fuzz(crate::args::FuzzArgs {
+            target,
+            engine,
+            lang,
+            duration_secs,
+            iterations,
+            timeout_ms,
+            sanitizer,
+            ai,
+            switches:
+                crate::args::FuzzSwitchArgs {
+                    no_llm_review,
+                    fresh,
+                    resume,
+                },
+            json,
+            ..
+        }) = parsed.command
+        else {
+            panic!("expected fuzz");
+        };
+        assert_eq!(target.as_deref(), Some("parse_entry"));
+        assert_eq!(engine, "afl++");
+        assert_eq!(lang.as_deref(), Some("c"));
+        assert_eq!(duration_secs, 120);
+        assert_eq!(iterations, 5);
+        assert_eq!(timeout_ms, Some(250));
+        assert_eq!(sanitizer.as_deref(), Some("undefined"));
+        assert!(!resume);
+        assert_eq!(ai, AiOption::Require);
+        assert!(no_llm_review);
+        assert!(fresh);
+        assert!(json);
+    }
+
+    #[test]
+    fn fuzz_rejects_an_unknown_ai_mode() {
+        assert!(Cli::try_parse_from(["oxfuzz", "fuzz", "/p", "--ai", "maybe"]).is_err());
+    }
+
+    #[test]
+    fn fuzz_help_documents_the_pipeline_and_the_human_gate() {
+        use clap::CommandFactory as _;
+
+        let mut command = Cli::command();
+        let fuzz = command
+            .find_subcommand_mut("fuzz")
+            .expect("fuzz subcommand");
+        let help = fuzz.render_long_help().to_string();
+
+        assert!(help.contains("discover"), "{help}");
+        assert!(help.contains("promote"), "{help}");
+        assert!(help.contains("--no-llm-review"), "{help}");
+        assert!(help.contains("--fresh"), "{help}");
+    }
+}
+
+#[cfg(test)]
+mod resume_cli_tests {
+    use clap::Parser as _;
+
+    use super::{Cli, Commands};
+
+    #[test]
+    fn run_campaign_and_fuzz_accept_resume_and_default_it_off() {
+        let parsed = Cli::try_parse_from([
+            "oxfuzz", "run", "/p", "--target", "t", "--engine", "afl++", "--resume",
+        ])
+        .unwrap();
+        let Commands::Run(crate::args::RunArgs { resume, .. }) = parsed.command else {
+            panic!("expected run");
+        };
+        assert!(resume);
+
+        let parsed =
+            Cli::try_parse_from(["oxfuzz", "run", "/p", "--target", "t", "--engine", "afl++"])
+                .unwrap();
+        let Commands::Run(crate::args::RunArgs { resume, .. }) = parsed.command else {
+            panic!("expected run");
+        };
+        assert!(
+            !resume,
+            "resume is opt-in; omitted means the config default"
+        );
+
+        let parsed = Cli::try_parse_from(["oxfuzz", "campaign", "/p", "--resume"]).unwrap();
+        let Commands::Campaign(crate::args::CampaignArgs { resume, .. }) = parsed.command else {
+            panic!("expected campaign");
+        };
+        assert!(resume);
+
+        let parsed = Cli::try_parse_from(["oxfuzz", "fuzz", "/p", "--resume"]).unwrap();
+        let Commands::Fuzz(crate::args::FuzzArgs { switches, .. }) = parsed.command else {
+            panic!("expected fuzz");
+        };
+        assert!(switches.resume);
+    }
+
+    #[test]
+    fn replay_conflicts_with_resume() {
+        // Replay pins the recorded run configuration; continuing a session
+        // would contradict the exact re-execution the replay promises.
+        assert!(
+            Cli::try_parse_from(["oxfuzz", "run", "/p", "--replay", "a1b2c3d4", "--resume",])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn replay_conflicts_with_sanitizer() {
+        // A replay re-executes the recorded config, sanitizer included, so a
+        // sanitizer request cannot combine with it.
+        assert!(Cli::try_parse_from([
+            "oxfuzz",
+            "run",
+            "/p",
+            "--replay",
+            "a1b2c3d4",
+            "--sanitizer",
+            "undefined",
+        ])
+        .is_err());
+    }
+}
+
+#[cfg(test)]
+mod sanitizer_cli_tests {
+    use clap::Parser as _;
+
+    use super::{Cli, Commands};
+
+    #[test]
+    fn harness_run_campaign_and_fuzz_accept_sanitizer() {
+        let parsed = Cli::try_parse_from([
+            "oxfuzz",
+            "harness",
+            "/p",
+            "--target",
+            "t",
+            "--engine",
+            "libfuzzer",
+            "--sanitizer",
+            "undefined",
+        ])
+        .unwrap();
+        let Commands::Harness(crate::args::HarnessArgs { sanitizer, .. }) = parsed.command else {
+            panic!("expected harness");
+        };
+        assert_eq!(sanitizer.as_deref(), Some("undefined"));
+
+        let parsed = Cli::try_parse_from([
+            "oxfuzz",
+            "run",
+            "/p",
+            "--target",
+            "t",
+            "--engine",
+            "afl++",
+            "--sanitizer",
+            "address",
+        ])
+        .unwrap();
+        let Commands::Run(crate::args::RunArgs { sanitizer, .. }) = parsed.command else {
+            panic!("expected run");
+        };
+        assert_eq!(sanitizer.as_deref(), Some("address"));
+
+        let parsed =
+            Cli::try_parse_from(["oxfuzz", "campaign", "/p", "--sanitizer", "undefined"]).unwrap();
+        let Commands::Campaign(crate::args::CampaignArgs { sanitizer, .. }) = parsed.command else {
+            panic!("expected campaign");
+        };
+        assert_eq!(sanitizer.as_deref(), Some("undefined"));
+
+        let parsed =
+            Cli::try_parse_from(["oxfuzz", "fuzz", "/p", "--sanitizer", "undefined"]).unwrap();
+        let Commands::Fuzz(crate::args::FuzzArgs { sanitizer, .. }) = parsed.command else {
+            panic!("expected fuzz");
+        };
+        assert_eq!(sanitizer.as_deref(), Some("undefined"));
+    }
+
+    #[test]
+    fn sanitizer_defaults_to_none_so_the_config_applies() {
+        let parsed = Cli::try_parse_from([
+            "oxfuzz",
+            "harness",
+            "/p",
+            "--target",
+            "t",
+            "--engine",
+            "libfuzzer",
+        ])
+        .unwrap();
+        let Commands::Harness(crate::args::HarnessArgs { sanitizer, .. }) = parsed.command else {
+            panic!("expected harness");
+        };
+        assert_eq!(
+            sanitizer, None,
+            "no flag: `fuzzing.default_sanitizer` applies"
+        );
+
+        let parsed =
+            Cli::try_parse_from(["oxfuzz", "run", "/p", "--target", "t", "--engine", "afl++"])
+                .unwrap();
+        let Commands::Run(crate::args::RunArgs { sanitizer, .. }) = parsed.command else {
+            panic!("expected run");
+        };
+        assert_eq!(sanitizer, None, "no flag: no run-side constraint");
+    }
+}
+
+#[cfg(test)]
+mod timeout_cli_tests {
+    use clap::Parser as _;
+
+    use super::{Cli, Commands};
+
+    #[test]
+    fn run_accepts_a_per_input_timeout_and_defaults_to_none() {
+        let parsed = Cli::try_parse_from([
+            "oxfuzz",
+            "run",
+            "/p",
+            "--target",
+            "t",
+            "--engine",
+            "afl++",
+            "--timeout-ms",
+            "250",
+        ])
+        .unwrap();
+        let Commands::Run(crate::args::RunArgs { timeout_ms, .. }) = parsed.command else {
+            panic!("expected run");
+        };
+        assert_eq!(timeout_ms, Some(250));
+
+        // Omitted means the configured `fuzzing.default_timeout_ms` applies.
+        let parsed =
+            Cli::try_parse_from(["oxfuzz", "run", "/p", "--target", "t", "--engine", "afl++"])
+                .unwrap();
+        let Commands::Run(crate::args::RunArgs { timeout_ms, .. }) = parsed.command else {
+            panic!("expected run");
+        };
+        assert_eq!(timeout_ms, None);
+    }
+
+    #[test]
+    fn campaign_accepts_a_per_input_timeout() {
+        let parsed =
+            Cli::try_parse_from(["oxfuzz", "campaign", "/p", "--timeout-ms", "5000"]).unwrap();
+        let Commands::Campaign(crate::args::CampaignArgs { timeout_ms, .. }) = parsed.command
+        else {
+            panic!("expected campaign");
+        };
+        assert_eq!(timeout_ms, Some(5000));
+
+        let parsed = Cli::try_parse_from(["oxfuzz", "campaign", "/p"]).unwrap();
+        let Commands::Campaign(crate::args::CampaignArgs { timeout_ms, .. }) = parsed.command
+        else {
+            panic!("expected campaign");
+        };
+        assert_eq!(timeout_ms, None);
+    }
+
+    #[test]
+    fn replay_conflicts_with_a_per_input_timeout_override() {
+        // Replay pins the recorded run configuration; silently dropping an
+        // explicit timeout there would be a lie about what ran.
+        assert!(Cli::try_parse_from([
+            "oxfuzz",
+            "run",
+            "/p",
+            "--replay",
+            "a1b2c3d4",
+            "--timeout-ms",
+            "5",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn timeout_ms_rejects_non_numeric_values() {
+        assert!(Cli::try_parse_from([
+            "oxfuzz",
+            "run",
+            "/p",
+            "--target",
+            "t",
+            "--engine",
+            "afl++",
+            "--timeout-ms",
+            "fast",
+        ])
+        .is_err());
     }
 }
 

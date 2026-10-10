@@ -294,7 +294,10 @@ impl ServiceContainer {
 
     /// Construct the canonical container used by every presentation layer
     /// (CLI, web, GUI): a Docker (or stub) runtime, an LLM provider pool from
-    /// the environment, and the persistence store from `HF_DB_PATH`.
+    /// the environment, and the persistence store from `HF_DB_PATH`. Guardrails
+    /// start as [`Guardrails::from_env`]; a presentation layer with its own
+    /// approval source (the CLI's terminal prompt, the GUI's dialog) installs
+    /// it via [`Self::with_guardrails`].
     ///
     /// Storage and the provider pool are optional: when unavailable the
     /// container still serves every non-persistent, non-LLM operation, so a

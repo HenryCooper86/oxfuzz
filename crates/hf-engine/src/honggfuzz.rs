@@ -3,6 +3,7 @@
 //! See `docs/standards/ENGINE_ADAPTER_STANDARD.md`.
 
 use hf_core::engine::FuzzRunConfig;
+use hf_core::error::ClassifiedError;
 
 /// Bounded container shared memory for honggfuzz's fixed-size feedback file.
 pub const SHARED_MEMORY_MB: u32 = 192;
@@ -14,8 +15,16 @@ pub const SHARED_MEMORY_BYTES: u64 = SHARED_MEMORY_MB as u64 * 1024 * 1024;
 /// honggfuzz has no user-specified RNG seed (its RNG is seeded from
 /// arc4random//dev/urandom with no flag or env override), so a recorded
 /// `cfg.seed` is deliberately not translated into an invented flag here.
-#[must_use]
-pub fn build_run_args(cfg: &FuzzRunConfig, binary: &str, corpus: &str, out: &str) -> Vec<String> {
+///
+/// # Errors
+/// Currently infallible; the shared adapter signature is fallible because
+/// other engines validate flag combinations (see AFL++'s resume rule).
+pub fn build_run_args(
+    cfg: &FuzzRunConfig,
+    binary: &str,
+    corpus: &str,
+    out: &str,
+) -> Result<Vec<String>, ClassifiedError> {
     let duration = cfg.duration.map_or(0, |d| d.as_secs());
     let mut args = vec!["honggfuzz".to_owned()];
     if duration > 0 {
@@ -40,9 +49,17 @@ pub fn build_run_args(cfg: &FuzzRunConfig, binary: &str, corpus: &str, out: &str
     // the container. An `env K=V` wrapper here would be a second home for one
     // meaning and would displace the fuzzer program from argv[0].
     args.extend(cfg.extra_args.iter().cloned());
+    // The explicit per-input timeout follows `extra_args` so it wins under
+    // honggfuzz's last-occurrence-wins parsing (`case 't'` reassigns
+    // `timing.tmOut`). honggfuzz takes whole seconds (its `-t`/`--timeout`
+    // default is 1s in the pinned 2.6 release), so a sub-second budget rounds
+    // up, never to 0.
+    if let Some(timeout) = cfg.input_timeout {
+        args.push(format!("--timeout={}", crate::timeout_secs_ceil(timeout)));
+    }
     args.push("--".to_owned());
     args.push(binary.to_owned());
-    args
+    Ok(args)
 }
 
 /// The honggfuzz engine adapter. See [`build_run_args`] and the

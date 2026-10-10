@@ -386,6 +386,9 @@ impl ServiceContainer {
                 payload.engine,
                 &target_selector,
                 payload.target.language,
+                // A work order carries no sanitizer request; the configured
+                // `fuzzing.default_sanitizer` applies.
+                None,
             )
             .await
         {
@@ -423,6 +426,7 @@ impl ServiceContainer {
                 payload.engine,
                 payload.target.language,
                 compiled.harness_id,
+                crate::harness_review::HarnessReviewBypass::NotRequested,
             )
             .await
         {
@@ -465,6 +469,7 @@ impl ServiceContainer {
                 payload.engine,
                 payload.target.language,
                 compiled.harness_id,
+                crate::harness_review::HarnessReviewBypass::NotRequested,
             )
             .await
         {

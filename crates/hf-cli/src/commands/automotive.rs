@@ -93,7 +93,7 @@ pub(crate) async fn cmd_automotive(op: AutomotiveOp) -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&settings)?);
         }
         AutomotiveOp::Capabilities { project } => {
-            let container = ServiceContainer::bootstrap().await;
+            let container = crate::approval::bootstrap().await;
             let outcome = container
                 .execute_automotive(AutomotiveOperationRequest {
                     project_root: project,
@@ -108,7 +108,7 @@ pub(crate) async fn cmd_automotive(op: AutomotiveOp) -> anyhow::Result<()> {
             protocol,
             capture,
         } => {
-            let container = ServiceContainer::bootstrap().await;
+            let container = crate::approval::bootstrap().await;
             let outcome = container
                 .execute_automotive(AutomotiveOperationRequest {
                     project_root: project,
@@ -126,7 +126,7 @@ pub(crate) async fn cmd_automotive(op: AutomotiveOp) -> anyhow::Result<()> {
             format,
             dbc,
         } => {
-            let container = ServiceContainer::bootstrap().await;
+            let container = crate::approval::bootstrap().await;
             let import = container.automotive_import_capture(&capture, &format, dbc.as_deref())?;
             println!("{}", serde_json::to_string_pretty(&import)?);
         }
@@ -135,7 +135,7 @@ pub(crate) async fn cmd_automotive(op: AutomotiveOp) -> anyhow::Result<()> {
             second,
             format,
         } => {
-            let container = ServiceContainer::bootstrap().await;
+            let container = crate::approval::bootstrap().await;
             let diff = container.automotive_diff_captures(&first, &second, &format)?;
             println!("{}", serde_json::to_string_pretty(&diff)?);
         }
@@ -144,7 +144,7 @@ pub(crate) async fn cmd_automotive(op: AutomotiveOp) -> anyhow::Result<()> {
             interface,
             protocol,
         } => {
-            let container = ServiceContainer::bootstrap().await;
+            let container = crate::approval::bootstrap().await;
             let outcome = container
                 .execute_automotive(AutomotiveOperationRequest {
                     project_root: project,
@@ -171,7 +171,7 @@ pub(crate) async fn cmd_automotive(op: AutomotiveOp) -> anyhow::Result<()> {
                         .map_err(|_| anyhow::anyhow!("service id out of range: {value}"))
                 })
                 .collect::<anyhow::Result<Vec<u8>>>()?;
-            let container = ServiceContainer::bootstrap().await;
+            let container = crate::approval::bootstrap().await;
             let outcome = container
                 .execute_automotive(AutomotiveOperationRequest {
                     project_root: project,
@@ -194,7 +194,7 @@ pub(crate) async fn cmd_automotive(op: AutomotiveOp) -> anyhow::Result<()> {
             seed,
             media_type,
         } => {
-            let container = ServiceContainer::bootstrap().await;
+            let container = crate::approval::bootstrap().await;
             let outcome = container
                 .execute_automotive(AutomotiveOperationRequest {
                     project_root: project,
@@ -217,7 +217,7 @@ pub(crate) async fn cmd_automotive(op: AutomotiveOp) -> anyhow::Result<()> {
             mode,
             seed,
         } => {
-            let container = ServiceContainer::bootstrap().await;
+            let container = crate::approval::bootstrap().await;
             let outcome = container
                 .execute_automotive(AutomotiveOperationRequest {
                     project_root: project,
@@ -241,7 +241,7 @@ pub(crate) async fn cmd_automotive(op: AutomotiveOp) -> anyhow::Result<()> {
                 anyhow::anyhow!("read automotive replay plan {}: {error}", plan.display())
             })?;
             let plan = parse_virtual_replay_plan(&encoded)?;
-            let container = ServiceContainer::bootstrap().await;
+            let container = crate::approval::bootstrap().await;
             let outcome = container
                 .execute_automotive(AutomotiveOperationRequest {
                     project_root: project,
@@ -255,7 +255,7 @@ pub(crate) async fn cmd_automotive(op: AutomotiveOp) -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&outcome)?);
         }
         AutomotiveOp::Operations { project, limit } => {
-            let container = ServiceContainer::bootstrap().await;
+            let container = crate::approval::bootstrap().await;
             let operations: Vec<AutomotiveOperationSummary> = container
                 .list_automotive_operations(&project, limit)
                 .await?;
@@ -263,7 +263,7 @@ pub(crate) async fn cmd_automotive(op: AutomotiveOp) -> anyhow::Result<()> {
         }
         AutomotiveOp::Operation { project, id } => {
             use hf_service::automotive::AutomotiveOperationSummary;
-            let container = ServiceContainer::bootstrap().await;
+            let container = crate::approval::bootstrap().await;
             let operation: AutomotiveOperationSummary =
                 container
                     .automotive_operation(id)
@@ -275,7 +275,7 @@ pub(crate) async fn cmd_automotive(op: AutomotiveOp) -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&operation)?);
         }
         AutomotiveOp::StateCorpus { project, limit } => {
-            let container = ServiceContainer::bootstrap().await;
+            let container = crate::approval::bootstrap().await;
             let entries = container
                 .list_automotive_state_corpus(&project, limit)
                 .await?;
@@ -295,7 +295,7 @@ pub(crate) async fn cmd_automotive(op: AutomotiveOp) -> anyhow::Result<()> {
                 input_artifact,
                 output_artifact,
             )?;
-            let container = ServiceContainer::bootstrap().await;
+            let container = crate::approval::bootstrap().await;
             let entry = container
                 .promote_automotive_state_artifact(promotion)
                 .await?;
@@ -315,7 +315,7 @@ pub(crate) async fn cmd_automotive(op: AutomotiveOp) -> anyhow::Result<()> {
                 output.as_deref(),
                 &report_lang,
                 &mut std::io::stdout(),
-                ServiceContainer::bootstrap,
+                crate::approval::bootstrap,
             )
             .await?;
         }

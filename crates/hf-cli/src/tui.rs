@@ -43,7 +43,7 @@ impl Tui {
         let lang = TargetLanguage::C;
         // Route discovery through the service container so results are persisted
         // (the DB) and ranked, instead of calling hf-discovery directly.
-        let container = ServiceContainer::bootstrap().await;
+        let container = crate::approval::bootstrap().await;
         let inventory = container.discover(project, lang).await?;
 
         let mut app = Self {

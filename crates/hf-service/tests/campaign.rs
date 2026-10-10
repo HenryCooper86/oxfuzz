@@ -127,6 +127,7 @@ async fn run_campaign_runs_full_pipeline_and_picks_a_target() {
             EngineKind::LibFuzzer,
             TargetLanguage::C,
             1,
+            None,
         )
         .await
         .expect("prepare harness");
@@ -162,6 +163,9 @@ async fn run_campaign_runs_full_pipeline_and_picks_a_target() {
             EngineKind::LibFuzzer,
             TargetLanguage::C,
             1, // duration secs (fake runtime returns instantly)
+            None,
+            None,
+            None,
             2, // max iterations
         ),
     )
@@ -224,4 +228,157 @@ async fn run_campaign_runs_full_pipeline_and_picks_a_target() {
     let exported_report = std::fs::read_to_string(report_path).unwrap();
     assert!(exported_report.starts_with("# Fuzzing Report: `parse_entry`"));
     assert!(exported_report.contains("| Status | Done |"));
+}
+
+/// A runtime whose fuzz runs emit libFuzzer pulse and terminal stat lines, so
+/// a campaign has structured stats to forward.
+struct PulseRuntime;
+
+#[async_trait::async_trait]
+impl hf_core::runtime::RuntimeAdapter for PulseRuntime {
+    async fn resolve_image_reference(
+        &self,
+        _image: &str,
+    ) -> Result<Option<hf_core::runtime::ImmutableImageReference>, hf_core::error::ClassifiedError>
+    {
+        Ok(Some(hf_test_utils::immutable_test_image()?))
+    }
+
+    async fn run_command(
+        &self,
+        _cmd: &[String],
+        cwd: &std::path::Path,
+        _limits: &hf_core::runtime::ResourceLimits,
+    ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
+        Ok(hf_core::runtime::CommandResult {
+            exit_code: 0,
+            stdout: "#512 pulse cov: 12 ft: 20 corp: 3/12b lim: 4096 exec/s: 64 rss: 40Mb\n\
+                     stat::number_of_executed_units: 512\n\
+                     stat::average_exec_per_sec: 64\n"
+                .to_owned(),
+            stderr: String::new(),
+            workspace: cwd.to_path_buf(),
+            termination: hf_core::runtime::CommandTermination::Completed,
+        })
+    }
+    async fn write_file(
+        &self,
+        path: &std::path::Path,
+        content: &str,
+    ) -> Result<(), hf_core::error::ClassifiedError> {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(path, content)
+            .map_err(|e| hf_core::error::ClassifiedError::Internal(e.to_string()))
+    }
+    async fn read_file(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<String, hf_core::error::ClassifiedError> {
+        Ok(std::fs::read_to_string(path).unwrap_or_default())
+    }
+}
+
+#[tokio::test]
+async fn run_campaign_observed_forwards_markers_and_stats_but_not_engine_log_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    let _workspace_root = common::install_managed_workspace("oxfuzz_campaign_progress_it");
+    let project = dir.path().join("campproj");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("parse.c"),
+        "#include <stddef.h>\n#include <stdint.h>\n\
+         int parse_entry(const uint8_t *data, size_t size){ return size>0 && data[0]=='A'; }\n",
+    )
+    .unwrap();
+
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("campaign.db"))
+            .await
+            .unwrap(),
+    );
+    let container = ServiceContainer::new(Arc::new(PulseRuntime), Some(Arc::new(CodeBlockPool)))
+        .with_store(Arc::clone(&store));
+    container
+        .harness_generate(
+            &project,
+            "parse_entry",
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+            1,
+            None,
+        )
+        .await
+        .expect("prepare harness");
+    let workspace = hf_service::workspace_dir(&project, "parse_entry");
+    std::fs::write(workspace.join("fuzz_parse_entry"), b"#!/bin/true").unwrap();
+    container
+        .harness_smoke(
+            &project,
+            "parse_entry",
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+        )
+        .await
+        .expect("smoke harness");
+    container
+        .harness_promote(&project, "parse_entry", EngineKind::LibFuzzer)
+        .await
+        .expect("operator promotes harness");
+
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = {
+        let events = Arc::clone(&events);
+        move |progress: hf_service::FuzzProgress| {
+            events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(progress);
+        }
+    };
+    container
+        .run_campaign_observed(
+            &project,
+            Some("parse_entry"),
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+            1,
+            None,
+            None,
+            None,
+            2,
+            &sink,
+        )
+        .await
+        .expect("campaign should complete");
+
+    let events = events.lock().unwrap();
+    assert!(
+        events.iter().any(|progress| matches!(
+            progress,
+            hf_service::FuzzProgress::LogLine(line) if line.contains("iteration")
+        )),
+        "each iteration boundary is announced: {events:?}"
+    );
+    assert!(
+        events.iter().any(|progress| matches!(
+            progress,
+            hf_service::FuzzProgress::Stats(stats) if stats.execs_total == Some(512)
+        )),
+        "engine stats snapshots reach the campaign sink: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|progress| matches!(progress, hf_service::FuzzProgress::Done)),
+        "run completion is forwarded: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|progress| matches!(
+            progress,
+            hf_service::FuzzProgress::LogLine(line) if line.contains("#512 pulse")
+        )),
+        "raw engine output stays out of the campaign channel: {events:?}"
+    );
 }

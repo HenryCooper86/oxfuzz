@@ -66,6 +66,8 @@ async fn fixture(project: &std::path::Path) -> (ServiceContainer, Arc<Store>, Ru
         seed: Some(1),
         replay_of: None,
         input_manifest_sha256: None,
+        input_timeout: None,
+        resume: false,
     };
     let mut run = RunRecord::new(
         project.to_string_lossy(),

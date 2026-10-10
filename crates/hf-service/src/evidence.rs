@@ -10,7 +10,6 @@ use std::path::Path;
 
 use hf_core::engine::EngineKind;
 use hf_core::error::ClassifiedError;
-use hf_core::target::Sanitizer;
 use hf_runtime::SANDBOX_IMAGE;
 use hf_storage::{HarnessApprovalKind, RunKind, RunRecord, RunStatus};
 use serde::{Deserialize, Serialize};
@@ -384,7 +383,7 @@ impl ServiceContainer {
                 duration_secs: duration.as_secs(),
                 max_mem_mb: config.max_mem_mb,
                 max_cpus: config.max_cpus,
-                sanitizer: sanitizer_name(config.sanitizer).to_owned(),
+                sanitizer: config.sanitizer.as_str().to_owned(),
                 seed: config.seed,
                 environment,
                 extra_args: config.extra_args.clone(),
@@ -458,16 +457,6 @@ fn approval_kind_name(kind: HarnessApprovalKind) -> &'static str {
     match kind {
         HarnessApprovalKind::CleanSmoke => "clean_smoke",
         HarnessApprovalKind::KnownFindings => "known_findings",
-    }
-}
-
-const fn sanitizer_name(sanitizer: Sanitizer) -> &'static str {
-    match sanitizer {
-        Sanitizer::None => "none",
-        Sanitizer::Address => "address",
-        Sanitizer::Undefined => "undefined",
-        Sanitizer::Memory => "memory",
-        Sanitizer::Thread => "thread",
     }
 }
 

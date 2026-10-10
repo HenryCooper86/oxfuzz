@@ -284,7 +284,14 @@ pub async fn harness_draft(
     };
     let draft = state
         .container
-        .harness_draft_with_policy(&project, &target, engine_kind, lang, ai.unwrap_or_default())
+        .harness_draft_with_policy(
+            &project,
+            &target,
+            engine_kind,
+            lang,
+            ai.unwrap_or_default(),
+            None,
+        )
         .await
         .map_err(|e| e.to_string())?;
     Ok(serde_json::json!({
@@ -325,7 +332,7 @@ pub async fn harness_compile(
     }
     match state
         .container
-        .harness_compile(source, &project, engine_kind, &target, lang)
+        .harness_compile(source, &project, engine_kind, &target, lang, None)
         .await
     {
         Ok(out) => Ok(serde_json::json!({
@@ -1814,6 +1821,7 @@ fn run_progress_payload(run_id: Option<uuid::Uuid>, progress: FuzzProgress) -> s
         FuzzProgress::ExecsPerSec(value) => ("ExecsPerSec", serde_json::json!(value)),
         FuzzProgress::CrashesFound(value) => ("CrashesFound", serde_json::json!(value)),
         FuzzProgress::LogLine(value) => ("LogLine", serde_json::json!(value)),
+        FuzzProgress::Stats(value) => ("Stats", serde_json::json!(value)),
         FuzzProgress::Done => ("Done", serde_json::Value::Null),
     };
     serde_json::json!({ "run_id": run_id, "type": kind, "data": data })
@@ -2019,6 +2027,13 @@ pub async fn run_fuzzer(
             engine_kind,
             duration,
             None,
+            // The desktop run button carries no per-run timeout, resume, or
+            // sanitizer override; the configured `fuzzing.default_timeout_ms` /
+            // `fuzzing.default_resume` apply and the run records the harness's
+            // own sanitizer.
+            None,
+            None,
+            None,
             &(on_progress),
             &(on_started),
         )
@@ -2030,6 +2045,7 @@ pub async fn run_fuzzer(
             "edges": summary.edges,
             "crashes": summary.crashes,
             "execs": summary.execs,
+            "hangs": summary.hangs,
             // A coverage-stagnation proposal (e.g. "new_harness") when the run
             // plateaued, so the UI can offer an iterate-next affordance; null
             // when coverage kept progressing.
@@ -4662,6 +4678,23 @@ mod run_progress_payload_tests {
             hf_service::FuzzProgress::LogLine("preflight".to_owned()),
         );
         assert!(payload["run_id"].is_null());
+    }
+
+    #[test]
+    fn stats_progress_serializes_as_a_named_kind_with_the_snapshot_object() {
+        let payload = run_progress_payload(
+            Some(uuid::Uuid::from_u128(42)),
+            hf_service::FuzzProgress::Stats(hf_service::EngineStats {
+                execs_total: Some(128_934),
+                execs_per_sec: Some(842.0),
+                ..hf_service::EngineStats::default()
+            }),
+        );
+        assert_eq!(payload["type"], "Stats");
+        assert_eq!(payload["data"]["execs_total"], 128_934);
+        assert_eq!(payload["data"]["execs_per_sec"], 842.0);
+        // Absent fields stay out of the payload entirely.
+        assert!(payload["data"].get("cycles_done").is_none());
     }
 
     #[test]

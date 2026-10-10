@@ -8,7 +8,7 @@ use hf_core::build::BuildContext;
 use hf_core::engine::{EngineKind, FuzzRunConfig};
 use hf_core::error::ClassifiedError;
 use hf_core::harness::{Harness, HarnessDraft, HarnessStatus};
-use hf_core::provider::{ChatRequest, ChatResponse, FinishReason, LlmProvider as _};
+use hf_core::provider::{ChatRequest, FinishReason, LlmProvider as _};
 use hf_core::target::{Sanitizer, TargetCandidate, TargetLanguage};
 use hf_core::types::Message;
 use hf_guardrails::Action;
@@ -39,37 +39,17 @@ use super::workspace::{
     prepare_configured_workspace_root, workspace_dir, workspace_relative_record,
 };
 use super::{
-    heuristic_draft, require_fuzzing_harness_engine, resolve_internal_run, AiPolicy,
-    CompileOutcome, HarnessGenOutcome, LlmProviderBridge, SeedEntry, ServiceContainer,
+    fuzzing_policy_error, heuristic_draft, require_fuzzing_harness_engine, resolve_internal_run,
+    AiPolicy, CompileOutcome, HarnessGenOutcome, LlmProviderBridge, SeedEntry, ServiceContainer,
     SMOKE_FUZZ_SECS,
 };
-
-/// Maximum complete source revision accepted by the mandatory model review.
-const MAX_HARNESS_REVIEW_SOURCE_BYTES: usize = 64 * 1024;
-/// Maximum normalized provider response retained as review evidence.
-const MAX_HARNESS_REVIEW_RESPONSE_BYTES: usize = 64 * 1024;
-const MAX_HARNESS_REVIEW_REASONS: usize = 32;
-const MAX_HARNESS_REVIEW_REASON_BYTES: usize = 1024;
-const HARNESS_AI_REVIEW_SCHEMA_VERSION: u32 = 1;
-const HARNESS_AI_REVIEW_PROMPT_VERSION: u32 = 1;
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct HarnessPreExecutionOpinion {
-    exercises_target: bool,
-    safe_to_execute: bool,
-    reasons: Vec<String>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct HarnessAiReviewEvidence {
-    schema_version: u32,
-    prompt_version: u32,
-    target: String,
-    opinion: HarnessPreExecutionOpinion,
-    response: ChatResponse,
-}
+use crate::harness_review::{
+    parse_review_evidence, validate_bypassed_review, HarnessAiReviewEvidence,
+    HarnessBypassedReviewEvidence, HarnessPreExecutionOpinion, HarnessReviewBypass,
+    HarnessReviewBypassSource, HarnessReviewEvidence, HARNESS_AI_REVIEW_PROMPT_VERSION,
+    HARNESS_AI_REVIEW_SCHEMA_VERSION, MAX_HARNESS_REVIEW_REASONS, MAX_HARNESS_REVIEW_REASON_BYTES,
+    MAX_HARNESS_REVIEW_RESPONSE_BYTES, MAX_HARNESS_REVIEW_SOURCE_BYTES,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HarnessReviewOutcome {
@@ -134,6 +114,26 @@ fn enforce_positive_harness_review(
         "LLM review refused harness execution: {}",
         opinion.reasons.join("; ")
     )))
+}
+
+/// Resolve whether this invocation may smoke-qualify without the independent
+/// LLM review, and through which opt-in surface. The per-invocation flag
+/// decides on its own; the deployment config is only consulted without it, so
+/// a flag-bearing call never depends on ambient config (Engineering Protocol
+/// 2.15). The config read fails closed: an unparsable policy is an error, not
+/// a silent default (Engineering Protocol 2.16).
+fn resolve_review_bypass_source(
+    bypass: HarnessReviewBypass,
+) -> Result<Option<HarnessReviewBypassSource>, ClassifiedError> {
+    if bypass == HarnessReviewBypass::Requested {
+        return Ok(Some(HarnessReviewBypassSource::CliFlag));
+    }
+    let settings = crate::config::effective_harness_settings().map_err(|error| {
+        ClassifiedError::Validation(format!("invalid harness settings: {error}"))
+    })?;
+    Ok(settings
+        .allow_unreviewed_smoke
+        .then_some(HarnessReviewBypassSource::Config))
 }
 
 fn require_expected_harness_id(
@@ -230,6 +230,7 @@ impl ServiceContainer {
         engine: EngineKind,
         language: TargetLanguage,
         expected_harness_id: Option<Uuid>,
+        bypass: HarnessReviewBypass,
     ) -> Result<(Harness, HarnessReviewOutcome), HarnessReviewFailure> {
         let harness = self.active_harness_locked(project, target, engine).await?;
         require_expected_harness_id(&harness, expected_harness_id)?;
@@ -272,7 +273,14 @@ impl ServiceContainer {
             binary_sha256,
         };
         if let Err(error) = self
-            .require_harness_ai_review(store, &harness, target, &review.binary_sha256)
+            .require_harness_ai_review(
+                store,
+                &harness,
+                target,
+                &review.binary_sha256,
+                Some(project),
+                bypass,
+            )
             .await
         {
             return Err(HarnessReviewFailure {
@@ -291,10 +299,18 @@ impl ServiceContainer {
         engine: EngineKind,
         language: TargetLanguage,
         expected_harness_id: Uuid,
+        bypass: HarnessReviewBypass,
     ) -> Result<HarnessReviewOutcome, ClassifiedError> {
-        self.harness_review_exact_detailed(project, target, engine, language, expected_harness_id)
-            .await
-            .map_err(|failure| failure.error)
+        self.harness_review_exact_detailed(
+            project,
+            target,
+            engine,
+            language,
+            expected_harness_id,
+            bypass,
+        )
+        .await
+        .map_err(|failure| failure.error)
     }
 
     pub(crate) async fn harness_review_exact_detailed(
@@ -304,6 +320,7 @@ impl ServiceContainer {
         engine: EngineKind,
         language: TargetLanguage,
         expected_harness_id: Uuid,
+        bypass: HarnessReviewBypass,
     ) -> Result<HarnessReviewOutcome, HarnessReviewFailure> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
         let project_root = canonical_project_root(project)?;
@@ -317,17 +334,30 @@ impl ServiceContainer {
                 engine,
                 language,
                 Some(expected_harness_id),
+                bypass,
             )
             .await?;
         Ok(review)
     }
 
+    /// Require durable review evidence for the exact active revision before it
+    /// may execute.
+    ///
+    /// A persisted record -- model review or marked bypass -- is reused when
+    /// its digests still bind (the decision is per-revision, not per-command).
+    /// Without one, the operator's opt-in decides: [`HarnessReviewBypass::Requested`]
+    /// (`--no-llm-review`) or the deployment's `harness.allow_unreviewed_smoke`
+    /// writes a marked bypass record and a policy audit row instead of calling
+    /// a model. Otherwise the independent model review runs, and a missing
+    /// provider fails closed with the opt-in surfaces named in the error.
     async fn require_harness_ai_review(
         &self,
         store: &Store,
         harness: &Harness,
         target: &str,
         binary_sha256: &str,
+        project: Option<&Path>,
+        bypass: HarnessReviewBypass,
     ) -> Result<(), ClassifiedError> {
         let source_sha256 = sha256_hex(harness.source.as_bytes());
         if let Some(record) = store.harness_ai_review(harness.id).await? {
@@ -343,37 +373,56 @@ impl ServiceContainer {
                     harness.id
                 )));
             }
-            let evidence: HarnessAiReviewEvidence = serde_json::from_str(&record.review_json)
-                .map_err(|error| {
-                    ClassifiedError::Storage(format!(
-                        "stored LLM review for harness {} is malformed: {error}",
-                        harness.id
-                    ))
-                })?;
-            if evidence.schema_version != HARNESS_AI_REVIEW_SCHEMA_VERSION
-                || evidence.prompt_version != HARNESS_AI_REVIEW_PROMPT_VERSION
-                || evidence.target != target
-                || evidence.response.finish_reason != FinishReason::Stop
-            {
-                return Err(ClassifiedError::Storage(format!(
-                    "stored LLM review for harness {} has invalid provenance",
+            let evidence = parse_review_evidence(&record.review_json).map_err(|error| {
+                ClassifiedError::Storage(format!(
+                    "stored harness review for harness {} is malformed: {error}",
                     harness.id
-                )));
+                ))
+            })?;
+            match evidence {
+                HarnessReviewEvidence::Bypassed(bypassed) => {
+                    validate_bypassed_review(&bypassed, target).map_err(|error| {
+                        ClassifiedError::Storage(format!(
+                            "stored harness review for harness {} is malformed: {error}",
+                            harness.id
+                        ))
+                    })?;
+                    self.audit_harness_review_bypass(
+                        harness.id,
+                        &source_sha256,
+                        bypassed.bypass_source,
+                        project,
+                    )
+                    .await;
+                    return Ok(());
+                }
+                HarnessReviewEvidence::Llm(evidence) => {
+                    if evidence.schema_version != HARNESS_AI_REVIEW_SCHEMA_VERSION
+                        || evidence.prompt_version != HARNESS_AI_REVIEW_PROMPT_VERSION
+                        || evidence.target != target
+                        || evidence.response.finish_reason != FinishReason::Stop
+                    {
+                        return Err(ClassifiedError::Storage(format!(
+                            "stored LLM review for harness {} has invalid provenance",
+                            harness.id
+                        )));
+                    }
+                    let response_opinion: HarnessPreExecutionOpinion =
+                        serde_json::from_str(evidence.response.text().trim()).map_err(|error| {
+                            ClassifiedError::Storage(format!(
+                                "stored LLM review response for harness {} is malformed: {error}",
+                                harness.id
+                            ))
+                        })?;
+                    if response_opinion != evidence.opinion {
+                        return Err(ClassifiedError::Storage(format!(
+                            "stored LLM review for harness {} has inconsistent evidence",
+                            harness.id
+                        )));
+                    }
+                    return enforce_positive_harness_review(&evidence.opinion);
+                }
             }
-            let response_opinion: HarnessPreExecutionOpinion =
-                serde_json::from_str(evidence.response.text().trim()).map_err(|error| {
-                    ClassifiedError::Storage(format!(
-                        "stored LLM review response for harness {} is malformed: {error}",
-                        harness.id
-                    ))
-                })?;
-            if response_opinion != evidence.opinion {
-                return Err(ClassifiedError::Storage(format!(
-                    "stored LLM review for harness {} has inconsistent evidence",
-                    harness.id
-                )));
-            }
-            return enforce_positive_harness_review(&evidence.opinion);
         }
 
         if harness.source.len() > MAX_HARNESS_REVIEW_SOURCE_BYTES {
@@ -383,9 +432,24 @@ impl ServiceContainer {
                 MAX_HARNESS_REVIEW_SOURCE_BYTES
             )));
         }
+        if let Some(source) = resolve_review_bypass_source(bypass)? {
+            return self
+                .record_bypassed_harness_review(
+                    store,
+                    harness,
+                    target,
+                    &source_sha256,
+                    binary_sha256,
+                    source,
+                    project,
+                )
+                .await;
+        }
         let pool = self.provider_pool().ok_or_else(|| {
             ClassifiedError::Provider(
-                "harness execution requires an independent LLM review, but no LLM provider is configured"
+                "harness execution requires an independent LLM review, but no LLM provider is \
+                 configured; pass --no-llm-review or set harness.allow_unreviewed_smoke = true \
+                 to proceed without the review"
                     .to_owned(),
             )
         })?;
@@ -437,6 +501,71 @@ impl ServiceContainer {
         enforce_positive_harness_review(&opinion)
     }
 
+    /// Persist the marked bypass record for a smoke qualification the operator
+    /// opted out of the independent LLM review. The record is digest-bound and
+    /// schema-versioned exactly like a model review (Engineering Protocol
+    /// 2.13), so downstream "was this revision reviewed?" checks keep one
+    /// answer, with the bypass visible rather than implied.
+    async fn record_bypassed_harness_review(
+        &self,
+        store: &Store,
+        harness: &Harness,
+        target: &str,
+        source_sha256: &str,
+        binary_sha256: &str,
+        source: HarnessReviewBypassSource,
+        project: Option<&Path>,
+    ) -> Result<(), ClassifiedError> {
+        let evidence = HarnessBypassedReviewEvidence::new(target, source);
+        let review = HarnessAiReviewRecord {
+            harness_id: harness.id,
+            source_sha256: source_sha256.to_owned(),
+            binary_sha256: binary_sha256.to_owned(),
+            review_json: serde_json::to_string(&evidence)
+                .map_err(|error| ClassifiedError::Storage(error.to_string()))?,
+            reviewed_at: Utc::now(),
+        };
+        store.record_harness_ai_review(&review).await?;
+        self.audit_harness_review_bypass(harness.id, source_sha256, source, project)
+            .await;
+        Ok(())
+    }
+
+    /// Log and persist the policy audit row for a qualification that runs on
+    /// the bypass path -- on the fresh bypass and on every later reuse of the
+    /// marker, so each execution of the unreviewed revision is attributable.
+    /// Recording is best-effort, exactly like the rest of the guardrail
+    /// decision trail: a storage failure never changes the outcome.
+    async fn audit_harness_review_bypass(
+        &self,
+        harness_id: Uuid,
+        source_sha256: &str,
+        source: HarnessReviewBypassSource,
+        project: Option<&Path>,
+    ) {
+        tracing::warn!(
+            %harness_id,
+            opt_in = source.surface(),
+            "harness qualification proceeds WITHOUT the independent LLM review"
+        );
+        self.record_guardrail_decision(hf_storage::GuardrailDecisionRecord {
+            id: Uuid::new_v4().to_string(),
+            decided_at: Utc::now(),
+            action: "harness_llm_review_bypass".to_owned(),
+            risk_tier: "high".to_owned(),
+            decision: "allowed".to_owned(),
+            origin: "harness_review".to_owned(),
+            project: project.map(|path| path.to_string_lossy().into_owned()),
+            detail: Some(super::bounded_guardrail_detail(&format!(
+                "harness qualification without the independent LLM review via {}; \
+                 harness {harness_id}, source sha256 {}",
+                source.surface(),
+                &source_sha256[..12]
+            ))),
+        })
+        .await;
+    }
+
     /// Resolve a target symbol to its discovered candidate id.
     ///
     /// Unknown symbols are rejected rather than being attached to the nil UUID.
@@ -471,11 +600,15 @@ impl ServiceContainer {
     /// Draft the harness source for a candidate: LLM-authored when a provider is
     /// configured, otherwise the heuristic template. Never fails -- an LLM error
     /// degrades to the heuristic draft so generation can proceed.
+    ///
+    /// `sanitizer` is the already-resolved build sanitizer: the draft's recorded
+    /// build command must match the compile that follows.
     async fn draft_harness_source(
         &self,
         project: &Path,
         candidate: &TargetCandidate,
         engine: EngineKind,
+        sanitizer: Sanitizer,
     ) -> Result<String, ClassifiedError> {
         if let Some(pool) = self.provider_pool() {
             let provider = LlmProviderBridge::new(pool)
@@ -489,6 +622,7 @@ impl ServiceContainer {
                 &related,
                 build.as_ref(),
                 &examples,
+                sanitizer,
                 Box::new(provider),
             )
             .await
@@ -500,7 +634,7 @@ impl ServiceContainer {
                 ),
             }
         }
-        Ok(heuristic_draft(candidate, engine)?.source)
+        Ok(heuristic_draft(candidate, engine, sanitizer)?.source)
     }
 
     /// Accepted examples for one draft: previously promoted harnesses of this
@@ -559,6 +693,7 @@ impl ServiceContainer {
         engine: EngineKind,
         source: &str,
         diagnostics: &str,
+        sanitizer: Sanitizer,
     ) -> Result<Option<String>, ClassifiedError> {
         self.admit_harness_build(&candidate.project_root, candidate.language)
             .await?;
@@ -567,7 +702,16 @@ impl ServiceContainer {
         };
         let provider = LlmProviderBridge::new(pool)
             .with_diagnostics(Arc::clone(&self.diagnostics), "harness_repair");
-        match hf_harness::repair(candidate, engine, source, diagnostics, Box::new(provider)).await {
+        match hf_harness::repair(
+            candidate,
+            engine,
+            source,
+            diagnostics,
+            sanitizer,
+            Box::new(provider),
+        )
+        .await
+        {
             Ok(draft) => Ok(Some(draft.source)),
             Err(error) => {
                 tracing::warn!("harness repair for '{}' failed: {error}", candidate.symbol);
@@ -591,6 +735,10 @@ impl ServiceContainer {
         let _target_revision = self
             .acquire_target_revision(&candidate.project_root, target)
             .await?;
+        // Tournament candidates share the configured build sanitizer; a
+        // per-candidate choice would make their smoke evidence incomparable.
+        let sanitizer = crate::config::resolve_build_sanitizer(None)
+            .map_err(|error| fuzzing_policy_error(&error))?;
         self.compile_source_with_repair_locked(
             candidate,
             engine,
@@ -598,6 +746,7 @@ impl ServiceContainer {
             workspace,
             initial_source,
             max_repairs,
+            sanitizer,
         )
         .await
     }
@@ -612,6 +761,7 @@ impl ServiceContainer {
         workspace: &Path,
         initial_source: String,
         max_repairs: usize,
+        sanitizer: Sanitizer,
     ) -> Result<HarnessGenOutcome, ClassifiedError> {
         self.compilation_store()?;
         self.admit_harness_build(&candidate.project_root, lang)
@@ -630,7 +780,7 @@ impl ServiceContainer {
                 // of an unusable harness.
                 last_diagnostics = hf_harness::render_findings(&lint);
                 match self
-                    .repair_harness_source(candidate, engine, &source, &last_diagnostics)
+                    .repair_harness_source(candidate, engine, &source, &last_diagnostics, sanitizer)
                     .await?
                 {
                     Some(repaired) if repairs_used < max_repairs => {
@@ -642,7 +792,7 @@ impl ServiceContainer {
                 }
             }
             let mut build_cmd =
-                hf_harness::build_command(engine, lang, &harness_binary_name(target))?;
+                hf_harness::build_command(engine, lang, &harness_binary_name(target), sanitizer)?;
             build_cmd.output = PathBuf::from(harness_binary_name(target));
             let captured = self
                 .capture_harness_build_inputs(&candidate.project_root, lang, true)
@@ -656,7 +806,7 @@ impl ServiceContainer {
                 source: source.clone(),
                 language: lang,
                 build_cmd,
-                sanitizer: Sanitizer::Address,
+                sanitizer,
                 status: HarnessStatus::Draft,
                 smoke_run: None,
             };
@@ -706,7 +856,13 @@ impl ServiceContainer {
                         break;
                     }
                     match self
-                        .repair_harness_source(candidate, engine, &source, &last_diagnostics)
+                        .repair_harness_source(
+                            candidate,
+                            engine,
+                            &source,
+                            &last_diagnostics,
+                            sanitizer,
+                        )
                         .await?
                     {
                         Some(repaired) => {
@@ -751,7 +907,7 @@ impl ServiceContainer {
         engine: EngineKind,
         lang: TargetLanguage,
     ) -> Result<HarnessDraft, ClassifiedError> {
-        self.harness_draft_with_policy(project, target, engine, lang, AiPolicy::Auto)
+        self.harness_draft_with_policy(project, target, engine, lang, AiPolicy::Auto, None)
             .await
     }
 
@@ -761,13 +917,17 @@ impl ServiceContainer {
     /// happens to be exported: the model and the template produce materially
     /// different harnesses, so a caller can demand one, refuse the other, or
     /// accept either. The draft records which one answered
-    /// ([`HarnessDraft::generator`]).
+    /// ([`HarnessDraft::generator`]). `sanitizer` is the per-build request (the
+    /// CLI's `--sanitizer`); `None` applies the configured
+    /// `fuzzing.default_sanitizer`, and the resolved value shapes the draft's
+    /// recorded build command.
     ///
     /// # Errors
     /// Returns a validation error for an engine/language that cannot carry a
-    /// generated harness, and -- under [`AiPolicy::Require`] -- a provider error
-    /// when no provider is configured or the model call fails, rather than
-    /// substituting a template harness the caller said it did not want.
+    /// generated harness or a sanitizer outside the selectable set, and --
+    /// under [`AiPolicy::Require`] -- a provider error when no provider is
+    /// configured or the model call fails, rather than substituting a template
+    /// harness the caller said it did not want.
     pub async fn harness_draft_with_policy(
         &self,
         project: &Path,
@@ -775,18 +935,25 @@ impl ServiceContainer {
         engine: EngineKind,
         lang: TargetLanguage,
         policy: AiPolicy,
+        sanitizer: Option<Sanitizer>,
     ) -> Result<HarnessDraft, ClassifiedError> {
         self.admit_harness_build(project, lang).await?;
         require_fuzzing_harness_engine(engine, lang)?;
         self.authorize_recorded(Action::DraftHarness, "harness_draft", Some(project))
             .await?;
+        let sanitizer = crate::config::resolve_build_sanitizer(sanitizer)
+            .map_err(|error| fuzzing_policy_error(&error))?;
+        // The toolchain/language check runs before any drafting: an
+        // unsupported combination (e.g. Rust with UBSan) must not spend an
+        // LLM call on a harness that cannot build.
+        let _ = hf_harness::build_command(engine, lang, "sanitizer-check", sanitizer)?;
         let inv = self.discover(project, lang).await?;
         let candidate = select_target_candidate(&inv.candidates, target)?
             .ok_or_else(|| ClassifiedError::Validation(format!("target '{target}' not found")))?
             .clone();
 
         if policy == AiPolicy::Off {
-            return heuristic_draft(&candidate, engine);
+            return heuristic_draft(&candidate, engine, sanitizer);
         }
         let Some(pool) = self.provider_pool() else {
             if policy == AiPolicy::Require {
@@ -798,7 +965,7 @@ impl ServiceContainer {
             }
             // No LLM configured: generate a heuristic draft so the GUI still
             // produces something useful.
-            return heuristic_draft(&candidate, engine);
+            return heuristic_draft(&candidate, engine, sanitizer);
         };
         {
             let provider = LlmProviderBridge::new(pool)
@@ -813,6 +980,7 @@ impl ServiceContainer {
                 engine,
                 &related,
                 build.as_ref(),
+                sanitizer,
                 Box::new(provider),
             )
             .await
@@ -832,7 +1000,7 @@ impl ServiceContainer {
                         "LLM harness draft for '{target}' failed ({e}); \
                          falling back to heuristic draft"
                     );
-                    heuristic_draft(&candidate, engine)
+                    heuristic_draft(&candidate, engine, sanitizer)
                 }
             }
         }
@@ -840,8 +1008,14 @@ impl ServiceContainer {
 
     /// Compile a harness in the sandbox via `hf-runtime`.
     ///
+    /// `sanitizer` is the per-build request (the CLI's `--sanitizer`); `None`
+    /// applies the configured `fuzzing.default_sanitizer`. The resolved value
+    /// is baked into the build command and recorded on the harness revision;
+    /// runs then record the harness's sanitizer as their own identity.
+    ///
     /// # Errors
-    /// Returns `ClassifiedError` if the build command fails.
+    /// Returns `ClassifiedError` if the build command fails, or a validation
+    /// error for a sanitizer the selectable set or the toolchain rejects.
     pub async fn harness_compile(
         &self,
         source: String,
@@ -849,6 +1023,7 @@ impl ServiceContainer {
         engine: EngineKind,
         target: &str,
         lang: TargetLanguage,
+        sanitizer: Option<Sanitizer>,
     ) -> Result<CompileOutcome, ClassifiedError> {
         self.compilation_store()?;
         self.admit_harness_build(project, lang).await?;
@@ -857,6 +1032,8 @@ impl ServiceContainer {
         require_fuzzing_harness_engine(engine, lang)?;
         self.authorize_recorded(Action::CompileHarness, "harness_compile", Some(project))
             .await?;
+        let sanitizer = crate::config::resolve_build_sanitizer(sanitizer)
+            .map_err(|error| fuzzing_policy_error(&error))?;
         // Cheapest check first: a harness that terminates the process, spawns a
         // shell, or opens a socket is rejected before a container starts.
         let lint = hf_harness::lint_harness_source(&source, lang);
@@ -874,7 +1051,8 @@ impl ServiceContainer {
         self.stage_generated_build_inputs_for_project(project, &workspace)
             .await?;
 
-        let mut build_cmd = hf_harness::build_command(engine, lang, &harness_binary_name(target))?;
+        let mut build_cmd =
+            hf_harness::build_command(engine, lang, &harness_binary_name(target), sanitizer)?;
         let target_id = self.resolve_target_id(project, target, lang).await?;
         let captured = self
             .capture_harness_build_inputs(project, lang, true)
@@ -888,7 +1066,7 @@ impl ServiceContainer {
             source,
             language: lang,
             build_cmd,
-            sanitizer: hf_core::target::Sanitizer::Address,
+            sanitizer,
             status: HarnessStatus::Draft,
             smoke_run: None,
         };
@@ -929,10 +1107,14 @@ impl ServiceContainer {
     /// fail to compile, and abandoning the target on the first failure wastes a
     /// discovered, potentially high-value target. Repair recovers many of them.
     ///
+    /// `sanitizer` is the per-build request (the CLI's `--sanitizer`); `None`
+    /// applies the configured `fuzzing.default_sanitizer`.
+    ///
     /// # Errors
-    /// Returns `ClassifiedError::Validation` if the target is unknown,
-    /// `ClassifiedError::Harness` if the harness still fails to build after
-    /// `max_repairs` attempts, or an infrastructure error from the sandbox.
+    /// Returns `ClassifiedError::Validation` if the target is unknown or the
+    /// sanitizer is not selectable, `ClassifiedError::Harness` if the harness
+    /// still fails to build after `max_repairs` attempts, or an infrastructure
+    /// error from the sandbox.
     pub async fn harness_generate(
         &self,
         project: &Path,
@@ -940,6 +1122,7 @@ impl ServiceContainer {
         engine: EngineKind,
         lang: TargetLanguage,
         max_repairs: usize,
+        sanitizer: Option<Sanitizer>,
     ) -> Result<HarnessGenOutcome, ClassifiedError> {
         self.compilation_store()?;
         self.admit_harness_build(project, lang).await?;
@@ -947,6 +1130,12 @@ impl ServiceContainer {
         require_fuzzing_harness_engine(engine, lang)?;
         self.authorize_recorded(Action::CompileHarness, "harness_generate", Some(project))
             .await?;
+        let sanitizer = crate::config::resolve_build_sanitizer(sanitizer)
+            .map_err(|error| fuzzing_policy_error(&error))?;
+        // The toolchain/language check runs before any drafting: an
+        // unsupported combination (e.g. Rust with UBSan) must not spend an
+        // LLM call on a harness that cannot build.
+        let _ = hf_harness::build_command(engine, lang, "sanitizer-check", sanitizer)?;
         let inv = self.discover(project, lang).await?;
         let candidate = select_target_candidate(&inv.candidates, target)?
             .ok_or_else(|| ClassifiedError::Validation(format!("target '{target}' not found")))?
@@ -964,7 +1153,7 @@ impl ServiceContainer {
             .await?;
 
         let source = self
-            .draft_harness_source(project, &candidate, engine)
+            .draft_harness_source(project, &candidate, engine, sanitizer)
             .await?;
         self.compile_source_with_repair_locked(
             &candidate,
@@ -973,6 +1162,7 @@ impl ServiceContainer {
             &workspace,
             source,
             max_repairs,
+            sanitizer,
         )
         .await
     }
@@ -1017,6 +1207,14 @@ impl ServiceContainer {
                 "no current harness for '{target}' to refine; generate one first"
             ))
         })?;
+        // Refinement reshapes the source of the SAME harness identity: the
+        // rebuild must keep the active revision's sanitizer, or the
+        // before/after coverage comparison measures a different build instead
+        // of the refined source.
+        let active_sanitizer = self
+            .active_harness_locked(project, target, engine)
+            .await?
+            .sanitizer;
 
         // Prefer the dynamic llvm-cov frontier (uncovered code with file:line
         // locations) so the refine prompt points the LLM at concrete gaps. Fall
@@ -1051,6 +1249,7 @@ impl ServiceContainer {
             engine,
             &current_source,
             &uncovered,
+            active_sanitizer,
             Box::new(provider),
         )
         .await?;
@@ -1062,6 +1261,7 @@ impl ServiceContainer {
             &workspace,
             refined.source,
             max_repairs,
+            active_sanitizer,
         )
         .await
     }
@@ -1069,6 +1269,11 @@ impl ServiceContainer {
     /// Run a short smoke fuzz (60 seconds, clamped to the configured campaign
     /// ceiling) on the active, persisted harness revision and durably record
     /// its qualification evidence.
+    ///
+    /// The independent LLM pre-execution review is mandatory here; the
+    /// deployment's `harness.allow_unreviewed_smoke` may still permit the
+    /// audited bypass. Use [`Self::harness_smoke_with_review_bypass`] for a
+    /// per-invocation opt-in.
     ///
     /// # Errors
     /// Returns `ClassifiedError` if the binary is missing or the smoke run
@@ -1080,8 +1285,37 @@ impl ServiceContainer {
         engine: EngineKind,
         lang: TargetLanguage,
     ) -> Result<crate::verification::SmokeOutcome, ClassifiedError> {
+        self.harness_smoke_with_review_bypass(
+            project,
+            target,
+            engine,
+            lang,
+            HarnessReviewBypass::NotRequested,
+        )
+        .await
+    }
+
+    /// Smoke-qualify with an explicit per-invocation LLM-review opt-in.
+    ///
+    /// `HarnessReviewBypass::Requested` (the CLI's `--no-llm-review`) permits
+    /// one run without the independent review even when the deployment config
+    /// denies it; the bypass is persisted as a marked review record and a
+    /// policy audit row, and the human promotion gate is unchanged. With no
+    /// opt-in anywhere the behavior is exactly [`Self::harness_smoke`].
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the binary is missing or the smoke run
+    /// finds zero execs/sec.
+    pub async fn harness_smoke_with_review_bypass(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+        lang: TargetLanguage,
+        bypass: HarnessReviewBypass,
+    ) -> Result<crate::verification::SmokeOutcome, ClassifiedError> {
         let harness = self.active_harness(project, target, engine).await?;
-        self.harness_smoke_exact(project, target, engine, lang, harness.id)
+        self.harness_smoke_exact(project, target, engine, lang, harness.id, bypass)
             .await
     }
 
@@ -1092,9 +1326,10 @@ impl ServiceContainer {
         engine: EngineKind,
         lang: TargetLanguage,
         expected_harness_id: Uuid,
+        bypass: HarnessReviewBypass,
     ) -> Result<crate::verification::SmokeOutcome, ClassifiedError> {
         let review = self
-            .harness_review_exact(project, target, engine, lang, expected_harness_id)
+            .harness_review_exact(project, target, engine, lang, expected_harness_id, bypass)
             .await?;
         let _workspace_operation = self.acquire_workspace_operation().await?;
         let project_root = canonical_project_root(project)?;
@@ -1122,9 +1357,17 @@ impl ServiceContainer {
         engine: EngineKind,
         lang: TargetLanguage,
         expected_harness_id: Uuid,
+        bypass: HarnessReviewBypass,
     ) -> Result<crate::verification::SmokeOutcome, HarnessSmokeFailure> {
         let review = self
-            .harness_review_exact_detailed(project, target, engine, lang, expected_harness_id)
+            .harness_review_exact_detailed(
+                project,
+                target,
+                engine,
+                lang,
+                expected_harness_id,
+                bypass,
+            )
             .await
             .map_err(|failure| HarnessSmokeFailure {
                 error: failure.error,
@@ -2019,18 +2262,25 @@ impl ServiceContainer {
         self.stage_generated_build_inputs_for_project(project, &workspace)
             .await?;
 
+        // Every candidate builds with the same configured sanitizer (resolved
+        // once here): a per-candidate choice would make their smoke evidence
+        // incomparable, and `compile_source_with_repair` resolves the same
+        // value for its own builds.
+        let sanitizer = crate::config::resolve_build_sanitizer(None)
+            .map_err(|error| fuzzing_policy_error(&error))?;
+
         // The deterministic baseline first, then independent model drafts. The
         // drafts differ by sampling, not by prompt, so a losing candidate is
         // never handicapped by a prompt the others did not get.
         let mut sources: Vec<(CandidateOrigin, String)> = Vec::with_capacity(req.candidates);
         sources.push((
             CandidateOrigin::Heuristic,
-            heuristic_draft(&candidate, req.engine)?.source,
+            heuristic_draft(&candidate, req.engine, sanitizer)?.source,
         ));
         for _ in 1..req.candidates {
             sources.push((
                 CandidateOrigin::Llm,
-                self.draft_harness_source(project, &candidate, req.engine)
+                self.draft_harness_source(project, &candidate, req.engine, sanitizer)
                     .await?,
             ));
         }
@@ -2153,7 +2403,10 @@ pub(super) fn sha256_hex(bytes: &[u8]) -> String {
 /// the operator's CPU allocation, so raising `fuzzing.sandbox.max_cpus`
 /// (which puts campaign libFuzzer runs into fork mode and orchestrates AFL++
 /// primaries and secondaries) never changes the qualification argv or its
-/// exit-code evidence.
+/// exit-code evidence. The same holds for the per-input timeout: smoke keeps
+/// each engine's built-in default (`input_timeout: None`) rather than the
+/// campaign's `fuzzing.default_timeout_ms`, because a 1s campaign budget could
+/// false-fail a slow sanitized harness during qualification.
 fn smoke_qualification_config(
     harness: &Harness,
     resolved: crate::config::ResolvedFuzzingRun,
@@ -2172,6 +2425,8 @@ fn smoke_qualification_config(
         seed: None,
         replay_of: None,
         input_manifest_sha256: None,
+        input_timeout: None,
+        resume: false,
     }
 }
 
@@ -2210,6 +2465,9 @@ mod smoke_config_tests {
             duration_secs: 60,
             max_mem_mb: 2048,
             max_cpus: 8,
+            timeout_ms: 1000,
+            resume: false,
+            sanitizer: None,
         };
         let config =
             smoke_qualification_config(&harness(), resolved, std::path::Path::new("/work"));
@@ -2244,7 +2502,7 @@ mod exact_qualification_tests {
     };
     use uuid::Uuid;
 
-    use super::{harness_binary_name, workspace_dir, ServiceContainer};
+    use super::{harness_binary_name, workspace_dir, HarnessReviewBypass, ServiceContainer};
 
     const TARGET: &str = "parse_entry";
     const SOURCE: &str = "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }";
@@ -2433,6 +2691,29 @@ mod exact_qualification_tests {
         ServiceContainer::workspace_environment_test_gate()
     }
 
+    /// Pin config to a private directory with function-coverage collection off.
+    ///
+    /// The auto-revert fixture stages its historical harness by hand but
+    /// compiles the replacement through the real compile path, so their
+    /// smoke-run configs are only baseline-compatible when no per-run
+    /// `LLVM_PROFILE_FILE` entry lands in the persisted run environment.
+    /// Neither the checked-in example config (`collect_function_coverage =
+    /// true`) nor a developer's per-user config may leak in here.
+    fn install_test_config() {
+        static DIR: OnceLock<PathBuf> = OnceLock::new();
+        let dir = DIR.get_or_init(|| {
+            let dir = std::env::temp_dir().join(format!("oxfuzz-exact-config-{}", Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("oxfuzz.toml"),
+                "[fuzzing]\ncollect_function_coverage = false\n",
+            )
+            .unwrap();
+            dir
+        });
+        std::env::set_var("HF_CONFIG_DIR", dir);
+    }
+
     async fn fixture(
         review: Arc<CountingReviewPool>,
     ) -> (
@@ -2477,6 +2758,7 @@ mod exact_qualification_tests {
                     EngineKind::LibFuzzer,
                     TargetLanguage::C,
                     &harness_binary_name(TARGET),
+                    Sanitizer::Address,
                 )
                 .unwrap(),
                 sanitizer: Sanitizer::Address,
@@ -2529,6 +2811,7 @@ mod exact_qualification_tests {
                 EngineKind::LibFuzzer,
                 TargetLanguage::C,
                 id,
+                HarnessReviewBypass::NotRequested,
             )
             .await
             .unwrap();
@@ -2541,6 +2824,7 @@ mod exact_qualification_tests {
                 EngineKind::LibFuzzer,
                 TargetLanguage::C,
                 id,
+                HarnessReviewBypass::NotRequested,
             )
             .await
             .unwrap();
@@ -2553,6 +2837,7 @@ mod exact_qualification_tests {
                 EngineKind::LibFuzzer,
                 TargetLanguage::C,
                 Uuid::new_v4(),
+                HarnessReviewBypass::NotRequested,
             )
             .await
             .unwrap_err();
@@ -2575,6 +2860,7 @@ mod exact_qualification_tests {
                 EngineKind::LibFuzzer,
                 TargetLanguage::C,
                 Uuid::new_v4(),
+                HarnessReviewBypass::NotRequested,
             )
             .await
             .unwrap_err();
@@ -2596,6 +2882,7 @@ mod exact_qualification_tests {
                 EngineKind::LibFuzzer,
                 TargetLanguage::C,
                 id,
+                HarnessReviewBypass::NotRequested,
             )
             .await
             .unwrap_err();
@@ -2628,6 +2915,7 @@ mod exact_qualification_tests {
                 EngineKind::LibFuzzer,
                 TargetLanguage::C,
                 id,
+                HarnessReviewBypass::NotRequested,
             )
             .await
             .expect_err("a changed record under the active id must fail closed");
@@ -2653,6 +2941,7 @@ mod exact_qualification_tests {
             EngineKind::LibFuzzer,
             TargetLanguage::C,
             id,
+            HarnessReviewBypass::NotRequested,
         );
         let second = container.harness_review_exact(
             &project_path,
@@ -2660,6 +2949,7 @@ mod exact_qualification_tests {
             EngineKind::LibFuzzer,
             TargetLanguage::C,
             id,
+            HarnessReviewBypass::NotRequested,
         );
 
         let (first, second) = tokio::join!(first, second);
@@ -2667,6 +2957,104 @@ mod exact_qualification_tests {
         assert_eq!(second.unwrap().harness_id, id);
         assert_eq!(review.calls.load(Ordering::SeqCst), 1);
         assert!(store.harness_ai_review(id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn the_flag_bypasses_the_review_without_touching_the_provider() {
+        let _gate = qualification_test_gate().lock().await;
+        let review = Arc::new(CountingReviewPool::approving());
+        let (project, store, container, _runtime, id) = fixture(Arc::clone(&review)).await;
+
+        let outcome = container
+            .harness_review_exact(
+                project.path(),
+                TARGET,
+                EngineKind::LibFuzzer,
+                TargetLanguage::C,
+                id,
+                HarnessReviewBypass::Requested,
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome.harness_id, id);
+        assert_eq!(
+            review.calls.load(Ordering::SeqCst),
+            0,
+            "an opted-in bypass must not call the provider"
+        );
+
+        let record = store
+            .harness_ai_review(id)
+            .await
+            .unwrap()
+            .expect("the bypass persists a marked review record");
+        assert!(record.review_json.contains("\"verdict\":\"bypassed\""));
+        assert!(record.review_json.contains("\"reviewer\":\"none\""));
+        assert!(record
+            .review_json
+            .contains("\"bypass_source\":\"cli_flag\""));
+        assert_eq!(record.source_sha256, super::sha256_hex(SOURCE.as_bytes()));
+
+        // The durable marker is the review-of-record for this exact revision:
+        // a later review without the flag reuses it and still makes no call.
+        container
+            .harness_review_exact(
+                project.path(),
+                TARGET,
+                EngineKind::LibFuzzer,
+                TargetLanguage::C,
+                id,
+                HarnessReviewBypass::NotRequested,
+            )
+            .await
+            .expect("the persisted bypass marker satisfies later reviews of this revision");
+        assert_eq!(review.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn the_flag_does_not_overturn_a_persisted_negative_review() {
+        let _gate = qualification_test_gate().lock().await;
+        let review = Arc::new(CountingReviewPool::approving());
+        let (project, store, container, _runtime, id) = fixture(review).await;
+        // A negative model verdict persisted for this exact revision: the
+        // bypass flag skips performing a review, never overturns one.
+        let refusing =
+            r#"{"exercises_target":true,"safe_to_execute":false,"reasons":["spawns a shell"]}"#;
+        let evidence = crate::harness_review::HarnessAiReviewEvidence {
+            schema_version: crate::harness_review::HARNESS_AI_REVIEW_SCHEMA_VERSION,
+            prompt_version: crate::harness_review::HARNESS_AI_REVIEW_PROMPT_VERSION,
+            target: TARGET.to_owned(),
+            opinion: crate::harness_review::HarnessPreExecutionOpinion {
+                exercises_target: true,
+                safe_to_execute: false,
+                reasons: vec!["spawns a shell".to_owned()],
+            },
+            response: hf_test_utils::fixtures::make_chat_response(refusing),
+        };
+        let binary = workspace_dir(project.path(), TARGET).join(harness_binary_name(TARGET));
+        store
+            .record_harness_ai_review(&hf_storage::HarnessAiReviewRecord {
+                harness_id: id,
+                source_sha256: super::sha256_hex(SOURCE.as_bytes()),
+                binary_sha256: super::sha256_hex(&std::fs::read(&binary).unwrap()),
+                review_json: serde_json::to_string(&evidence).unwrap(),
+                reviewed_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        let error = container
+            .harness_review_exact(
+                project.path(),
+                TARGET,
+                EngineKind::LibFuzzer,
+                TargetLanguage::C,
+                id,
+                HarnessReviewBypass::Requested,
+            )
+            .await
+            .expect_err("a recorded negative verdict must survive the bypass flag");
+        assert!(error.to_string().contains("refused"), "{error}");
     }
 
     #[tokio::test]
@@ -3040,6 +3428,7 @@ mod exact_qualification_tests {
     #[tokio::test]
     async fn normal_auto_revert_completes_after_a_queued_workspace_cleanup() {
         let _gate = qualification_test_gate().lock().await;
+        install_test_config();
         let (project, store, container, _runtime, historical) = promoted_fixture().await;
         let active =
             install_different_promoted_revision(&project, &store, &container, &historical).await;

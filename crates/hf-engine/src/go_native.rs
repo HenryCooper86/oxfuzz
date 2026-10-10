@@ -6,6 +6,7 @@
 //! that binary directly, matching the qualified direct-test-binary control.
 
 use hf_core::engine::FuzzRunConfig;
+use hf_core::error::ClassifiedError;
 
 /// Construct the Go native fuzzing argument list for a fuzz run.
 ///
@@ -23,8 +24,16 @@ use hf_core::engine::FuzzRunConfig;
 /// `cfg.env` is deliberately absent from the argument list: the Go offline
 /// and cache variables (`GOPROXY=off`, `GOSUMDB=off`, `GOTOOLCHAIN=local`)
 /// are sandbox environment values with one home in `ResourceLimits.env`.
-#[must_use]
-pub fn build_run_args(cfg: &FuzzRunConfig, binary: &str, corpus: &str, _out: &str) -> Vec<String> {
+///
+/// # Errors
+/// Currently infallible; the shared adapter signature is fallible because
+/// other engines validate flag combinations (see AFL++'s resume rule).
+pub fn build_run_args(
+    cfg: &FuzzRunConfig,
+    binary: &str,
+    corpus: &str,
+    _out: &str,
+) -> Result<Vec<String>, ClassifiedError> {
     let duration = cfg.duration.map_or(0, |d| d.as_secs());
     let test_name = format!(
         "Fuzz{}",
@@ -43,7 +52,7 @@ pub fn build_run_args(cfg: &FuzzRunConfig, binary: &str, corpus: &str, _out: &st
     }
     args.push(corpus.to_owned());
     args.extend(cfg.extra_args.iter().cloned());
-    args
+    Ok(args)
 }
 
 /// The staged Go test binary is named `fuzz_<Symbol>.test`, where `<Symbol>`

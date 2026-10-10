@@ -556,6 +556,188 @@ pub(crate) fn run_context_source_digest(
     Ok(run_context_digests(workspace, sandbox_image_sha256)?.source)
 }
 
+/// Total byte ceiling for one copied AFL++ resume tree. The resumed run still
+/// has to fit the 64 MiB retained-evidence budget alongside this tree, so the
+/// copy holds half of it; a session beyond that fails loud instead of
+/// silently dropping AFL-internal state.
+pub(super) const MAX_AFL_RESUME_TREE_BYTES: u64 = 32 * 1024 * 1024;
+
+/// File-count ceiling for one copied AFL++ resume tree, mirroring the run
+/// context walk's bound.
+pub(super) const MAX_AFL_RESUME_TREE_FILES: usize = 100_000;
+
+/// Whether an output tree holds resumable AFL++ session state: at least one
+/// instance directory (`default`, `main`, `sK`, ...) with a `fuzzer_stats`
+/// snapshot and a queue -- either `queue/` or the `_resume/` staging dir an
+/// interrupted in-place import leaves behind. Only real directories and files
+/// qualify; anything else is simply not a donor.
+pub(super) fn afl_tree_has_session(tree: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(tree) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if !kind.is_dir() {
+            continue;
+        }
+        let instance = entry.path();
+        let stats = instance.join(hf_engine::afl::AFL_FUZZER_STATS_FILE);
+        let has_stats = std::fs::symlink_metadata(&stats)
+            .map(|metadata| metadata.file_type().is_file())
+            .unwrap_or(false);
+        let has_queue = ["queue", "_resume"].iter().any(|name| {
+            std::fs::symlink_metadata(instance.join(name))
+                .map(|metadata| metadata.file_type().is_dir())
+                .unwrap_or(false)
+        });
+        if has_stats && has_queue {
+            return true;
+        }
+    }
+    false
+}
+
+/// Copy one donor AFL++ output tree into a fresh run output directory,
+/// verbatim and bounded.
+///
+/// The copy is what `afl-fuzz` resumes against under `AFL_AUTORESUME`:
+/// instance queues (queue position and `.state` bookkeeping), `fuzzer_stats`
+/// (the per-instance resume trigger), crashes/hangs, and any `_resume`
+/// staging left by an interrupted import. Symlinks and non-regular files fail
+/// closed, and the tree must fit [`MAX_AFL_RESUME_TREE_BYTES`] and
+/// [`MAX_AFL_RESUME_TREE_FILES`] -- beyond that the operator gets an error
+/// naming the ceiling rather than a silently cold-started run.
+///
+/// # Errors
+/// Returns [`ClassifiedError::Validation`] for an unsafe or over-budget donor
+/// tree, and [`ClassifiedError::Internal`] for copy failures.
+pub(super) fn copy_afl_resume_tree(donor: &Path, output: &Path) -> Result<(), ClassifiedError> {
+    let mut remaining_bytes = MAX_AFL_RESUME_TREE_BYTES;
+    let mut remaining_files = MAX_AFL_RESUME_TREE_FILES;
+    let mut stack = vec![(donor.to_path_buf(), output.to_path_buf())];
+    while let Some((from, to)) = stack.pop() {
+        let mut read = std::fs::read_dir(&from).map_err(|error| {
+            ClassifiedError::Internal(format!(
+                "read AFL++ resume tree {}: {error}",
+                from.display()
+            ))
+        })?;
+        let mut entries = Vec::new();
+        for entry in &mut read {
+            let entry = entry.map_err(|error| {
+                ClassifiedError::Internal(format!("read AFL++ resume tree entry: {error}"))
+            })?;
+            entries.push(entry);
+        }
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        for entry in entries {
+            let source = entry.path();
+            let kind = entry.file_type().map_err(|error| {
+                ClassifiedError::Internal(format!(
+                    "inspect AFL++ resume tree entry {}: {error}",
+                    source.display()
+                ))
+            })?;
+            let target = to.join(entry.file_name());
+            if kind.is_symlink() || (!kind.is_dir() && !kind.is_file()) {
+                return Err(ClassifiedError::Validation(format!(
+                    "AFL++ resume tree contains a symlink or non-regular entry: {}",
+                    source.display()
+                )));
+            }
+            if kind.is_dir() {
+                std::fs::create_dir(&target).map_err(|error| {
+                    ClassifiedError::Internal(format!(
+                        "create resumed output directory {}: {error}",
+                        target.display()
+                    ))
+                })?;
+                stack.push((source, target));
+                continue;
+            }
+            if remaining_files == 0 {
+                return Err(ClassifiedError::Validation(format!(
+                    "AFL++ resume tree exceeds {MAX_AFL_RESUME_TREE_FILES} files"
+                )));
+            }
+            remaining_files -= 1;
+            let metadata = std::fs::symlink_metadata(&source).map_err(|error| {
+                ClassifiedError::Internal(format!(
+                    "inspect AFL++ resume tree file {}: {error}",
+                    source.display()
+                ))
+            })?;
+            if metadata.len() > remaining_bytes {
+                return Err(ClassifiedError::Validation(format!(
+                    "AFL++ resume tree exceeds the {MAX_AFL_RESUME_TREE_BYTES}-byte ceiling"
+                )));
+            }
+            remaining_bytes -= metadata.len();
+            std::fs::copy(&source, &target).map_err(|error| {
+                ClassifiedError::Internal(format!(
+                    "copy AFL++ resume tree file {}: {error}",
+                    source.display()
+                ))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Find the output tree a resume-enabled AFL++ run should continue: the newest
+/// terminal AFL++ campaign run for the same project workspace executing the
+/// exact same harness binary (`binary_rev`), with its session tree still on
+/// disk. Smoke runs, in-flight runs, other engines, and other harness
+/// revisions are never donors; a candidate whose tree is missing or holds no
+/// session is skipped for the next one.
+///
+/// # Errors
+/// Returns [`ClassifiedError::Storage`] when the run history cannot be read:
+/// resume cannot decide without it, so the run fails rather than guessing.
+pub(super) async fn afl_resume_donor(
+    store: &hf_storage::Store,
+    workspace: &Path,
+    project_root: &str,
+    binary_sha256: &str,
+    current_run_id: Uuid,
+) -> Result<Option<(Uuid, PathBuf)>, ClassifiedError> {
+    let mut runs = store
+        .list_runs(Some(project_root))
+        .await
+        .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
+    // list_runs is newest first; the sort only pins the tie-break.
+    runs.sort_by_key(|run| std::cmp::Reverse(run.started_at));
+    for run in runs {
+        let terminal = matches!(
+            run.status,
+            hf_storage::RunStatus::Done
+                | hf_storage::RunStatus::Failed
+                | hf_storage::RunStatus::Cancelled
+        );
+        if run.id == current_run_id
+            || run.engine != hf_core::engine::EngineKind::AflPlusPlus
+            || run.kind != hf_storage::RunKind::Campaign
+            || !terminal
+            || run.binary_rev.as_deref() != Some(binary_sha256)
+            || run.evidence_dir.is_none()
+        {
+            continue;
+        }
+        // A mismatched or pruned evidence directory is skipped, not fatal:
+        // resume searches for *a* usable donor, and the run simply cold-starts
+        // when none qualifies.
+        let Ok(output) = run_output_dir(workspace, &run) else {
+            continue;
+        };
+        if afl_tree_has_session(&output) {
+            return Ok(Some((run.id, output)));
+        }
+    }
+    Ok(None)
+}
+
 /// Resolve one runtime image reference before persisting or executing a run.
 /// Docker returns a content-addressed `sha256:` ID. Proof-carrying runs reject
 /// adapters without an immutable image identity.
@@ -1003,10 +1185,102 @@ pub(super) fn run_source_path(
 #[cfg(test)]
 mod staging_tests {
     use super::{
-        resolve_run_sandbox_image, run_binary_path, run_context_digests, run_output_dir,
-        stage_run_artifacts, verify_run_artifacts,
+        afl_resume_donor, afl_tree_has_session, copy_afl_resume_tree, resolve_run_sandbox_image,
+        run_binary_path, run_context_digests, run_output_dir, stage_run_artifacts,
+        verify_run_artifacts,
     };
     use crate::container::workspace::workspace_relative_record;
+
+    #[test]
+    fn afl_tree_has_session_requires_stats_and_a_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!afl_tree_has_session(dir.path()));
+        let instance = dir.path().join("default");
+        std::fs::create_dir(&instance).unwrap();
+        std::fs::write(instance.join("fuzzer_stats"), b"start_time : 1\n").unwrap();
+        assert!(
+            !afl_tree_has_session(dir.path()),
+            "stats without a queue is not a resumable session"
+        );
+        std::fs::create_dir(instance.join("queue")).unwrap();
+        assert!(afl_tree_has_session(dir.path()));
+        // An interrupted in-place import leaves `_resume` in place of `queue`;
+        // afl-fuzz resumes from it directly.
+        std::fs::rename(instance.join("queue"), instance.join("_resume")).unwrap();
+        assert!(afl_tree_has_session(dir.path()));
+    }
+
+    #[test]
+    fn resume_copy_is_verbatim() {
+        let donor = tempfile::tempdir().unwrap();
+        let instance = donor.path().join("main");
+        std::fs::create_dir_all(instance.join("queue")).unwrap();
+        std::fs::create_dir_all(instance.join("crashes")).unwrap();
+        std::fs::write(instance.join("queue/id:000000,orig:seed"), b"queue input").unwrap();
+        std::fs::write(instance.join("crashes/id:000001,sig:06"), b"crash input").unwrap();
+        std::fs::write(
+            instance.join("fuzzer_stats"),
+            b"start_time : 1\nlast_update : 2\n",
+        )
+        .unwrap();
+
+        let out = tempfile::tempdir().unwrap();
+        let output = out.path().join("out");
+        std::fs::create_dir(&output).unwrap();
+        copy_afl_resume_tree(donor.path(), &output).unwrap();
+
+        assert_eq!(
+            std::fs::read(output.join("main/queue/id:000000,orig:seed")).unwrap(),
+            b"queue input"
+        );
+        assert_eq!(
+            std::fs::read(output.join("main/crashes/id:000001,sig:06")).unwrap(),
+            b"crash input"
+        );
+        assert_eq!(
+            std::fs::read(output.join("main/fuzzer_stats")).unwrap(),
+            b"start_time : 1\nlast_update : 2\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resume_copy_fails_closed_on_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let donor = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret"), b"secret").unwrap();
+        std::fs::create_dir(donor.path().join("default")).unwrap();
+        symlink(
+            outside.path().join("secret"),
+            donor.path().join("default/fuzzer_stats"),
+        )
+        .unwrap();
+
+        let out = tempfile::tempdir().unwrap();
+        let output = out.path().join("out");
+        std::fs::create_dir(&output).unwrap();
+        let error = copy_afl_resume_tree(donor.path(), &output).unwrap_err();
+        assert!(error.to_string().contains("symlink"), "{error}");
+    }
+
+    #[test]
+    fn resume_copy_rejects_a_tree_over_its_byte_ceiling() {
+        let donor = tempfile::tempdir().unwrap();
+        let instance = donor.path().join("default");
+        std::fs::create_dir_all(instance.join("queue")).unwrap();
+        std::fs::File::create(instance.join("queue/id:000000"))
+            .unwrap()
+            .set_len(super::MAX_AFL_RESUME_TREE_BYTES + 1)
+            .unwrap();
+
+        let out = tempfile::tempdir().unwrap();
+        let output = out.path().join("out");
+        std::fs::create_dir(&output).unwrap();
+        let error = copy_afl_resume_tree(donor.path(), &output).unwrap_err();
+        assert!(error.to_string().contains("resume tree"), "{error}");
+    }
 
     #[test]
     fn comparison_context_tracks_target_and_corpus_bytes() {
@@ -1444,5 +1718,135 @@ mod staging_tests {
 
         assert!(error.to_string().contains("runs"));
         assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
+    }
+
+    #[tokio::test]
+    async fn afl_resume_donor_prefers_the_newest_matching_finished_campaign() {
+        use super::run_output_relative;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = hf_storage::Store::connect(dir.path().join("resume.db"))
+            .await
+            .unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let binary = "b".repeat(64);
+        let other_binary = "c".repeat(64);
+
+        let insert = |engine: hf_core::engine::EngineKind,
+                      kind: hf_storage::RunKind,
+                      status: hf_storage::RunStatus,
+                      binary_rev: Option<String>,
+                      minutes_ago: i64| {
+            let store = &store;
+            async move {
+                let mut run = hf_storage::RunRecord::new(
+                    "/project",
+                    engine,
+                    None,
+                    chrono::Utc::now() - chrono::Duration::minutes(minutes_ago),
+                );
+                run.kind = kind;
+                run.status = status;
+                run.binary_rev = binary_rev;
+                run.evidence_dir = Some(workspace_relative_record(&run_output_relative(run.id)));
+                store.insert_run(&run).await.unwrap();
+                run.id
+            }
+        };
+
+        // Eligible donor: finished AFL++ campaign with a session tree.
+        let eligible = insert(
+            hf_core::engine::EngineKind::AflPlusPlus,
+            hf_storage::RunKind::Campaign,
+            hf_storage::RunStatus::Done,
+            Some(binary.clone()),
+            20,
+        )
+        .await;
+        let tree = workspace
+            .join("runs")
+            .join(eligible.to_string())
+            .join("out");
+        std::fs::create_dir_all(tree.join("default/queue")).unwrap();
+        std::fs::write(tree.join("default/fuzzer_stats"), b"start_time : 1\n").unwrap();
+
+        // Newer but ineligible rows must not win: another engine, a smoke run,
+        // a still-running run, and a different harness binary.
+        insert(
+            hf_core::engine::EngineKind::LibFuzzer,
+            hf_storage::RunKind::Campaign,
+            hf_storage::RunStatus::Done,
+            Some(binary.clone()),
+            1,
+        )
+        .await;
+        insert(
+            hf_core::engine::EngineKind::AflPlusPlus,
+            hf_storage::RunKind::Smoke,
+            hf_storage::RunStatus::Done,
+            Some(binary.clone()),
+            2,
+        )
+        .await;
+        insert(
+            hf_core::engine::EngineKind::AflPlusPlus,
+            hf_storage::RunKind::Campaign,
+            hf_storage::RunStatus::Running,
+            Some(binary.clone()),
+            3,
+        )
+        .await;
+        insert(
+            hf_core::engine::EngineKind::AflPlusPlus,
+            hf_storage::RunKind::Campaign,
+            hf_storage::RunStatus::Done,
+            Some(other_binary),
+            4,
+        )
+        .await;
+        // A matching finished run whose tree was pruned is skipped, not fatal.
+        insert(
+            hf_core::engine::EngineKind::AflPlusPlus,
+            hf_storage::RunKind::Campaign,
+            hf_storage::RunStatus::Failed,
+            Some(binary.clone()),
+            5,
+        )
+        .await;
+
+        let donor = afl_resume_donor(
+            &store,
+            &workspace,
+            "/project",
+            &binary,
+            uuid::Uuid::new_v4(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(donor.map(|(id, _)| id), Some(eligible));
+
+        // A newer matching campaign with a tree wins over the older one.
+        let newer = insert(
+            hf_core::engine::EngineKind::AflPlusPlus,
+            hf_storage::RunKind::Campaign,
+            hf_storage::RunStatus::Cancelled,
+            Some(binary.clone()),
+            10,
+        )
+        .await;
+        let tree = workspace.join("runs").join(newer.to_string()).join("out");
+        std::fs::create_dir_all(tree.join("main/queue")).unwrap();
+        std::fs::write(tree.join("main/fuzzer_stats"), b"start_time : 1\n").unwrap();
+        let donor = afl_resume_donor(
+            &store,
+            &workspace,
+            "/project",
+            &binary,
+            uuid::Uuid::new_v4(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(donor.map(|(id, _)| id), Some(newer));
     }
 }

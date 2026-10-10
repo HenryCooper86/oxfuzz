@@ -271,7 +271,7 @@ fn config_value(config: &FuzzRunConfig) -> Result<serde_json::Value, ClassifiedE
     serde_json::to_value(config).map_err(invalid)
 }
 
-fn invocation(config: &FuzzRunConfig) -> Vec<String> {
+fn invocation(config: &FuzzRunConfig) -> Result<Vec<String>, ClassifiedError> {
     // Run-owned paths differ only by UUID. Bind adapter behavior with that component normalized.
     hf_engine::registry::adapter_for(config.engine).build_run_args(
         config,
@@ -291,7 +291,7 @@ pub(super) fn seal(
         version: 1,
         image: image.to_owned(),
         config: config_value(config)?,
-        argv: invocation(config),
+        argv: invocation(config)?,
         entries: entries(root, &[MANIFEST])?,
     };
     let bytes = serde_json::to_vec(&manifest).map_err(invalid)?;
@@ -330,7 +330,7 @@ pub(super) fn verify(root: &Path, config: &FuzzRunConfig) -> Result<String, Clas
     let manifest: Manifest = serde_json::from_slice(&bytes).map_err(invalid)?;
     if manifest.version != 1
         || manifest.config != config_value(config)?
-        || manifest.argv != invocation(config)
+        || manifest.argv != invocation(config)?
     {
         return Err(invalid("manifest version or run configuration mismatch"));
     }

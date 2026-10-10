@@ -149,6 +149,8 @@ async fn fixture(name: &str) -> Fixture {
             seed: None,
             replay_of: None,
             input_manifest_sha256: None,
+            input_timeout: None,
+            resume: false,
         }),
         chrono::Utc::now(),
     );
@@ -484,6 +486,7 @@ async fn campaign_fixture(name: &str) -> CampaignFixture {
             EngineKind::LibFuzzer,
             TargetLanguage::C,
             1,
+            None,
         )
         .await
         .expect("prepare harness");
@@ -560,6 +563,9 @@ async fn run_completed_fires_matching_event_schedule() {
             EngineKind::LibFuzzer,
             TargetLanguage::C,
             1,
+            None,
+            None,
+            None,
             1,
         )
         .await
@@ -607,6 +613,9 @@ async fn run_failed_fires_matching_event_schedule() {
             EngineKind::LibFuzzer,
             TargetLanguage::C,
             1,
+            None,
+            None,
+            None,
             1,
         )
         .await;

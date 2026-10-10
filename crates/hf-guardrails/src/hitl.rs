@@ -45,11 +45,23 @@ impl ApprovalGate for DenyAll {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct EnvApprovalGate;
 
+impl EnvApprovalGate {
+    /// Whether `HF_AUTO_APPROVE` currently opts into automatic approval. This
+    /// is the single home of the truthy-value vocabulary, so a gate that
+    /// composes with the environment (e.g. an interactive terminal prompt
+    /// that must still honor `HF_AUTO_APPROVE=1`) agrees with this gate on
+    /// what the variable means.
+    #[must_use]
+    pub fn auto_approve_enabled() -> bool {
+        std::env::var("HF_AUTO_APPROVE")
+            .is_ok_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+    }
+}
+
 #[async_trait]
 impl ApprovalGate for EnvApprovalGate {
     async fn request_approval(&self, action: &Action, reason: &str) -> bool {
-        let approved = std::env::var("HF_AUTO_APPROVE")
-            .is_ok_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"));
+        let approved = Self::auto_approve_enabled();
         if approved {
             tracing::warn!(action = %action.label(), reason, "guardrail approved via HF_AUTO_APPROVE");
         } else {

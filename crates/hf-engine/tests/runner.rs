@@ -54,6 +54,8 @@ fn run_config(engine: EngineKind, duration_secs: u64) -> FuzzRunConfig {
         seed: None,
         replay_of: None,
         input_manifest_sha256: None,
+        input_timeout: None,
+        resume: false,
     }
 }
 
@@ -175,6 +177,182 @@ async fn libfuzzer_fork_runs_disable_the_exit_time_leak_sanitizer() {
         limits.env.get("ASAN_OPTIONS").map(String::as_str),
         Some("abort_on_error=1")
     );
+}
+
+/// A UBSan build still aborts on a finding (the binary is compiled
+/// `-fno-sanitize-recover=undefined`), but its default report carries no stack
+/// frames, which the dedup signature feeds on. For the direct libFuzzer run the
+/// runner adds `UBSAN_OPTIONS=print_stacktrace=1` unless the operator set
+/// UBSAN_OPTIONS outright.
+///
+/// The runner must NEVER set UBSAN_OPTIONS for AFL++ or honggfuzz: both engines
+/// auto-configure `abort_on_error` when they detect sanitizer instrumentation,
+/// and a preset UBSAN_OPTIONS suppresses that, turning the UBSan `Die()` (exit
+/// code 1, no signal) into a non-crash those signal-based engines never save.
+/// Verified against the pinned sandbox image (AFL++ 4.09c, honggfuzz 2.6).
+#[tokio::test]
+async fn ubsan_runs_set_print_stacktrace_for_libfuzzer_only() {
+    async fn captured_env(
+        engine: EngineKind,
+        cfg: &FuzzRunConfig,
+    ) -> std::collections::HashMap<String, String> {
+        let runtime = LimitCapturingRuntime {
+            limits: std::sync::Mutex::new(None),
+        };
+        EngineRunner::new()
+            .run(
+                engine,
+                cfg,
+                "/work/h",
+                "/work/corpus",
+                "/work/out",
+                &runtime,
+                Path::new("/work"),
+            )
+            .await
+            .expect("run completes");
+        let limits = runtime
+            .limits
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("captured limits");
+        limits.env
+    }
+
+    let mut cfg = run_config(EngineKind::LibFuzzer, 10);
+    cfg.sanitizer = Sanitizer::Undefined;
+    let env = captured_env(EngineKind::LibFuzzer, &cfg).await;
+    assert_eq!(
+        env.get("UBSAN_OPTIONS").map(String::as_str),
+        Some("print_stacktrace=1"),
+        "UBSan reports need frames for the dedup signature: {env:?}"
+    );
+
+    // An operator-provided UBSAN_OPTIONS wins outright (the runner does not
+    // merge sanitizer options it cannot interpret).
+    let mut cfg = run_config(EngineKind::LibFuzzer, 10);
+    cfg.sanitizer = Sanitizer::Undefined;
+    cfg.env
+        .push(("UBSAN_OPTIONS".to_owned(), "abort_on_error=1".to_owned()));
+    let env = captured_env(EngineKind::LibFuzzer, &cfg).await;
+    assert_eq!(
+        env.get("UBSAN_OPTIONS").map(String::as_str),
+        Some("abort_on_error=1")
+    );
+
+    // AFL++ and honggfuzz auto-configure their sanitizer environment; a preset
+    // UBSAN_OPTIONS would suppress it and silently drop UBSan findings.
+    for engine in [EngineKind::AflPlusPlus, EngineKind::Honggfuzz] {
+        let mut cfg = run_config(engine, 10);
+        cfg.sanitizer = Sanitizer::Undefined;
+        let env = captured_env(engine, &cfg).await;
+        assert!(
+            !env.contains_key("UBSAN_OPTIONS"),
+            "{engine:?} owns its sanitizer environment: {env:?}"
+        );
+    }
+
+    // An ASan build gets no UBSan environment.
+    let cfg = run_config(EngineKind::LibFuzzer, 10);
+    let env = captured_env(EngineKind::LibFuzzer, &cfg).await;
+    assert!(!env.contains_key("UBSAN_OPTIONS"));
+}
+
+/// `cfg.env` is copied into the sandbox environment by the runner. AFL++
+/// session resume is the runner's own env knob: `FuzzRunConfig.resume` injects
+/// `AFL_AUTORESUME=1` so afl-fuzz continues a copied-forward output tree, and
+/// a hand-set `AFL_AUTORESUME` in `cfg.env` is a second source of resume truth
+/// and rejected.
+#[tokio::test]
+async fn afl_resume_injects_autoresume_and_rejects_a_hand_set_one() {
+    async fn captured_env(
+        cfg: &FuzzRunConfig,
+    ) -> Result<std::collections::HashMap<String, String>, ClassifiedError> {
+        let runtime = LimitCapturingRuntime {
+            limits: std::sync::Mutex::new(None),
+        };
+        EngineRunner::new()
+            .run(
+                EngineKind::AflPlusPlus,
+                cfg,
+                "/work/h",
+                "/work/corpus",
+                "/work/out",
+                &runtime,
+                Path::new("/work"),
+            )
+            .await?;
+        let env = runtime
+            .limits
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("captured limits")
+            .env;
+        Ok(env)
+    }
+
+    let resumed = captured_env(&FuzzRunConfig {
+        resume: true,
+        ..run_config(EngineKind::AflPlusPlus, 10)
+    })
+    .await
+    .expect("a resume run completes");
+    assert_eq!(
+        resumed.get("AFL_AUTORESUME").map(String::as_str),
+        Some("1"),
+        "resume must set AFL_AUTORESUME=1: {resumed:?}"
+    );
+
+    let cold = captured_env(&run_config(EngineKind::AflPlusPlus, 10))
+        .await
+        .expect("a cold run completes");
+    assert!(
+        !cold.contains_key("AFL_AUTORESUME"),
+        "a cold run must not enable resume: {cold:?}"
+    );
+
+    for resume in [false, true] {
+        let mut cfg = run_config(EngineKind::AflPlusPlus, 10);
+        cfg.resume = resume;
+        cfg.env.push(("AFL_AUTORESUME".to_owned(), "1".to_owned()));
+        let error = captured_env(&cfg)
+            .await
+            .expect_err("a hand-set AFL_AUTORESUME is a second resume source");
+        assert!(
+            error.to_string().contains("AFL_AUTORESUME"),
+            "the error must name the smuggled variable: {error}"
+        );
+    }
+
+    // The knob belongs to AFL++; other engines never see it.
+    let libfuzzer = {
+        let runtime = LimitCapturingRuntime {
+            limits: std::sync::Mutex::new(None),
+        };
+        EngineRunner::new()
+            .run(
+                EngineKind::LibFuzzer,
+                &run_config(EngineKind::LibFuzzer, 10),
+                "/work/h",
+                "/work/corpus",
+                "/work/out",
+                &runtime,
+                Path::new("/work"),
+            )
+            .await
+            .expect("libfuzzer run completes");
+        let env = runtime
+            .limits
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("captured limits")
+            .env;
+        env
+    };
+    assert!(!libfuzzer.contains_key("AFL_AUTORESUME"));
 }
 
 #[tokio::test]

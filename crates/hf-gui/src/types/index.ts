@@ -306,6 +306,8 @@ export interface SystemStatus {
   syzkaller: boolean;
   /** The configured DefectDojo is answering (false also when unconfigured). */
   defectdojo: boolean;
+  /** How to obtain the sandbox image; present only when it is missing. */
+  sandbox_image_remedy?: string;
 }
 
 /** Lifecycle state of the DefectDojo instance the app is pointed at. */
@@ -369,6 +371,11 @@ export interface HarnessAiReviewSummary {
   reasons: string[];
   /** RFC 3339; empty when unknown. */
   reviewed_at: string;
+  /** Opt-in surface when the operator bypassed the independent LLM review
+   * (`--no-llm-review` or the deployment config); null/absent when a model
+   * reviewed this exact revision. A bypassed record is not a review: the
+   * approval surface must show it, never collapse it into "reviewed". */
+  bypass_source?: "cli_flag" | "config" | null;
 }
 
 /** One lexical lint finding for a harness source. */

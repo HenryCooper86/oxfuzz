@@ -316,6 +316,7 @@ async fn run_records_a_seed_and_replay_reexecutes_with_it() {
             EngineKind::LibFuzzer,
             TargetLanguage::C,
             1,
+            None,
         )
         .await
         .expect("prepare harness");
@@ -350,6 +351,9 @@ async fn run_records_a_seed_and_replay_reexecutes_with_it() {
             "parse_value",
             EngineKind::LibFuzzer,
             60,
+            None,
+            None,
+            None,
             None,
             &|_| {},
         )

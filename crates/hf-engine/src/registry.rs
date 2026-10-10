@@ -4,6 +4,7 @@
 //! in [`adapter_for`] (Engineering Protocol 2.1: extend via traits, not core changes).
 
 use hf_core::engine::{EngineKind, FuzzRunConfig};
+use hf_core::error::ClassifiedError;
 
 /// An engine adapter builds the sandboxed command line for a fuzz run. The
 /// [`EngineRunner`](crate::runner::EngineRunner) parses progress/coverage from
@@ -14,13 +15,18 @@ pub trait EngineAdapter: Send + Sync {
 
     /// Build the argv for a fuzz run. `binary` (or, for syzkaller, the manager
     /// config), `corpus`, and `out` are container-internal paths.
+    ///
+    /// # Errors
+    /// Returns [`ClassifiedError::Validation`] when the config asks for a flag
+    /// combination the engine cannot honor (e.g. a hand-passed AFL++ resume
+    /// through `extra_args`, which is owned by `FuzzRunConfig.resume`).
     fn build_run_args(
         &self,
         cfg: &FuzzRunConfig,
         binary: &str,
         corpus: &str,
         out: &str,
-    ) -> Vec<String>;
+    ) -> Result<Vec<String>, ClassifiedError>;
 }
 
 macro_rules! impl_adapter {
@@ -35,7 +41,7 @@ macro_rules! impl_adapter {
                 binary: &str,
                 corpus: &str,
                 out: &str,
-            ) -> Vec<String> {
+            ) -> Result<Vec<String>, ClassifiedError> {
                 $args(cfg, binary, corpus, out)
             }
         }

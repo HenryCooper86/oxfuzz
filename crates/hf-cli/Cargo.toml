@@ -84,6 +84,7 @@ uuid = { workspace = true }
 tracing-subscriber = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
+tracing = { workspace = true }
 axum = { workspace = true }
 reqwest = { workspace = true }
 ratatui = { workspace = true }
@@ -95,6 +96,8 @@ windows-sys = { workspace = true, optional = true, features = ["Win32_Storage_Fi
 
 [dev-dependencies]
 tempfile = { workspace = true }
+chrono = { workspace = true }
+hf-service = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

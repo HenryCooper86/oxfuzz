@@ -31,6 +31,7 @@ mod discovery;
 mod export;
 #[cfg(feature = "triage-disposition")]
 mod finding_review;
+mod fuzz;
 mod guards;
 mod harness;
 mod harness_inputs;
@@ -66,6 +67,7 @@ mod workspace_file;
 
 #[cfg(feature = "native-analysis")]
 pub use discovery::AnalyzedInventory;
+pub use fuzz::{FuzzOutcome, FuzzRequest, FuzzStage, FUZZ_PIPELINE_REPAIRS};
 pub use guards::AgentTurnGuard;
 pub use harness_workspace::{
     copy_project_sources, generate_target_seeds, stage_generated_build_inputs,
@@ -210,9 +212,19 @@ fn resolve_fuzzing_run(
     engine: EngineKind,
     duration_secs: u64,
     requested_cpus: Option<u32>,
+    timeout_ms: Option<u64>,
+    resume: Option<bool>,
+    sanitizer: Option<hf_core::target::Sanitizer>,
 ) -> Result<crate::config::ResolvedFuzzingRun, ClassifiedError> {
-    crate::config::resolve_fuzzing_run(Some(engine), Some(duration_secs), requested_cpus)
-        .map_err(|error| fuzzing_policy_error(&error))
+    crate::config::resolve_fuzzing_run(
+        Some(engine),
+        Some(duration_secs),
+        requested_cpus,
+        timeout_ms,
+        resume,
+        sanitizer,
+    )
+    .map_err(|error| fuzzing_policy_error(&error))
 }
 
 /// Internal pipeline steps (smoke qualification, coverage pruning, corpus
@@ -376,6 +388,15 @@ struct TerminalRunMetrics {
     edges: u64,
     execs: f64,
     crashes: u64,
+    /// Per-input-timeout findings retained by the engine: AFL++ `saved_hangs`
+    /// from the terminal `fuzzer_stats`, honggfuzz's peak `Timeouts` tick, and
+    /// libFuzzer's `timeout-*` artifact count. `None` when the engine never
+    /// reported a hang count.
+    hangs: Option<u64>,
+    /// The final AFL++ `fuzzer_stats` snapshot, when the run had one. Kept so
+    /// the caller can emit a closing stats event covering the gap between the
+    /// live poller's last tick and the engine's final flush.
+    afl_stats: Option<hf_engine::afl::AflFuzzerStats>,
 }
 
 fn retained_coverage_samples(
@@ -422,16 +443,34 @@ async fn terminal_run_metrics(
     let mut edges = 0_u64;
     let mut execs = 0.0_f64;
     let mut finding_reported = false;
+    let mut hangs: Option<u64> = None;
     for progress in &result.progress {
         match progress {
             FuzzProgress::EdgesCovered(value) => edges = edges.max(*value),
             FuzzProgress::ExecsPerSec(value) => execs = execs.max(*value),
             FuzzProgress::CrashesFound(count) => finding_reported |= *count > 0,
+            // A snapshot's coverage/rate fields re-state the scalar events
+            // from the same engine line; peaking both is idempotent.
+            FuzzProgress::Stats(stats) => {
+                if let Some(value) = stats.edges_covered {
+                    edges = edges.max(value);
+                }
+                if let Some(value) = stats.execs_per_sec {
+                    execs = execs.max(value);
+                }
+                // honggfuzz reports its timeout total on `Timeouts` ticks (and
+                // the AFL++ poller restates `saved_hangs` here); the peak of a
+                // cumulative counter is its final value.
+                if let Some(value) = stats.hangs {
+                    hangs = Some(peak_hangs(hangs, value));
+                }
+            }
             FuzzProgress::LogLine(_) | FuzzProgress::Done => {}
         }
     }
 
     let mut terminal_afl_crashes = 0_u64;
+    let mut afl_stats = None;
     if engine == EngineKind::AflPlusPlus {
         let output = artifacts.output_host.clone();
         if let Some(stats) = tokio::task::spawn_blocking(move || {
@@ -448,26 +487,55 @@ async fn terminal_run_metrics(
             if let Some(value) = stats.execs_per_sec {
                 execs = execs.max(value);
             }
+            if let Some(value) = stats.saved_hangs {
+                hangs = Some(peak_hangs(hangs, value));
+            }
             terminal_afl_crashes = stats.saved_crashes.unwrap_or(0);
+            afl_stats = Some(stats);
         }
     }
     // Recursive crash-artifact walk over a possibly large output tree: run it on
     // the blocking pool, like the AFL stats read above, rather than stalling a
     // tokio worker (and progress streaming) on synchronous filesystem I/O.
     let crash_out = artifacts.output_host.clone();
-    let artifact_crashes =
-        tokio::task::spawn_blocking(move || collect_crash_inputs(engine, &crash_out).len() as u64)
-            .await
-            .map_err(|error| {
-                ClassifiedError::Internal(format!("join crash-artifact scan task: {error}"))
-            })?;
+    let (artifact_crashes, timeout_artifacts) = tokio::task::spawn_blocking(move || {
+        let inputs = collect_crash_inputs(engine, &crash_out);
+        // libFuzzer keeps per-input-timeout findings as `timeout-*` artifacts
+        // in the same flat output; count them separately so a hang is visible
+        // as a hang, not only as one more crash.
+        let timeouts = inputs
+            .iter()
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| hf_crash::is_timeout_artifact(engine, name))
+            })
+            .count() as u64;
+        (inputs.len() as u64, timeouts)
+    })
+    .await
+    .map_err(|error| {
+        ClassifiedError::Internal(format!("join crash-artifact scan task: {error}"))
+    })?;
+    if engine == EngineKind::LibFuzzer {
+        hangs = Some(peak_hangs(hangs, timeout_artifacts));
+    }
     Ok(TerminalRunMetrics {
         edges,
         execs,
         crashes: artifact_crashes
             .max(u64::from(finding_reported))
             .max(terminal_afl_crashes),
+        hangs,
+        afl_stats,
     })
+}
+
+/// Merge one reported hang count into the run's peak: each engine's hang
+/// counter is cumulative within a run, so the latest/largest reading is the
+/// run total.
+fn peak_hangs(current: Option<u64>, value: u64) -> u64 {
+    current.map_or(value, |peak| peak.max(value))
 }
 
 /// Resolve a per-project directory beneath an explicit managed workspace root.
@@ -495,23 +563,42 @@ fn syz_kvm_usable(platform: &str) -> bool {
     }
 }
 
+/// The `docker` argv for the sandbox image build, extracted so the exact
+/// command is unit-testable without a Docker daemon. Kept in sync with the
+/// remedy text in [`crate::system::sandbox_image_remedy`].
+fn sandbox_build_argv(platform: &str) -> Vec<String> {
+    [
+        "build",
+        "--platform",
+        platform,
+        "-t",
+        SANDBOX_IMAGE,
+        "-f",
+        "docker/sandbox/Dockerfile",
+        ".",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect()
+}
+
 /// Build the sandbox image from the repo's Dockerfile for a given platform.
 ///
 /// # Errors
-/// Returns `ClassifiedError::Internal` if the `docker build` command fails.
+/// Returns `ClassifiedError::Validation` when `root` has no
+/// `docker/sandbox/Dockerfile` to build from, and `ClassifiedError::Internal`
+/// if the `docker build` command fails.
 pub fn build_sandbox_image(root: &Path, platform: &str) -> Result<(), ClassifiedError> {
+    let dockerfile = root.join("docker/sandbox/Dockerfile");
+    if !dockerfile.is_file() {
+        return Err(ClassifiedError::Validation(format!(
+            "cannot build the sandbox image: {} does not exist; run from an oxfuzz source checkout",
+            dockerfile.display()
+        )));
+    }
     let status = hf_runtime::scrubbed_command(hf_runtime::docker_bin())
         .current_dir(root)
-        .args([
-            "build",
-            "--platform",
-            platform,
-            "-t",
-            SANDBOX_IMAGE,
-            "-f",
-            "docker/sandbox/Dockerfile",
-            ".",
-        ])
+        .args(sandbox_build_argv(platform))
         .status()
         .map_err(|e| ClassifiedError::Internal(format!("docker build: {e}")))?;
     if status.success() {
@@ -521,8 +608,10 @@ pub fn build_sandbox_image(root: &Path, platform: &str) -> Result<(), Classified
     }
 }
 
-/// Walk up from the current dir and the executable path looking for the repo
-/// root (the directory that contains `docker/sandbox/Dockerfile`).
+/// Walk up from the current dir and the executable path looking for a source
+/// checkout: a directory that contains both `Cargo.toml` and `config/`.
+/// Callers that need the sandbox build inputs must verify
+/// `docker/sandbox/Dockerfile` themselves (see [`build_sandbox_image`]).
 pub fn repo_root() -> Option<PathBuf> {
     let mut starts: Vec<PathBuf> = Vec::new();
     if let Ok(dir) = std::env::current_dir() {
@@ -1652,6 +1741,10 @@ pub struct CampaignOutcome {
     /// regressed coverage past the threshold). Counts both applied reverts and
     /// notify-only detections, so headless history surfaces self-healing.
     pub auto_reverts: usize,
+    /// Per-input-timeout (hang) findings summed across the campaign's runs.
+    /// `None` when no iteration's engine reported a hang count.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hangs: Option<u64>,
     /// Why the final campaign iteration stopped.
     pub termination: hf_core::runtime::CommandTermination,
     /// When the campaign plateaued on coverage without finding a crash, the
@@ -1815,15 +1908,16 @@ fn auto_revert_decision(
 /// to compare for an automatic harness rollback.
 ///
 /// The harness id is intentionally ignored because a revision change is the
-/// subject of the comparison. Engine, budget, sanitizer, corpus location,
-/// environment, engine arguments, and the separately persisted comparison
-/// context must match; otherwise a lower edge count can be caused by the
-/// experimental setup rather than the new harness.
+/// subject of the comparison. Engine, budget, per-input timeout, sanitizer,
+/// corpus location, environment, engine arguments, and the separately
+/// persisted comparison context must match; otherwise a lower edge count can
+/// be caused by the experimental setup rather than the new harness.
 fn auto_revert_baseline_compatible(previous: &FuzzRunConfig, current: &FuzzRunConfig) -> bool {
     previous.engine == current.engine
         && previous.duration == current.duration
         && previous.max_mem_mb == current.max_mem_mb
         && previous.max_cpus == current.max_cpus
+        && previous.input_timeout == current.input_timeout
         && previous.seed_corpus == current.seed_corpus
         && previous.sanitizer == current.sanitizer
         && previous.env == current.env
@@ -1846,6 +1940,7 @@ fn auto_revert_comparison_key(
         "duration": config.duration,
         "max_mem_mb": config.max_mem_mb,
         "max_cpus": config.max_cpus,
+        "input_timeout": config.input_timeout,
         "seed_corpus": config.seed_corpus,
         "sanitizer": config.sanitizer,
         "env": config.env,
@@ -1994,6 +2089,65 @@ pub enum RunCancelOutcome {
     Inactive,
 }
 
+/// The latest retained live telemetry snapshot for one run
+/// (see [`ServiceContainer::run_detail`]).
+///
+/// This is the campaign-health monitor's periodic persistence, not the engine's
+/// progress event stream: it refreshes on the configured health-assessment
+/// cadence and carries only the fields health assessment needs.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct RunTelemetryView {
+    /// When the owning process retained this snapshot (RFC3339).
+    pub observed_at: String,
+    /// When the engine last reported progress within it (RFC3339).
+    pub last_progress_at: Option<String>,
+    /// Latest finite executions/second.
+    pub current_execs: Option<f64>,
+    /// Whole-run mean executions/second.
+    pub mean_execs: Option<f64>,
+    /// Highest executions/second observed.
+    pub peak_execs: Option<f64>,
+    /// Latest reported edge coverage.
+    pub edges: Option<u64>,
+    /// Free bytes on the evidence filesystem at observation time.
+    pub free_disk_bytes: Option<u64>,
+}
+
+impl From<hf_storage::RunTelemetryRecord> for RunTelemetryView {
+    fn from(record: hf_storage::RunTelemetryRecord) -> Self {
+        Self {
+            observed_at: record.observed_at.to_rfc3339(),
+            last_progress_at: record
+                .last_progress_at
+                .map(|progress_at| progress_at.to_rfc3339()),
+            current_execs: record.current_execs,
+            mean_execs: record.mean_execs,
+            peak_execs: record.peak_execs,
+            edges: record.edges,
+            free_disk_bytes: record.free_disk_bytes,
+        }
+    }
+}
+
+/// Detail view for one run (see [`ServiceContainer::run_detail`]): the history
+/// row plus the live state only the running process and the latest retained
+/// telemetry snapshot can provide.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RunDetailView {
+    /// The enriched history row (terminal metrics included once persisted).
+    #[serde(flatten)]
+    pub run: RunHistoryItem,
+    /// Whether this process currently owns the run's cooperative cancellation
+    /// token. `false` for terminal runs and for runs owned by another process
+    /// (a one-shot CLI never owns a run).
+    pub active_in_this_process: bool,
+    /// Latest retained live telemetry, when the campaign-health monitor
+    /// persisted one for this run. Absent for runs that predate it, runs whose
+    /// build excluded `campaign-health`, and smoke/short runs that ended before
+    /// the first assessment tick.
+    pub telemetry: Option<RunTelemetryView>,
+}
+
 /// A fuzz run summary.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RunSummary {
@@ -2002,6 +2156,11 @@ pub struct RunSummary {
     pub edges: u64,
     pub execs: f64,
     pub crashes: u64,
+    /// Per-input-timeout (hang) findings the engine retained: AFL++
+    /// `saved_hangs`, honggfuzz's `Timeouts` total, libFuzzer's `timeout-*`
+    /// artifact count. `None` when the engine never reported a hang count.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hangs: Option<u64>,
     /// Authoritative reason the sandboxed engine stopped.
     pub termination: hf_core::runtime::CommandTermination,
     /// The highest coverage-stagnation proposal tier surfaced during the run
@@ -2284,6 +2443,7 @@ impl hf_core::provider::LlmProvider for LlmProviderBridge {
 fn heuristic_draft(
     candidate: &TargetCandidate,
     engine: EngineKind,
+    sanitizer: hf_core::target::Sanitizer,
 ) -> Result<HarnessDraft, ClassifiedError> {
     let includes = generate_includes(candidate);
     let forward_decl = generate_forward_decl(&candidate.symbol, candidate.signature.as_deref());
@@ -2331,6 +2491,7 @@ fn heuristic_draft(
             engine,
             candidate.language,
             &harness_binary_name(&candidate.symbol),
+            sanitizer,
         )?,
         generator: hf_core::harness::DraftGenerator::Heuristic,
     })
@@ -2542,6 +2703,7 @@ mod heuristic_harness_tests {
         let cpp = super::heuristic_draft(
             &candidate(hf_core::target::TargetLanguage::Cpp),
             hf_core::engine::EngineKind::LibFuzzer,
+            hf_core::target::Sanitizer::Address,
         )
         .unwrap();
         assert!(
@@ -2554,6 +2716,7 @@ mod heuristic_harness_tests {
         let c = super::heuristic_draft(
             &candidate(hf_core::target::TargetLanguage::C),
             hf_core::engine::EngineKind::LibFuzzer,
+            hf_core::target::Sanitizer::Address,
         )
         .unwrap();
         assert!(
@@ -2736,6 +2899,8 @@ mod auto_revert_tests {
             seed: None,
             replay_of: None,
             input_manifest_sha256: None,
+            input_timeout: None,
+            resume: false,
         }
     }
 
@@ -2763,6 +2928,12 @@ mod auto_revert_tests {
         baseline = current.clone();
         baseline.extra_args.clear();
         assert!(!auto_revert_baseline_compatible(&baseline, &current));
+        baseline = current.clone();
+        baseline.input_timeout = Some(Duration::from_millis(250));
+        assert!(
+            !auto_revert_baseline_compatible(&baseline, &current),
+            "a different per-input timeout is a different experimental setup"
+        );
     }
 
     #[test]
@@ -2784,6 +2955,14 @@ mod auto_revert_tests {
         assert_ne!(
             auto_revert_comparison_key(target, &current, "context-a"),
             auto_revert_comparison_key(target, &other_revision, "context-a")
+        );
+        // A different sanitizer is a different binary: its coverage never
+        // groups with this run's.
+        let mut other_sanitizer = current.clone();
+        other_sanitizer.sanitizer = Sanitizer::Undefined;
+        assert_ne!(
+            auto_revert_comparison_key(target, &current, "context-a"),
+            auto_revert_comparison_key(target, &other_sanitizer, "context-a")
         );
         assert_ne!(
             auto_revert_comparison_key(target, &current, "context-a"),
@@ -2825,5 +3004,180 @@ mod auto_revert_tests {
     fn fires_exactly_at_threshold() {
         let drop = auto_revert_decision("old", "new", 100, 80, 20.0);
         assert!(matches!(drop, Some(p) if (p - 20.0).abs() < f64::EPSILON));
+    }
+}
+
+#[cfg(test)]
+mod sandbox_build_tests {
+    #[test]
+    fn sandbox_build_argv_matches_the_documented_command() {
+        let argv = super::sandbox_build_argv("linux/arm64");
+        assert_eq!(
+            argv,
+            [
+                "build",
+                "--platform",
+                "linux/arm64",
+                "-t",
+                hf_runtime::SANDBOX_IMAGE,
+                "-f",
+                "docker/sandbox/Dockerfile",
+                ".",
+            ]
+        );
+    }
+
+    #[test]
+    fn build_sandbox_image_refuses_a_tree_without_the_dockerfile_before_contacting_docker() {
+        let root = tempfile::tempdir().unwrap();
+
+        let error = super::build_sandbox_image(root.path(), "linux/arm64").unwrap_err();
+
+        assert!(
+            error.to_string().contains("docker/sandbox/Dockerfile"),
+            "{error}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod terminal_metrics_tests {
+    use super::{staging::RunArtifacts, terminal_run_metrics};
+    use hf_core::engine::{EngineKind, EngineStats, FuzzProgress};
+    use hf_core::runtime::CommandTermination;
+    use std::path::PathBuf;
+
+    fn artifacts(out: PathBuf) -> RunArtifacts {
+        RunArtifacts {
+            input_host: PathBuf::new(),
+            binary_host: PathBuf::new(),
+            source_host: PathBuf::new(),
+            corpus_host: PathBuf::new(),
+            initial_corpus_host: PathBuf::new(),
+            source_context_host: PathBuf::new(),
+            corpus_relative: PathBuf::new(),
+            binary_container: String::new(),
+            corpus_container: String::new(),
+            output_host: out,
+            output_container: String::new(),
+            output_relative: PathBuf::new(),
+            source_sha256: String::new(),
+            binary_sha256: String::new(),
+        }
+    }
+
+    fn result(progress: Vec<FuzzProgress>) -> hf_engine::runner::RunResult {
+        hf_engine::runner::RunResult {
+            progress,
+            termination: CommandTermination::Completed,
+        }
+    }
+
+    #[tokio::test]
+    async fn libfuzzer_timeout_artifacts_count_as_hangs() {
+        let out = tempfile::tempdir().unwrap();
+        std::fs::write(out.path().join("timeout-da39a3ee"), b"slow input").unwrap();
+        std::fs::write(out.path().join("crash-00cd"), b"crash input").unwrap();
+
+        let metrics = terminal_run_metrics(
+            EngineKind::LibFuzzer,
+            &artifacts(out.path().to_path_buf()),
+            &result(Vec::new()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(metrics.hangs, Some(1), "the timeout-* artifact is a hang");
+        // The timeout artifact remains a finding for the crash count too;
+        // hangs are an additional, distinct reading.
+        assert_eq!(metrics.crashes, 2);
+    }
+
+    #[tokio::test]
+    async fn honggfuzz_timeout_ticks_peak_into_hangs() {
+        let out = tempfile::tempdir().unwrap();
+        let progress = vec![
+            FuzzProgress::Stats(EngineStats {
+                hangs: Some(1),
+                ..EngineStats::default()
+            }),
+            FuzzProgress::Stats(EngineStats {
+                hangs: Some(3),
+                ..EngineStats::default()
+            }),
+            FuzzProgress::Stats(EngineStats {
+                hangs: Some(2),
+                ..EngineStats::default()
+            }),
+        ];
+
+        let metrics = terminal_run_metrics(
+            EngineKind::Honggfuzz,
+            &artifacts(out.path().to_path_buf()),
+            &result(progress),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            metrics.hangs,
+            Some(3),
+            "the peak of a cumulative counter is its final value"
+        );
+        assert_eq!(metrics.crashes, 0);
+    }
+
+    #[tokio::test]
+    async fn afl_terminal_saved_hangs_reach_the_summary() {
+        let out = tempfile::tempdir().unwrap();
+        let instance = out.path().join("default");
+        std::fs::create_dir_all(&instance).unwrap();
+        std::fs::write(
+            instance.join("fuzzer_stats"),
+            b"start_time : 100\nlast_update : 200\nsaved_hangs : 4\nsaved_crashes : 0\n",
+        )
+        .unwrap();
+
+        let metrics = terminal_run_metrics(
+            EngineKind::AflPlusPlus,
+            &artifacts(out.path().to_path_buf()),
+            &result(Vec::new()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(metrics.hangs, Some(4));
+    }
+
+    #[tokio::test]
+    async fn engines_without_hang_evidence_report_none() {
+        let out = tempfile::tempdir().unwrap();
+        std::fs::write(out.path().join("crash-00cd"), b"crash input").unwrap();
+
+        let metrics = terminal_run_metrics(
+            EngineKind::LibFuzzer,
+            &artifacts(out.path().to_path_buf()),
+            &result(Vec::new()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            metrics.hangs,
+            Some(0),
+            "libFuzzer's artifact scan is a complete measurement, so zero hangs is Some(0)"
+        );
+
+        let out = tempfile::tempdir().unwrap();
+        let metrics = terminal_run_metrics(
+            EngineKind::Honggfuzz,
+            &artifacts(out.path().to_path_buf()),
+            &result(Vec::new()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            metrics.hangs, None,
+            "no Timeouts tick was ever observed, so no count is invented"
+        );
     }
 }

@@ -8,6 +8,13 @@ pub(crate) fn parse_engine(s: &str) -> Result<EngineKind, anyhow::Error> {
     s.parse().map_err(|e: String| anyhow::anyhow!(e))
 }
 
+/// Parse a sanitizer id (`address`/`undefined`; the remaining canonical ids
+/// parse but are rejected as unselectable by the service policy resolver,
+/// which names the reason).
+pub(crate) fn parse_sanitizer(s: &str) -> Result<hf_service::Sanitizer, anyhow::Error> {
+    s.parse().map_err(|e: String| anyhow::anyhow!(e))
+}
+
 /// Parse a human duration string like "60m", "2h", "30s".
 pub(crate) fn parse_duration(s: &str) -> Result<u64, anyhow::Error> {
     let s = s.trim();

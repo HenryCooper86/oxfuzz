@@ -222,6 +222,10 @@ impl RunTelemetryRegistry {
             FuzzProgress::ExecsPerSec(_)
             | FuzzProgress::CrashesFound(_)
             | FuzzProgress::LogLine(_)
+            // A Stats snapshot re-states the scalar edge/rate events parsed
+            // from the same engine line; telemetry keeps peaking those
+            // dedicated events and does not double-sample the snapshot.
+            | FuzzProgress::Stats(_)
             | FuzzProgress::Done => {}
         }
     }

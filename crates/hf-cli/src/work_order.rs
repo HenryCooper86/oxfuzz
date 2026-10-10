@@ -232,7 +232,7 @@ fn open_submission_source_without_following_final_link(_path: &Path) -> anyhow::
 
 /// Dispatch one work-order command through `hf-service`.
 pub async fn run(command: WorkOrderCommand) -> anyhow::Result<()> {
-    run_with_bootstrap(command, ServiceContainer::bootstrap).await
+    run_with_bootstrap(command, crate::approval::bootstrap).await
 }
 
 async fn run_with_bootstrap<F, Fut>(command: WorkOrderCommand, bootstrap: F) -> anyhow::Result<()>
@@ -585,6 +585,9 @@ mod tests {
                         lang,
                         duration,
                         cpus,
+                        timeout_ms,
+                        resume,
+                        sanitizer,
                         replay,
                     }),
                 ) => {
@@ -594,6 +597,12 @@ mod tests {
                     assert_eq!(lang, "cpp");
                     assert_eq!(duration.as_deref(), Some("300s"));
                     assert!(cpus.is_none());
+                    assert!(timeout_ms.is_none());
+                    assert!(!resume, "a work-order run does not request resume");
+                    assert!(
+                        sanitizer.is_none(),
+                        "a work-order run does not request a sanitizer"
+                    );
                     assert!(replay.is_none());
                 }
                 (

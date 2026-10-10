@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::ai_policy::apply_ai_policy;
 use crate::args::AiOption;
-use crate::parse::{parse_duration, parse_engine, parse_lang};
+use crate::parse::{parse_duration, parse_engine, parse_lang, parse_sanitizer};
 
 /// Print campaign health conditions for one run.
 ///
@@ -15,7 +15,7 @@ pub(crate) async fn cmd_health(run: &str) -> anyhow::Result<()> {
 
     let run_id = uuid::Uuid::parse_str(run)
         .map_err(|_| anyhow::anyhow!("run id '{run}' is not a valid UUID"))?;
-    let container = ServiceContainer::bootstrap().await;
+    let container = crate::approval::bootstrap().await;
     let report = container.campaign_health(run_id).await?;
 
     match &report.plateau_check {
@@ -58,7 +58,7 @@ fn render_closeout_outcome(outcome: &hf_service::StepOutcome) -> (&'static str, 
 pub(crate) async fn cmd_closeout(run: &str) -> anyhow::Result<()> {
     let run_id = uuid::Uuid::parse_str(run)
         .map_err(|_| anyhow::anyhow!("run id '{run}' is not a valid UUID"))?;
-    let container = ServiceContainer::bootstrap().await;
+    let container = crate::approval::bootstrap().await;
     let report = container.close_out_run(run_id).await?;
 
     if let Some(step) = report.resumed_at {
@@ -101,7 +101,7 @@ pub(crate) async fn cmd_trust(run: &str) -> anyhow::Result<()> {
 
     let run_id = uuid::Uuid::parse_str(run)
         .map_err(|_| anyhow::anyhow!("run id '{run}' is not a valid UUID"))?;
-    let container = ServiceContainer::bootstrap().await;
+    let container = crate::approval::bootstrap().await;
     let report = container.campaign_trust_report(run_id).await?;
 
     println!("Campaign trust for run {}:", report.run_id);
@@ -128,7 +128,7 @@ pub(crate) async fn cmd_trust(run: &str) -> anyhow::Result<()> {
 }
 
 pub(crate) async fn cmd_coverage(project: PathBuf, target: &str) -> anyhow::Result<()> {
-    let container = ServiceContainer::bootstrap().await;
+    let container = crate::approval::bootstrap().await;
     match container.coverage_summary(&project, target).await {
         Some(s) => {
             println!("Coverage for {target}:");
@@ -173,8 +173,7 @@ pub(crate) async fn cmd_ci(
     let engine_kind = parse_engine(engine)?;
     let _lang = parse_lang(lang)?;
     let duration_secs = parse_duration(duration)?;
-    let container =
-        apply_ai_policy(ServiceContainer::bootstrap().await, ai, "this CI gate").await?;
+    let container = apply_ai_policy(crate::approval::bootstrap().await, ai, "this CI gate").await?;
     if ai == AiOption::Off {
         println!("[ci] --ai off: no model is called at any step of this gate.");
     }
@@ -223,7 +222,7 @@ pub(crate) async fn cmd_sarif(
     target: &str,
     out: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
-    let container = ServiceContainer::bootstrap().await;
+    let container = crate::approval::bootstrap().await;
     let sarif = container.export_sarif(&project, target).await?;
     match out {
         Some(path) => {
@@ -245,7 +244,7 @@ pub(crate) async fn cmd_repro(
 ) -> anyhow::Result<()> {
     let engine = parse_engine(engine)?;
     let lang = parse_lang(lang)?;
-    let container = ServiceContainer::bootstrap().await;
+    let container = crate::approval::bootstrap().await;
     let dir = container
         .export_repro_bundle_for_latest(&project, target, engine, lang, crash, out)
         .await?;
@@ -259,7 +258,7 @@ pub(crate) async fn cmd_defectdojo(
     target: Option<&str>,
     test_only: bool,
 ) -> anyhow::Result<()> {
-    let container = ServiceContainer::bootstrap().await;
+    let container = crate::approval::bootstrap().await;
     if test_only {
         container.defectdojo_test_connection().await?;
         println!("DefectDojo connection OK.");
@@ -284,7 +283,7 @@ pub(crate) async fn cmd_defectdojo(
 }
 
 pub(crate) async fn cmd_ingest(project: PathBuf, file: &std::path::Path) -> anyhow::Result<()> {
-    let container = ServiceContainer::bootstrap().await;
+    let container = crate::approval::bootstrap().await;
     let stats = container.ingest_document(&project, file).await?;
     println!(
         "Ingested {} -> knowledge base now has {} file(s), {} chunk(s).",
@@ -296,7 +295,7 @@ pub(crate) async fn cmd_ingest(project: PathBuf, file: &std::path::Path) -> anyh
 }
 
 pub(crate) async fn cmd_regress(project: PathBuf, target: &str) -> anyhow::Result<()> {
-    let container = ServiceContainer::bootstrap().await;
+    let container = crate::approval::bootstrap().await;
     let results = container.verify_regressions(&project, target).await?;
     if results.is_empty() {
         println!("No stored crashes to replay.");
@@ -336,19 +335,38 @@ pub(crate) async fn cmd_campaign(
     engine: &str,
     lang: &str,
     duration_secs: u64,
+    timeout_ms: Option<u64>,
+    resume: bool,
+    sanitizer: Option<&str>,
     iterations: usize,
     ai: AiOption,
 ) -> anyhow::Result<()> {
     let engine = parse_engine(engine)?;
     let lang = parse_lang(lang)?;
+    let sanitizer = sanitizer.map(parse_sanitizer).transpose()?;
     let container =
-        apply_ai_policy(ServiceContainer::bootstrap().await, ai, "this campaign").await?;
+        apply_ai_policy(crate::approval::bootstrap().await, ai, "this campaign").await?;
     if ai == AiOption::Off {
         println!("--ai off: no model is called at any step of this campaign.");
     }
     println!("--- Running autonomous campaign ---");
+    let on_progress = crate::commands::status::printing_sink();
     let outcome = container
-        .run_campaign(&project, target, engine, lang, duration_secs, iterations)
+        .run_campaign_observed(
+            &project,
+            target,
+            engine,
+            lang,
+            duration_secs,
+            timeout_ms,
+            // An absent flag defers to the configured `fuzzing.default_resume`.
+            resume.then_some(true),
+            // An absent flag is no constraint: the run records the harness's
+            // own sanitizer.
+            sanitizer,
+            iterations,
+            &on_progress,
+        )
         .await?;
     println!(
         "target={} harness={:?} iterations={} edges={} crashes={} termination={:?}",
@@ -359,6 +377,9 @@ pub(crate) async fn cmd_campaign(
         outcome.crashes,
         outcome.termination
     );
+    if let Some(hangs) = outcome.hangs {
+        println!("  hangs (per-input timeouts across iterations): {hangs}");
+    }
     if let Some(refine) = &outcome.refine {
         // A coverage plateau proposed a targeted refined harness. It is only
         // Compiled (never promoted/auto-run); the operator reviews and promotes.
@@ -428,7 +449,7 @@ pub(crate) async fn cmd_report(
     out: Option<&std::path::Path>,
     lang: &str,
 ) -> anyhow::Result<()> {
-    run_report_command(&project, target, out, lang, ServiceContainer::bootstrap).await
+    run_report_command(&project, target, out, lang, crate::approval::bootstrap).await
 }
 
 #[cfg(test)]

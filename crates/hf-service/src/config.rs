@@ -175,6 +175,29 @@ pub struct FuzzingSettings {
     pub default_engine: String,
     /// Campaign duration selected when a client does not provide one.
     pub default_duration_secs: u64,
+    /// Per-input timeout selected when a client does not provide one, in
+    /// milliseconds: one input running longer is a hang finding. Milliseconds
+    /// are the wire unit because AFL++ `-t` is millisecond-granular and
+    /// sub-second budgets are the common case for fast parsers; adapters map
+    /// the value to each engine's flag (`-timeout=<s>` for libFuzzer, `-t` for
+    /// AFL++, `--timeout=<s>` for honggfuzz, rounding up to whole seconds).
+    pub default_timeout_ms: u64,
+    /// Continue the most recent compatible AFL++ output tree instead of
+    /// cold-starting every run. Applies to AFL++ runs only (the other engines
+    /// carry no resumable output-tree state, so the default is inert for
+    /// them); a per-run `--resume` / `resume = false` request overrides it.
+    /// Off by default: resuming changes which queue entries an iteration
+    /// revisits, so a deployment opts in deliberately.
+    pub default_resume: bool,
+    /// Sanitizer for newly built C/C++ harnesses, as a canonical
+    /// `Sanitizer` id: `address` (default, the long-standing build) or
+    /// `undefined` (`UndefinedBehaviorSanitizer`, halt-on-error). Applies at
+    /// harness BUILD time only: the sanitizer is baked into the harness
+    /// binary, so campaigns record the harness's own sanitizer and this
+    /// default never constrains which already-built harness may run. The
+    /// `memory`, `thread`, and `none` choices are rejected (the sandbox
+    /// cannot honor them; see `resolve_build_sanitizer`).
+    pub default_sanitizer: String,
     /// Sandboxed resource limits for harness-based campaigns.
     pub sandbox: FuzzingSandboxSettings,
 }
@@ -193,6 +216,9 @@ impl Default for FuzzingSettings {
             enabled_engines: all_engine_ids(),
             default_engine: EngineKind::LibFuzzer.as_str().to_owned(),
             default_duration_secs: 60,
+            default_timeout_ms: DEFAULT_INPUT_TIMEOUT_MS,
+            default_resume: false,
+            default_sanitizer: hf_core::target::Sanitizer::Address.as_str().to_owned(),
             sandbox: FuzzingSandboxSettings::default(),
         }
     }
@@ -357,6 +383,18 @@ pub struct ResolvedFuzzingRun {
     pub max_mem_mb: u64,
     /// CPU limit copied into the persisted run configuration.
     pub max_cpus: u32,
+    /// Validated per-input timeout in milliseconds, copied into the persisted
+    /// run configuration (`FuzzRunConfig.input_timeout`).
+    pub timeout_ms: u64,
+    /// Whether the run continues the most recent compatible AFL++ output tree
+    /// (`FuzzRunConfig.resume`). Always `false` for engines without resumable
+    /// tree state and for internal maintenance budgets.
+    pub resume: bool,
+    /// The operator's explicit sanitizer constraint (`--sanitizer`), validated
+    /// against the selectable set. `None` means unconstrained: the run records
+    /// the promoted harness's own sanitizer (the binary is the truth), and the
+    /// configured `fuzzing.default_sanitizer` never applies at run time.
+    pub sanitizer: Option<hf_core::target::Sanitizer>,
 }
 
 /// Resource and evidence ceilings for one automotive sidecar operation.
@@ -691,6 +729,57 @@ impl AutomotiveSettings {
 const HARD_MAX_FUZZ_DURATION_SECS: u64 = 7 * 24 * 60 * 60;
 const HARD_MAX_FUZZ_MEMORY_MB: u64 = 64 * 1024;
 const HARD_MAX_FUZZ_CPUS: u32 = 64;
+/// Largest accepted per-input timeout: one hour. A single input allowed to
+/// run longer means the campaign exercises almost nothing, so a larger request
+/// is misconfiguration rather than policy.
+const HARD_MAX_INPUT_TIMEOUT_MS: u64 = 60 * 60 * 1000;
+/// Default per-input timeout for campaigns, in milliseconds. Matches the
+/// classic explicit `afl-fuzz -t 1000` and honggfuzz 2.6's own 1s built-in;
+/// libFuzzer's 1200s built-in is deliberately not inherited because a
+/// 20-minute per-input budget defeats hang discovery.
+const DEFAULT_INPUT_TIMEOUT_MS: u64 = 1000;
+
+/// Fail loud on a per-input timeout that cannot do useful work (zero, or so
+/// large the campaign is a single hanging input).
+fn validate_timeout_ms(value: u64) -> Result<(), String> {
+    if value == 0 || value > HARD_MAX_INPUT_TIMEOUT_MS {
+        return Err(format!(
+            "fuzzing per-input timeout must be within 1..={HARD_MAX_INPUT_TIMEOUT_MS} milliseconds"
+        ));
+    }
+    Ok(())
+}
+
+/// The sanitizer choices a fuzz build or run may select today. `Address` and
+/// `Undefined` build and run in the pinned sandbox image; the remaining
+/// `Sanitizer` variants parse (they are valid ids) but cannot be honored, so
+/// selecting one is a misconfiguration the operator must hear about rather
+/// than a build that silently differs from what was asked.
+fn require_selectable_sanitizer(
+    sanitizer: hf_core::target::Sanitizer,
+) -> Result<hf_core::target::Sanitizer, String> {
+    use hf_core::target::Sanitizer;
+    match sanitizer {
+        Sanitizer::Address | Sanitizer::Undefined => Ok(sanitizer),
+        Sanitizer::None => Err(
+            "sanitizer 'none' is not selectable: the pipeline's crash evidence \
+             (classification, dedup, triage) comes from sanitizer reports"
+                .to_owned(),
+        ),
+        Sanitizer::Memory => Err(
+            "sanitizer 'memory' is not selectable: MemorySanitizer requires a fully \
+             instrumented libc and userspace, and the sandbox image's Ubuntu 24.04 \
+             runtime is not MSan-instrumented, so its findings would be false positives"
+                .to_owned(),
+        ),
+        Sanitizer::Thread => Err(
+            "sanitizer 'thread' is not selectable: ThreadSanitizer data-race reports \
+             do not map onto the crash-triage pipeline, and TSan cannot combine with \
+             the address/undefined harness builds"
+                .to_owned(),
+        ),
+    }
+}
 
 fn all_engine_ids() -> Vec<String> {
     EngineKind::ALL
@@ -755,6 +844,13 @@ impl FuzzingSettings {
                 "fuzzing.default_duration_secs cannot exceed sandbox.max_duration_secs".to_owned(),
             );
         }
+        validate_timeout_ms(self.default_timeout_ms)?;
+        let default_sanitizer = self
+            .default_sanitizer
+            .parse::<hf_core::target::Sanitizer>()
+            .map_err(|error| format!("fuzzing.default_sanitizer: {error}"))?;
+        require_selectable_sanitizer(default_sanitizer)
+            .map_err(|error| format!("fuzzing.default_sanitizer: {error}"))?;
         if self.sandbox.max_mem_mb == 0 || self.sandbox.max_mem_mb > HARD_MAX_FUZZ_MEMORY_MB {
             return Err(format!(
                 "fuzzing.sandbox.max_mem_mb must be within 1..={HARD_MAX_FUZZ_MEMORY_MB}"
@@ -768,18 +864,61 @@ impl FuzzingSettings {
         Ok(())
     }
 
-    /// Resolve a requested engine, duration, and CPU allocation against this
-    /// policy.
+    /// Resolve the sanitizer for a newly built harness.
+    ///
+    /// The per-build request (the CLI's `--sanitizer`) overrides the
+    /// configured `fuzzing.default_sanitizer`; both are restricted to the
+    /// selectable set. The toolchain and language check (Rust is
+    /// AddressSanitizer-only, syzkaller takes no userspace sanitizer) is
+    /// enforced separately by `hf_harness::build_command`, the operation that
+    /// emits the build (Engineering Protocol 2.19).
+    ///
+    /// # Errors
+    /// Returns an error when the policy is invalid or the requested or
+    /// configured sanitizer is not selectable.
+    pub fn resolve_build_sanitizer(
+        &self,
+        requested: Option<hf_core::target::Sanitizer>,
+    ) -> Result<hf_core::target::Sanitizer, String> {
+        self.validate()?;
+        let default = self
+            .default_sanitizer
+            .parse::<hf_core::target::Sanitizer>()
+            .map_err(|error| format!("fuzzing.default_sanitizer: {error}"))?;
+        require_selectable_sanitizer(requested.unwrap_or(default))
+    }
+
+    /// Resolve a requested engine, duration, CPU allocation, per-input
+    /// timeout, resume choice, and sanitizer constraint against this policy.
+    ///
+    /// `resume` is the per-run request (`None` applies
+    /// `fuzzing.default_resume`). The resolved value is meaningful only for
+    /// AFL++, the one engine with resumable output-tree state: an explicit
+    /// request on another engine fails loud, while the configured default is
+    /// inert for them.
+    ///
+    /// `sanitizer` is the per-run constraint (the CLI's `--sanitizer`): it
+    /// restricts which already-built harness the run may use and is validated
+    /// against the selectable set here, but it never substitutes for the
+    /// harness's own build sanitizer -- a run always records the harness
+    /// binary's sanitizer. `None` (and the configured
+    /// `fuzzing.default_sanitizer`) impose no run-time constraint.
     ///
     /// # Errors
     /// Returns an error when the policy is invalid, the engine is disabled,
-    /// the duration is zero or above the configured ceiling, or the requested
-    /// CPU allocation is zero or above the configured ceiling.
+    /// the duration is zero or above the configured ceiling, the requested
+    /// CPU allocation is zero or above the configured ceiling, the requested
+    /// per-input timeout is outside `1..=3600000` milliseconds, an explicit
+    /// resume request names an engine other than AFL++, or the requested
+    /// sanitizer is not selectable.
     pub fn resolve(
         &self,
         engine: Option<EngineKind>,
         duration_secs: Option<u64>,
         requested_cpus: Option<u32>,
+        timeout_ms: Option<u64>,
+        resume: Option<bool>,
+        sanitizer: Option<hf_core::target::Sanitizer>,
     ) -> Result<ResolvedFuzzingRun, String> {
         self.validate()?;
         let enabled = self.enabled_engine_set()?;
@@ -813,11 +952,30 @@ impl FuzzingSettings {
                 self.sandbox.max_cpus
             ));
         }
+        // The per-run request overrides the configured default; both are
+        // range-checked here so no adapter ever sees a nonsense timeout.
+        let timeout_ms = timeout_ms.unwrap_or(self.default_timeout_ms);
+        validate_timeout_ms(timeout_ms)?;
+        // Resume is AFL++-scoped: the configured default simply does not apply
+        // to engines without resumable tree state, but an explicit per-run
+        // request for one is a mistake the operator should hear about.
+        if resume == Some(true) && engine != EngineKind::AflPlusPlus {
+            return Err(format!(
+                "--resume is only supported by the afl++ engine (requested '{}'); \
+                 drop the flag or choose afl++",
+                engine.as_str()
+            ));
+        }
+        let resume = engine == EngineKind::AflPlusPlus && resume.unwrap_or(self.default_resume);
+        let sanitizer = sanitizer.map(require_selectable_sanitizer).transpose()?;
         Ok(ResolvedFuzzingRun {
             engine,
             duration_secs,
             max_mem_mb: self.sandbox.max_mem_mb,
             max_cpus,
+            timeout_ms,
+            resume,
+            sanitizer,
         })
     }
 
@@ -827,7 +985,9 @@ impl FuzzingSettings {
     /// corpus minimization) run implementation-defined budgets, not
     /// operator-requested campaigns, so an over-ceiling budget clamps to the
     /// ceiling instead of failing: a low `sandbox.max_duration_secs` must not
-    /// block mandatory operations like harness smoke qualification.
+    /// block mandatory operations like harness smoke qualification. Internal
+    /// probes are never session resumes, so `resume` is pinned off regardless
+    /// of `fuzzing.default_resume`.
     ///
     /// # Errors
     /// Returns an error when the policy is invalid or the engine is disabled.
@@ -837,7 +997,7 @@ impl FuzzingSettings {
         internal_budget_secs: u64,
     ) -> Result<ResolvedFuzzingRun, String> {
         let clamped = internal_budget_secs.min(self.sandbox.max_duration_secs);
-        self.resolve(Some(engine), Some(clamped), None)
+        self.resolve(Some(engine), Some(clamped), None, None, Some(false), None)
     }
 
     /// Check that an engine is enabled without resolving run-specific values.
@@ -845,7 +1005,8 @@ impl FuzzingSettings {
     /// # Errors
     /// Returns an error for an invalid policy or a disabled engine.
     pub fn require_engine(&self, engine: EngineKind) -> Result<(), String> {
-        self.resolve(Some(engine), None, None).map(|_| ())
+        self.resolve(Some(engine), None, None, None, None, None)
+            .map(|_| ())
     }
 
     /// Resolve an enabled engine that can build a harness for `language`.
@@ -888,6 +1049,21 @@ impl FuzzingSettings {
             "no enabled fuzzing engine supports {language:?} harnesses"
         ))
     }
+}
+
+/// Operator policy for harness qualification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+#[derive(Default)]
+pub struct HarnessSettings {
+    /// Permit smoke qualification without the independent LLM pre-execution
+    /// review. Off by default and deliberately so: with the review skipped,
+    /// only the 13-rule lexical lint and the human promotion gate stand
+    /// between generated harness code and the sandbox. Every bypass -- via
+    /// this setting or the per-invocation `--no-llm-review` flag -- persists a
+    /// marked review record and a policy-decision row (Engineering Protocol
+    /// 2.13), and promotion still requires human approval.
+    pub allow_unreviewed_smoke: bool,
 }
 
 /// Deployment allowance for explicit `CMake` definitions in saved build profiles.
@@ -975,6 +1151,7 @@ struct OxfuzzRuntimeConfig {
     auto_revert_notify_only: bool,
     grep: hf_core::grep_limits::GrepLimitsConfig,
     fuzzing: FuzzingSettings,
+    harness: HarnessSettings,
     build_profiles: BuildProfileSettings,
     campaign_health: CampaignHealthSettings,
     concolic: ConcolicSettings,
@@ -995,6 +1172,7 @@ impl Default for OxfuzzRuntimeConfig {
             auto_revert_notify_only: false,
             grep: hf_core::grep_limits::GrepLimitsConfig::default(),
             fuzzing: FuzzingSettings::default(),
+            harness: HarnessSettings::default(),
             build_profiles: BuildProfileSettings::default(),
             campaign_health: CampaignHealthSettings::default(),
             concolic: ConcolicSettings::default(),
@@ -1100,6 +1278,31 @@ pub fn effective_fuzzing_settings() -> Result<FuzzingSettings, String> {
     Ok(parse_oxfuzz_runtime_config(&raw)?.fuzzing)
 }
 
+/// Parse and validate harness qualification settings from a config document.
+///
+/// Separate from [`effective_harness_settings`] so the parsing rules can be
+/// exercised without a global config file on disk.
+///
+/// # Errors
+/// Returns an error when the document is malformed or a field is invalid.
+pub fn parse_harness_settings(raw: &str) -> Result<HarnessSettings, String> {
+    Ok(parse_oxfuzz_runtime_config(raw)?.harness)
+}
+
+/// Read and validate the harness qualification policy for the next operation.
+///
+/// Read on every qualification, like [`effective_fuzzing_settings`], so a
+/// Settings save affects the next operation without a restart. An invalid
+/// manually-edited value fails closed: the LLM review bypass can never be
+/// armed by a config the service could not parse.
+///
+/// # Errors
+/// Returns an error when the global config cannot be read or validated.
+pub fn effective_harness_settings() -> Result<HarnessSettings, String> {
+    let raw = read_config("oxfuzz")?;
+    Ok(parse_oxfuzz_runtime_config(&raw)?.harness)
+}
+
 /// Parse and validate campaign health thresholds from a config document.
 ///
 /// Separate from [`effective_campaign_health_settings`] so the validation rules
@@ -1158,15 +1361,45 @@ pub fn effective_automotive_settings() -> Result<AutomotiveSettings, String> {
 
 /// Resolve the next fuzz run from the current persisted operator policy.
 ///
+/// `timeout_ms` is the per-run per-input timeout override in milliseconds;
+/// `None` applies the configured `fuzzing.default_timeout_ms`. `resume` is the
+/// per-run AFL++ session-resume request; `None` applies the configured
+/// `fuzzing.default_resume`.
+///
 /// # Errors
 /// Returns an error for an invalid policy, disabled engine, invalid duration,
-/// or a CPU request outside `(0, sandbox.max_cpus]`.
+/// a CPU request outside `(0, sandbox.max_cpus]`, a per-input timeout
+/// outside `1..=3600000` milliseconds, an explicit resume request naming an
+/// engine other than AFL++, or a requested sanitizer outside the selectable
+/// set.
 pub fn resolve_fuzzing_run(
     engine: Option<EngineKind>,
     duration_secs: Option<u64>,
     requested_cpus: Option<u32>,
+    timeout_ms: Option<u64>,
+    resume: Option<bool>,
+    sanitizer: Option<hf_core::target::Sanitizer>,
 ) -> Result<ResolvedFuzzingRun, String> {
-    effective_fuzzing_settings()?.resolve(engine, duration_secs, requested_cpus)
+    effective_fuzzing_settings()?.resolve(
+        engine,
+        duration_secs,
+        requested_cpus,
+        timeout_ms,
+        resume,
+        sanitizer,
+    )
+}
+
+/// Resolve the sanitizer for a newly built harness from the current persisted
+/// operator policy: the per-build request, else `fuzzing.default_sanitizer`.
+///
+/// # Errors
+/// Returns an error for an invalid policy or a requested or configured
+/// sanitizer outside the selectable set.
+pub fn resolve_build_sanitizer(
+    requested: Option<hf_core::target::Sanitizer>,
+) -> Result<hf_core::target::Sanitizer, String> {
+    effective_fuzzing_settings()?.resolve_build_sanitizer(requested)
 }
 
 /// Resolve a fixed internal maintenance budget from the current persisted
@@ -3683,12 +3916,16 @@ product_name = "old-product"
                 Some(hf_core::engine::EngineKind::AflPlusPlus),
                 Some(90),
                 None,
+                None,
+                None,
+                None,
             )
             .expect("enabled engine and bounded duration should resolve");
         assert_eq!(run.engine, hf_core::engine::EngineKind::AflPlusPlus);
         assert_eq!(run.duration_secs, 90);
         assert_eq!(run.max_mem_mb, 3072);
         assert_eq!(run.max_cpus, 2);
+        assert_eq!(run.timeout_ms, 1000);
         assert_eq!(config.knowledge.retrieval_strategy, "keyword");
         assert!((config.knowledge.bm25_weight - 2.5).abs() < f64::EPSILON);
         assert_eq!(config.session.max_depth, 4);
@@ -3899,6 +4136,8 @@ default_duration_secs = 22
             "[fuzzing]\nenabled_engines = [\"unknown\"]\ndefault_engine = \"unknown\"\n",
             "[fuzzing]\nenabled_engines = [\"afl++\"]\ndefault_engine = \"libfuzzer\"\n",
             "[fuzzing]\ndefault_duration_secs = 0\n",
+            "[fuzzing]\ndefault_timeout_ms = 0\n",
+            "[fuzzing]\ndefault_timeout_ms = 3600001\n",
             "[fuzzing]\ndefault_duration_secs = 120\n[fuzzing.sandbox]\nmax_duration_secs = 60\n",
             "[fuzzing.sandbox]\nmax_mem_mb = 0\n",
             "[fuzzing.sandbox]\nmax_cpus = 0\n",
@@ -3972,6 +4211,9 @@ default_duration_secs = 22
             enabled_engines: vec!["honggfuzz".to_owned()],
             default_engine: "honggfuzz".to_owned(),
             default_duration_secs: 30,
+            default_timeout_ms: 1000,
+            default_resume: false,
+            default_sanitizer: "address".to_owned(),
             sandbox: FuzzingSandboxSettings {
                 max_mem_mb: 1024,
                 max_cpus: 1,
@@ -3980,7 +4222,7 @@ default_duration_secs = 22
         };
 
         let resolved = settings
-            .resolve(None, None, None)
+            .resolve(None, None, None, None, None, None)
             .expect("defaults should resolve");
         assert_eq!(resolved.engine, hf_core::engine::EngineKind::Honggfuzz);
         assert_eq!(resolved.duration_secs, 30);
@@ -3988,11 +4230,25 @@ default_duration_secs = 22
         assert_eq!(resolved.max_cpus, 1);
 
         assert!(settings
-            .resolve(Some(hf_core::engine::EngineKind::LibFuzzer), Some(30), None)
+            .resolve(
+                Some(hf_core::engine::EngineKind::LibFuzzer),
+                Some(30),
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap_err()
             .contains("disabled"));
         assert!(settings
-            .resolve(Some(hf_core::engine::EngineKind::Honggfuzz), Some(61), None)
+            .resolve(
+                Some(hf_core::engine::EngineKind::Honggfuzz),
+                Some(61),
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap_err()
             .contains("maximum"));
     }
@@ -4009,25 +4265,333 @@ default_duration_secs = 22
 
         // No request keeps the configured allocation (existing behavior).
         let resolved = settings
-            .resolve(None, None, None)
+            .resolve(None, None, None, None, None, None)
             .expect("defaults should resolve");
         assert_eq!(resolved.max_cpus, 8);
 
         // A within-ceiling request is honored.
         let requested = settings
-            .resolve(None, None, Some(4))
+            .resolve(None, None, Some(4), None, None, None)
             .expect("within-ceiling cpu request should resolve");
         assert_eq!(requested.max_cpus, 4);
 
         // Zero and over-ceiling requests fail loud, mirroring duration.
         assert!(settings
-            .resolve(None, None, Some(0))
+            .resolve(None, None, Some(0), None, None, None,)
             .unwrap_err()
             .contains("greater than zero"));
         assert!(settings
-            .resolve(None, None, Some(9))
+            .resolve(None, None, Some(9), None, None, None,)
             .unwrap_err()
             .contains("exceeds the configured maximum"));
+    }
+
+    #[test]
+    fn fuzzing_policy_resolves_the_per_input_timeout() {
+        // The shipped default is the documented 1000ms practitioner value: it
+        // matches the classic explicit `afl-fuzz -t 1000` and honggfuzz 2.6's
+        // own 1s default, and replaces libFuzzer's 1200s built-in, which is
+        // too long to surface hangs during triage.
+        let settings = FuzzingSettings::default();
+        assert_eq!(settings.default_timeout_ms, 1000);
+
+        // No request resolves to the configured default.
+        let resolved = settings
+            .resolve(None, None, None, None, None, None)
+            .expect("defaults should resolve");
+        assert_eq!(resolved.timeout_ms, 1000);
+
+        // A configured default applies when the run does not override it.
+        let configured = FuzzingSettings {
+            default_timeout_ms: 250,
+            ..FuzzingSettings::default()
+        };
+        assert_eq!(
+            configured
+                .resolve(None, None, None, None, None, None,)
+                .expect("configured default should resolve")
+                .timeout_ms,
+            250
+        );
+
+        // An explicit per-run request overrides the configured default.
+        let requested = settings
+            .resolve(None, None, None, Some(2500), None, None)
+            .expect("explicit timeout should resolve");
+        assert_eq!(requested.timeout_ms, 2500);
+
+        // Zero and absurdly large budgets are misconfiguration, not policy:
+        // they fail loud instead of reaching an engine flag.
+        assert!(settings
+            .resolve(None, None, None, Some(0), None, None,)
+            .unwrap_err()
+            .contains("per-input timeout"));
+        assert!(settings
+            .resolve(
+                None,
+                None,
+                None,
+                Some(HARD_MAX_INPUT_TIMEOUT_MS + 1),
+                None,
+                None,
+            )
+            .unwrap_err()
+            .contains("per-input timeout"));
+    }
+
+    #[test]
+    fn fuzzing_policy_resolves_afl_resume_explicitly() {
+        let settings = FuzzingSettings::default();
+        assert!(!settings.default_resume, "resume is opt-in");
+
+        // No request resolves to the configured default (off).
+        let resolved = settings
+            .resolve(None, None, None, None, None, None)
+            .expect("defaults should resolve");
+        assert!(!resolved.resume);
+
+        // A configured default applies to AFL++ runs...
+        let configured = FuzzingSettings {
+            default_resume: true,
+            ..FuzzingSettings::default()
+        };
+        let resolved = configured
+            .resolve(
+                Some(hf_core::engine::EngineKind::AflPlusPlus),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("afl++ with a configured resume default resolves");
+        assert!(resolved.resume);
+        // ...and is inert for engines without a resumable output tree.
+        let resolved = configured
+            .resolve(
+                Some(hf_core::engine::EngineKind::LibFuzzer),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("libfuzzer ignores the afl++-scoped default");
+        assert!(!resolved.resume);
+
+        // An explicit per-run request overrides the configured default, both ways.
+        assert!(
+            settings
+                .resolve(
+                    Some(hf_core::engine::EngineKind::AflPlusPlus),
+                    None,
+                    None,
+                    None,
+                    Some(true),
+                    None,
+                )
+                .expect("explicit resume resolves")
+                .resume
+        );
+        assert!(
+            !configured
+                .resolve(
+                    Some(hf_core::engine::EngineKind::AflPlusPlus),
+                    None,
+                    None,
+                    None,
+                    Some(false),
+                    None,
+                )
+                .expect("explicit cold start resolves")
+                .resume
+        );
+
+        // An explicit request on an engine without resumable tree state fails
+        // loud instead of being silently ignored.
+        let error = settings
+            .resolve(
+                Some(hf_core::engine::EngineKind::LibFuzzer),
+                None,
+                None,
+                None,
+                Some(true),
+                None,
+            )
+            .unwrap_err();
+        assert!(
+            error.contains("resume") && error.contains("afl++"),
+            "{error}"
+        );
+
+        // Internal maintenance budgets never resume, whatever the default says.
+        assert!(
+            !configured
+                .resolve_internal(hf_core::engine::EngineKind::AflPlusPlus, 10)
+                .expect("internal budget resolves")
+                .resume
+        );
+    }
+
+    #[test]
+    fn fuzzing_policy_parses_the_resume_default() {
+        let parsed = parse_oxfuzz_runtime_config("[fuzzing]\ndefault_resume = true\n")
+            .expect("an explicit resume default is valid");
+        assert!(parsed.fuzzing.default_resume);
+
+        let parsed = parse_oxfuzz_runtime_config("[fuzzing]\ndefault_duration_secs = 30\n")
+            .expect("a config without the resume default is valid");
+        assert!(!parsed.fuzzing.default_resume);
+    }
+
+    #[test]
+    fn fuzzing_policy_rejects_an_invalid_configured_timeout() {
+        // A config that says nothing gets the documented default.
+        let parsed = parse_oxfuzz_runtime_config("[fuzzing]\ndefault_duration_secs = 30\n")
+            .expect("a config without a timeout setting is valid");
+        assert_eq!(parsed.fuzzing.default_timeout_ms, 1000);
+
+        // An explicit configured value round-trips into the resolved run.
+        let parsed = parse_oxfuzz_runtime_config("[fuzzing]\ndefault_timeout_ms = 250\n")
+            .expect("an explicit timeout setting is valid");
+        assert_eq!(parsed.fuzzing.default_timeout_ms, 250);
+    }
+
+    #[test]
+    fn fuzzing_policy_resolves_the_build_sanitizer() {
+        // No request resolves to the configured default (address).
+        let settings = FuzzingSettings::default();
+        assert_eq!(
+            settings
+                .resolve_build_sanitizer(None)
+                .expect("default resolves"),
+            hf_core::target::Sanitizer::Address
+        );
+
+        // A configured default round-trips into the resolution.
+        let parsed = parse_oxfuzz_runtime_config("[fuzzing]\ndefault_sanitizer = \"undefined\"\n")
+            .expect("an explicit sanitizer default is valid");
+        assert_eq!(
+            parsed
+                .fuzzing
+                .resolve_build_sanitizer(None)
+                .expect("configured default resolves"),
+            hf_core::target::Sanitizer::Undefined
+        );
+
+        // An explicit per-build request beats the configured default.
+        assert_eq!(
+            parsed
+                .fuzzing
+                .resolve_build_sanitizer(Some(hf_core::target::Sanitizer::Address))
+                .expect("explicit request resolves"),
+            hf_core::target::Sanitizer::Address
+        );
+
+        // A value the pipeline cannot build fails at resolution, not silently.
+        let error = parsed
+            .fuzzing
+            .resolve_build_sanitizer(Some(hf_core::target::Sanitizer::Memory))
+            .unwrap_err();
+        assert!(error.contains("memory"), "{error}");
+        let error = settings
+            .resolve_build_sanitizer(Some(hf_core::target::Sanitizer::Thread))
+            .unwrap_err();
+        assert!(error.contains("thread"), "{error}");
+        let error = settings
+            .resolve_build_sanitizer(Some(hf_core::target::Sanitizer::None))
+            .unwrap_err();
+        assert!(error.contains("sanitizer"), "{error}");
+    }
+
+    #[test]
+    fn fuzzing_policy_rejects_a_nonselectable_configured_sanitizer() {
+        // A sanitizer the pipeline cannot build fails at load: the value is
+        // self-contained misconfiguration (Engineering Protocol 2.16).
+        let error =
+            parse_oxfuzz_runtime_config("[fuzzing]\ndefault_sanitizer = \"memory\"\n").unwrap_err();
+        assert!(
+            error.contains("default_sanitizer") && error.contains("memory"),
+            "{error}"
+        );
+
+        // A non-canonical spelling fails at load rather than resolving to a
+        // different sanitizer.
+        assert!(
+            parse_oxfuzz_runtime_config("[fuzzing]\ndefault_sanitizer = \"Address\"\n").is_err()
+        );
+
+        let parsed = parse_oxfuzz_runtime_config("[fuzzing]\ndefault_sanitizer = \"undefined\"\n")
+            .expect("undefined is selectable");
+        assert_eq!(parsed.fuzzing.default_sanitizer, "undefined");
+    }
+
+    #[test]
+    fn fuzzing_policy_resolves_an_explicit_run_sanitizer_constraint() {
+        let settings = FuzzingSettings::default();
+        // No request: no constraint -- the harness binary is the truth.
+        let resolved = settings
+            .resolve(None, None, None, None, None, None)
+            .expect("defaults should resolve");
+        assert_eq!(resolved.sanitizer, None);
+
+        // An explicit selectable constraint round-trips.
+        let resolved = settings
+            .resolve(
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(hf_core::target::Sanitizer::Undefined),
+            )
+            .expect("undefined is a selectable constraint");
+        assert_eq!(
+            resolved.sanitizer,
+            Some(hf_core::target::Sanitizer::Undefined)
+        );
+
+        // A constraint outside the selectable set fails loud with the reason.
+        let error = settings
+            .resolve(
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(hf_core::target::Sanitizer::Memory),
+            )
+            .unwrap_err();
+        assert!(error.contains("memory"), "{error}");
+    }
+
+    #[test]
+    fn harness_settings_deny_unreviewed_smoke_by_default() {
+        let parsed = parse_oxfuzz_runtime_config("[fuzzing]\ndefault_duration_secs = 30\n")
+            .expect("a config without harness settings is valid");
+        assert!(!parsed.harness.allow_unreviewed_smoke);
+
+        let settings =
+            parse_harness_settings("[fuzzing]\ndefault_duration_secs = 30\n").expect("default");
+        assert!(!settings.allow_unreviewed_smoke);
+    }
+
+    #[test]
+    fn harness_settings_accept_the_explicit_unreviewed_smoke_opt_in() {
+        let settings = parse_harness_settings("[harness]\nallow_unreviewed_smoke = true\n")
+            .expect("an explicit opt-in is valid");
+        assert!(settings.allow_unreviewed_smoke);
+
+        let settings = parse_harness_settings("[harness]\nallow_unreviewed_smoke = false\n")
+            .expect("an explicit refusal is valid");
+        assert!(!settings.allow_unreviewed_smoke);
+    }
+
+    #[test]
+    fn harness_settings_reject_a_non_boolean_opt_in() {
+        let error = parse_harness_settings("[harness]\nallow_unreviewed_smoke = \"yes\"\n")
+            .expect_err("a non-boolean opt-in must fail the load, loudly");
+        assert!(error.contains("allow_unreviewed_smoke"), "{error}");
     }
 
     #[test]
@@ -4047,7 +4611,14 @@ default_duration_secs = 22
 
         // The operator-requested path still rejects over-ceiling durations.
         assert!(settings
-            .resolve(Some(hf_core::engine::EngineKind::LibFuzzer), Some(60), None)
+            .resolve(
+                Some(hf_core::engine::EngineKind::LibFuzzer),
+                Some(60),
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap_err()
             .contains("maximum"));
 
@@ -4150,6 +4721,7 @@ default_duration_secs = 22
             "coverage_stagnation_stop_windows",
             "fuzzing",
             "grep",
+            "harness",
             "knowledge",
             "scheduler",
             "session",

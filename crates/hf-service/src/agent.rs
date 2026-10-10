@@ -288,7 +288,7 @@ impl ServiceContainer {
                     .harness_draft(project, target, engine, language)
                     .await?;
                 let compile = self
-                    .harness_compile(draft.source, project, engine, target, language)
+                    .harness_compile(draft.source, project, engine, target, language, None)
                     .await?;
                 let smoke = self
                     .harness_smoke(project, target, engine, language)
@@ -355,15 +355,24 @@ impl ServiceContainer {
                     .map(parse_engine)
                     .transpose()?;
                 let requested_duration = args.get("duration_secs").and_then(Value::as_u64);
-                let resolved =
-                    crate::config::resolve_fuzzing_run(requested_engine, requested_duration, None)
-                        .map_err(ClassifiedError::Validation)?;
+                let resolved = crate::config::resolve_fuzzing_run(
+                    requested_engine,
+                    requested_duration,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .map_err(ClassifiedError::Validation)?;
                 let summary = self
                     .run_fuzzer(
                         project,
                         target,
                         resolved.engine,
                         resolved.duration_secs,
+                        None,
+                        None,
+                        None,
                         None,
                         &|_| {},
                     )

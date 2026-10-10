@@ -97,6 +97,8 @@ async fn seeded_run_at(container: &ServiceContainer, project: PathBuf) -> Uuid {
             seed: None,
             replay_of: None,
             input_manifest_sha256: None,
+            input_timeout: None,
+            resume: false,
         }),
         Utc::now(),
     );

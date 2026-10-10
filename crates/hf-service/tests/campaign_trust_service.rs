@@ -140,6 +140,8 @@ fn run(harness_id: Uuid, status: RunStatus) -> RunRecord {
             seed: None,
             replay_of: None,
             input_manifest_sha256: None,
+            input_timeout: None,
+            resume: false,
         }),
         Utc::now(),
     );

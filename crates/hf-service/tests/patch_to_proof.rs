@@ -213,6 +213,8 @@ async fn fixture() -> (
             seed: Some(7),
             replay_of: None,
             input_manifest_sha256: None,
+            input_timeout: None,
+            resume: false,
         }),
         Utc::now(),
     );

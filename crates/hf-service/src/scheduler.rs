@@ -29,7 +29,7 @@ use std::time::Duration;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use async_trait::async_trait;
-use hf_core::engine::EngineKind;
+use hf_core::engine::{EngineKind, FuzzProgress};
 use hf_core::error::ClassifiedError;
 use hf_core::target::TargetLanguage;
 use hf_guardrails::Guardrails;
@@ -1140,7 +1140,7 @@ fn validate_campaign_fuzzing_policy(params: &CampaignParams) -> Result<(), Campa
                 .map_err(CampaignSchedulerError::Validation)?,
         )
     };
-    crate::config::resolve_fuzzing_run(engine, Some(params.duration_secs), None)
+    crate::config::resolve_fuzzing_run(engine, Some(params.duration_secs), None, None, None, None)
         .map(|_| ())
         .map_err(CampaignSchedulerError::Validation)
 }
@@ -1706,6 +1706,13 @@ impl FuzzCampaignDispatcher {
                 allocation
                     .as_ref()
                     .map_or(params.duration_secs, |grant| grant.duration_secs),
+                // Scheduled campaigns carry no per-run timeout, resume, or
+                // sanitizer override; the configured `fuzzing.default_timeout_ms` /
+                // `fuzzing.default_resume` apply and the run records the
+                // harness's own sanitizer.
+                None,
+                None,
+                None,
                 crate::container::CampaignRunLimits {
                     iterations: allocation.as_ref().map_or_else(
                         || {
@@ -1719,6 +1726,9 @@ impl FuzzCampaignDispatcher {
                         std::time::Duration::from_secs(maximum.saturating_sub(state.secs_done))
                     }),
                 },
+                // Scheduled campaigns run headless; there is no operator
+                // terminal to stream progress to.
+                &|_: FuzzProgress| {},
             ),
         );
         let result = match &allocation {

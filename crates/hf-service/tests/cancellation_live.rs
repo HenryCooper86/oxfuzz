@@ -58,6 +58,7 @@ async fn qualify_engine(container: Arc<ServiceContainer>, root: &Path, engine: E
             engine,
             "qualification_parse",
             TargetLanguage::C,
+            None,
         )
         .await
         .expect("sandbox compile");
@@ -91,6 +92,9 @@ async fn qualify_engine(container: Arc<ServiceContainer>, root: &Path, engine: E
                     "qualification_parse",
                     engine,
                     10,
+                    None,
+                    None,
+                    None,
                     None,
                     &|event| {
                         if matches!(event, FuzzProgress::ExecsPerSec(value) if value > 0.0) {

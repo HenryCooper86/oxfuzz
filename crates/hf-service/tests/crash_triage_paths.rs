@@ -158,6 +158,8 @@ async fn triage_fixture(name: &str, crash_files: &[String]) -> TriageFixture {
             seed: None,
             replay_of: None,
             input_manifest_sha256: None,
+            input_timeout: None,
+            resume: false,
         }),
         Utc::now(),
     );

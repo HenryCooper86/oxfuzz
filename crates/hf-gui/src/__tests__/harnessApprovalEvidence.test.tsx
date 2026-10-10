@@ -85,6 +85,32 @@ describe("HarnessApprovalEvidence", () => {
     expect(absent).toContain("--");
   });
 
+  it("shows a bypassed review as a bypass, never as a model verdict", () => {
+    const html = renderToStaticMarkup(
+      <I18nProvider>
+        <HarnessApprovalEvidence
+          item={withItem({
+            ai_review: {
+              exercises_target: false,
+              safe_to_execute: false,
+              reasons: ["the operator bypassed the independent LLM pre-execution review"],
+              reviewed_at: "2026-10-09T09:00:00Z",
+              bypass_source: "cli_flag",
+            },
+          })}
+        />
+      </I18nProvider>,
+    );
+
+    expect(html).toContain("harness-evidence-bypassed-review");
+    expect(html).toContain("--no-llm-review");
+    // The bypass marker replaces the boolean verdict badges: no model
+    // affirmed either property, so neither may render as a verdict.
+    expect(html).not.toContain("exercises target");
+    expect(html).not.toContain("safe to execute");
+    expect(html).not.toContain("harness-evidence-no-review");
+  });
+
   it("marks blocking lint findings with the error styling hook", () => {
     const html = renderToStaticMarkup(
       <I18nProvider>

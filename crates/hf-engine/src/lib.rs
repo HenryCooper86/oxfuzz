@@ -20,3 +20,18 @@ pub mod showmap;
 pub mod syzkaller;
 
 pub use registry::{adapter_for, EngineAdapter};
+
+/// Per-input timeout rendered in whole seconds for engines whose flag takes
+/// seconds (libFuzzer `-timeout=`, honggfuzz `--timeout=`). Rounds up so a
+/// sub-second budget never becomes 0, which libFuzzer reads as "no timeout".
+pub(crate) fn timeout_secs_ceil(timeout: std::time::Duration) -> u64 {
+    timeout_millis(timeout).div_ceil(1000).max(1)
+}
+
+/// Per-input timeout in exact milliseconds (AFL++ `-t`). The value is
+/// range-validated against `fuzzing` policy before it enters a run config;
+/// the saturating conversion only guards a hand-built config, which no
+/// service path produces.
+pub(crate) fn timeout_millis(timeout: std::time::Duration) -> u64 {
+    u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)
+}

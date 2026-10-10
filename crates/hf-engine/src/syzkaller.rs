@@ -10,17 +10,31 @@
 //! <https://github.com/google/syzkaller/blob/master/docs/linux/setup.md>.
 
 use hf_core::engine::FuzzRunConfig;
+use hf_core::error::ClassifiedError;
 
 /// Construct the `syz-manager` argument list for a kernel fuzz campaign.
 ///
 /// `config` is the path to the manager config (`manager.cfg`). The `corpus`
 /// and `out` directories are managed by syz-manager via its config, so they
 /// are not passed on the command line here.
-#[must_use]
-pub fn build_run_args(cfg: &FuzzRunConfig, config: &str, _corpus: &str, _out: &str) -> Vec<String> {
+///
+/// `FuzzRunConfig.input_timeout` is deliberately not translated: syz-manager's
+/// config has no per-input timeout knob (per-program timing is syz-executor
+/// internal), so there is no engine flag to emit. The sandbox wall-clock cap
+/// remains the bound on a wedged campaign.
+///
+/// # Errors
+/// Currently infallible; the shared adapter signature is fallible because
+/// other engines validate flag combinations (see AFL++'s resume rule).
+pub fn build_run_args(
+    cfg: &FuzzRunConfig,
+    config: &str,
+    _corpus: &str,
+    _out: &str,
+) -> Result<Vec<String>, ClassifiedError> {
     let mut args = vec!["syz-manager".to_owned(), format!("-config={config}")];
     args.extend(cfg.extra_args.iter().cloned());
-    args
+    Ok(args)
 }
 
 /// The syzkaller engine adapter. Kernel fuzzing launches `syz-manager`; see

@@ -26,6 +26,8 @@ fn cfg(engine: EngineKind, seed: Option<u64>) -> FuzzRunConfig {
         seed,
         replay_of: None,
         input_manifest_sha256: None,
+        input_timeout: None,
+        resume: false,
     }
 }
 
@@ -58,7 +60,8 @@ fn libfuzzer_args_include_seed_only_when_recorded() {
         "/work/fuzz_bin",
         "/work/corpus",
         "/work/out",
-    );
+    )
+    .unwrap();
     assert!(
         seeded.iter().any(|arg| arg == "-seed=1234"),
         "libFuzzer must receive -seed=1234: {}",
@@ -70,7 +73,8 @@ fn libfuzzer_args_include_seed_only_when_recorded() {
         "/work/fuzz_bin",
         "/work/corpus",
         "/work/out",
-    );
+    )
+    .unwrap();
     assert!(
         !unseeded.iter().any(|arg| arg.starts_with("-seed=")),
         "an unseeded config must not pin libFuzzer's seed: {}",
@@ -85,7 +89,8 @@ fn afl_args_include_seed_flag_only_when_recorded() {
         "/work/fuzz_bin",
         "/work/corpus",
         "/work/out",
-    );
+    )
+    .unwrap();
     let position = seeded
         .iter()
         .position(|arg| arg == "-s")
@@ -104,7 +109,8 @@ fn afl_args_include_seed_flag_only_when_recorded() {
         "/work/fuzz_bin",
         "/work/corpus",
         "/work/out",
-    );
+    )
+    .unwrap();
     assert!(
         !unseeded.iter().any(|arg| arg == "-s"),
         "an unseeded config must not pin AFL++'s seed: {}",
@@ -122,7 +128,8 @@ fn honggfuzz_never_emits_a_seed_flag() {
         "/work/fuzz_bin",
         "/work/corpus",
         "/work/out",
-    );
+    )
+    .unwrap();
     assert!(
         !args.iter().any(|arg| arg.contains("seed")),
         "honggfuzz has no seed knob; no seed flag may be emitted: {}",

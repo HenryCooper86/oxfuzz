@@ -9,7 +9,7 @@ use hf_service::{BuildDependency, BuildDependencyKind, ProfileBuildSystem};
 use serde_json::Value;
 
 pub(crate) async fn run(command: BuildCommand) -> anyhow::Result<()> {
-    let service = ServiceContainer::bootstrap().await;
+    let service = crate::approval::bootstrap().await;
     let (view, json) = execute(&service, command).await?;
     println!(
         "{}",

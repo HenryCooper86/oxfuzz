@@ -231,6 +231,7 @@ async fn harness_generate_conditions_the_draft_on_promoted_harnesses() {
             EngineKind::LibFuzzer,
             TargetLanguage::C,
             0,
+            None,
         )
         .await
         .expect("generation should complete");
@@ -268,6 +269,7 @@ async fn harness_generate_without_promotions_drafts_without_the_section() {
             EngineKind::LibFuzzer,
             TargetLanguage::C,
             0,
+            None,
         )
         .await
         .expect("generation should complete");

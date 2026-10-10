@@ -404,6 +404,16 @@ fn is_libfuzzer_crash(name: &str) -> bool {
         || name.starts_with("oom-")
 }
 
+/// Whether the artifact name is a per-input-timeout finding for `engine`.
+///
+/// libFuzzer writes `timeout-<sha1>` next to its crash artifacts. AFL++ keeps
+/// hangs in a separate `hangs/` tree outside the crash scan, and honggfuzz
+/// retains no timeout artifact, so only libFuzzer contributes a count here.
+#[must_use]
+pub fn is_timeout_artifact(engine: EngineKind, name: &str) -> bool {
+    matches!(engine, EngineKind::LibFuzzer) && name.starts_with("timeout-")
+}
+
 fn is_honggfuzz_crash(name: &str) -> bool {
     let Some(rest) = name.strip_prefix("SIG") else {
         return false;

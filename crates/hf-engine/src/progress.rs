@@ -2,7 +2,7 @@
 //!
 //! See `docs/standards/ENGINE_ADAPTER_STANDARD.md` section 4.
 
-use hf_core::engine::FuzzProgress;
+use hf_core::engine::{EngineStats, FuzzProgress};
 
 /// Parse a single line of engine stdout into a `FuzzProgress` event.
 #[must_use]
@@ -67,10 +67,115 @@ pub fn parse_progress_events(line: &str) -> Vec<FuzzProgress> {
     if let Some(aggregate) = fork_aggregate_execs(line) {
         events.push(FuzzProgress::ExecsPerSec(aggregate));
     }
+    if let Some(stats) = stats_from_line(line) {
+        events.push(FuzzProgress::Stats(stats));
+    }
     if is_finding_signal(&lower) {
         events.push(FuzzProgress::CrashesFound(1));
     }
     events
+}
+
+/// Extract an engine-neutral stats snapshot from a single stdout line.
+///
+/// libFuzzer `#N <phase>` status lines (pulse/NEW/REDUCE/INITED, and the
+/// fork-mode counter lines) and `stat::` terminal counters carry a cumulative
+/// execution total that the scalar events cannot express. honggfuzz prints
+/// one metric per status-tick line; only the metrics without a dedicated
+/// scalar event are read here (`Iterations`, `Corpus Size`, `Timeouts`) --
+/// speed and coverage already flow as `ExecsPerSec`/`EdgesCovered`, and crash
+/// totals come from ingesting the crash directory, not a status tick.
+fn stats_from_line(line: &str) -> Option<EngineStats> {
+    libfuzzer_stats_from_line(line).or_else(|| honggfuzz_stats_from_line(line))
+}
+
+/// Parse a libFuzzer status or terminal line into a stats snapshot.
+///
+/// Status lines are `#<total> <phase> cov: N ... corp: N/... exec/s: N ...`;
+/// terminal lines are `stat::number_of_executed_units: N` and
+/// `stat::average_exec_per_sec: N`. A `#N` prefix alone is not enough --
+/// `NEW_FUNC` lines carry the counter but no metrics, so at least one stats
+/// field keyword must be present.
+fn libfuzzer_stats_from_line(line: &str) -> Option<EngineStats> {
+    if let Some(rest) = line.trim_start().strip_prefix("stat::") {
+        return libfuzzer_final_stat(rest);
+    }
+    let rest = line.strip_prefix('#')?;
+    let counter: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    let lower = line.to_ascii_lowercase();
+    if counter.is_empty()
+        || !(lower.contains("cov:") || lower.contains("corp:") || lower.contains("exec/s:"))
+    {
+        return None;
+    }
+    Some(EngineStats {
+        execs_total: counter.parse().ok(),
+        edges_covered: number_near_word(line, "cov"),
+        corpus_count: corpus_count_from_line(&lower),
+        execs_per_sec: rate_after_keyword(line, "exec/s"),
+        uptime_secs: uptime_from_fork_line(&lower),
+        ..EngineStats::default()
+    })
+}
+
+/// Parse a libFuzzer terminal counter (`stat::<name>: <value>`).
+fn libfuzzer_final_stat(rest: &str) -> Option<EngineStats> {
+    let (name, value) = rest.split_once(':')?;
+    match name.trim() {
+        "number_of_executed_units" => {
+            let total = value.trim().parse::<u64>().ok()?;
+            Some(EngineStats {
+                execs_total: Some(total),
+                ..EngineStats::default()
+            })
+        }
+        "average_exec_per_sec" => {
+            let rate = value.trim().parse::<f64>().ok()?;
+            if !rate.is_finite() || rate.is_sign_negative() {
+                return None;
+            }
+            Some(EngineStats {
+                execs_per_sec: Some(rate),
+                ..EngineStats::default()
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Read the corpus count from a libFuzzer `corp: 215/64Kb` field (the size
+/// suffix after `/` is dropped).
+fn corpus_count_from_line(lower: &str) -> Option<u64> {
+    let after = lower[lower.find("corp:")? + "corp:".len()..].trim_start();
+    let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+/// Read the uptime from a libFuzzer fork-mode `time: 18s` field. The space in
+/// the needle keeps `dft_time:` on the same line from matching.
+fn uptime_from_fork_line(lower: &str) -> Option<u64> {
+    let after = lower[lower.find(" time:")? + " time:".len()..].trim_start();
+    let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+/// Parse the honggfuzz per-tick metrics that have no dedicated scalar event.
+fn honggfuzz_stats_from_line(line: &str) -> Option<EngineStats> {
+    let mut stats = EngineStats::default();
+    let mut found = false;
+    if let Some(iterations) = number_after_word(line, "iterations") {
+        stats.execs_total = Some(iterations);
+        found = true;
+    }
+    if let Some(corpus) = number_after_word(line, "corpus size") {
+        stats.corpus_count = Some(corpus);
+        found = true;
+    }
+    if let Some(timeouts) = number_after_word(line, "timeouts") {
+        stats.hangs = Some(timeouts);
+        found = true;
+    }
+    found.then_some(stats)
 }
 
 /// Derive the true aggregate execution rate from a libFuzzer fork-mode

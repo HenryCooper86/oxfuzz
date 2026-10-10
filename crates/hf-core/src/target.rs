@@ -145,6 +145,41 @@ pub enum Sanitizer {
     Thread,
 }
 
+impl Sanitizer {
+    /// Canonical lowercase id used by the CLI and configuration files.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Address => "address",
+            Self::Undefined => "undefined",
+            Self::Memory => "memory",
+            Self::Thread => "thread",
+        }
+    }
+}
+
+impl std::str::FromStr for Sanitizer {
+    type Err = String;
+
+    /// Parse a canonical sanitizer id. Only the exact lowercase ids are
+    /// accepted so the CLI, config files, and the REST/IPC wire agree on one
+    /// spelling; which ids a build may actually select is a separate policy
+    /// decision (see `hf-service` fuzzing settings).
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "none" => Ok(Self::None),
+            "address" => Ok(Self::Address),
+            "undefined" => Ok(Self::Undefined),
+            "memory" => Ok(Self::Memory),
+            "thread" => Ok(Self::Thread),
+            other => Err(format!(
+                "unknown sanitizer '{other}' (expected one of: address, undefined, memory, thread, none)"
+            )),
+        }
+    }
+}
+
 /// A source location.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceLocation {
@@ -308,6 +343,31 @@ mod tests {
     fn relative_file_keeps_an_already_relative_path() {
         let c = candidate("/proj", "src/a.c");
         assert_eq!(c.relative_file(), "src/a.c");
+    }
+
+    #[test]
+    fn sanitizer_canonical_ids_round_trip() {
+        use super::Sanitizer;
+        for (sanitizer, id) in [
+            (Sanitizer::None, "none"),
+            (Sanitizer::Address, "address"),
+            (Sanitizer::Undefined, "undefined"),
+            (Sanitizer::Memory, "memory"),
+            (Sanitizer::Thread, "thread"),
+        ] {
+            assert_eq!(sanitizer.as_str(), id);
+            assert_eq!(id.parse::<Sanitizer>().unwrap(), sanitizer);
+        }
+    }
+
+    #[test]
+    fn sanitizer_parse_rejects_unknown_ids() {
+        use super::Sanitizer;
+        let error = "asan".parse::<Sanitizer>().unwrap_err();
+        assert!(error.contains("asan"), "{error}");
+        assert!(error.contains("address"), "{error}");
+        assert!("".parse::<Sanitizer>().is_err());
+        assert!("Address".parse::<Sanitizer>().is_err());
     }
 
     #[test]

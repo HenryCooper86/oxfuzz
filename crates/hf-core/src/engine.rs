@@ -240,6 +240,114 @@ pub struct FuzzRunConfig {
     /// Digest of the retained execution-input manifest; absent on older runs.
     #[serde(default)]
     pub input_manifest_sha256: Option<String>,
+    /// Per-input timeout: one input that runs longer than this is a hang
+    /// finding. Resolved explicitly by `hf-service` policy
+    /// (`fuzzing.default_timeout_ms`, overridable per run) before a campaign
+    /// launches; `None` on rows persisted before timeouts were recorded and on
+    /// internal probes that keep the engine's built-in default. Adapters emit
+    /// the engine flag only for `Some`: libFuzzer `-timeout=<s>` and honggfuzz
+    /// `--timeout=<s>` take whole seconds (rounded up, never 0, which libFuzzer
+    /// reads as "no timeout"), AFL++ `-t` takes the exact milliseconds.
+    /// Syzkaller has no per-input knob in its manager config and ignores this.
+    #[serde(default)]
+    pub input_timeout: Option<Duration>,
+    /// Continue the most recent compatible AFL++ output tree instead of
+    /// cold-starting (queue cycle position, favored bookkeeping, and cycle
+    /// counts survive an interrupted run or a chained campaign iteration).
+    /// Resolved explicitly by `hf-service` policy (`--resume` over
+    /// `fuzzing.default_resume`) before a campaign launches; only the AFL++
+    /// adapter consumes it (via `AFL_AUTORESUME`, injected by the runner --
+    /// never through argv or a hand-set env). `false` on rows persisted before
+    /// resume was recorded and on exact-input replays, which never resume.
+    /// `false` is omitted from the wire so run manifests sealed before this
+    /// field existed keep verifying.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resume: bool,
+}
+
+/// A point-in-time statistics snapshot from a running (or just-finished)
+/// fuzzer, projected onto engine-neutral fields.
+///
+/// Every field is optional: availability differs per engine and per moment
+/// (AFL++ flushes `fuzzer_stats` about once a second; libFuzzer reports
+/// coverage only on pulse lines; honggfuzz never reports edges). `Some(0)` is
+/// a measured zero, distinct from "not reported". Absent fields stay off the
+/// wire so older readers ignore them.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct EngineStats {
+    /// Inputs executed since the run started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execs_total: Option<u64>,
+    /// Current execution throughput.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execs_per_sec: Option<f64>,
+    /// Coverage edges (or the engine's coverage proxy) discovered so far.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edges_covered: Option<u64>,
+    /// AFL++ queue cycles completed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cycles_done: Option<u64>,
+    /// Inputs retained in the engine's active corpus.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corpus_count: Option<u64>,
+    /// AFL++ stability percentage (bitmap variability across calibration runs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stability_pct: Option<f64>,
+    /// Hangs/timeout findings retained by the engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hangs: Option<u64>,
+    /// Seconds since the engine last found new coverage or a retained input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_find_age_secs: Option<u64>,
+    /// Seconds the engine has been running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uptime_secs: Option<u64>,
+}
+
+impl EngineStats {
+    /// Overlay `other` onto `self`: every field present in `other` replaces the
+    /// current value; absent fields keep it. Snapshots from one engine stream
+    /// are cumulative, so a newer partial snapshot refines rather than erases.
+    pub fn merge_from(&mut self, other: &Self) {
+        let Self {
+            execs_total,
+            execs_per_sec,
+            edges_covered,
+            cycles_done,
+            corpus_count,
+            stability_pct,
+            hangs,
+            last_find_age_secs,
+            uptime_secs,
+        } = other;
+        if let Some(value) = execs_total {
+            self.execs_total = Some(*value);
+        }
+        if let Some(value) = execs_per_sec {
+            self.execs_per_sec = Some(*value);
+        }
+        if let Some(value) = edges_covered {
+            self.edges_covered = Some(*value);
+        }
+        if let Some(value) = cycles_done {
+            self.cycles_done = Some(*value);
+        }
+        if let Some(value) = corpus_count {
+            self.corpus_count = Some(*value);
+        }
+        if let Some(value) = stability_pct {
+            self.stability_pct = Some(*value);
+        }
+        if let Some(value) = hangs {
+            self.hangs = Some(*value);
+        }
+        if let Some(value) = last_find_age_secs {
+            self.last_find_age_secs = Some(*value);
+        }
+        if let Some(value) = uptime_secs {
+            self.uptime_secs = Some(*value);
+        }
+    }
 }
 
 /// A progress event streamed from a running fuzzer.
@@ -249,6 +357,10 @@ pub enum FuzzProgress {
     EdgesCovered(u64),
     CrashesFound(u32),
     LogLine(String),
+    /// An engine-neutral statistics snapshot; see [`EngineStats`]. Additive
+    /// with the scalar variants above, which keep flowing unchanged for
+    /// aggregation and health telemetry.
+    Stats(EngineStats),
     Done,
 }
 
@@ -432,5 +544,196 @@ mod tests {
         assert!(EngineKind::GoNative.supports_language(crate::target::TargetLanguage::Go));
         assert!(!EngineKind::GoNative.supports_language(crate::target::TargetLanguage::C));
         assert!(!EngineKind::GoNative.supports_language(crate::target::TargetLanguage::Rust));
+    }
+
+    #[test]
+    fn existing_progress_variants_keep_their_exact_wire_shape() {
+        use super::FuzzProgress;
+        // The CLI, web SSE, and desktop GUI consume these events; their
+        // encoding must not move when new variants are added.
+        assert_eq!(
+            serde_json::to_value(FuzzProgress::ExecsPerSec(842.5)).unwrap(),
+            json!({"ExecsPerSec": 842.5})
+        );
+        assert_eq!(
+            serde_json::to_value(FuzzProgress::EdgesCovered(1523)).unwrap(),
+            json!({"EdgesCovered": 1523})
+        );
+        assert_eq!(
+            serde_json::to_value(FuzzProgress::CrashesFound(2)).unwrap(),
+            json!({"CrashesFound": 2})
+        );
+        assert_eq!(
+            serde_json::to_value(FuzzProgress::LogLine("line".to_owned())).unwrap(),
+            json!({"LogLine": "line"})
+        );
+        assert_eq!(
+            serde_json::to_value(FuzzProgress::Done).unwrap(),
+            json!("Done")
+        );
+    }
+
+    #[test]
+    fn stats_progress_round_trips_with_all_fields() {
+        use super::{EngineStats, FuzzProgress};
+        let stats = EngineStats {
+            execs_total: Some(128_934),
+            execs_per_sec: Some(842.0),
+            edges_covered: Some(1523),
+            cycles_done: Some(2),
+            corpus_count: Some(91),
+            stability_pct: Some(100.0),
+            hangs: Some(0),
+            last_find_age_secs: Some(14),
+            uptime_secs: Some(153),
+        };
+        let event = FuzzProgress::Stats(stats.clone());
+        let encoded = serde_json::to_value(&event).unwrap();
+        assert_eq!(
+            encoded,
+            json!({"Stats": {
+                "execs_total": 128934,
+                "execs_per_sec": 842.0,
+                "edges_covered": 1523,
+                "cycles_done": 2,
+                "corpus_count": 91,
+                "stability_pct": 100.0,
+                "hangs": 0,
+                "last_find_age_secs": 14,
+                "uptime_secs": 153,
+            }})
+        );
+        let restored: FuzzProgress = serde_json::from_value(encoded).unwrap();
+        assert!(
+            matches!(restored, FuzzProgress::Stats(ref parsed) if *parsed == stats),
+            "{restored:?}"
+        );
+    }
+
+    #[test]
+    fn stats_progress_omits_absent_fields_and_accepts_partial_payloads() {
+        use super::{EngineStats, FuzzProgress};
+        // Per-engine availability differs: an AFL++ snapshot may lack a find
+        // age, a libFuzzer pulse lacks cycles. Absent fields stay off the wire
+        // and partial payloads decode with None.
+        let sparse = FuzzProgress::Stats(EngineStats {
+            execs_per_sec: Some(43_690.0),
+            ..EngineStats::default()
+        });
+        assert_eq!(
+            serde_json::to_value(&sparse).unwrap(),
+            json!({"Stats": {"execs_per_sec": 43690.0}})
+        );
+        let decoded: FuzzProgress =
+            serde_json::from_value(json!({"Stats": {"execs_total": 128934}})).unwrap();
+        match decoded {
+            FuzzProgress::Stats(stats) => {
+                assert_eq!(stats.execs_total, Some(128_934));
+                assert_eq!(stats.execs_per_sec, None);
+                assert_eq!(stats.stability_pct, None);
+            }
+            other => panic!("expected Stats, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn engine_stats_merge_overlays_present_fields_only() {
+        use super::EngineStats;
+        let mut base = EngineStats {
+            execs_total: Some(100),
+            edges_covered: Some(50),
+            ..EngineStats::default()
+        };
+        base.merge_from(&EngineStats {
+            execs_total: Some(200),
+            hangs: Some(1),
+            ..EngineStats::default()
+        });
+        assert_eq!(base.execs_total, Some(200));
+        assert_eq!(
+            base.edges_covered,
+            Some(50),
+            "absent fields keep the old value"
+        );
+        assert_eq!(base.hangs, Some(1));
+    }
+
+    #[test]
+    fn run_config_resume_is_explicit_and_omitted_when_off() {
+        use super::FuzzRunConfig;
+        use crate::target::Sanitizer;
+        use std::time::Duration;
+
+        let config = FuzzRunConfig {
+            harness_id: uuid::Uuid::nil(),
+            engine: EngineKind::LibFuzzer,
+            duration: Some(Duration::from_secs(60)),
+            max_mem_mb: 2048,
+            max_cpus: 1,
+            seed_corpus: None,
+            sanitizer: Sanitizer::Address,
+            env: Vec::new(),
+            extra_args: Vec::new(),
+            seed: None,
+            replay_of: None,
+            input_manifest_sha256: None,
+            input_timeout: None,
+            resume: false,
+        };
+        // `false` stays off the wire: run manifests persisted before the field
+        // existed carry no `resume` key and must keep verifying against it.
+        let encoded = serde_json::to_value(&config).unwrap();
+        assert!(encoded.get("resume").is_none(), "{encoded}");
+        let restored: FuzzRunConfig = serde_json::from_value(encoded).unwrap();
+        assert!(!restored.resume);
+
+        let mut resumed = config.clone();
+        resumed.resume = true;
+        let encoded = serde_json::to_value(&resumed).unwrap();
+        assert_eq!(encoded["resume"], serde_json::json!(true));
+        let restored: FuzzRunConfig = serde_json::from_value(encoded).unwrap();
+        assert!(restored.resume);
+    }
+
+    #[test]
+    fn run_config_round_trips_input_timeout_and_defaults_absent_to_none() {
+        use super::FuzzRunConfig;
+        use crate::target::Sanitizer;
+        use std::time::Duration;
+
+        let mut config = FuzzRunConfig {
+            harness_id: uuid::Uuid::nil(),
+            engine: EngineKind::LibFuzzer,
+            duration: Some(Duration::from_secs(60)),
+            max_mem_mb: 2048,
+            max_cpus: 1,
+            seed_corpus: None,
+            sanitizer: Sanitizer::Address,
+            env: Vec::new(),
+            extra_args: Vec::new(),
+            seed: None,
+            replay_of: None,
+            input_manifest_sha256: None,
+            input_timeout: Some(Duration::from_millis(1500)),
+            resume: false,
+        };
+        let encoded = serde_json::to_value(&config).unwrap();
+        assert_eq!(
+            encoded["input_timeout"],
+            serde_json::json!({"secs": 1, "nanos": 500_000_000}),
+            "the persisted record carries the exact per-input timeout"
+        );
+        let restored: FuzzRunConfig = serde_json::from_value(encoded).unwrap();
+        assert_eq!(restored.input_timeout, Some(Duration::from_millis(1500)));
+
+        // Rows persisted before per-input timeouts were recorded carry no
+        // field; they decode to None, and adapters then leave the engine's
+        // built-in default alone.
+        config.input_timeout = None;
+        let encoded = serde_json::to_value(&config).unwrap();
+        let mut historical = encoded.clone();
+        historical.as_object_mut().unwrap().remove("input_timeout");
+        let restored: FuzzRunConfig = serde_json::from_value(historical).unwrap();
+        assert_eq!(restored.input_timeout, None);
     }
 }

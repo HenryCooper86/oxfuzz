@@ -23,9 +23,10 @@ use hf_prompt::{
 pub async fn draft(
     target: &TargetCandidate,
     engine: EngineKind,
+    sanitizer: hf_core::target::Sanitizer,
     llm: Box<dyn LlmProvider>,
 ) -> Result<HarnessDraft, ClassifiedError> {
-    draft_with_context(target, engine, &[], None, llm).await
+    draft_with_context(target, engine, &[], None, sanitizer, llm).await
 }
 
 /// Draft a harness for a target using the LLM, augmenting the prompt with
@@ -44,9 +45,10 @@ pub async fn draft_with_context(
     engine: EngineKind,
     related: &[RelatedContext],
     build: Option<&BuildContext>,
+    sanitizer: hf_core::target::Sanitizer,
     llm: Box<dyn LlmProvider>,
 ) -> Result<HarnessDraft, ClassifiedError> {
-    draft_with_examples(target, engine, related, build, &[], llm).await
+    draft_with_examples(target, engine, related, build, &[], sanitizer, llm).await
 }
 
 /// Draft a harness for a target using the LLM, additionally conditioning the
@@ -67,6 +69,7 @@ pub async fn draft_with_examples(
     related: &[RelatedContext],
     build: Option<&BuildContext>,
     examples: &[hf_prompt::AcceptedExample],
+    sanitizer: hf_core::target::Sanitizer,
     llm: Box<dyn LlmProvider>,
 ) -> Result<HarnessDraft, ClassifiedError> {
     let prompt = render_harness_prompt_with_examples(target, engine, related, build, examples);
@@ -81,7 +84,12 @@ pub async fn draft_with_examples(
         engine,
         source,
         rationale: String::new(),
-        build_cmd: build_command(engine, target.language, &format!("fuzz_{}", target.symbol))?,
+        build_cmd: build_command(
+            engine,
+            target.language,
+            &format!("fuzz_{}", target.symbol),
+            sanitizer,
+        )?,
         generator: hf_core::harness::DraftGenerator::Llm,
     })
 }
@@ -107,6 +115,7 @@ pub async fn repair(
     engine: EngineKind,
     failing_source: &str,
     diagnostics: &str,
+    sanitizer: hf_core::target::Sanitizer,
     llm: Box<dyn LlmProvider>,
 ) -> Result<HarnessDraft, ClassifiedError> {
     let diagnostics = summarize_diagnostics(diagnostics);
@@ -122,7 +131,12 @@ pub async fn repair(
         engine,
         source,
         rationale: "repair".to_owned(),
-        build_cmd: build_command(engine, target.language, &format!("fuzz_{}", target.symbol))?,
+        build_cmd: build_command(
+            engine,
+            target.language,
+            &format!("fuzz_{}", target.symbol),
+            sanitizer,
+        )?,
         generator: hf_core::harness::DraftGenerator::Llm,
     })
 }
@@ -139,6 +153,7 @@ pub async fn refine(
     engine: EngineKind,
     current_source: &str,
     uncovered: &[String],
+    sanitizer: hf_core::target::Sanitizer,
     llm: Box<dyn LlmProvider>,
 ) -> Result<HarnessDraft, ClassifiedError> {
     let prompt = render_harness_refine_prompt(target, engine, current_source, uncovered);
@@ -152,7 +167,12 @@ pub async fn refine(
         engine,
         source,
         rationale: "refine".to_owned(),
-        build_cmd: build_command(engine, target.language, &format!("fuzz_{}", target.symbol))?,
+        build_cmd: build_command(
+            engine,
+            target.language,
+            &format!("fuzz_{}", target.symbol),
+            sanitizer,
+        )?,
         generator: hf_core::harness::DraftGenerator::Llm,
     })
 }
@@ -977,29 +997,20 @@ fn smoke_command(
             binary.to_owned(),
             format!("-max_total_time={duration_secs}"),
         ]),
-        EngineKind::AflPlusPlus => Ok(hf_engine::afl::build_run_args(
-            &single_instance,
-            binary,
-            corpus,
-            out,
-        )),
-        EngineKind::Honggfuzz => Ok(hf_engine::honggfuzz::build_run_args(
-            &single_instance,
-            binary,
-            corpus,
-            out,
-        )),
+        EngineKind::AflPlusPlus => {
+            hf_engine::afl::build_run_args(&single_instance, binary, corpus, out)
+        }
+        EngineKind::Honggfuzz => {
+            hf_engine::honggfuzz::build_run_args(&single_instance, binary, corpus, out)
+        }
         EngineKind::Syzkaller => Err(ClassifiedError::Harness(
             "smoke fuzz does not apply to syzkaller: it fuzzes an instrumented \
              kernel image, not a userspace harness binary"
                 .to_owned(),
         )),
-        EngineKind::GoNative => Ok(hf_engine::go_native::build_run_args(
-            &single_instance,
-            binary,
-            corpus,
-            out,
-        )),
+        EngineKind::GoNative => {
+            hf_engine::go_native::build_run_args(&single_instance, binary, corpus, out)
+        }
     }
 }
 
@@ -1018,6 +1029,11 @@ fn smoke_sandbox_duration(duration_secs: u64) -> u64 {
 
 /// Default configuration retained for direct `hf-harness` callers. Production
 /// service paths pass their resolved policy snapshot explicitly.
+///
+/// `input_timeout` stays `None` here: smoke is a short qualification probe,
+/// not a campaign, so it keeps the engine's built-in per-input default rather
+/// than the campaign knob (a 1s budget could false-fail a slow sanitized
+/// harness during qualification).
 fn smoke_cfg(harness: &Harness) -> hf_core::engine::FuzzRunConfig {
     hf_core::engine::FuzzRunConfig {
         harness_id: harness.id,
@@ -1032,21 +1048,51 @@ fn smoke_cfg(harness: &Harness) -> hf_core::engine::FuzzRunConfig {
         seed: None,
         replay_of: None,
         input_manifest_sha256: None,
+        input_timeout: None,
+        resume: false,
     }
 }
 
-/// Construct a build command for an engine + language.
+/// Construct a build command for an engine + language + sanitizer.
 ///
 /// Rust targets are always built with cargo-fuzz (libfuzzer-sys), regardless of
 /// the requested engine, since that is the only supported Rust fuzzing backend;
 /// the produced libFuzzer binary is then driven by the libFuzzer run path. C/C++
 /// targets use the engine-correct instrumenting compiler.
+///
+/// Sanitizer mapping (all verified against the pinned sandbox image; see
+/// `docs/standards/ENGINE_ADAPTER_STANDARD.md`):
+///
+/// - `Address`: the default build (`-fsanitize=address`), unchanged.
+/// - `Undefined`: `-fsanitize=undefined -fno-sanitize-recover=undefined`
+///   (halt-on-error: a finding must terminate the process so the engine
+///   records a crash). afl-clang-fast and hfuzz-cc are clang wrappers and pass
+///   the flags through; AFL++'s own `AFL_USE_UBSAN=1` is deliberately not
+///   used because in the pinned 4.09c it expands to `-fsanitize-trap=...`,
+///   which kills the process with no diagnostics for the triage pipeline.
+/// - `None`/`Memory`/`Thread`, and any non-`Address` choice for Rust or
+///   syzkaller, are rejected: the sandbox cannot honor them and silently
+///   building something else would mislabel every finding the run produces.
+///
+/// # Errors
+/// Returns `ClassifiedError::Harness` for an engine/language/sanitizer
+/// combination the sandbox toolchain cannot build.
 pub fn build_command(
     engine: EngineKind,
     lang: TargetLanguage,
     output_name: &str,
+    sanitizer: hf_core::target::Sanitizer,
 ) -> Result<BuildCommand, ClassifiedError> {
     if lang == TargetLanguage::Rust {
+        if sanitizer != hf_core::target::Sanitizer::Address {
+            return Err(ClassifiedError::Harness(format!(
+                "sanitizer '{}' is not available for Rust fuzz targets: cargo-fuzz \
+                 (libfuzzer-sys) builds them with AddressSanitizer only -- rustc has no \
+                 UndefinedBehaviorSanitizer on this path, and the memory/thread/none \
+                 choices are not admitted by the harness pipeline",
+                sanitizer.as_str()
+            )));
+        }
         return Ok(BuildCommand {
             compiler: "cargo".to_owned(),
             args: vec![
@@ -1087,11 +1133,7 @@ pub fn build_command(
         )),
         EngineKind::LibFuzzer => Ok(BuildCommand {
             compiler: if is_cpp { "clang++" } else { "clang" }.to_owned(),
-            args: vec![
-                "-fsanitize=fuzzer".to_owned(),
-                "-fsanitize=address".to_owned(),
-                "-g".to_owned(),
-            ],
+            args: c_sanitizer_args(sanitizer, true)?,
             output: PathBuf::from(output_name),
             extra_flags: Vec::new(),
         }),
@@ -1102,29 +1144,92 @@ pub fn build_command(
                 "afl-clang-fast"
             }
             .to_owned(),
-            args: vec![
-                "-fsanitize=fuzzer".to_owned(),
-                "-fsanitize=address".to_owned(),
-                "-g".to_owned(),
-            ],
+            args: c_sanitizer_args(sanitizer, true)?,
             output: PathBuf::from(output_name),
             extra_flags: Vec::new(),
         }),
         EngineKind::Honggfuzz => Ok(BuildCommand {
-            compiler: if is_cpp { "hfuzz-c++" } else { "hfuzz-cc" }.to_owned(),
-            args: vec!["-fsanitize=address".to_owned(), "-g".to_owned()],
+            // The pinned honggfuzz 2.6 install ships `hfuzz-clang++` as the C++
+            // driver; no `hfuzz-c++` binary exists in the sandbox image.
+            compiler: if is_cpp { "hfuzz-clang++" } else { "hfuzz-cc" }.to_owned(),
+            args: c_sanitizer_args(sanitizer, false)?,
             output: PathBuf::from(output_name),
             extra_flags: Vec::new(),
         }),
         // syzkaller fuzzes a kernel built with coverage instrumentation rather
         // than a per-function harness binary; this represents the kernel build.
-        EngineKind::Syzkaller => Ok(BuildCommand {
-            compiler: "make".to_owned(),
-            args: vec!["CONFIG_KCOV=y".to_owned(), "CONFIG_DEBUG_INFO=y".to_owned()],
-            output: PathBuf::from(output_name),
-            extra_flags: Vec::new(),
-        }),
+        EngineKind::Syzkaller => {
+            if sanitizer != hf_core::target::Sanitizer::Address {
+                return Err(ClassifiedError::Harness(format!(
+                    "sanitizer '{}' does not apply to the syzkaller kernel build \
+                     (KASAN/UBSAN are kernel-image configuration, not harness \
+                     compile flags)",
+                    sanitizer.as_str()
+                )));
+            }
+            Ok(BuildCommand {
+                compiler: "make".to_owned(),
+                args: vec!["CONFIG_KCOV=y".to_owned(), "CONFIG_DEBUG_INFO=y".to_owned()],
+                output: PathBuf::from(output_name),
+                extra_flags: Vec::new(),
+            })
+        }
     }
+}
+
+/// Sanitizer compile flags for a C/C++ harness build. `fuzzer_driver` adds
+/// `-fsanitize=fuzzer`, the libFuzzer-compatible driver the libFuzzer and AFL++
+/// harnesses link; honggfuzz instruments through `hfuzz-cc` instead.
+///
+/// # Errors
+/// Returns `ClassifiedError::Harness` for a sanitizer the sandbox cannot honor
+/// (`None`, `Memory`, `Thread`), naming the reason.
+fn c_sanitizer_args(
+    sanitizer: hf_core::target::Sanitizer,
+    fuzzer_driver: bool,
+) -> Result<Vec<String>, ClassifiedError> {
+    use hf_core::target::Sanitizer;
+    let mut args = Vec::new();
+    if fuzzer_driver {
+        args.push("-fsanitize=fuzzer".to_owned());
+    }
+    match sanitizer {
+        Sanitizer::Address => args.push("-fsanitize=address".to_owned()),
+        Sanitizer::Undefined => {
+            args.push("-fsanitize=undefined".to_owned());
+            // Halt-on-error: a UBSan finding must terminate the process so the
+            // engine records a crash; the recoverable default would log and
+            // continue past the bug.
+            args.push("-fno-sanitize-recover=undefined".to_owned());
+        }
+        Sanitizer::None => {
+            return Err(ClassifiedError::Harness(
+                "a harness build without a sanitizer is not admitted: the pipeline's \
+                 crash evidence (classification, dedup, triage) comes from sanitizer \
+                 reports"
+                    .to_owned(),
+            ));
+        }
+        Sanitizer::Memory => {
+            return Err(ClassifiedError::Harness(
+                "sanitizer 'memory' is not admitted: MemorySanitizer requires a fully \
+                 instrumented libc and userspace, and the sandbox image's Ubuntu 24.04 \
+                 runtime is not MSan-instrumented, so its findings would be false \
+                 positives"
+                    .to_owned(),
+            ));
+        }
+        Sanitizer::Thread => {
+            return Err(ClassifiedError::Harness(
+                "sanitizer 'thread' is not admitted: ThreadSanitizer data-race reports \
+                 do not map onto the crash-triage pipeline, and TSan cannot combine \
+                 with the address/undefined harness builds"
+                    .to_owned(),
+            ));
+        }
+    }
+    args.push("-g".to_owned());
+    Ok(args)
 }
 
 /// Extract the first fenced code block from a string.
@@ -1491,6 +1596,7 @@ mod tests {
             EngineKind::LibFuzzer,
             "int LLVMFuzzerTestOneInput(){ frobnicate(); }",
             "error: implicit declaration of function 'frobnicate'",
+            hf_core::target::Sanitizer::Address,
             Box::new(llm),
         )
         .await
@@ -1510,6 +1616,7 @@ mod tests {
             EngineKind::LibFuzzer,
             "bad source",
             "some error",
+            hf_core::target::Sanitizer::Address,
             Box::new(llm),
         )
         .await;
@@ -1589,6 +1696,7 @@ mod tests {
             EngineKind::LibFuzzer,
             &related,
             None,
+            hf_core::target::Sanitizer::Address,
             Box::new(CaptureProvider {
                 seen: Arc::clone(&seen),
             }),
@@ -1615,6 +1723,7 @@ mod tests {
             EngineKind::LibFuzzer,
             &[],
             Some(&build),
+            hf_core::target::Sanitizer::Address,
             Box::new(CaptureProvider {
                 seen: Arc::clone(&seen),
             }),
@@ -1634,6 +1743,7 @@ mod tests {
         draft(
             &target,
             EngineKind::LibFuzzer,
+            hf_core::target::Sanitizer::Address,
             Box::new(CaptureProvider {
                 seen: Arc::clone(&seen),
             }),
@@ -1662,6 +1772,7 @@ mod tests {
             &[],
             None,
             &examples,
+            hf_core::target::Sanitizer::Address,
             Box::new(CaptureProvider {
                 seen: Arc::clone(&seen),
             }),
@@ -1686,6 +1797,7 @@ mod tests {
             &[],
             None,
             &[],
+            hf_core::target::Sanitizer::Address,
             Box::new(CaptureProvider {
                 seen: Arc::clone(&seen),
             }),
@@ -1742,7 +1854,13 @@ mod tests {
             engine: EngineKind::LibFuzzer,
             source: "int LLVMFuzzerTestOneInput(const uint8_t*d,size_t n){return 0;}".to_owned(),
             language: TargetLanguage::C,
-            build_cmd: build_command(EngineKind::LibFuzzer, TargetLanguage::C, "fuzz_t").unwrap(),
+            build_cmd: build_command(
+                EngineKind::LibFuzzer,
+                TargetLanguage::C,
+                "fuzz_t",
+                hf_core::target::Sanitizer::Address,
+            )
+            .unwrap(),
             sanitizer: hf_core::target::Sanitizer::Address,
             status: HarnessStatus::Draft,
             smoke_run: None,
@@ -1795,6 +1913,7 @@ mod tests {
             EngineKind::LibFuzzer,
             "int LLVMFuzzerTestOneInput(const uint8_t*d,size_t n){return 0;}",
             &["decode_frame".to_owned()],
+            hf_core::target::Sanitizer::Address,
             Box::new(llm),
         )
         .await
@@ -1961,38 +2080,259 @@ mod tests {
 
     #[test]
     fn build_command_cpp_uses_cpp_compiler_driver() {
+        use hf_core::target::Sanitizer;
         // C++ targets must link the C++ stdlib, which requires the ++ drivers.
         assert_eq!(
-            build_command(EngineKind::LibFuzzer, TargetLanguage::Cpp, "fuzz_t")
-                .unwrap()
-                .compiler,
+            build_command(
+                EngineKind::LibFuzzer,
+                TargetLanguage::Cpp,
+                "fuzz_t",
+                Sanitizer::Address
+            )
+            .unwrap()
+            .compiler,
             "clang++"
         );
         assert_eq!(
-            build_command(EngineKind::AflPlusPlus, TargetLanguage::Cpp, "fuzz_t")
-                .unwrap()
-                .compiler,
+            build_command(
+                EngineKind::AflPlusPlus,
+                TargetLanguage::Cpp,
+                "fuzz_t",
+                Sanitizer::Address
+            )
+            .unwrap()
+            .compiler,
             "afl-clang-fast++"
         );
+        // The pinned honggfuzz 2.6 install ships `hfuzz-clang++`; `hfuzz-c++`
+        // does not exist in the sandbox image.
         assert_eq!(
-            build_command(EngineKind::Honggfuzz, TargetLanguage::Cpp, "fuzz_t")
-                .unwrap()
-                .compiler,
-            "hfuzz-c++"
+            build_command(
+                EngineKind::Honggfuzz,
+                TargetLanguage::Cpp,
+                "fuzz_t",
+                Sanitizer::Address
+            )
+            .unwrap()
+            .compiler,
+            "hfuzz-clang++"
         );
         // C targets keep the C drivers.
         assert_eq!(
-            build_command(EngineKind::LibFuzzer, TargetLanguage::C, "fuzz_t")
-                .unwrap()
-                .compiler,
+            build_command(
+                EngineKind::LibFuzzer,
+                TargetLanguage::C,
+                "fuzz_t",
+                Sanitizer::Address
+            )
+            .unwrap()
+            .compiler,
             "clang"
         );
         assert_eq!(
-            build_command(EngineKind::Honggfuzz, TargetLanguage::C, "fuzz_t")
-                .unwrap()
-                .compiler,
+            build_command(
+                EngineKind::Honggfuzz,
+                TargetLanguage::C,
+                "fuzz_t",
+                Sanitizer::Address
+            )
+            .unwrap()
+            .compiler,
             "hfuzz-cc"
         );
+    }
+
+    #[test]
+    fn build_command_address_keeps_the_asan_argv() {
+        use hf_core::target::Sanitizer;
+        let libfuzzer = build_command(
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+            "fuzz_t",
+            Sanitizer::Address,
+        )
+        .unwrap();
+        assert_eq!(libfuzzer.compiler, "clang");
+        assert_eq!(
+            libfuzzer.args,
+            ["-fsanitize=fuzzer", "-fsanitize=address", "-g"]
+        );
+        let afl = build_command(
+            EngineKind::AflPlusPlus,
+            TargetLanguage::C,
+            "fuzz_t",
+            Sanitizer::Address,
+        )
+        .unwrap();
+        assert_eq!(afl.compiler, "afl-clang-fast");
+        assert_eq!(afl.args, ["-fsanitize=fuzzer", "-fsanitize=address", "-g"]);
+        let honggfuzz = build_command(
+            EngineKind::Honggfuzz,
+            TargetLanguage::C,
+            "fuzz_t",
+            Sanitizer::Address,
+        )
+        .unwrap();
+        assert_eq!(honggfuzz.compiler, "hfuzz-cc");
+        assert_eq!(honggfuzz.args, ["-fsanitize=address", "-g"]);
+    }
+
+    #[test]
+    fn build_command_undefined_maps_the_ubsan_argv_per_engine() {
+        use hf_core::target::Sanitizer;
+        // halt-on-error semantics (`-fno-sanitize-recover=undefined`): a UBSan
+        // finding must terminate the process so the engine records a crash.
+        let libfuzzer = build_command(
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+            "fuzz_t",
+            Sanitizer::Undefined,
+        )
+        .unwrap();
+        assert_eq!(libfuzzer.compiler, "clang");
+        assert_eq!(
+            libfuzzer.args,
+            [
+                "-fsanitize=fuzzer",
+                "-fsanitize=undefined",
+                "-fno-sanitize-recover=undefined",
+                "-g"
+            ]
+        );
+        // afl-clang-fast is a clang wrapper and passes the flags through
+        // (verified against AFL++ 4.09c in the pinned sandbox image);
+        // AFL_USE_UBSAN=1 is deliberately not used: it maps to
+        // `-fsanitize-trap=...`, which kills the process without printing the
+        // `runtime error:` diagnostics the triage pipeline classifies.
+        let afl = build_command(
+            EngineKind::AflPlusPlus,
+            TargetLanguage::C,
+            "fuzz_t",
+            Sanitizer::Undefined,
+        )
+        .unwrap();
+        assert_eq!(afl.compiler, "afl-clang-fast");
+        assert_eq!(
+            afl.args,
+            [
+                "-fsanitize=fuzzer",
+                "-fsanitize=undefined",
+                "-fno-sanitize-recover=undefined",
+                "-g"
+            ]
+        );
+        let honggfuzz = build_command(
+            EngineKind::Honggfuzz,
+            TargetLanguage::C,
+            "fuzz_t",
+            Sanitizer::Undefined,
+        )
+        .unwrap();
+        assert_eq!(honggfuzz.compiler, "hfuzz-cc");
+        assert_eq!(
+            honggfuzz.args,
+            [
+                "-fsanitize=undefined",
+                "-fno-sanitize-recover=undefined",
+                "-g"
+            ]
+        );
+    }
+
+    #[test]
+    fn build_command_undefined_uses_cpp_drivers_for_cpp() {
+        use hf_core::target::Sanitizer;
+        let libfuzzer = build_command(
+            EngineKind::LibFuzzer,
+            TargetLanguage::Cpp,
+            "fuzz_t",
+            Sanitizer::Undefined,
+        )
+        .unwrap();
+        assert_eq!(libfuzzer.compiler, "clang++");
+        let afl = build_command(
+            EngineKind::AflPlusPlus,
+            TargetLanguage::Cpp,
+            "fuzz_t",
+            Sanitizer::Undefined,
+        )
+        .unwrap();
+        assert_eq!(afl.compiler, "afl-clang-fast++");
+        // The pinned sandbox image ships `hfuzz-clang++`; no `hfuzz-c++`
+        // binary exists.
+        let honggfuzz = build_command(
+            EngineKind::Honggfuzz,
+            TargetLanguage::Cpp,
+            "fuzz_t",
+            Sanitizer::Undefined,
+        )
+        .unwrap();
+        assert_eq!(honggfuzz.compiler, "hfuzz-clang++");
+    }
+
+    #[test]
+    fn build_command_rejects_unsupported_sanitizers_loudly() {
+        use hf_core::target::Sanitizer;
+        for engine in [
+            EngineKind::LibFuzzer,
+            EngineKind::AflPlusPlus,
+            EngineKind::Honggfuzz,
+        ] {
+            let memory =
+                build_command(engine, TargetLanguage::C, "fuzz_t", Sanitizer::Memory).unwrap_err();
+            assert!(memory.to_string().contains("memory"), "{memory}");
+            assert!(memory.to_string().contains("instrumented libc"), "{memory}");
+            let thread =
+                build_command(engine, TargetLanguage::C, "fuzz_t", Sanitizer::Thread).unwrap_err();
+            assert!(thread.to_string().contains("thread"), "{thread}");
+            let none =
+                build_command(engine, TargetLanguage::C, "fuzz_t", Sanitizer::None).unwrap_err();
+            assert!(none.to_string().contains("sanitizer"), "{none}");
+        }
+    }
+
+    #[test]
+    fn build_command_rejects_non_address_sanitizers_for_rust() {
+        use hf_core::target::Sanitizer;
+        // cargo-fuzz (libfuzzer-sys) builds Rust targets with AddressSanitizer
+        // only; rustc has no UBSan support on this path.
+        let address = build_command(
+            EngineKind::LibFuzzer,
+            TargetLanguage::Rust,
+            "fuzz_t",
+            Sanitizer::Address,
+        )
+        .unwrap();
+        assert_eq!(address.compiler, "cargo");
+        for sanitizer in [
+            Sanitizer::Undefined,
+            Sanitizer::Memory,
+            Sanitizer::Thread,
+            Sanitizer::None,
+        ] {
+            let error = build_command(
+                EngineKind::LibFuzzer,
+                TargetLanguage::Rust,
+                "fuzz_t",
+                sanitizer,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("Rust"), "{error}");
+            assert!(error.to_string().contains(sanitizer.as_str()), "{error}");
+        }
+    }
+
+    #[test]
+    fn build_command_rejects_a_sanitizer_choice_for_syzkaller() {
+        use hf_core::target::Sanitizer;
+        let error = build_command(
+            EngineKind::Syzkaller,
+            TargetLanguage::C,
+            "fuzz_t",
+            Sanitizer::Undefined,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("kernel"), "{error}");
     }
 
     #[test]
@@ -2218,6 +2558,8 @@ Iterations : 12345
             seed: None,
             replay_of: None,
             input_manifest_sha256: None,
+            input_timeout: None,
+            resume: false,
         }
     }
 

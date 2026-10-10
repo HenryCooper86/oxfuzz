@@ -86,6 +86,16 @@ impl ServiceContainer {
             request.engine,
             request.duration_secs,
             None,
+            // The CI gate carries no per-run timeout override; the configured
+            // `fuzzing.default_timeout_ms` applies.
+            None,
+            // A CI gate measures the current tree exactly: a resumed AFL++
+            // session would carry prior crashes into this verdict, so resume
+            // is pinned off here even when a deployment defaults it on.
+            Some(false),
+            // The gate runs the promoted harness as built; the run records
+            // the harness's own sanitizer.
+            None,
             on_progress,
         )
         .await?;

@@ -488,3 +488,58 @@ async fn disarming_stops_a_campaign_that_was_previously_authorized() {
         "withdrawing authorization must take effect immediately"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Environment-driven construction
+// ---------------------------------------------------------------------------
+
+#[test]
+fn env_auto_approve_flag_recognizes_truthy_values_only() {
+    // The truthy vocabulary is the composition contract every gate that
+    // defers to the environment agrees on; pin it in one place.
+    for value in ["1", "true", "yes", "on"] {
+        std::env::set_var("HF_AUTO_APPROVE", value);
+        assert!(
+            hf_guardrails::EnvApprovalGate::auto_approve_enabled(),
+            "value {value:?} must opt into automatic approval"
+        );
+    }
+    for value in ["0", "false", "no", "off", "", "2"] {
+        std::env::set_var("HF_AUTO_APPROVE", value);
+        assert!(
+            !hf_guardrails::EnvApprovalGate::auto_approve_enabled(),
+            "value {value:?} must not opt into automatic approval"
+        );
+    }
+    std::env::remove_var("HF_AUTO_APPROVE");
+    assert!(!hf_guardrails::EnvApprovalGate::auto_approve_enabled());
+}
+
+#[tokio::test]
+async fn from_env_with_gate_uses_the_given_gate_unless_permissive() {
+    std::env::remove_var("HF_GUARDRAILS");
+    // The default policy consults the supplied gate, and its answer decides.
+    let denied = Guardrails::from_env_with_gate(std::sync::Arc::new(DenyAll));
+    assert!(denied.authorize(run_fuzzer()).await.is_err());
+    let allowed = Guardrails::from_env_with_gate(std::sync::Arc::new(AutoApprove));
+    assert!(allowed.authorize(run_fuzzer()).await.is_ok());
+    // A Critical action stays policy-denied no matter what the gate says.
+    assert!(
+        allowed
+            .authorize(Action::ShellExec {
+                command: "id".to_owned(),
+            })
+            .await
+            .is_err(),
+        "a permissive gate must not loosen a policy denial"
+    );
+
+    // The permissive opt-out keeps its meaning and never consults the gate.
+    std::env::set_var("HF_GUARDRAILS", "permissive");
+    let permissive = Guardrails::from_env_with_gate(std::sync::Arc::new(DenyAll));
+    assert!(
+        permissive.authorize(run_fuzzer()).await.is_ok(),
+        "HF_GUARDRAILS=permissive must keep auto-approving past a denying gate"
+    );
+    std::env::remove_var("HF_GUARDRAILS");
+}

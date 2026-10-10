@@ -256,6 +256,23 @@ impl Guardrails {
         Self::new(GuardrailPolicy::default(), Arc::new(EnvApprovalGate))
     }
 
+    /// Construct from the environment, consulting `gate` (instead of an
+    /// [`EnvApprovalGate`]) when the default policy requires approval.
+    /// `HF_GUARDRAILS=permissive` keeps its meaning here: auto-approve with an
+    /// audit trail for trusted local loops, and `gate` is never consulted.
+    /// Every other value (or none) selects the default policy with `gate`.
+    ///
+    /// This is how a presentation layer installs its own human-in-the-loop
+    /// source (the CLI's terminal prompt, for example) without forking the
+    /// environment contract.
+    #[must_use]
+    pub fn from_env_with_gate(gate: Arc<dyn ApprovalGate>) -> Self {
+        match std::env::var("HF_GUARDRAILS").as_deref() {
+            Ok("permissive") => Self::permissive(),
+            _ => Self::new(GuardrailPolicy::default(), gate),
+        }
+    }
+
     /// Construct from the environment. The default is the safe env-gated policy:
     /// high-risk actions (harness compile/run, fuzzer execution) require explicit
     /// consent via `HF_AUTO_APPROVE=1`. `HF_GUARDRAILS=permissive` opts out into
@@ -267,10 +284,7 @@ impl Guardrails {
     /// runs on the host without an explicit opt-in.
     #[must_use]
     pub fn from_env() -> Self {
-        match std::env::var("HF_GUARDRAILS").as_deref() {
-            Ok("permissive") => Self::permissive(),
-            _ => Self::env_gated(),
-        }
+        Self::from_env_with_gate(Arc::new(EnvApprovalGate))
     }
 
     /// The active policy.

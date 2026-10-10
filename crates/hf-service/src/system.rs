@@ -48,6 +48,12 @@ pub struct SystemStatus {
     /// configured at all -- [`crate::defectdojo_lifecycle::status`] tells the two
     /// apart for a panel that needs to explain itself.
     pub defectdojo: StatusFlag,
+    /// How to obtain the sandbox image when it is missing: the one-step CLI
+    /// build plus `scripts/build-sandbox.sh` or the canonical `docker build`
+    /// command. `None` when the image is present (the field is omitted from
+    /// the JSON shape then -- additive for existing consumers).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sandbox_image_remedy: Option<String>,
 }
 
 impl SystemStatus {
@@ -114,7 +120,105 @@ pub async fn system_status() -> SystemStatus {
             .supports(hf_core::engine::EngineKind::Syzkaller)
             .into(),
         defectdojo: crate::defectdojo_lifecycle::reachable().await.into(),
+        sandbox_image_remedy: (!sandbox_image).then(sandbox_image_remedy),
     }
+}
+
+/// The operator-facing remedy for a missing sandbox image.
+pub fn sandbox_image_remedy() -> String {
+    sandbox_image_remedy_from(
+        crate::container::repo_root().as_deref(),
+        &hf_runtime::host_platform(),
+    )
+}
+
+/// Compose the one-line remedy: the source tree's build script when it has
+/// one, else the canonical `docker build` command when the tree carries the
+/// sandbox build inputs, else the generic form -- never name a tree as the
+/// build context when it has neither `scripts/build-sandbox.sh` nor
+/// `docker/sandbox/Dockerfile`, since the build cannot run there. Without a
+/// buildable checkout the CLI build has nothing to run either, so only the
+/// canonical command applies.
+fn sandbox_image_remedy_from(source_root: Option<&std::path::Path>, platform: &str) -> String {
+    let docker_build = format!(
+        "docker build --platform {platform} -t {} -f docker/sandbox/Dockerfile .",
+        hf_runtime::SANDBOX_IMAGE
+    );
+    match source_root {
+        Some(root) if root.join("scripts/build-sandbox.sh").is_file() => format!(
+            "build it with `oxfuzz doctor --build-image` or `scripts/build-sandbox.sh` (from {})",
+            root.display()
+        ),
+        Some(root) if root.join("docker/sandbox/Dockerfile").is_file() => format!(
+            "build it with `oxfuzz doctor --build-image`, or run `{docker_build}` from {}",
+            root.display()
+        ),
+        _ => format!("run `{docker_build}` from an oxfuzz source checkout"),
+    }
+}
+
+/// Preflight for a sandbox image build, in probe order: each failure names the
+/// exact blocker (Engineering Protocol 2.16). Returns the source checkout to
+/// build from.
+fn build_preflight(
+    docker_enabled: bool,
+    docker_cli_present: bool,
+    docker_daemon_ready: bool,
+    source_root: Option<&std::path::Path>,
+) -> Result<std::path::PathBuf, hf_core::error::ClassifiedError> {
+    use hf_core::error::ClassifiedError;
+    if !docker_enabled {
+        return Err(ClassifiedError::Validation(
+            "Docker is disabled (HF_USE_DOCKER=0); building the sandbox image requires Docker"
+                .to_owned(),
+        ));
+    }
+    if !docker_cli_present {
+        return Err(ClassifiedError::Validation(
+            "Docker CLI not found; install OrbStack or Docker Desktop first".to_owned(),
+        ));
+    }
+    if !docker_daemon_ready {
+        return Err(ClassifiedError::Validation(
+            "Docker daemon is not running; start it first".to_owned(),
+        ));
+    }
+    let root = source_root.ok_or_else(|| {
+        ClassifiedError::Validation(
+            "no oxfuzz source checkout found above the current directory or the executable; \
+             run `oxfuzz doctor --build-image` from a source checkout, or `docker build` with \
+             docker/sandbox/Dockerfile directly"
+                .to_owned(),
+        )
+    })?;
+    if !root.join("docker/sandbox/Dockerfile").is_file() {
+        return Err(ClassifiedError::Validation(format!(
+            "the source checkout at {} has no docker/sandbox/Dockerfile to build from",
+            root.display()
+        )));
+    }
+    Ok(root.to_path_buf())
+}
+
+/// Build the sandbox image for the host platform via the same
+/// [`crate::container::build_sandbox_image`] operation the desktop app uses.
+///
+/// The build streams its output to the caller's terminal (inherited stdio),
+/// matching the GUI's behavior; it can take several minutes on first run.
+///
+/// # Errors
+/// Returns `ClassifiedError::Validation` naming the exact blocker when Docker
+/// is disabled, the CLI or daemon is absent, or no source checkout with
+/// `docker/sandbox/Dockerfile` is found; `ClassifiedError::Internal` when the
+/// build itself fails.
+pub fn build_sandbox_image_for_host() -> Result<(), hf_core::error::ClassifiedError> {
+    let root = build_preflight(
+        crate::container::docker_runtime_enabled(),
+        hf_runtime::docker_cli_present(),
+        hf_runtime::docker_daemon_ready(),
+        crate::container::repo_root().as_deref(),
+    )?;
+    crate::container::build_sandbox_image(&root, &hf_runtime::host_platform())
 }
 
 /// Readiness of one selected campaign, without authoring or executing a target.
@@ -142,7 +246,9 @@ pub async fn fuzzing_preflight(
     duration_secs: Option<u64>,
     require_provider: bool,
 ) -> FuzzingPreflight {
-    let policy = crate::config::resolve_fuzzing_run(Some(engine), duration_secs, None).map(|_| ());
+    let policy =
+        crate::config::resolve_fuzzing_run(Some(engine), duration_secs, None, None, None, None)
+            .map(|_| ());
     let provider_configured = require_provider.then(|| {
         crate::container::provider_pool_from_config()
             .or_else(crate::container::provider_pool_from_env)
@@ -208,6 +314,7 @@ mod tests {
             honggfuzz: StatusFlag(false),
             syzkaller: StatusFlag(false),
             defectdojo: StatusFlag(false),
+            sandbox_image_remedy: None,
         }
     }
 
@@ -223,6 +330,124 @@ mod tests {
             assert_eq!(json["runtime_ready"], expected);
             assert_eq!(json["status"]["defectdojo"], false);
         }
+    }
+
+    #[test]
+    fn the_remedy_field_is_additive_in_the_json_shape() {
+        let mut ready = status(true, true, true);
+        ready.sandbox_image_remedy = None;
+        assert!(serde_json::to_value(&ready).unwrap()["sandbox_image_remedy"].is_null());
+
+        let mut missing = status(true, false, false);
+        missing.sandbox_image_remedy = Some("build it".to_owned());
+        assert_eq!(
+            serde_json::to_value(&missing).unwrap()["sandbox_image_remedy"],
+            "build it"
+        );
+    }
+
+    #[test]
+    fn remedy_names_the_build_script_when_the_checkout_has_one() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("scripts")).unwrap();
+        std::fs::write(root.path().join("scripts/build-sandbox.sh"), "#!/bin/sh\n").unwrap();
+
+        let remedy = super::sandbox_image_remedy_from(Some(root.path()), "linux/arm64");
+
+        assert!(remedy.contains("scripts/build-sandbox.sh"), "{remedy}");
+        assert!(remedy.contains("doctor --build-image"), "{remedy}");
+        assert_eq!(remedy.lines().count(), 1, "one line: {remedy}");
+    }
+
+    #[test]
+    fn remedy_falls_back_to_the_canonical_docker_build_command() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("docker/sandbox")).unwrap();
+        std::fs::write(
+            root.path().join("docker/sandbox/Dockerfile"),
+            "FROM scratch\n",
+        )
+        .unwrap();
+
+        let remedy = super::sandbox_image_remedy_from(Some(root.path()), "linux/arm64");
+
+        assert!(
+            remedy.contains(
+                "docker build --platform linux/arm64 -t oxfuzz/fuzz-sandbox:0.2.1 -f docker/sandbox/Dockerfile ."
+            ),
+            "{remedy}"
+        );
+        assert!(
+            remedy.contains(root.path().to_string_lossy().as_ref()),
+            "{remedy}"
+        );
+    }
+
+    #[test]
+    fn remedy_never_names_a_tree_that_cannot_build_the_image() {
+        // A tree that has neither the script nor the Dockerfile (e.g. a foreign
+        // project bound by the config walk-up) is not a usable build context.
+        let root = tempfile::tempdir().unwrap();
+
+        let remedy = super::sandbox_image_remedy_from(Some(root.path()), "linux/arm64");
+
+        assert!(remedy.contains("docker build"), "{remedy}");
+        assert!(remedy.contains("oxfuzz source checkout"), "{remedy}");
+        assert!(
+            !remedy.contains(root.path().to_string_lossy().as_ref()),
+            "{remedy}"
+        );
+        assert!(!remedy.contains("doctor --build-image"), "{remedy}");
+    }
+
+    #[test]
+    fn remedy_without_a_checkout_names_the_canonical_build_and_its_context() {
+        let remedy = super::sandbox_image_remedy_from(None, "linux/amd64");
+
+        assert!(
+            remedy.contains("docker build --platform linux/amd64"),
+            "{remedy}"
+        );
+        assert!(remedy.contains("oxfuzz/fuzz-sandbox:0.2.1"), "{remedy}");
+        assert!(remedy.contains("docker/sandbox/Dockerfile"), "{remedy}");
+        // Without a source checkout the CLI build has nothing to run.
+        assert!(!remedy.contains("doctor --build-image"), "{remedy}");
+    }
+
+    #[test]
+    fn build_preflight_fails_loud_in_probe_order() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("docker/sandbox")).unwrap();
+        std::fs::write(
+            root.path().join("docker/sandbox/Dockerfile"),
+            "FROM scratch\n",
+        )
+        .unwrap();
+        let bare = tempfile::tempdir().unwrap();
+
+        let disabled = super::build_preflight(false, true, true, Some(root.path())).unwrap_err();
+        assert!(disabled.to_string().contains("HF_USE_DOCKER"), "{disabled}");
+
+        let no_cli = super::build_preflight(true, false, true, Some(root.path())).unwrap_err();
+        assert!(no_cli.to_string().contains("Docker CLI"), "{no_cli}");
+
+        let no_daemon = super::build_preflight(true, true, false, Some(root.path())).unwrap_err();
+        assert!(no_daemon.to_string().contains("not running"), "{no_daemon}");
+
+        let no_root = super::build_preflight(true, true, true, None).unwrap_err();
+        assert!(no_root.to_string().contains("source checkout"), "{no_root}");
+
+        let no_dockerfile =
+            super::build_preflight(true, true, true, Some(bare.path())).unwrap_err();
+        assert!(
+            no_dockerfile
+                .to_string()
+                .contains("docker/sandbox/Dockerfile"),
+            "{no_dockerfile}"
+        );
+
+        let resolved = super::build_preflight(true, true, true, Some(root.path())).unwrap();
+        assert_eq!(resolved, root.path());
     }
 
     #[test]

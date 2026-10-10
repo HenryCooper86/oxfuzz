@@ -2,6 +2,8 @@
 //! (`ServiceContainer::harness_generate`).
 
 mod common;
+#[path = "common/test_config.rs"]
+mod test_config;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -12,6 +14,9 @@ use hf_service::ServiceContainer;
 
 fn isolate_workspace() {
     common::install_managed_workspace("oxfuzz_repair_it");
+    // Exact compile-flag assertions cannot tolerate the ambient per-developer
+    // config (coverage collection injects profiling flags into the build).
+    test_config::install();
 }
 
 /// A runtime whose compile command fails (`exit 1`) for the first
@@ -153,6 +158,7 @@ async fn harness_generate_repairs_a_failing_compile() {
             EngineKind::LibFuzzer,
             TargetLanguage::C,
             2,
+            None,
         )
         .await
         .expect("harness_generate should recover via repair");
@@ -188,6 +194,7 @@ async fn harness_generate_gives_up_after_max_repairs() {
             EngineKind::LibFuzzer,
             TargetLanguage::C,
             1,
+            None,
         )
         .await;
     assert!(err.is_err(), "should fail after exhausting repairs");
@@ -233,6 +240,7 @@ async fn failed_compile_does_not_replace_the_active_harness_revision() {
             EngineKind::LibFuzzer,
             "parse_entry",
             TargetLanguage::C,
+            None,
         )
         .await;
 
@@ -265,6 +273,7 @@ async fn successful_compile_commits_the_active_harness_revision() {
             EngineKind::LibFuzzer,
             "parse_entry",
             TargetLanguage::C,
+            None,
         )
         .await
         .expect("compile should succeed");
@@ -293,6 +302,7 @@ async fn new_compilation_requires_store_before_runtime_or_provider() {
             EngineKind::LibFuzzer,
             "parse_entry",
             TargetLanguage::C,
+            None,
         )
         .await;
     assert!(compile
@@ -306,6 +316,7 @@ async fn new_compilation_requires_store_before_runtime_or_provider() {
             EngineKind::LibFuzzer,
             TargetLanguage::C,
             0,
+            None,
         )
         .await;
     assert!(generated
@@ -341,6 +352,7 @@ async fn repair_success_records_only_the_successful_attempts_fresh_database_flag
             EngineKind::LibFuzzer,
             TargetLanguage::C,
             1,
+            None,
         )
         .await
         .unwrap();

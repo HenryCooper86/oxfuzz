@@ -53,6 +53,14 @@ max_mem_mb = 2048
 max_cpus = 1
 max_duration_secs = 7200
 
+# Harness qualification policy. `allow_unreviewed_smoke` lets smoke
+# qualification skip the mandatory independent LLM review (offline operation);
+# `oxfuzz harness --no-llm-review` opts in per invocation without it. Every
+# bypass is persisted as a marked review record and audited. See
+# oxfuzz.example.toml and docs/guides/SAFETY_MODEL.md for the residual risk.
+[harness]
+allow_unreviewed_smoke = false
+
 # Retained monitoring for active and recent campaign runs. Throughput mean is
 # the arithmetic mean of all valid reported samples for the run; the live
 # coverage deque remains bounded independently.

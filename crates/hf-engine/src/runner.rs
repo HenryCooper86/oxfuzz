@@ -37,7 +37,12 @@ impl ProgressAggregate {
             // that at least one finding occurred; the service counts distinct
             // run-owned artifact files for the exact total.
             FuzzProgress::CrashesFound(_) => self.crashes = self.crashes.max(1),
-            FuzzProgress::LogLine(_) | FuzzProgress::Done => {}
+            // A Stats snapshot restates the scalar EdgesCovered/ExecsPerSec
+            // events parsed from the same engine line; the aggregate keeps
+            // peaking only the dedicated scalar events, so the run summary is
+            // unchanged whether or not a line carried a snapshot. Stats
+            // carries no crash counter.
+            FuzzProgress::LogLine(_) | FuzzProgress::Stats(_) | FuzzProgress::Done => {}
         }
     }
 
@@ -71,6 +76,59 @@ pub struct RunResult {
     pub progress: Vec<FuzzProgress>,
     /// The runtime-owned reason the command stopped.
     pub termination: CommandTermination,
+}
+
+/// Assemble the sandbox environment for one engine run from the typed config.
+///
+/// `cfg.env` passes through untouched except for the runner-owned keys:
+///
+/// - libFuzzer fork-mode children run the exit-time `LeakSanitizer`, which
+///   misreports the forked snapshot of the parent's heap as leaked (the
+///   adapter also passes `-detect_leaks=0`). An operator-provided `ASAN_OPTIONS`
+///   wins outright: merging sanitizer options we cannot interpret would
+///   silently change what the operator asked to measure.
+/// - A libFuzzer run over a `UBSan` build gets `UBSAN_OPTIONS=print_stacktrace=1`
+///   (unless the operator set `UBSAN_OPTIONS`): the binary already aborts on a
+///   finding (`-fno-sanitize-recover=undefined` at compile time), and the
+///   frames make the dedup signature work. This key is libFuzzer-scoped by
+///   design: AFL++ and honggfuzz auto-configure `abort_on_error` when they
+///   detect sanitizer instrumentation, and a preset `UBSAN_OPTIONS` suppresses
+///   that, turning the `UBSan` `Die()` (exit code 1, no signal) into a non-crash
+///   those signal-based engines never save (verified against the pinned
+///   sandbox: AFL++ 4.09c saved 0 crashes with a preset, 1 without).
+/// - AFL++ session resume is environment-driven: `cfg.resume` injects
+///   `AFL_AUTORESUME=1`, so afl-fuzz continues the output tree the service
+///   copied into this run's staging instead of refusing the existing tree.
+///   A hand-set `AFL_AUTORESUME` in `cfg.env` is rejected as a second source
+///   of resume truth, in both resume states.
+fn run_env(
+    engine: EngineKind,
+    cfg: &FuzzRunConfig,
+) -> Result<std::collections::HashMap<String, String>, ClassifiedError> {
+    let mut env: std::collections::HashMap<String, String> = cfg.env.iter().cloned().collect();
+    if engine == EngineKind::LibFuzzer && cfg.max_cpus > 1 && !env.contains_key("ASAN_OPTIONS") {
+        env.insert("ASAN_OPTIONS".to_owned(), "detect_leaks=0".to_owned());
+    }
+    if engine == EngineKind::LibFuzzer
+        && cfg.sanitizer == hf_core::target::Sanitizer::Undefined
+        && !env.contains_key("UBSAN_OPTIONS")
+    {
+        env.insert("UBSAN_OPTIONS".to_owned(), "print_stacktrace=1".to_owned());
+    }
+    if engine == EngineKind::AflPlusPlus {
+        if env.contains_key("AFL_AUTORESUME") {
+            return Err(ClassifiedError::Validation(
+                "AFL_AUTORESUME must not be set through the run environment: AFL++ session \
+                 resume is owned by the typed run config (`FuzzRunConfig.resume`, CLI \
+                 `--resume`)"
+                    .to_owned(),
+            ));
+        }
+        if cfg.resume {
+            env.insert("AFL_AUTORESUME".to_owned(), "1".to_owned());
+        }
+    }
+    Ok(env)
 }
 
 /// An engine-agnostic runner that executes fuzz commands via a
@@ -196,7 +254,7 @@ impl EngineRunner {
         };
         let cfg = effective_cfg.as_ref();
 
-        let args = crate::registry::adapter_for(engine).build_run_args(cfg, binary, corpus, out);
+        let args = crate::registry::adapter_for(engine).build_run_args(cfg, binary, corpus, out)?;
         // The sandbox wall-clock timeout must exceed the fuzzer's own run time:
         // a libFuzzer `-max_total_time=N` campaign also spends time loading the
         // corpus and running ASan leak detection at exit, so without headroom
@@ -204,16 +262,7 @@ impl EngineRunner {
         let max_duration_secs = cfg.duration.map_or(DEFAULT_RUN_SECS, |d| {
             d.as_secs().saturating_add(SANDBOX_TIMEOUT_HEADROOM_SECS)
         });
-        let mut env: std::collections::HashMap<String, String> = cfg.env.iter().cloned().collect();
-        // libFuzzer fork-mode children run the exit-time LeakSanitizer, which
-        // misreports the forked snapshot of the parent's heap as leaked (the
-        // adapter also passes `-detect_leaks=0`). An operator-provided
-        // ASAN_OPTIONS wins outright: merging sanitizer options we cannot
-        // interpret would silently change what the operator asked to measure.
-        if engine == EngineKind::LibFuzzer && cfg.max_cpus > 1 && !env.contains_key("ASAN_OPTIONS")
-        {
-            env.insert("ASAN_OPTIONS".to_owned(), "detect_leaks=0".to_owned());
-        }
+        let env = run_env(engine, cfg)?;
         let limits = hf_core::runtime::ResourceLimits {
             max_mem_mb: cfg.max_mem_mb,
             max_cpus: cfg.max_cpus,

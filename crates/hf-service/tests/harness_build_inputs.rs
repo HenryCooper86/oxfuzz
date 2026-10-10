@@ -1,5 +1,7 @@
 //! Exact compilation inputs and configured admission through shared service operations.
 mod common;
+#[path = "common/test_config.rs"]
+mod test_config;
 use hf_core::{
     engine::EngineKind,
     error::ClassifiedError,
@@ -177,6 +179,7 @@ impl hf_core::provider::ProviderPool for Provider {
         Ok(())
     }
 }
+
 struct Fixture {
     project: tempfile::TempDir,
     store: Arc<hf_storage::Store>,
@@ -187,6 +190,10 @@ struct Fixture {
 impl Fixture {
     async fn new() -> Self {
         common::install_managed_workspace("oxfuzz_build_inputs_it");
+        // Pin the fuzzing policy: the assertions below name exact compile
+        // flags, which the ambient per-developer config changes (coverage
+        // collection injects profiling flags into the build).
+        test_config::install();
         let project = tempfile::tempdir().unwrap();
         std::fs::write(project.path().join("parse.c"), "#include <stddef.h>\nint parse_entry(const unsigned char *data, size_t size) { return size && data[0]; }\n").unwrap();
         let store = Arc::new(
@@ -215,6 +222,7 @@ impl Fixture {
                 EngineKind::LibFuzzer,
                 "parse_entry",
                 TargetLanguage::C,
+                None,
             )
             .await
             .unwrap()
@@ -337,6 +345,7 @@ async fn configured_image_movement_stops_generate_before_discovery_or_provider()
             EngineKind::LibFuzzer,
             TargetLanguage::C,
             0,
+            None,
         )
         .await;
     assert!(result.unwrap_err().to_string().contains("Stale"));
@@ -415,6 +424,7 @@ async fn missing_store_prevents_generation_provider_and_runtime() {
             EngineKind::LibFuzzer,
             TargetLanguage::C,
             0,
+            None,
         )
         .await
         .unwrap_err();
@@ -442,7 +452,7 @@ async fn rust_compile_pins_image_and_records_only_flags_emitted_by_cargo() {
         if database {
             f.database("-DNEVER_EMITTED=1");
         }
-        let compiled=f.service.harness_compile("#![no_main]\nlibfuzzer_sys::fuzz_target!(|data: &[u8]| { parse_sample::parse_entry(data); });".into(),f.project.path(),EngineKind::LibFuzzer,"parse_entry",TargetLanguage::Rust).await.unwrap();
+        let compiled=f.service.harness_compile("#![no_main]\nlibfuzzer_sys::fuzz_target!(|data: &[u8]| { parse_sample::parse_entry(data); });".into(),f.project.path(),EngineKind::LibFuzzer,"parse_entry",TargetLanguage::Rust, None).await.unwrap();
         let inputs = f
             .store
             .harness_build_inputs(compiled.harness_id)
@@ -475,6 +485,7 @@ async fn atomic_input_storage_failure_publishes_no_active_revision() {
             EngineKind::LibFuzzer,
             "parse_entry",
             TargetLanguage::C,
+            None,
         )
         .await;
     assert!(result.is_err());
@@ -566,6 +577,9 @@ async fn changed_configured_inputs_block_shared_lifecycle_and_rebuild_restores_e
                 EngineKind::LibFuzzer,
                 TargetLanguage::C,
                 1,
+                None,
+                None,
+                None,
                 1,
             )
             .await;
@@ -577,6 +591,9 @@ async fn changed_configured_inputs_block_shared_lifecycle_and_rebuild_restores_e
                 "parse_entry",
                 EngineKind::LibFuzzer,
                 1,
+                None,
+                None,
+                None,
                 None,
                 &|_| {},
             )
@@ -759,6 +776,7 @@ async fn deleted_configured_database_reports_needs_build_before_dispatch() {
             EngineKind::LibFuzzer,
             TargetLanguage::C,
             0,
+            None,
         )
         .await
         .unwrap_err();
@@ -960,6 +978,9 @@ async fn final_direct_and_corpus_image_resolution_cannot_select_a_moved_tag() {
                     EngineKind::LibFuzzer,
                     1,
                     None,
+                    None,
+                    None,
+                    None,
                     &|_| {},
                 )
                 .await
@@ -1014,6 +1035,7 @@ async fn pending_corpus_engine_input_change_preserves_corpus_and_stops_regenerat
                 engine,
                 "parse_entry",
                 TargetLanguage::C,
+                None,
             )
             .await
             .unwrap();
@@ -1098,6 +1120,9 @@ async fn image_change_after_run_reservation_is_retained_failed_before_engine_dis
             EngineKind::LibFuzzer,
             1,
             None,
+            None,
+            None,
+            None,
             &|_| {},
             &|id| {
                 *reserved.lock().unwrap() = Some(id);
@@ -1171,6 +1196,9 @@ async fn campaign_pending_seed_preserves_corpus(provider_fails: bool) {
         EngineKind::LibFuzzer,
         TargetLanguage::C,
         1,
+        None,
+        None,
+        None,
         1,
     );
     let mutation = async {
@@ -1252,6 +1280,9 @@ async fn campaign_rechecks_after_seed_discovery_before_provider() {
             EngineKind::LibFuzzer,
             TargetLanguage::C,
             1,
+            None,
+            None,
+            None,
             1,
         )
         .await;

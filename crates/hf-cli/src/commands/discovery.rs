@@ -15,7 +15,7 @@ pub(crate) async fn cmd_discover(
     ai: AiOption,
 ) -> anyhow::Result<()> {
     let lang = parse_lang(lang)?;
-    let container = ServiceContainer::bootstrap().await;
+    let container = crate::approval::bootstrap().await;
     #[cfg(feature = "native-analysis")]
     let inv = {
         let analyzed = container.discover_analyzed(&project, lang).await?;
@@ -148,7 +148,7 @@ pub(crate) async fn cmd_discover(
     semgrep: bool,
 ) -> anyhow::Result<()> {
     let (language, container) =
-        bootstrap_discover_service(lang, ServiceContainer::bootstrap).await?;
+        bootstrap_discover_service(lang, crate::approval::bootstrap).await?;
     let mut output = ConsoleDiscoverOutput;
     run_discover_command(
         &container,

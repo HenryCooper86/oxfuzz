@@ -50,6 +50,7 @@ pub mod evidence;
 pub mod finding_proof;
 #[cfg(feature = "triage-disposition")]
 pub mod finding_review;
+pub mod harness_review;
 #[cfg(feature = "harness-tournament")]
 pub mod harness_tournament;
 #[cfg(feature = "harness-work-order")]
@@ -109,7 +110,7 @@ pub use hf_agent::{
     AgentDefinition, AgentEvent, AgentRegistry, CollectingSink, EventSink, NullSink, TOOL_SPECS,
 };
 pub use hf_core::crash::Crash;
-pub use hf_core::engine::{EngineCapabilities, EngineKind, FuzzProgress};
+pub use hf_core::engine::{EngineCapabilities, EngineKind, EngineStats, FuzzProgress};
 pub use hf_core::error::ClassifiedError;
 pub use hf_core::harness::{DraftGenerator, HarnessStatus};
 pub use hf_core::provider::ProviderStatus;
@@ -117,9 +118,11 @@ pub use hf_core::retired_engine::{RETIRED_ENGINE_ID, RETIRED_ENGINE_IDS};
 pub use hf_core::runtime::{
     CommandResult, CommandTermination, ImmutableImageReference, ResourceLimits, RuntimeAdapter,
 };
-pub use hf_core::target::{TargetInventory, TargetLanguage};
+pub use hf_core::target::{Sanitizer, TargetInventory, TargetLanguage};
 pub use hf_core::types::{Message, ProviderId, Role, SessionId};
-pub use hf_guardrails::{Action, ApprovalGate, GuardrailPolicy, Guardrails};
+pub use hf_guardrails::{
+    Action, ApprovalGate, EnvApprovalGate, GuardrailPolicy, Guardrails, RiskTier,
+};
 pub use hf_runtime::{
     can_run_platform, docker_cli_present, docker_daemon_ready, host_platform, norm_platform,
     platform_short, sandbox_image_arch, sandbox_image_present, scrubbed_command,
@@ -179,11 +182,12 @@ pub use container::{
     project_workspace_dir, provider_pool_from_config, provider_pool_from_env, repo_root,
     runtime_from_env, workspace_dir, workspace_root, AgentInstanceSnapshot, AgentPoolSnapshot,
     ArtifactSummary, CompileOutcome, CorpusCapabilities, CorpusCapability, CorpusImportOutcome,
-    CorpusInventory, CoverageSample, EffectiveAutoRevert, MemorySnapshot, MinimizeOutcome,
-    ProviderSnapshot, RegressionResult, ReplayInputs, ReplayReview, RunCancelOutcome,
-    RunControlStatus, RunFunctionCoverage, RunHistoryItem, RunLifecycleStatus, RunOwnerView,
-    RunSummary, SchedulableTarget, SeedEntry, SeedRegenerationOutcome, SeedSurvivalReport,
-    ServiceContainer, SystemSnapshot, SyzkallerRunOpts, SyzkallerSummary,
+    CorpusInventory, CoverageSample, EffectiveAutoRevert, FuzzOutcome, FuzzRequest, FuzzStage,
+    MemorySnapshot, MinimizeOutcome, ProviderSnapshot, RegressionResult, ReplayInputs,
+    ReplayReview, RunCancelOutcome, RunControlStatus, RunDetailView, RunFunctionCoverage,
+    RunHistoryItem, RunLifecycleStatus, RunOwnerView, RunSummary, RunTelemetryView,
+    SchedulableTarget, SeedEntry, SeedRegenerationOutcome, SeedSurvivalReport, ServiceContainer,
+    SystemSnapshot, SyzkallerRunOpts, SyzkallerSummary, FUZZ_PIPELINE_REPAIRS,
 };
 #[cfg(feature = "ai-target-ranking")]
 pub use container::{RankedDiscoveryResult, RankedDiscoveryStatus, RankedInventoryAdvice};
@@ -204,6 +208,7 @@ pub use finding_proof::{
 };
 #[cfg(feature = "triage-disposition")]
 pub use finding_review::{FindingDispositionFilter, FindingReviewFilter, FindingReviewItem};
+pub use harness_review::{HarnessReviewBypass, HarnessReviewBypassSource};
 #[cfg(feature = "harness-tournament")]
 pub use harness_tournament::{
     HarnessCandidateEvidence, HarnessTournamentRequest, HarnessTournamentResult,
@@ -227,7 +232,10 @@ pub use hf_storage::{AutoRevertEvent, GuardrailDecisionRecord, ProjectAutoRevert
 pub use hf_storage::{HarnessWorkOrderAttemptStage, HarnessWorkOrderAttemptStatus};
 #[cfg(feature = "patch-to-proof")]
 pub use hf_storage::{RemediationOperationStage, RemediationOperationStatus};
-pub use init::{init_at, init_workspace, InitReport};
+pub use init::{
+    config_resolution, init_at, init_workspace, set_cli_config_dir, ConfigDirResolution,
+    ConfigDirSource, InitReport,
+};
 pub use issue_tracker::{CreatedIssue, IssueTrackerConfig};
 #[cfg(feature = "oracle-studio")]
 pub use oracle_studio::{
@@ -251,7 +259,10 @@ pub use semgrep::{
     SemgrepCancelOutcome, SemgrepFindingView, SemgrepInventoryView, SemgrepOperationState,
     SemgrepOperationView, SemgrepOverlayState, SemgrepTargetView,
 };
-pub use system::{fuzzing_preflight, system_status, FuzzingPreflight, SystemStatus};
+pub use system::{
+    build_sandbox_image_for_host, fuzzing_preflight, sandbox_image_remedy, system_status,
+    FuzzingPreflight, SystemStatus,
+};
 #[cfg(feature = "triage-disposition")]
 pub use triage_disposition::{
     triage_disposition, triage_order_key, ClaimCeiling, Disposition, DispositionAction,

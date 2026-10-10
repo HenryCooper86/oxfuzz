@@ -112,7 +112,9 @@ async fn harness_refine_recompiles_from_existing_harness() {
     .unwrap();
     let target = "parse_entry";
 
-    // Pre-existing harness in the workspace (refine requires one).
+    // Pre-existing harness in the workspace (refine requires one), with its
+    // persisted record: refinement inherits the revision's build sanitizer
+    // from that record, so the fixture must persist it.
     let workspace = hf_service::workspace_dir(&project, target);
     std::fs::create_dir_all(&workspace).unwrap();
     std::fs::write(
@@ -121,12 +123,41 @@ async fn harness_refine_recompiles_from_existing_harness() {
     )
     .unwrap();
 
+    let store = Arc::new(
+        hf_storage::Store::connect(project.join("state.db"))
+            .await
+            .unwrap(),
+    );
     let container = ServiceContainer::new(Arc::new(OkRuntime), Some(Arc::new(RefinePool)))
-        .with_store(Arc::new(
-            hf_storage::Store::connect(project.join("state.db"))
-                .await
-                .unwrap(),
-        ));
+        .with_store(Arc::clone(&store));
+    let candidate = container
+        .discover(&project, TargetLanguage::C)
+        .await
+        .unwrap()
+        .candidates
+        .into_iter()
+        .find(|candidate| candidate.symbol == target)
+        .expect("the fixture target is discovered");
+    store
+        .upsert_harness(&hf_core::harness::Harness {
+            id: uuid::Uuid::new_v4(),
+            target_id: candidate.id,
+            engine: EngineKind::LibFuzzer,
+            source: "int LLVMFuzzerTestOneInput(const uint8_t*d,size_t n){return 0;}".to_owned(),
+            language: TargetLanguage::C,
+            build_cmd: hf_harness::build_command(
+                EngineKind::LibFuzzer,
+                TargetLanguage::C,
+                "fuzz_parse_entry",
+                hf_core::target::Sanitizer::Address,
+            )
+            .unwrap(),
+            sanitizer: hf_core::target::Sanitizer::Address,
+            status: hf_core::harness::HarnessStatus::Compiled,
+            smoke_run: None,
+        })
+        .await
+        .unwrap();
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         container.harness_refine(

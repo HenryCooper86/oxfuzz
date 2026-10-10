@@ -210,6 +210,9 @@ async fn approved_campaign_survives_service_process_loss() {
             EngineKind::LibFuzzer,
             10,
             None,
+            None,
+            None,
+            None,
             &|_| {},
         )
         .await
@@ -363,6 +366,7 @@ async fn live_campaign_child() {
             EngineKind::LibFuzzer,
             "qualification_parse",
             TargetLanguage::C,
+            None,
         )
         .await
         .unwrap();
@@ -389,6 +393,9 @@ async fn live_campaign_child() {
             "qualification_parse",
             EngineKind::LibFuzzer,
             120,
+            None,
+            None,
+            None,
             None,
             &|_| {},
             &|id| {
@@ -585,6 +592,8 @@ async fn seed_terminal_closeout_run(store: &Store, project: &Path) -> Uuid {
             seed: None,
             replay_of: None,
             input_manifest_sha256: None,
+            input_timeout: None,
+            resume: false,
         }),
         Utc::now(),
     );

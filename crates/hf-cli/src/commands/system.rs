@@ -1,5 +1,5 @@
 use hf_service::scheduler::{CampaignScheduler, CampaignSchedulerError};
-use hf_service::{ServiceContainer, SessionId};
+use hf_service::SessionId;
 use std::path::PathBuf;
 
 use crate::args::{KnowledgeOp, PolicyOp, ProvidersOp, ScheduleOp, ScheduleRecoveryOp, SessionOp};
@@ -12,7 +12,7 @@ fn doctor_lines(status: &hf_service::SystemStatus) -> Vec<String> {
         format!("{}  {label}", if ready { "READY" } else { "UNAVAILABLE" })
     };
 
-    vec![
+    let mut lines = vec![
         required(status.docker.is_ready(), "Docker daemon"),
         required(status.sandbox_image.is_ready(), "sandbox image"),
         engine(status.libfuzzer.is_ready(), "libFuzzer"),
@@ -27,7 +27,12 @@ fn doctor_lines(status: &hf_service::SystemStatus) -> Vec<String> {
                 "OPTIONAL"
             }
         ),
-    ]
+    ];
+    // A missing image must name its remedy, not just its absence.
+    if let Some(remedy) = &status.sandbox_image_remedy {
+        lines.push(format!("sandbox image missing: {remedy}"));
+    }
+    lines
 }
 
 /// One line per provider: readiness state, id, cumulative request/error
@@ -97,6 +102,7 @@ pub(crate) async fn cmd_doctor(
     engine: Option<&str>,
     duration: Option<&str>,
     require_provider: bool,
+    build_image: bool,
 ) -> anyhow::Result<()> {
     if let Some(engine) = engine {
         let engine = crate::parse::parse_engine(engine)?;
@@ -123,6 +129,15 @@ pub(crate) async fn cmd_doctor(
         }
         return Ok(());
     }
+    if build_image {
+        // The same service operation the desktop app's first launch runs. The
+        // build streams to the terminal and can take minutes, so it runs on the
+        // blocking pool; a preflight failure names the exact blocker.
+        tokio::task::spawn_blocking(hf_service::build_sandbox_image_for_host)
+            .await
+            .map_err(|error| anyhow::anyhow!("join sandbox image build task: {error}"))??;
+        eprintln!("sandbox image build finished; re-probing readiness");
+    }
     let status = hf_service::system_status().await;
     if json {
         println!("{}", serde_json::to_string_pretty(&status)?);
@@ -135,7 +150,7 @@ pub(crate) async fn cmd_doctor(
         #[cfg(feature = "concolic-enrichment")]
         {
             use hf_service::ConcolicAvailability;
-            let container = ServiceContainer::bootstrap().await;
+            let container = crate::approval::bootstrap().await;
             // The service returns a typed reason code; the CLI renders it and
             // does not assert a cause it cannot know (an absent SymCC layer is
             // only one of the ways the probe comes back unavailable).
@@ -158,7 +173,7 @@ pub(crate) async fn cmd_doctor(
 }
 
 pub(crate) async fn cmd_export(project: Option<PathBuf>, output: PathBuf) -> anyhow::Result<()> {
-    let container = ServiceContainer::bootstrap().await;
+    let container = crate::approval::bootstrap().await;
     let bundle = container.export_project_data(project.as_deref()).await?;
     let json = serde_json::to_string_pretty(&bundle)?;
     std::fs::write(&output, json)?;
@@ -192,7 +207,7 @@ pub(crate) async fn cmd_agent(
     project: Option<PathBuf>,
     agent: Option<&str>,
 ) -> anyhow::Result<()> {
-    let container = ServiceContainer::bootstrap().await;
+    let container = crate::approval::bootstrap().await;
     if container.provider_pool().is_none() {
         anyhow::bail!("agent requires an LLM provider; set HF_PROVIDER_API_KEY");
     }
@@ -253,7 +268,7 @@ pub(crate) fn cmd_knowledge(op: KnowledgeOp) -> anyhow::Result<()> {
 /// stops when the process exits; persisted schedules live under the user data
 /// dir (shared with the GUI and web server).
 async fn start_scheduler() -> Result<CampaignScheduler, CampaignSchedulerError> {
-    let container = ServiceContainer::bootstrap().await;
+    let container = crate::approval::bootstrap().await;
     let store_path = hf_service::init::user_app_dir().join("schedules.json");
     CampaignScheduler::try_start(container, store_path, None).await
 }
@@ -398,7 +413,7 @@ pub(crate) async fn cmd_schedule(op: ScheduleOp) -> anyhow::Result<()> {
 }
 
 pub(crate) async fn cmd_session(op: SessionOp) -> anyhow::Result<()> {
-    let container = ServiceContainer::bootstrap().await;
+    let container = crate::approval::bootstrap().await;
     match op {
         SessionOp::New { title } => match container.create_chat_session(title).await? {
             Some(id) => println!("{id}"),
@@ -434,7 +449,7 @@ pub(crate) async fn cmd_session(op: SessionOp) -> anyhow::Result<()> {
 }
 
 pub(crate) async fn cmd_providers(op: Option<ProvidersOp>) -> anyhow::Result<()> {
-    let container = ServiceContainer::bootstrap().await;
+    let container = crate::approval::bootstrap().await;
     match op {
         None => {
             let statuses = container.provider_statuses().await;
@@ -455,7 +470,7 @@ pub(crate) async fn cmd_providers(op: Option<ProvidersOp>) -> anyhow::Result<()>
 }
 
 pub(crate) async fn cmd_policy(op: PolicyOp) -> anyhow::Result<()> {
-    let container = ServiceContainer::bootstrap().await;
+    let container = crate::approval::bootstrap().await;
     match op {
         PolicyOp::Decisions { limit } => {
             let decisions = container.policy_decisions(limit).await?;
@@ -480,13 +495,11 @@ pub(crate) async fn cmd_policy(op: PolicyOp) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod doctor_tests {
-    #[cfg(feature = "semgrep-enrichment")]
     use clap::Parser as _;
     use hf_service::system::StatusFlag;
     use hf_service::{SystemStatus, RETIRED_ENGINE_ID};
 
     use super::doctor_lines;
-    #[cfg(feature = "semgrep-enrichment")]
     use crate::args::{Cli, Commands};
     use crate::parse::{parse_engine, parse_lang};
 
@@ -519,6 +532,7 @@ mod doctor_tests {
             honggfuzz: StatusFlag::from(false),
             syzkaller: StatusFlag::from(false),
             defectdojo: StatusFlag::from(false),
+            sandbox_image_remedy: None,
         };
 
         let output = doctor_lines(&status).join("\n");
@@ -532,6 +546,48 @@ mod doctor_tests {
         assert!(!output.contains(retired_engine_label));
         assert!(output.contains("OPTIONAL  DefectDojo"));
         assert!(status.fuzzing_ready());
+    }
+
+    #[test]
+    fn doctor_output_names_the_sandbox_image_remedy_when_the_image_is_missing() {
+        let status = SystemStatus {
+            docker: StatusFlag::from(true),
+            sandbox_image: StatusFlag::from(false),
+            libfuzzer: StatusFlag::from(false),
+            aflplusplus: StatusFlag::from(false),
+            honggfuzz: StatusFlag::from(false),
+            syzkaller: StatusFlag::from(false),
+            defectdojo: StatusFlag::from(false),
+            sandbox_image_remedy: Some(
+                "build it with `oxfuzz doctor --build-image` or `scripts/build-sandbox.sh` (from /repo)"
+                    .to_owned(),
+            ),
+        };
+
+        let output = doctor_lines(&status).join("\n");
+        assert!(output.contains("MISSING  sandbox image"), "{output}");
+        assert!(
+            output.contains("scripts/build-sandbox.sh"),
+            "the remedy reaches the human output: {output}"
+        );
+    }
+
+    #[test]
+    fn doctor_build_image_parses_and_conflicts_with_engine_scope() {
+        let parsed = Cli::try_parse_from(["oxfuzz", "doctor", "--build-image"]).unwrap();
+        let Commands::Doctor(crate::args::DoctorArgs { build_image, .. }) = parsed.command else {
+            panic!("expected doctor");
+        };
+        assert!(build_image);
+
+        assert!(Cli::try_parse_from([
+            "oxfuzz",
+            "doctor",
+            "--build-image",
+            "--engine",
+            "libfuzzer"
+        ])
+        .is_err());
     }
 
     #[test]

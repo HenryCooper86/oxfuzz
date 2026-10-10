@@ -715,6 +715,7 @@ async fn configured_harness_admission_enforces_saved_profile_without_optional_fe
             hf_core::engine::EngineKind::LibFuzzer,
             hf_core::target::TargetLanguage::C,
             0,
+            None,
         )
         .await
         .unwrap_err();
@@ -735,6 +736,7 @@ async fn configured_harness_admission_enforces_saved_profile_without_optional_fe
             hf_core::engine::EngineKind::LibFuzzer,
             "not_discovered",
             hf_core::target::TargetLanguage::C,
+            None,
         )
         .await
         .unwrap_err();

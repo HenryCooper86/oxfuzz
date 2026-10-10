@@ -179,7 +179,7 @@ async fn coverage_prune_collapses_same_coverage_inputs() {
             &project,
             hf_core::engine::EngineKind::AflPlusPlus,
             target,
-            hf_core::target::TargetLanguage::C,
+            hf_core::target::TargetLanguage::C, None,
         )
         .await
         .unwrap();
@@ -316,7 +316,7 @@ async fn coverage_prune_propagates_sandbox_failure_without_pruning() {
             &project,
             hf_core::engine::EngineKind::AflPlusPlus,
             target,
-            hf_core::target::TargetLanguage::C,
+            hf_core::target::TargetLanguage::C, None,
         )
         .await
         .unwrap();

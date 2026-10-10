@@ -229,6 +229,7 @@ async fn smoke_without_a_required_llm_review_is_refused() {
             EngineKind::LibFuzzer,
             "parse_entry",
             TargetLanguage::C,
+            None,
         )
         .await
         .unwrap();
@@ -257,7 +258,7 @@ async fn negative_llm_review_is_persisted_and_prevents_smoke_execution() {
             project.path(),
             EngineKind::LibFuzzer,
             "parse_entry",
-            TargetLanguage::C,
+            TargetLanguage::C, None,
         )
         .await
         .unwrap();
@@ -296,7 +297,7 @@ async fn malformed_llm_review_fails_closed_before_smoke_execution() {
             project.path(),
             EngineKind::LibFuzzer,
             "parse_entry",
-            TargetLanguage::C,
+            TargetLanguage::C, None,
         )
         .await
         .unwrap();
@@ -330,7 +331,7 @@ async fn binary_substitution_during_llm_review_is_refused_before_execution() {
             project.path(),
             EngineKind::LibFuzzer,
             "parse_entry",
-            TargetLanguage::C,
+            TargetLanguage::C, None,
         )
         .await
         .unwrap();
@@ -360,6 +361,7 @@ async fn smoke_updates_the_compiled_revision_and_promotion_is_explicit() {
             EngineKind::LibFuzzer,
             "parse_entry",
             TargetLanguage::C,
+            None,
         )
         .await
         .unwrap();
@@ -459,6 +461,7 @@ async fn promotion_is_refused_when_the_smoke_profile_never_entered_the_target() 
             EngineKind::LibFuzzer,
             "parse_entry",
             TargetLanguage::C,
+            None,
         )
         .await
         .unwrap();
@@ -491,6 +494,7 @@ async fn promotion_succeeds_when_the_smoke_profile_entered_the_target() {
             EngineKind::LibFuzzer,
             "parse_entry",
             TargetLanguage::C,
+            None,
         )
         .await
         .unwrap();
@@ -531,7 +535,7 @@ async fn promotion_rejects_a_binary_changed_after_smoke_qualification() {
             project.path(),
             EngineKind::LibFuzzer,
             "parse_entry",
-            TargetLanguage::C,
+            TargetLanguage::C, None,
         )
         .await
         .unwrap();
@@ -566,7 +570,7 @@ async fn campaign_rejects_a_binary_changed_after_promotion() {
             project.path(),
             EngineKind::LibFuzzer,
             "parse_entry",
-            TargetLanguage::C,
+            TargetLanguage::C, None,
         )
         .await
         .unwrap();
@@ -597,6 +601,9 @@ async fn campaign_rejects_a_binary_changed_after_promotion() {
             EngineKind::LibFuzzer,
             60,
             None,
+            None,
+            None,
+            None,
             &|_| {},
         )
         .await
@@ -616,7 +623,7 @@ async fn legacy_promoted_harness_can_be_requalified_and_requires_reapproval() {
             project.path(),
             EngineKind::LibFuzzer,
             "parse_entry",
-            TargetLanguage::C,
+            TargetLanguage::C, None,
         )
         .await
         .unwrap();
@@ -666,7 +673,7 @@ async fn campaign_run_rejects_an_unpromoted_active_revision() {
             project.path(),
             EngineKind::LibFuzzer,
             "parse_entry",
-            TargetLanguage::C,
+            TargetLanguage::C, None,
         )
         .await
         .unwrap();
@@ -680,6 +687,9 @@ async fn campaign_run_rejects_an_unpromoted_active_revision() {
             "parse_entry",
             EngineKind::LibFuzzer,
             60,
+            None,
+            None,
+            None,
             None,
             &|_| {},
         )
@@ -748,6 +758,7 @@ async fn unsupported_harness_languages_fail_before_the_compiler() {
                 EngineKind::LibFuzzer,
                 "parse_entry",
                 language,
+                None,
             )
             .await
             .expect_err("unsupported harness language must fail closed");
@@ -767,6 +778,7 @@ async fn a_smoke_run_requests_a_profile_it_can_actually_retain() {
             EngineKind::LibFuzzer,
             "parse_entry",
             TargetLanguage::C,
+            None,
         )
         .await
         .unwrap();
@@ -819,6 +831,7 @@ async fn a_smoke_run_retains_the_profile_promotion_reads() {
             EngineKind::LibFuzzer,
             "parse_entry",
             TargetLanguage::C,
+            None,
         )
         .await
         .unwrap();
@@ -899,6 +912,7 @@ async fn promotion_is_refused_when_the_gate_denies_it() {
             EngineKind::LibFuzzer,
             "parse_entry",
             TargetLanguage::C,
+            None,
         )
         .await
         .unwrap();

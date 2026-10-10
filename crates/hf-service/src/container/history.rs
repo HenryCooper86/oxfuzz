@@ -21,7 +21,7 @@ use super::staging::quarantine_corpus_entry;
 use super::workspace::{resolve_workspace_directory, run_output_relative, workspace_dir};
 use super::{
     auto_revert_comparison_key, run_has_crash_evidence, ArtifactSummary, CoverageSample,
-    RunHistoryItem, ServiceContainer,
+    RunDetailView, RunHistoryItem, RunTelemetryView, ServiceContainer,
 };
 
 /// One persisted corpus entry and the target that owns it.
@@ -282,6 +282,96 @@ impl ServiceContainer {
             .collect();
         items.sort_by(|a, b| b.started_at.cmp(&a.started_at));
         Ok(items)
+    }
+
+    /// Resolve a user-supplied run identifier -- a full UUID, or an unambiguous
+    /// prefix of one (the short form `runs list` prints) -- to the durable run
+    /// id. Resolution is service-side so every entrypoint rejects an unknown or
+    /// ambiguous id the same way.
+    ///
+    /// # Errors
+    /// Returns a [`ClassifiedError`] validation error when no store is
+    /// configured, the input is empty, no run matches, or a prefix matches
+    /// more than one run; a storage error when the lookup itself fails.
+    pub async fn resolve_run_id(&self, id_or_prefix: &str) -> Result<Uuid, ClassifiedError> {
+        let store = self.store().ok_or_else(|| {
+            ClassifiedError::Validation(
+                "run id resolution requires the persistent store".to_owned(),
+            )
+        })?;
+        let candidate = id_or_prefix.trim();
+        if candidate.is_empty() {
+            return Err(ClassifiedError::Validation(
+                "run id must not be empty".to_owned(),
+            ));
+        }
+        if let Ok(id) = Uuid::parse_str(candidate) {
+            return match store
+                .get_run(id)
+                .await
+                .map_err(|error| ClassifiedError::Storage(error.to_string()))?
+            {
+                Some(_) => Ok(id),
+                None => Err(ClassifiedError::Validation(format!("run '{id}' not found"))),
+            };
+        }
+        let prefix = candidate.to_ascii_lowercase();
+        let matches: Vec<Uuid> = store
+            .list_runs(None)
+            .await
+            .map_err(|error| ClassifiedError::Storage(error.to_string()))?
+            .into_iter()
+            .map(|run| run.id)
+            .filter(|id| id.to_string().starts_with(&prefix))
+            .collect();
+        match matches.len() {
+            0 => Err(ClassifiedError::Validation(format!(
+                "no run id matches '{candidate}'"
+            ))),
+            1 => Ok(matches[0]),
+            count => Err(ClassifiedError::Validation(format!(
+                "run id prefix '{candidate}' is ambiguous: {count} runs match; use more characters"
+            ))),
+        }
+    }
+
+    /// One run's detail view: the enriched history row (target, engine,
+    /// lifecycle, terminal metrics) plus whether this process owns the run's
+    /// cancellation token and the latest retained live telemetry snapshot.
+    ///
+    /// The history row comes from [`Self::run_history`] so `runs status` and
+    /// `runs list` can never disagree about a run.
+    ///
+    /// # Errors
+    /// Returns a [`ClassifiedError`] when the id is unknown or ambiguous (see
+    /// [`Self::resolve_run_id`]) or the underlying reads fail.
+    pub async fn run_detail(&self, id_or_prefix: &str) -> Result<RunDetailView, ClassifiedError> {
+        let id = self.resolve_run_id(id_or_prefix).await?;
+        let item = self
+            .run_history(None)
+            .await?
+            .into_iter()
+            .find(|item| item.id == id.to_string())
+            .ok_or_else(|| ClassifiedError::Validation(format!("run '{id}' not found")))?;
+        // resolve_run_id proved the row exists; a `None` here means the row was
+        // deleted between the two reads, which is indistinguishable from "never
+        // existed" for the caller.
+        let Some(control) = self.run_control_status(id).await? else {
+            return Err(ClassifiedError::Validation(format!("run '{id}' not found")));
+        };
+        let telemetry = match self.store() {
+            Some(store) => store
+                .run_telemetry(id)
+                .await
+                .map_err(|error| ClassifiedError::Storage(error.to_string()))?
+                .map(RunTelemetryView::from),
+            None => None,
+        };
+        Ok(RunDetailView {
+            run: item,
+            active_in_this_process: control.active,
+            telemetry,
+        })
     }
 
     /// The intra-run coverage/throughput curve for a run (empty if none was
@@ -1067,6 +1157,8 @@ mod workspace_lease_tests {
             seed: None,
             replay_of: None,
             input_manifest_sha256: None,
+            input_timeout: None,
+            resume: false,
         };
         let mut run = RunRecord::new(
             project.to_string_lossy(),

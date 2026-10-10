@@ -676,6 +676,8 @@ mod relocation_tests {
             seed: None,
             replay_of: None,
             input_manifest_sha256: None,
+            input_timeout: None,
+            resume: false,
         }
     }
 

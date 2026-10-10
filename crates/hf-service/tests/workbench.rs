@@ -94,6 +94,8 @@ fn sample_run(project: &str, harness_id: Uuid) -> RunRecord {
             seed: None,
             replay_of: None,
             input_manifest_sha256: None,
+            input_timeout: None,
+            resume: false,
         }),
         Utc::now(),
     );
@@ -825,12 +827,29 @@ async fn harness_review_items_carry_the_qualification_evidence() {
         run_id: None,
     });
     store.upsert_harness(&harness).await.unwrap();
+    // The durable review evidence is the schema-versioned envelope the
+    // qualification path writes: provider response plus structured opinion.
+    let review_json = serde_json::json!({
+        "schema_version": 1,
+        "prompt_version": 1,
+        "target": "parse_packet",
+        "opinion": {
+            "exercises_target": true,
+            "safe_to_execute": true,
+            "reasons": ["drives parse_packet with fuzz input"],
+        },
+        "response": serde_json::to_value(hf_test_utils::fixtures::make_chat_response(
+            r#"{"exercises_target":true,"safe_to_execute":true,"reasons":["drives parse_packet with fuzz input"]}"#,
+        ))
+        .unwrap(),
+    })
+    .to_string();
     store
         .record_harness_ai_review(&hf_storage::HarnessAiReviewRecord {
             harness_id: harness.id,
             source_sha256: "a".repeat(64),
             binary_sha256: "b".repeat(64),
-            review_json: r#"{"exercises_target":true,"safe_to_execute":true,"reasons":["drives parse_packet with fuzz input"]}"#.to_owned(),
+            review_json,
             reviewed_at: Utc::now(),
         })
         .await
@@ -846,6 +865,7 @@ async fn harness_review_items_carry_the_qualification_evidence() {
     let review = item.ai_review.as_ref().expect("review evidence attached");
     assert!(review.exercises_target);
     assert!(review.safe_to_execute);
+    assert_eq!(review.bypass_source, None, "a model review is not a bypass");
     assert!(
         review.reasons.iter().any(|r| r.contains("parse_packet")),
         "{review:?}"

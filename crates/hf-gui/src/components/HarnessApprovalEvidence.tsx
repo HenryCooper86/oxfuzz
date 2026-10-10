@@ -53,16 +53,33 @@ export function HarnessApprovalEvidence({ item }: { item: HarnessReviewItem }) {
             {localized(t, "harness.evidence.review", "Independent review")}
           </span>
           {review ? (
-            <>
-              <Badge variant={review.exercises_target ? "success" : "error"}>
-                {localized(t, "harness.evidence.exercises", "exercises target")}:{" "}
-                {String(review.exercises_target)}
-              </Badge>
-              <Badge variant={review.safe_to_execute ? "success" : "error"}>
-                {localized(t, "harness.evidence.safe", "safe to execute")}:{" "}
-                {String(review.safe_to_execute)}
-              </Badge>
-            </>
+            review.bypass_source ? (
+              <span
+                className="text-xs px-2 py-0.5 rounded-sm"
+                data-testid="harness-evidence-bypassed-review"
+                style={{
+                  background: "var(--surface-active)",
+                  border: "1px solid var(--warning, #e5a000)",
+                  color: "var(--warning, #e5a000)",
+                }}
+              >
+                {localized(t, "harness.evidence.reviewBypassed", "LLM review bypassed")}:{" "}
+                {review.bypass_source === "cli_flag"
+                  ? "--no-llm-review"
+                  : "harness.allow_unreviewed_smoke"}
+              </span>
+            ) : (
+              <>
+                <Badge variant={review.exercises_target ? "success" : "error"}>
+                  {localized(t, "harness.evidence.exercises", "exercises target")}:{" "}
+                  {String(review.exercises_target)}
+                </Badge>
+                <Badge variant={review.safe_to_execute ? "success" : "error"}>
+                  {localized(t, "harness.evidence.safe", "safe to execute")}:{" "}
+                  {String(review.safe_to_execute)}
+                </Badge>
+              </>
+            )
           ) : (
             <span
               className="text-xs px-2 py-0.5 rounded-sm"

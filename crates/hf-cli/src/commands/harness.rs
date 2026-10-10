@@ -1,8 +1,8 @@
-use hf_service::{EngineKind, FuzzProgress, ServiceContainer, TargetLanguage, VerdictLevel};
+use hf_service::{EngineKind, ServiceContainer, TargetLanguage, VerdictLevel};
 use std::path::PathBuf;
 
 use crate::args::AiOption;
-use crate::parse::{parse_duration, parse_engine, parse_lang};
+use crate::parse::{parse_duration, parse_engine, parse_lang, parse_sanitizer};
 
 pub(crate) enum HarnessOutput {
     Text,
@@ -19,10 +19,13 @@ pub(crate) async fn cmd_harness(
     repair: usize,
     refine: bool,
     promote: bool,
+    review_bypass: hf_service::HarnessReviewBypass,
+    sanitizer: Option<&str>,
     output: HarnessOutput,
 ) -> anyhow::Result<()> {
     let engine = parse_engine(engine)?;
     let lang = parse_lang(lang)?;
+    let sanitizer = sanitizer.map(parse_sanitizer).transpose()?;
     // --draft-only stops before compile/smoke/promotion, so flags that only
     // take effect in those stages must not be silently ignored. (--refine is
     // exempt: it honors --repair during its recompile.)
@@ -32,11 +35,26 @@ pub(crate) async fn cmd_harness(
     if draft_only && promote {
         eprintln!("warning: --promote is ignored with --draft-only (no smoke qualification runs)");
     }
-    let container = ServiceContainer::bootstrap().await;
+    if draft_only && review_bypass == hf_service::HarnessReviewBypass::Requested {
+        eprintln!(
+            "warning: --no-llm-review is ignored with --draft-only (no smoke qualification runs)"
+        );
+    }
+    let container = crate::approval::bootstrap().await;
 
     // With --refine, reshape the existing harness toward uncovered reachable
     // functions (coverage-guided), then recompile with auto-repair.
     if refine {
+        if sanitizer.is_some() {
+            // Refinement rebuilds the SAME harness identity: it keeps the
+            // active revision's sanitizer rather than taking a new one, so a
+            // requested sanitizer here would be silently ignored.
+            anyhow::bail!(
+                "--sanitizer does not combine with --refine: refinement keeps the active \
+                 revision's build sanitizer; use a fresh `oxfuzz harness --sanitizer ...` to \
+                 change it"
+            );
+        }
         println!("--- Refining harness (coverage-guided) ---");
         let outcome = container
             .harness_refine(&project, target, engine, lang, repair.max(1))
@@ -53,7 +71,16 @@ pub(crate) async fn cmd_harness(
             );
             return Ok(());
         }
-        qualify_harness(&container, &project, target, engine, lang, promote).await?;
+        qualify_harness(
+            &container,
+            &project,
+            target,
+            engine,
+            lang,
+            promote,
+            review_bypass,
+        )
+        .await?;
         return Ok(());
     }
 
@@ -62,19 +89,28 @@ pub(crate) async fn cmd_harness(
     if repair > 0 && !draft_only {
         println!("--- Generating harness (auto-repair up to {repair}x) ---");
         let outcome = container
-            .harness_generate(&project, target, engine, lang, repair)
+            .harness_generate(&project, target, engine, lang, repair, sanitizer)
             .await?;
         println!(
             "compile: status={:?} repairs_used={}",
             outcome.status, outcome.repairs_used
         );
         print_lint_findings(&outcome.lint);
-        qualify_harness(&container, &project, target, engine, lang, promote).await?;
+        qualify_harness(
+            &container,
+            &project,
+            target,
+            engine,
+            lang,
+            promote,
+            review_bypass,
+        )
+        .await?;
         return Ok(());
     }
 
     let draft = container
-        .harness_draft_with_policy(&project, target, engine, lang, ai.into())
+        .harness_draft_with_policy(&project, target, engine, lang, ai.into(), sanitizer)
         .await?;
     if matches!(output, HarnessOutput::Json) {
         println!("{}", serde_json::to_string_pretty(&draft)?);
@@ -103,11 +139,20 @@ pub(crate) async fn cmd_harness(
     }
     println!("\n--- Compiling in sandbox ---");
     let outcome = container
-        .harness_compile(draft.source, &project, engine, target, lang)
+        .harness_compile(draft.source, &project, engine, target, lang, sanitizer)
         .await?;
     println!("compile: status={:?}", outcome.status);
     print_lint_findings(&outcome.lint);
-    qualify_harness(&container, &project, target, engine, lang, promote).await?;
+    qualify_harness(
+        &container,
+        &project,
+        target,
+        engine,
+        lang,
+        promote,
+        review_bypass,
+    )
+    .await?;
     Ok(())
 }
 
@@ -137,10 +182,18 @@ async fn qualify_harness(
     engine: EngineKind,
     lang: TargetLanguage,
     promote: bool,
+    review_bypass: hf_service::HarnessReviewBypass,
 ) -> anyhow::Result<()> {
+    if review_bypass == hf_service::HarnessReviewBypass::Requested {
+        eprintln!(
+            "WARNING: --no-llm-review: smoke-qualifying WITHOUT the independent LLM review; \
+             the lexical lint gate and the human promotion decision are the only remaining \
+             checks before sandboxed execution."
+        );
+    }
     println!("\n--- Smoke qualification ---");
     let smoke = container
-        .harness_smoke(project, target, engine, lang)
+        .harness_smoke_with_review_bypass(project, target, engine, lang, review_bypass)
         .await?;
     println!(
         "smoke: execs/sec={:.0} crashes={} passed={}",
@@ -174,20 +227,19 @@ pub(crate) async fn cmd_run(
     lang: &str,
     duration: Option<&str>,
     requested_cpus: Option<u32>,
+    timeout_ms: Option<u64>,
+    resume: bool,
+    sanitizer: Option<&str>,
     replay: Option<&str>,
 ) -> anyhow::Result<()> {
-    let on_progress = |p: FuzzProgress| match p {
-        FuzzProgress::LogLine(line) => println!("  {line}"),
-        FuzzProgress::CrashesFound(_) => println!("  >> crash found"),
-        _ => {}
-    };
+    let on_progress = crate::commands::status::printing_sink();
 
     let summary = if let Some(run_id) = replay {
         // Replay pins the recorded engine/duration/seed; target/engine/duration
         // flags are intentionally not required in this mode.
         let run_id = uuid::Uuid::parse_str(run_id)
             .map_err(|e| anyhow::anyhow!("invalid --replay run id {run_id:?}: {e}"))?;
-        let container = std::sync::Arc::new(ServiceContainer::bootstrap().await);
+        let container = std::sync::Arc::new(crate::approval::bootstrap().await);
         println!("\n--- Replaying run {run_id} (live, Ctrl-C to stop) ---");
         let mut handle = {
             let container = std::sync::Arc::clone(&container);
@@ -210,15 +262,22 @@ pub(crate) async fn cmd_run(
         // the value is not threaded further. Still validate it (like triage/ci) so an
         // invalid `--lang` is rejected up front rather than silently ignored.
         parse_lang(lang)?;
+        let sanitizer = sanitizer.map(parse_sanitizer).transpose()?;
         let requested_duration = duration.map(parse_duration).transpose()?;
+        // An absent flag defers to the configured `fuzzing.default_resume`;
+        // the flag only ever requests resume, never forces a cold start.
+        let resume = resume.then_some(true);
         let resolved = hf_service::config::resolve_fuzzing_run(
             Some(engine_kind),
             requested_duration,
             requested_cpus,
+            timeout_ms,
+            resume,
+            sanitizer,
         )
         .map_err(anyhow::Error::msg)?;
         let duration_secs = resolved.duration_secs;
-        let container = std::sync::Arc::new(ServiceContainer::bootstrap().await);
+        let container = std::sync::Arc::new(crate::approval::bootstrap().await);
         // Ensure a seed corpus exists before running. A failure here is not fatal
         // (the engine can still run on an empty corpus) but must not be silent.
         if let Err(e) = container.generate_seeds(&project, target).await {
@@ -241,6 +300,9 @@ pub(crate) async fn cmd_run(
                         engine_kind,
                         duration_secs,
                         requested_cpus,
+                        timeout_ms,
+                        resume,
+                        sanitizer,
                         &on_progress,
                     )
                     .await
@@ -258,6 +320,9 @@ pub(crate) async fn cmd_run(
     println!("\n--- Run summary ---");
     println!("  execs/sec: {:.0}", summary.execs);
     println!("  crashes detected: {}", summary.crashes);
+    if let Some(hangs) = summary.hangs {
+        println!("  hangs (per-input timeouts): {hangs}");
+    }
     println!("  edges covered: {}", summary.edges);
     if let Some(proposal) = &summary.stagnation {
         println!("  coverage stalled: {proposal:?} -- consider regenerating the harness or adding seeds/a dictionary");
@@ -269,7 +334,7 @@ pub(crate) async fn cmd_triage(project: PathBuf, target: &str, lang: &str) -> an
     // Language is validated for a clear error, though triage works off the
     // already-compiled workspace.
     let _lang = parse_lang(lang)?;
-    let container = ServiceContainer::bootstrap().await;
+    let container = crate::approval::bootstrap().await;
     let crashes = container.triage(&project, target).await?;
     if crashes.is_empty() {
         println!("No crash artifacts found.");
@@ -304,7 +369,7 @@ pub(crate) async fn cmd_corpus(
     op: &str,
     from: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
-    let container = ServiceContainer::bootstrap().await;
+    let container = crate::approval::bootstrap().await;
     match op {
         "seed" => {
             let n = container.corpus_seed(&project, target).await?;
@@ -422,7 +487,7 @@ pub(crate) async fn cmd_unreached(project: PathBuf, lang: &str) -> anyhow::Resul
     use hf_service::SurfaceMeasurement;
 
     let language = parse_lang(lang)?;
-    let container = ServiceContainer::bootstrap().await;
+    let container = crate::approval::bootstrap().await;
     let view = container.unreached_surface(&project, language).await?;
 
     match &view.measurement {
@@ -459,7 +524,7 @@ pub(crate) async fn cmd_attribution(project: PathBuf, lang: &str) -> anyhow::Res
     use hf_service::{AttributionTier, SurfaceMeasurement};
 
     let language = parse_lang(lang)?;
-    let container = ServiceContainer::bootstrap().await;
+    let container = crate::approval::bootstrap().await;
     let view = container.coverage_attribution(&project, language).await?;
 
     match &view.measurement {

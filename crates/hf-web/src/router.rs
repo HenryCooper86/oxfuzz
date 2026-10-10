@@ -1997,7 +1997,7 @@ async fn harness_draft(
     };
     let draft = state
         .container
-        .harness_draft_with_policy(&project, &req.target, engine, lang, req.ai)
+        .harness_draft_with_policy(&project, &req.target, engine, lang, req.ai, None)
         .await
         .map_err(classified_api_error)?;
     Ok(Json(serde_json::json!({
@@ -2037,7 +2037,7 @@ async fn harness_compile(
     };
     let out = state
         .container
-        .harness_compile(req.source, &project, engine, &req.target, lang)
+        .harness_compile(req.source, &project, engine, &req.target, lang, None)
         .await
         .map_err(classified_api_error)?;
     Ok(Json(serde_json::json!({
@@ -2322,6 +2322,7 @@ async fn launch_campaign(
             FuzzProgress::ExecsPerSec(value) => ("ExecsPerSec", serde_json::json!(value)),
             FuzzProgress::CrashesFound(value) => ("CrashesFound", serde_json::json!(value)),
             FuzzProgress::LogLine(value) => ("LogLine", serde_json::json!(value)),
+            FuzzProgress::Stats(value) => ("Stats", serde_json::json!(value)),
             FuzzProgress::Done => ("Done", serde_json::Value::Null),
         };
         if let Err(error) = progress_state.publish_event(SseEvent::RunProgress {

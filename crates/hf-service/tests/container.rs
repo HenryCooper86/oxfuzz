@@ -192,6 +192,8 @@ fn stored_run(
             seed: None,
             replay_of: None,
             input_manifest_sha256: None,
+            input_timeout: None,
+            resume: false,
         }),
         started_at,
     );
@@ -401,7 +403,7 @@ async fn admitted_runtime_failure_awaits_final_health_without_replacing_the_erro
             &project,
             hf_core::engine::EngineKind::LibFuzzer,
             target,
-            hf_core::target::TargetLanguage::C,
+            hf_core::target::TargetLanguage::C, None,
         )
         .await
         .unwrap();
@@ -429,6 +431,9 @@ async fn admitted_runtime_failure_awaits_final_health_without_replacing_the_erro
                     target,
                     hf_core::engine::EngineKind::LibFuzzer,
                     60,
+                    None,
+                    None,
+                    None,
                     None,
                     &|_| {},
                 )
@@ -573,7 +578,7 @@ async fn cancel_run_stops_an_in_flight_fuzz_run() {
             &project,
             hf_core::engine::EngineKind::LibFuzzer,
             target,
-            hf_core::target::TargetLanguage::C,
+            hf_core::target::TargetLanguage::C, None,
         )
         .await
         .expect("compile harness");
@@ -602,6 +607,9 @@ async fn cancel_run_stops_an_in_flight_fuzz_run() {
                     target,
                     hf_core::engine::EngineKind::LibFuzzer,
                     60,
+                    None,
+                    None,
+                    None,
                     None,
                     &|_| {},
                 )
@@ -749,7 +757,7 @@ async fn terminal_status_write_failure_still_awaits_monitor_cleanup() {
             &project,
             hf_core::engine::EngineKind::LibFuzzer,
             target,
-            hf_core::target::TargetLanguage::C,
+            hf_core::target::TargetLanguage::C, None,
         )
         .await
         .unwrap();
@@ -776,6 +784,9 @@ async fn terminal_status_write_failure_still_awaits_monitor_cleanup() {
                     target,
                     hf_core::engine::EngineKind::LibFuzzer,
                     60,
+                    None,
+                    None,
+                    None,
                     None,
                     &|_| {},
                 )
@@ -939,7 +950,7 @@ async fn a_wall_clock_killed_run_persists_the_coverage_it_measured() {
             &project,
             hf_core::engine::EngineKind::LibFuzzer,
             target,
-            hf_core::target::TargetLanguage::C,
+            hf_core::target::TargetLanguage::C, None,
         )
         .await
         .expect("compile harness");
@@ -963,6 +974,9 @@ async fn a_wall_clock_killed_run_persists_the_coverage_it_measured() {
             target,
             hf_core::engine::EngineKind::LibFuzzer,
             60,
+            None,
+            None,
+            None,
             None,
             &|_| {},
         )
@@ -1030,7 +1044,7 @@ async fn background_start_returns_a_durable_cancellable_run_id() {
             &project,
             hf_core::engine::EngineKind::LibFuzzer,
             target,
-            hf_core::target::TargetLanguage::C,
+            hf_core::target::TargetLanguage::C, None,
         )
         .await
         .expect("compile harness");
@@ -1168,7 +1182,7 @@ async fn completed_run_merges_discoveries_without_writable_live_corpus() {
             &project,
             hf_core::engine::EngineKind::LibFuzzer,
             target,
-            hf_core::target::TargetLanguage::C,
+            hf_core::target::TargetLanguage::C, None,
         )
         .await
         .unwrap();
@@ -1192,6 +1206,9 @@ async fn completed_run_merges_discoveries_without_writable_live_corpus() {
             target,
             hf_core::engine::EngineKind::LibFuzzer,
             1,
+            None,
+            None,
+            None,
             None,
             &|_| {},
         )
@@ -1580,7 +1597,7 @@ async fn corpus_minimize_uses_the_promoted_revision_and_an_isolated_snapshot() {
             &project,
             hf_core::engine::EngineKind::LibFuzzer,
             target,
-            hf_core::target::TargetLanguage::C,
+            hf_core::target::TargetLanguage::C, None,
         )
         .await
         .unwrap();
@@ -1623,6 +1640,9 @@ async fn corpus_minimize_uses_the_promoted_revision_and_an_isolated_snapshot() {
     let resolved = hf_service::config::resolve_fuzzing_run(
         Some(hf_core::engine::EngineKind::LibFuzzer),
         Some(300),
+        None,
+        None,
+        None,
         None,
     )
     .unwrap();
@@ -2926,4 +2946,164 @@ async fn chat_rollback_waits_for_the_shared_session_mutation_lock() {
 
     drop(guard);
     assert_eq!(rollback.await.unwrap().unwrap(), 2);
+}
+
+/// The fake engine writes one libFuzzer `timeout-*` artifact into the run's
+/// output mount, the way a real engine does when an input overruns the
+/// per-input timeout.
+struct TimeoutArtifactRuntime;
+
+#[async_trait::async_trait]
+impl hf_core::runtime::RuntimeAdapter for TimeoutArtifactRuntime {
+    async fn resolve_image_reference(
+        &self,
+        _image: &str,
+    ) -> Result<Option<hf_core::runtime::ImmutableImageReference>, hf_core::error::ClassifiedError>
+    {
+        Ok(Some(hf_test_utils::immutable_test_image()?))
+    }
+
+    async fn run_command(
+        &self,
+        _cmd: &[String],
+        cwd: &std::path::Path,
+        _limits: &hf_core::runtime::ResourceLimits,
+    ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
+        Ok(hf_core::runtime::CommandResult {
+            exit_code: 0,
+            stdout: "DONE cov: 8 exec/s: 64".to_owned(),
+            stderr: String::new(),
+            workspace: cwd.to_path_buf(),
+            termination: hf_core::runtime::CommandTermination::Completed,
+        })
+    }
+
+    async fn run_command_streaming_opts(
+        &self,
+        cmd: &[String],
+        cwd: &std::path::Path,
+        limits: &hf_core::runtime::ResourceLimits,
+        opts: &hf_core::runtime::SandboxOptions,
+        _cancel: &tokio_util::sync::CancellationToken,
+        on_line: &hf_core::runtime::LineSink<'_>,
+    ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
+        // Only the fuzz run carries an output mount; compile/smoke commands
+        // must not drop artifacts anywhere.
+        if let Some(out) = opts
+            .extra_mounts
+            .iter()
+            .find(|mount| mount.container_path.ends_with("/out"))
+        {
+            std::fs::write(
+                out.host_path
+                    .join("timeout-da39a3ee5f6b4b0d3255bfef95601890afd80709"),
+                b"slow input",
+            )
+            .unwrap();
+        }
+        on_line("#1 cov: 8 exec/s: 64");
+        self.run_command(cmd, cwd, limits).await
+    }
+
+    async fn write_file(
+        &self,
+        _path: &std::path::Path,
+        _content: &str,
+    ) -> Result<(), hf_core::error::ClassifiedError> {
+        Ok(())
+    }
+
+    async fn read_file(
+        &self,
+        _path: &std::path::Path,
+    ) -> Result<String, hf_core::error::ClassifiedError> {
+        Ok(String::new())
+    }
+}
+
+/// A run against the resolved default per-input timeout persists the setting
+/// in its run config (replay evidence) and surfaces the engine's timeout
+/// artifacts as a hang count in the run summary.
+#[tokio::test]
+async fn run_persists_the_input_timeout_and_surfaces_hangs() {
+    use std::fs;
+    isolate_workspace();
+
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("hang_proj");
+    fs::create_dir_all(&project).unwrap();
+    let target = "parse_entry";
+    fs::write(
+        project.join("parse.c"),
+        "#include <stddef.h>\nint parse_entry(const unsigned char *data, size_t size) { return size && data[0]; }\n",
+    )
+    .unwrap();
+
+    let workspace = hf_service::workspace_dir(&project, target);
+    fs::create_dir_all(workspace.join("corpus")).unwrap();
+    fs::write(workspace.join(format!("fuzz_{target}")), b"#!/bin/true").unwrap();
+
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("h.db"))
+            .await
+            .expect("connect store"),
+    );
+    let container = ServiceContainer::new(
+        Arc::new(TimeoutArtifactRuntime),
+        Some(hf_test_utils::approving_harness_review_pool()),
+    )
+    .with_store(Arc::clone(&store));
+    container
+        .harness_compile(
+            "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }".to_owned(),
+            &project,
+            hf_core::engine::EngineKind::LibFuzzer,
+            target,
+            hf_core::target::TargetLanguage::C, None,
+        )
+        .await
+        .expect("compile harness");
+    container
+        .harness_smoke(
+            &project,
+            target,
+            hf_core::engine::EngineKind::LibFuzzer,
+            hf_core::target::TargetLanguage::C,
+        )
+        .await
+        .expect("smoke harness");
+    container
+        .harness_promote(&project, target, hf_core::engine::EngineKind::LibFuzzer)
+        .await
+        .expect("promote harness");
+
+    let summary = container
+        .run_fuzzer(
+            &project,
+            target,
+            hf_core::engine::EngineKind::LibFuzzer,
+            60,
+            None,
+            None,
+            None,
+            None,
+            &|_| {},
+        )
+        .await
+        .expect("run completes");
+
+    assert_eq!(summary.hangs, Some(1), "the timeout artifact is a hang");
+    assert_eq!(summary.crashes, 1, "a timeout artifact is also a finding");
+
+    let run = store
+        .get_run(summary.run_id)
+        .await
+        .unwrap()
+        .expect("run persisted");
+    let config = run.config.expect("run config persisted");
+    assert_eq!(
+        config.input_timeout,
+        Some(std::time::Duration::from_millis(1000)),
+        "the resolved default per-input timeout is persisted with the run"
+    );
 }

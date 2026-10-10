@@ -92,6 +92,27 @@ fn libfuzzer_accepts_only_known_artifact_prefixes() {
 }
 
 #[test]
+fn timeout_artifact_naming_is_engine_scoped() {
+    // libFuzzer writes `timeout-<sha1>` next to its crash artifacts. AFL++
+    // hangs live in a separate `hangs/` tree outside the crash scan, and
+    // honggfuzz retains no timeout artifact, so only libFuzzer names match.
+    assert!(hf_crash::is_timeout_artifact(
+        EngineKind::LibFuzzer,
+        "timeout-da39a3ee"
+    ));
+    assert!(!hf_crash::is_timeout_artifact(
+        EngineKind::LibFuzzer,
+        "crash-da39a3ee"
+    ));
+    for engine in [EngineKind::AflPlusPlus, EngineKind::Honggfuzz] {
+        assert!(
+            !hf_crash::is_timeout_artifact(engine, "timeout-da39a3ee"),
+            "{engine:?} has no ingestable timeout artifact"
+        );
+    }
+}
+
+#[test]
 fn syzkaller_does_not_ingest_userspace_artifacts() {
     let dir = TempDir::new().unwrap();
     fs::write(
@@ -104,6 +125,66 @@ fn syzkaller_does_not_ingest_userspace_artifacts() {
 
     assert!(result.crashes.is_empty());
     assert!(!result.artifact_limit_reached);
+}
+
+/// A UBSan-variant run emits `<file>:<line>: runtime error: <description>` plus
+/// a `SUMMARY: UndefinedBehaviorSanitizer:` line (captured verbatim from a
+/// `-fsanitize=undefined -fno-sanitize-recover=undefined` build in the pinned
+/// sandbox image). The ingester must classify the finding as `Ubsan` -- ahead
+/// of any ASan tokens -- so the dedup signature keeps the bug class distinct
+/// from a memory error at the same call site.
+#[test]
+fn ubsan_variant_run_ingests_as_ubsan() {
+    const UBSAN_REPORT: &str = "/work/harness.c:5:23: runtime error: signed integer overflow: 2147483647 + 1 cannot be represented in type 'int'\n    #0 0xaaaac0ffee98 in LLVMFuzzerTestOneInput /work/harness.c:5:23\n    #1 0xaaaac0ff0123 in main /work/harness.c:12:5\n\nSUMMARY: UndefinedBehaviorSanitizer: undefined-behavior /work/harness.c:5:23 in \n";
+    for engine in [
+        EngineKind::LibFuzzer,
+        EngineKind::AflPlusPlus,
+        EngineKind::Honggfuzz,
+    ] {
+        let dir = TempDir::new().unwrap();
+        let (artifact, log) = match engine {
+            EngineKind::LibFuzzer => ("crash-6dcd4ce23d88", "log-crash-6dcd4ce23d88.txt"),
+            // AFL++ saves crashing inputs under `<instance>/crashes/`; the
+            // service's repro step writes the sanitizer log into the run root
+            // (inside `crashes/` every regular file is itself an artifact).
+            EngineKind::AflPlusPlus => {
+                let crashes = dir.path().join("default").join("crashes");
+                fs::create_dir_all(&crashes).unwrap();
+                fs::write(crashes.join("id_000000,sig_06,src_000000"), b"A").unwrap();
+                fs::write(
+                    dir.path().join("log-id_000000,sig_06,src_000000.txt"),
+                    UBSAN_REPORT,
+                )
+                .unwrap();
+                let result = ingest(&dir, engine);
+                assert_eq!(result.crashes.len(), 1, "{engine:?}");
+                assert_eq!(result.crashes[0].kind, CrashKind::Ubsan, "{engine:?}");
+                assert!(
+                    result.crashes[0].summary.contains("runtime error"),
+                    "{engine:?}: {}",
+                    result.crashes[0].summary
+                );
+                continue;
+            }
+            EngineKind::Honggfuzz => (
+                "SIGABRT.PC.7f83.STACK.18d5.fuzz",
+                "log-SIGABRT.PC.7f83.STACK.18d5.fuzz.txt",
+            ),
+            _ => unreachable!(),
+        };
+        fs::write(dir.path().join(artifact), b"A").unwrap();
+        fs::write(dir.path().join(log), UBSAN_REPORT).unwrap();
+
+        let result = ingest(&dir, engine);
+
+        assert_eq!(result.crashes.len(), 1, "{engine:?}");
+        assert_eq!(result.crashes[0].kind, CrashKind::Ubsan, "{engine:?}");
+        assert!(
+            result.crashes[0].summary.contains("runtime error"),
+            "{engine:?}: {}",
+            result.crashes[0].summary
+        );
+    }
 }
 
 #[test]

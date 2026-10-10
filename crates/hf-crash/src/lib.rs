@@ -21,8 +21,8 @@ pub use frames::{
     crash_origin, frame_origin, parse_frames, root_target_frame, FrameOrigin, StackFrame,
 };
 pub use ingest::{
-    ingest, ingest_for_engine, CrashIngestResult, MAX_AGGREGATE_REPORT_BYTES, MAX_CRASH_ARTIFACTS,
-    MAX_SANITIZER_REPORT_BYTES,
+    ingest, ingest_for_engine, is_timeout_artifact, CrashIngestResult, MAX_AGGREGATE_REPORT_BYTES,
+    MAX_CRASH_ARTIFACTS, MAX_SANITIZER_REPORT_BYTES,
 };
 pub use minimize::build_minimize_args;
 pub use report::{draft_report, draft_report_with_context, MAX_SOURCE_CONTEXT_CHARS};

@@ -238,9 +238,14 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
 That's it."
             .to_owned(),
     };
-    let draft = draft(&target(), EngineKind::LibFuzzer, Box::new(llm))
-        .await
-        .expect("draft should succeed");
+    let draft = draft(
+        &target(),
+        EngineKind::LibFuzzer,
+        hf_core::target::Sanitizer::Address,
+        Box::new(llm),
+    )
+    .await
+    .expect("draft should succeed");
     assert!(draft.source.contains("LLVMFuzzerTestOneInput"));
     assert!(draft.source.contains("parse_value"));
     assert!(
@@ -382,6 +387,8 @@ async fn smoke_fuzz_uses_one_resolved_config_for_command_runtime_and_summary() {
         seed: None,
         replay_of: None,
         input_manifest_sha256: None,
+        input_timeout: None,
+        resume: false,
     };
     let workspace = tempfile::tempdir().expect("temp workspace");
 
@@ -447,6 +454,8 @@ async fn honggfuzz_smoke_bounds_feedback_shared_memory() {
         seed: None,
         replay_of: None,
         input_manifest_sha256: None,
+        input_timeout: None,
+        resume: false,
     };
     let workspace = tempfile::tempdir().unwrap();
     smoke_fuzz_in_paths_with_config(
@@ -502,6 +511,8 @@ async fn smoke_fuzz_uses_the_resolved_immutable_sandbox_image() {
         seed: None,
         replay_of: None,
         input_manifest_sha256: None,
+        input_timeout: None,
+        resume: false,
     };
     let workspace = tempfile::tempdir().expect("temp workspace");
     let image = format!("sha256:{}", "a".repeat(64));
@@ -664,9 +675,13 @@ async fn smoke_fuzz_rejects_libfuzzer_inited_without_execs() {
 
 #[test]
 fn build_command_for_libfuzzer_has_fuzzer_flag() {
-    let cmd =
-        hf_harness::build_command(EngineKind::LibFuzzer, TargetLanguage::C, "fuzz_parse_value")
-            .unwrap();
+    let cmd = hf_harness::build_command(
+        EngineKind::LibFuzzer,
+        TargetLanguage::C,
+        "fuzz_parse_value",
+        hf_core::target::Sanitizer::Address,
+    )
+    .unwrap();
     assert!(cmd.args.contains(&"-fsanitize=fuzzer".to_owned()));
 }
 
@@ -676,6 +691,7 @@ fn build_command_for_afl_uses_afl_compiler() {
         EngineKind::AflPlusPlus,
         TargetLanguage::C,
         "fuzz_parse_value",
+        hf_core::target::Sanitizer::Address,
     )
     .unwrap();
     assert!(cmd.compiler.contains("afl"));

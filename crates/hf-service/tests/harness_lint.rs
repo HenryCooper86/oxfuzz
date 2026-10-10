@@ -34,6 +34,7 @@ async fn compile(
             EngineKind::LibFuzzer,
             "a",
             TargetLanguage::C,
+            None,
         )
         .await
 }

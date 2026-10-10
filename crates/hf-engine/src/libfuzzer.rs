@@ -3,13 +3,22 @@
 //! See `docs/standards/ENGINE_ADAPTER_STANDARD.md`.
 
 use hf_core::engine::FuzzRunConfig;
+use hf_core::error::ClassifiedError;
 
 /// Construct the libFuzzer argument list for a fuzz run.
 ///
 /// libFuzzer runs the harness binary directly (no separate `fuzz` binary),
 /// so the first element is the harness binary path itself.
-#[must_use]
-pub fn build_run_args(cfg: &FuzzRunConfig, binary: &str, corpus: &str, out: &str) -> Vec<String> {
+///
+/// # Errors
+/// Currently infallible; the shared adapter signature is fallible because
+/// other engines validate flag combinations (see AFL++'s resume rule).
+pub fn build_run_args(
+    cfg: &FuzzRunConfig,
+    binary: &str,
+    corpus: &str,
+    out: &str,
+) -> Result<Vec<String>, ClassifiedError> {
     let duration = cfg.duration.map_or(0, |d| d.as_secs());
     let mut args = vec![binary.to_owned()];
     if duration > 0 {
@@ -63,7 +72,15 @@ pub fn build_run_args(cfg: &FuzzRunConfig, binary: &str, corpus: &str, out: &str
     // the container. An `env K=V` wrapper here would be a second home for one
     // meaning and would displace the fuzzer program from argv[0].
     args.extend(cfg.extra_args.iter().cloned());
-    args
+    // The explicit per-input timeout is emitted after `extra_args`: libFuzzer
+    // applies the last occurrence of a repeated flag, so a configured timeout
+    // is never silently overridden by the escape hatch. libFuzzer takes whole
+    // seconds, so a sub-second budget rounds up (never to 0, which libFuzzer
+    // reads as "no timeout").
+    if let Some(timeout) = cfg.input_timeout {
+        args.push(format!("-timeout={}", crate::timeout_secs_ceil(timeout)));
+    }
+    Ok(args)
 }
 
 /// The libFuzzer engine adapter. See [`build_run_args`] and the

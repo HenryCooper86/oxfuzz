@@ -263,6 +263,13 @@ impl ServiceContainer {
         let harness_source = read_current_harness_source(&workspace).ok_or_else(|| {
             ClassifiedError::Validation(format!("no harness source for '{target}' to bundle"))
         })?;
+        // The bundle must document the build the finding came from. The run
+        // that produced the crash records its sanitizer; legacy records
+        // predate selectable sanitizers and were all AddressSanitizer builds.
+        let sanitizer = match self.run_record(crash.run_id).await?.config {
+            Some(config) => config.sanitizer,
+            None => hf_core::target::Sanitizer::Address,
+        };
         // Copy the crash input by value; refuse a symlinked input rather than
         // following it out of the workspace into an unrelated file.
         if !is_regular_file(&crash.input_path) {
@@ -294,7 +301,7 @@ impl ServiceContainer {
             .iter()
             .filter(|path| !is_header_path(path))
             .collect();
-        let build = hf_harness::build_command(engine, lang, "fuzz_bin")?;
+        let build = hf_harness::build_command(engine, lang, "fuzz_bin", sanitizer)?;
         let build_command = format!(
             "{} {} {} {} -o {}",
             build.compiler,
@@ -312,8 +319,7 @@ impl ServiceContainer {
             target: target.to_owned(),
             language: format!("{lang:?}"),
             engine: engine.as_str().to_owned(),
-            // Harnesses build with ASan by default (see `build_command`).
-            sanitizer: "address".to_owned(),
+            sanitizer: sanitizer.as_str().to_owned(),
             build_command,
             harness_filename,
             input_filename: "crash_input".to_owned(),

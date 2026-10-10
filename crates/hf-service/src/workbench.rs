@@ -118,8 +118,8 @@ pub struct HarnessReviewItem {
     pub lint: Vec<hf_harness::LintFinding>,
 }
 
-/// The verdict half of a persisted harness AI review, parsed from the
-/// durable `review_json` for display beside the approve action.
+/// The verdict half of a persisted harness pre-execution review, parsed from
+/// the durable `review_json` for display beside the approve action.
 #[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
 pub struct HarnessAiReviewSummary {
     pub exercises_target: bool,
@@ -130,6 +130,12 @@ pub struct HarnessAiReviewSummary {
     /// stored verdict JSON -- joined from the record's column.
     #[serde(default)]
     pub reviewed_at: String,
+    /// The opt-in surface when the operator bypassed the independent LLM
+    /// review for this exact revision (`--no-llm-review` or the deployment
+    /// config); `None` when a model reviewed it. The approval surface must
+    /// show the bypass, never collapse it into "reviewed".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bypass_source: Option<crate::harness_review::HarnessReviewBypassSource>,
 }
 
 /// One crash that may need a human-created issue.
@@ -661,15 +667,36 @@ fn harness_review_items(
     items
 }
 
-/// Parse a persisted review record's verdict half for display. A `review_json`
-/// that does not parse is `None`: the durable-format boundary admits foreign
-/// shapes, and an unparseable verdict must read as absent, never as approval.
+/// Parse a persisted review record for display. A `review_json` that matches
+/// neither the model-review envelope nor the bypass marker is `None`: the
+/// durable-format boundary admits foreign shapes, and an unparseable record
+/// must read as absent, never as approval.
 fn ai_review_summary(record: &hf_storage::HarnessAiReviewRecord) -> Option<HarnessAiReviewSummary> {
-    let mut summary: HarnessAiReviewSummary = serde_json::from_str(&record.review_json).ok()?;
-    summary.reviewed_at = record
+    let reviewed_at = record
         .reviewed_at
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    Some(summary)
+    match crate::harness_review::parse_review_evidence(&record.review_json).ok()? {
+        crate::harness_review::HarnessReviewEvidence::Llm(evidence) => {
+            Some(HarnessAiReviewSummary {
+                exercises_target: evidence.opinion.exercises_target,
+                safe_to_execute: evidence.opinion.safe_to_execute,
+                reasons: evidence.opinion.reasons,
+                reviewed_at,
+                bypass_source: None,
+            })
+        }
+        crate::harness_review::HarnessReviewEvidence::Bypassed(evidence) => {
+            Some(HarnessAiReviewSummary {
+                // No model affirmed anything: both booleans stay false, and
+                // the rationale carries the operator's opt-in.
+                exercises_target: false,
+                safe_to_execute: false,
+                reasons: vec![evidence.rationale],
+                reviewed_at,
+                bypass_source: Some(evidence.bypass_source),
+            })
+        }
+    }
 }
 
 pub(crate) fn crash_review_items(

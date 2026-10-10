@@ -22,9 +22,10 @@ coverage_stagnation_stop_windows = 4
 # coverage dropped by at least `auto_revert_threshold_pct` percent versus the
 # latest comparable run for the same target, automatically restore that
 # last-good harness revision and recompile it. Comparable means the engine,
-# duration, resources, sanitizer, corpus location, environment, and engine
-# arguments match. The recompile is HITL-gated like any other compile. Off by
-# default -- opt in per project. Threshold must be in (0, 100].
+# duration, per-input timeout, resources, sanitizer, corpus location,
+# environment, and engine arguments match. The recompile is HITL-gated like
+# any other compile. Off by default -- opt in per project. Threshold must be
+# in (0, 100].
 # Override with HF_AUTO_REVERT (1/true) and HF_AUTO_REVERT_THRESHOLD_PCT.
 auto_revert_enabled = false
 auto_revert_threshold_pct = 20.0
@@ -52,6 +53,41 @@ enabled_engines = ["libfuzzer", "afl++", "honggfuzz", "syzkaller"]
 default_engine = "libfuzzer"
 default_duration_secs = 60
 
+# Per-input timeout in milliseconds: one input running longer is a hang
+# finding. Milliseconds are the unit because AFL++ takes `-t` in ms and
+# sub-second budgets are the common case for fast parsers; adapters round up
+# to whole seconds for libFuzzer (`-timeout=<s>`) and honggfuzz
+# (`--timeout=<s>`). The 1000ms default matches the classic explicit
+# `afl-fuzz -t 1000` and honggfuzz's own 1s built-in; libFuzzer's 1200s
+# built-in is deliberately not inherited because it defeats hang discovery.
+# Must be within 1..=3600000. Override per run with `oxfuzz run --timeout-ms`
+# or `oxfuzz campaign --timeout-ms`. Syzkaller has no per-input timeout knob
+# and ignores this setting.
+default_timeout_ms = 1000
+
+# AFL++ session resume default: when true, AFL++ runs continue the most recent
+# compatible output tree (same target workspace, same harness binary) instead
+# of cold-starting, preserving queue cycle position and favored bookkeeping
+# across interrupted runs and chained campaign iterations. Off by default;
+# override per invocation with `oxfuzz run --resume` / `campaign --resume` /
+# `fuzz --resume`. Applies to AFL++ only -- other engines have no resumable
+# output-tree state and ignore this setting. Replays and the CI gate never
+# resume regardless of this setting.
+default_resume = false
+
+# Sanitizer for newly built C/C++ harnesses: "address" (the default,
+# AddressSanitizer) or "undefined" (UndefinedBehaviorSanitizer, built
+# halt-on-error so a finding is a crash). The sanitizer is baked into the
+# harness binary, so this default applies at build time only: campaigns record
+# the promoted harness's own sanitizer, and this setting never constrains
+# which already-built harness may run. Override per build with
+# `oxfuzz harness --sanitizer undefined` (or `fuzz --sanitizer`); assert a
+# promoted harness's sanitizer per run with `run --sanitizer` /
+# `campaign --sanitizer`. "memory", "thread", and "none" are rejected: the
+# sandbox cannot honor them (see docs/standards/ENGINE_ADAPTER_STANDARD.md
+# 3.5), and Rust targets build AddressSanitizer-only regardless.
+default_sanitizer = "address"
+
 # Resource limits for harness-based fuzzing campaigns. The service rejects a
 # requested duration or CPU allocation above this ceiling instead of silently
 # clamping it. max_cpus is also the engine worker count: libFuzzer runs
@@ -62,6 +98,18 @@ default_duration_secs = 60
 max_mem_mb = 2048
 max_cpus = 1
 max_duration_secs = 7200
+
+# Harness qualification policy. `allow_unreviewed_smoke` lets every smoke
+# qualification proceed without the mandatory independent LLM pre-execution
+# review -- the offline / no-provider-key path. Off by default and never
+# implied: the per-invocation `oxfuzz harness --no-llm-review` flag opts in
+# without this setting. Residual risk when enabled: only the 13-rule lexical
+# lint and the human promotion gate stand between generated harness code and
+# the sandbox. Every bypass is persisted as a marked review record
+# (verdict "bypassed", reviewer "none") and a guardrail policy-decision row;
+# promotion still requires human approval. See docs/guides/SAFETY_MODEL.md.
+[harness]
+allow_unreviewed_smoke = false
 
 # Retained monitoring for active and recent campaign runs. Throughput mean is
 # the arithmetic mean of all valid reported samples for the run; the live

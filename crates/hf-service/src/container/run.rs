@@ -96,6 +96,68 @@ fn notify_run_subscriber(callback: impl FnOnce()) {
     }
 }
 
+/// How often the AFL++ stats poller re-reads `fuzzer_stats` during a run.
+/// AFL++ flushes the file about once a second; polling faster buys nothing.
+const AFL_STATS_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Drive `run` to completion while streaming AFL++ `fuzzer_stats` snapshots.
+///
+/// AFL++ reports its status through the stats file in the run-owned output
+/// tree rather than stdout, and the tree is bind-mounted to the host, so the
+/// live status line cannot come from the engine's output stream. Poll the
+/// bind-mounted file every `poll_interval`; each *changed* snapshot becomes
+/// one [`FuzzProgress::Stats`] event through the same callback the engine
+/// stream uses. Poll failures (a mid-write snapshot, a not-yet-flushed file)
+/// are logged and retried on the next tick -- they never fail the run.
+async fn poll_afl_stats_while<F, S>(
+    run: F,
+    output: &Path,
+    poll_interval: std::time::Duration,
+    emit: &S,
+) -> F::Output
+where
+    F: std::future::Future,
+    S: Fn(FuzzProgress) + ?Sized,
+{
+    tokio::pin!(run);
+    let mut interval = tokio::time::interval(poll_interval);
+    let mut last: Option<hf_engine::afl::AflFuzzerStats> = None;
+    loop {
+        tokio::select! {
+            result = &mut run => return result,
+            _ = interval.tick() => {
+                let path = output.to_path_buf();
+                let read = tokio::task::spawn_blocking(move || {
+                    hf_engine::afl::read_fuzzer_stats(&path)
+                })
+                .await;
+                let snapshot = match read {
+                    Ok(Ok(snapshot)) => snapshot,
+                    Ok(Err(error)) => {
+                        // A snapshot torn mid-write or replaced between stat
+                        // and read: skipped, retried on the next tick.
+                        tracing::debug!("AFL++ fuzzer_stats poll skipped: {error}");
+                        continue;
+                    }
+                    Err(error) => {
+                        // The blocking task itself failed to join.
+                        tracing::debug!("AFL++ fuzzer_stats poll task failed: {error}");
+                        continue;
+                    }
+                };
+                let Some(stats) = snapshot else {
+                    continue;
+                };
+                if last.as_ref() == Some(&stats) {
+                    continue;
+                }
+                emit(FuzzProgress::Stats(stats.to_engine_stats()));
+                last = Some(stats);
+            }
+        }
+    }
+}
+
 struct PreparedUserspaceRun {
     config: FuzzRunConfig,
     record: RunRecord,
@@ -109,6 +171,17 @@ struct SyzkallerInputs {
     kernel_image: Option<String>,
     disk_image: Option<String>,
     ssh_key: Option<String>,
+}
+
+/// The durable registration of a kernel campaign: its run id, workspace
+/// identity, store handle, and the guard that closes the record out.
+struct KernelRunRegistration {
+    run_id: Uuid,
+    project_root: PathBuf,
+    target_label: String,
+    kernel_workspace: PathBuf,
+    store: Arc<hf_storage::Store>,
+    guard: PersistedRunGuard,
 }
 
 fn syzkaller_inputs(
@@ -665,6 +738,7 @@ impl ServiceContainer {
                         "edges": summary.edges,
                         "execs": summary.execs,
                         "crashes": summary.crashes,
+                        "hangs": summary.hangs,
                         "termination": summary.termination,
                     }),
                 )
@@ -702,6 +776,25 @@ impl ServiceContainer {
     ) -> Result<PreparedUserspaceRun, ClassifiedError> {
         crate::campaign_allocation::verify_granted_harness(qualified, resolved.duration_secs)?;
         let engine = resolved.engine;
+        // The sanitizer is baked into the harness binary at build time, so the
+        // run records the harness's own sanitizer -- never the configured
+        // default. An explicit per-run request (`--sanitizer`) is a constraint
+        // on which harness may run: a mismatch means the binary in the
+        // workspace is not the build the operator asked for.
+        if let Some(requested) = resolved.sanitizer {
+            if requested != qualified.sanitizer {
+                return Err(ClassifiedError::Validation(format!(
+                    "the promoted harness for '{target}' was built with sanitizer '{}' but this \
+                     run requested '{}'; rebuild and re-promote it with `oxfuzz harness --target \
+                     {target} --engine {} --sanitizer {}`, or drop --sanitizer to run the \
+                     existing harness",
+                    qualified.sanitizer.as_str(),
+                    requested.as_str(),
+                    engine.as_str(),
+                    requested.as_str(),
+                )));
+            }
+        }
         let historical = replay
             .as_ref()
             .is_some_and(|value| value.inputs == ReplayInputs::Retained);
@@ -718,12 +811,14 @@ impl ServiceContainer {
             max_mem_mb: resolved.max_mem_mb,
             max_cpus: resolved.max_cpus,
             seed_corpus: Some(corpus_dir),
-            sanitizer: hf_core::target::Sanitizer::Address,
+            sanitizer: qualified.sanitizer,
             env: Vec::new(),
             extra_args,
             seed: None,
             replay_of: None,
             input_manifest_sha256: None,
+            input_timeout: Some(std::time::Duration::from_millis(resolved.timeout_ms)),
+            resume: resolved.resume,
         };
         let store = self.store.as_ref().ok_or_else(|| {
             ClassifiedError::Validation("fuzz runs require the persistent service store".to_owned())
@@ -768,6 +863,10 @@ impl ServiceContainer {
             config = retained;
             config.replay_of = Some(provenance.original_run_id);
             config.input_manifest_sha256 = None;
+            // A replay re-executes the exact retained inputs on a fresh output
+            // tree: it must not continue the session the original run resumed,
+            // or the "same inputs" claim stops meaning anything.
+            config.resume = false;
             (
                 artifacts,
                 hf_core::runtime::ImmutableImageReference::from_sha256_id(image)?,
@@ -821,6 +920,42 @@ impl ServiceContainer {
                 let _ignored_cleanup_error = std::fs::remove_dir_all(run_root);
             }
             return Err(error);
+        }
+        // AFL++ session resume: continue the newest compatible output tree
+        // (same project workspace, engine, harness binary) inside this run's
+        // own fresh output directory. The tree is staged before the run row is
+        // inserted, so a failure leaves no persisted run behind; the outcome
+        // (donor or cold start) is journaled once the run is durable.
+        let mut resumed_from = None;
+        if engine == EngineKind::AflPlusPlus && config.resume {
+            let donor = match super::staging::afl_resume_donor(
+                store,
+                workspace,
+                &record.project_root,
+                &artifacts.binary_sha256,
+                record.id,
+            )
+            .await
+            {
+                Ok(donor) => donor,
+                Err(error) => {
+                    if let Some(run_root) = artifacts.output_host.parent() {
+                        let _ignored_cleanup_error = std::fs::remove_dir_all(run_root);
+                    }
+                    return Err(error);
+                }
+            };
+            if let Some((donor_run, donor_tree)) = donor {
+                if let Err(error) =
+                    super::staging::copy_afl_resume_tree(&donor_tree, &artifacts.output_host)
+                {
+                    if let Some(run_root) = artifacts.output_host.parent() {
+                        let _ignored_cleanup_error = std::fs::remove_dir_all(run_root);
+                    }
+                    return Err(error);
+                }
+                resumed_from = Some(donor_run);
+            }
         }
         let previous_run_id = replay
             .as_ref()
@@ -885,6 +1020,25 @@ impl ServiceContainer {
             return Err(ClassifiedError::Storage(error.to_string()));
         }
         self.run_journal.open_run(run_id, project, target, engine);
+        match resumed_from {
+            Some(donor) => {
+                tracing::info!(%run_id, %donor, "resuming AFL++ session tree");
+                self.run_journal.note(
+                    run_id,
+                    "afl-resume",
+                    &format!("continues the AFL++ session output tree of run {donor}"),
+                );
+            }
+            None if engine == EngineKind::AflPlusPlus && config.resume => {
+                tracing::info!(%run_id, "resume requested but no prior AFL++ session; cold start");
+                self.run_journal.note(
+                    run_id,
+                    "afl-resume",
+                    "resume requested, but no compatible prior AFL++ session exists; cold start",
+                );
+            }
+            None => {}
+        }
         if let Err(error) = ensure_run_journal_durable(&self.run_journal) {
             store
                 .set_run_status(run_id, RunStatus::Failed, Some(Utc::now()))
@@ -1015,7 +1169,6 @@ impl ServiceContainer {
         // process has been launched yet.
         on_started(run_id);
 
-        let runner = hf_engine::runner::EngineRunner::new();
         // Watch edge readings for stagnation while forwarding every event.
         let feedback = CoverageFeedback::new(
             run_id,
@@ -1071,28 +1224,12 @@ impl ServiceContainer {
         ));
         // Stream progress live: `on_progress` fires for each output line and
         // stat as the fuzzer runs, not post-hoc.
-        let run_result = async {
-            if !historical {
-                self.verify_harness_dispatch_image(project, &qualified, sandbox.image.as_deref())
-                    .await?;
-            }
-            super::retained_inputs::verify(&artifacts.input_host, &run_cfg)?;
-            runner
-                .run_streaming_opts(
-                    engine,
-                    &run_cfg,
-                    &artifacts.binary_container,
-                    &artifacts.corpus_container,
-                    &artifacts.output_container,
-                    self.runtime.as_ref(),
-                    &artifacts.input_host.join("workspace"),
-                    &sandbox,
-                    &cancel,
-                    &watched,
-                )
-                .await
-        }
-        .await;
+        let run_result = self
+            .stream_engine_run(
+                engine, historical, project, &qualified, &run_cfg, &artifacts, &sandbox, &cancel,
+                &watched,
+            )
+            .await;
         #[cfg(feature = "campaign-health")]
         managed_invocation.finish();
         output_monitor_stop.cancel();
@@ -1213,7 +1350,15 @@ impl ServiceContainer {
             edges,
             execs,
             crashes,
+            hangs,
+            afl_stats,
         } = metrics;
+        // The poller's last tick can lag AFL++'s final fuzzer_stats flush by
+        // up to the poll interval; emit the terminal snapshot so the run
+        // closes on the exact final counters.
+        if let Some(stats) = afl_stats {
+            watched(FuzzProgress::Stats(stats.to_engine_stats()));
+        }
         let status = match result.termination {
             hf_core::runtime::CommandTermination::Cancelled => RunStatus::Cancelled,
             // The sandbox cap is a backstop over the fuzzer's own self-limit, and
@@ -1265,10 +1410,65 @@ impl ServiceContainer {
             edges,
             execs,
             crashes,
+            hangs,
             termination: result.termination,
             stagnation: feedback.proposal(),
             auto_revert,
         })
+    }
+
+    /// Execute the sandboxed engine run, streaming every parsed progress event
+    /// through `watched` as it happens.
+    ///
+    /// AFL++ keeps its status in the bind-mounted `fuzzer_stats` file rather
+    /// than stdout, so its run is additionally wrapped in a host-side poll of
+    /// that file ([`poll_afl_stats_while`]) to stream the same live stats
+    /// snapshots the other engines produce from their output.
+    async fn stream_engine_run(
+        &self,
+        engine: EngineKind,
+        historical: bool,
+        project: &Path,
+        qualified: &Harness,
+        run_cfg: &FuzzRunConfig,
+        artifacts: &RunArtifacts,
+        sandbox: &SandboxOptions,
+        cancel: &CancellationToken,
+        watched: &(dyn Fn(FuzzProgress) + Send + Sync),
+    ) -> Result<hf_engine::runner::RunResult, ClassifiedError> {
+        let runner = hf_engine::runner::EngineRunner::new();
+        let run = async {
+            if !historical {
+                self.verify_harness_dispatch_image(project, qualified, sandbox.image.as_deref())
+                    .await?;
+            }
+            super::retained_inputs::verify(&artifacts.input_host, run_cfg)?;
+            runner
+                .run_streaming_opts(
+                    engine,
+                    run_cfg,
+                    &artifacts.binary_container,
+                    &artifacts.corpus_container,
+                    &artifacts.output_container,
+                    self.runtime.as_ref(),
+                    &artifacts.input_host.join("workspace"),
+                    sandbox,
+                    cancel,
+                    watched,
+                )
+                .await
+        };
+        if engine == EngineKind::AflPlusPlus {
+            poll_afl_stats_while(
+                run,
+                &artifacts.output_host,
+                AFL_STATS_POLL_INTERVAL,
+                watched,
+            )
+            .await
+        } else {
+            run.await
+        }
     }
 
     /// Run an approved fuzzing campaign end to end: discover (and pick the best
@@ -1291,7 +1491,54 @@ impl ServiceContainer {
         engine: EngineKind,
         lang: TargetLanguage,
         duration_secs: u64,
+        timeout_ms: Option<u64>,
+        resume: Option<bool>,
+        sanitizer: Option<hf_core::target::Sanitizer>,
         max_iterations: usize,
+    ) -> Result<CampaignOutcome, ClassifiedError> {
+        let sink = |_: FuzzProgress| {};
+        self.run_campaign_with_limits(
+            project,
+            target,
+            engine,
+            lang,
+            duration_secs,
+            timeout_ms,
+            resume,
+            sanitizer,
+            CampaignRunLimits {
+                iterations: max_iterations.max(1),
+                time: None,
+            },
+            &sink,
+        )
+        .await
+    }
+
+    /// Like [`Self::run_campaign`], but reports campaign-level progress:
+    /// a [`FuzzProgress::LogLine`] marker at each iteration boundary plus every
+    /// structured event from each iteration's run (stats snapshots, edge/rate
+    /// samples, crash signals, completion).
+    ///
+    /// Raw engine output lines are deliberately not forwarded: a
+    /// multi-iteration campaign would otherwise stream thousands of engine
+    /// status lines past the one-line status renderer. [`Self::run_fuzzer`]
+    /// provides the raw live view.
+    ///
+    /// # Errors
+    /// Returns the same errors as [`Self::run_campaign`].
+    pub async fn run_campaign_observed(
+        &self,
+        project: &Path,
+        target: Option<&str>,
+        engine: EngineKind,
+        lang: TargetLanguage,
+        duration_secs: u64,
+        timeout_ms: Option<u64>,
+        resume: Option<bool>,
+        sanitizer: Option<hf_core::target::Sanitizer>,
+        max_iterations: usize,
+        on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
     ) -> Result<CampaignOutcome, ClassifiedError> {
         self.run_campaign_with_limits(
             project,
@@ -1299,10 +1546,14 @@ impl ServiceContainer {
             engine,
             lang,
             duration_secs,
+            timeout_ms,
+            resume,
+            sanitizer,
             CampaignRunLimits {
                 iterations: max_iterations.max(1),
                 time: None,
             },
+            on_progress,
         )
         .await
     }
@@ -1314,12 +1565,22 @@ impl ServiceContainer {
         engine: EngineKind,
         lang: TargetLanguage,
         duration_secs: u64,
+        timeout_ms: Option<u64>,
+        resume: Option<bool>,
+        sanitizer: Option<hf_core::target::Sanitizer>,
         limits: CampaignRunLimits,
+        on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
     ) -> Result<CampaignOutcome, ClassifiedError> {
         let started = std::time::Instant::now();
         let project_root = canonical_project_root(project)?;
         let project = project_root.as_path();
-        let resolved = resolve_fuzzing_run(engine, duration_secs, None)?;
+        // `resume` resolves once and applies to every iteration: iteration N
+        // continues the output tree iteration N-1 produced, which is exactly
+        // what a long AFL++ campaign wants from session resume. The sanitizer
+        // constraint resolves once too: every iteration runs the same promoted
+        // harness revision.
+        let resolved =
+            resolve_fuzzing_run(engine, duration_secs, None, timeout_ms, resume, sanitizer)?;
         let engine = resolved.engine;
         // 1. Choose a target: the caller's, else the top-ranked candidate.
         let inv = self.discover(project, lang).await?;
@@ -1364,11 +1625,20 @@ impl ServiceContainer {
             .await?;
 
         // 3. Run -> triage loop, stopping on the first crash or the iteration cap.
-        let noop = |_: FuzzProgress| {};
+        // Forward each iteration's structured events to the campaign sink, but
+        // not the raw engine output lines: a multi-iteration campaign would
+        // otherwise stream thousands of status lines. `run_fuzzer` provides
+        // the raw live view.
+        let forward = |progress: FuzzProgress| {
+            if !matches!(progress, FuzzProgress::LogLine(_)) {
+                on_progress(progress);
+            }
+        };
         let mut edges = 0u64;
         let mut crashes = 0usize;
         let mut iterations = 0usize;
         let mut auto_reverts = 0usize;
+        let mut hangs: Option<u64> = None;
         let mut termination = hf_core::runtime::CommandTermination::Completed;
         let mut last_stagnation: Option<hf_coverage::StagnationProposal> = None;
         let cap = limits.iterations;
@@ -1382,11 +1652,20 @@ impl ServiceContainer {
                 iteration_run.duration_secs = iteration_run.duration_secs.min(remaining);
             }
             iterations += 1;
+            on_progress(FuzzProgress::LogLine(format!(
+                "--- campaign iteration {iterations}/{cap}: fuzzing for {}s ---",
+                iteration_run.duration_secs
+            )));
             let summary = self
-                .run_fuzzer_with_started(project, &target, iteration_run, &noop, &|_| {}, None)
+                .run_fuzzer_with_started(project, &target, iteration_run, &forward, &|_| {}, None)
                 .await?;
             termination = summary.termination;
             edges = edges.max(summary.edges);
+            // Hang findings are per run; the campaign total sums its
+            // iterations. Engines that never report a hang count keep `None`.
+            if let Some(value) = summary.hangs {
+                hangs = Some(hangs.map_or(value, |total| total.saturating_add(value)));
+            }
             last_stagnation = summary.stagnation.clone();
             // A refine step between iterations can regress coverage; the policy
             // (armed via config) then restores the last-good harness, or, in
@@ -1436,6 +1715,7 @@ impl ServiceContainer {
             edges,
             iterations,
             auto_reverts,
+            hangs,
             termination,
             refine,
         })
@@ -1461,7 +1741,11 @@ impl ServiceContainer {
         on_progress: Arc<dyn Fn(Uuid, FuzzProgress) + Send + Sync + 'static>,
         on_status: Arc<dyn Fn(Uuid, RunLifecycleStatus) + Send + Sync + 'static>,
     ) -> Result<Uuid, ClassifiedError> {
-        let resolved = resolve_fuzzing_run(engine, duration_secs, None)?;
+        // The web/desktop launch surface carries no per-run timeout, resume, or
+        // sanitizer override; the configured `fuzzing.default_timeout_ms` /
+        // `fuzzing.default_resume` apply and the run records the harness's own
+        // sanitizer.
+        let resolved = resolve_fuzzing_run(engine, duration_secs, None, None, None, None)?;
         self.start_run_launch(
             RunLaunch {
                 project,
@@ -1700,9 +1984,19 @@ impl ServiceContainer {
         engine: EngineKind,
         duration_secs: u64,
         requested_cpus: Option<u32>,
+        timeout_ms: Option<u64>,
+        resume: Option<bool>,
+        sanitizer: Option<hf_core::target::Sanitizer>,
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
     ) -> Result<RunSummary, ClassifiedError> {
-        let resolved = resolve_fuzzing_run(engine, duration_secs, requested_cpus)?;
+        let resolved = resolve_fuzzing_run(
+            engine,
+            duration_secs,
+            requested_cpus,
+            timeout_ms,
+            resume,
+            sanitizer,
+        )?;
         self.run_fuzzer_with_started(project, target, resolved, on_progress, &|_| {}, None)
             .await
     }
@@ -1719,10 +2013,20 @@ impl ServiceContainer {
         engine: EngineKind,
         duration_secs: u64,
         requested_cpus: Option<u32>,
+        timeout_ms: Option<u64>,
+        resume: Option<bool>,
+        sanitizer: Option<hf_core::target::Sanitizer>,
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
         on_started: &(dyn Fn(Uuid) + Send + Sync),
     ) -> Result<RunSummary, ClassifiedError> {
-        let resolved = resolve_fuzzing_run(engine, duration_secs, requested_cpus)?;
+        let resolved = resolve_fuzzing_run(
+            engine,
+            duration_secs,
+            requested_cpus,
+            timeout_ms,
+            resume,
+            sanitizer,
+        )?;
         self.run_fuzzer_with_started(project, target, resolved, on_progress, on_started, None)
             .await
     }
@@ -1874,6 +2178,19 @@ impl ServiceContainer {
         let mut resolved = resolve_fuzzing_run(
             original.engine,
             config.duration.map_or(3600, |duration| duration.as_secs()),
+            None,
+            // The recorded per-input timeout replays exactly, subject to the
+            // current policy range (a saturated conversion cannot pass the
+            // range check, so a corrupt duration fails loud here).
+            config
+                .input_timeout
+                .map(|timeout| u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)),
+            // Replay pins `Some(false)`: a policy-level `default_resume` must
+            // not turn an exact re-execution into a session continuation.
+            Some(false),
+            // Replay likewise carries no sanitizer constraint: a retained
+            // replay re-executes the recorded config (sanitizer included)
+            // verbatim, and a current-input rerun follows the current harness.
             None,
         )?;
         if config.max_mem_mb > resolved.max_mem_mb || config.max_cpus > resolved.max_cpus {
@@ -2050,7 +2367,14 @@ impl ServiceContainer {
         use std::sync::atomic::{AtomicU64, Ordering};
         let _workspace_operation = self.acquire_workspace_operation().await?;
 
-        let resolved = resolve_fuzzing_run(EngineKind::Syzkaller, opts.duration_secs, None)?;
+        let resolved = resolve_fuzzing_run(
+            EngineKind::Syzkaller,
+            opts.duration_secs,
+            None,
+            None,
+            None,
+            None,
+        )?;
         let duration_secs = resolved.duration_secs;
         #[cfg(feature = "campaign-health")]
         let campaign_health_settings = crate::config::effective_campaign_health_settings()
@@ -2095,38 +2419,13 @@ impl ServiceContainer {
         // run before anything else. Inserted after the artifact and daemon
         // gates above, both of which return before a campaign starts -- a run
         // that never launched should not appear in history.
-        let store = self.store.as_ref().ok_or_else(|| {
-            ClassifiedError::Validation(
-                "syzkaller campaigns require the persistent service store".to_owned(),
-            )
-        })?;
-        let project_root = canonical_project_root(&opts.project)?;
-        let target_label = crate::container::syzkaller_target_label(opts);
-        let kernel_workspace = workspace_dir(&project_root, &target_label);
-        let mut run_record = RunRecord::new(
-            project_root.to_string_lossy().to_string(),
-            EngineKind::Syzkaller,
-            None,
-            Utc::now(),
-        );
-        let run_id = run_record.id;
-        run_record.status = RunStatus::Pending;
-        // No harness and no binary: a kernel campaign fuzzes an instrumented
-        // image, so `harness_rev`/`binary_rev` stay unset and triage skips the
-        // digest checks that exist to pin a userspace harness.
-        run_record.evidence_dir = Some(workspace_relative_record(&run_output_relative(run_id)));
-        store
-            .insert_run(&run_record)
-            .await
-            .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
-        self.run_journal
-            .open_run(run_id, &project_root, &target_label, EngineKind::Syzkaller);
-        let mut persisted_run = PersistedRunGuard::new(
-            Arc::clone(store),
-            Some(Arc::clone(&self.run_journal)),
-            run_id,
-        );
-        ensure_run_journal_durable(&self.run_journal)?;
+        let registration = self.persist_kernel_run_record(opts).await?;
+        let store = registration.store.clone();
+        let project_root = registration.project_root.clone();
+        let target_label = registration.target_label.clone();
+        let kernel_workspace = registration.kernel_workspace.clone();
+        let run_id = registration.run_id;
+        let mut persisted_run = registration.guard;
 
         let provided_config = inputs.manager_cfg.is_some();
         let workspace_root = match workspace_override {
@@ -2414,6 +2713,58 @@ impl ServiceContainer {
         journal_update?;
         persisted_run.disarm();
         Ok(summary)
+    }
+
+    /// Persist a kernel campaign's run record (Pending) and open its journal
+    /// entry.
+    ///
+    /// # Errors
+    /// Returns a validation error without the persistent store, or a storage
+    /// error when the insert fails.
+    async fn persist_kernel_run_record(
+        &self,
+        opts: &SyzkallerRunOpts,
+    ) -> Result<KernelRunRegistration, ClassifiedError> {
+        let store = self.store.as_ref().ok_or_else(|| {
+            ClassifiedError::Validation(
+                "syzkaller campaigns require the persistent service store".to_owned(),
+            )
+        })?;
+        let project_root = canonical_project_root(&opts.project)?;
+        let target_label = crate::container::syzkaller_target_label(opts);
+        let kernel_workspace = workspace_dir(&project_root, &target_label);
+        let mut run_record = RunRecord::new(
+            project_root.to_string_lossy().to_string(),
+            EngineKind::Syzkaller,
+            None,
+            Utc::now(),
+        );
+        let run_id = run_record.id;
+        run_record.status = RunStatus::Pending;
+        // No harness and no binary: a kernel campaign fuzzes an instrumented
+        // image, so `harness_rev`/`binary_rev` stay unset and triage skips the
+        // digest checks that exist to pin a userspace harness.
+        run_record.evidence_dir = Some(workspace_relative_record(&run_output_relative(run_id)));
+        store
+            .insert_run(&run_record)
+            .await
+            .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
+        self.run_journal
+            .open_run(run_id, &project_root, &target_label, EngineKind::Syzkaller);
+        let guard = PersistedRunGuard::new(
+            Arc::clone(store),
+            Some(Arc::clone(&self.run_journal)),
+            run_id,
+        );
+        ensure_run_journal_durable(&self.run_journal)?;
+        Ok(KernelRunRegistration {
+            run_id,
+            project_root,
+            target_label,
+            kernel_workspace,
+            store: Arc::clone(store),
+            guard,
+        })
     }
 
     /// Record a terminal status for a syzkaller campaign.
@@ -2745,6 +3096,9 @@ mod semgrep_ranking_consumer_tests {
                 EngineKind::LibFuzzer,
                 TargetLanguage::C,
                 1,
+                None,
+                None,
+                None,
                 1,
             )
             .await
@@ -2757,6 +3111,9 @@ mod semgrep_ranking_consumer_tests {
                 EngineKind::LibFuzzer,
                 TargetLanguage::C,
                 1,
+                None,
+                None,
+                None,
                 1,
             )
             .await
@@ -2820,7 +3177,7 @@ mod allocation_preparation_tests {
             service.prepare_userspace_run(
                 root.path(),
                 "parse",
-                resolve_fuzzing_run(EngineKind::LibFuzzer, 10, None).unwrap(),
+                resolve_fuzzing_run(EngineKind::LibFuzzer, 10, None, None, None, None).unwrap(),
                 &harness,
                 root.path(),
                 root.path().join("corpus"),
@@ -2880,7 +3237,7 @@ mod allocation_preparation_tests {
                 .prepare_userspace_run(
                     root.path(),
                     "parse",
-                    resolve_fuzzing_run(EngineKind::LibFuzzer, 11, None).unwrap(),
+                    resolve_fuzzing_run(EngineKind::LibFuzzer, 11, None, None, None, None).unwrap(),
                     &harness,
                     root.path(),
                     root.path().join("corpus"),
@@ -2901,7 +3258,7 @@ mod allocation_preparation_tests {
                 .prepare_userspace_run(
                     root.path(),
                     "parse",
-                    resolve_fuzzing_run(EngineKind::LibFuzzer, 10, None).unwrap(),
+                    resolve_fuzzing_run(EngineKind::LibFuzzer, 10, None, None, None, None).unwrap(),
                     &harness,
                     root.path(),
                     root.path().join("corpus"),
@@ -2913,7 +3270,7 @@ mod allocation_preparation_tests {
                 .prepare_userspace_run(
                     root.path(),
                     "parse",
-                    resolve_fuzzing_run(EngineKind::LibFuzzer, 10, None).unwrap(),
+                    resolve_fuzzing_run(EngineKind::LibFuzzer, 10, None, None, None, None).unwrap(),
                     &harness,
                     root.path(),
                     root.path().join("corpus"),
@@ -2926,5 +3283,132 @@ mod allocation_preparation_tests {
             assert!(error.to_string().contains("already attempted"), "{error}");
         })
         .await;
+    }
+}
+
+#[cfg(test)]
+mod afl_stats_polling_tests {
+    use super::poll_afl_stats_while;
+    use hf_core::engine::FuzzProgress;
+    use hf_core::error::ClassifiedError;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    fn recorded(events: &Arc<Mutex<Vec<FuzzProgress>>>) -> impl Fn(FuzzProgress) + '_ {
+        move |progress| {
+            events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(progress);
+        }
+    }
+
+    fn execs_totals(events: &[FuzzProgress]) -> Vec<u64> {
+        events
+            .iter()
+            .filter_map(|progress| match progress {
+                FuzzProgress::Stats(stats) => stats.execs_total,
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn poller_streams_each_changed_snapshot_until_the_run_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path();
+        std::fs::create_dir(output.join("default")).unwrap();
+        std::fs::write(
+            output.join("default/fuzzer_stats"),
+            "execs_done : 100\nexecs_per_sec : 50\n",
+        )
+        .unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = recorded(&events);
+        let writer = output.to_path_buf();
+        let run = async move {
+            // Mid-run, AFL++ flushes a newer snapshot into the bind mount.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            std::fs::write(
+                writer.join("default/fuzzer_stats"),
+                "execs_done : 200\nexecs_per_sec : 80\n",
+            )
+            .unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Ok::<_, ClassifiedError>(7)
+        };
+
+        let result = poll_afl_stats_while(run, output, Duration::from_millis(10), &sink).await;
+
+        assert_eq!(result.unwrap(), 7, "the run's own result passes through");
+        let totals = execs_totals(&events.lock().unwrap());
+        assert_eq!(
+            totals.first(),
+            Some(&100),
+            "the initial snapshot: {totals:?}"
+        );
+        assert!(
+            totals.contains(&200),
+            "the mid-run flush must be observed: {totals:?}"
+        );
+        // Snapshots are de-duplicated: the unchanged file is not re-emitted
+        // on every tick.
+        assert_eq!(
+            totals.iter().filter(|total| **total == 100).count(),
+            1,
+            "an unchanged snapshot must not be re-emitted: {totals:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn poller_emits_nothing_until_afl_flushes_the_first_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = recorded(&events);
+        let run = async move {
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            Ok::<_, ClassifiedError>(())
+        };
+
+        poll_afl_stats_while(run, dir.path(), Duration::from_millis(10), &sink)
+            .await
+            .unwrap();
+
+        assert!(
+            events.lock().unwrap().is_empty(),
+            "no fuzzer_stats file means no stats events"
+        );
+    }
+
+    #[tokio::test]
+    async fn poller_survives_a_malformed_snapshot_and_recovers_on_the_next_tick() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path();
+        std::fs::create_dir(output.join("default")).unwrap();
+        // A mid-write or corrupt snapshot must not fail the run.
+        std::fs::write(
+            output.join("default/fuzzer_stats"),
+            "execs_done : garbage\n",
+        )
+        .unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = recorded(&events);
+        let writer = output.to_path_buf();
+        let run = async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            std::fs::write(writer.join("default/fuzzer_stats"), "execs_done : 42\n").unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Ok::<_, ClassifiedError>(())
+        };
+
+        poll_afl_stats_while(run, output, Duration::from_millis(10), &sink)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            execs_totals(&events.lock().unwrap()),
+            vec![42],
+            "only the valid snapshot is emitted"
+        );
     }
 }
