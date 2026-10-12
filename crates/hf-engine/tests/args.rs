@@ -124,8 +124,116 @@ fn afl_input_delivery_is_identical_across_lifecycle_builders() {
     let showmap_separator = showmap.iter().position(|arg| arg == "--").unwrap();
     assert_eq!(&showmap[showmap_separator + 1..], replay_target);
 
+    // afl-cmin distills a corpus, so it fuzzes from a file placeholder like
+    // afl-fuzz/afl-tmin, never a concrete input path.
+    let cmin = hf_engine::cmin::build_cmin_args(
+        "/work/corpus",
+        "/work/out",
+        Duration::from_millis(1000),
+        1,
+        "/work/fuzz_bin",
+    );
+    let cmin_separator = cmin.iter().position(|arg| arg == "--").unwrap();
+    assert_eq!(&cmin[cmin_separator + 1..], fuzz_target);
+
     // The `afl-tmin` minimizer command is built by `hf_crash::minimize::
     // build_minimize_args` (the single source), tested in hf-crash.
+}
+
+#[test]
+fn afl_cmin_argv_matches_the_pinned_afl_cmin_interface() {
+    // afl-cmin as shipped by the sandbox image (Ubuntu afl++ 4.09c-1ubuntu3,
+    // /usr/bin/afl-cmin): `afl-cmin [options] -- /path/to/target_app [...]`.
+    let args = hf_engine::cmin::build_cmin_args(
+        "/work/runs/x/corpus",
+        "/work/runs/x/out",
+        Duration::from_millis(1000),
+        1,
+        "/work/runs/x/input/harness",
+    );
+    assert_eq!(
+        args.iter().map(String::as_str).collect::<Vec<_>>(),
+        vec![
+            "afl-cmin",
+            "-i",
+            "/work/runs/x/corpus",
+            "-o",
+            "/work/runs/x/out",
+            "-m",
+            "none",
+            "-t",
+            "1000",
+            "--",
+            "/work/runs/x/input/harness",
+            "@@",
+        ],
+        "the single-CPU argv must be byte-identical"
+    );
+}
+
+#[test]
+fn afl_cmin_threads_the_configured_input_timeout_in_exact_milliseconds() {
+    let args = hf_engine::cmin::build_cmin_args(
+        "/work/corpus",
+        "/work/out",
+        Duration::from_millis(250),
+        1,
+        "/work/fuzz_bin",
+    );
+    let flag = args.iter().position(|arg| arg == "-t").expect("-t flag");
+    assert_eq!(
+        args.get(flag + 1).map(String::as_str),
+        Some("250"),
+        "afl-cmin takes the exact millisecond budget like afl-fuzz -t: {args:?}"
+    );
+}
+
+#[test]
+fn afl_cmin_disables_the_memory_limit_for_sanitizer_builds() {
+    // Promoted harnesses are sanitizer builds (ASan by default); a megabyte
+    // cap kills the shadow-memory reservation. `-m none` is explicit rather
+    // than inherited from the script's own default.
+    let args = hf_engine::cmin::build_cmin_args(
+        "/work/corpus",
+        "/work/out",
+        Duration::from_millis(1000),
+        1,
+        "/work/fuzz_bin",
+    );
+    let flag = args.iter().position(|arg| arg == "-m").expect("-m flag");
+    assert_eq!(args.get(flag + 1).map(String::as_str), Some("none"));
+}
+
+#[test]
+fn afl_cmin_parallelizes_only_above_one_cpu() {
+    // afl-cmin 4.09c rejects `-T 1` ("must be between 1 and nproc" reads
+    // strictly greater than one), so a one-CPU allocation keeps the sequential
+    // default path and a larger one fans out showmap workers.
+    let sequential = hf_engine::cmin::build_cmin_args(
+        "/work/corpus",
+        "/work/out",
+        Duration::from_millis(1000),
+        1,
+        "/work/fuzz_bin",
+    );
+    assert!(
+        !sequential.iter().any(|arg| arg == "-T"),
+        "one CPU must not emit -T: {sequential:?}"
+    );
+    let parallel = hf_engine::cmin::build_cmin_args(
+        "/work/corpus",
+        "/work/out",
+        Duration::from_millis(1000),
+        3,
+        "/work/fuzz_bin",
+    );
+    let flag = parallel
+        .iter()
+        .position(|arg| arg == "-T")
+        .expect("-T flag");
+    assert_eq!(parallel.get(flag + 1).map(String::as_str), Some("3"));
+    let separator = parallel.iter().position(|arg| arg == "--").expect("--");
+    assert!(flag < separator, "-T belongs before the target argv");
 }
 
 #[test]

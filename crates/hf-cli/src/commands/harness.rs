@@ -438,6 +438,13 @@ pub(crate) async fn cmd_corpus(
                 outcome.before, outcome.after
             );
         }
+        "afl-cmin" => {
+            let outcome = container.corpus_afl_cmin(&project, target).await?;
+            println!(
+                "afl-cmin distilled {} -> {} entries ({} -> {} bytes).",
+                outcome.before, outcome.after, outcome.before_bytes, outcome.after_bytes
+            );
+        }
         "survival" => {
             let report = container.seed_survival(&project, target).await?;
             let ratio = report.survival_ratio.map_or_else(
@@ -510,7 +517,7 @@ pub(crate) async fn cmd_corpus(
         other => {
             anyhow::bail!(
                 "unknown corpus op: {other} \
-                 (use seed|llmseed|grow|prune|cprune|survival|regen|minimize|absorb|concolic|import|list)"
+                 (use seed|llmseed|grow|prune|cprune|afl-cmin|survival|regen|minimize|absorb|concolic|import|list)"
             )
         }
     }

@@ -19,16 +19,16 @@ use super::project_identity::{
     canonical_project_root, select_target_candidate, stored_project_matches,
 };
 use super::staging::{
-    minimization_failure_with_rollback, minimization_sandbox_options, run_output_dir,
-    stage_run_artifacts, verify_run_artifacts, verify_staged_qualification,
+    cmin_sandbox_options, minimization_failure_with_rollback, minimization_sandbox_options,
+    run_output_dir, stage_run_artifacts, verify_run_artifacts, verify_staged_qualification,
 };
 use super::workspace::workspace_dir;
 use super::{
     ensure_workspace_directory, prepare_configured_workspace_root, resolve_internal_run,
     run_has_crash_evidence, CorpusCapabilities, CorpusCapability, CorpusImportOutcome,
-    CorpusInventory, MinimizeOutcome, SeedSurvivalReport, ServiceContainer, CORPUS_MINIMIZE_SECS,
-    COVERAGE_PRUNE_COMMAND_SECS, COVERAGE_PRUNE_OPERATION_SECS, SEED_SURVIVAL_COMMAND_SECS,
-    SEED_SURVIVAL_OPERATION_SECS,
+    CorpusInventory, MinimizeOutcome, SeedSurvivalReport, ServiceContainer, CORPUS_CMIN_SECS,
+    CORPUS_MINIMIZE_SECS, COVERAGE_PRUNE_COMMAND_SECS, COVERAGE_PRUNE_OPERATION_SECS,
+    SEED_SURVIVAL_COMMAND_SECS, SEED_SURVIVAL_OPERATION_SECS,
 };
 
 fn corpus_inventory(corpus: &hf_core::corpus::Corpus) -> Result<CorpusInventory, ClassifiedError> {
@@ -474,6 +474,214 @@ impl ServiceContainer {
         let pruned = hf_corpus::prune(corpus)?;
         let after = corpus_inventory(&pruned)?;
         self.persist_corpus(qualified.target_id, &pruned).await?;
+        Ok(MinimizeOutcome {
+            before: before.inputs,
+            after: after.inputs,
+            before_bytes: before.bytes,
+            after_bytes: after.bytes,
+        })
+    }
+
+    /// Batch corpus distillation: a single sandboxed `afl-cmin` run reduces
+    /// the whole corpus to a minimum covering set -- the smallest input
+    /// covering each observed coverage tuple is kept, the rest dropped. This
+    /// is the scale tier next to [`Self::corpus_prune_coverage`]: one
+    /// container invocation for the whole corpus instead of one `afl-showmap`
+    /// spawn per input, so a large AFL++ queue (tens of thousands of entries,
+    /// past the per-input tier's 10 000-input ceiling) can be distilled at
+    /// all.
+    ///
+    /// The reduction is a set cover, not the per-input tier's
+    /// one-per-fingerprint dedup: two inputs with distinct coverage may both
+    /// survive there while only the smaller survives here. Inputs that crash
+    /// or time out produce no trace and are dropped from the distilled set
+    /// (afl-cmin's default; crash reproducers are triage-owned and re-enter
+    /// through [`Self::corpus_absorb_crashes`]). Deliberately explicit: the
+    /// operator picks the batch tier via `corpus --op afl-cmin`, because the
+    /// two reductions are semantically different answers and corpus size must
+    /// not silently select between them.
+    ///
+    /// Staging, budgets, and adoption mirror [`Self::corpus_minimize`]: the
+    /// exact promoted, smoke-qualified AFL++ harness and a run-scoped corpus
+    /// snapshot are digest-verified before launch; the sandbox sees an
+    /// immutable workspace, a writable run-scoped snapshot (afl-cmin writes a
+    /// hardlink probe into its input directory), and a bounded writable
+    /// output; the distilled tree is validated on the host before adoption
+    /// (non-empty, every survivor byte-identical to a pre-run corpus entry,
+    /// `hf_corpus::minimize` re-validates the flat regular tree), and any
+    /// failure keeps the retained corpus -- an empty or garbage run can never
+    /// empty it.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the corpus cannot be read, no promoted
+    /// AFL++ harness qualifies, the sandbox run fails or exceeds its budget,
+    /// or the distilled output fails validation.
+    pub async fn corpus_afl_cmin(
+        &self,
+        project: &Path,
+        target: &str,
+    ) -> Result<MinimizeOutcome, ClassifiedError> {
+        let resolved = resolve_internal_run(EngineKind::AflPlusPlus, CORPUS_CMIN_SECS)?;
+        let _workspace_operation = self.acquire_workspace_operation().await?;
+        self.authorize_recorded(Action::CorpusOp, "corpus_afl_cmin", Some(project))
+            .await?;
+        prepare_configured_workspace_root()?;
+        let workspace = workspace_dir(project, target);
+        let corpus_dir = ensure_workspace_directory(&workspace, Path::new("corpus"))?;
+        let starting = hf_corpus::list(&corpus_dir)?;
+        let before = corpus_inventory(&starting)?;
+        if before.inputs == 0 {
+            return Ok(MinimizeOutcome {
+                before: 0,
+                after: 0,
+                before_bytes: 0,
+                after_bytes: 0,
+            });
+        }
+
+        let _target_revision = self.acquire_target_revision(project, target).await?;
+        let qualified = self
+            .active_harness_locked(project, target, EngineKind::AflPlusPlus)
+            .await?;
+        if qualified.status != HarnessStatus::Promoted {
+            return Err(ClassifiedError::Validation(
+                "batch corpus distillation requires an explicitly promoted AFL++ harness"
+                    .to_owned(),
+            ));
+        }
+        self.verify_harness_qualification_locked(project, target, &qualified)
+            .await?;
+        self.authorize_recorded(
+            Action::RunFuzzer {
+                engine: "AFL++ afl-cmin".to_owned(),
+                duration_secs: resolved.duration_secs,
+            },
+            "corpus_afl_cmin",
+            Some(project),
+        )
+        .await?;
+
+        let binary = workspace.join(harness_binary_name(target));
+        if !is_regular_file(&binary) {
+            return Err(ClassifiedError::Validation(format!(
+                "promoted AFL++ harness binary is missing: {}",
+                binary.display()
+            )));
+        }
+        // Batch distillation replays the main binary only; a CmpLog companion
+        // is never part of it (mirrors corpus_minimize).
+        let artifacts =
+            stage_run_artifacts(&workspace, Uuid::new_v4(), &qualified.source, &binary, None)?;
+        let run_root = artifacts.output_host.parent().ok_or_else(|| {
+            ClassifiedError::Internal("distillation output has no run directory".to_owned())
+        })?;
+        let _staging_guard = StagingDirectoryGuard(run_root.to_path_buf());
+        verify_staged_qualification(&qualified, &artifacts)?;
+        verify_run_artifacts(&artifacts)?;
+
+        let cmd = hf_engine::cmin::build_cmin_args(
+            &artifacts.corpus_container,
+            &artifacts.output_container,
+            std::time::Duration::from_millis(resolved.timeout_ms),
+            resolved.max_cpus,
+            &artifacts.binary_container,
+        );
+        let limits = hf_core::runtime::ResourceLimits {
+            max_mem_mb: resolved.max_mem_mb,
+            max_cpus: resolved.max_cpus,
+            max_duration_secs: resolved.duration_secs,
+            env: std::collections::HashMap::new(),
+            ptrace: false,
+        };
+        let mut sandbox = cmin_sandbox_options(&artifacts);
+        sandbox.image = self.configured_harness_image(project, &qualified).await?;
+        let cancel = CancellationToken::new();
+        let monitor_stop = CancellationToken::new();
+        let budget_exceeded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let monitor = tokio::spawn(monitor_run_output(
+            artifacts.output_host.clone(),
+            artifacts.corpus_host.clone(),
+            hf_corpus::DEFAULT_CORPUS_LIMITS.max_input_bytes,
+            cancel.clone(),
+            monitor_stop.clone(),
+            Arc::clone(&budget_exceeded),
+        ));
+        let result = self
+            .runtime
+            .run_command_streaming_opts(&cmd, &workspace, &limits, &sandbox, &cancel, &|_| {})
+            .await;
+        monitor_stop.cancel();
+        // Swallowed: the monitor's only output is the `budget_exceeded` flag;
+        // its join result carries nothing the flag does not.
+        let _ = monitor.await;
+        if !run_artifacts_within_budget(
+            &artifacts,
+            hf_corpus::DEFAULT_CORPUS_LIMITS.max_input_bytes,
+        )
+        .await
+        {
+            budget_exceeded.store(true, std::sync::atomic::Ordering::Release);
+        }
+        if budget_exceeded.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(ClassifiedError::Sandbox(
+                "batch corpus distillation exceeded its corpus/output budget".to_owned(),
+            ));
+        }
+        let result = result?.require_completed("batch corpus distillation")?;
+        if result.exit_code != 0 {
+            return Err(ClassifiedError::Sandbox(format!(
+                "batch corpus distillation exited with status {}: {}",
+                result.exit_code,
+                result.stderr.trim()
+            )));
+        }
+
+        let distilled = hf_corpus::list(&artifacts.output_host)?;
+        if distilled.entries.is_empty() {
+            return Err(ClassifiedError::Sandbox(
+                "batch corpus distillation produced an empty survivor set".to_owned(),
+            ));
+        }
+        // afl-cmin copies or hardlinks its survivors from the input corpus
+        // verbatim, so an output entry whose content was never in the corpus
+        // is a garbage run: fail loud and keep the retained corpus.
+        let retained_hashes: std::collections::HashSet<&str> = starting
+            .entries
+            .iter()
+            .map(|entry| entry.sha256.as_str())
+            .collect();
+        if let Some(foreign) = distilled
+            .entries
+            .iter()
+            .find(|entry| !retained_hashes.contains(entry.sha256.as_str()))
+        {
+            return Err(ClassifiedError::Sandbox(format!(
+                "batch corpus distillation produced an input that was never in the corpus: {}",
+                foreign.path.display()
+            )));
+        }
+        self.verify_harness_build_inputs(project, &qualified, true)
+            .await
+            .map_err(|error| super::harness_inputs::corpus_input_error("corpus_afl_cmin", error))?;
+        let mut minimized = match hf_corpus::minimize(&corpus_dir, &artifacts.output_host) {
+            Ok(corpus) => corpus,
+            Err(error) => {
+                return Err(minimization_failure_with_rollback(
+                    &corpus_dir,
+                    &artifacts.corpus_host,
+                    error,
+                ));
+            }
+        };
+        minimized.target_id = qualified.target_id;
+        if let Err(error) = self.persist_corpus(qualified.target_id, &minimized).await {
+            return Err(minimization_failure_with_rollback(
+                &corpus_dir,
+                &artifacts.corpus_host,
+                error,
+            ));
+        }
+        let after = corpus_inventory(&minimized)?;
         Ok(MinimizeOutcome {
             before: before.inputs,
             after: after.inputs,

@@ -136,6 +136,10 @@ const COVERAGE_PRUNE_COMMAND_SECS: u64 = 10;
 const SEED_SURVIVAL_OPERATION_SECS: u64 = 600;
 const SEED_SURVIVAL_COMMAND_SECS: u64 = 10;
 const CORPUS_MINIMIZE_SECS: u64 = 300;
+/// Wall-clock budget for one batch afl-cmin distillation: the same 10-minute
+/// bound coverage pruning gets, but covering the whole corpus in a single
+/// sandboxed invocation instead of one spawn per input.
+const CORPUS_CMIN_SECS: u64 = 600;
 /// Bound on the stored policy reason; denial reasons embed action labels that
 /// can carry long parameters (e.g. a shell command).
 const MAX_GUARDAIL_DETAIL_CHARS: usize = 256;

@@ -214,7 +214,7 @@ Binary Tool integration is outside this release's scope.
 | `trust --run <run UUID>` | Audit which claims about a finished run its retained evidence supports. Read-only; starts no build, run, or coverage measurement. |
 | `closeout --run <run UUID>` | Explicitly run or resume the seven retained terminal closeout steps. Successful/skipped steps remain retained; failed or dependency-blocked work can be retried. |
 | `triage <project> --target <sym>` | Ingest, dedup, classify (CASR), and draft reports for crashes. |
-| `corpus <project> --target <sym> --op seed\|llmseed\|grow\|prune\|cprune\|survival\|regen\|minimize\|absorb\|concolic\|import\|list [--from <dir>]` | Manage the corpus. `prune` removes byte duplicates; `cprune`, `survival`, `regen`, `minimize`, and optional `concolic` have the distinct execution/provider requirements below; `import` requires `--from`. |
+| `corpus <project> --target <sym> --op seed\|llmseed\|grow\|prune\|cprune\|afl-cmin\|survival\|regen\|minimize\|absorb\|concolic\|import\|list [--from <dir>]` | Manage the corpus. `prune` removes byte duplicates; `cprune`, `afl-cmin`, `survival`, `regen`, `minimize`, and optional `concolic` have the distinct execution/provider requirements below; `import` requires `--from`. |
 | `build diagnose <project> [--json]` | Read current build prerequisites and the exact available plan without building. |
 | `build profile show\|set\|clear ...` | Read or explicitly change the optional CMake/plain-Make project build profile. `show` remains available in builds without Build Doctor. |
 | `build history <project> [--limit N] [--json]` | Read retained diagnosis and build output. |
@@ -597,13 +597,23 @@ only through the sandbox. Clearing a profile keeps diagnosis/build history.
 
 `seed`, `grow`, `prune`, `absorb`, `import`, and `list` use deterministic corpus
 operations. `llmseed` contacts the configured provider. `survival`, `cprune`,
-and `regen` require an exact promoted, smoke-qualified AFL++ harness; `regen`
-also asks the provider for bounded replacement seeds. `minimize` (also accepted
-as `cmin`) requires an exact promoted, smoke-qualified libFuzzer harness.
-`concolic` is available only with its feature and performs sandboxed symbolic
-enrichment. Engine-backed actions repeat qualification and current policy checks
-at execution time. `prune` claims byte deduplication only; `cprune` retains one
-input per whole-map fingerprint and is not a global minimum covering set.
+`afl-cmin`, and `regen` require an exact promoted, smoke-qualified AFL++
+harness; `regen` also asks the provider for bounded replacement seeds.
+`minimize` (also accepted as `cmin`) requires an exact promoted,
+smoke-qualified libFuzzer harness. `concolic` is available only with its
+feature and performs sandboxed symbolic enrichment. Engine-backed actions
+repeat qualification and current policy checks at execution time. `prune`
+claims byte deduplication only; `cprune` retains one input per whole-map
+fingerprint (one `afl-showmap` container spawn per input, capped at 10,000
+inputs in a 10-minute budget) and is not a global minimum covering set.
+`afl-cmin` is the batch tier for large AFL++ corpora: one sandboxed afl-cmin
+invocation reduces the whole corpus to a minimum covering set in parallel
+(`-T` follows the sandbox CPU ceiling, `-t` the configured per-input timeout,
+`-m none` for sanitizer builds), bounded by the same 10-minute budget. It is
+never auto-selected: the two reductions answer different questions, so the
+operator picks the tier. A failed or empty afl-cmin run keeps the retained
+corpus untouched. The op is spelled `afl-cmin`, not `cmin`, because `cmin` is
+already the libFuzzer `minimize` alias.
 
 ### Coverage experiments and replay
 

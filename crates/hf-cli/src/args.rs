@@ -545,8 +545,8 @@ pub(crate) struct CorpusArgs {
     /// Target symbol.
     #[arg(long)]
     pub(crate) target: String,
-    /// Operation: seed, llmseed, grow, prune, cprune, survival, regen,
-    /// minimize, absorb, concolic, import, list.
+    /// Operation: seed, llmseed, grow, prune, cprune, afl-cmin, survival,
+    /// regen, minimize, absorb, concolic, import, list.
     #[arg(long)]
     pub(crate) op: String,
     /// Source directory for `import` (an external corpus, e.g. OSS-Fuzz).

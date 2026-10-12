@@ -1100,17 +1100,23 @@ pub(super) fn run_sandbox_options(
     }
 }
 
-/// Hardened libFuzzer merge profile: the starting snapshot remains immutable
-/// and only the bounded, disposable merge result can be written.
-pub(super) fn minimization_sandbox_options(
+/// Hardened corpus-reduction profile: the primary workspace stays immutable
+/// and only the bounded, disposable reduction output can be written. The
+/// run's corpus snapshot is read-only for a pure merge and writable for
+/// afl-cmin, which writes a `.afl-cmin.test` hardlink probe into its input
+/// directory (AFL++ 4.09c); the retained corpus is never mounted either way.
+fn reduction_sandbox_options(
     artifacts: &RunArtifacts,
+    corpus_writable: bool,
 ) -> hf_core::runtime::SandboxOptions {
+    let corpus = hf_core::runtime::SandboxMount {
+        host_path: artifacts.corpus_host.clone(),
+        container_path: artifacts.corpus_container.clone(),
+        read_only: !corpus_writable,
+    };
     hf_core::runtime::SandboxOptions {
         extra_mounts: vec![
-            hf_core::runtime::SandboxMount::read_only(
-                artifacts.corpus_host.clone(),
-                artifacts.corpus_container.clone(),
-            ),
+            corpus,
             hf_core::runtime::SandboxMount::writable(
                 artifacts.output_host.clone(),
                 artifacts.output_container.clone(),
@@ -1120,6 +1126,20 @@ pub(super) fn minimization_sandbox_options(
         max_file_size_bytes: Some(hf_corpus::DEFAULT_CORPUS_LIMITS.max_input_bytes),
         ..hf_core::runtime::SandboxOptions::default()
     }
+}
+
+/// Hardened libFuzzer merge profile: the starting snapshot remains immutable
+/// and only the bounded, disposable merge result can be written.
+pub(super) fn minimization_sandbox_options(
+    artifacts: &RunArtifacts,
+) -> hf_core::runtime::SandboxOptions {
+    reduction_sandbox_options(artifacts, false)
+}
+
+/// Hardened afl-cmin profile: the corpus snapshot must be writable for the
+/// input-directory link probe, everything else matches the merge profile.
+pub(super) fn cmin_sandbox_options(artifacts: &RunArtifacts) -> hf_core::runtime::SandboxOptions {
+    reduction_sandbox_options(artifacts, true)
 }
 
 pub(super) fn minimization_failure_with_rollback(

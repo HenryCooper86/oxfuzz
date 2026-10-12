@@ -90,9 +90,10 @@ a file argument:
 | Fuzz run | `<binary> @@` |
 | `afl-showmap` | `<binary> <input>` |
 | `afl-tmin` | `<binary> @@` |
+| `afl-cmin` | `<binary> @@` |
 | Reproduction | `<binary> <input>` |
 
-All four forms must be built through `hf-engine::afl`'s typed input-delivery
+All five forms must be built through `hf-engine::afl`'s typed input-delivery
 helpers. Omitting `@@` selects AFL++'s stdin mode and is a contract violation.
 
 ### 3.3 Per-Input Timeout
@@ -300,6 +301,64 @@ covers the initial corpus too; the lighter mode is for large carried
 corpora/CI and can be revisited when those exist). The `-l` CmpLog level knob
 (`2AT` transform-following, scale mode) is not emitted; level 1 is the
 feature's base.
+
+### 3.7 AFL++ afl-cmin Batch Distillation
+
+`oxfuzz corpus --op afl-cmin` reduces an AFL++ target's whole corpus to a
+minimum covering set in ONE sandboxed `afl-cmin` invocation, next to the
+per-input `afl-showmap` fingerprinting of `--op cprune` (one container spawn
+per input, capped at 10 000 inputs). The op name spells the tool because
+`cmin` is already the libFuzzer `minimize` alias. The batch tier is explicit
+and never auto-selected: `cprune` answers "one input per whole-map
+fingerprint", afl-cmin answers "smallest set covering every observed tuple",
+and corpus size must not silently choose between them.
+
+The argv is built by `hf_engine::cmin::build_cmin_args` against the pinned
+interface (the sandbox image's Ubuntu `afl++` 4.09c-1ubuntu3 package ships
+`/usr/bin/afl-cmin`; its usage line is `afl-cmin [options] --
+/path/to/target_app [...]`):
+
+```text
+afl-cmin -i <corpus> -o <out> -m none -t <ms> [-T <tasks>] -- <binary> @@
+```
+
+- `-t` carries the resolved per-input timeout in exact milliseconds (the
+  policy's `fuzzing.default_timeout_ms` for an internal corpus operation),
+  the same granularity `afl-fuzz -t` takes (§3.3).
+- `-m none` is always explicit. Promoted harnesses are sanitizer builds (ASan
+  by default, §3.5), and any megabyte cap kills ASan's shadow-memory
+  reservation; the script's own default is also `none`, and an explicit flag
+  cannot be silently re-defaulted.
+- `-T <tasks>` is emitted only when the resolved sandbox CPU allocation is
+  greater than one: afl-cmin 4.09c rejects `-T 1` (its "between 1 and nproc"
+  check reads strictly greater than one), so a one-CPU allocation keeps the
+  sequential default path. The value never exceeds the sandbox CPU ceiling.
+- The target argv is the §3.2 file-input contract (`<binary> @@`), the same
+  form `afl-fuzz` and `afl-tmin` take.
+- `-A`/`-C` are never passed. afl-cmin's default drops inputs that crash or
+  time out from the distilled set (afl-showmap writes an empty trace for
+  them); crash reproducers are triage-owned and re-enter the corpus through
+  `corpus absorb`. With `-A`, a binary that crashes at entry on every input
+  would trace everything identically and collapse a large corpus toward one
+  file -- the garbage-adoption failure this op exists not to have.
+- `-e` is never passed: hit-count-sensitive tuples match the bucket-sensitive
+  fingerprints `hf_engine::showmap::coverage_hash` uses.
+
+Execution and adoption live in `hf-service` (`corpus_afl_cmin`), mirroring
+`corpus_minimize`: the exact promoted, smoke-qualified AFL++ harness and a
+run-scoped corpus snapshot are digest-verified before launch; the sandbox
+gets an immutable workspace, the snapshot mounted **writable** (afl-cmin
+4.09c writes a `.afl-cmin.test` hardlink probe into its input directory) and
+a bounded writable output; a live output monitor plus the sandbox wall clock
+bound the run to the same 10-minute budget coverage pruning gets. The
+distilled tree is validated on the host before adoption: it must be
+non-empty and every survivor must be byte-identical (SHA-256) to a pre-run
+corpus entry, since afl-cmin copies or hardlinks survivors verbatim; then
+`hf_corpus::minimize` re-validates the flat regular tree and adopts it
+through fresh-inode atomic writes. Any failure -- non-zero exit, empty or
+foreign output, budget overflow, adoption error -- keeps the retained corpus
+untouched (with rollback from the pristine snapshot), so a failed or garbage
+run can never empty the corpus.
 
 ## 4. Progress Streaming
 

@@ -11,6 +11,21 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ### Added
 
+- Batch corpus distillation for AFL++ targets: `oxfuzz corpus --op afl-cmin`
+  runs one sandboxed `afl-cmin` invocation that reduces the whole corpus to a
+  minimum covering set (parallel `-T` follows the sandbox CPU ceiling, `-t`
+  the configured per-input timeout, `-m none` for sanitizer builds), bounded
+  by the same 10-minute budget coverage pruning gets. This is the scale tier
+  next to `--op cprune`'s one-container-spawn-per-input fingerprinting (capped
+  at 10,000 inputs); it is explicit and never auto-selected because the two
+  reductions answer different questions. The op is spelled `afl-cmin` since
+  `cmin` is already the libFuzzer `minimize` alias. The distilled tree is
+  validated on the host before adoption (non-empty, every survivor
+  byte-identical to a pre-run corpus entry), and a failed or garbage run
+  keeps the retained corpus untouched. Requires an exact promoted,
+  smoke-qualified AFL++ harness; audit goes through the existing
+  corpus-operation and run-fuzzer approvals. See
+  `docs/standards/ENGINE_ADAPTER_STANDARD.md` 3.7.
 - AFL++ CmpLog/redqueen support for magic-byte and multi-byte comparison
   targets. `oxfuzz harness --target <sym> --engine afl++ --cmplog` builds a
   CmpLog companion binary (same source, driver, and sanitizer flags, compiled

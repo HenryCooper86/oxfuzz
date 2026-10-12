@@ -289,6 +289,11 @@ async fn default_policy_allows_corpus_operations_without_prompting() {
         .await
         .unwrap();
     assert_eq!(minimized.after, 0);
+    let distilled = container
+        .corpus_afl_cmin(project.path(), "fresh_target")
+        .await
+        .unwrap();
+    assert_eq!(distilled.after, 0);
     assert!(
         gate.consulted.lock().unwrap().is_empty(),
         "corpus operations are auto-allowed under the default policy"
@@ -324,6 +329,11 @@ async fn strict_policy_denies_corpus_operations() {
     assert_guardrail_denied(&error, "corpus operation");
     let error = container
         .corpus_minimize(project.path(), target)
+        .await
+        .unwrap_err();
+    assert_guardrail_denied(&error, "corpus operation");
+    let error = container
+        .corpus_afl_cmin(project.path(), target)
         .await
         .unwrap_err();
     assert_guardrail_denied(&error, "corpus operation");

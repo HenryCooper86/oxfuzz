@@ -8,6 +8,7 @@
 //! `docs/standards/ENGINE_ADAPTER_STANDARD.md`.
 
 pub mod afl;
+pub mod cmin;
 pub mod dict;
 pub mod go_native;
 pub mod honggfuzz;
