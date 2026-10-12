@@ -432,6 +432,22 @@ pub async fn try_compile_with_options(
     workspace: &Path,
     options: &hf_core::runtime::SandboxOptions,
 ) -> Result<CompileResult, ClassifiedError> {
+    // The companion record is constructed only for AFL++ C/C++ harnesses; the
+    // compile operation refuses anything else rather than silently dropping or
+    // honoring a misplaced one (Engineering Protocol 2.19). The language arm
+    // matters because the Rust path below is engine-agnostic: a Rust harness
+    // carrying a companion record would otherwise lose it in the cargo-fuzz
+    // build.
+    if harness.cmplog.is_some()
+        && (harness.engine != EngineKind::AflPlusPlus
+            || !matches!(harness.language, TargetLanguage::C | TargetLanguage::Cpp))
+    {
+        return Err(ClassifiedError::Harness(format!(
+            "a CmpLog companion build applies only to afl++ C/C++ harnesses, not '{}' {:?}",
+            harness.engine.as_str(),
+            harness.language
+        )));
+    }
     // Rust fuzz targets take the cargo-fuzz path (project scaffold + `cargo fuzz
     // build`) rather than the single-file compile below, which assumes a C-style
     // `compiler args source -o output` invocation.
@@ -498,7 +514,106 @@ pub async fn try_compile_with_options(
     // can be referenced by subsequent run steps.
     harness.build_cmd.output = workspace.join(output_name);
     harness.status = HarnessStatus::Compiled;
+    if harness.cmplog.is_some() {
+        if let Some(failure) =
+            compile_cmplog_companion(&mut harness, rt, workspace, options).await?
+        {
+            return Ok(CompileResult::Failed(failure));
+        }
+    }
     Ok(CompileResult::Ok(Box::new(harness)))
+}
+
+/// Compile the `CmpLog` companion of an AFL++ harness: the same source, driver,
+/// flags, and project sources as the main build, with `AFL_LLVM_CMPLOG=1` in
+/// the sandbox environment (the one place that env is set; it is the
+/// definition of a `CmpLog` build). On success the companion record gains the
+/// exact binary digest, so a later `--cmplog` run stages exactly this build.
+///
+/// # Errors
+/// Returns `ClassifiedError` only for infrastructure failures; a non-zero
+/// compiler exit is returned as a [`CompileFailure`] for the caller's repair
+/// loop.
+async fn compile_cmplog_companion(
+    harness: &mut Harness,
+    rt: &dyn RuntimeAdapter,
+    workspace: &Path,
+    options: &hf_core::runtime::SandboxOptions,
+) -> Result<Option<CompileFailure>, ClassifiedError> {
+    let Some(companion) = harness.cmplog.as_mut() else {
+        return Ok(None);
+    };
+    let container_ws = "/work";
+    let source_name = source_filename(harness.language);
+    let output_name = companion
+        .build_cmd
+        .output
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let script = compile_script(
+        &companion.build_cmd.compiler,
+        &companion.build_cmd.args,
+        &companion.build_cmd.extra_flags,
+        container_ws,
+        source_name,
+        &output_name,
+        &list_c_files(workspace, container_ws, &[source_name]),
+    );
+    let cmd = vec!["bash".to_owned(), "-c".to_owned(), script];
+    let limits = hf_core::runtime::ResourceLimits {
+        max_mem_mb: 4096,
+        max_cpus: 2,
+        max_duration_secs: 120,
+        env: std::collections::HashMap::from([(
+            AFL_LLVM_CMPLOG_ENV.0.to_owned(),
+            AFL_LLVM_CMPLOG_ENV.1.to_owned(),
+        )]),
+        ptrace: false,
+    };
+    let result = rt
+        .run_command_opts(&cmd, workspace, &limits, options)
+        .await?
+        .require_completed("harness cmplog compile")?;
+    if result.exit_code != 0 {
+        return Ok(Some(CompileFailure {
+            exit_code: result.exit_code,
+            stdout: result.stdout,
+            stderr: result.stderr,
+        }));
+    }
+    let output = workspace.join(&output_name);
+    companion.binary_sha256 = Some(sha256_file(&output)?);
+    companion.build_cmd.output = output;
+    Ok(None)
+}
+
+/// The compile-time environment that turns an afl-clang-fast build into its
+/// `CmpLog` companion build (AFL++ 4.09c `instrumentation/README.cmplog.md`).
+pub const AFL_LLVM_CMPLOG_ENV: (&str, &str) = ("AFL_LLVM_CMPLOG", "1");
+
+/// Full SHA-256 of a just-compiled harness binary (our own build output, not
+/// foreign input).
+fn sha256_file(path: &Path) -> Result<String, ClassifiedError> {
+    use sha2::{Digest as _, Sha256};
+    use std::io::Read as _;
+
+    let mut file = std::fs::File::open(path).map_err(|e| {
+        ClassifiedError::Harness(format!("read compiled harness {}: {e}", path.display()))
+    })?;
+    let mut digest = Sha256::new();
+    let mut chunk = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut chunk).map_err(|e| {
+            ClassifiedError::Harness(format!("hash compiled harness {}: {e}", path.display()))
+        })?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&chunk[..read]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 /// Compile a Rust harness with cargo-fuzz: scaffold `fuzz/Cargo.toml` +
@@ -1050,7 +1165,50 @@ fn smoke_cfg(harness: &Harness) -> hf_core::engine::FuzzRunConfig {
         input_manifest_sha256: None,
         input_timeout: None,
         resume: false,
+        // Qualification probes the main binary only; the CmpLog companion
+        // never runs in smoke.
+        cmplog: false,
     }
+}
+
+/// Construct the `CmpLog` companion build for an AFL++ harness: the same
+/// compiler, sanitizer flags, and project sources as the main build, compiled
+/// with `AFL_LLVM_CMPLOG=1` (the definition of a `CmpLog` build; AFL++ 4.09c
+/// `instrumentation/README.cmplog.md`) into `<output_name>.cmplog` beside the
+/// main binary. The companion carries the main build's sanitizer flags so the
+/// comparison operands it logs come from the same binary semantics; it never
+/// produces findings of its own -- afl-fuzz `-c` only reads its logged
+/// comparisons.
+///
+/// # Errors
+/// Returns `ClassifiedError::Harness` for a non-AFL++ engine or a language
+/// AFL++ cannot drive (`CmpLog` is afl-clang-fast instrumentation; Rust targets
+/// build through cargo-fuzz and have no companion path).
+pub fn cmplog_build_command(
+    engine: EngineKind,
+    lang: TargetLanguage,
+    output_name: &str,
+    sanitizer: hf_core::target::Sanitizer,
+) -> Result<BuildCommand, ClassifiedError> {
+    if engine != EngineKind::AflPlusPlus {
+        return Err(ClassifiedError::Harness(format!(
+            "a CmpLog companion build applies only to the afl++ engine (requested '{}'); \
+             CmpLog is AFL++ instrumentation paired with afl-fuzz -c",
+            engine.as_str()
+        )));
+    }
+    if !engine.supports_language(lang) {
+        return Err(ClassifiedError::Harness(format!(
+            "a CmpLog companion build requires a language afl++ can drive; \
+             {lang:?} harnesses have no CmpLog path"
+        )));
+    }
+    build_command(
+        engine,
+        lang,
+        &format!("{output_name}{}", hf_engine::afl::CMPLOG_BINARY_SUFFIX),
+        sanitizer,
+    )
 }
 
 /// Construct a build command for an engine + language + sanitizer.
@@ -1863,6 +2021,7 @@ mod tests {
             sanitizer: hf_core::target::Sanitizer::Address,
             status: HarnessStatus::Draft,
             smoke_run: None,
+            cmplog: None,
         }
     }
 
@@ -2381,6 +2540,284 @@ mod tests {
     }
 
     #[test]
+    fn cmplog_build_command_mirrors_the_main_afl_build() {
+        use hf_core::target::Sanitizer;
+        for lang in [TargetLanguage::C, TargetLanguage::Cpp] {
+            let main =
+                build_command(EngineKind::AflPlusPlus, lang, "fuzz_t", Sanitizer::Address).unwrap();
+            let companion =
+                cmplog_build_command(EngineKind::AflPlusPlus, lang, "fuzz_t", Sanitizer::Address)
+                    .unwrap();
+            assert_eq!(companion.compiler, main.compiler, "{lang:?}");
+            assert_eq!(
+                companion.args, main.args,
+                "the companion is the same build, CmpLog env aside: {lang:?}"
+            );
+            assert_eq!(
+                companion.output,
+                PathBuf::from(format!("fuzz_t{}", hf_engine::afl::CMPLOG_BINARY_SUFFIX)),
+                "{lang:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cmplog_build_command_rejects_non_afl_engines_and_rust() {
+        use hf_core::target::Sanitizer;
+        for engine in [
+            EngineKind::LibFuzzer,
+            EngineKind::Honggfuzz,
+            EngineKind::Syzkaller,
+            EngineKind::GoNative,
+        ] {
+            let error =
+                cmplog_build_command(engine, TargetLanguage::C, "fuzz_t", Sanitizer::Address)
+                    .expect_err("CmpLog is an AFL++ instrumentation feature");
+            assert!(error.to_string().contains("afl++"), "{error}");
+        }
+        let error = cmplog_build_command(
+            EngineKind::AflPlusPlus,
+            TargetLanguage::Rust,
+            "fuzz_t",
+            Sanitizer::Address,
+        )
+        .expect_err("afl++ cannot drive a Rust harness, so no CmpLog companion exists");
+        assert!(error.to_string().contains("afl++"), "{error}");
+    }
+
+    /// A runtime whose compiles all succeed: it records each invocation's
+    /// script and sandbox env, and materializes the output binary the script
+    /// names so the compile step can digest it.
+    struct CompanionRuntime {
+        invocations: Mutex<Vec<(String, std::collections::HashMap<String, String>)>>,
+        companion_exit: i32,
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeAdapter for CompanionRuntime {
+        async fn run_command(
+            &self,
+            _cmd: &[String],
+            cwd: &Path,
+            _limits: &hf_core::runtime::ResourceLimits,
+        ) -> Result<hf_core::runtime::CommandResult, ClassifiedError> {
+            Ok(hf_core::runtime::CommandResult {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                workspace: cwd.to_path_buf(),
+                termination: hf_core::runtime::CommandTermination::Completed,
+            })
+        }
+        async fn run_command_opts(
+            &self,
+            cmd: &[String],
+            cwd: &Path,
+            limits: &hf_core::runtime::ResourceLimits,
+            _opts: &hf_core::runtime::SandboxOptions,
+        ) -> Result<hf_core::runtime::CommandResult, ClassifiedError> {
+            let script = cmd.join(" ");
+            self.invocations
+                .lock()
+                .expect("invocations lock")
+                .push((script.clone(), limits.env.clone()));
+            // The script compiles to /tmp and copies to /work; materialize the
+            // named output on the host workspace the way the real sandbox does.
+            let marker = "-o /tmp/";
+            let at = script.find(marker).expect("compile script names -o /tmp");
+            let name = script[at + marker.len()..]
+                .split_whitespace()
+                .next()
+                .expect("output name")
+                .trim_matches('\'')
+                .to_owned();
+            std::fs::write(cwd.join(&name), format!("binary:{name}")).unwrap();
+            let companion = name.ends_with(hf_engine::afl::CMPLOG_BINARY_SUFFIX);
+            Ok(hf_core::runtime::CommandResult {
+                exit_code: if companion { self.companion_exit } else { 0 },
+                stdout: String::new(),
+                stderr: if companion && self.companion_exit != 0 {
+                    "afl-llvm-pass: CmpLog instrumentation unavailable".to_owned()
+                } else {
+                    String::new()
+                },
+                workspace: cwd.to_path_buf(),
+                termination: hf_core::runtime::CommandTermination::Completed,
+            })
+        }
+        async fn write_file(&self, path: &Path, content: &str) -> Result<(), ClassifiedError> {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, content).unwrap();
+            Ok(())
+        }
+        async fn read_file(&self, _path: &Path) -> Result<String, ClassifiedError> {
+            Ok(String::new())
+        }
+    }
+
+    fn cmplog_harness() -> Harness {
+        Harness {
+            id: uuid::Uuid::nil(),
+            target_id: uuid::Uuid::nil(),
+            engine: EngineKind::AflPlusPlus,
+            source: "int LLVMFuzzerTestOneInput(const uint8_t*d,size_t n){return 0;}".to_owned(),
+            language: TargetLanguage::C,
+            build_cmd: build_command(
+                EngineKind::AflPlusPlus,
+                TargetLanguage::C,
+                "fuzz_t",
+                hf_core::target::Sanitizer::Address,
+            )
+            .unwrap(),
+            sanitizer: hf_core::target::Sanitizer::Address,
+            status: HarnessStatus::Draft,
+            smoke_run: None,
+            cmplog: Some(hf_core::harness::CmpLogCompanion {
+                build_cmd: cmplog_build_command(
+                    EngineKind::AflPlusPlus,
+                    TargetLanguage::C,
+                    "fuzz_t",
+                    hf_core::target::Sanitizer::Address,
+                )
+                .unwrap(),
+                binary_sha256: None,
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn try_compile_builds_the_cmplog_companion_with_the_cmplog_env() {
+        use sha2::{Digest as _, Sha256};
+
+        let dir = tempfile::tempdir().unwrap();
+        let rt = CompanionRuntime {
+            invocations: Mutex::new(Vec::new()),
+            companion_exit: 0,
+        };
+        let result = try_compile(cmplog_harness(), &rt, dir.path())
+            .await
+            .expect("infra ok");
+        let CompileResult::Ok(harness) = result else {
+            panic!("expected a compiled harness")
+        };
+        assert_eq!(harness.status, HarnessStatus::Compiled);
+
+        let invocations = rt.invocations.lock().expect("invocations lock");
+        assert_eq!(
+            invocations.len(),
+            2,
+            "main build plus one companion build: {invocations:?}"
+        );
+        let (main_script, main_env) = &invocations[0];
+        let (companion_script, companion_env) = &invocations[1];
+        assert!(
+            !main_env.contains_key("AFL_LLVM_CMPLOG"),
+            "the main build must not be a CmpLog build: {main_env:?}"
+        );
+        assert_eq!(
+            companion_env.get("AFL_LLVM_CMPLOG").map(String::as_str),
+            Some("1"),
+            "the companion build sets AFL_LLVM_CMPLOG=1: {companion_env:?}"
+        );
+        assert!(main_script.contains("afl-clang-fast"), "{main_script}");
+        assert!(
+            companion_script.contains("afl-clang-fast"),
+            "{companion_script}"
+        );
+        assert!(
+            companion_script.contains("fuzz_t.cmplog"),
+            "{companion_script}"
+        );
+        drop(invocations);
+
+        let companion = harness.cmplog.expect("companion record");
+        let companion_path = dir.path().join("fuzz_t.cmplog");
+        assert_eq!(companion.build_cmd.output, companion_path);
+        let expected = format!("{:x}", Sha256::digest(b"binary:fuzz_t.cmplog"));
+        assert_eq!(
+            companion.binary_sha256.as_deref(),
+            Some(expected.as_str()),
+            "the revision records the exact companion build's digest"
+        );
+    }
+
+    #[tokio::test]
+    async fn try_compile_refuses_a_cmplog_companion_for_a_non_afl_harness() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = CompanionRuntime {
+            invocations: Mutex::new(Vec::new()),
+            companion_exit: 0,
+        };
+        let mut harness = cmplog_harness();
+        harness.engine = EngineKind::LibFuzzer;
+        harness.build_cmd = build_command(
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+            "fuzz_t",
+            hf_core::target::Sanitizer::Address,
+        )
+        .unwrap();
+        let error = try_compile(harness, &rt, dir.path())
+            .await
+            .expect_err("a non-AFL++ harness cannot carry a CmpLog companion");
+        assert!(error.to_string().contains("afl++"), "{error}");
+        assert!(
+            rt.invocations.lock().expect("invocations lock").is_empty(),
+            "the refusal happens before any sandbox command"
+        );
+    }
+
+    #[tokio::test]
+    async fn try_compile_refuses_a_cmplog_companion_on_the_rust_path() {
+        // The Rust build path is engine-agnostic (cargo-fuzz): a companion
+        // record on a Rust harness would be silently dropped there, so the
+        // operation refuses it even when the engine says afl++.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"t\"\n").unwrap();
+        let rt = CompanionRuntime {
+            invocations: Mutex::new(Vec::new()),
+            companion_exit: 0,
+        };
+        let mut harness = cmplog_harness();
+        harness.language = TargetLanguage::Rust;
+        let error = try_compile(harness, &rt, dir.path())
+            .await
+            .expect_err("a Rust harness cannot carry a CmpLog companion");
+        assert!(error.to_string().contains("CmpLog"), "{error}");
+        assert!(
+            rt.invocations.lock().expect("invocations lock").is_empty(),
+            "the refusal happens before any sandbox command"
+        );
+    }
+
+    #[tokio::test]
+    async fn try_compile_reports_the_companion_compile_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = CompanionRuntime {
+            invocations: Mutex::new(Vec::new()),
+            companion_exit: 1,
+        };
+        let result = try_compile(cmplog_harness(), &rt, dir.path())
+            .await
+            .expect("infra ok");
+        match result {
+            CompileResult::Failed(failure) => {
+                assert_eq!(failure.exit_code, 1);
+                assert!(
+                    failure
+                        .diagnostics()
+                        .contains("CmpLog instrumentation unavailable"),
+                    "the companion's diagnostics reach the caller: {}",
+                    failure.diagnostics()
+                );
+            }
+            CompileResult::Ok(_) => panic!("a failed companion compile is not a compiled harness"),
+        }
+    }
+
+    #[test]
     fn counts_libfuzzer_crash_artifacts() {
         // One crash: an artifact-save line plus a SUMMARY line. Must count as
         // exactly 1, not 2 -- the SUMMARY line is part of the same crash.
@@ -2605,6 +3042,7 @@ Iterations : 12345
             input_manifest_sha256: None,
             input_timeout: None,
             resume: false,
+            cmplog: false,
         }
     }
 

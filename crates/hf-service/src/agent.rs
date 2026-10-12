@@ -288,7 +288,16 @@ impl ServiceContainer {
                     .harness_draft(project, target, engine, language)
                     .await?;
                 let compile = self
-                    .harness_compile(draft.source, project, engine, target, language, None)
+                    .harness_compile(
+                        draft.source,
+                        project,
+                        engine,
+                        target,
+                        language,
+                        None,
+                        // The agent tool surface builds no CmpLog companion.
+                        false,
+                    )
                     .await?;
                 let smoke = self
                     .harness_smoke(project, target, engine, language)
@@ -362,6 +371,8 @@ impl ServiceContainer {
                     None,
                     None,
                     None,
+                    // The agent tool surface carries no per-run CmpLog request.
+                    None,
                 )
                 .map_err(ClassifiedError::Validation)?;
                 let summary = self
@@ -370,6 +381,7 @@ impl ServiceContainer {
                         target,
                         resolved.engine,
                         resolved.duration_secs,
+                        None,
                         None,
                         None,
                         None,

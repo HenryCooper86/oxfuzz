@@ -390,6 +390,11 @@ pub struct ResolvedFuzzingRun {
     /// (`FuzzRunConfig.resume`). Always `false` for engines without resumable
     /// tree state and for internal maintenance budgets.
     pub resume: bool,
+    /// Whether the AFL++ run drives the harness revision's `CmpLog` companion
+    /// (`FuzzRunConfig.cmplog`). Purely opt-in per run (there is no
+    /// `default_cmplog` setting); always `false` for non-AFL++ engines and
+    /// internal maintenance budgets.
+    pub cmplog: bool,
     /// The operator's explicit sanitizer constraint (`--sanitizer`), validated
     /// against the selectable set. `None` means unconstrained: the run records
     /// the promoted harness's own sanitizer (the binary is the truth), and the
@@ -889,13 +894,19 @@ impl FuzzingSettings {
     }
 
     /// Resolve a requested engine, duration, CPU allocation, per-input
-    /// timeout, resume choice, and sanitizer constraint against this policy.
+    /// timeout, resume choice, sanitizer constraint, and `CmpLog` choice against
+    /// this policy.
     ///
     /// `resume` is the per-run request (`None` applies
     /// `fuzzing.default_resume`). The resolved value is meaningful only for
     /// AFL++, the one engine with resumable output-tree state: an explicit
     /// request on another engine fails loud, while the configured default is
     /// inert for them.
+    ///
+    /// `cmplog` is the per-run `CmpLog` request (the CLI's `--cmplog`), also
+    /// meaningful only for AFL++: an explicit request on another engine fails
+    /// loud. There is deliberately no `default_cmplog` setting -- `CmpLog` slows
+    /// every interesting-input pass, so opting in is a per-run decision.
     ///
     /// `sanitizer` is the per-run constraint (the CLI's `--sanitizer`): it
     /// restricts which already-built harness the run may use and is validated
@@ -909,8 +920,8 @@ impl FuzzingSettings {
     /// the duration is zero or above the configured ceiling, the requested
     /// CPU allocation is zero or above the configured ceiling, the requested
     /// per-input timeout is outside `1..=3600000` milliseconds, an explicit
-    /// resume request names an engine other than AFL++, or the requested
-    /// sanitizer is not selectable.
+    /// resume or `CmpLog` request names an engine other than AFL++, or the
+    /// requested sanitizer is not selectable.
     pub fn resolve(
         &self,
         engine: Option<EngineKind>,
@@ -919,6 +930,7 @@ impl FuzzingSettings {
         timeout_ms: Option<u64>,
         resume: Option<bool>,
         sanitizer: Option<hf_core::target::Sanitizer>,
+        cmplog: Option<bool>,
     ) -> Result<ResolvedFuzzingRun, String> {
         self.validate()?;
         let enabled = self.enabled_engine_set()?;
@@ -967,6 +979,17 @@ impl FuzzingSettings {
             ));
         }
         let resume = engine == EngineKind::AflPlusPlus && resume.unwrap_or(self.default_resume);
+        // CmpLog is AFL++-scoped and opt-in only: an explicit request on
+        // another engine is a mistake the operator should hear about, and no
+        // configured default exists to apply silently.
+        if cmplog == Some(true) && engine != EngineKind::AflPlusPlus {
+            return Err(format!(
+                "--cmplog is only supported by the afl++ engine (requested '{}'); \
+                 drop the flag or choose afl++",
+                engine.as_str()
+            ));
+        }
+        let cmplog = engine == EngineKind::AflPlusPlus && cmplog.unwrap_or(false);
         let sanitizer = sanitizer.map(require_selectable_sanitizer).transpose()?;
         Ok(ResolvedFuzzingRun {
             engine,
@@ -975,6 +998,7 @@ impl FuzzingSettings {
             max_cpus,
             timeout_ms,
             resume,
+            cmplog,
             sanitizer,
         })
     }
@@ -986,8 +1010,8 @@ impl FuzzingSettings {
     /// operator-requested campaigns, so an over-ceiling budget clamps to the
     /// ceiling instead of failing: a low `sandbox.max_duration_secs` must not
     /// block mandatory operations like harness smoke qualification. Internal
-    /// probes are never session resumes, so `resume` is pinned off regardless
-    /// of `fuzzing.default_resume`.
+    /// probes are never session resumes and never `CmpLog` runs, so both are
+    /// pinned off regardless of operator choices.
     ///
     /// # Errors
     /// Returns an error when the policy is invalid or the engine is disabled.
@@ -997,7 +1021,15 @@ impl FuzzingSettings {
         internal_budget_secs: u64,
     ) -> Result<ResolvedFuzzingRun, String> {
         let clamped = internal_budget_secs.min(self.sandbox.max_duration_secs);
-        self.resolve(Some(engine), Some(clamped), None, None, Some(false), None)
+        self.resolve(
+            Some(engine),
+            Some(clamped),
+            None,
+            None,
+            Some(false),
+            None,
+            Some(false),
+        )
     }
 
     /// Check that an engine is enabled without resolving run-specific values.
@@ -1005,7 +1037,7 @@ impl FuzzingSettings {
     /// # Errors
     /// Returns an error for an invalid policy or a disabled engine.
     pub fn require_engine(&self, engine: EngineKind) -> Result<(), String> {
-        self.resolve(Some(engine), None, None, None, None, None)
+        self.resolve(Some(engine), None, None, None, None, None, None)
             .map(|_| ())
     }
 
@@ -1364,14 +1396,15 @@ pub fn effective_automotive_settings() -> Result<AutomotiveSettings, String> {
 /// `timeout_ms` is the per-run per-input timeout override in milliseconds;
 /// `None` applies the configured `fuzzing.default_timeout_ms`. `resume` is the
 /// per-run AFL++ session-resume request; `None` applies the configured
-/// `fuzzing.default_resume`.
+/// `fuzzing.default_resume`. `cmplog` is the per-run AFL++ `CmpLog` request;
+/// `None` is off (no configured default exists).
 ///
 /// # Errors
 /// Returns an error for an invalid policy, disabled engine, invalid duration,
 /// a CPU request outside `(0, sandbox.max_cpus]`, a per-input timeout
-/// outside `1..=3600000` milliseconds, an explicit resume request naming an
-/// engine other than AFL++, or a requested sanitizer outside the selectable
-/// set.
+/// outside `1..=3600000` milliseconds, an explicit resume or `CmpLog` request
+/// naming an engine other than AFL++, or a requested sanitizer outside the
+/// selectable set.
 pub fn resolve_fuzzing_run(
     engine: Option<EngineKind>,
     duration_secs: Option<u64>,
@@ -1379,6 +1412,7 @@ pub fn resolve_fuzzing_run(
     timeout_ms: Option<u64>,
     resume: Option<bool>,
     sanitizer: Option<hf_core::target::Sanitizer>,
+    cmplog: Option<bool>,
 ) -> Result<ResolvedFuzzingRun, String> {
     effective_fuzzing_settings()?.resolve(
         engine,
@@ -1387,6 +1421,7 @@ pub fn resolve_fuzzing_run(
         timeout_ms,
         resume,
         sanitizer,
+        cmplog,
     )
 }
 
@@ -3919,6 +3954,7 @@ product_name = "old-product"
                 None,
                 None,
                 None,
+                None,
             )
             .expect("enabled engine and bounded duration should resolve");
         assert_eq!(run.engine, hf_core::engine::EngineKind::AflPlusPlus);
@@ -4222,7 +4258,7 @@ default_duration_secs = 22
         };
 
         let resolved = settings
-            .resolve(None, None, None, None, None, None)
+            .resolve(None, None, None, None, None, None, None)
             .expect("defaults should resolve");
         assert_eq!(resolved.engine, hf_core::engine::EngineKind::Honggfuzz);
         assert_eq!(resolved.duration_secs, 30);
@@ -4237,6 +4273,7 @@ default_duration_secs = 22
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap_err()
             .contains("disabled"));
@@ -4244,6 +4281,7 @@ default_duration_secs = 22
             .resolve(
                 Some(hf_core::engine::EngineKind::Honggfuzz),
                 Some(61),
+                None,
                 None,
                 None,
                 None,
@@ -4265,23 +4303,23 @@ default_duration_secs = 22
 
         // No request keeps the configured allocation (existing behavior).
         let resolved = settings
-            .resolve(None, None, None, None, None, None)
+            .resolve(None, None, None, None, None, None, None)
             .expect("defaults should resolve");
         assert_eq!(resolved.max_cpus, 8);
 
         // A within-ceiling request is honored.
         let requested = settings
-            .resolve(None, None, Some(4), None, None, None)
+            .resolve(None, None, Some(4), None, None, None, None)
             .expect("within-ceiling cpu request should resolve");
         assert_eq!(requested.max_cpus, 4);
 
         // Zero and over-ceiling requests fail loud, mirroring duration.
         assert!(settings
-            .resolve(None, None, Some(0), None, None, None,)
+            .resolve(None, None, Some(0), None, None, None, None,)
             .unwrap_err()
             .contains("greater than zero"));
         assert!(settings
-            .resolve(None, None, Some(9), None, None, None,)
+            .resolve(None, None, Some(9), None, None, None, None,)
             .unwrap_err()
             .contains("exceeds the configured maximum"));
     }
@@ -4297,7 +4335,7 @@ default_duration_secs = 22
 
         // No request resolves to the configured default.
         let resolved = settings
-            .resolve(None, None, None, None, None, None)
+            .resolve(None, None, None, None, None, None, None)
             .expect("defaults should resolve");
         assert_eq!(resolved.timeout_ms, 1000);
 
@@ -4308,7 +4346,7 @@ default_duration_secs = 22
         };
         assert_eq!(
             configured
-                .resolve(None, None, None, None, None, None,)
+                .resolve(None, None, None, None, None, None, None,)
                 .expect("configured default should resolve")
                 .timeout_ms,
             250
@@ -4316,14 +4354,14 @@ default_duration_secs = 22
 
         // An explicit per-run request overrides the configured default.
         let requested = settings
-            .resolve(None, None, None, Some(2500), None, None)
+            .resolve(None, None, None, Some(2500), None, None, None)
             .expect("explicit timeout should resolve");
         assert_eq!(requested.timeout_ms, 2500);
 
         // Zero and absurdly large budgets are misconfiguration, not policy:
         // they fail loud instead of reaching an engine flag.
         assert!(settings
-            .resolve(None, None, None, Some(0), None, None,)
+            .resolve(None, None, None, Some(0), None, None, None,)
             .unwrap_err()
             .contains("per-input timeout"));
         assert!(settings
@@ -4332,6 +4370,7 @@ default_duration_secs = 22
                 None,
                 None,
                 Some(HARD_MAX_INPUT_TIMEOUT_MS + 1),
+                None,
                 None,
                 None,
             )
@@ -4346,7 +4385,7 @@ default_duration_secs = 22
 
         // No request resolves to the configured default (off).
         let resolved = settings
-            .resolve(None, None, None, None, None, None)
+            .resolve(None, None, None, None, None, None, None)
             .expect("defaults should resolve");
         assert!(!resolved.resume);
 
@@ -4363,6 +4402,7 @@ default_duration_secs = 22
                 None,
                 None,
                 None,
+                None,
             )
             .expect("afl++ with a configured resume default resolves");
         assert!(resolved.resume);
@@ -4370,6 +4410,7 @@ default_duration_secs = 22
         let resolved = configured
             .resolve(
                 Some(hf_core::engine::EngineKind::LibFuzzer),
+                None,
                 None,
                 None,
                 None,
@@ -4389,6 +4430,7 @@ default_duration_secs = 22
                     None,
                     Some(true),
                     None,
+                    None,
                 )
                 .expect("explicit resume resolves")
                 .resume
@@ -4401,6 +4443,7 @@ default_duration_secs = 22
                     None,
                     None,
                     Some(false),
+                    None,
                     None,
                 )
                 .expect("explicit cold start resolves")
@@ -4416,6 +4459,7 @@ default_duration_secs = 22
                 None,
                 None,
                 Some(true),
+                None,
                 None,
             )
             .unwrap_err();
@@ -4442,6 +4486,93 @@ default_duration_secs = 22
         let parsed = parse_oxfuzz_runtime_config("[fuzzing]\ndefault_duration_secs = 30\n")
             .expect("a config without the resume default is valid");
         assert!(!parsed.fuzzing.default_resume);
+    }
+
+    #[test]
+    fn fuzzing_policy_resolves_afl_cmplog_explicitly() {
+        use hf_core::engine::EngineKind;
+        let settings = FuzzingSettings::default();
+
+        // CmpLog is a pure per-run opt-in: no config default exists, so an
+        // omitted request resolves off even for AFL++.
+        let resolved = settings
+            .resolve(
+                Some(EngineKind::AflPlusPlus),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("defaults should resolve");
+        assert!(!resolved.cmplog);
+
+        // An explicit request resolves for AFL++...
+        assert!(
+            settings
+                .resolve(
+                    Some(EngineKind::AflPlusPlus),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(true),
+                )
+                .expect("explicit cmplog resolves")
+                .cmplog
+        );
+        assert!(
+            !settings
+                .resolve(
+                    Some(EngineKind::AflPlusPlus),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(false),
+                )
+                .expect("an explicit non-cmplog run resolves")
+                .cmplog
+        );
+
+        // ...and fails loud on engines without a CmpLog companion path,
+        // rather than silently running without it.
+        let error = settings
+            .resolve(
+                Some(EngineKind::LibFuzzer),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(true),
+            )
+            .unwrap_err();
+        assert!(
+            error.contains("cmplog") && error.contains("afl++"),
+            "{error}"
+        );
+
+        // Internal maintenance budgets never run CmpLog.
+        assert!(
+            !settings
+                .resolve_internal(EngineKind::AflPlusPlus, 10)
+                .expect("internal budget resolves")
+                .cmplog
+        );
+    }
+
+    #[test]
+    fn fuzzing_policy_has_no_cmplog_default_key() {
+        // Deliberately no `[fuzzing] default_cmplog`: CmpLog slows every
+        // interesting-input pass, so a deployment-wide default would silently
+        // tax every AFL++ campaign. The strict schema rejects it.
+        let error = parse_oxfuzz_runtime_config("[fuzzing]\ndefault_cmplog = true\n")
+            .expect_err("there is no default_cmplog setting");
+        assert!(error.contains("default_cmplog"), "{error}");
     }
 
     #[test]
@@ -4531,7 +4662,7 @@ default_duration_secs = 22
         let settings = FuzzingSettings::default();
         // No request: no constraint -- the harness binary is the truth.
         let resolved = settings
-            .resolve(None, None, None, None, None, None)
+            .resolve(None, None, None, None, None, None, None)
             .expect("defaults should resolve");
         assert_eq!(resolved.sanitizer, None);
 
@@ -4544,6 +4675,7 @@ default_duration_secs = 22
                 None,
                 None,
                 Some(hf_core::target::Sanitizer::Undefined),
+                None,
             )
             .expect("undefined is a selectable constraint");
         assert_eq!(
@@ -4560,6 +4692,7 @@ default_duration_secs = 22
                 None,
                 None,
                 Some(hf_core::target::Sanitizer::Memory),
+                None,
             )
             .unwrap_err();
         assert!(error.contains("memory"), "{error}");
@@ -4614,6 +4747,7 @@ default_duration_secs = 22
             .resolve(
                 Some(hf_core::engine::EngineKind::LibFuzzer),
                 Some(60),
+                None,
                 None,
                 None,
                 None,

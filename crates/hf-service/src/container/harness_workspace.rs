@@ -71,6 +71,18 @@ pub(super) fn harness_binary_name(target: &str) -> String {
     format!("fuzz_{}", target_artifact_stem(target))
 }
 
+/// The AFL++ `CmpLog` companion binary name for a target: the main binary's
+/// name plus the adapter's companion suffix (the single home for the suffix
+/// is `hf_engine::afl::CMPLOG_BINARY_SUFFIX`). Built beside the main binary in
+/// the target workspace by a `--cmplog` harness build.
+pub(super) fn harness_cmplog_binary_name(target: &str) -> String {
+    format!(
+        "{}{}",
+        harness_binary_name(target),
+        hf_engine::afl::CMPLOG_BINARY_SUFFIX
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Seed generation
 // ---------------------------------------------------------------------------

@@ -46,6 +46,9 @@ impl ServiceContainer {
                 None,
                 None,
                 None,
+                // A coverage experiment replays retained runs; CmpLog is not
+                // part of experiment identity here.
+                None,
             )
             .map_err(|_| CoverageExperimentError::field(C::InvalidRequest, "fuzzing_policy"))?;
         if resolved.duration_secs != request.duration_secs

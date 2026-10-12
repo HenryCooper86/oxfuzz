@@ -2037,7 +2037,10 @@ async fn harness_compile(
     };
     let out = state
         .container
-        .harness_compile(req.source, &project, engine, &req.target, lang, None)
+        // The REST surface carries no sanitizer or CmpLog request: the
+        // configured `fuzzing.default_sanitizer` applies and no CmpLog
+        // companion is built.
+        .harness_compile(req.source, &project, engine, &req.target, lang, None, false)
         .await
         .map_err(classified_api_error)?;
     Ok(Json(serde_json::json!({

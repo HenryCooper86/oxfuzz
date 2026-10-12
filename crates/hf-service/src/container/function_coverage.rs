@@ -542,6 +542,7 @@ mod staging_tests {
             sanitizer: Sanitizer::Address,
             status: HarnessStatus::Promoted,
             smoke_run: None,
+            cmplog: None,
         };
         configure(&mut run_config, &harness, false);
         assert!(run_config
@@ -691,6 +692,7 @@ mod relocation_tests {
             input_manifest_sha256: None,
             input_timeout: None,
             resume: false,
+            cmplog: false,
         }
     }
 

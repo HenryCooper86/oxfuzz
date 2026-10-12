@@ -51,6 +51,7 @@ async fn fixture(project: &std::path::Path) -> (ServiceContainer, Arc<Store>, Ru
             output: "unused".into(),
             extra_flags: Vec::new(),
         },
+        cmplog: None,
     };
     store.upsert_harness(&harness).await.unwrap();
     let config = FuzzRunConfig {
@@ -68,6 +69,7 @@ async fn fixture(project: &std::path::Path) -> (ServiceContainer, Arc<Store>, Ru
         input_manifest_sha256: None,
         input_timeout: None,
         resume: false,
+        cmplog: false,
     };
     let mut run = RunRecord::new(
         project.to_string_lossy(),

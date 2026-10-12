@@ -273,6 +273,7 @@ mod semgrep_ranking_consumer_tests {
             sanitizer: Sanitizer::Address,
             status: HarnessStatus::Promoted,
             smoke_run: None,
+            cmplog: None,
         }
     }
 

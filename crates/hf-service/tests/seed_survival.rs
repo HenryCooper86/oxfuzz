@@ -161,6 +161,7 @@ async fn promoted_afl_harness(target: &str) -> PromotedFixture {
             hf_core::engine::EngineKind::AflPlusPlus,
             target,
             hf_core::target::TargetLanguage::C, None,
+            false,
         )
         .await
         .unwrap();
@@ -250,6 +251,7 @@ async fn seed_survival_requires_a_promoted_afl_harness() {
             hf_core::engine::EngineKind::AflPlusPlus,
             "parse_gate",
             hf_core::target::TargetLanguage::C, None,
+            false,
         )
         .await
         .unwrap();
@@ -358,6 +360,7 @@ async fn promoted_afl_harness_with_regen_pool(target: &str) -> PromotedFixture {
             hf_core::engine::EngineKind::AflPlusPlus,
             target,
             hf_core::target::TargetLanguage::C, None,
+            false,
         )
         .await
         .unwrap();

@@ -166,6 +166,31 @@ fn require_expected_promotion(
     Ok(())
 }
 
+/// Build the recorded `CmpLog` companion spec for a requested AFL++ harness
+/// build: the companion mirrors the main build's compiler, sanitizer, and
+/// captured project flags and compiles beside the main binary. `None` when the
+/// build does not opt in. The companion constructor rejects non-AFL++ engines
+/// and languages AFL++ cannot drive (Engineering Protocol 2.19).
+fn cmplog_companion_spec(
+    engine: EngineKind,
+    lang: TargetLanguage,
+    target: &str,
+    sanitizer: Sanitizer,
+    extra_flags: &[String],
+    requested: bool,
+) -> Result<Option<hf_core::harness::CmpLogCompanion>, ClassifiedError> {
+    if !requested {
+        return Ok(None);
+    }
+    let mut build_cmd =
+        hf_harness::cmplog_build_command(engine, lang, &harness_binary_name(target), sanitizer)?;
+    build_cmd.extra_flags = extra_flags.to_vec();
+    Ok(Some(hf_core::harness::CmpLogCompanion {
+        build_cmd,
+        binary_sha256: None,
+    }))
+}
+
 /// Retain configured provider context before rendering; legacy prompts remain best-effort.
 async fn project_build_context(
     container: &ServiceContainer,
@@ -747,12 +772,18 @@ impl ServiceContainer {
             initial_source,
             max_repairs,
             sanitizer,
+            // Tournament smoke compares candidates; none runs a CmpLog
+            // companion, so tournament builds skip it.
+            false,
         )
         .await
     }
 
     /// Compile a replacement while the caller holds workspace-operation followed
     /// by target-revision leases for the complete read/replace sequence.
+    ///
+    /// `cmplog` additionally compiles and records the AFL++ `CmpLog` companion
+    /// binary of the same source.
     async fn compile_source_with_repair_locked(
         &self,
         candidate: &TargetCandidate,
@@ -762,6 +793,7 @@ impl ServiceContainer {
         initial_source: String,
         max_repairs: usize,
         sanitizer: Sanitizer,
+        cmplog: bool,
     ) -> Result<HarnessGenOutcome, ClassifiedError> {
         self.compilation_store()?;
         self.admit_harness_build(&candidate.project_root, lang)
@@ -809,6 +841,14 @@ impl ServiceContainer {
                 sanitizer,
                 status: HarnessStatus::Draft,
                 smoke_run: None,
+                cmplog: cmplog_companion_spec(
+                    engine,
+                    lang,
+                    target,
+                    sanitizer,
+                    &captured.flags,
+                    cmplog,
+                )?,
             };
             let options = hf_core::runtime::SandboxOptions {
                 image: Some(captured.record.sandbox_image_id.clone()),
@@ -1013,9 +1053,14 @@ impl ServiceContainer {
     /// is baked into the build command and recorded on the harness revision;
     /// runs then record the harness's sanitizer as their own identity.
     ///
+    /// `cmplog` (the CLI's `--cmplog`) additionally compiles the AFL++ `CmpLog`
+    /// companion binary of the same source and records it on the revision; a
+    /// later `--cmplog` run requires exactly that record.
+    ///
     /// # Errors
     /// Returns `ClassifiedError` if the build command fails, or a validation
-    /// error for a sanitizer the selectable set or the toolchain rejects.
+    /// error for a sanitizer the selectable set or the toolchain rejects, or a
+    /// `CmpLog` request for an engine/language without a companion path.
     pub async fn harness_compile(
         &self,
         source: String,
@@ -1024,6 +1069,7 @@ impl ServiceContainer {
         target: &str,
         lang: TargetLanguage,
         sanitizer: Option<Sanitizer>,
+        cmplog: bool,
     ) -> Result<CompileOutcome, ClassifiedError> {
         self.compilation_store()?;
         require_fuzzing_harness_engine(engine, lang)?;
@@ -1069,6 +1115,14 @@ impl ServiceContainer {
             sanitizer,
             status: HarnessStatus::Draft,
             smoke_run: None,
+            cmplog: cmplog_companion_spec(
+                engine,
+                lang,
+                target,
+                sanitizer,
+                &captured.flags,
+                cmplog,
+            )?,
         };
         let options = hf_core::runtime::SandboxOptions {
             image: Some(captured.record.sandbox_image_id.clone()),
@@ -1108,7 +1162,8 @@ impl ServiceContainer {
     /// discovered, potentially high-value target. Repair recovers many of them.
     ///
     /// `sanitizer` is the per-build request (the CLI's `--sanitizer`); `None`
-    /// applies the configured `fuzzing.default_sanitizer`.
+    /// applies the configured `fuzzing.default_sanitizer`. `cmplog` (the CLI's
+    /// `--cmplog`) additionally compiles the AFL++ `CmpLog` companion binary.
     ///
     /// # Errors
     /// Returns `ClassifiedError::Validation` if the target is unknown or the
@@ -1123,6 +1178,7 @@ impl ServiceContainer {
         lang: TargetLanguage,
         max_repairs: usize,
         sanitizer: Option<Sanitizer>,
+        cmplog: bool,
     ) -> Result<HarnessGenOutcome, ClassifiedError> {
         self.compilation_store()?;
         require_fuzzing_harness_engine(engine, lang)?;
@@ -1136,6 +1192,11 @@ impl ServiceContainer {
         // unsupported combination (e.g. Rust with UBSan) must not spend an
         // LLM call on a harness that cannot build.
         let _ = hf_harness::build_command(engine, lang, "sanitizer-check", sanitizer)?;
+        // Same for a requested CmpLog companion: a non-AFL++ engine fails here,
+        // before any drafting.
+        if cmplog {
+            let _ = hf_harness::cmplog_build_command(engine, lang, "cmplog-check", sanitizer)?;
+        }
         let inv = self.discover(project, lang).await?;
         let candidate = select_target_candidate(&inv.candidates, target)?
             .ok_or_else(|| ClassifiedError::Validation(format!("target '{target}' not found")))?
@@ -1163,6 +1224,7 @@ impl ServiceContainer {
             source,
             max_repairs,
             sanitizer,
+            cmplog,
         )
         .await
     }
@@ -1211,10 +1273,13 @@ impl ServiceContainer {
         // rebuild must keep the active revision's sanitizer, or the
         // before/after coverage comparison measures a different build instead
         // of the refined source.
-        let active_sanitizer = self
-            .active_harness_locked(project, target, engine)
-            .await?
-            .sanitizer;
+        let active = self.active_harness_locked(project, target, engine).await?;
+        let active_sanitizer = active.sanitizer;
+        // The CmpLog companion follows the same identity rule: a revision
+        // built with one keeps it (rebuilt from the refined source), and a
+        // revision without one does not gain it -- `--cmplog` is a fresh-build
+        // decision.
+        let active_cmplog = active.cmplog.is_some();
 
         // Prefer the dynamic llvm-cov frontier (uncovered code with file:line
         // locations) so the refine prompt points the LLM at concrete gaps. Fall
@@ -1262,6 +1327,7 @@ impl ServiceContainer {
             refined.source,
             max_repairs,
             active_sanitizer,
+            active_cmplog,
         )
         .await
     }
@@ -1483,7 +1549,10 @@ impl ServiceContainer {
         let sandbox_image = resolve_run_sandbox_image(self.runtime.as_ref()).await?;
         self.verify_harness_dispatch_image(project, &harness, Some(sandbox_image.reference()))
             .await?;
-        let artifacts = stage_run_artifacts(&workspace, smoke_record.id, &harness.source, &binary)?;
+        // Smoke qualification probes the main binary only; a CmpLog companion
+        // is never part of the qualification argv or its evidence.
+        let artifacts =
+            stage_run_artifacts(&workspace, smoke_record.id, &harness.source, &binary, None)?;
         // A qualification run retains the same immutable inputs a campaign does,
         // because collection verifies that manifest to attribute the profile
         // export to an exact binary and image. Without it a smoke run cannot
@@ -2427,6 +2496,9 @@ fn smoke_qualification_config(
         input_manifest_sha256: None,
         input_timeout: None,
         resume: false,
+        // Smoke qualification probes the main binary only; a CmpLog companion
+        // build is never part of the qualification argv.
+        cmplog: false,
     }
 }
 
@@ -2455,6 +2527,7 @@ mod smoke_config_tests {
             sanitizer: Sanitizer::Address,
             status: HarnessStatus::Draft,
             smoke_run: None,
+            cmplog: None,
         }
     }
 
@@ -2467,6 +2540,7 @@ mod smoke_config_tests {
             max_cpus: 8,
             timeout_ms: 1000,
             resume: false,
+            cmplog: false,
             sanitizer: None,
         };
         let config =
@@ -2767,6 +2841,7 @@ mod exact_qualification_tests {
                 sanitizer: Sanitizer::Address,
                 status: HarnessStatus::Compiled,
                 smoke_run: None,
+                cmplog: None,
             })
             .await
             .unwrap();

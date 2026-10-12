@@ -169,6 +169,7 @@ async fn harness_compile_rejects_an_unknown_target_before_runtime_execution() {
             EngineKind::LibFuzzer,
             "misspelled_target",
             TargetLanguage::C, None,
+            false,
         )
         .await
         .expect_err("unknown targets must not be assigned the nil UUID");
@@ -198,6 +199,7 @@ async fn harness_compile_does_not_activate_metadata_that_failed_to_persist() {
             EngineKind::LibFuzzer,
             "parse_release",
             TargetLanguage::C, None,
+            false,
         )
         .await
         .expect_err("a compiled harness must be durable before becoming active");
@@ -230,6 +232,7 @@ async fn generated_harness_propagates_a_configured_store_write_failure() {
             TargetLanguage::C,
             0,
             None,
+            false,
         )
         .await
         .expect_err("generated harness persistence is part of successful generation");

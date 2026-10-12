@@ -132,6 +132,7 @@ async fn fixture(name: &str) -> Fixture {
         sanitizer: Sanitizer::Address,
         status: hf_core::harness::HarnessStatus::Promoted,
         smoke_run: None,
+        cmplog: None,
     };
     let mut run = hf_storage::RunRecord::new(
         project.to_string_lossy(),
@@ -151,6 +152,7 @@ async fn fixture(name: &str) -> Fixture {
             input_manifest_sha256: None,
             input_timeout: None,
             resume: false,
+            cmplog: false,
         }),
         chrono::Utc::now(),
     );
@@ -487,6 +489,7 @@ async fn campaign_fixture(name: &str) -> CampaignFixture {
             TargetLanguage::C,
             1,
             None,
+            false,
         )
         .await
         .expect("prepare harness");
@@ -566,6 +569,7 @@ async fn run_completed_fires_matching_event_schedule() {
             None,
             None,
             None,
+            None,
             1,
         )
         .await
@@ -613,6 +617,7 @@ async fn run_failed_fires_matching_event_schedule() {
             EngineKind::LibFuzzer,
             TargetLanguage::C,
             1,
+            None,
             None,
             None,
             None,

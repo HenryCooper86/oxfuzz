@@ -36,7 +36,7 @@ fn render_stage(project: &Path, stage: &FuzzStage) -> String {
             target,
             engine,
             reused,
-        } => {
+                    } => {
             if *reused {
                 format!(
                     "--- [2/5] harness: reusing the promoted {} revision for '{target}' ---",
@@ -106,6 +106,7 @@ pub(crate) async fn cmd_fuzz(args: crate::args::FuzzArgs) -> anyhow::Result<()> 
         timeout_ms,
         sanitizer,
         ai,
+        cmplog,
         switches,
         json,
     } = args;
@@ -155,6 +156,10 @@ pub(crate) async fn cmd_fuzz(args: crate::args::FuzzArgs) -> anyhow::Result<()> 
                 // `fuzzing.default_sanitizer` for a fresh build and imposes no
                 // constraint on a reused promoted harness.
                 sanitizer,
+                // CmpLog builds the companion for a fresh harness and drives
+                // it in every campaign iteration; a companion-less promoted
+                // harness is rebuilt, not reused.
+                cmplog,
             },
             &on_stage,
             on_progress.as_ref(),

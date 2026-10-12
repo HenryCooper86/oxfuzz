@@ -69,6 +69,10 @@ pub struct FuzzRequest<'a> {
     /// honored by drafting and qualifying a fresh revision (the promotion gate
     /// still applies). The same value constrains the campaign stage.
     pub sanitizer: Option<hf_core::target::Sanitizer>,
+    /// AFL++ `CmpLog` companion (the CLI's `--cmplog`): a fresh harness builds
+    /// the companion, and the campaign drives it via `-c`. A promoted harness
+    /// without a recorded companion is not reused for a `CmpLog` request.
+    pub cmplog: bool,
 }
 
 /// A stage boundary of the onboarding pipeline, reported through the stage
@@ -216,6 +220,8 @@ impl ServiceContainer {
         // active, unless the operator asked for a fresh draft. A requested
         // sanitizer the active revision was not built with forces a fresh
         // draft: reusing it would silently fuzz a different build than asked.
+        // The same rule covers CmpLog: a CmpLog campaign needs the recorded
+        // companion, so a companion-less revision is rebuilt with one.
         let reused = if request.fresh {
             None
         } else {
@@ -233,6 +239,7 @@ impl ServiceContainer {
                         .sanitizer
                         .is_none_or(|requested| requested == harness.sanitizer)
                 })
+                .filter(|harness| !request.cmplog || harness.cmplog.is_some())
         };
 
         let (harness, repairs_used, harness_reused) = if let Some(harness) = reused {
@@ -256,6 +263,7 @@ impl ServiceContainer {
                     lang,
                     FUZZ_PIPELINE_REPAIRS,
                     request.sanitizer,
+                    request.cmplog,
                 )
                 .await
                 .map_err(|error| {
@@ -344,6 +352,7 @@ impl ServiceContainer {
                 request.timeout_ms,
                 request.resume,
                 request.sanitizer,
+                request.cmplog.then_some(true),
                 request.iterations,
                 on_progress,
             )

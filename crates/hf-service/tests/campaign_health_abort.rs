@@ -141,6 +141,7 @@ async fn aborting_the_run_caller_stops_future_health_ticks_and_repairs_the_run()
             hf_core::engine::EngineKind::LibFuzzer,
             target,
             hf_core::target::TargetLanguage::C, None,
+            false,
         )
         .await
         .unwrap();
@@ -168,6 +169,7 @@ async fn aborting_the_run_caller_stops_future_health_ticks_and_repairs_the_run()
                     target,
                     hf_core::engine::EngineKind::LibFuzzer,
                     60,
+                    None,
                     None,
                     None,
                     None,

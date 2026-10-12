@@ -227,7 +227,15 @@ async fn assert_rows_match_survivors(
 /// switching the target's active harness to that engine.
 async fn promote_for_engine(container: &ServiceContainer, project: &Path, engine: EngineKind) {
     container
-        .harness_generate(project, "parse_value", engine, TargetLanguage::C, 1, None)
+        .harness_generate(
+            project,
+            "parse_value",
+            engine,
+            TargetLanguage::C,
+            1,
+            None,
+            false,
+        )
         .await
         .expect("prepare harness");
     container
@@ -301,6 +309,7 @@ async fn engines_share_one_canonical_corpus_and_absorbed_crashes() {
             None,
             None,
             None,
+            None,
             &|_| {},
         )
         .await
@@ -320,6 +329,7 @@ async fn engines_share_one_canonical_corpus_and_absorbed_crashes() {
             "parse_value",
             EngineKind::AflPlusPlus,
             60,
+            None,
             None,
             None,
             None,
@@ -372,6 +382,7 @@ async fn engines_share_one_canonical_corpus_and_absorbed_crashes() {
             "parse_value",
             EngineKind::LibFuzzer,
             60,
+            None,
             None,
             None,
             None,

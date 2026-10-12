@@ -120,6 +120,7 @@ fn harness(target_id: Uuid, status: HarnessStatus, smoke_passed: bool) -> Harnes
             binary_sha256: Some("b".repeat(64)),
             run_id: None,
         }),
+        cmplog: None,
     }
 }
 
@@ -142,6 +143,7 @@ fn run(harness_id: Uuid, status: RunStatus) -> RunRecord {
             input_manifest_sha256: None,
             input_timeout: None,
             resume: false,
+            cmplog: false,
         }),
         Utc::now(),
     );

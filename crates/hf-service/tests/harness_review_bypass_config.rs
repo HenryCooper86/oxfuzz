@@ -128,6 +128,7 @@ async fn the_config_opt_in_permits_smoke_without_a_provider_or_flag() {
             "parse_entry",
             TargetLanguage::C,
             None,
+            false,
         )
         .await
         .unwrap();

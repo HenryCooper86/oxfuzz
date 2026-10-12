@@ -148,6 +148,7 @@ async fn harness_compile_generate_and_refine_refuse_go_through_the_operations() 
             "ParsePacket",
             TargetLanguage::Go,
             None,
+            false,
         )
         .await
         .expect_err("a discovery-only language must not be compiled");
@@ -161,6 +162,7 @@ async fn harness_compile_generate_and_refine_refuse_go_through_the_operations() 
             TargetLanguage::Go,
             0,
             None,
+            false,
         )
         .await
         .expect_err("a discovery-only language must not be generated");
@@ -208,6 +210,7 @@ async fn fuzz_auto_pick_excludes_go_even_with_the_go_native_engine_enabled() {
                 review_bypass: hf_service::HarnessReviewBypass::NotRequested,
                 fresh: false,
                 sanitizer: None,
+                cmplog: false,
             },
             &noop_stage(),
             &noop_progress(),
@@ -256,6 +259,7 @@ async fn fuzz_with_an_explicit_go_target_fails_naming_the_language() {
                 review_bypass: hf_service::HarnessReviewBypass::NotRequested,
                 fresh: false,
                 sanitizer: None,
+                cmplog: false,
             },
             &noop_stage(),
             &noop_progress(),
@@ -286,6 +290,7 @@ async fn campaign_refuses_a_discovery_only_language_before_picking_a_target() {
             EngineKind::LibFuzzer,
             TargetLanguage::Python,
             1,
+            None,
             None,
             None,
             None,

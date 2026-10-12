@@ -16,6 +16,22 @@ const AFL_INPUT_PLACEHOLDER: &str = "@@";
 /// service's resume-staging donor check keys on it too.
 pub const AFL_FUZZER_STATS_FILE: &str = "fuzzer_stats";
 
+/// Suffix distinguishing a `CmpLog` companion binary from the main harness
+/// binary it was built alongside (`<binary>.cmplog`). The one home for the
+/// naming rule: the AFL++ adapter derives the `-c` path from the staged
+/// binary, and `hf-service` stages the recorded companion under exactly this
+/// name in the run's retained inputs.
+pub const CMPLOG_BINARY_SUFFIX: &str = ".cmplog";
+
+/// The `CmpLog` companion binary path for a staged main binary. `CmpLog` needs a
+/// second build of the same source compiled with `AFL_LLVM_CMPLOG=1` (see
+/// `docs/standards/ENGINE_ADAPTER_STANDARD.md`); afl-fuzz receives it through
+/// `-c` and runs redqueen input-to-state solving over it.
+#[must_use]
+pub fn cmplog_binary_path(binary: &str) -> String {
+    format!("{binary}{CMPLOG_BINARY_SUFFIX}")
+}
+
 /// The one supported AFL++ harness input-delivery contract.
 ///
 /// Generated harnesses expose `LLVMFuzzerTestOneInput` through AFL++'s
@@ -66,9 +82,15 @@ pub fn build_reproduction_args(binary: &str, input: &str) -> Vec<String> {
 /// would duplicate this builder's own `-i`, which afl-fuzz refuses
 /// ("Multiple -i options not supported").
 ///
+/// `CmpLog` is an argv concern: `cfg.cmplog` appends `-c <binary>.cmplog`
+/// naming the staged companion binary (derived by [`cmplog_binary_path`]).
+/// The companion's provenance is the harness revision's recorded build; a
+/// hand-passed `-c` in `cfg.extra_args` is rejected in both cmplog states,
+/// since it would be a second, unrecorded source of `CmpLog` truth.
+///
 /// # Errors
 /// Returns [`ClassifiedError::Validation`] when `cfg.extra_args` carries a
-/// hand-passed `-i -` / `-i-`.
+/// hand-passed `-i -` / `-i-` or `-c`.
 pub fn build_run_args(
     cfg: &FuzzRunConfig,
     binary: &str,
@@ -76,6 +98,7 @@ pub fn build_run_args(
     out: &str,
 ) -> Result<Vec<String>, ClassifiedError> {
     reject_hand_passed_resume(&cfg.extra_args)?;
+    reject_hand_passed_cmplog(&cfg.extra_args)?;
     if cfg.max_cpus > 1 {
         return Ok(build_parallel_run_args(cfg, binary, corpus, out));
     }
@@ -110,11 +133,38 @@ pub fn build_run_args(
         args.push("-t".to_owned());
         args.push(crate::timeout_millis(timeout).to_string());
     }
+    // The CmpLog companion likewise follows `extra_args`: the typed config
+    // owns `-c`, and a single instance is both primary and secondary, so the
+    // secondaries-only parallel rule does not apply to it.
+    if cfg.cmplog {
+        args.push("-c".to_owned());
+        args.push(cmplog_binary_path(binary));
+    }
     // The binary and its AFL-substituted input file. Omitting `@@` selects
     // stdin and would disagree with replay/showmap/minimization.
     args.push("--".to_owned());
     args.extend(build_target_args(binary, AflInput::FuzzerFile));
     Ok(args)
+}
+
+/// Reject a hand-passed AFL++ `CmpLog` flag (`-c <binary>`, bare or with an
+/// attached value) in the escape hatch. `FuzzRunConfig.cmplog` is the single
+/// source of `CmpLog` truth: the companion is the harness revision's recorded
+/// build, staged into the run's retained inputs by the service, and a
+/// hand-passed path would bypass both (Engineering Protocol 2.19). Rejected in
+/// both cmplog states, exactly like the resume rule.
+fn reject_hand_passed_cmplog(extra_args: &[String]) -> Result<(), ClassifiedError> {
+    for arg in extra_args {
+        if arg == "-c" || (arg.starts_with("-c") && arg.len() > 2) {
+            return Err(ClassifiedError::Validation(
+                "extra_args must not carry the AFL++ CmpLog flag (`-c`): the CmpLog companion \
+                 is owned by the typed run config (`FuzzRunConfig.cmplog`, CLI `--cmplog`), \
+                 which stages the harness revision's recorded companion binary"
+                    .to_owned(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Reject a hand-passed AFL++ in-place resume (`-i -` or `-i-`) in the escape
@@ -155,7 +205,12 @@ fn reject_hand_passed_resume(extra_args: &[String]) -> Result<(), ClassifiedErro
 /// `fuzzer_stats`) and any new `--cpus`-grown instance cold-starts from the
 /// staged corpus. `-i -` cannot express that mix: it FATALs on an instance
 /// whose directory is missing ("Resume attempted but old output directory not
-/// found"). The TERM/INT trap forwards a cooperative
+/// found"). `CmpLog` is per-instance by design (AFL++ 4.09c,
+/// `docs/fuzzing_in_depth.md` 3c): the `-M` primary fuzzes the plain build and
+/// never carries `-c`; every `-S` secondary of a cmplog run gets the companion
+/// (the coordinator runs homogeneous workers -- the one-or-two-secondaries
+/// guidance exists to reserve cores for OTHER variations this coordinator
+/// does not have). The TERM/INT trap forwards a cooperative
 /// Stop to all instances so AFL can flush `fuzzer_stats`; the coordinator
 /// logs every worker's exit status and exits with the primary's status,
 /// with the sandbox wall-clock cap as the hard backstop, exactly as for a
@@ -171,7 +226,7 @@ fn build_parallel_run_args(
     use std::fmt::Write as _;
 
     let duration = cfg.duration.map_or(0, |d| d.as_secs());
-    let instance = |line: &mut String, role: &str, seed: Option<u64>| {
+    let instance = |line: &mut String, role: &str, seed: Option<u64>, cmplog: bool| {
         write!(
             line,
             "afl-fuzz -i {} -o {}",
@@ -195,14 +250,20 @@ fn build_parallel_run_args(
             write!(line, " -t {}", crate::timeout_millis(timeout))
                 .expect("String formatting is infallible");
         }
+        if cmplog {
+            write!(line, " -c {}", shell_quote(&cmplog_binary_path(binary)))
+                .expect("String formatting is infallible");
+        }
         write!(line, " -- {} @@ &", shell_quote(binary)).expect("String formatting is infallible");
     };
 
     let mut script = String::new();
-    instance(&mut script, "-M main", cfg.seed);
+    // The primary keeps the plain build even for a cmplog run: AFL++ 4.09c's
+    // multi-core guidance puts CmpLog on secondaries.
+    instance(&mut script, "-M main", cfg.seed, false);
     script.push_str("\nprimary=$!\n");
     for worker in 1..cfg.max_cpus {
-        instance(&mut script, &format!("-S s{worker}"), None);
+        instance(&mut script, &format!("-S s{worker}"), None, cfg.cmplog);
         script.push('\n');
     }
     script.push_str("trap 'kill -TERM $(jobs -p) 2>/dev/null' TERM INT\n");

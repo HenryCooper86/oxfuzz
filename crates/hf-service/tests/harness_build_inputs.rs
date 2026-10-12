@@ -223,6 +223,7 @@ impl Fixture {
                 "parse_entry",
                 TargetLanguage::C,
                 None,
+                false,
             )
             .await
             .unwrap()
@@ -346,6 +347,7 @@ async fn configured_image_movement_stops_generate_before_discovery_or_provider()
             TargetLanguage::C,
             0,
             None,
+            false,
         )
         .await;
     assert!(result.unwrap_err().to_string().contains("Stale"));
@@ -425,6 +427,7 @@ async fn missing_store_prevents_generation_provider_and_runtime() {
             TargetLanguage::C,
             0,
             None,
+            false,
         )
         .await
         .unwrap_err();
@@ -452,7 +455,9 @@ async fn rust_compile_pins_image_and_records_only_flags_emitted_by_cargo() {
         if database {
             f.database("-DNEVER_EMITTED=1");
         }
-        let compiled=f.service.harness_compile("#![no_main]\nlibfuzzer_sys::fuzz_target!(|data: &[u8]| { parse_sample::parse_entry(data); });".into(),f.project.path(),EngineKind::LibFuzzer,"parse_entry",TargetLanguage::Rust, None).await.unwrap();
+        let compiled=f.service.harness_compile("#![no_main]\nlibfuzzer_sys::fuzz_target!(|data: &[u8]| { parse_sample::parse_entry(data); });".into(),f.project.path(),EngineKind::LibFuzzer,"parse_entry",TargetLanguage::Rust, None,
+            false,
+        ).await.unwrap();
         let inputs = f
             .store
             .harness_build_inputs(compiled.harness_id)
@@ -486,6 +491,7 @@ async fn atomic_input_storage_failure_publishes_no_active_revision() {
             "parse_entry",
             TargetLanguage::C,
             None,
+            false,
         )
         .await;
     assert!(result.is_err());
@@ -580,6 +586,7 @@ async fn changed_configured_inputs_block_shared_lifecycle_and_rebuild_restores_e
                 None,
                 None,
                 None,
+                None,
                 1,
             )
             .await;
@@ -591,6 +598,7 @@ async fn changed_configured_inputs_block_shared_lifecycle_and_rebuild_restores_e
                 "parse_entry",
                 EngineKind::LibFuzzer,
                 1,
+                None,
                 None,
                 None,
                 None,
@@ -777,6 +785,7 @@ async fn deleted_configured_database_reports_needs_build_before_dispatch() {
             TargetLanguage::C,
             0,
             None,
+            false,
         )
         .await
         .unwrap_err();
@@ -981,6 +990,7 @@ async fn final_direct_and_corpus_image_resolution_cannot_select_a_moved_tag() {
                     None,
                     None,
                     None,
+                    None,
                     &|_| {},
                 )
                 .await
@@ -1036,6 +1046,7 @@ async fn pending_corpus_engine_input_change_preserves_corpus_and_stops_regenerat
                 "parse_entry",
                 TargetLanguage::C,
                 None,
+                false,
             )
             .await
             .unwrap();
@@ -1123,6 +1134,7 @@ async fn image_change_after_run_reservation_is_retained_failed_before_engine_dis
             None,
             None,
             None,
+            None,
             &|_| {},
             &|id| {
                 *reserved.lock().unwrap() = Some(id);
@@ -1196,6 +1208,7 @@ async fn campaign_pending_seed_preserves_corpus(provider_fails: bool) {
         EngineKind::LibFuzzer,
         TargetLanguage::C,
         1,
+        None,
         None,
         None,
         None,
@@ -1280,6 +1293,7 @@ async fn campaign_rechecks_after_seed_discovery_before_provider() {
             EngineKind::LibFuzzer,
             TargetLanguage::C,
             1,
+            None,
             None,
             None,
             None,

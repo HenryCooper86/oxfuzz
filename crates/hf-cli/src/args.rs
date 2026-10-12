@@ -226,12 +226,27 @@ pub(crate) struct HarnessArgs {
     /// harness and the sandbox. See `docs/guides/SAFETY_MODEL.md`.
     #[arg(long)]
     pub(crate) no_llm_review: bool,
+    #[command(flatten)]
+    pub(crate) build: HarnessBuildArgs,
+}
+
+/// The build-variant selection of `oxfuzz harness`: which sanitizer the
+/// harness binary is built with, and whether an AFL++ `CmpLog` companion is
+/// built alongside it. Both are baked into the harness revision's recorded
+/// build.
+#[derive(clap::Args)]
+pub(crate) struct HarnessBuildArgs {
     /// Sanitizer for the built harness: `address` (default) or `undefined`
     /// (`UBSan`, halt-on-error). Baked into the harness binary; runs over the
     /// promoted harness record its sanitizer. Overrides the configured
     /// `fuzzing.default_sanitizer` for this build.
     #[arg(long)]
     pub(crate) sanitizer: Option<String>,
+    /// AFL++ only: also build the `CmpLog` companion binary
+    /// (`AFL_LLVM_CMPLOG=1`) for redqueen input-to-state solving; a
+    /// `run`/`campaign`/`fuzz --cmplog` then drives it via `afl-fuzz -c`.
+    #[arg(long)]
+    pub(crate) cmplog: bool,
 }
 
 /// Controls for emitting harness drafts without execution.
@@ -286,6 +301,13 @@ pub(crate) struct RunArgs {
     /// unconstrained -- the run records the harness's own sanitizer.
     #[arg(long, conflicts_with = "replay")]
     pub(crate) sanitizer: Option<String>,
+    /// AFL++ only: drive the promoted harness's recorded `CmpLog` companion
+    /// (`afl-fuzz -c`) so redqueen input-to-state solving cracks magic-byte
+    /// and multi-byte comparisons. Requires a harness built with
+    /// `oxfuzz harness --cmplog`; the run fails before launch otherwise.
+    /// Trades throughput for comparison solving.
+    #[arg(long, conflicts_with = "replay")]
+    pub(crate) cmplog: bool,
     /// Replay a persisted run with its recorded engine, duration, and
     /// deterministic seed.
     #[arg(long)]
@@ -395,6 +417,11 @@ pub(crate) struct CampaignArgs {
     /// sanitizer.
     #[arg(long)]
     pub(crate) sanitizer: Option<String>,
+    /// AFL++ only: every iteration drives the promoted harness's recorded
+    /// `CmpLog` companion (`afl-fuzz -c`). Requires a harness built with
+    /// `oxfuzz harness --cmplog`; the campaign fails before launch otherwise.
+    #[arg(long)]
+    pub(crate) cmplog: bool,
     /// Max run -> triage iterations.
     #[arg(long, default_value_t = 3)]
     pub(crate) iterations: usize,
@@ -461,6 +488,11 @@ pub(crate) struct FuzzArgs {
     /// not degrade a step, since each one warns and continues by design.
     #[arg(long, value_enum, default_value_t = AiOption::Auto)]
     pub(crate) ai: AiOption,
+    /// AFL++ only: build a fresh harness with its `CmpLog` companion and drive
+    /// it (`afl-fuzz -c`) in every campaign iteration. A promoted harness
+    /// without a recorded companion is rebuilt, not reused.
+    #[arg(long)]
+    pub(crate) cmplog: bool,
     #[command(flatten)]
     pub(crate) switches: FuzzSwitchArgs,
     /// Emit the pipeline outcome as JSON on stdout; stage headers and the live
@@ -1591,6 +1623,7 @@ mod fuzz_cli_tests {
             timeout_ms,
             sanitizer,
             ai,
+            cmplog,
             switches:
                 crate::args::FuzzSwitchArgs {
                     no_llm_review,
@@ -1611,6 +1644,7 @@ mod fuzz_cli_tests {
         assert_eq!(timeout_ms, None);
         assert_eq!(sanitizer, None, "no flag: the config default applies");
         assert!(!resume, "resume is opt-in");
+        assert!(!cmplog, "cmplog is opt-in");
         assert_eq!(ai, AiOption::Auto);
         assert!(!no_llm_review, "the review bypass is never the default");
         assert!(!fresh, "reuse is the default; --fresh opts out");
@@ -1641,6 +1675,7 @@ mod fuzz_cli_tests {
             "require",
             "--no-llm-review",
             "--fresh",
+            "--cmplog",
             "--json",
         ])
         .unwrap();
@@ -1653,6 +1688,7 @@ mod fuzz_cli_tests {
             timeout_ms,
             sanitizer,
             ai,
+            cmplog,
             switches:
                 crate::args::FuzzSwitchArgs {
                     no_llm_review,
@@ -1673,6 +1709,7 @@ mod fuzz_cli_tests {
         assert_eq!(timeout_ms, Some(250));
         assert_eq!(sanitizer.as_deref(), Some("undefined"));
         assert!(!resume);
+        assert!(cmplog);
         assert_eq!(ai, AiOption::Require);
         assert!(no_llm_review);
         assert!(fresh);
@@ -1770,6 +1807,69 @@ mod resume_cli_tests {
 }
 
 #[cfg(test)]
+mod cmplog_cli_tests {
+    use clap::Parser as _;
+
+    use super::{Cli, Commands};
+
+    #[test]
+    fn harness_run_campaign_and_fuzz_accept_cmplog_and_default_it_off() {
+        let parsed = Cli::try_parse_from([
+            "oxfuzz", "harness", "/p", "--target", "t", "--engine", "afl++", "--cmplog",
+        ])
+        .unwrap();
+        let Commands::Harness(crate::args::HarnessArgs {
+            build: crate::args::HarnessBuildArgs { cmplog, .. },
+            ..
+        }) = parsed.command
+        else {
+            panic!("expected harness");
+        };
+        assert!(cmplog);
+
+        let parsed = Cli::try_parse_from([
+            "oxfuzz", "run", "/p", "--target", "t", "--engine", "afl++", "--cmplog",
+        ])
+        .unwrap();
+        let Commands::Run(crate::args::RunArgs { cmplog, .. }) = parsed.command else {
+            panic!("expected run");
+        };
+        assert!(cmplog);
+
+        // Omitted means off everywhere: CmpLog is a per-invocation opt-in.
+        let parsed =
+            Cli::try_parse_from(["oxfuzz", "run", "/p", "--target", "t", "--engine", "afl++"])
+                .unwrap();
+        let Commands::Run(crate::args::RunArgs { cmplog, .. }) = parsed.command else {
+            panic!("expected run");
+        };
+        assert!(!cmplog, "cmplog is opt-in");
+
+        let parsed = Cli::try_parse_from(["oxfuzz", "campaign", "/p", "--cmplog"]).unwrap();
+        let Commands::Campaign(crate::args::CampaignArgs { cmplog, .. }) = parsed.command else {
+            panic!("expected campaign");
+        };
+        assert!(cmplog);
+
+        let parsed = Cli::try_parse_from(["oxfuzz", "fuzz", "/p", "--cmplog"]).unwrap();
+        let Commands::Fuzz(crate::args::FuzzArgs { cmplog, .. }) = parsed.command else {
+            panic!("expected fuzz");
+        };
+        assert!(cmplog);
+    }
+
+    #[test]
+    fn replay_conflicts_with_cmplog() {
+        // Replay re-executes the recorded run configuration, companion binary
+        // included, so a CmpLog request cannot combine with it.
+        assert!(
+            Cli::try_parse_from(["oxfuzz", "run", "/p", "--replay", "a1b2c3d4", "--cmplog",])
+                .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
 mod sanitizer_cli_tests {
     use clap::Parser as _;
 
@@ -1789,7 +1889,11 @@ mod sanitizer_cli_tests {
             "undefined",
         ])
         .unwrap();
-        let Commands::Harness(crate::args::HarnessArgs { sanitizer, .. }) = parsed.command else {
+        let Commands::Harness(crate::args::HarnessArgs {
+            build: crate::args::HarnessBuildArgs { sanitizer, .. },
+            ..
+        }) = parsed.command
+        else {
             panic!("expected harness");
         };
         assert_eq!(sanitizer.as_deref(), Some("undefined"));
@@ -1838,7 +1942,11 @@ mod sanitizer_cli_tests {
             "libfuzzer",
         ])
         .unwrap();
-        let Commands::Harness(crate::args::HarnessArgs { sanitizer, .. }) = parsed.command else {
+        let Commands::Harness(crate::args::HarnessArgs {
+            build: crate::args::HarnessBuildArgs { sanitizer, .. },
+            ..
+        }) = parsed.command
+        else {
             panic!("expected harness");
         };
         assert_eq!(

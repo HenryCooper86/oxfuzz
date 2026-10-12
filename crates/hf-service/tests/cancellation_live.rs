@@ -59,6 +59,7 @@ async fn qualify_engine(container: Arc<ServiceContainer>, root: &Path, engine: E
             "qualification_parse",
             TargetLanguage::C,
             None,
+            false,
         )
         .await
         .expect("sandbox compile");
@@ -92,6 +93,7 @@ async fn qualify_engine(container: Arc<ServiceContainer>, root: &Path, engine: E
                     "qualification_parse",
                     engine,
                     10,
+                    None,
                     None,
                     None,
                     None,

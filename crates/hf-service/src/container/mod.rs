@@ -232,6 +232,7 @@ fn resolve_fuzzing_run(
     timeout_ms: Option<u64>,
     resume: Option<bool>,
     sanitizer: Option<hf_core::target::Sanitizer>,
+    cmplog: Option<bool>,
 ) -> Result<crate::config::ResolvedFuzzingRun, ClassifiedError> {
     crate::config::resolve_fuzzing_run(
         Some(engine),
@@ -240,6 +241,7 @@ fn resolve_fuzzing_run(
         timeout_ms,
         resume,
         sanitizer,
+        cmplog,
     )
     .map_err(|error| fuzzing_policy_error(&error))
 }
@@ -1968,6 +1970,7 @@ fn auto_revert_baseline_compatible(previous: &FuzzRunConfig, current: &FuzzRunCo
         && previous.input_timeout == current.input_timeout
         && previous.seed_corpus == current.seed_corpus
         && previous.sanitizer == current.sanitizer
+        && previous.cmplog == current.cmplog
         && comparison_env(&previous.env) == comparison_env(&current.env)
         && previous.extra_args == current.extra_args
 }
@@ -1994,6 +1997,7 @@ fn auto_revert_comparison_key(
         "input_timeout": config.input_timeout,
         "seed_corpus": config.seed_corpus,
         "sanitizer": config.sanitizer,
+        "cmplog": config.cmplog,
         "env": comparison_env(&config.env),
         "extra_args": config.extra_args,
         "context_rev": context_rev,
@@ -2226,6 +2230,11 @@ pub struct RunSummary {
     /// the automatic action. `None` when the policy is off or did not trigger.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_revert: Option<AutoRevertOutcome>,
+    /// Whether this run drove the harness revision's AFL++ `CmpLog` companion
+    /// (`-c`): an opted-in run trades throughput for redqueen input-to-state
+    /// solving, so the summary must say when that cost was active.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cmplog: bool,
 }
 
 /// The outcome of the auto-revert policy firing for a finished run: its harness
@@ -2952,6 +2961,7 @@ mod auto_revert_tests {
             input_manifest_sha256: None,
             input_timeout: None,
             resume: false,
+            cmplog: false,
         }
     }
 
@@ -2984,6 +2994,26 @@ mod auto_revert_tests {
         assert!(
             !auto_revert_baseline_compatible(&baseline, &current),
             "a different per-input timeout is a different experimental setup"
+        );
+        baseline = current.clone();
+        baseline.cmplog = true;
+        assert!(
+            !auto_revert_baseline_compatible(&baseline, &current),
+            "a CmpLog run is a different experimental setup (redqueen solving \
+             changes both throughput and what the queue explores)"
+        );
+    }
+
+    #[test]
+    fn cmplog_splits_the_comparison_key() {
+        let target = Uuid::new_v4();
+        let baseline = config(EngineKind::AflPlusPlus, 60);
+        let mut current = baseline.clone();
+        current.cmplog = true;
+        assert_ne!(
+            auto_revert_comparison_key(target, &baseline, "context-a"),
+            auto_revert_comparison_key(target, &current, "context-a"),
+            "a cmplog run must never share a comparison group with a plain run"
         );
     }
 
@@ -3195,6 +3225,8 @@ mod terminal_metrics_tests {
             output_relative: PathBuf::new(),
             source_sha256: String::new(),
             binary_sha256: String::new(),
+            cmplog_binary_host: None,
+            cmplog_binary_sha256: None,
         }
     }
 

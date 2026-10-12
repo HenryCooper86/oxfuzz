@@ -338,6 +338,7 @@ pub(crate) async fn cmd_campaign(
     timeout_ms: Option<u64>,
     resume: bool,
     sanitizer: Option<&str>,
+    cmplog: bool,
     iterations: usize,
     ai: AiOption,
 ) -> anyhow::Result<()> {
@@ -364,6 +365,8 @@ pub(crate) async fn cmd_campaign(
             // An absent flag is no constraint: the run records the harness's
             // own sanitizer.
             sanitizer,
+            // CmpLog has no configured default: the flag is the only opt-in.
+            cmplog.then_some(true),
             iterations,
             &on_progress,
         )

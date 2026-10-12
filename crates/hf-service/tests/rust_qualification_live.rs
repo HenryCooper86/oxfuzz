@@ -122,6 +122,7 @@ async fn approved_rust_workspace_completes_userspace_lifecycle() {
             "parse_record",
             TargetLanguage::Rust,
             None,
+            false,
         )
         .await
         .expect("sandbox cargo-fuzz build");
@@ -160,6 +161,7 @@ async fn approved_rust_workspace_completes_userspace_lifecycle() {
                     "parse_record",
                     EngineKind::LibFuzzer,
                     10,
+                    None,
                     None,
                     None,
                     None,

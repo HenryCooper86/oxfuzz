@@ -230,6 +230,7 @@ async fn smoke_without_a_required_llm_review_is_refused() {
             "parse_entry",
             TargetLanguage::C,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -259,6 +260,7 @@ async fn negative_llm_review_is_persisted_and_prevents_smoke_execution() {
             EngineKind::LibFuzzer,
             "parse_entry",
             TargetLanguage::C, None,
+            false,
         )
         .await
         .unwrap();
@@ -298,6 +300,7 @@ async fn malformed_llm_review_fails_closed_before_smoke_execution() {
             EngineKind::LibFuzzer,
             "parse_entry",
             TargetLanguage::C, None,
+            false,
         )
         .await
         .unwrap();
@@ -332,6 +335,7 @@ async fn binary_substitution_during_llm_review_is_refused_before_execution() {
             EngineKind::LibFuzzer,
             "parse_entry",
             TargetLanguage::C, None,
+            false,
         )
         .await
         .unwrap();
@@ -362,6 +366,7 @@ async fn smoke_updates_the_compiled_revision_and_promotion_is_explicit() {
             "parse_entry",
             TargetLanguage::C,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -462,6 +467,7 @@ async fn promotion_is_refused_when_the_smoke_profile_never_entered_the_target() 
             "parse_entry",
             TargetLanguage::C,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -495,6 +501,7 @@ async fn promotion_succeeds_when_the_smoke_profile_entered_the_target() {
             "parse_entry",
             TargetLanguage::C,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -536,6 +543,7 @@ async fn promotion_rejects_a_binary_changed_after_smoke_qualification() {
             EngineKind::LibFuzzer,
             "parse_entry",
             TargetLanguage::C, None,
+            false,
         )
         .await
         .unwrap();
@@ -571,6 +579,7 @@ async fn campaign_rejects_a_binary_changed_after_promotion() {
             EngineKind::LibFuzzer,
             "parse_entry",
             TargetLanguage::C, None,
+            false,
         )
         .await
         .unwrap();
@@ -604,6 +613,7 @@ async fn campaign_rejects_a_binary_changed_after_promotion() {
             None,
             None,
             None,
+            None,
             &|_| {},
         )
         .await
@@ -624,6 +634,7 @@ async fn legacy_promoted_harness_can_be_requalified_and_requires_reapproval() {
             EngineKind::LibFuzzer,
             "parse_entry",
             TargetLanguage::C, None,
+            false,
         )
         .await
         .unwrap();
@@ -674,6 +685,7 @@ async fn campaign_run_rejects_an_unpromoted_active_revision() {
             EngineKind::LibFuzzer,
             "parse_entry",
             TargetLanguage::C, None,
+            false,
         )
         .await
         .unwrap();
@@ -687,6 +699,7 @@ async fn campaign_run_rejects_an_unpromoted_active_revision() {
             "parse_entry",
             EngineKind::LibFuzzer,
             60,
+            None,
             None,
             None,
             None,
@@ -759,6 +772,7 @@ async fn unsupported_harness_languages_fail_before_the_compiler() {
                 "parse_entry",
                 language,
                 None,
+                false,
             )
             .await
             .expect_err("unsupported harness language must fail closed");
@@ -789,6 +803,7 @@ async fn a_smoke_run_requests_a_profile_it_can_actually_retain() {
             "parse_entry",
             TargetLanguage::C,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -842,6 +857,7 @@ async fn a_smoke_run_retains_the_profile_promotion_reads() {
             "parse_entry",
             TargetLanguage::C,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -923,6 +939,7 @@ async fn promotion_is_refused_when_the_gate_denies_it() {
             "parse_entry",
             TargetLanguage::C,
             None,
+            false,
         )
         .await
         .unwrap();

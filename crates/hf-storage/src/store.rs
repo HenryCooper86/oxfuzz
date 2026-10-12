@@ -2718,6 +2718,7 @@ impl Store {
                 || serde_json::to_string(&persisted.build_cmd)?
                     != serde_json::to_string(&h.build_cmd)?
                 || persisted.sanitizer != h.sanitizer
+                || serde_json::to_string(&persisted.cmplog)? != serde_json::to_string(&h.cmplog)?
             {
                 return Err(StorageError::InvalidData(format!(
                     "harness {} immutable revision fields conflict with the persisted record",

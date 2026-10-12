@@ -225,6 +225,7 @@ async fn service_assembles_a_manifest_from_durable_run_and_approval_evidence() {
             binary_sha256: Some(binary_sha256.clone()),
             run_id: Some(Uuid::new_v4()),
         }),
+        cmplog: None,
     };
     store.upsert_harness(&harness).await.unwrap();
     harness.status = HarnessStatus::Promoted;
@@ -258,6 +259,7 @@ async fn service_assembles_a_manifest_from_durable_run_and_approval_evidence() {
             input_manifest_sha256: None,
             input_timeout: None,
             resume: false,
+            cmplog: false,
         }),
         now,
     );

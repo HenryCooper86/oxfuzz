@@ -588,6 +588,7 @@ mod tests {
                         timeout_ms,
                         resume,
                         sanitizer,
+                        cmplog,
                         replay,
                     }),
                 ) => {
@@ -603,6 +604,7 @@ mod tests {
                         sanitizer.is_none(),
                         "a work-order run does not request a sanitizer"
                     );
+                    assert!(!cmplog, "a work-order run does not request cmplog");
                     assert!(replay.is_none());
                 }
                 (

@@ -878,8 +878,10 @@ impl ServiceContainer {
                 binary.display()
             )));
         }
+        // Corpus minimization replays the main binary only (`-merge=1`); a
+        // CmpLog companion is never part of it.
         let artifacts =
-            stage_run_artifacts(&workspace, Uuid::new_v4(), &qualified.source, &binary)?;
+            stage_run_artifacts(&workspace, Uuid::new_v4(), &qualified.source, &binary, None)?;
         let run_root = artifacts.output_host.parent().ok_or_else(|| {
             ClassifiedError::Internal("minimization output has no run directory".to_owned())
         })?;

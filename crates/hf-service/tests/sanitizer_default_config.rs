@@ -244,6 +244,7 @@ async fn qualify(container: &ServiceContainer, project: &Path, sanitizer: Option
             TargetLanguage::C,
             1,
             sanitizer,
+            false,
         )
         .await
         .expect("prepare harness");

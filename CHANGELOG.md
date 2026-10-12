@@ -11,6 +11,25 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ### Added
 
+- AFL++ CmpLog/redqueen support for magic-byte and multi-byte comparison
+  targets. `oxfuzz harness --target <sym> --engine afl++ --cmplog` builds a
+  CmpLog companion binary (same source, driver, and sanitizer flags, compiled
+  with `AFL_LLVM_CMPLOG=1`, written as `<main>.cmplog`) and records the build
+  plus the companion's SHA-256 on the harness revision; `oxfuzz run
+  --cmplog`, `campaign --cmplog`, and `fuzz --cmplog` drive it via
+  `afl-fuzz -c`. An opted-in run against a companion-less (or
+  digest-mismatched) revision fails before any engine starts, naming the
+  build that produces the companion; `--cmplog` on a non-AFL++ engine fails
+  at policy resolution. In a multi-CPU run the `-M` primary fuzzes the plain
+  build and every `-S` secondary carries `-c` (per AFL++ 4.09c's multi-core
+  guidance). The companion is staged into the run's retained inputs, so
+  replay re-executes with the identical binary, and CmpLog runs form their
+  own comparison group for auto-revert and run comparison. The run summary
+  and journal note when CmpLog was active (its throughput is not comparable
+  with a plain run's). There is deliberately no `[fuzzing] default_cmplog`;
+  opt-in is per invocation. `AFL_CMPLOG_ONLY_NEW` and the `-l` CmpLog level
+  knob are deliberately not set/emitted. See
+  `docs/standards/ENGINE_ADAPTER_STANDARD.md` 3.6.
 - Edge-set diff between runs. A terminal AFL++ campaign now retains its
   covered edge set — the union of AFL coverage-map offsets its run-local
   corpus exercises, replayed through `afl-showmap` against the run's exact

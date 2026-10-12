@@ -133,6 +133,7 @@ async fn unreviewed_fixture() -> (tempfile::TempDir, Arc<hf_storage::Store>, Ser
             "parse_entry",
             TargetLanguage::C,
             None,
+            false,
         )
         .await
         .unwrap();

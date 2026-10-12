@@ -263,6 +263,18 @@ pub struct FuzzRunConfig {
     /// field existed keep verifying.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub resume: bool,
+    /// Run the AFL++ `CmpLog` companion binary of the harness revision
+    /// (redqueen input-to-state solving): afl-fuzz receives it through `-c`.
+    /// Resolved explicitly by `hf-service` (`--cmplog`; there is deliberately
+    /// no config default) before a campaign launches, and meaningful only for
+    /// AFL++ -- an explicit request on another engine fails at policy
+    /// resolution. The companion binary is part of the harness revision's
+    /// recorded build artifacts and is staged into the run's retained inputs,
+    /// so a replay re-executes with the identical companion. `false` on rows
+    /// persisted before cmplog was recorded. `false` is omitted from the wire
+    /// so run manifests sealed before this field existed keep verifying.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cmplog: bool,
 }
 
 /// A point-in-time statistics snapshot from a running (or just-finished)
@@ -679,6 +691,7 @@ mod tests {
             input_manifest_sha256: None,
             input_timeout: None,
             resume: false,
+            cmplog: false,
         };
         // `false` stays off the wire: run manifests persisted before the field
         // existed carry no `resume` key and must keep verifying against it.
@@ -693,6 +706,44 @@ mod tests {
         assert_eq!(encoded["resume"], serde_json::json!(true));
         let restored: FuzzRunConfig = serde_json::from_value(encoded).unwrap();
         assert!(restored.resume);
+    }
+
+    #[test]
+    fn run_config_cmplog_is_explicit_and_omitted_when_off() {
+        use super::FuzzRunConfig;
+        use crate::target::Sanitizer;
+        use std::time::Duration;
+
+        let config = FuzzRunConfig {
+            harness_id: uuid::Uuid::nil(),
+            engine: EngineKind::AflPlusPlus,
+            duration: Some(Duration::from_secs(60)),
+            max_mem_mb: 2048,
+            max_cpus: 1,
+            seed_corpus: None,
+            sanitizer: Sanitizer::Address,
+            env: Vec::new(),
+            extra_args: Vec::new(),
+            seed: None,
+            replay_of: None,
+            input_manifest_sha256: None,
+            input_timeout: None,
+            resume: false,
+            cmplog: false,
+        };
+        // `false` stays off the wire: run manifests persisted before the field
+        // existed carry no `cmplog` key and must keep verifying against it.
+        let encoded = serde_json::to_value(&config).unwrap();
+        assert!(encoded.get("cmplog").is_none(), "{encoded}");
+        let restored: FuzzRunConfig = serde_json::from_value(encoded).unwrap();
+        assert!(!restored.cmplog);
+
+        let mut cmplog = config.clone();
+        cmplog.cmplog = true;
+        let encoded = serde_json::to_value(&cmplog).unwrap();
+        assert_eq!(encoded["cmplog"], serde_json::json!(true));
+        let restored: FuzzRunConfig = serde_json::from_value(encoded).unwrap();
+        assert!(restored.cmplog);
     }
 
     #[test]
@@ -716,6 +767,7 @@ mod tests {
             input_manifest_sha256: None,
             input_timeout: Some(Duration::from_millis(1500)),
             resume: false,
+            cmplog: false,
         };
         let encoded = serde_json::to_value(&config).unwrap();
         assert_eq!(

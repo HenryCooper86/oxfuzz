@@ -332,7 +332,7 @@ pub async fn harness_compile(
     }
     match state
         .container
-        .harness_compile(source, &project, engine_kind, &target, lang, None)
+        .harness_compile(source, &project, engine_kind, &target, lang, None, false)
         .await
     {
         Ok(out) => Ok(serde_json::json!({
@@ -2027,10 +2027,12 @@ pub async fn run_fuzzer(
             engine_kind,
             duration,
             None,
-            // The desktop run button carries no per-run timeout, resume, or
-            // sanitizer override; the configured `fuzzing.default_timeout_ms` /
-            // `fuzzing.default_resume` apply and the run records the harness's
-            // own sanitizer.
+            // The desktop run button carries no per-run timeout, resume,
+            // sanitizer, or CmpLog override; the configured
+            // `fuzzing.default_timeout_ms` / `fuzzing.default_resume` apply,
+            // CmpLog stays off (per-run opt-in only), and the run records the
+            // harness's own sanitizer.
+            None,
             None,
             None,
             None,

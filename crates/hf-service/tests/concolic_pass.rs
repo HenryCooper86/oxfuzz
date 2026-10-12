@@ -135,6 +135,7 @@ impl Fixture {
             sanitizer: Sanitizer::Address,
             status,
             smoke_run: None,
+            cmplog: None,
         };
         if status == HarnessStatus::Promoted {
             harness.status = HarnessStatus::SmokePassed;

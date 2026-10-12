@@ -22,6 +22,7 @@ fn cfg(engine: EngineKind, duration_secs: u64) -> FuzzRunConfig {
         input_manifest_sha256: None,
         input_timeout: None,
         resume: false,
+        cmplog: false,
     }
 }
 
@@ -672,4 +673,97 @@ fn afl_resume_accepts_unrelated_extra_args() {
         joined.contains("-i") && joined.contains("/work/corpus"),
         "{joined}"
     );
+}
+
+#[test]
+fn afl_cmplog_points_the_single_instance_at_the_companion_binary() {
+    // The CmpLog companion path is derived from the staged main binary by the
+    // one shared suffix rule; the service stages the companion there.
+    let mut c = cfg(EngineKind::AflPlusPlus, 300);
+    c.cmplog = true;
+    let args =
+        hf_engine::afl::build_run_args(&c, "/work/fuzz_bin", "/work/corpus", "/work/out").unwrap();
+    let flag = args.iter().position(|arg| arg == "-c").expect("-c flag");
+    assert_eq!(
+        args.get(flag + 1).map(String::as_str),
+        Some("/work/fuzz_bin.cmplog"),
+        "-c names the CmpLog companion of the staged binary: {args:?}"
+    );
+    let separator = args.iter().position(|arg| arg == "--").expect("--");
+    assert!(
+        flag < separator,
+        "-c belongs before the target argv: {args:?}"
+    );
+    // extra_args stays overridable for other flags, but `-c` follows them so
+    // the typed config wins under afl-fuzz's last-occurrence-wins parsing.
+    assert_eq!(
+        args.iter()
+            .skip(separator + 1)
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["/work/fuzz_bin", "@@"],
+        "the file-input contract is unchanged: {args:?}"
+    );
+}
+
+#[test]
+fn afl_cmplog_runs_on_secondaries_only_in_parallel_mode() {
+    // AFL++ 4.09c (docs/fuzzing_in_depth.md 3c): the -M primary fuzzes the
+    // plain build; CmpLog/redqueen belongs to -S secondaries.
+    let mut c = cfg(EngineKind::AflPlusPlus, 300);
+    c.max_cpus = 3;
+    c.cmplog = true;
+    let args =
+        hf_engine::afl::build_run_args(&c, "/work/fuzz_bin", "/work/corpus", "/work/out").unwrap();
+    let script = args.get(2).expect("coordinator script").as_str();
+
+    let primary = script
+        .lines()
+        .find(|line| line.contains("-M main"))
+        .unwrap();
+    assert!(
+        !primary.contains("-c "),
+        "the primary never runs CmpLog: {primary}"
+    );
+    let secondaries: Vec<&str> = script
+        .lines()
+        .filter(|line| line.contains("-S s"))
+        .collect();
+    assert_eq!(secondaries.len(), 2, "{script}");
+    for secondary in secondaries {
+        assert!(
+            secondary.contains("-c '/work/fuzz_bin.cmplog'"),
+            "every secondary carries the CmpLog companion: {secondary}"
+        );
+    }
+}
+
+#[test]
+fn afl_rejects_a_hand_passed_cmplog_flag_in_extra_args() {
+    // `-c` (bare or with an attached value) is owned by the typed
+    // `FuzzRunConfig.cmplog`, which stages the recorded companion binary of the
+    // harness revision; a hand-passed one is a second source of CmpLog truth.
+    for extra_args in [
+        vec!["-c".to_owned(), "/tmp/evil".to_owned()],
+        vec!["-c/tmp/evil".to_owned()],
+        vec![
+            "-x".to_owned(),
+            "/work/d.dict".to_owned(),
+            "-c".to_owned(),
+            "/tmp/evil".to_owned(),
+        ],
+    ] {
+        for cmplog in [false, true] {
+            let mut c = cfg(EngineKind::AflPlusPlus, 60);
+            c.cmplog = cmplog;
+            c.extra_args = extra_args.clone();
+            let error =
+                hf_engine::afl::build_run_args(&c, "/work/fuzz_bin", "/work/corpus", "/work/out")
+                    .expect_err("a hand-passed AFL++ -c must be rejected");
+            assert!(
+                error.to_string().contains("cmplog"),
+                "the error must name the owned CmpLog path: {error}"
+            );
+        }
+    }
 }

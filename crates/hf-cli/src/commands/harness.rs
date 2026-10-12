@@ -14,18 +14,24 @@ pub(crate) async fn cmd_harness(
     target: &str,
     engine: &str,
     lang: &str,
-    draft_only: bool,
+    draft: crate::args::HarnessDraftArgs,
     ai: AiOption,
     repair: usize,
     refine: bool,
     promote: bool,
     review_bypass: hf_service::HarnessReviewBypass,
     sanitizer: Option<&str>,
-    output: HarnessOutput,
+    cmplog: bool,
 ) -> anyhow::Result<()> {
     let engine = parse_engine(engine)?;
     let lang = parse_lang(lang)?;
     let sanitizer = sanitizer.map(parse_sanitizer).transpose()?;
+    let crate::args::HarnessDraftArgs { draft_only, json } = draft;
+    let output = if json {
+        HarnessOutput::Json
+    } else {
+        HarnessOutput::Text
+    };
     // --draft-only stops before compile/smoke/promotion, so flags that only
     // take effect in those stages must not be silently ignored. (--refine is
     // exempt: it honors --repair during its recompile.)
@@ -40,6 +46,9 @@ pub(crate) async fn cmd_harness(
             "warning: --no-llm-review is ignored with --draft-only (no smoke qualification runs)"
         );
     }
+    if draft_only && cmplog {
+        eprintln!("warning: --cmplog is ignored with --draft-only (the harness is not compiled)");
+    }
     let container = crate::approval::bootstrap().await;
 
     // With --refine, reshape the existing harness toward uncovered reachable
@@ -53,6 +62,16 @@ pub(crate) async fn cmd_harness(
                 "--sanitizer does not combine with --refine: refinement keeps the active \
                  revision's build sanitizer; use a fresh `oxfuzz harness --sanitizer ...` to \
                  change it"
+            );
+        }
+        if cmplog {
+            // Same identity rule: refinement keeps the active revision's
+            // CmpLog setup (rebuilding the companion when it has one), so a
+            // requested --cmplog here would be silently ignored.
+            anyhow::bail!(
+                "--cmplog does not combine with --refine: refinement keeps the active \
+                 revision's CmpLog setup; use a fresh `oxfuzz harness --cmplog` to add a \
+                 companion"
             );
         }
         println!("--- Refining harness (coverage-guided) ---");
@@ -89,7 +108,7 @@ pub(crate) async fn cmd_harness(
     if repair > 0 && !draft_only {
         println!("--- Generating harness (auto-repair up to {repair}x) ---");
         let outcome = container
-            .harness_generate(&project, target, engine, lang, repair, sanitizer)
+            .harness_generate(&project, target, engine, lang, repair, sanitizer, cmplog)
             .await?;
         println!(
             "compile: status={:?} repairs_used={}",
@@ -139,7 +158,15 @@ pub(crate) async fn cmd_harness(
     }
     println!("\n--- Compiling in sandbox ---");
     let outcome = container
-        .harness_compile(draft.source, &project, engine, target, lang, sanitizer)
+        .harness_compile(
+            draft.source,
+            &project,
+            engine,
+            target,
+            lang,
+            sanitizer,
+            cmplog,
+        )
         .await?;
     println!("compile: status={:?}", outcome.status);
     print_lint_findings(&outcome.lint);
@@ -230,6 +257,7 @@ pub(crate) async fn cmd_run(
     timeout_ms: Option<u64>,
     resume: bool,
     sanitizer: Option<&str>,
+    cmplog: bool,
     replay: Option<&str>,
 ) -> anyhow::Result<()> {
     let on_progress = crate::commands::status::printing_sink();
@@ -267,6 +295,8 @@ pub(crate) async fn cmd_run(
         // An absent flag defers to the configured `fuzzing.default_resume`;
         // the flag only ever requests resume, never forces a cold start.
         let resume = resume.then_some(true);
+        // CmpLog has no configured default: the flag is the only opt-in.
+        let cmplog = cmplog.then_some(true);
         let resolved = hf_service::config::resolve_fuzzing_run(
             Some(engine_kind),
             requested_duration,
@@ -274,6 +304,7 @@ pub(crate) async fn cmd_run(
             timeout_ms,
             resume,
             sanitizer,
+            cmplog,
         )
         .map_err(anyhow::Error::msg)?;
         let duration_secs = resolved.duration_secs;
@@ -303,6 +334,7 @@ pub(crate) async fn cmd_run(
                         timeout_ms,
                         resume,
                         sanitizer,
+                        cmplog,
                         &on_progress,
                     )
                     .await
@@ -324,6 +356,13 @@ pub(crate) async fn cmd_run(
         println!("  hangs (per-input timeouts): {hangs}");
     }
     println!("  edges covered: {}", summary.edges);
+    if summary.cmplog {
+        // Cost visibility: the companion ran on interesting inputs, so this
+        // run's exec/s is not comparable with a plain run's.
+        println!(
+            "  cmplog (redqueen input-to-state): active -- expect lower exec/s than a plain run"
+        );
+    }
     if let Some(proposal) = &summary.stagnation {
         println!("  coverage stalled: {proposal:?} -- consider regenerating the harness or adding seeds/a dictionary");
     }

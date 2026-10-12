@@ -204,6 +204,7 @@ async fn harness_generate_conditions_the_draft_on_promoted_harnesses() {
         sanitizer: hf_core::target::Sanitizer::Address,
         status: HarnessStatus::Promoted,
         smoke_run: None,
+        cmplog: None,
     };
     let not_promoted = Harness {
         id: uuid::Uuid::new_v4(),
@@ -220,6 +221,7 @@ async fn harness_generate_conditions_the_draft_on_promoted_harnesses() {
         sanitizer: hf_core::target::Sanitizer::Address,
         status: HarnessStatus::Draft,
         smoke_run: None,
+        cmplog: None,
     };
     store.upsert_harness(&promoted).await.unwrap();
     store.upsert_harness(&not_promoted).await.unwrap();
@@ -232,6 +234,7 @@ async fn harness_generate_conditions_the_draft_on_promoted_harnesses() {
             TargetLanguage::C,
             0,
             None,
+            false,
         )
         .await
         .expect("generation should complete");
@@ -270,6 +273,7 @@ async fn harness_generate_without_promotions_drafts_without_the_section() {
             TargetLanguage::C,
             0,
             None,
+            false,
         )
         .await
         .expect("generation should complete");

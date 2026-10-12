@@ -244,6 +244,7 @@ async fn qualify(container: &ServiceContainer, project: &Path, sanitizer: Option
             TargetLanguage::C,
             1,
             sanitizer,
+            false,
         )
         .await
         .expect("prepare harness");
@@ -321,6 +322,7 @@ async fn requested_ubsan_reaches_the_build_script_and_the_run_identity() {
             None,
             None,
             Some(Sanitizer::Undefined),
+            None,
             &|_| {},
         )
         .await
@@ -349,6 +351,7 @@ async fn run_with_a_mismatched_sanitizer_request_fails_loud() {
             None,
             None,
             Some(Sanitizer::Address),
+            None,
             &|_| {},
         )
         .await
@@ -383,6 +386,7 @@ async fn unselectable_sanitizers_fail_loud_at_build_resolution() {
             "parse_value",
             TargetLanguage::C,
             Some(Sanitizer::Memory),
+            false,
         )
         .await
         .expect_err("MSan is not selectable");
@@ -397,6 +401,7 @@ async fn unselectable_sanitizers_fail_loud_at_build_resolution() {
             "parse_value",
             TargetLanguage::C,
             Some(Sanitizer::Thread),
+            false,
         )
         .await
         .expect_err("TSan is not selectable");
@@ -410,6 +415,7 @@ async fn unselectable_sanitizers_fail_loud_at_build_resolution() {
             "parse_value",
             TargetLanguage::C,
             Some(Sanitizer::None),
+            false,
         )
         .await
         .expect_err("a sanitizer-less build is not admitted");
@@ -430,6 +436,7 @@ async fn rust_targets_reject_a_non_address_sanitizer_loudly() {
             "parse_value",
             TargetLanguage::Rust,
             Some(Sanitizer::Undefined),
+            false,
         )
         .await
         .expect_err("rustc has no UBSan on the cargo-fuzz path");
@@ -463,6 +470,7 @@ async fn fuzz_redrafts_when_the_promoted_harness_has_a_different_sanitizer() {
         review_bypass: hf_service::HarnessReviewBypass::NotRequested,
         fresh: false,
         sanitizer,
+        cmplog: false,
     };
 
     let first = container

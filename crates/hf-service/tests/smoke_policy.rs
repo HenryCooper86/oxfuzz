@@ -113,6 +113,7 @@ async fn smoke_budget_clamps_to_the_operator_ceiling_and_drives_runtime_and_pers
             EngineKind::LibFuzzer,
             "parse_policy",
             TargetLanguage::C, None,
+            false,
         )
         .await
         .unwrap();

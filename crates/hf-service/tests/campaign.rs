@@ -128,6 +128,7 @@ async fn run_campaign_runs_full_pipeline_and_picks_a_target() {
             TargetLanguage::C,
             1,
             None,
+            false,
         )
         .await
         .expect("prepare harness");
@@ -166,7 +167,8 @@ async fn run_campaign_runs_full_pipeline_and_picks_a_target() {
             None,
             None,
             None,
-            2, // max iterations
+            None, // no CmpLog request
+            2,    // max iterations
         ),
     )
     .await
@@ -308,6 +310,7 @@ async fn run_campaign_observed_forwards_markers_and_stats_but_not_engine_log_lin
             TargetLanguage::C,
             1,
             None,
+            false,
         )
         .await
         .expect("prepare harness");
@@ -344,6 +347,7 @@ async fn run_campaign_observed_forwards_markers_and_stats_but_not_engine_log_lin
             EngineKind::LibFuzzer,
             TargetLanguage::C,
             1,
+            None,
             None,
             None,
             None,

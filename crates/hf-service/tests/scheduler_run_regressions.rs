@@ -154,7 +154,9 @@ impl Fixture {
         .with_store_path(root.path().join("store.db"))
         .await
         .unwrap();
-        service.harness_compile("int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }".to_owned(), &project, EngineKind::LibFuzzer, "parse_background", TargetLanguage::C, None).await.unwrap();
+        service.harness_compile("int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }".to_owned(), &project, EngineKind::LibFuzzer, "parse_background", TargetLanguage::C, None,
+            false,
+        ).await.unwrap();
         service
             .harness_smoke(
                 &project,

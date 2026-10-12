@@ -36,6 +36,12 @@ pub(super) struct RunArtifacts {
     pub(super) output_relative: PathBuf,
     pub(super) source_sha256: String,
     pub(super) binary_sha256: String,
+    /// The staged AFL++ `CmpLog` companion binary (`<binary>.cmplog` beside the
+    /// staged main binary) and its digest, present exactly when the run
+    /// carries `FuzzRunConfig.cmplog`. The retained-inputs manifest covers it,
+    /// so a replay re-executes with the identical companion.
+    pub(super) cmplog_binary_host: Option<PathBuf>,
+    pub(super) cmplog_binary_sha256: Option<String>,
 }
 
 /// Provenance of a replayed run: the original run it re-executes and the exact
@@ -758,11 +764,18 @@ pub(super) async fn resolve_run_sandbox_image(
 /// create its isolated output directory. The primary workspace is mounted
 /// read-only during execution, so these staged inputs cannot be rewritten by
 /// the engine.
+///
+/// `cmplog_companion` is the workspace `CmpLog` companion binary (already
+/// verified against the harness revision's recorded digest by the caller) for
+/// a run that opted into `CmpLog`; it is staged beside the main binary under
+/// the adapter's companion name (`harness.cmplog`) so the AFL++ `-c` path
+/// derived from the staged binary resolves.
 pub(super) fn stage_run_artifacts(
     workspace: &Path,
     run_id: Uuid,
     source: &str,
     binary: &Path,
+    cmplog_companion: Option<&Path>,
 ) -> Result<RunArtifacts, ClassifiedError> {
     if !is_regular_file(binary) {
         return Err(ClassifiedError::Validation(format!(
@@ -785,6 +798,30 @@ pub(super) fn stage_run_artifacts(
             binary.display()
         )));
     }
+    let approved_companion = match cmplog_companion {
+        Some(companion) => {
+            if !is_regular_file(companion) {
+                return Err(ClassifiedError::Validation(format!(
+                    "CmpLog companion binary is not a regular workspace file: {}",
+                    companion.display()
+                )));
+            }
+            let resolved = std::fs::canonicalize(companion).map_err(|e| {
+                ClassifiedError::Validation(format!(
+                    "resolve CmpLog companion binary {}: {e}",
+                    companion.display()
+                ))
+            })?;
+            if !resolved.starts_with(&workspace_root) {
+                return Err(ClassifiedError::Validation(format!(
+                    "CmpLog companion binary resolves outside workspace: {}",
+                    companion.display()
+                )));
+            }
+            Some(resolved)
+        }
+        None => None,
+    };
     let runs_dir = ensure_workspace_directory(workspace, Path::new("runs"))?;
     let run_root = runs_dir.join(run_id.to_string());
     std::fs::create_dir(&run_root).map_err(|e| {
@@ -819,6 +856,20 @@ pub(super) fn stage_run_artifacts(
         std::fs::write(&source_host, source).map_err(|e| {
             ClassifiedError::Internal(format!("stage approved harness source: {e}"))
         })?;
+        let cmplog_binary_host = match approved_companion {
+            Some(companion) => {
+                let staged =
+                    input_dir.join(format!("harness{}", hf_engine::afl::CMPLOG_BINARY_SUFFIX));
+                std::fs::copy(&companion, &staged).map_err(|e| {
+                    ClassifiedError::Validation(format!(
+                        "stage CmpLog companion binary {}: {e}",
+                        companion.display()
+                    ))
+                })?;
+                Some(staged)
+            }
+            None => None,
+        };
 
         let live_corpus = ensure_workspace_directory(workspace, Path::new("corpus"))?;
         let initial_corpus_host = input_dir.join("corpus");
@@ -836,6 +887,10 @@ pub(super) fn stage_run_artifacts(
 
         let source_sha256 = sha256_file(&source_host)?;
         let binary_sha256 = sha256_file(&binary_host)?;
+        let cmplog_binary_sha256 = match &cmplog_binary_host {
+            Some(companion) => Some(sha256_file(companion)?),
+            None => None,
+        };
         let run_container_root = format!("/work/runs/{run_id}");
         Ok(RunArtifacts {
             input_host: input_dir,
@@ -852,6 +907,8 @@ pub(super) fn stage_run_artifacts(
             output_relative,
             source_sha256,
             binary_sha256,
+            cmplog_binary_host,
+            cmplog_binary_sha256,
         })
     })();
     if staged.is_err() {
@@ -899,6 +956,16 @@ pub(super) fn stage_replay_artifacts(
         let source_host = input_host.join("harness.source");
         let source_sha256 = sha256_file(&source_host)?;
         let binary_sha256 = sha256_file(&binary_host)?;
+        // A CmpLog run replays with the identical companion: the retained
+        // inputs were verified against the original run's manifest, which
+        // covers the companion, so presence follows `config.cmplog` exactly.
+        let cmplog_binary_host = config
+            .cmplog
+            .then(|| input_host.join(format!("harness{}", hf_engine::afl::CMPLOG_BINARY_SUFFIX)));
+        let cmplog_binary_sha256 = match &cmplog_binary_host {
+            Some(companion) => Some(sha256_file(companion)?),
+            None => None,
+        };
         let root = format!("/work/runs/{run_id}");
         Ok((
             RunArtifacts {
@@ -916,6 +983,8 @@ pub(super) fn stage_replay_artifacts(
                 binary_container: format!("{root}/input/harness"),
                 corpus_container: format!("{root}/corpus"),
                 output_container: format!("{root}/out"),
+                cmplog_binary_host,
+                cmplog_binary_sha256,
             },
             image,
         ))
@@ -941,6 +1010,16 @@ pub(super) fn verify_run_artifacts(artifacts: &RunArtifacts) -> Result<(), Class
         return Err(ClassifiedError::Validation(
             "approved harness binary digest changed before launch".to_owned(),
         ));
+    }
+    if let (Some(companion), Some(recorded)) = (
+        &artifacts.cmplog_binary_host,
+        &artifacts.cmplog_binary_sha256,
+    ) {
+        if sha256_file(companion)? != *recorded {
+            return Err(ClassifiedError::Validation(
+                "CmpLog companion binary digest changed before launch".to_owned(),
+            ));
+        }
     }
     Ok(())
 }
@@ -1410,7 +1489,8 @@ mod staging_tests {
         let run_id = uuid::Uuid::new_v4();
 
         let artifacts =
-            stage_run_artifacts(workspace.path(), run_id, "approved source", &binary).unwrap();
+            stage_run_artifacts(workspace.path(), run_id, "approved source", &binary, None)
+                .unwrap();
         assert_eq!(artifacts.source_sha256.len(), 64);
         assert_eq!(artifacts.binary_sha256.len(), 64);
         assert!(artifacts.output_host.is_dir());
@@ -1431,6 +1511,76 @@ mod staging_tests {
     }
 
     #[test]
+    fn staged_cmplog_companion_lands_beside_the_binary_and_is_digest_verified() {
+        let workspace = tempfile::tempdir().unwrap();
+        let binary = workspace.path().join("fuzz_parse");
+        std::fs::write(&binary, b"approved binary").unwrap();
+        let companion = workspace.path().join("fuzz_parse.cmplog");
+        std::fs::write(&companion, b"approved cmplog companion").unwrap();
+        std::fs::create_dir(workspace.path().join("corpus")).unwrap();
+        let run_id = uuid::Uuid::new_v4();
+
+        let artifacts = stage_run_artifacts(
+            workspace.path(),
+            run_id,
+            "approved source",
+            &binary,
+            Some(&companion),
+        )
+        .unwrap();
+        // The companion is staged under the name the AFL++ adapter derives
+        // from the staged binary path (`-c <binary>.cmplog`).
+        let staged = artifacts
+            .cmplog_binary_host
+            .as_ref()
+            .expect("companion staged");
+        assert!(
+            staged.ends_with(format!("harness{}", hf_engine::afl::CMPLOG_BINARY_SUFFIX)),
+            "{staged:?}"
+        );
+        assert!(staged.starts_with(&artifacts.input_host));
+        assert_eq!(std::fs::read(staged).unwrap(), b"approved cmplog companion");
+        assert_eq!(
+            artifacts.cmplog_binary_sha256.as_deref().map(str::len),
+            Some(64)
+        );
+        verify_run_artifacts(&artifacts).unwrap();
+
+        // Tampering with the staged companion is a hard failure at launch,
+        // exactly like the main binary.
+        std::fs::write(staged, b"tampered companion").unwrap();
+        let error = verify_run_artifacts(&artifacts).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("CmpLog companion binary digest changed"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn staged_run_artifacts_reject_a_companion_outside_the_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        let binary = workspace.path().join("fuzz_parse");
+        std::fs::write(&binary, b"approved binary").unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let companion = outside.path().join("fuzz_parse.cmplog");
+        std::fs::write(&companion, b"outside companion").unwrap();
+
+        let result = stage_run_artifacts(
+            workspace.path(),
+            uuid::Uuid::new_v4(),
+            "approved source",
+            &binary,
+            Some(&companion),
+        );
+        let Err(error) = result else {
+            panic!("a companion outside the workspace must not stage")
+        };
+        assert!(error.to_string().contains("outside workspace"), "{error}");
+    }
+
+    #[test]
     fn retained_starting_corpus_survives_engine_and_canonical_changes() {
         let workspace = tempfile::tempdir().unwrap();
         let binary = workspace.path().join("fuzz_parse");
@@ -1439,7 +1589,8 @@ mod staging_tests {
         std::fs::create_dir(&live).unwrap();
         std::fs::write(live.join("seed"), b"original input").unwrap();
         let run_id = uuid::Uuid::new_v4();
-        let artifacts = stage_run_artifacts(workspace.path(), run_id, "source", &binary).unwrap();
+        let artifacts =
+            stage_run_artifacts(workspace.path(), run_id, "source", &binary, None).unwrap();
         let initial = workspace
             .path()
             .join("runs")
@@ -1470,8 +1621,14 @@ mod staging_tests {
         let workspace = tempfile::tempdir().unwrap();
         let binary = workspace.path().join("fuzz_parse");
         std::fs::write(&binary, b"approved binary").unwrap();
-        let artifacts =
-            stage_run_artifacts(workspace.path(), uuid::Uuid::new_v4(), "source", &binary).unwrap();
+        let artifacts = stage_run_artifacts(
+            workspace.path(),
+            uuid::Uuid::new_v4(),
+            "source",
+            &binary,
+            None,
+        )
+        .unwrap();
         let options =
             super::run_sandbox_options(&artifacts, None, hf_core::engine::EngineKind::Honggfuzz);
         assert_eq!(
@@ -1495,8 +1652,14 @@ mod staging_tests {
         std::fs::write(live.join("seed"), b"original input").unwrap();
         let image = "a".repeat(64);
         let expected = run_context_digests(workspace.path(), &image).unwrap();
-        let artifacts =
-            stage_run_artifacts(workspace.path(), uuid::Uuid::new_v4(), "source", &binary).unwrap();
+        let artifacts = stage_run_artifacts(
+            workspace.path(),
+            uuid::Uuid::new_v4(),
+            "source",
+            &binary,
+            None,
+        )
+        .unwrap();
         std::fs::write(live.join("seed"), b"later input").unwrap();
         let captured = super::captured_run_context_digests(
             workspace.path(),
@@ -1543,7 +1706,7 @@ mod staging_tests {
         let expected = run_context_digests(workspace.path(), &image).unwrap();
         let run_id = uuid::Uuid::new_v4();
         let artifacts =
-            stage_run_artifacts(workspace.path(), run_id, "harness source", &binary).unwrap();
+            stage_run_artifacts(workspace.path(), run_id, "harness source", &binary, None).unwrap();
         let retained = workspace
             .path()
             .join("runs")
@@ -1611,7 +1774,7 @@ mod staging_tests {
         std::fs::write(&binary, b"approved binary").unwrap();
         std::fs::write(workspace.path().join("corpus"), b"not a corpus directory").unwrap();
         let run_id = uuid::Uuid::new_v4();
-        assert!(stage_run_artifacts(workspace.path(), run_id, "source", &binary).is_err());
+        assert!(stage_run_artifacts(workspace.path(), run_id, "source", &binary, None).is_err());
         assert!(!workspace
             .path()
             .join("runs")
@@ -1626,7 +1789,8 @@ mod staging_tests {
         let active = workspace.path().join("fuzz_parse");
         std::fs::write(&active, b"mutable active binary").unwrap();
         let run_id = uuid::Uuid::new_v4();
-        let artifacts = stage_run_artifacts(workspace.path(), run_id, "source", &active).unwrap();
+        let artifacts =
+            stage_run_artifacts(workspace.path(), run_id, "source", &active, None).unwrap();
         let mut run = hf_storage::RunRecord::new(
             "/project",
             hf_core::engine::EngineKind::LibFuzzer,
@@ -1691,6 +1855,7 @@ mod staging_tests {
             uuid::Uuid::new_v4(),
             "approved source",
             &escaped,
+            None,
         );
         assert!(result.is_err(), "parent traversal staged an outside binary");
     }
@@ -1711,6 +1876,7 @@ mod staging_tests {
             uuid::Uuid::new_v4(),
             "approved source",
             &binary,
+            None,
         );
         let Err(error) = result else {
             panic!("a build-created symlink redirected run evidence");

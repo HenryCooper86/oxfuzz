@@ -144,6 +144,7 @@ async fn seed_run(
         sanitizer: Sanitizer::Address,
         status: HarnessStatus::Promoted,
         smoke_run: None,
+        cmplog: None,
     };
     store.upsert_harness(&harness).await.unwrap();
     let mut run = RunRecord::new(
@@ -164,6 +165,7 @@ async fn seed_run(
             input_manifest_sha256: None,
             input_timeout: None,
             resume: false,
+            cmplog: false,
         }),
         Utc::now(),
     );

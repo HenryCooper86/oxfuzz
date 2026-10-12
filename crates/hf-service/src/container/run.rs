@@ -19,7 +19,8 @@ use super::guards::{
     close_run_journal, ensure_run_journal_durable, ActiveRunGuard, PersistedRunGuard,
 };
 use super::harness_workspace::{
-    build_workspace_dictionary, dict_llm_cache, harness_binary_name, read_dictionary_source_excerpt,
+    build_workspace_dictionary, dict_llm_cache, harness_binary_name, harness_cmplog_binary_name,
+    read_dictionary_source_excerpt,
 };
 use super::output_budget::{monitor_run_output, run_artifacts_within_budget};
 use super::policy::CurrentHarnessEvidence;
@@ -284,6 +285,48 @@ fn userspace_harness_binary(workspace: &Path, target: &str) -> Result<PathBuf, C
         )));
     }
     Ok(binary)
+}
+
+/// Resolve the AFL++ `CmpLog` companion for a run that opted in, failing loud
+/// when the promoted harness revision never built one or the workspace
+/// companion no longer matches the recorded build digest (stale or tampered).
+/// The remedy always names the build that produces the companion.
+fn require_cmplog_companion(
+    target: &str,
+    harness: &Harness,
+    workspace: &Path,
+) -> Result<PathBuf, ClassifiedError> {
+    let rebuild =
+        format!("rebuild it with `oxfuzz harness --target {target} --engine afl++ --cmplog`");
+    let companion = harness.cmplog.as_ref().ok_or_else(|| {
+        ClassifiedError::Validation(format!(
+            "--cmplog requires a CmpLog companion binary, but the promoted harness for \
+             '{target}' was built without one; {rebuild}"
+        ))
+    })?;
+    let recorded = companion.binary_sha256.as_deref().ok_or_else(|| {
+        ClassifiedError::Validation(format!(
+            "--cmplog requires a completed CmpLog companion build, but the harness revision \
+             for '{target}' records none; {rebuild}"
+        ))
+    })?;
+    let path = workspace.join(harness_cmplog_binary_name(target));
+    if !is_regular_file(&path) {
+        return Err(ClassifiedError::Validation(format!(
+            "--cmplog requires the CmpLog companion binary {} built alongside the harness, \
+             but it is missing; {rebuild}",
+            path.display()
+        )));
+    }
+    let actual = super::staging::sha256_file(&path)?;
+    if actual != recorded {
+        return Err(ClassifiedError::Validation(format!(
+            "--cmplog requires the recorded CmpLog companion build, but {} no longer matches \
+             the digest recorded at build time (stale or tampered); {rebuild}",
+            path.display()
+        )));
+    }
+    Ok(path)
 }
 
 fn report_syzkaller_launch(
@@ -795,6 +838,17 @@ impl ServiceContainer {
                 )));
             }
         }
+        // CmpLog is a build-and-run pair: the run opts in, and the promoted
+        // harness revision must carry the recorded companion build. Checked
+        // before any staging so an opted-in run without one fails fast.
+        // `resolved.cmplog` is already false for non-AFL++ engines (policy
+        // resolution), and replays skip this check: their companion arrives
+        // with the retained inputs, not from the live workspace.
+        let cmplog_companion = if resolved.cmplog {
+            Some(require_cmplog_companion(target, qualified, workspace)?)
+        } else {
+            None
+        };
         let historical = replay
             .as_ref()
             .is_some_and(|value| value.inputs == ReplayInputs::Retained);
@@ -819,6 +873,7 @@ impl ServiceContainer {
             input_manifest_sha256: None,
             input_timeout: Some(std::time::Duration::from_millis(resolved.timeout_ms)),
             resume: resolved.resume,
+            cmplog: resolved.cmplog,
         };
         let store = self.store.as_ref().ok_or_else(|| {
             ClassifiedError::Validation("fuzz runs require the persistent service store".to_owned())
@@ -880,6 +935,7 @@ impl ServiceContainer {
                 record.id,
                 &qualified.source,
                 &workspace.join(harness_binary_name(target)),
+                cmplog_companion.as_deref(),
             )?;
             if let Err(error) = super::retained_inputs::capture_workspace(
                 workspace,
@@ -1020,6 +1076,17 @@ impl ServiceContainer {
             return Err(ClassifiedError::Storage(error.to_string()));
         }
         self.run_journal.open_run(run_id, project, target, engine);
+        if config.cmplog {
+            // Cost visibility (roadmap P2 guardrail note): CmpLog runs the
+            // companion on interesting inputs, so throughput drops; the run is
+            // the same authorized sandboxed run, so no new approval exists.
+            self.run_journal.note(
+                run_id,
+                "afl-cmplog",
+                "CmpLog/redqueen active: afl-fuzz drives the recorded companion binary via -c; \
+                 expect lower exec/s on interesting inputs",
+            );
+        }
         match resumed_from {
             Some(donor) => {
                 tracing::info!(%run_id, %donor, "resuming AFL++ session tree");
@@ -1418,6 +1485,7 @@ impl ServiceContainer {
             termination: result.termination,
             stagnation: feedback.proposal(),
             auto_revert,
+            cmplog: run_cfg.cmplog,
         })
     }
 
@@ -1498,6 +1566,7 @@ impl ServiceContainer {
         timeout_ms: Option<u64>,
         resume: Option<bool>,
         sanitizer: Option<hf_core::target::Sanitizer>,
+        cmplog: Option<bool>,
         max_iterations: usize,
     ) -> Result<CampaignOutcome, ClassifiedError> {
         let sink = |_: FuzzProgress| {};
@@ -1510,6 +1579,7 @@ impl ServiceContainer {
             timeout_ms,
             resume,
             sanitizer,
+            cmplog,
             CampaignRunLimits {
                 iterations: max_iterations.max(1),
                 time: None,
@@ -1541,6 +1611,7 @@ impl ServiceContainer {
         timeout_ms: Option<u64>,
         resume: Option<bool>,
         sanitizer: Option<hf_core::target::Sanitizer>,
+        cmplog: Option<bool>,
         max_iterations: usize,
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
     ) -> Result<CampaignOutcome, ClassifiedError> {
@@ -1553,6 +1624,7 @@ impl ServiceContainer {
             timeout_ms,
             resume,
             sanitizer,
+            cmplog,
             CampaignRunLimits {
                 iterations: max_iterations.max(1),
                 time: None,
@@ -1572,6 +1644,7 @@ impl ServiceContainer {
         timeout_ms: Option<u64>,
         resume: Option<bool>,
         sanitizer: Option<hf_core::target::Sanitizer>,
+        cmplog: Option<bool>,
         limits: CampaignRunLimits,
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
     ) -> Result<CampaignOutcome, ClassifiedError> {
@@ -1594,9 +1667,17 @@ impl ServiceContainer {
         // continues the output tree iteration N-1 produced, which is exactly
         // what a long AFL++ campaign wants from session resume. The sanitizer
         // constraint resolves once too: every iteration runs the same promoted
-        // harness revision.
-        let resolved =
-            resolve_fuzzing_run(engine, duration_secs, None, timeout_ms, resume, sanitizer)?;
+        // harness revision. CmpLog likewise resolves once: every iteration
+        // drives the same recorded companion.
+        let resolved = resolve_fuzzing_run(
+            engine,
+            duration_secs,
+            None,
+            timeout_ms,
+            resume,
+            sanitizer,
+            cmplog,
+        )?;
         let engine = resolved.engine;
         // 1. Choose a target: the caller's, else the top-ranked candidate.
         let inv = self.discover(project, lang).await?;
@@ -1757,11 +1838,12 @@ impl ServiceContainer {
         on_progress: Arc<dyn Fn(Uuid, FuzzProgress) + Send + Sync + 'static>,
         on_status: Arc<dyn Fn(Uuid, RunLifecycleStatus) + Send + Sync + 'static>,
     ) -> Result<Uuid, ClassifiedError> {
-        // The web/desktop launch surface carries no per-run timeout, resume, or
-        // sanitizer override; the configured `fuzzing.default_timeout_ms` /
-        // `fuzzing.default_resume` apply and the run records the harness's own
-        // sanitizer.
-        let resolved = resolve_fuzzing_run(engine, duration_secs, None, None, None, None)?;
+        // The web/desktop launch surface carries no per-run timeout, resume,
+        // sanitizer, or CmpLog override; the configured
+        // `fuzzing.default_timeout_ms` / `fuzzing.default_resume` apply, CmpLog
+        // stays off (per-run opt-in only), and the run records the harness's
+        // own sanitizer.
+        let resolved = resolve_fuzzing_run(engine, duration_secs, None, None, None, None, None)?;
         self.start_run_launch(
             RunLaunch {
                 project,
@@ -2003,6 +2085,7 @@ impl ServiceContainer {
         timeout_ms: Option<u64>,
         resume: Option<bool>,
         sanitizer: Option<hf_core::target::Sanitizer>,
+        cmplog: Option<bool>,
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
     ) -> Result<RunSummary, ClassifiedError> {
         let resolved = resolve_fuzzing_run(
@@ -2012,6 +2095,7 @@ impl ServiceContainer {
             timeout_ms,
             resume,
             sanitizer,
+            cmplog,
         )?;
         self.run_fuzzer_with_started(project, target, resolved, on_progress, &|_| {}, None)
             .await
@@ -2032,6 +2116,7 @@ impl ServiceContainer {
         timeout_ms: Option<u64>,
         resume: Option<bool>,
         sanitizer: Option<hf_core::target::Sanitizer>,
+        cmplog: Option<bool>,
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
         on_started: &(dyn Fn(Uuid) + Send + Sync),
     ) -> Result<RunSummary, ClassifiedError> {
@@ -2042,6 +2127,7 @@ impl ServiceContainer {
             timeout_ms,
             resume,
             sanitizer,
+            cmplog,
         )?;
         self.run_fuzzer_with_started(project, target, resolved, on_progress, on_started, None)
             .await
@@ -2207,6 +2293,9 @@ impl ServiceContainer {
             // Replay likewise carries no sanitizer constraint: a retained
             // replay re-executes the recorded config (sanitizer included)
             // verbatim, and a current-input rerun follows the current harness.
+            None,
+            // CmpLog replays exactly like the sanitizer: the recorded config's
+            // `cmplog` governs, and the retained inputs carry the companion.
             None,
         )?;
         if config.max_mem_mb > resolved.max_mem_mb || config.max_cpus > resolved.max_cpus {
@@ -2389,6 +2478,8 @@ impl ServiceContainer {
             None,
             None,
             None,
+            None,
+            // Kernel campaigns have no CmpLog companion concept.
             None,
         )?;
         let duration_secs = resolved.duration_secs;
@@ -3115,6 +3206,7 @@ mod semgrep_ranking_consumer_tests {
                 None,
                 None,
                 None,
+                None,
                 1,
             )
             .await
@@ -3127,6 +3219,7 @@ mod semgrep_ranking_consumer_tests {
                 EngineKind::LibFuzzer,
                 TargetLanguage::C,
                 1,
+                None,
                 None,
                 None,
                 None,
@@ -3149,6 +3242,93 @@ mod semgrep_ranking_consumer_tests {
 }
 
 #[cfg(test)]
+mod cmplog_companion_tests {
+    use super::super::harness_workspace::harness_cmplog_binary_name;
+    use super::require_cmplog_companion;
+    use hf_core::engine::EngineKind;
+    use hf_core::harness::{BuildCommand, CmpLogCompanion, Harness, HarnessStatus};
+    use hf_core::target::{Sanitizer, TargetLanguage};
+    use sha2::{Digest as _, Sha256};
+    use uuid::Uuid;
+
+    fn harness(cmplog: Option<CmpLogCompanion>) -> Harness {
+        Harness {
+            id: Uuid::new_v4(),
+            target_id: Uuid::new_v4(),
+            engine: EngineKind::AflPlusPlus,
+            source: "int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n){return 0;}".into(),
+            language: TargetLanguage::C,
+            build_cmd: BuildCommand {
+                compiler: "afl-clang-fast".into(),
+                args: Vec::new(),
+                output: "fuzz_parse".into(),
+                extra_flags: Vec::new(),
+            },
+            sanitizer: Sanitizer::Address,
+            status: HarnessStatus::Promoted,
+            smoke_run: None,
+            cmplog,
+        }
+    }
+
+    fn companion_record(digest: Option<String>) -> CmpLogCompanion {
+        CmpLogCompanion {
+            build_cmd: BuildCommand {
+                compiler: "afl-clang-fast".into(),
+                args: Vec::new(),
+                output: "fuzz_parse.cmplog".into(),
+                extra_flags: Vec::new(),
+            },
+            binary_sha256: digest,
+        }
+    }
+
+    #[test]
+    fn a_companionless_revision_fails_loud_naming_the_build() {
+        let workspace = tempfile::tempdir().unwrap();
+        let error =
+            require_cmplog_companion("parse", &harness(None), workspace.path()).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("--cmplog"), "{message}");
+        assert!(
+            message.contains("oxfuzz harness --target parse --engine afl++ --cmplog"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_missing_companion_file_fails_loud() {
+        let workspace = tempfile::tempdir().unwrap();
+        let harness = harness(Some(companion_record(Some("ab".repeat(32)))));
+        let error = require_cmplog_companion("parse", &harness, workspace.path()).unwrap_err();
+        assert!(error.to_string().contains("missing"), "{error}");
+        assert!(error.to_string().contains("--cmplog"), "{error}");
+    }
+
+    #[test]
+    fn a_digest_mismatch_fails_loud() {
+        let workspace = tempfile::tempdir().unwrap();
+        let companion = workspace.path().join(harness_cmplog_binary_name("parse"));
+        std::fs::write(&companion, b"stale companion").unwrap();
+        let harness = harness(Some(companion_record(Some("ab".repeat(32)))));
+        let error = require_cmplog_companion("parse", &harness, workspace.path()).unwrap_err();
+        assert!(error.to_string().contains("stale or tampered"), "{error}");
+    }
+
+    #[test]
+    fn the_recorded_companion_resolves() {
+        let workspace = tempfile::tempdir().unwrap();
+        let companion = workspace.path().join(harness_cmplog_binary_name("parse"));
+        std::fs::write(&companion, b"reviewed companion").unwrap();
+        let digest = format!("{:x}", Sha256::digest(b"reviewed companion"));
+        let harness = harness(Some(companion_record(Some(digest))));
+        let resolved = require_cmplog_companion("parse", &harness, workspace.path())
+            .expect("the recorded companion resolves");
+        assert_eq!(resolved, companion);
+    }
+}
+
+#[cfg(test)]
 mod allocation_preparation_tests {
     use super::*;
     use sha2::{Digest, Sha256};
@@ -3164,6 +3344,7 @@ mod allocation_preparation_tests {
             sanitizer: hf_core::target::Sanitizer::Address,
             status: HarnessStatus::Promoted,
             smoke_run: None,
+            cmplog: None,
             build_cmd: hf_core::harness::BuildCommand {
                 compiler: "clang".into(),
                 args: Vec::new(),
@@ -3193,7 +3374,8 @@ mod allocation_preparation_tests {
             service.prepare_userspace_run(
                 root.path(),
                 "parse",
-                resolve_fuzzing_run(EngineKind::LibFuzzer, 10, None, None, None, None).unwrap(),
+                resolve_fuzzing_run(EngineKind::LibFuzzer, 10, None, None, None, None, None)
+                    .unwrap(),
                 &harness,
                 root.path(),
                 root.path().join("corpus"),
@@ -3224,6 +3406,7 @@ mod allocation_preparation_tests {
             sanitizer: hf_core::target::Sanitizer::Address,
             status: HarnessStatus::Promoted,
             smoke_run: None,
+            cmplog: None,
             build_cmd: hf_core::harness::BuildCommand {
                 compiler: "clang".into(),
                 args: Vec::new(),
@@ -3253,7 +3436,8 @@ mod allocation_preparation_tests {
                 .prepare_userspace_run(
                     root.path(),
                     "parse",
-                    resolve_fuzzing_run(EngineKind::LibFuzzer, 11, None, None, None, None).unwrap(),
+                    resolve_fuzzing_run(EngineKind::LibFuzzer, 11, None, None, None, None, None)
+                        .unwrap(),
                     &harness,
                     root.path(),
                     root.path().join("corpus"),
@@ -3274,7 +3458,8 @@ mod allocation_preparation_tests {
                 .prepare_userspace_run(
                     root.path(),
                     "parse",
-                    resolve_fuzzing_run(EngineKind::LibFuzzer, 10, None, None, None, None).unwrap(),
+                    resolve_fuzzing_run(EngineKind::LibFuzzer, 10, None, None, None, None, None)
+                        .unwrap(),
                     &harness,
                     root.path(),
                     root.path().join("corpus"),
@@ -3286,7 +3471,8 @@ mod allocation_preparation_tests {
                 .prepare_userspace_run(
                     root.path(),
                     "parse",
-                    resolve_fuzzing_run(EngineKind::LibFuzzer, 10, None, None, None, None).unwrap(),
+                    resolve_fuzzing_run(EngineKind::LibFuzzer, 10, None, None, None, None, None)
+                        .unwrap(),
                     &harness,
                     root.path(),
                     root.path().join("corpus"),

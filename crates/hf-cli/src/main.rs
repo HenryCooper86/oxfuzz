@@ -128,19 +128,14 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
             target,
             engine,
             lang,
-            draft: args::HarnessDraftArgs { draft_only, json },
+            draft,
             ai,
             repair,
             refine,
             promote,
             no_llm_review,
-            sanitizer,
+            build: args::HarnessBuildArgs { sanitizer, cmplog },
         }) => {
-            let output = if json {
-                commands::harness::HarnessOutput::Json
-            } else {
-                commands::harness::HarnessOutput::Text
-            };
             let review_bypass = if no_llm_review {
                 hf_service::HarnessReviewBypass::Requested
             } else {
@@ -151,14 +146,14 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
                 &target,
                 &engine,
                 &lang,
-                draft_only,
+                draft,
                 ai,
                 repair,
                 refine,
                 promote,
                 review_bypass,
                 sanitizer.as_deref(),
-                output,
+                cmplog,
             )
             .await?;
         }
@@ -172,6 +167,7 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
             timeout_ms,
             resume,
             sanitizer,
+            cmplog,
             replay,
         }) => {
             cmd_run(
@@ -184,6 +180,7 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
                 timeout_ms,
                 resume,
                 sanitizer.as_deref(),
+                cmplog,
                 replay.as_deref(),
             )
             .await?;
@@ -211,6 +208,7 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
             timeout_ms,
             resume,
             sanitizer,
+            cmplog,
             iterations,
             ai,
         }) => {
@@ -223,6 +221,7 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
                 timeout_ms,
                 resume,
                 sanitizer.as_deref(),
+                cmplog,
                 iterations,
                 ai,
             )

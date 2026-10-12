@@ -50,6 +50,13 @@ sandbox does not have, TSan data-race reports do not map onto the crash-triage
 pipeline, and a sanitizer-less build has no sanitizer evidence to classify.
 Syzkaller kernel builds take no userspace sanitizer selection.
 
+AFL++ CmpLog/redqueen (`--cmplog` on `harness`, `run`, `campaign`, `fuzz`):
+an opt-in companion binary (`AFL_LLVM_CMPLOG=1`) for magic-byte and
+multi-byte comparison targets, driven by `afl-fuzz -c`. AFL++-only; a run
+that opts in requires the promoted harness revision's recorded companion and
+fails loud otherwise. Mechanics and the parallel-mode choice live in
+[ENGINE_ADAPTER_STANDARD.md](../standards/ENGINE_ADAPTER_STANDARD.md#36-afl-cmplogredqueen).
+
 Additional operation limits:
 
 - Crash ingestion and deduplication are implemented for userspace engines;

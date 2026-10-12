@@ -500,6 +500,7 @@ pub async fn change_aware_fixture() -> Result<ChangeAwareTestFixture, Box<dyn Er
             binary_sha256: Some("b".repeat(64)),
             run_id: Some(uuid::Uuid::new_v4()),
         }),
+        cmplog: None,
     };
     store.upsert_harness(&harness).await?;
     harness.status = HarnessStatus::Promoted;
@@ -528,6 +529,7 @@ pub async fn change_aware_fixture() -> Result<ChangeAwareTestFixture, Box<dyn Er
         input_manifest_sha256: None,
         input_timeout: None,
         resume: false,
+        cmplog: false,
     };
     let image = format!("docker-image-id-sha256:{}", "f".repeat(64));
     let make_run = |source: &str, edges: u64| {
@@ -665,6 +667,7 @@ pub async fn run_closeout_fixture() -> Result<RunCloseoutTestFixture, Box<dyn Er
         sanitizer: Sanitizer::Address,
         status: HarnessStatus::Draft,
         smoke_run: None,
+        cmplog: None,
     };
     store.upsert_harness(&harness).await?;
     let mut run = RunRecord::new(
@@ -685,6 +688,7 @@ pub async fn run_closeout_fixture() -> Result<RunCloseoutTestFixture, Box<dyn Er
             input_manifest_sha256: None,
             input_timeout: None,
             resume: false,
+            cmplog: false,
         }),
         chrono::Utc::now(),
     );

@@ -246,9 +246,18 @@ pub async fn fuzzing_preflight(
     duration_secs: Option<u64>,
     require_provider: bool,
 ) -> FuzzingPreflight {
-    let policy =
-        crate::config::resolve_fuzzing_run(Some(engine), duration_secs, None, None, None, None)
-            .map(|_| ());
+    let policy = crate::config::resolve_fuzzing_run(
+        Some(engine),
+        duration_secs,
+        None,
+        None,
+        None,
+        None,
+        // Preflight answers "may this engine run"; CmpLog is a per-run build
+        // detail, not a policy gate.
+        None,
+    )
+    .map(|_| ());
     let provider_configured = require_provider.then(|| {
         crate::container::provider_pool_from_config()
             .or_else(crate::container::provider_pool_from_env)

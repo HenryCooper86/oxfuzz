@@ -199,17 +199,17 @@ Binary Tool integration is outside this release's scope.
 | `init` | Scaffold config from templates into the resolved config directory (see Quick Start) and create/migrate the database. |
 | `doctor [--engine <e> [--duration <d>] [--require-provider]] [--build-image] [--json]` | Probe Docker and bundled engines. When the sandbox image is missing, the output names how to build it (`oxfuzz doctor --build-image`, `scripts/build-sandbox.sh`, or the canonical `docker build` command; JSON carries it as `sandbox_image_remedy`). `--build-image` runs that build from the source checkout's `docker/sandbox/Dockerfile` -- the same build the desktop app runs on first launch -- then re-probes; it fails loud when Docker is unavailable or no source checkout is found. With `--engine`, enforce selected-engine availability and run policy; optionally require provider configuration. Exit non-zero on failure. |
 | `discover <project> --lang c [--rank] [--ai auto\|require\|off] [--semgrep]` | Scan a project; `--rank` requests service-owned AI assessment, and `--semgrep` explicitly adds separate C/C++ enrichment. Every candidate carries a derived `harnessable` flag; a discovery-only language (`go`, `python`) still scans and persists its inventory but marks each candidate `false` with a note naming the supported set. |
-| `harness <project> --target <sym> --engine <e> [--draft-only] [--repair N] [--refine] [--promote] [--no-llm-review] [--sanitizer address\|undefined]` | Write, compile (optionally auto-repair or coverage-refine), and smoke-qualify a newly generated harness. Smoke requires the independent LLM pre-execution review; with no provider configured it fails closed unless you pass `--no-llm-review` (or set `harness.allow_unreviewed_smoke = true`), which persists a marked bypass record and an audit row -- without the model review, only the lexical lint and your own promotion decision check the harness. Without `--promote`, review the output; rerunning creates another draft. Use the retained Work Order flow below when approval must name a previously reviewed source. |
+| `harness <project> --target <sym> --engine <e> [--draft-only] [--repair N] [--refine] [--promote] [--no-llm-review] [--sanitizer address\|undefined] [--cmplog]` | Write, compile (optionally auto-repair or coverage-refine), and smoke-qualify a newly generated harness. Smoke requires the independent LLM pre-execution review; with no provider configured it fails closed unless you pass `--no-llm-review` (or set `harness.allow_unreviewed_smoke = true`), which persists a marked bypass record and an audit row -- without the model review, only the lexical lint and your own promotion decision check the harness. Without `--promote`, review the output; rerunning creates another draft. `--cmplog` (AFL++ only) also builds the CmpLog companion binary; see "AFL++ CmpLog/redqueen" below. Use the retained Work Order flow below when approval must name a previously reviewed source. |
 | `work-order export\|import\|list\|submissions\|qualify\|rank\|promote ...` | Manage immutable external harness packets, submissions, qualification attempts, deterministic ranking, and exact-attempt promotion. |
-| `run <project> --target <sym> --engine <e> --duration 60m [--cpus N] [--timeout-ms N] [--resume] [--sanitizer address\|undefined]` | Run a sandboxed campaign with the active promoted harness (Ctrl-C cancels cooperatively). A file-qualified selector is `<relative-file>::<complete-symbol>`; a retained Work Order run always uses that complete selector. `--cpus N` requests a per-run CPU allocation within the configured `fuzzing.sandbox.max_cpus` ceiling; an allocation above one runs libFuzzer fork mode (`-fork=N`) and honggfuzz `--threads N` (AFL++ runs a single instance). `--timeout-ms N` overrides the per-input timeout for this run. `--resume` (AFL++ only) continues the most recent compatible AFL++ session instead of cold-starting; see "AFL++ session resume" below. `--sanitizer` asserts the promoted harness's build sanitizer (mismatch fails before any engine starts); see "Sanitizer selection" below. |
-| `run . --replay <run UUID>` | Replay a retained run with its recorded engine, duration, per-input timeout, and deterministic seed under current policy. The positional `.` is ignored in replay mode; the retained run resolves its original project. `--timeout-ms` and `--sanitizer` do not combine with `--replay`: the recorded timeout and sanitizer replay exactly. |
+| `run <project> --target <sym> --engine <e> --duration 60m [--cpus N] [--timeout-ms N] [--resume] [--sanitizer address\|undefined] [--cmplog]` | Run a sandboxed campaign with the active promoted harness (Ctrl-C cancels cooperatively). A file-qualified selector is `<relative-file>::<complete-symbol>`; a retained Work Order run always uses that complete selector. `--cpus N` requests a per-run CPU allocation within the configured `fuzzing.sandbox.max_cpus` ceiling; an allocation above one runs libFuzzer fork mode (`-fork=N`) and honggfuzz `--threads N` (AFL++ runs a single instance). `--timeout-ms N` overrides the per-input timeout for this run. `--resume` (AFL++ only) continues the most recent compatible AFL++ session instead of cold-starting; see "AFL++ session resume" below. `--sanitizer` asserts the promoted harness's build sanitizer (mismatch fails before any engine starts); see "Sanitizer selection" below. `--cmplog` (AFL++ only) drives the harness's recorded CmpLog companion via `afl-fuzz -c`; see "AFL++ CmpLog/redqueen" below. |
+| `run . --replay <run UUID>` | Replay a retained run with its recorded engine, duration, per-input timeout, and deterministic seed under current policy. The positional `.` is ignored in replay mode; the retained run resolves its original project. `--timeout-ms`, `--sanitizer`, and `--cmplog` do not combine with `--replay`: the recorded configuration replays exactly (the CmpLog companion, when the original run used one, is part of the retained inputs). |
 | `runs list [--project <path>] [--active] [--limit N] [--json]` | List persisted runs, newest first: short id, target, engine, status, start, duration, crashes. |
 | `runs status <run-id-or-prefix> [--json]` | Show one run's full record plus its latest persisted live telemetry, when any was retained. |
 | `runs stop <run-id-or-prefix>` | Cooperatively cancel a run owned by this process; exits non-zero with the reason otherwise. |
 | `runs diff <run-a> <run-b> [--json]` | Exact edge-set diff between two runs' retained coverage: counts of edges only a covered (lost), only b covered (gained), shared, and union, plus capped id samples. See "Edge-set capture and diffs" below. |
 | `runs capture-edges <run-id-or-prefix> [--json]` | Capture a terminal AFL++ campaign run's covered edge set on demand (replays its retained corpus through afl-showmap in the sandbox); a run that already retains one is reported without re-measurement. |
-| `campaign <project> --target <sym> --engine <e> [--timeout-ms N] [--resume] [--sanitizer address\|undefined]` | Run and triage a bounded campaign using an already smoke-qualified, human-promoted harness. Prints an iteration marker per iteration plus the same throttled live status line as `run`; raw engine output lines stay internal to the campaign. `--timeout-ms N` applies the per-input timeout to every iteration. `--resume` (AFL++ only) applies to every iteration: iteration N continues the output tree iteration N-1 produced. `--sanitizer` asserts the promoted harness's build sanitizer for every iteration. |
-| `fuzz <project> [--target <sym>] [--engine <e>] [--lang <l>] [--duration-secs N] [--iterations N] [--timeout-ms N] [--resume] [--sanitizer address\|undefined] [--ai auto\|require\|off] [--no-llm-review] [--fresh] [--json]` | One-command onboarding: discover -> harness -> smoke -> promote -> campaign in a single invocation. The only pause is the human promotion gate; a denial stops the pipeline before any campaign. Reuses an already-promoted harness for the same target/engine unless `--fresh` is given. `--resume` (AFL++ only) forwards to the campaign stage. `--sanitizer` selects the build sanitizer for a fresh harness and re-qualifies rather than reusing a promoted harness built with the other sanitizer. |
+| `campaign <project> --target <sym> --engine <e> [--timeout-ms N] [--resume] [--sanitizer address\|undefined] [--cmplog]` | Run and triage a bounded campaign using an already smoke-qualified, human-promoted harness. Prints an iteration marker per iteration plus the same throttled live status line as `run`; raw engine output lines stay internal to the campaign. `--timeout-ms N` applies the per-input timeout to every iteration. `--resume` (AFL++ only) applies to every iteration: iteration N continues the output tree iteration N-1 produced. `--sanitizer` asserts the promoted harness's build sanitizer for every iteration. `--cmplog` (AFL++ only) drives the recorded CmpLog companion every iteration. |
+| `fuzz <project> [--target <sym>] [--engine <e>] [--lang <l>] [--duration-secs N] [--iterations N] [--timeout-ms N] [--resume] [--sanitizer address\|undefined] [--cmplog] [--ai auto\|require\|off] [--no-llm-review] [--fresh] [--json]` | One-command onboarding: discover -> harness -> smoke -> promote -> campaign in a single invocation. The only pause is the human promotion gate; a denial stops the pipeline before any campaign. Reuses an already-promoted harness for the same target/engine unless `--fresh` is given. `--resume` (AFL++ only) forwards to the campaign stage. `--sanitizer` selects the build sanitizer for a fresh harness and re-qualifies rather than reusing a promoted harness built with the other sanitizer. `--cmplog` (AFL++ only) builds the fresh harness with its CmpLog companion and drives it in the campaign; a promoted harness without a recorded companion is rebuilt, not reused. |
 | `health --run <run UUID>` | Assess retained campaign health. This read-only command never stops, restarts, or resizes the run. |
 | `trust --run <run UUID>` | Audit which claims about a finished run its retained evidence supports. Read-only; starts no build, run, or coverage measurement. |
 | `closeout --run <run UUID>` | Explicitly run or resume the seven retained terminal closeout steps. Successful/skipped steps remain retained; failed or dependency-blocked work can be retried. |
@@ -518,6 +518,41 @@ The work order retains the complete `relative-file::symbol` selector. Use it
 for every run, coverage, and corpus command that follows the Work Order flow,
 including when the display symbol is currently unique. A symbol label by itself
 does not preserve the reviewed Work Order workspace identity.
+
+### AFL++ CmpLog/redqueen
+
+CmpLog is the AFL++ answer to magic-byte and multi-byte comparison targets
+(magic constants, fixed tokens, version checks): a second build of the same
+harness source, compiled with `AFL_LLVM_CMPLOG=1`, logs every comparison
+operand, and `afl-fuzz -c <companion>` runs redqueen input-to-state solving
+over it -- the fuzzer stops guessing `0xDEADBEEF` and reads it out of the
+comparison log.
+
+CmpLog is a build-and-run pair, both opt-in per invocation:
+
+- `oxfuzz harness --target <sym> --engine afl++ --cmplog` compiles the
+  companion beside the main binary (same driver, sanitizer, and project
+  flags; `<main>.cmplog`) and records the build plus the companion's exact
+  digest on the harness revision. `--cmplog` does not combine with
+  `--refine` (refinement keeps the active revision's CmpLog setup and
+  rebuilds the companion when one exists) and is ignored with `--draft-only`.
+- `oxfuzz run --cmplog` / `campaign --cmplog` / `fuzz --cmplog` drive the
+  recorded companion. A run that opts in without one fails before any engine
+  starts, naming the build that produces it; a companion whose workspace file
+  no longer matches the recorded digest fails the same way. Requesting
+  `--cmplog` for a non-AFL++ engine fails at policy resolution. There is no
+  `[fuzzing]` default: CmpLog taxes every interesting-input pass, so opting
+  in is a deliberate per-run choice, and the run summary and journal say when
+  it was active.
+
+Under a multi-CPU allocation, the `-M` primary fuzzes the plain build and
+every `-S` secondary carries `-c` (AFL++ 4.09c's multi-core guidance puts
+CmpLog on secondaries). A CmpLog run is a different experimental setup: it
+never shares an auto-revert baseline or comparison group with a plain run,
+and a replay of a CmpLog run re-executes with the identical companion (it is
+part of the retained inputs). Edge-set capture, replay, and minimization keep
+reading the main binary; the companion only feeds the fuzzer's solving stage.
+See `docs/standards/ENGINE_ADAPTER_STANDARD.md` 3.6 for the exact mechanics.
 
 ### Campaign health and closeout
 

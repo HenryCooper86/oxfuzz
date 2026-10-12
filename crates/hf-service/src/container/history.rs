@@ -1142,6 +1142,7 @@ mod workspace_lease_tests {
             sanitizer: Sanitizer::Address,
             status: HarnessStatus::Compiled,
             smoke_run: None,
+            cmplog: None,
         };
         store.upsert_harness(&harness).await.unwrap();
         let config = FuzzRunConfig {
@@ -1159,6 +1160,7 @@ mod workspace_lease_tests {
             input_manifest_sha256: None,
             input_timeout: None,
             resume: false,
+            cmplog: false,
         };
         let mut run = RunRecord::new(
             project.to_string_lossy(),

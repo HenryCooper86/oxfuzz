@@ -237,6 +237,70 @@ difference still makes two runs incomparable. The per-run seed is not part of
 either comparison; the revision gate, not the seed, attributes a coverage
 change to the harness.
 
+### 3.6 AFL++ CmpLog/Redqueen
+
+CmpLog is AFL++'s answer to magic-byte and multi-byte comparison gates: a
+second build of the same harness source compiled with `AFL_LLVM_CMPLOG=1`
+logs every comparison operand, and `afl-fuzz -c <companion>` runs redqueen
+input-to-state solving over it (AFL++ 4.09c,
+`instrumentation/README.cmplog.md`).
+
+**Build side.** `hf_harness::cmplog_build_command` constructs the companion
+`BuildCommand`: the same afl-clang-fast driver, sanitizer flags, and project
+flags as the main build, writing `<main output>.cmplog` beside the main
+binary. The companion carries the sanitizer flags so the comparisons it logs
+come from the same binary semantics; it never produces findings of its own.
+The constructor rejects non-AFL++ engines and languages AFL++ cannot drive,
+and the compile operation refuses a companion record on a non-AFL++ harness
+(Engineering Protocol 2.19). `try_compile_with_options` compiles the
+companion in the same sandbox with `AFL_LLVM_CMPLOG=1` in the compile
+environment (the one place that variable is set; it is the definition of a
+CmpLog build) and records the exact companion digest on the harness revision
+(`Harness.cmplog: Option<CmpLogCompanion>`). The revision's persisted CmpLog
+record is immutable, like its source and main build command.
+
+**Run side.** `FuzzRunConfig.cmplog` (default `false`, per-run opt-in via
+`--cmplog`; there is deliberately no `[fuzzing] default_cmplog` -- CmpLog
+slows every interesting-input pass, so opting in is a per-run decision, not a
+deployment default). An explicit request on a non-AFL++ engine fails at
+policy resolution. When set, the service requires the promoted harness
+revision to carry a completed companion record, verifies the workspace
+companion against the recorded digest (stale or tampered fails closed), and
+stages it into the run's retained inputs as `input/harness.cmplog` -- the
+retained-inputs manifest binds its exact bytes, so a replay re-executes with
+the identical companion. A missing or mismatched companion fails before any
+sandbox launch, naming the build that produces one (`oxfuzz harness --target
+<target> --engine afl++ --cmplog`).
+
+The AFL adapter emits `-c <binary>.cmplog` when `cfg.cmplog` is set
+(the suffix rule's one home is `hf_engine::afl::cmplog_binary_path`), after
+`extra_args` and `-t`, before `--`. A hand-passed `-c` in `extra_args` is
+rejected in both states, exactly like the resume rule: the typed config is
+the only source of CmpLog truth.
+
+**Parallel mode.** In the multi-instance coordinator, the `-M` primary never
+carries `-c` and every `-S` secondary does. This follows AFL++ 4.09c
+`docs/fuzzing_in_depth.md` 3c, which puts CmpLog/redqueen on secondaries
+("one or two") while the main instance fuzzes the plain build; our
+coordinator runs homogeneous workers with no other per-instance variation to
+reserve cores for, so an opted-in run gives every secondary the companion. A
+single-instance run takes `-c` on its one instance, which 4.09c accepts.
+
+**Identity and comparability.** A CmpLog run is a different experimental
+setup: `cmplog` is part of the auto-revert baseline check and the comparison
+key, and the run record's persisted config carries it. Run summaries and the
+run journal note an active CmpLog run, since its exec/s is not comparable
+with a plain run's (cost visibility; the run is the same authorized sandboxed
+run, so no new guardrail action exists). Edge-set capture (`run_edge_sets`),
+replay, showmap, and minimization keep reading the MAIN staged binary; the
+companion is never a replay target.
+
+**Deliberate omissions.** `AFL_CMPLOG_ONLY_NEW` is not set (base CmpLog
+covers the initial corpus too; the lighter mode is for large carried
+corpora/CI and can be revisited when those exist). The `-l` CmpLog level knob
+(`2AT` transform-following, scale mode) is not emitted; level 1 is the
+feature's base.
+
 ## 4. Progress Streaming
 
 For userspace runs, `EngineRunner` forwards `FuzzProgress` events as a run

@@ -79,6 +79,7 @@ fn harness(
         sanitizer: Sanitizer::Address,
         status,
         smoke_run: None,
+        cmplog: None,
     }
 }
 

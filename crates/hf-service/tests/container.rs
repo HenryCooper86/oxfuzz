@@ -168,6 +168,7 @@ fn stored_harness(target_id: uuid::Uuid, symbol: &str) -> hf_core::harness::Harn
             binary_sha256: None,
             run_id: None,
         }),
+        cmplog: None,
     }
 }
 
@@ -194,6 +195,7 @@ fn stored_run(
             input_manifest_sha256: None,
             input_timeout: None,
             resume: false,
+            cmplog: false,
         }),
         started_at,
     );
@@ -404,6 +406,7 @@ async fn admitted_runtime_failure_awaits_final_health_without_replacing_the_erro
             hf_core::engine::EngineKind::LibFuzzer,
             target,
             hf_core::target::TargetLanguage::C, None,
+            false,
         )
         .await
         .unwrap();
@@ -431,6 +434,7 @@ async fn admitted_runtime_failure_awaits_final_health_without_replacing_the_erro
                     target,
                     hf_core::engine::EngineKind::LibFuzzer,
                     60,
+                    None,
                     None,
                     None,
                     None,
@@ -579,6 +583,7 @@ async fn cancel_run_stops_an_in_flight_fuzz_run() {
             hf_core::engine::EngineKind::LibFuzzer,
             target,
             hf_core::target::TargetLanguage::C, None,
+            false,
         )
         .await
         .expect("compile harness");
@@ -607,6 +612,7 @@ async fn cancel_run_stops_an_in_flight_fuzz_run() {
                     target,
                     hf_core::engine::EngineKind::LibFuzzer,
                     60,
+                    None,
                     None,
                     None,
                     None,
@@ -758,6 +764,7 @@ async fn terminal_status_write_failure_still_awaits_monitor_cleanup() {
             hf_core::engine::EngineKind::LibFuzzer,
             target,
             hf_core::target::TargetLanguage::C, None,
+            false,
         )
         .await
         .unwrap();
@@ -784,6 +791,7 @@ async fn terminal_status_write_failure_still_awaits_monitor_cleanup() {
                     target,
                     hf_core::engine::EngineKind::LibFuzzer,
                     60,
+                    None,
                     None,
                     None,
                     None,
@@ -951,6 +959,7 @@ async fn a_wall_clock_killed_run_persists_the_coverage_it_measured() {
             hf_core::engine::EngineKind::LibFuzzer,
             target,
             hf_core::target::TargetLanguage::C, None,
+            false,
         )
         .await
         .expect("compile harness");
@@ -974,6 +983,7 @@ async fn a_wall_clock_killed_run_persists_the_coverage_it_measured() {
             target,
             hf_core::engine::EngineKind::LibFuzzer,
             60,
+            None,
             None,
             None,
             None,
@@ -1045,6 +1055,7 @@ async fn background_start_returns_a_durable_cancellable_run_id() {
             hf_core::engine::EngineKind::LibFuzzer,
             target,
             hf_core::target::TargetLanguage::C, None,
+            false,
         )
         .await
         .expect("compile harness");
@@ -1183,6 +1194,7 @@ async fn completed_run_merges_discoveries_without_writable_live_corpus() {
             hf_core::engine::EngineKind::LibFuzzer,
             target,
             hf_core::target::TargetLanguage::C, None,
+            false,
         )
         .await
         .unwrap();
@@ -1206,6 +1218,7 @@ async fn completed_run_merges_discoveries_without_writable_live_corpus() {
             target,
             hf_core::engine::EngineKind::LibFuzzer,
             1,
+            None,
             None,
             None,
             None,
@@ -1598,6 +1611,7 @@ async fn corpus_minimize_uses_the_promoted_revision_and_an_isolated_snapshot() {
             hf_core::engine::EngineKind::LibFuzzer,
             target,
             hf_core::target::TargetLanguage::C, None,
+            false,
         )
         .await
         .unwrap();
@@ -1640,6 +1654,7 @@ async fn corpus_minimize_uses_the_promoted_revision_and_an_isolated_snapshot() {
     let resolved = hf_service::config::resolve_fuzzing_run(
         Some(hf_core::engine::EngineKind::LibFuzzer),
         Some(300),
+        None,
         None,
         None,
         None,
@@ -3060,6 +3075,7 @@ async fn run_persists_the_input_timeout_and_surfaces_hangs() {
             hf_core::engine::EngineKind::LibFuzzer,
             target,
             hf_core::target::TargetLanguage::C, None,
+            false,
         )
         .await
         .expect("compile harness");
@@ -3083,6 +3099,7 @@ async fn run_persists_the_input_timeout_and_surfaces_hangs() {
             target,
             hf_core::engine::EngineKind::LibFuzzer,
             60,
+            None,
             None,
             None,
             None,

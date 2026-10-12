@@ -3145,6 +3145,7 @@ fn sample_harness(target_id: Uuid) -> Harness {
         sanitizer: Sanitizer::Address,
         status: HarnessStatus::Draft,
         smoke_run: None,
+        cmplog: None,
     }
 }
 
@@ -3245,6 +3246,42 @@ async fn harness_upsert_rejects_a_changed_build_identity_for_an_existing_id() {
             .build_cmd
             .output,
         harness.build_cmd.output
+    );
+}
+
+#[tokio::test]
+async fn harness_upsert_rejects_a_changed_cmplog_record_for_an_existing_id() {
+    // The CmpLog companion record is part of the revision's immutable build
+    // identity: a run must never read a companion the revision did not build.
+    let (store, _dir) = temp_store().await;
+    let harness = sample_harness(Uuid::new_v4());
+    store.upsert_harness(&harness).await.unwrap();
+
+    let mut replacement = harness.clone();
+    replacement.cmplog = Some(hf_core::harness::CmpLogCompanion {
+        build_cmd: hf_core::harness::BuildCommand {
+            compiler: "afl-clang-fast".to_owned(),
+            args: Vec::new(),
+            output: PathBuf::from("fuzz_parse_value.cmplog"),
+            extra_flags: Vec::new(),
+        },
+        binary_sha256: Some("ab".repeat(32)),
+    });
+    let error = store
+        .upsert_harness(&replacement)
+        .await
+        .expect_err("same harness id must not accept a changed CmpLog record");
+
+    assert!(matches!(error, StorageError::InvalidData(_)));
+    assert!(
+        store
+            .get_harness(harness.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .cmplog
+            .is_none(),
+        "the persisted revision keeps its original CmpLog identity"
     );
 }
 

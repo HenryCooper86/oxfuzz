@@ -96,6 +96,9 @@ impl ServiceContainer {
             // The gate runs the promoted harness as built; the run records
             // the harness's own sanitizer.
             None,
+            // The gate verdict measures the plain build; CmpLog is pinned off
+            // so a gate run stays comparable with prior gate runs.
+            None,
             on_progress,
         )
         .await?;

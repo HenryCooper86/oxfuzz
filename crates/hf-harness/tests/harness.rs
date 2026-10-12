@@ -220,6 +220,7 @@ fn compiled_harness(engine: EngineKind) -> Harness {
         sanitizer: Sanitizer::Address,
         status: HarnessStatus::Compiled,
         smoke_run: None,
+        cmplog: None,
     }
 }
 
@@ -275,6 +276,7 @@ async fn compile_transitions_status_on_success() {
         sanitizer: Sanitizer::Address,
         status: HarnessStatus::Draft,
         smoke_run: None,
+        cmplog: None,
     };
     let workspace = tempfile::tempdir().expect("temp workspace");
     let compiled = compile(harness, &rt, workspace.path())
@@ -304,6 +306,7 @@ async fn compile_returns_error_on_failure() {
         sanitizer: Sanitizer::Address,
         status: HarnessStatus::Draft,
         smoke_run: None,
+        cmplog: None,
     };
     let workspace = tempfile::tempdir().expect("temp workspace");
     let result = compile(harness, &rt, workspace.path()).await;
@@ -331,6 +334,7 @@ async fn smoke_fuzz_passes_with_positive_execs() {
         sanitizer: Sanitizer::Address,
         status: HarnessStatus::Compiled,
         smoke_run: None,
+        cmplog: None,
     };
     // A real host directory: `smoke_fuzz` creates the `out/` dir the fuzzer
     // writes crashes into. `/work` is where the *sandbox* mounts the workspace,
@@ -373,6 +377,7 @@ async fn smoke_fuzz_uses_one_resolved_config_for_command_runtime_and_summary() {
         sanitizer: Sanitizer::Address,
         status: HarnessStatus::Compiled,
         smoke_run: None,
+        cmplog: None,
     };
     let cfg = FuzzRunConfig {
         harness_id: harness.id,
@@ -389,6 +394,7 @@ async fn smoke_fuzz_uses_one_resolved_config_for_command_runtime_and_summary() {
         input_manifest_sha256: None,
         input_timeout: None,
         resume: false,
+        cmplog: false,
     };
     let workspace = tempfile::tempdir().expect("temp workspace");
 
@@ -440,6 +446,7 @@ async fn honggfuzz_smoke_bounds_feedback_shared_memory() {
         sanitizer: Sanitizer::Address,
         status: HarnessStatus::Compiled,
         smoke_run: None,
+        cmplog: None,
     };
     let cfg = FuzzRunConfig {
         harness_id: harness.id,
@@ -456,6 +463,7 @@ async fn honggfuzz_smoke_bounds_feedback_shared_memory() {
         input_manifest_sha256: None,
         input_timeout: None,
         resume: false,
+        cmplog: false,
     };
     let workspace = tempfile::tempdir().unwrap();
     smoke_fuzz_in_paths_with_config(
@@ -497,6 +505,7 @@ async fn smoke_fuzz_uses_the_resolved_immutable_sandbox_image() {
         sanitizer: Sanitizer::Address,
         status: HarnessStatus::Compiled,
         smoke_run: None,
+        cmplog: None,
     };
     let cfg = FuzzRunConfig {
         harness_id: harness.id,
@@ -513,6 +522,7 @@ async fn smoke_fuzz_uses_the_resolved_immutable_sandbox_image() {
         input_manifest_sha256: None,
         input_timeout: None,
         resume: false,
+        cmplog: false,
     };
     let workspace = tempfile::tempdir().expect("temp workspace");
     let image = format!("sha256:{}", "a".repeat(64));
@@ -549,6 +559,7 @@ async fn smoke_fuzz_counts_a_fresh_artifact_even_without_a_log_marker() {
         sanitizer: Sanitizer::Address,
         status: HarnessStatus::Compiled,
         smoke_run: None,
+        cmplog: None,
     };
     let workspace = tempfile::tempdir().expect("temp workspace");
 
@@ -624,6 +635,7 @@ async fn smoke_fuzz_fails_on_zero_execs() {
         sanitizer: Sanitizer::Address,
         status: HarnessStatus::Compiled,
         smoke_run: None,
+        cmplog: None,
     };
     let workspace = tempfile::tempdir().expect("temp workspace");
     let err = smoke_fuzz(harness, &rt, workspace.path())
@@ -662,6 +674,7 @@ async fn smoke_fuzz_rejects_libfuzzer_inited_without_execs() {
         sanitizer: Sanitizer::Address,
         status: HarnessStatus::Compiled,
         smoke_run: None,
+        cmplog: None,
     };
     let workspace = tempfile::tempdir().expect("temp workspace");
     let err = smoke_fuzz(harness, &rt, workspace.path())

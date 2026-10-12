@@ -716,6 +716,7 @@ async fn configured_harness_admission_enforces_saved_profile_without_optional_fe
             hf_core::target::TargetLanguage::C,
             0,
             None,
+            false,
         )
         .await
         .unwrap_err();
@@ -737,6 +738,7 @@ async fn configured_harness_admission_enforces_saved_profile_without_optional_fe
             "not_discovered",
             hf_core::target::TargetLanguage::C,
             None,
+            false,
         )
         .await
         .unwrap_err();

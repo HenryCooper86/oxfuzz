@@ -389,6 +389,8 @@ impl ServiceContainer {
                 // A work order carries no sanitizer request; the configured
                 // `fuzzing.default_sanitizer` applies.
                 None,
+                // A work order builds no CmpLog companion.
+                false,
             )
             .await
         {

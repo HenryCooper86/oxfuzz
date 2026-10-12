@@ -56,6 +56,7 @@ fn run_config(engine: EngineKind, duration_secs: u64) -> FuzzRunConfig {
         input_manifest_sha256: None,
         input_timeout: None,
         resume: false,
+        cmplog: false,
     }
 }
 

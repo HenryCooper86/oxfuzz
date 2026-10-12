@@ -81,6 +81,7 @@ async fn fixture() -> (
         sanitizer: Sanitizer::Address,
         status: HarnessStatus::Promoted,
         smoke_run: None,
+        cmplog: None,
     };
     store.upsert_target(&target, Utc::now()).await.unwrap();
     store.upsert_harness(&harness).await.unwrap();
@@ -108,6 +109,7 @@ fn run(project: &str, harness_id: Uuid, engine: EngineKind, offset_minutes: i64)
             input_manifest_sha256: None,
             input_timeout: None,
             resume: false,
+            cmplog: false,
         }),
         Utc::now() + Duration::minutes(offset_minutes),
     );

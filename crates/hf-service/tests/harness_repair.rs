@@ -159,6 +159,7 @@ async fn harness_generate_repairs_a_failing_compile() {
             TargetLanguage::C,
             2,
             None,
+            false,
         )
         .await
         .expect("harness_generate should recover via repair");
@@ -195,6 +196,7 @@ async fn harness_generate_gives_up_after_max_repairs() {
             TargetLanguage::C,
             1,
             None,
+            false,
         )
         .await;
     assert!(err.is_err(), "should fail after exhausting repairs");
@@ -241,6 +243,7 @@ async fn failed_compile_does_not_replace_the_active_harness_revision() {
             "parse_entry",
             TargetLanguage::C,
             None,
+            false,
         )
         .await;
 
@@ -274,6 +277,7 @@ async fn successful_compile_commits_the_active_harness_revision() {
             "parse_entry",
             TargetLanguage::C,
             None,
+            false,
         )
         .await
         .expect("compile should succeed");
@@ -303,6 +307,7 @@ async fn new_compilation_requires_store_before_runtime_or_provider() {
             "parse_entry",
             TargetLanguage::C,
             None,
+            false,
         )
         .await;
     assert!(compile
@@ -317,6 +322,7 @@ async fn new_compilation_requires_store_before_runtime_or_provider() {
             TargetLanguage::C,
             0,
             None,
+            false,
         )
         .await;
     assert!(generated
@@ -353,6 +359,7 @@ async fn repair_success_records_only_the_successful_attempts_fresh_database_flag
             TargetLanguage::C,
             1,
             None,
+            false,
         )
         .await
         .unwrap();

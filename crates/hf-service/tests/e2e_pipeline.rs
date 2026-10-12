@@ -331,6 +331,7 @@ async fn discover_harness_run_triage_end_to_end() {
             "parse_value",
             TargetLanguage::C,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -409,6 +410,7 @@ async fn discover_harness_run_triage_end_to_end() {
             "parse_value",
             EngineKind::LibFuzzer,
             60,
+            None,
             None,
             None,
             None,
@@ -549,6 +551,7 @@ async fn full_pipeline_minimizes_the_crash_it_found() {
             "parse_value",
             TargetLanguage::C,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -572,6 +575,7 @@ async fn full_pipeline_minimizes_the_crash_it_found() {
             "parse_value",
             EngineKind::LibFuzzer,
             1,
+            None,
             None,
             None,
             None,

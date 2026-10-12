@@ -35,6 +35,7 @@ async fn compile(
             "a",
             TargetLanguage::C,
             None,
+            false,
         )
         .await
 }

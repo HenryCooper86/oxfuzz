@@ -74,6 +74,7 @@ fn sample_harness(target_id: Uuid) -> Harness {
         sanitizer: Sanitizer::Address,
         status: HarnessStatus::Compiled,
         smoke_run: None,
+        cmplog: None,
     }
 }
 
@@ -96,6 +97,7 @@ fn sample_run(project: &str, harness_id: Uuid) -> RunRecord {
             input_manifest_sha256: None,
             input_timeout: None,
             resume: false,
+            cmplog: false,
         }),
         Utc::now(),
     );

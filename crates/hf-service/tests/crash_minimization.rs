@@ -174,6 +174,7 @@ async fn fixture(name: &str) -> Fixture {
         sanitizer: Sanitizer::Address,
         status: hf_core::harness::HarnessStatus::Promoted,
         smoke_run: None,
+        cmplog: None,
     };
     let mut run = hf_storage::RunRecord::new(
         project.to_string_lossy(),
@@ -193,6 +194,7 @@ async fn fixture(name: &str) -> Fixture {
             input_manifest_sha256: None,
             input_timeout: None,
             resume: false,
+            cmplog: false,
         }),
         chrono::Utc::now(),
     );

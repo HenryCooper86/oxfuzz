@@ -213,6 +213,7 @@ async fn approved_campaign_survives_service_process_loss() {
             None,
             None,
             None,
+            None,
             &|_| {},
         )
         .await
@@ -367,6 +368,7 @@ async fn live_campaign_child() {
             "qualification_parse",
             TargetLanguage::C,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -393,6 +395,7 @@ async fn live_campaign_child() {
             "qualification_parse",
             EngineKind::LibFuzzer,
             120,
+            None,
             None,
             None,
             None,
@@ -574,6 +577,7 @@ async fn seed_terminal_closeout_run(store: &Store, project: &Path) -> Uuid {
         sanitizer: Sanitizer::Address,
         status: HarnessStatus::SmokePassed,
         smoke_run: None,
+        cmplog: None,
     };
     store.upsert_harness(&harness).await.unwrap();
     let mut run = RunRecord::new(
@@ -594,6 +598,7 @@ async fn seed_terminal_closeout_run(store: &Store, project: &Path) -> Uuid {
             input_manifest_sha256: None,
             input_timeout: None,
             resume: false,
+            cmplog: false,
         }),
         Utc::now(),
     );
