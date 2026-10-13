@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "manifest_id": "held-out-c-parsers-2026-10-13",
+  "notes": "Held-out effectiveness cohort targets: three reviewed, license-checked C JSON parsers pinned by full commit. Revisions and review digests come from docs/acceptance/held-out-cohort-candidates-2026-09-27.md. None of these projects ship in examples/, so benchmark results measure targets the harness pipeline was not tuned against. Fetch with `python3 -m scripts.effectiveness_run fetch`.",
+  "projects": [
+    {
+      "id": "cjson",
+      "source_url": "https://github.com/DaveGamble/cJSON.git",
+      "revision": "6d9f2443ab071f86e5d9b43025a40929ec41c46c",
+      "license": "MIT",
+      "language": "c",
+      "selected_functions": ["cJSON_ParseWithLengthOpts"],
+      "notes": "Single-file parser (cJSON.c/cJSON.h); the selected entry accepts a byte buffer plus length. Review archive SHA-256 ec38c5916785f16394225fb3f6246e2a15a235a856ecf03800828e1baf0c8031 (git archive at the pinned revision; not the run-source digest)."
+    },
+    {
+      "id": "yyjson",
+      "source_url": "https://github.com/ibireme/yyjson.git",
+      "revision": "6447536015f3d600f3d65323b10976103b337ca7",
+      "license": "MIT",
+      "language": "c",
+      "selected_functions": ["yyjson_read_opts"],
+      "notes": "High-performance parser (src/yyjson.c/yyjson.h). Review archive SHA-256 f135a140e1a870b2b14e95f1d6e021e800226661f5c4cfe29e6b8b98ea7d330e (git archive at the pinned revision; not the run-source digest)."
+    },
+    {
+      "id": "mjson",
+      "source_url": "https://github.com/cesanta/mjson.git",
+      "revision": "696969cd0d35399cc66075f5ec7a96e23ba4a89b",
+      "license": "MIT",
+      "language": "c",
+      "selected_functions": ["mjson"],
+      "notes": "Minimal embedded parser (src/mjson.c/mjson.h). Review archive SHA-256 ca738a6604fe6abc7c9c68cf7e60109a367c7b2d287ee4f08146921cf6106b72 (git archive at the pinned revision; not the run-source digest)."
+    }
+  ]
+}
