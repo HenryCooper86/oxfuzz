@@ -364,6 +364,56 @@ impl hf_guardrails::Advisor for AlwaysAsk {
 }
 
 #[tokio::test]
+async fn replacement_approval_gate_applies_only_to_the_consumed_clone() {
+    let original = Guardrails::new(GuardrailPolicy::default(), std::sync::Arc::new(DenyAll));
+    let approved = original
+        .clone()
+        .with_approval_gate(std::sync::Arc::new(AutoApprove));
+
+    assert!(approved.authorize(Action::RunHarness).await.is_ok());
+    assert!(original.authorize(Action::RunHarness).await.is_err());
+}
+
+#[tokio::test]
+async fn replacement_approval_gate_preserves_configured_policy() {
+    let original = Guardrails::new(
+        GuardrailPolicy {
+            auto_allow_max: RiskTier::Low,
+            deny_at: Some(RiskTier::High),
+        },
+        std::sync::Arc::new(AutoApprove),
+    );
+    let approved = original
+        .clone()
+        .with_approval_gate(std::sync::Arc::new(AutoApprove));
+    let error = approved.authorize(Action::RunHarness).await.unwrap_err();
+    assert!(error.to_string().contains("denied by policy"), "{error}");
+
+    let declined = original.with_approval_gate(std::sync::Arc::new(DenyAll));
+    assert!(declined.authorize(Action::CompileHarness).await.is_err());
+}
+
+#[tokio::test]
+async fn replacement_approval_gate_preserves_advisor_requests() {
+    let guardrails = Guardrails::new(GuardrailPolicy::default(), std::sync::Arc::new(AutoApprove))
+        .with_advisor(std::sync::Arc::new(AlwaysAsk))
+        .with_approval_gate(std::sync::Arc::new(DenyAll));
+
+    let error = guardrails.authorize(Action::Discover).await.unwrap_err();
+    assert!(error.to_string().contains("advisor asked"), "{error}");
+}
+
+#[tokio::test]
+async fn replacement_approval_gate_preserves_deny_guards() {
+    let guardrails = Guardrails::new(GuardrailPolicy::default(), std::sync::Arc::new(DenyAll))
+        .with_guard(std::sync::Arc::new(DenyEverything("retained guard")))
+        .with_approval_gate(std::sync::Arc::new(AutoApprove));
+
+    let error = guardrails.authorize(Action::RunHarness).await.unwrap_err();
+    assert!(error.to_string().contains("retained guard"), "{error}");
+}
+
+#[tokio::test]
 async fn a_guard_denies_what_the_policy_would_have_allowed() {
     let g = Guardrails::permissive().with_guard(std::sync::Arc::new(DenyEverything("nope")));
     // Discover is low risk and auto-allowed by every policy.

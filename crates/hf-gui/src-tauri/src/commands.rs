@@ -7,11 +7,13 @@
 use std::path::PathBuf;
 
 use hf_service::{
-    Action, ApprovalGate, EngineKind, FuzzProgress, GuardrailPolicy, Guardrails, Message, Role,
-    SessionId, SkillDefinition, TargetLanguage,
+    Action, ApprovalGate, EngineKind, FuzzProgress, Message, Role, SessionId, SkillDefinition,
+    TargetLanguage,
 };
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
+
+use crate::workflow_approval::{with_user_approval, ExplicitAction};
 
 pub use hf_service::SystemStatus;
 
@@ -364,14 +366,7 @@ pub async fn harness_smoke(
         Some(value) => parse_lang(value)?,
         None => TargetLanguage::C,
     };
-    // The explicit Smoke Test click is the human approval for this bounded,
-    // sandboxed harness execution. Do not route workflow actions through the
-    // chat-only approval listener: that would deny them when ChatView is not
-    // mounted, even though the operator just clicked the action button.
-    let container = state.container.clone().with_guardrails(Guardrails::new(
-        GuardrailPolicy::default(),
-        std::sync::Arc::new(AutoApproveGate),
-    ));
+    let container = with_user_approval(&state.container, ExplicitAction::RunHarness);
     let smoke = container
         .harness_smoke(&project, &target, engine_kind, language)
         .await
@@ -400,8 +395,7 @@ pub async fn harness_promote(
     engine: String,
 ) -> Result<serde_json::Value, String> {
     let engine_kind = parse_engine(&engine)?;
-    let harness = state
-        .container
+    let harness = with_user_approval(&state.container, ExplicitAction::PromoteHarness)
         .harness_promote(&project, &target, engine_kind)
         .await
         .map_err(|e| e.to_string())?;
@@ -421,8 +415,7 @@ pub async fn harness_promote_with_findings(
     engine: String,
 ) -> Result<serde_json::Value, String> {
     let engine_kind = parse_engine(&engine)?;
-    let promoted = state
-        .container
+    let promoted = with_user_approval(&state.container, ExplicitAction::PromoteHarness)
         .harness_promote_with_findings(&project, &target, engine_kind)
         .await
         .map_err(|e| e.to_string())?;
@@ -573,8 +566,7 @@ pub async fn seed_survival(
     project: String,
     target: String,
 ) -> Result<serde_json::Value, String> {
-    let report = state
-        .container
+    let report = with_user_approval(&state.container, ExplicitAction::RunFuzzer)
         .seed_survival(std::path::Path::new(&project), &target)
         .await
         .map_err(|error| error.to_string())?;
@@ -587,8 +579,7 @@ pub async fn corpus_prune_coverage(
     project: String,
     target: String,
 ) -> Result<serde_json::Value, String> {
-    let outcome = state
-        .container
+    let outcome = with_user_approval(&state.container, ExplicitAction::RunFuzzer)
         .corpus_prune_coverage(std::path::Path::new(&project), &target)
         .await
         .map_err(|error| error.to_string())?;
@@ -601,8 +592,7 @@ pub async fn corpus_minimize(
     project: String,
     target: String,
 ) -> Result<serde_json::Value, String> {
-    let outcome = state
-        .container
+    let outcome = with_user_approval(&state.container, ExplicitAction::RunFuzzer)
         .corpus_minimize(std::path::Path::new(&project), &target)
         .await
         .map_err(|error| error.to_string())?;
@@ -630,13 +620,7 @@ pub async fn triage(
     project: String,
     target: String,
 ) -> Result<serde_json::Value, String> {
-    // Clicking Scan for Crashes is the operator's approval for this bounded
-    // sandboxed triage action; use the workflow gate rather than the Chat-only
-    // interactive approval listener.
-    let container = state.container.clone().with_guardrails(Guardrails::new(
-        GuardrailPolicy::default(),
-        std::sync::Arc::new(AutoApproveGate),
-    ));
+    let container = with_user_approval(&state.container, ExplicitAction::Triage);
     let deduped = container
         .triage(std::path::Path::new(&project), &target)
         .await
@@ -746,19 +730,6 @@ impl ApprovalGate for GuiApprovalGate {
             }),
         );
         self.pending.await_decision(id, rx, APPROVAL_TIMEOUT).await
-    }
-}
-
-/// An approval gate that auto-approves. Used for high-risk actions the user has
-/// already explicitly initiated via the workflow UI (e.g. clicking "Run Fuzzer"):
-/// the click itself is the human approval, and execution still goes through the
-/// hf-runtime sandbox. The agent/chat path uses the interactive `GuiApprovalGate`.
-struct AutoApproveGate;
-
-#[async_trait::async_trait]
-impl ApprovalGate for AutoApproveGate {
-    async fn request_approval(&self, _action: &Action, _reason: &str) -> bool {
-        true
     }
 }
 
@@ -963,8 +934,7 @@ pub async fn file_issue(
     state: tauri::State<'_, crate::state::AppState>,
     crash_id: String,
 ) -> Result<hf_service::CreatedIssue, String> {
-    state
-        .container
+    with_user_approval(&state.container, ExplicitAction::PublishFindings)
         .file_issue(&crash_id)
         .await
         .map_err(|e| e.to_string())
@@ -1051,8 +1021,7 @@ pub async fn push_to_defectdojo(
     let expected_run_id = expected_run_id
         .map(|id| uuid::Uuid::parse_str(&id).map_err(|error| error.to_string()))
         .transpose()?;
-    state
-        .container
+    with_user_approval(&state.container, ExplicitAction::PublishFindings)
         .push_to_defectdojo_for_run(
             std::path::Path::new(&project),
             target.as_deref(),
@@ -1785,7 +1754,11 @@ pub async fn chat_agent(
         app: app.clone(),
         pending: state.pending_approvals.clone(),
     });
-    let guardrails = Guardrails::new(GuardrailPolicy::default(), gate);
+    let guardrails = state
+        .container
+        .guardrails()
+        .clone()
+        .with_approval_gate(gate);
     let container = state.container.clone().with_guardrails(guardrails);
     let sink = TauriEventSink { app };
 
@@ -1910,11 +1883,7 @@ pub async fn replay_run(
     on_run_started: Option<tauri::ipc::JavaScriptChannelId>,
 ) -> Result<serde_json::Value, String> {
     let (on_progress, on_started) = native_run_callbacks(app, webview, on_run_started);
-    // The reviewed launch click is the desktop user's execution approval, as for run_fuzzer.
-    let container = state.container.clone().with_guardrails(Guardrails::new(
-        GuardrailPolicy::default(),
-        std::sync::Arc::new(AutoApproveGate),
-    ));
+    let container = with_user_approval(&state.container, ExplicitAction::RunFuzzer);
     let summary = container
         .replay_run_reviewed(review, &on_progress, &on_started)
         .await
@@ -2017,13 +1986,7 @@ pub async fn run_fuzzer(
 
     let (on_progress, on_started) = native_run_callbacks(app, webview, on_run_started);
 
-    // The explicit "Run Fuzzer" click is the human approval for this high-risk
-    // action (sandboxed via hf-runtime); auto-approve so the workflow run is not
-    // blocked by the agent-oriented HITL gate.
-    let container = state.container.clone().with_guardrails(Guardrails::new(
-        GuardrailPolicy::default(),
-        std::sync::Arc::new(AutoApproveGate),
-    ));
+    let container = with_user_approval(&state.container, ExplicitAction::RunFuzzer);
     let result = container
         .run_fuzzer_observed(
             std::path::Path::new(&project),
@@ -3203,8 +3166,7 @@ pub async fn harness_tournament(
 ) -> Result<serde_json::Value, String> {
     let engine = parse_engine(&engine)?;
     let lang = parse_lang(&lang)?;
-    let result = state
-        .container
+    let result = with_user_approval(&state.container, ExplicitAction::RunHarness)
         .run_harness_tournament(hf_service::HarnessTournamentRequest {
             project,
             target,
@@ -3377,8 +3339,7 @@ pub async fn build_run(
     project: String,
     expected_profile_sha256: String,
 ) -> Result<serde_json::Value, String> {
-    let outcome = state
-        .container
+    let outcome = with_user_approval(&state.container, ExplicitAction::RunProjectBuild)
         .run_build_plan(hf_service::RunBuildPlanRequest {
             project,
             expected_profile_sha256,
@@ -3493,8 +3454,7 @@ pub async fn change_publish(
         "defectdojo" => hf_service::PublishDestination::DefectDojo,
         other => return Err(format!("unknown publication destination: {other}")),
     };
-    let published = state
-        .container
+    let published = with_user_approval(&state.container, ExplicitAction::PublishChangeComparison)
         .publish_change_comparison(hf_service::PublishComparisonRequest {
             base_run_id,
             head_run_id,
@@ -3618,8 +3578,7 @@ pub async fn start_remediation_verification(
     operation_id: String,
 ) -> Result<(), String> {
     let operation_id = uuid::Uuid::parse_str(&operation_id).map_err(|error| error.to_string())?;
-    state
-        .container
+    with_user_approval(&state.container, ExplicitAction::VerifyRemediation)
         .start_remediation_verification(hf_service::RemediationStartRequest { operation_id })
         .await
         .map_err(|error| error.to_string())?;
@@ -3864,13 +3823,7 @@ pub async fn run_syzkaller(
         vm_count: opts.vm_count,
     };
 
-    // The explicit launch is the human approval for this sandboxed run; auto-
-    // approve so the agent-oriented HITL gate does not block it (mirrors
-    // `run_fuzzer`).
-    let container = state.container.clone().with_guardrails(Guardrails::new(
-        GuardrailPolicy::default(),
-        std::sync::Arc::new(AutoApproveGate),
-    ));
+    let container = with_user_approval(&state.container, ExplicitAction::RunFuzzer);
 
     match container
         .run_syzkaller_observed(&svc_opts, &on_progress, &on_started)
@@ -4144,10 +4097,7 @@ pub async fn automotive_execute_replay(
         // Invoking this dedicated workflow command is the operator's approval
         // for the bounded sandbox replay. Physical mode still requires the
         // independent, plan-scoped approval evidence enforced by hf-service.
-        let container = state.container.clone().with_guardrails(Guardrails::new(
-            GuardrailPolicy::default(),
-            std::sync::Arc::new(AutoApproveGate),
-        ));
+        let container = with_user_approval(&state.container, ExplicitAction::AutomotiveReplay);
         let outcome = container
             .execute_automotive(hf_service::automotive::AutomotiveOperationRequest {
                 project_root,
@@ -4350,8 +4300,7 @@ pub async fn automotive_live_monitor(
     {
         let protocol = serde_json::from_value(serde_json::Value::String(protocol))
             .map_err(|error| error.to_string())?;
-        let outcome = state
-            .container
+        let outcome = with_user_approval(&state.container, ExplicitAction::AutomotiveVirtualCan)
             .execute_automotive(hf_service::automotive::AutomotiveOperationRequest {
                 project_root,
                 command: hf_service::automotive::AutomotiveCommand::LiveMonitor {
@@ -4384,8 +4333,7 @@ pub async fn automotive_scan_uds(
 ) -> Result<serde_json::Value, String> {
     #[cfg(feature = "automotive-scapy")]
     {
-        let outcome = state
-            .container
+        let outcome = with_user_approval(&state.container, ExplicitAction::AutomotiveVirtualCan)
             .execute_automotive(hf_service::automotive::AutomotiveOperationRequest {
                 project_root,
                 command: hf_service::automotive::AutomotiveCommand::ScanUds {

@@ -4,6 +4,8 @@
 //! domain logic here (Engineering Protocol 2.9). All builds and fuzz runs go through
 //! `hf-runtime` sandboxing (Engineering Protocol 2.12).
 
+#[cfg(test)]
+mod approval_ipc_tests;
 mod closeout_commands;
 mod commands;
 mod coverage_experiment_commands;
@@ -11,6 +13,9 @@ mod coverage_experiment_commands;
 mod ranked_discovery_commands;
 mod state;
 mod work_order_commands;
+mod workflow_approval;
+#[cfg(test)]
+mod workflow_approval_tests;
 
 #[cfg(feature = "ai-target-ranking")]
 use ranked_discovery_commands::{

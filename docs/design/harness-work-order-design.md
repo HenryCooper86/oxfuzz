@@ -35,6 +35,9 @@ existing sandboxed harness path.
    its exact active `SmokePassed` harness revision with matching reviewed and
    smoked source and executable digests. The existing atomic promotion operation
    persists the human approval for that exact evidence.
+   Policy and approval refusals return `promotion_denied` with the guardrail
+   reason; they do not imply that the qualified revision is stale. The service
+   preserves the typed refusal through the same locked promotion operation.
 
 The feature is exposed through service-owned operations, thin CLI commands, and
 REST resources. Presentation layers parse and render I/O but do not reproduce

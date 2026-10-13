@@ -34,8 +34,15 @@ sandboxed run of the exact promoted revision; it never weakens isolation.**
 
 ## How approval reaches the gate
 
-The desktop app asks through an interactive dialog. The CLI asks on the
-terminal when it has one: with stdin and stderr both TTYs, a high-risk action
+The desktop assistant asks through an interactive dialog. In desktop workflow
+tools, an explicit execution or publication button supplies consent for that
+operation on the selected inputs. Smoke qualification and campaign promotion
+remain separate approvals. The command uses a temporary, action-scoped approval
+gate; the configured policy, advisors, and deny guards still apply. It does not
+grant consent to the startup container, background work, or unrelated actions.
+Opening a view or expanding a call tree does not supply execution consent.
+
+The CLI asks on the terminal when it has one: with stdin and stderr both TTYs, a high-risk action
 prints one line naming the action and its detail and waits for `y` (this once),
 `n` (deny), or `a` (always allow that action kind for the rest of the process;
 never persisted). Empty, unrecognized, or missing input denies -- the prompt

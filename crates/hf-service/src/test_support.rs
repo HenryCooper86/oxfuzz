@@ -1,6 +1,7 @@
 //! Feature-gated fixtures for presentation-layer integration tests.
 
 pub mod coverage_experiments;
+pub mod desktop_approval;
 mod retained_campaign;
 mod scheduler_history;
 pub use scheduler_history::{scheduler_history_fixture, SchedulerHistoryTestFixture};

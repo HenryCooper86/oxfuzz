@@ -359,6 +359,8 @@ pub enum HarnessWorkOrderErrorCode {
     AttemptNotSmokePassed,
     /// Promotion requires the exact active workspace revision.
     AttemptNotActive,
+    /// Promotion was refused by policy or the approval gate.
+    PromotionDenied,
     /// A requested work order was not found.
     WorkOrderNotFound,
     /// A requested submission was not found.
@@ -396,6 +398,7 @@ impl HarnessWorkOrderErrorCode {
             Self::AttemptInterrupted => "attempt_interrupted",
             Self::AttemptNotSmokePassed => "attempt_not_smoke_passed",
             Self::AttemptNotActive => "attempt_not_active",
+            Self::PromotionDenied => "promotion_denied",
             Self::WorkOrderNotFound => "work_order_not_found",
             Self::SubmissionNotFound => "submission_not_found",
             Self::AttemptNotFound => "attempt_not_found",

@@ -223,6 +223,16 @@ impl Guardrails {
         }
     }
 
+    /// Replace the approval gate while retaining the policy, advisors, and deny guards.
+    ///
+    /// Call on a clone to use a different approval source for one operation
+    /// without changing the original guardrails.
+    #[must_use]
+    pub fn with_approval_gate(mut self, gate: Arc<dyn ApprovalGate>) -> Self {
+        self.gate = gate;
+        self
+    }
+
     /// Register an [`Advisor`], consulted before the policy. Tighten-only.
     #[must_use]
     pub fn with_advisor(mut self, advisor: Arc<dyn Advisor>) -> Self {

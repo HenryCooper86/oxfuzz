@@ -28,6 +28,7 @@ use sha2::Digest;
 
 use crate::{
     container::{
+        harness::HarnessPromotionFailure,
         project_identity::{canonical_project_root, select_target_candidate},
         require_fuzzing_harness_engine, ServiceContainer,
     },
@@ -972,11 +973,17 @@ fn attempt_not_smoke_passed() -> HarnessWorkOrderError {
     )
 }
 
-fn exact_promotion_error(error: &ClassifiedError) -> HarnessWorkOrderError {
-    if matches!(error, ClassifiedError::Storage(_)) {
-        return HarnessWorkOrderError::storage("persist exact harness promotion");
+fn exact_promotion_error(error: &HarnessPromotionFailure) -> HarnessWorkOrderError {
+    match error {
+        HarnessPromotionFailure::Denied(error) => HarnessWorkOrderError::validation(
+            HarnessWorkOrderErrorCode::PromotionDenied,
+            sanitize_work_order_diagnostic(&error.to_string(), MAX_ATTEMPT_FAILURE_MESSAGE_BYTES),
+        ),
+        HarnessPromotionFailure::Operation(ClassifiedError::Storage(_)) => {
+            HarnessWorkOrderError::storage("persist exact harness promotion")
+        }
+        HarnessPromotionFailure::Operation(_) => attempt_not_active(),
     }
-    attempt_not_active()
 }
 
 fn attempt_not_active() -> HarnessWorkOrderError {

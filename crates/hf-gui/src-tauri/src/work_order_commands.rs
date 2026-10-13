@@ -183,10 +183,12 @@ pub async fn work_order_qualify(
 ) -> Result<Value, Value> {
     #[cfg(feature = "harness-work-order")]
     return response(
-        state
-            .container
-            .qualify_harness_work_order_submission(submission_id)
-            .await,
+        crate::workflow_approval::with_user_approval(
+            &state.container,
+            crate::workflow_approval::ExplicitAction::RunHarness,
+        )
+        .qualify_harness_work_order_submission(submission_id)
+        .await,
     );
     #[cfg(not(feature = "harness-work-order"))]
     {
@@ -254,10 +256,12 @@ pub async fn work_order_promote(
 ) -> Result<Value, Value> {
     #[cfg(feature = "harness-work-order")]
     return response(
-        state
-            .container
-            .promote_harness_work_order_attempt(attempt_id)
-            .await,
+        crate::workflow_approval::with_user_approval(
+            &state.container,
+            crate::workflow_approval::ExplicitAction::PromoteHarness,
+        )
+        .promote_harness_work_order_attempt(attempt_id)
+        .await,
     );
     #[cfg(not(feature = "harness-work-order"))]
     {

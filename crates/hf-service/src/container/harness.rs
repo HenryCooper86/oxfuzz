@@ -11,7 +11,7 @@ use hf_core::harness::{Harness, HarnessDraft, HarnessStatus};
 use hf_core::provider::{ChatRequest, FinishReason, LlmProvider as _};
 use hf_core::target::{Sanitizer, TargetCandidate, TargetLanguage};
 use hf_core::types::Message;
-use hf_guardrails::Action;
+use hf_guardrails::{Action, GuardrailError};
 use hf_storage::{HarnessAiReviewRecord, RunKind, RunRecord, RunStatus, Store};
 use uuid::Uuid;
 
@@ -78,6 +78,23 @@ impl From<ClassifiedError> for HarnessReviewFailure {
 pub(crate) struct HarnessSmokeFailure {
     pub error: ClassifiedError,
     pub smoke_run_id: Option<Uuid>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum HarnessPromotionFailure {
+    #[error(transparent)]
+    Denied(#[from] GuardrailError),
+    #[error(transparent)]
+    Operation(#[from] ClassifiedError),
+}
+
+impl From<HarnessPromotionFailure> for ClassifiedError {
+    fn from(error: HarnessPromotionFailure) -> Self {
+        match error {
+            HarnessPromotionFailure::Denied(error) => error.into(),
+            HarnessPromotionFailure::Operation(error) => error,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1894,6 +1911,7 @@ impl ServiceContainer {
             binary_sha256,
         )
         .await
+        .map_err(ClassifiedError::from)
     }
 
     pub(crate) async fn harness_promote_exact(
@@ -1904,7 +1922,7 @@ impl ServiceContainer {
         expected_harness_id: Uuid,
         expected_source_sha256: &str,
         expected_binary_sha256: &str,
-    ) -> Result<Harness, ClassifiedError> {
+    ) -> Result<Harness, HarnessPromotionFailure> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
         let project_root = canonical_project_root(project)?;
         let _target_revision = self
@@ -1964,7 +1982,7 @@ impl ServiceContainer {
         target: &str,
         engine: EngineKind,
         expected: Option<ExactPromotion<'_>>,
-    ) -> Result<Harness, ClassifiedError> {
+    ) -> Result<Harness, HarnessPromotionFailure> {
         self.authorize_recorded(Action::PromoteHarness, "harness_promote", Some(project))
             .await?;
         let harness = self.active_harness_locked(project, target, engine).await?;
@@ -1977,7 +1995,8 @@ impl ServiceContainer {
         if harness.status != HarnessStatus::SmokePassed || !smoke.passed {
             return Err(ClassifiedError::Validation(format!(
                 "harness '{target}' cannot be promoted until a crash-free smoke run passes"
-            )));
+            ))
+            .into());
         }
         self.verify_harness_qualification_locked(project, target, &harness)
             .await?;
@@ -1993,7 +2012,8 @@ impl ServiceContainer {
         if harness.status != HarnessStatus::SmokePassed || !smoke.passed {
             return Err(ClassifiedError::Validation(format!(
                 "harness '{target}' cannot be promoted until a crash-free smoke run passes"
-            )));
+            ))
+            .into());
         }
         self.require_smoke_target_entry(target, smoke.run_id)
             .await?;
