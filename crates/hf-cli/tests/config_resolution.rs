@@ -35,13 +35,6 @@ impl Fixture {
         self.tree.join("config")
     }
 
-    /// The child's `std::env::current_dir()` is canonicalized by the OS (on
-    /// macOS `/var/...` resolves to `/private/var/...`), while `HOME` is used
-    /// verbatim -- expectations must match each input's treatment.
-    fn canonical_tree_config(&self) -> PathBuf {
-        std::fs::canonicalize(self.tree_config()).unwrap()
-    }
-
     fn path(&self, name: &str) -> PathBuf {
         self.directory.path().join(name)
     }
@@ -93,6 +86,23 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+fn config_warning(stderr: &str) -> &str {
+    stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("warning: config directory '"))
+        .expect("config selection must emit its warning")
+}
+
+fn assert_same_directory(reported: &str, expected: &std::path::Path) {
+    // Windows canonicalization adds a verbatim prefix and can expand short
+    // names; macOS resolves /var to /private/var. Compare the directories
+    // named by the warning without requiring one OS-specific spelling.
+    assert_eq!(
+        std::fs::canonicalize(reported).expect("reported directory exists"),
+        std::fs::canonicalize(expected).expect("expected directory exists")
+    );
+}
+
 #[test]
 fn the_walk_up_fallback_binds_the_enclosing_tree_and_warns_on_stderr() {
     let fixture = Fixture::new();
@@ -101,13 +111,10 @@ fn the_walk_up_fallback_binds_the_enclosing_tree_and_warns_on_stderr() {
 
     assert!(output.status.success(), "{}", stderr(&output));
     let stderr = stderr(&output);
-    assert!(
-        stderr.contains(&format!(
-            "config directory '{}' comes from the source tree",
-            fixture.canonical_tree_config().display()
-        )),
-        "the warning names the resolved dir: {stderr}"
-    );
+    let (reported, _) = config_warning(&stderr)
+        .split_once("' comes from the source tree")
+        .expect("the warning identifies the source tree");
+    assert_same_directory(reported, &fixture.tree_config());
     assert!(
         stderr.contains("set HF_CONFIG_DIR to pin one explicitly"),
         "the warning names the override: {stderr}"
@@ -148,14 +155,14 @@ fn a_live_per_user_config_shadows_a_source_checkout_and_says_so() {
 
     assert!(output.status.success(), "{}", stderr(&output));
     let stderr = stderr(&output);
-    assert!(
-        stderr.contains(&format!(
-            "config directory '{}' (per-user) shadows the source tree config at '{}'",
-            user_config.display(),
-            fixture.canonical_tree_config().display()
-        )),
-        "the shadowing is named both ways: {stderr}"
-    );
+    let (reported_user, checkout) = config_warning(&stderr)
+        .split_once("' (per-user) shadows the source tree config at '")
+        .expect("the warning identifies both config sources");
+    let (reported_checkout, _) = checkout
+        .split_once("'; set HF_CONFIG_DIR to pin one explicitly")
+        .expect("the warning names the override");
+    assert_same_directory(reported_user, &user_config);
+    assert_same_directory(reported_checkout, &fixture.tree_config());
     assert!(
         !stderr.contains("comes from the source tree"),
         "the walk-up did not win: {stderr}"
