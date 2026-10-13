@@ -264,6 +264,10 @@ impl ServiceContainer {
                     FUZZ_PIPELINE_REPAIRS,
                     request.sanitizer,
                     request.cmplog,
+                    // The onboarding pipeline always drafts the stock driver
+                    // shape; the persistent-mode flavor is a deliberate
+                    // per-target choice on `oxfuzz harness --persistent`.
+                    false,
                 )
                 .await
                 .map_err(|error| {

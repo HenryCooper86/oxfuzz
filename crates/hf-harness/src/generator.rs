@@ -73,6 +73,70 @@ pub async fn draft_with_examples(
     llm: Box<dyn LlmProvider>,
 ) -> Result<HarnessDraft, ClassifiedError> {
     let prompt = render_harness_prompt_with_examples(target, engine, related, build, examples);
+    complete_draft(target, engine, prompt, sanitizer, llm).await
+}
+
+/// Draft an AFL++ persistent-mode harness: the prompt embeds the canonical
+/// skeleton ([`crate::persistent::render_harness_source`]) for the model to
+/// fill in. The flavor is AFL++ + C/C++ only; anything else fails before a
+/// model call is spent (Engineering Protocol 2.16).
+///
+/// # Errors
+/// Returns `ClassifiedError::Validation` for a non-AFL++ engine or non-C/C++
+/// target, and `ClassifiedError` if the LLM call fails or the response
+/// contains no fenced code block.
+pub async fn draft_persistent_with_examples(
+    target: &TargetCandidate,
+    engine: EngineKind,
+    related: &[RelatedContext],
+    build: Option<&BuildContext>,
+    examples: &[hf_prompt::AcceptedExample],
+    sanitizer: hf_core::target::Sanitizer,
+    llm: Box<dyn LlmProvider>,
+) -> Result<HarnessDraft, ClassifiedError> {
+    crate::persistent::require_persistent_support(engine, target.language)?;
+    let prompt = hf_prompt::render_persistent_harness_prompt_with_examples(
+        target,
+        related,
+        build,
+        examples,
+        &persistent_prompt_skeleton(target),
+    );
+    complete_draft(target, engine, prompt, sanitizer, llm).await
+}
+
+/// The canonical persistent-mode skeleton a draft prompt embeds, with
+/// placeholders where the model fills the target's includes, declaration, and
+/// call. Rendered by [`crate::persistent::render_harness_source`] so prompt
+/// guidance and the no-model heuristic draft share one structure.
+fn persistent_prompt_skeleton(target: &TargetCandidate) -> String {
+    let location = format!(
+        "{}:{}",
+        target.location.file.display(),
+        target.location.line
+    );
+    crate::persistent::render_harness_source(&crate::persistent::PersistentHarnessParts {
+        symbol: &target.symbol,
+        location: &location,
+        signature: target.signature.as_deref(),
+        includes: "/* the target's headers here */",
+        forward_decl: "/* the target's forward declaration here, when no header declares it */",
+        body: "    /* call the target with (data, size) here */",
+    })
+}
+
+/// One LLM draft attempt: send the prompt, extract the fenced source, record
+/// the build command the produced source requires. The build command derives
+/// from the answer's actual shape ([`build_command_for_source`]), so a model
+/// answer in a different shape than the prompt asked for still records the
+/// command that would build it.
+async fn complete_draft(
+    target: &TargetCandidate,
+    engine: EngineKind,
+    prompt: String,
+    sanitizer: hf_core::target::Sanitizer,
+    llm: Box<dyn LlmProvider>,
+) -> Result<HarnessDraft, ClassifiedError> {
     let messages = vec![Message::user(prompt)];
     let req = ChatRequest::from_messages(messages);
     let resp = llm.chat_completion(&req).await?;
@@ -82,14 +146,15 @@ pub async fn draft_with_examples(
     Ok(HarnessDraft {
         target_id: target.id,
         engine,
-        source,
-        rationale: String::new(),
-        build_cmd: build_command(
+        build_cmd: build_command_for_source(
             engine,
             target.language,
             &format!("fuzz_{}", target.symbol),
             sanitizer,
+            &source,
         )?,
+        source,
+        rationale: String::new(),
         generator: hf_core::harness::DraftGenerator::Llm,
     })
 }
@@ -119,7 +184,19 @@ pub async fn repair(
     llm: Box<dyn LlmProvider>,
 ) -> Result<HarnessDraft, ClassifiedError> {
     let diagnostics = summarize_diagnostics(diagnostics);
-    let prompt = render_harness_repair_prompt(target, engine, failing_source, &diagnostics);
+    // A persistent-structured source is repaired toward the persistent
+    // contract: the stock prompt's entry-point rule would contradict the
+    // custom main the source carries.
+    let prompt = if crate::persistent::is_persistent_source(failing_source) {
+        hf_prompt::render_persistent_harness_repair_prompt(
+            target,
+            failing_source,
+            &diagnostics,
+            &persistent_prompt_skeleton(target),
+        )
+    } else {
+        render_harness_repair_prompt(target, engine, failing_source, &diagnostics)
+    };
     let messages = vec![Message::user(prompt)];
     let req = ChatRequest::from_messages(messages);
     let resp = llm.chat_completion(&req).await?;
@@ -129,14 +206,15 @@ pub async fn repair(
     Ok(HarnessDraft {
         target_id: target.id,
         engine,
-        source,
-        rationale: "repair".to_owned(),
-        build_cmd: build_command(
+        build_cmd: build_command_for_source(
             engine,
             target.language,
             &format!("fuzz_{}", target.symbol),
             sanitizer,
+            &source,
         )?,
+        source,
+        rationale: "repair".to_owned(),
         generator: hf_core::harness::DraftGenerator::Llm,
     })
 }
@@ -156,7 +234,18 @@ pub async fn refine(
     sanitizer: hf_core::target::Sanitizer,
     llm: Box<dyn LlmProvider>,
 ) -> Result<HarnessDraft, ClassifiedError> {
-    let prompt = render_harness_refine_prompt(target, engine, current_source, uncovered);
+    // Same shape rule as repair: a persistent harness is refined toward the
+    // persistent contract, never back to the stock driver entry point.
+    let prompt = if crate::persistent::is_persistent_source(current_source) {
+        hf_prompt::render_persistent_harness_refine_prompt(
+            target,
+            current_source,
+            uncovered,
+            &persistent_prompt_skeleton(target),
+        )
+    } else {
+        render_harness_refine_prompt(target, engine, current_source, uncovered)
+    };
     let req = ChatRequest::from_messages(vec![Message::user(prompt)]);
     let resp = llm.chat_completion(&req).await?;
     let source = extract_code_block(resp.text()).ok_or_else(|| {
@@ -165,14 +254,15 @@ pub async fn refine(
     Ok(HarnessDraft {
         target_id: target.id,
         engine,
-        source,
-        rationale: "refine".to_owned(),
-        build_cmd: build_command(
+        build_cmd: build_command_for_source(
             engine,
             target.language,
             &format!("fuzz_{}", target.symbol),
             sanitizer,
+            &source,
         )?,
+        source,
+        rationale: "refine".to_owned(),
         generator: hf_core::harness::DraftGenerator::Llm,
     })
 }
@@ -447,6 +537,37 @@ pub async fn try_compile_with_options(
             harness.engine.as_str(),
             harness.language
         )));
+    }
+    // An AFL++ persistent-mode source (one carrying __AFL_LOOP/__AFL_FUZZ_INIT)
+    // owns `main` and the forkserver loop. It compiles only one way: afl++
+    // engine, no libFuzzer driver -- `__AFL_FUZZ_INIT()` and the driver both
+    // define `__afl_sharedmem_fuzzing` strongly, so a driver link is a certain
+    // duplicate-symbol failure, and another engine's driver cannot serve the
+    // custom loop at all. Fail here, naming the fix, rather than handing the
+    // linker error to the repair loop (Engineering Protocol 2.19).
+    if matches!(harness.language, TargetLanguage::C | TargetLanguage::Cpp)
+        && crate::persistent::is_persistent_source(&harness.source)
+    {
+        if harness.engine != EngineKind::AflPlusPlus {
+            return Err(ClassifiedError::Harness(format!(
+                "an AFL++ persistent-mode harness (carrying __AFL_LOOP/__AFL_FUZZ_INIT) builds \
+                 only for the afl++ engine, not '{}'",
+                harness.engine.as_str()
+            )));
+        }
+        if harness
+            .build_cmd
+            .args
+            .iter()
+            .any(|arg| arg == "-fsanitize=fuzzer")
+        {
+            return Err(ClassifiedError::Harness(
+                "an AFL++ persistent-mode harness links no libFuzzer driver (it owns `main`); \
+                 derive the build with hf_harness::build_command_for_source so \
+                 -fsanitize=fuzzer is dropped"
+                    .to_owned(),
+            ));
+        }
     }
     // Rust fuzz targets take the cargo-fuzz path (project scaffold + `cargo fuzz
     // build`) rather than the single-file compile below, which assumes a C-style
@@ -1190,6 +1311,22 @@ pub fn cmplog_build_command(
     output_name: &str,
     sanitizer: hf_core::target::Sanitizer,
 ) -> Result<BuildCommand, ClassifiedError> {
+    cmplog_build_command_for_source(engine, lang, output_name, sanitizer, "")
+}
+
+/// The source-aware [`cmplog_build_command`]: the companion compiles the same
+/// source as the main build, so it follows the main build's driver choice --
+/// a persistent-mode harness's companion links no libFuzzer driver either.
+///
+/// # Errors
+/// See [`cmplog_build_command`].
+pub fn cmplog_build_command_for_source(
+    engine: EngineKind,
+    lang: TargetLanguage,
+    output_name: &str,
+    sanitizer: hf_core::target::Sanitizer,
+    source: &str,
+) -> Result<BuildCommand, ClassifiedError> {
     if engine != EngineKind::AflPlusPlus {
         return Err(ClassifiedError::Harness(format!(
             "a CmpLog companion build applies only to the afl++ engine (requested '{}'); \
@@ -1203,11 +1340,12 @@ pub fn cmplog_build_command(
              {lang:?} harnesses have no CmpLog path"
         )));
     }
-    build_command(
+    build_command_for_source(
         engine,
         lang,
         &format!("{output_name}{}", hf_engine::afl::CMPLOG_BINARY_SUFFIX),
         sanitizer,
+        source,
     )
 }
 
@@ -1246,6 +1384,28 @@ pub fn build_command(
     lang: TargetLanguage,
     output_name: &str,
     sanitizer: hf_core::target::Sanitizer,
+) -> Result<BuildCommand, ClassifiedError> {
+    build_command_for_source(engine, lang, output_name, sanitizer, "")
+}
+
+/// The source-aware [`build_command`]. One harness property only the source
+/// can state is read here: an AFL++ persistent-mode harness
+/// ([`crate::persistent::is_persistent_source`]) owns `main` and the
+/// forkserver loop, so it links AFL++'s instrumentation runtime but NOT the
+/// `-fsanitize=fuzzer` libFuzzer driver -- `__AFL_FUZZ_INIT()` and the driver
+/// both define `__afl_sharedmem_fuzzing` strongly and cannot link together.
+/// Every other engine/language/source combination produces exactly what
+/// [`build_command`] produces.
+///
+/// # Errors
+/// Returns `ClassifiedError::Harness` for an engine/language/sanitizer
+/// combination the sandbox toolchain cannot build.
+pub fn build_command_for_source(
+    engine: EngineKind,
+    lang: TargetLanguage,
+    output_name: &str,
+    sanitizer: hf_core::target::Sanitizer,
+    source: &str,
 ) -> Result<BuildCommand, ClassifiedError> {
     if !lang.harnessable() {
         return Err(ClassifiedError::Harness(format!(
@@ -1301,7 +1461,10 @@ pub fn build_command(
                 "afl-clang-fast"
             }
             .to_owned(),
-            args: c_sanitizer_args(sanitizer, true)?,
+            // A persistent-mode source owns `main` and the forkserver loop:
+            // it links the instrumentation runtime but not the libFuzzer
+            // driver (their `__afl_sharedmem_fuzzing` definitions conflict).
+            args: c_sanitizer_args(sanitizer, !crate::persistent::is_persistent_source(source))?,
             output: PathBuf::from(output_name),
             extra_flags: Vec::new(),
         }),
@@ -1973,6 +2136,195 @@ mod tests {
         );
     }
 
+    /// A provider answering with the canonical persistent-mode harness.
+    struct PersistentCaptureProvider {
+        seen: Arc<Mutex<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for PersistentCaptureProvider {
+        async fn chat_completion(
+            &self,
+            request: &ChatRequest,
+        ) -> Result<ChatResponse, ProviderError> {
+            *self.seen.lock().expect("capture lock") = request
+                .messages
+                .last()
+                .map(|m| m.content.clone())
+                .unwrap_or_default();
+            let source = crate::persistent::render_harness_source(
+                &crate::persistent::PersistentHarnessParts {
+                    symbol: "parse_header",
+                    location: "src/parse.c:1",
+                    signature: Some("int parse_header(const uint8_t*, size_t)"),
+                    includes: "",
+                    forward_decl: "int parse_header(const uint8_t *data, size_t len);",
+                    body: "    parse_header((const uint8_t *)data, size);",
+                },
+            );
+            Ok(ChatResponse {
+                id: "capture".to_owned(),
+                model: "capture".to_owned(),
+                content: Some(format!("```c\n{source}\n```")),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                usage: TokenUsage::default(),
+                finish_reason: FinishReason::Stop,
+                raw_request: None,
+                raw_response: None,
+                provider_id: None,
+                generated_images: Vec::new(),
+            })
+        }
+        async fn chat_completion_stream(
+            &self,
+            _request: &ChatRequest,
+        ) -> Result<ChatStreamResponse, ProviderError> {
+            Err(ProviderError::Other {
+                message: "no stream".to_owned(),
+            })
+        }
+        fn metadata(&self) -> &ProviderMetadata {
+            use hf_core::provider::{ProviderCapability, ProviderType, ToolCallingMode};
+            static M: std::sync::OnceLock<ProviderMetadata> = std::sync::OnceLock::new();
+            M.get_or_init(|| ProviderMetadata {
+                id: hf_core::types::ProviderId::from_string("capture"),
+                provider_type: ProviderType::Custom,
+                model: "capture".to_owned(),
+                tags: Vec::new(),
+                capabilities: vec![ProviderCapability::Text],
+                max_concurrency: 1,
+                context_window: 128_000,
+                cost_per_1k_input: 0.0,
+                cost_per_1k_output: 0.0,
+                tool_calling_mode: ToolCallingMode::Native,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn persistent_draft_uses_the_persistent_prompt_and_records_the_driverless_build() {
+        let target = sample_target();
+        let seen = Arc::new(Mutex::new(String::new()));
+        let draft = draft_persistent_with_examples(
+            &target,
+            EngineKind::AflPlusPlus,
+            &[],
+            None,
+            &[],
+            hf_core::target::Sanitizer::Address,
+            Box::new(PersistentCaptureProvider {
+                seen: Arc::clone(&seen),
+            }),
+        )
+        .await
+        .expect("draft should succeed");
+        let prompt = seen.lock().expect("capture lock").clone();
+        assert!(prompt.contains("persistent mode"), "{prompt}");
+        assert!(prompt.contains("__AFL_LOOP"), "{prompt}");
+        assert!(prompt.contains("__AFL_FUZZ_INIT"), "{prompt}");
+        // The recorded build command must match the drafted source's shape:
+        // the persistent harness owns main and links no libFuzzer driver.
+        assert!(crate::persistent::is_persistent_source(&draft.source));
+        assert!(
+            !draft
+                .build_cmd
+                .args
+                .iter()
+                .any(|arg| arg == "-fsanitize=fuzzer"),
+            "{:?}",
+            draft.build_cmd.args
+        );
+    }
+
+    #[tokio::test]
+    async fn persistent_draft_rejects_a_non_afl_engine_before_calling_the_model() {
+        let target = sample_target();
+        let seen = Arc::new(Mutex::new(String::new()));
+        let error = draft_persistent_with_examples(
+            &target,
+            EngineKind::LibFuzzer,
+            &[],
+            None,
+            &[],
+            hf_core::target::Sanitizer::Address,
+            Box::new(PersistentCaptureProvider {
+                seen: Arc::clone(&seen),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("afl++"), "{error}");
+        assert!(
+            seen.lock().expect("capture lock").is_empty(),
+            "no model call may be spent on an unbuildable flavor"
+        );
+    }
+
+    #[tokio::test]
+    async fn repair_of_a_persistent_source_keeps_the_persistent_guidance() {
+        let target = sample_target();
+        let failing = "int main(void) { while (__AFL_LOOP(100)) { } return 0; }";
+        let seen = Arc::new(Mutex::new(String::new()));
+        let draft = repair(
+            &target,
+            EngineKind::AflPlusPlus,
+            failing,
+            "error: expected expression",
+            hf_core::target::Sanitizer::Address,
+            Box::new(PersistentCaptureProvider {
+                seen: Arc::clone(&seen),
+            }),
+        )
+        .await
+        .expect("repair should succeed");
+        let prompt = seen.lock().expect("capture lock").clone();
+        assert!(
+            prompt.contains("persistent-mode structure"),
+            "a persistent failing source must be repaired toward the persistent contract: {prompt}"
+        );
+        // The repaired source is persistent, so the recorded build drops the driver.
+        assert!(
+            !draft
+                .build_cmd
+                .args
+                .iter()
+                .any(|arg| arg == "-fsanitize=fuzzer"),
+            "{:?}",
+            draft.build_cmd.args
+        );
+    }
+
+    #[tokio::test]
+    async fn refine_of_a_persistent_source_keeps_the_persistent_guidance() {
+        let target = sample_target();
+        let current = "int main(void) { while (__AFL_LOOP(100)) { } return 0; }";
+        let seen = Arc::new(Mutex::new(String::new()));
+        let draft = refine(
+            &target,
+            EngineKind::AflPlusPlus,
+            current,
+            &["decode_frame".to_owned()],
+            hf_core::target::Sanitizer::Address,
+            Box::new(PersistentCaptureProvider {
+                seen: Arc::clone(&seen),
+            }),
+        )
+        .await
+        .expect("refine should succeed");
+        let prompt = seen.lock().expect("capture lock").clone();
+        assert!(prompt.contains("__AFL_LOOP"), "{prompt}");
+        assert!(
+            !draft
+                .build_cmd
+                .args
+                .iter()
+                .any(|arg| arg == "-fsanitize=fuzzer"),
+            "{:?}",
+            draft.build_cmd.args
+        );
+    }
+
     /// A runtime whose compile command returns a fixed exit code + output, so
     /// the compile-failure path is exercised without Docker.
     struct ScriptedRuntime {
@@ -2057,6 +2409,102 @@ mod tests {
         match result {
             CompileResult::Ok(h) => assert_eq!(h.status, HarnessStatus::Compiled),
             CompileResult::Failed(_) => panic!("expected success"),
+        }
+    }
+
+    /// A harness in the AFL++ persistent-mode shape: owns `main`, the
+    /// forkserver loop, and the shared-memory testcase buffer.
+    fn persistent_harness(engine: EngineKind, with_driver: bool) -> Harness {
+        let source =
+            crate::persistent::render_harness_source(&crate::persistent::PersistentHarnessParts {
+                symbol: "parse_entry",
+                location: "src/parse.c:42",
+                signature: Some("int parse_entry(const uint8_t *data, size_t len)"),
+                includes: "",
+                forward_decl: "int parse_entry(const uint8_t *data, size_t len);",
+                body: "    parse_entry((const uint8_t *)data, size);",
+            });
+        let mut build_cmd = build_command(
+            engine,
+            TargetLanguage::C,
+            "fuzz_parse_entry",
+            hf_core::target::Sanitizer::Address,
+        )
+        .unwrap();
+        if !with_driver {
+            build_cmd.args.retain(|arg| arg != "-fsanitize=fuzzer");
+        }
+        Harness {
+            id: uuid::Uuid::nil(),
+            target_id: uuid::Uuid::nil(),
+            engine,
+            source,
+            language: TargetLanguage::C,
+            build_cmd,
+            sanitizer: hf_core::target::Sanitizer::Address,
+            status: HarnessStatus::Draft,
+            smoke_run: None,
+            cmplog: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn try_compile_rejects_a_persistent_source_with_a_driver_build() {
+        // The pairing cannot link (`__afl_sharedmem_fuzzing` defined strongly
+        // twice); fail with the fix named instead of feeding the linker error
+        // to a repair loop.
+        let dir = tempfile::tempdir().unwrap();
+        let rt = ScriptedRuntime {
+            exit_code: 0,
+            stderr: String::new(),
+        };
+        let error = try_compile(
+            persistent_harness(EngineKind::AflPlusPlus, true),
+            &rt,
+            dir.path(),
+        )
+        .await
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("-fsanitize=fuzzer"), "{message}");
+        assert!(message.contains("build_command_for_source"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn try_compile_rejects_a_persistent_source_for_a_non_afl_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = ScriptedRuntime {
+            exit_code: 0,
+            stderr: String::new(),
+        };
+        let error = try_compile(
+            persistent_harness(EngineKind::LibFuzzer, true),
+            &rt,
+            dir.path(),
+        )
+        .await
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("afl++"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn try_compile_builds_a_persistent_afl_harness_without_the_driver() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = ScriptedRuntime {
+            exit_code: 0,
+            stderr: String::new(),
+        };
+        let result = try_compile(
+            persistent_harness(EngineKind::AflPlusPlus, false),
+            &rt,
+            dir.path(),
+        )
+        .await
+        .expect("infra ok");
+        match result {
+            CompileResult::Ok(h) => assert_eq!(h.status, HarnessStatus::Compiled),
+            CompileResult::Failed(f) => panic!("expected success, got {f:?}"),
         }
     }
 

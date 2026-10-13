@@ -2504,14 +2504,55 @@ impl hf_core::provider::LlmProvider for LlmProviderBridge {
 // ---------------------------------------------------------------------------
 
 /// Generate a heuristic harness draft when no LLM provider is configured.
+///
+/// `persistent` selects the AFL++ persistent-mode flavor (the CLI's
+/// `--persistent`): the draft owns `main` and the forkserver loop around the
+/// same signature-driven target call, and records the driver-less build
+/// command. The flavor is AFL++ + C/C++ only; anything else fails loud.
 fn heuristic_draft(
     candidate: &TargetCandidate,
     engine: EngineKind,
     sanitizer: hf_core::target::Sanitizer,
+    persistent: bool,
 ) -> Result<HarnessDraft, ClassifiedError> {
     let includes = generate_includes(candidate);
     let forward_decl = generate_forward_decl(&candidate.symbol, candidate.signature.as_deref());
     let body = generate_harness_body(&candidate.symbol, candidate.signature.as_deref());
+    if persistent {
+        hf_harness::persistent::require_persistent_support(engine, candidate.language)?;
+        let location = format!(
+            "{}:{}",
+            candidate.location.file.display(),
+            candidate.location.line
+        );
+        let source = hf_harness::persistent::render_harness_source(
+            &hf_harness::persistent::PersistentHarnessParts {
+                symbol: &candidate.symbol,
+                location: &location,
+                signature: candidate.signature.as_deref(),
+                includes: &includes,
+                forward_decl: &forward_decl,
+                body: &body,
+            },
+        );
+        // The recorded build command must match the compile that follows:
+        // the persistent source owns `main`, so no libFuzzer driver links.
+        let build_cmd = hf_harness::build_command_for_source(
+            engine,
+            candidate.language,
+            &harness_binary_name(&candidate.symbol),
+            sanitizer,
+            &source,
+        )?;
+        return Ok(HarnessDraft {
+            target_id: candidate.id,
+            engine,
+            source,
+            rationale: String::new(),
+            build_cmd,
+            generator: hf_core::harness::DraftGenerator::Heuristic,
+        });
+    }
     // libFuzzer's `main` has C linkage, so a C++ harness must not let the
     // entry point be name-mangled: without this every C++ target fails to link
     // with `undefined reference to LLVMFuzzerTestOneInput`, whatever its
@@ -2768,6 +2809,7 @@ mod heuristic_harness_tests {
             &candidate(hf_core::target::TargetLanguage::Cpp),
             hf_core::engine::EngineKind::LibFuzzer,
             hf_core::target::Sanitizer::Address,
+            false,
         )
         .unwrap();
         assert!(
@@ -2781,6 +2823,7 @@ mod heuristic_harness_tests {
             &candidate(hf_core::target::TargetLanguage::C),
             hf_core::engine::EngineKind::LibFuzzer,
             hf_core::target::Sanitizer::Address,
+            false,
         )
         .unwrap();
         assert!(
@@ -2848,6 +2891,96 @@ mod heuristic_harness_tests {
     fn an_unreadable_signature_still_falls_back() {
         assert!(generate_harness_body("f", None).contains("f((const char *)data, size);"));
         assert!(generate_harness_body("f", Some("garbage")).contains("(const char *)data"));
+    }
+
+    /// The persistent-mode heuristic draft: the canonical AFL++ structure
+    /// around the same signature-driven call, with the driver-less build
+    /// command recorded on the draft.
+    #[test]
+    fn a_persistent_heuristic_draft_carries_the_structure_and_its_build() {
+        let draft = super::heuristic_draft(
+            &candidate(hf_core::target::TargetLanguage::C),
+            hf_core::engine::EngineKind::AflPlusPlus,
+            hf_core::target::Sanitizer::Address,
+            true,
+        )
+        .unwrap();
+        let source = &draft.source;
+        for marker in [
+            "__AFL_FUZZ_INIT();",
+            "__AFL_INIT();",
+            "while (__AFL_LOOP(",
+            "oxfuzz_target_setup();",
+            "oxfuzz_target_reset();",
+            "int main(int argc, char **argv)",
+            "parse_frame((const uint8_t *)data, size);",
+        ] {
+            assert!(source.contains(marker), "missing {marker}:\n{source}");
+        }
+        assert!(hf_harness::persistent::is_persistent_source(source));
+        assert!(
+            hf_harness::lint_harness_source(source, hf_core::target::TargetLanguage::C).is_empty(),
+            "the template must be lint-clean: {source}"
+        );
+        assert_eq!(draft.build_cmd.compiler, "afl-clang-fast");
+        assert!(
+            !draft
+                .build_cmd
+                .args
+                .iter()
+                .any(|arg| arg == "-fsanitize=fuzzer"),
+            "a persistent harness links no libFuzzer driver: {:?}",
+            draft.build_cmd.args
+        );
+        assert_eq!(draft.generator, hf_core::harness::DraftGenerator::Heuristic);
+    }
+
+    /// The persistent flavor is AFL++ + C/C++ only; the no-model path refuses
+    /// other engines loudly rather than emitting an unbuildable skeleton.
+    #[test]
+    fn a_persistent_heuristic_draft_rejects_non_afl_engines() {
+        let error = super::heuristic_draft(
+            &candidate(hf_core::target::TargetLanguage::C),
+            hf_core::engine::EngineKind::LibFuzzer,
+            hf_core::target::Sanitizer::Address,
+            true,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("afl++"), "{error}");
+
+        let error = super::heuristic_draft(
+            &candidate(hf_core::target::TargetLanguage::C),
+            hf_core::engine::EngineKind::AflPlusPlus,
+            hf_core::target::Sanitizer::Address,
+            true,
+        );
+        assert!(
+            error.is_ok(),
+            "afl++ + C is the supported pairing: {error:?}"
+        );
+    }
+
+    /// The default (non-persistent) heuristic draft keeps the stock driver
+    /// build command.
+    #[test]
+    fn a_default_heuristic_draft_keeps_the_driver_build() {
+        let draft = super::heuristic_draft(
+            &candidate(hf_core::target::TargetLanguage::C),
+            hf_core::engine::EngineKind::AflPlusPlus,
+            hf_core::target::Sanitizer::Address,
+            false,
+        )
+        .unwrap();
+        assert!(
+            draft
+                .build_cmd
+                .args
+                .iter()
+                .any(|arg| arg == "-fsanitize=fuzzer"),
+            "{:?}",
+            draft.build_cmd.args
+        );
+        assert!(!hf_harness::persistent::is_persistent_source(&draft.source));
     }
 }
 

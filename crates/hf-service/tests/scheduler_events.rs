@@ -490,6 +490,7 @@ async fn campaign_fixture(name: &str) -> CampaignFixture {
             1,
             None,
             false,
+            false,
         )
         .await
         .expect("prepare harness");

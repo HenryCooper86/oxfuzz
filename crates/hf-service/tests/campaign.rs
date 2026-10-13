@@ -129,6 +129,7 @@ async fn run_campaign_runs_full_pipeline_and_picks_a_target() {
             1,
             None,
             false,
+            false,
         )
         .await
         .expect("prepare harness");
@@ -310,6 +311,7 @@ async fn run_campaign_observed_forwards_markers_and_stats_but_not_engine_log_lin
             TargetLanguage::C,
             1,
             None,
+            false,
             false,
         )
         .await

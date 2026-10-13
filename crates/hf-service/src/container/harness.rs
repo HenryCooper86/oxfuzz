@@ -170,7 +170,9 @@ fn require_expected_promotion(
 /// build: the companion mirrors the main build's compiler, sanitizer, and
 /// captured project flags and compiles beside the main binary. `None` when the
 /// build does not opt in. The companion constructor rejects non-AFL++ engines
-/// and languages AFL++ cannot drive (Engineering Protocol 2.19).
+/// and languages AFL++ cannot drive (Engineering Protocol 2.19). The companion
+/// compiles the same source, so it follows the main build's driver choice: a
+/// persistent-mode source's companion also links no libFuzzer driver.
 fn cmplog_companion_spec(
     engine: EngineKind,
     lang: TargetLanguage,
@@ -178,12 +180,18 @@ fn cmplog_companion_spec(
     sanitizer: Sanitizer,
     extra_flags: &[String],
     requested: bool,
+    source: &str,
 ) -> Result<Option<hf_core::harness::CmpLogCompanion>, ClassifiedError> {
     if !requested {
         return Ok(None);
     }
-    let mut build_cmd =
-        hf_harness::cmplog_build_command(engine, lang, &harness_binary_name(target), sanitizer)?;
+    let mut build_cmd = hf_harness::cmplog_build_command_for_source(
+        engine,
+        lang,
+        &harness_binary_name(target),
+        sanitizer,
+        source,
+    )?;
     build_cmd.extra_flags = extra_flags.to_vec();
     Ok(Some(hf_core::harness::CmpLogCompanion {
         build_cmd,
@@ -627,13 +635,16 @@ impl ServiceContainer {
     /// degrades to the heuristic draft so generation can proceed.
     ///
     /// `sanitizer` is the already-resolved build sanitizer: the draft's recorded
-    /// build command must match the compile that follows.
+    /// build command must match the compile that follows. `persistent` selects
+    /// the AFL++ persistent-mode flavor (the CLI's `--persistent`): the LLM
+    /// draft embeds the canonical skeleton, and the heuristic fallback emits it.
     async fn draft_harness_source(
         &self,
         project: &Path,
         candidate: &TargetCandidate,
         engine: EngineKind,
         sanitizer: Sanitizer,
+        persistent: bool,
     ) -> Result<String, ClassifiedError> {
         if let Some(pool) = self.provider_pool() {
             let provider = LlmProviderBridge::new(pool)
@@ -641,17 +652,30 @@ impl ServiceContainer {
             let related = crate::knowledge::harness_related_context(project, candidate);
             let build = project_build_context(self, project, candidate.language).await?;
             let examples = self.accepted_examples(project, candidate).await;
-            match hf_harness::draft_with_examples(
-                candidate,
-                engine,
-                &related,
-                build.as_ref(),
-                &examples,
-                sanitizer,
-                Box::new(provider),
-            )
-            .await
-            {
+            let drafted = if persistent {
+                hf_harness::draft_persistent_with_examples(
+                    candidate,
+                    engine,
+                    &related,
+                    build.as_ref(),
+                    &examples,
+                    sanitizer,
+                    Box::new(provider),
+                )
+                .await
+            } else {
+                hf_harness::draft_with_examples(
+                    candidate,
+                    engine,
+                    &related,
+                    build.as_ref(),
+                    &examples,
+                    sanitizer,
+                    Box::new(provider),
+                )
+                .await
+            };
+            match drafted {
                 Ok(draft) => return Ok(draft.source),
                 Err(e) => tracing::warn!(
                     "LLM harness draft for '{}' failed ({e}); using heuristic draft",
@@ -659,7 +683,7 @@ impl ServiceContainer {
                 ),
             }
         }
-        Ok(heuristic_draft(candidate, engine, sanitizer)?.source)
+        Ok(heuristic_draft(candidate, engine, sanitizer, persistent)?.source)
     }
 
     /// Accepted examples for one draft: previously promoted harnesses of this
@@ -823,8 +847,16 @@ impl ServiceContainer {
                     _ => break,
                 }
             }
-            let mut build_cmd =
-                hf_harness::build_command(engine, lang, &harness_binary_name(target), sanitizer)?;
+            // The build variant derives from the current source's structure
+            // each round: a repair that adds or drops the persistent markers
+            // gets the matching driver choice (Engineering Protocol 2.19).
+            let mut build_cmd = hf_harness::build_command_for_source(
+                engine,
+                lang,
+                &harness_binary_name(target),
+                sanitizer,
+                &source,
+            )?;
             build_cmd.output = PathBuf::from(harness_binary_name(target));
             let captured = self
                 .capture_harness_build_inputs(&candidate.project_root, lang, true)
@@ -848,6 +880,7 @@ impl ServiceContainer {
                     sanitizer,
                     &captured.flags,
                     cmplog,
+                    &source,
                 )?,
             };
             let options = hf_core::runtime::SandboxOptions {
@@ -947,7 +980,7 @@ impl ServiceContainer {
         engine: EngineKind,
         lang: TargetLanguage,
     ) -> Result<HarnessDraft, ClassifiedError> {
-        self.harness_draft_with_policy(project, target, engine, lang, AiPolicy::Auto, None)
+        self.harness_draft_with_policy(project, target, engine, lang, AiPolicy::Auto, None, false)
             .await
     }
 
@@ -964,10 +997,11 @@ impl ServiceContainer {
     ///
     /// # Errors
     /// Returns a validation error for an engine/language that cannot carry a
-    /// generated harness or a sanitizer outside the selectable set, and --
-    /// under [`AiPolicy::Require`] -- a provider error when no provider is
-    /// configured or the model call fails, rather than substituting a template
-    /// harness the caller said it did not want.
+    /// generated harness, a sanitizer outside the selectable set, or a
+    /// persistent-mode request (`--persistent`) for a non-AFL++ engine or
+    /// non-C/C++ target, and -- under [`AiPolicy::Require`] -- a provider error
+    /// when no provider is configured or the model call fails, rather than
+    /// substituting a template harness the caller said it did not want.
     pub async fn harness_draft_with_policy(
         &self,
         project: &Path,
@@ -976,8 +1010,14 @@ impl ServiceContainer {
         lang: TargetLanguage,
         policy: AiPolicy,
         sanitizer: Option<Sanitizer>,
+        persistent: bool,
     ) -> Result<HarnessDraft, ClassifiedError> {
         require_fuzzing_harness_engine(engine, lang)?;
+        if persistent {
+            // Reject an unbuildable flavor before any drafting spends a model
+            // call on it (Engineering Protocol 2.16).
+            hf_harness::persistent::require_persistent_support(engine, lang)?;
+        }
         self.admit_harness_build(project, lang).await?;
         self.authorize_recorded(Action::DraftHarness, "harness_draft", Some(project))
             .await?;
@@ -993,7 +1033,7 @@ impl ServiceContainer {
             .clone();
 
         if policy == AiPolicy::Off {
-            return heuristic_draft(&candidate, engine, sanitizer);
+            return heuristic_draft(&candidate, engine, sanitizer, persistent);
         }
         let Some(pool) = self.provider_pool() else {
             if policy == AiPolicy::Require {
@@ -1005,7 +1045,7 @@ impl ServiceContainer {
             }
             // No LLM configured: generate a heuristic draft so the GUI still
             // produces something useful.
-            return heuristic_draft(&candidate, engine, sanitizer);
+            return heuristic_draft(&candidate, engine, sanitizer, persistent);
         };
         {
             let provider = LlmProviderBridge::new(pool)
@@ -1015,16 +1055,29 @@ impl ServiceContainer {
             // the un-augmented prompt.
             let related = crate::knowledge::harness_related_context(project, &candidate);
             let build = project_build_context(self, project, candidate.language).await?;
-            match hf_harness::draft_with_context(
-                &candidate,
-                engine,
-                &related,
-                build.as_ref(),
-                sanitizer,
-                Box::new(provider),
-            )
-            .await
-            {
+            let drafted = if persistent {
+                hf_harness::draft_persistent_with_examples(
+                    &candidate,
+                    engine,
+                    &related,
+                    build.as_ref(),
+                    &[],
+                    sanitizer,
+                    Box::new(provider),
+                )
+                .await
+            } else {
+                hf_harness::draft_with_context(
+                    &candidate,
+                    engine,
+                    &related,
+                    build.as_ref(),
+                    sanitizer,
+                    Box::new(provider),
+                )
+                .await
+            };
+            match drafted {
                 Ok(draft) => Ok(draft),
                 // The LLM is configured but the call failed (provider down,
                 // auth, bad model, network). Under `Auto` degrade to the
@@ -1040,7 +1093,7 @@ impl ServiceContainer {
                         "LLM harness draft for '{target}' failed ({e}); \
                          falling back to heuristic draft"
                     );
-                    heuristic_draft(&candidate, engine, sanitizer)
+                    heuristic_draft(&candidate, engine, sanitizer, persistent)
                 }
             }
         }
@@ -1089,6 +1142,13 @@ impl ServiceContainer {
                 hf_harness::render_findings(&lint)
             )));
         }
+        // An AFL++ persistent-mode source (it owns `main` and the forkserver
+        // loop) builds only for AFL++: reject a mismatched engine before any
+        // staging or sandbox work (the compile operation itself also refuses
+        // it; this is the earlier, clearer error).
+        if hf_harness::persistent::is_persistent_source(&source) {
+            hf_harness::persistent::require_persistent_support(engine, lang)?;
+        }
         prepare_configured_workspace_root()?;
         let workspace = workspace_dir(project, target);
         std::fs::create_dir_all(&workspace)
@@ -1097,8 +1157,15 @@ impl ServiceContainer {
         self.stage_generated_build_inputs_for_project(project, &workspace)
             .await?;
 
-        let mut build_cmd =
-            hf_harness::build_command(engine, lang, &harness_binary_name(target), sanitizer)?;
+        // The build variant derives from the source's structure: a persistent
+        // harness links no libFuzzer driver, whatever caller supplied it.
+        let mut build_cmd = hf_harness::build_command_for_source(
+            engine,
+            lang,
+            &harness_binary_name(target),
+            sanitizer,
+            &source,
+        )?;
         let target_id = self.resolve_target_id(project, target, lang).await?;
         let captured = self
             .capture_harness_build_inputs(project, lang, true)
@@ -1109,7 +1176,7 @@ impl ServiceContainer {
             id: captured.record.harness_id,
             target_id,
             engine,
-            source,
+            source: source.clone(),
             language: lang,
             build_cmd,
             sanitizer,
@@ -1122,6 +1189,7 @@ impl ServiceContainer {
                 sanitizer,
                 &captured.flags,
                 cmplog,
+                &source,
             )?,
         };
         let options = hf_core::runtime::SandboxOptions {
@@ -1164,6 +1232,9 @@ impl ServiceContainer {
     /// `sanitizer` is the per-build request (the CLI's `--sanitizer`); `None`
     /// applies the configured `fuzzing.default_sanitizer`. `cmplog` (the CLI's
     /// `--cmplog`) additionally compiles the AFL++ `CmpLog` companion binary.
+    /// `persistent` (the CLI's `--persistent`) drafts an AFL++ persistent-mode
+    /// harness (custom `main`, `__AFL_INIT` + `__AFL_LOOP`, per-iteration
+    /// reset) instead of the stock driver shape.
     ///
     /// # Errors
     /// Returns `ClassifiedError::Validation` if the target is unknown or the
@@ -1179,6 +1250,7 @@ impl ServiceContainer {
         max_repairs: usize,
         sanitizer: Option<Sanitizer>,
         cmplog: bool,
+        persistent: bool,
     ) -> Result<HarnessGenOutcome, ClassifiedError> {
         self.compilation_store()?;
         require_fuzzing_harness_engine(engine, lang)?;
@@ -1197,6 +1269,11 @@ impl ServiceContainer {
         if cmplog {
             let _ = hf_harness::cmplog_build_command(engine, lang, "cmplog-check", sanitizer)?;
         }
+        // And for a requested persistent-mode flavor: a non-AFL++ engine or
+        // non-C/C++ target fails here, before any drafting.
+        if persistent {
+            hf_harness::persistent::require_persistent_support(engine, lang)?;
+        }
         let inv = self.discover(project, lang).await?;
         let candidate = select_target_candidate(&inv.candidates, target)?
             .ok_or_else(|| ClassifiedError::Validation(format!("target '{target}' not found")))?
@@ -1214,7 +1291,7 @@ impl ServiceContainer {
             .await?;
 
         let source = self
-            .draft_harness_source(project, &candidate, engine, sanitizer)
+            .draft_harness_source(project, &candidate, engine, sanitizer, persistent)
             .await?;
         self.compile_source_with_repair_locked(
             &candidate,
@@ -2340,16 +2417,19 @@ impl ServiceContainer {
 
         // The deterministic baseline first, then independent model drafts. The
         // drafts differ by sampling, not by prompt, so a losing candidate is
-        // never handicapped by a prompt the others did not get.
+        // never handicapped by a prompt the others did not get. Tournament
+        // candidates all take the stock driver shape: the persistent-mode
+        // flavor is a deliberate per-target choice on `oxfuzz harness
+        // --persistent`, not a tournament axis.
         let mut sources: Vec<(CandidateOrigin, String)> = Vec::with_capacity(req.candidates);
         sources.push((
             CandidateOrigin::Heuristic,
-            heuristic_draft(&candidate, req.engine, sanitizer)?.source,
+            heuristic_draft(&candidate, req.engine, sanitizer, false)?.source,
         ));
         for _ in 1..req.candidates {
             sources.push((
                 CandidateOrigin::Llm,
-                self.draft_harness_source(project, &candidate, req.engine, sanitizer)
+                self.draft_harness_source(project, &candidate, req.engine, sanitizer, false)
                     .await?,
             ));
         }

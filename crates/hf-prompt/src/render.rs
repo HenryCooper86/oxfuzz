@@ -109,6 +109,26 @@ pub fn render_harness_prompt(target: &TargetCandidate, engine: EngineKind) -> St
         engine_entry_point(engine)
     };
     let engine_name = engine_name(engine);
+    format!(
+        "You are the harness-agent for oxfuzz.\n\
+         Your job: write a fuzzing harness for the target below using {engine_name}.\n\
+         Rules:\n\
+         - Use the engine entry point exactly: {entry_point}\n\
+         - No host I/O. All input comes from the fuzzer.\n\
+         - Deterministic. No time-based or RNG branches.\n\
+         - Include only necessary headers.\n\
+         - Output only the harness source, in a fenced code block.\n\
+         \n\
+         Target:\n\
+         {target_block}",
+        engine_name = engine_name,
+        entry_point = entry_point,
+        target_block = target_block(target),
+    )
+}
+
+/// The target description every harness prompt variant shares.
+fn target_block(target: &TargetCandidate) -> String {
     // List the project functions this target reaches, so the harness shapes its
     // input to exercise them (capped to keep the prompt focused).
     let reach_line = if target.reachable_functions.is_empty() {
@@ -134,17 +154,7 @@ pub fn render_harness_prompt(target: &TargetCandidate, engine: EngineKind) -> St
         )
     };
     format!(
-        "You are the harness-agent for oxfuzz.\n\
-         Your job: write a fuzzing harness for the target below using {engine_name}.\n\
-         Rules:\n\
-         - Use the engine entry point exactly: {entry_point}\n\
-         - No host I/O. All input comes from the fuzzer.\n\
-         - Deterministic. No time-based or RNG branches.\n\
-         - Include only necessary headers.\n\
-         - Output only the harness source, in a fenced code block.\n\
-         \n\
-         Target:\n\
-         - symbol: {symbol}\n\
+        "- symbol: {symbol}\n\
          - language: {lang:?}\n\
          - kind: {kind:?}\n\
          - input_surface: {input_surface:?}\n\
@@ -159,6 +169,39 @@ pub fn render_harness_prompt(target: &TargetCandidate, engine: EngineKind) -> St
         sig = target.signature.as_deref().unwrap_or("(unknown)"),
         file = target.location.file.display(),
         line = target.location.line,
+        reach_line = reach_line,
+    )
+}
+
+/// Render the harness generation prompt for an AFL++ persistent-mode harness:
+/// one that owns `main`, moves the fork point past one-time setup with
+/// `__AFL_INIT()`, loops with `__AFL_LOOP(N)`, and resets state per iteration.
+/// `skeleton` is the canonical structure the model fills in (produced by
+/// `hf_harness::persistent::render_harness_source`); embedding it rather than
+/// describing the shape keeps the model's first draft compilable.
+#[must_use]
+pub fn render_persistent_harness_prompt(target: &TargetCandidate, skeleton: &str) -> String {
+    format!(
+        "You are the harness-agent for oxfuzz.\n\
+         Your job: write a fuzzing harness for the target below using AFL++ persistent mode.\n\
+         The harness owns `main` and the AFL++ forkserver loop; the build links NO\n\
+         libFuzzer driver. Structure the harness EXACTLY like this skeleton, filling in\n\
+         only the target's includes, forward declaration, setup/reset bodies, and the\n\
+         per-iteration target call:\n\
+         ```\n{skeleton}\n```\n\
+         Rules:\n\
+         - Keep the structure: `__AFL_FUZZ_INIT();` at file scope, one-time setup called before `__AFL_INIT();`, the `while (__AFL_LOOP(...))` loop over the shared-memory testcase buffer, and the standalone branch replaying each argv file once (crash replay, afl-showmap, and afl-cmin drive that branch).\n\
+         - The reset function must re-initialize ALL mutable state the target or harness keeps between calls, before every target call; state leaking between inputs causes phantom crashes and findings that never reproduce.\n\
+         - Keep the loop bound's default and its AFL_FUZZER_LOOPCOUNT override intact.\n\
+         - No host I/O beyond the standalone branch's file reads. All fuzzed input comes from the fuzzer.\n\
+         - Deterministic. No time-based or RNG branches.\n\
+         - Include only necessary headers.\n\
+         - Output only the harness source, in a fenced code block.\n\
+         \n\
+         Target:\n\
+         {target_block}",
+        skeleton = skeleton,
+        target_block = target_block(target),
     )
 }
 
@@ -218,7 +261,26 @@ pub fn render_harness_prompt_with_context(
     related: &[RelatedContext],
     build: Option<&BuildContext>,
 ) -> String {
-    let mut prompt = render_harness_prompt(target, engine);
+    compose_prompt_sections(
+        target,
+        render_harness_prompt(target, engine),
+        related,
+        build,
+        &[],
+    )
+}
+
+/// Append the optional context sections to a base harness prompt. Every
+/// absent section renders nothing, so a project without an index, build
+/// context, or promotions renders the base unchanged.
+fn compose_prompt_sections(
+    target: &TargetCandidate,
+    base: String,
+    related: &[RelatedContext],
+    build: Option<&BuildContext>,
+    examples: &[AcceptedExample],
+) -> String {
+    let mut prompt = base;
     if !related.is_empty() {
         prompt.push_str("\n\n");
         prompt.push_str(&render_related_context_section(related));
@@ -229,6 +291,11 @@ pub fn render_harness_prompt_with_context(
             prompt.push_str("\n\n");
             prompt.push_str(&section);
         }
+    }
+    let section = render_accepted_examples_section(examples);
+    if !section.is_empty() {
+        prompt.push_str("\n\n");
+        prompt.push_str(&section);
     }
     prompt
 }
@@ -292,13 +359,33 @@ pub fn render_harness_prompt_with_examples(
     build: Option<&BuildContext>,
     examples: &[AcceptedExample],
 ) -> String {
-    let mut prompt = render_harness_prompt_with_context(target, engine, related, build);
-    let section = render_accepted_examples_section(examples);
-    if !section.is_empty() {
-        prompt.push_str("\n\n");
-        prompt.push_str(&section);
-    }
-    prompt
+    compose_prompt_sections(
+        target,
+        render_harness_prompt(target, engine),
+        related,
+        build,
+        examples,
+    )
+}
+
+/// The persistent-mode draft prompt with the same context sections as the
+/// stock prompt. Empty/absent sections render the base persistent prompt
+/// unchanged.
+#[must_use]
+pub fn render_persistent_harness_prompt_with_examples(
+    target: &TargetCandidate,
+    related: &[RelatedContext],
+    build: Option<&BuildContext>,
+    examples: &[AcceptedExample],
+    skeleton: &str,
+) -> String {
+    compose_prompt_sections(
+        target,
+        render_persistent_harness_prompt(target, skeleton),
+        related,
+        build,
+        examples,
+    )
 }
 
 /// Include directories listed in a prompt. Past this the list stops helping the
@@ -395,6 +482,48 @@ pub fn render_harness_repair_prompt(
     )
 }
 
+/// The persistent-mode repair prompt: same fix-it shape as
+/// [`render_harness_repair_prompt`], but the base rules are the persistent
+/// structure, so a broken skeleton is repaired toward the persistent contract
+/// rather than toward the stock driver entry point.
+#[must_use]
+pub fn render_persistent_harness_repair_prompt(
+    target: &TargetCandidate,
+    failing_source: &str,
+    diagnostics: &str,
+    skeleton: &str,
+) -> String {
+    let base = render_persistent_harness_prompt(target, skeleton);
+    format!(
+        "{base}\n\
+         \n\
+         A previous attempt to build this harness FAILED. Fix it.\n\
+         \n\
+         Previous harness source:\n\
+         ```\n{failing_source}\n```\n\
+         \n\
+         Build/smoke diagnostics (fix the root cause, do not suppress warnings):\n\
+         ```\n{diagnostics}\n```\n\
+         \n\
+         Output only the corrected harness source, in a single fenced code block. \
+         Keep the same persistent-mode structure and rules as above.",
+    )
+}
+
+/// The uncovered-functions list the refine prompts share.
+fn uncovered_list(uncovered: &[String]) -> String {
+    if uncovered.is_empty() {
+        "(none reported -- broaden the input surface generally)".to_owned()
+    } else {
+        uncovered
+            .iter()
+            .take(30)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
 /// Render a harness *refinement* prompt: the target context, the current
 /// harness, and the reachable functions coverage has NOT reached yet, asking
 /// the LLM to reshape the harness so the fuzzer can drive into them.
@@ -410,16 +539,7 @@ pub fn render_harness_refine_prompt(
     uncovered: &[String],
 ) -> String {
     let base = render_harness_prompt(target, engine);
-    let uncovered_list = if uncovered.is_empty() {
-        "(none reported -- broaden the input surface generally)".to_owned()
-    } else {
-        uncovered
-            .iter()
-            .take(30)
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
+    let uncovered_list = uncovered_list(uncovered);
     format!(
         "{base}\n\
          \n\
@@ -433,6 +553,37 @@ pub fn render_harness_refine_prompt(
          Reshape the harness so the fuzzer can drive execution into those functions \
          (e.g. split the input into fields, dispatch on a leading selector byte, or \
          feed sub-buffers to the relevant calls). Keep the same engine entry point.\n\
+         Output only the improved harness source, in a single fenced code block.",
+    )
+}
+
+/// The persistent-mode refinement prompt: same stagnation framing as
+/// [`render_harness_refine_prompt`], with the persistent structure named as
+/// the invariant to keep.
+#[must_use]
+pub fn render_persistent_harness_refine_prompt(
+    target: &TargetCandidate,
+    current_source: &str,
+    uncovered: &[String],
+    skeleton: &str,
+) -> String {
+    let base = render_persistent_harness_prompt(target, skeleton);
+    let uncovered_list = uncovered_list(uncovered);
+    format!(
+        "{base}\n\
+         \n\
+         The current harness compiles and runs but coverage has STAGNATED: these \
+         reachable functions are still not exercised.\n\
+         Uncovered reachable functions: {uncovered_list}\n\
+         \n\
+         Current harness source:\n\
+         ```\n{current_source}\n```\n\
+         \n\
+         Reshape the harness so the fuzzer can drive execution into those functions \
+         (e.g. split the input into fields, dispatch on a leading selector byte, or \
+         feed sub-buffers to the relevant calls). Keep the same persistent-mode \
+         structure (__AFL_FUZZ_INIT, __AFL_INIT, the __AFL_LOOP loop, the per-iteration \
+         reset) and rules as above.\n\
          Output only the improved harness source, in a single fenced code block.",
     )
 }
@@ -936,5 +1087,114 @@ mod tests {
             render_harness_prompt_with_examples(&target, EngineKind::LibFuzzer, &[], None, &[]),
             render_harness_prompt_with_context(&target, EngineKind::LibFuzzer, &[], None)
         );
+    }
+
+    /// The skeleton the service embeds into persistent-mode prompts (the real
+    /// one is `hf_harness::persistent::render_harness_source`; the renderer
+    /// treats it as opaque text).
+    const PERSISTENT_SKELETON: &str = "__AFL_FUZZ_INIT();\n\
+         static void oxfuzz_target_setup(void);\n\
+         static void oxfuzz_target_reset(void);\n\
+         int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);\n\
+         int main(int argc, char **argv) { /* setup; __AFL_INIT(); loop/replay */ }\n";
+
+    #[test]
+    fn persistent_harness_prompt_names_the_structure_and_the_discipline() {
+        let target = sample_target();
+        let prompt = render_persistent_harness_prompt(&target, PERSISTENT_SKELETON);
+        for expected in [
+            "AFL++",
+            "persistent",
+            "__AFL_FUZZ_INIT",
+            "__AFL_INIT",
+            "__AFL_LOOP",
+            "LLVMFuzzerTestOneInput",
+            "AFL_FUZZER_LOOPCOUNT",
+            "fenced code block",
+            "symbol: parse_header",
+            "location: src/parse.c:42",
+        ] {
+            assert!(prompt.contains(expected), "missing {expected}:\n{prompt}");
+        }
+        assert!(prompt.contains(PERSISTENT_SKELETON), "{prompt}");
+        // The reset discipline is the point of the flavor.
+        assert!(prompt.contains("reset"), "{prompt}");
+        // The stock entry-point rule would contradict the custom main.
+        assert!(!prompt.contains("with -fsanitize=fuzzer"), "{prompt}");
+    }
+
+    #[test]
+    fn persistent_prompt_with_empty_sections_is_byte_identical_to_base() {
+        let target = sample_target();
+        assert_eq!(
+            render_persistent_harness_prompt_with_examples(
+                &target,
+                &[],
+                None,
+                &[],
+                PERSISTENT_SKELETON
+            ),
+            render_persistent_harness_prompt(&target, PERSISTENT_SKELETON)
+        );
+    }
+
+    #[test]
+    fn persistent_prompt_appends_context_and_example_sections() {
+        let target = sample_target();
+        let build = hf_core::build::BuildContext {
+            include_dirs: vec![std::path::PathBuf::from("/proj/include")],
+            ..hf_core::build::BuildContext::default()
+        };
+        let prompt = render_persistent_harness_prompt_with_examples(
+            &target,
+            &[RelatedContext {
+                file: "src/caller.c".to_owned(),
+                snippet: "void handle(void) { parse_header(buf, len); }".to_owned(),
+            }],
+            Some(&build),
+            &[AcceptedExample {
+                target_symbol: "parse_frame".to_owned(),
+                source: "int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n){return 0;}"
+                    .to_owned(),
+            }],
+            PERSISTENT_SKELETON,
+        );
+        assert!(prompt.contains("Related project context"), "{prompt}");
+        assert!(prompt.contains("src/caller.c"), "{prompt}");
+        assert!(prompt.contains("Project build context"), "{prompt}");
+        assert!(prompt.contains("Previously accepted"), "{prompt}");
+        assert!(prompt.contains("parse_frame"), "{prompt}");
+    }
+
+    #[test]
+    fn persistent_repair_prompt_keeps_the_structure_and_carries_diagnostics() {
+        let target = sample_target();
+        let prompt = render_persistent_harness_repair_prompt(
+            &target,
+            "int LLVMFuzzerTestOneInput(){ frobnicate(); }",
+            "error: use of undeclared identifier 'frobnicate'",
+            PERSISTENT_SKELETON,
+        );
+        assert!(prompt.contains("frobnicate()"), "{prompt}");
+        assert!(
+            prompt.contains("undeclared identifier 'frobnicate'"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("__AFL_LOOP"), "{prompt}");
+        assert!(prompt.contains("fenced code block"), "{prompt}");
+    }
+
+    #[test]
+    fn persistent_refine_prompt_keeps_the_structure_and_lists_uncovered() {
+        let target = sample_target();
+        let prompt = render_persistent_harness_refine_prompt(
+            &target,
+            "int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n){return 0;}",
+            &["decode_frame".to_owned()],
+            PERSISTENT_SKELETON,
+        );
+        assert!(prompt.contains("decode_frame"), "{prompt}");
+        assert!(prompt.contains("return 0;"), "{prompt}");
+        assert!(prompt.contains("__AFL_LOOP"), "{prompt}");
     }
 }

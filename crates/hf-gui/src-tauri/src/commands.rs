@@ -291,6 +291,10 @@ pub async fn harness_draft(
             lang,
             ai.unwrap_or_default(),
             None,
+            // The desktop draft flow offers the stock driver shape; a
+            // persistent-mode source pasted into the editor still compiles
+            // driver-less through the source-derived build variant.
+            false,
         )
         .await
         .map_err(|e| e.to_string())?;

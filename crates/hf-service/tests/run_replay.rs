@@ -318,6 +318,7 @@ async fn run_records_a_seed_and_replay_reexecutes_with_it() {
             1,
             None,
             false,
+            false,
         )
         .await
         .expect("prepare harness");

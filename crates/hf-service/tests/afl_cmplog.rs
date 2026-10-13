@@ -281,6 +281,7 @@ async fn qualify(container: &ServiceContainer, project: &Path, cmplog: bool) {
             1,
             None,
             cmplog,
+            false,
         )
         .await
         .expect("prepare harness");

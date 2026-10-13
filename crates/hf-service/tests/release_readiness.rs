@@ -233,6 +233,7 @@ async fn generated_harness_propagates_a_configured_store_write_failure() {
             0,
             None,
             false,
+            false,
         )
         .await
         .expect_err("generated harness persistence is part of successful generation");

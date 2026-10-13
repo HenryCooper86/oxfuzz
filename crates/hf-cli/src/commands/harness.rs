@@ -20,12 +20,18 @@ pub(crate) async fn cmd_harness(
     refine: bool,
     promote: bool,
     review_bypass: hf_service::HarnessReviewBypass,
-    sanitizer: Option<&str>,
-    cmplog: bool,
+    build: &crate::args::HarnessBuildArgs,
 ) -> anyhow::Result<()> {
     let engine = parse_engine(engine)?;
     let lang = parse_lang(lang)?;
-    let sanitizer = sanitizer.map(parse_sanitizer).transpose()?;
+    let crate::args::HarnessBuildArgs {
+        sanitizer,
+        cmplog,
+        persistent,
+    } = build;
+    let sanitizer = sanitizer.as_deref().map(parse_sanitizer).transpose()?;
+    let cmplog = *cmplog;
+    let persistent = *persistent;
     let crate::args::HarnessDraftArgs { draft_only, json } = draft;
     let output = if json {
         HarnessOutput::Json
@@ -74,6 +80,17 @@ pub(crate) async fn cmd_harness(
                  companion"
             );
         }
+        if persistent {
+            // Same identity rule: refinement keeps the active revision's
+            // driver/persistent shape (the build derives it from the refined
+            // source), so a requested --persistent here would be silently
+            // ignored.
+            anyhow::bail!(
+                "--persistent does not combine with --refine: refinement keeps the active \
+                 revision's harness shape; use a fresh `oxfuzz harness --persistent` to switch \
+                 to AFL++ persistent mode"
+            );
+        }
         println!("--- Refining harness (coverage-guided) ---");
         let outcome = container
             .harness_refine(&project, target, engine, lang, repair.max(1))
@@ -108,7 +125,9 @@ pub(crate) async fn cmd_harness(
     if repair > 0 && !draft_only {
         println!("--- Generating harness (auto-repair up to {repair}x) ---");
         let outcome = container
-            .harness_generate(&project, target, engine, lang, repair, sanitizer, cmplog)
+            .harness_generate(
+                &project, target, engine, lang, repair, sanitizer, cmplog, persistent,
+            )
             .await?;
         println!(
             "compile: status={:?} repairs_used={}",
@@ -129,7 +148,15 @@ pub(crate) async fn cmd_harness(
     }
 
     let draft = container
-        .harness_draft_with_policy(&project, target, engine, lang, ai.into(), sanitizer)
+        .harness_draft_with_policy(
+            &project,
+            target,
+            engine,
+            lang,
+            ai.into(),
+            sanitizer,
+            persistent,
+        )
         .await?;
     if matches!(output, HarnessOutput::Json) {
         println!("{}", serde_json::to_string_pretty(&draft)?);

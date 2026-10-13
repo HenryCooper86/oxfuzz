@@ -717,6 +717,7 @@ async fn configured_harness_admission_enforces_saved_profile_without_optional_fe
             0,
             None,
             false,
+            false,
         )
         .await
         .unwrap_err();

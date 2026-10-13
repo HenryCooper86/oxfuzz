@@ -185,9 +185,14 @@ mod collection {
                 .env
                 .push((PROFILE_ENV_KEY.to_owned(), PROFILE_FILE.to_owned()));
             if !smoke && config.engine == EngineKind::AflPlusPlus {
-                config
-                    .env
-                    .push(("AFL_FUZZER_LOOPCOUNT".to_owned(), "100".to_owned()));
+                // Bound the forkserver child's persistent loop so children exit
+                // and flush their LLVM profile counters regularly. The AFL++
+                // driver reads this knob; a persistent-mode harness
+                // (`hf_harness::persistent`) honors the same one.
+                config.env.push((
+                    hf_harness::persistent::LOOPCOUNT_ENV.to_owned(),
+                    "100".to_owned(),
+                ));
             }
         }
     }

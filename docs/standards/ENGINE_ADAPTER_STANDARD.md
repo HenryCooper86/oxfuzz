@@ -96,6 +96,15 @@ a file argument:
 All five forms must be built through `hf-engine::afl`'s typed input-delivery
 helpers. Omitting `@@` selects AFL++'s stdin mode and is a contract violation.
 
+This contract is unchanged for an AFL++ persistent-mode harness (one carrying
+`__AFL_LOOP`/`__AFL_FUZZ_INIT`, built per §3.8): afl-fuzz detects the binary's
+shared-memory capability in the forkserver handshake, unlinks the `@@` output
+file, and delivers every input through shared memory (4.09c, afl-fuzz.c's
+`use_shmem_fuzz` switch); the standalone forms (`<binary> <input>`) reach the
+harness's own replay branch. The stock driver build already receives
+shared-memory input the same way, so this pipeline has no stdin-mode harness
+at all.
+
 ### 3.3 Per-Input Timeout
 
 `FuzzRunConfig.input_timeout` carries the resolved per-input timeout (one input
@@ -359,6 +368,47 @@ through fresh-inode atomic writes. Any failure -- non-zero exit, empty or
 foreign output, budget overflow, adoption error -- keeps the retained corpus
 untouched (with rollback from the pristine snapshot), so a failed or garbage
 run can never empty the corpus.
+
+### 3.8 AFL++ Persistent-Mode Harnesses
+
+A persistent-mode harness is an AFL++ C/C++ harness whose source owns `main`
+and the forkserver loop (`__AFL_INIT()` + `while (__AFL_LOOP(N))` +
+`__AFL_FUZZ_INIT()`), for stateful or slow-to-initialize targets. The operator
+selects it at draft time with `oxfuzz harness --engine afl++ --persistent`;
+the full authoring discipline lives in `docs/standards/HARNESS_STANDARD.md`
+section 7. The adapter-facing contract:
+
+**Build side.** `hf_harness::build_command_for_source` derives the variant from
+the source (`hf_harness::persistent::is_persistent_source`): a persistent
+source compiles with afl-clang-fast/afl-clang-fast++ but WITHOUT
+`-fsanitize=fuzzer`, because `__AFL_FUZZ_INIT()` and the AFL++ libFuzzer
+driver both define `__afl_sharedmem_fuzzing` strongly and cannot link
+together. The instrumentation runtime that provides `__afl_persistent_loop`,
+`__afl_manual_init`, and the shared-memory testcase globals is linked
+regardless. `hf_harness::try_compile` refuses the two wrong pairings -- a
+persistent source with the driver flag, or with a non-AFL++ engine -- with the
+fix named, before any container work. A `CmpLog` companion of a persistent
+harness follows the same driver choice
+(`hf_harness::cmplog_build_command_for_source`), since it compiles the same
+source.
+
+**Run side.** Unchanged: `afl-fuzz ... -- <binary> @@` (§3.2). The harness
+advertises shared-memory input in the forkserver handshake; afl-fuzz 4.09c
+unlinks the `@@` file and switches to shared-memory delivery, and the
+harness's `__AFL_LOOP(N)` bounds each forkserver child's lifetime (N defaults
+to 1000 and honors the `AFL_FUZZER_LOOPCOUNT` override, the same knob the
+driver documents and the function-coverage proof path sets to 100 on profiled
+campaigns). The `stability` percentage in `fuzzer_stats` is the signal a state
+leak degrades; the per-iteration reset discipline is what keeps it high.
+
+**Measurement side.** `afl-showmap` and `afl-cmin` drive the same binary
+unchanged. Under their forkserver the harness serves one input per iteration
+through shared memory, and the fuzzer side clears the shared coverage map
+before every run (4.09c, afl-forkserver.c's per-run `memset`), so per-input
+maps stay per-input. Direct `binary <input>` replay (no forkserver) reaches
+the harness's standalone branch, which replays each file argument once. The
+corpus operations, edge-set capture, and crash replay therefore need no
+flavor-specific handling.
 
 ## 4. Progress Streaming
 

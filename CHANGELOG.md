@@ -11,6 +11,34 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ### Added
 
+- AFL++ persistent-mode harness flavor for stateful or slow-to-initialize
+  targets. `oxfuzz harness --target <sym> --engine afl++ --persistent` drafts
+  a harness that owns `main` and the forkserver loop: `__AFL_FUZZ_INIT()`
+  shared-memory input, one-time setup before `__AFL_INIT()` (the deferred
+  forkserver clones the post-setup state), a `while (__AFL_LOOP(N))` loop
+  (N defaults to 1000, AFL++'s recommended starting point, and honors the
+  `AFL_FUZZER_LOOPCOUNT` override the function-coverage proof path sets to
+  100 on profiled campaigns), an explicit per-iteration reset section (the
+  discipline that keeps persistent findings reproducible), and a standalone
+  branch that replays each file argument once so crash replay, afl-showmap,
+  and afl-cmin keep working unchanged. The build derives from the source's
+  structure: a persistent source compiles with afl-clang-fast but without
+  `-fsanitize=fuzzer` (its `__AFL_FUZZ_INIT()` and the libFuzzer driver both
+  define `__afl_sharedmem_fuzzing` strongly and cannot link), on every
+  compile surface -- CLI, GUI/REST source upload, and work-order import --
+  with the wrong pairings refused with the fix named. The lint gains three
+  warning-tier structural rules for persistent sources
+  (`persistent-loop-without-shm-init`, `persistent-shm-init-without-loop`,
+  `persistent-mutable-global`, the state-reset obligation); smoke,
+  independent review, and promotion gates are unchanged. The flavor is AFL++
+  + C/C++ only, opt-in per invocation with no `[fuzzing]` default, and does
+  not combine with `--refine` (refinement keeps the active revision's shape).
+  `oxfuzz fuzz` deliberately has no `--persistent`: the one-command pipeline
+  keeps the stock driver shape. Shared-memory input needed no work: the stock
+  driver build already receives it (afl-fuzz switches delivery on the
+  forkserver handshake), which is why the run argv is identical for both
+  shapes. See `docs/standards/HARNESS_STANDARD.md` section 7 and
+  `docs/standards/ENGINE_ADAPTER_STANDARD.md` 3.8.
 - Batch corpus distillation for AFL++ targets: `oxfuzz corpus --op afl-cmin`
   runs one sandboxed `afl-cmin` invocation that reduces the whole corpus to a
   minimum covering set (parallel `-T` follows the sandbox CPU ceiling, `-t`

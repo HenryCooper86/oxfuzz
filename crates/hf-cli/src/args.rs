@@ -222,7 +222,7 @@ pub(crate) struct HarnessArgs {
     /// offline work or hosts without a provider key. The bypass is persisted
     /// as a marked review record and a guardrail audit row, and human
     /// promotion is still required; without the model review, only the
-    /// 13-rule lexical lint and your own approval stand between the generated
+    /// 16-rule lexical lint and your own approval stand between the generated
     /// harness and the sandbox. See `docs/guides/SAFETY_MODEL.md`.
     #[arg(long)]
     pub(crate) no_llm_review: bool,
@@ -231,8 +231,9 @@ pub(crate) struct HarnessArgs {
 }
 
 /// The build-variant selection of `oxfuzz harness`: which sanitizer the
-/// harness binary is built with, and whether an AFL++ `CmpLog` companion is
-/// built alongside it. Both are baked into the harness revision's recorded
+/// harness binary is built with, whether an AFL++ `CmpLog` companion is
+/// built alongside it, and whether the harness is drafted in AFL++
+/// persistent mode. All three are baked into the harness revision's recorded
 /// build.
 #[derive(clap::Args)]
 pub(crate) struct HarnessBuildArgs {
@@ -247,6 +248,13 @@ pub(crate) struct HarnessBuildArgs {
     /// `run`/`campaign`/`fuzz --cmplog` then drives it via `afl-fuzz -c`.
     #[arg(long)]
     pub(crate) cmplog: bool,
+    /// AFL++ only: draft the harness in persistent mode -- it owns `main` and
+    /// the forkserver loop (`__AFL_INIT` + `__AFL_LOOP(N)`) with an explicit
+    /// per-iteration state reset, for stateful or slow-to-initialize targets.
+    /// The build links no libFuzzer driver. See
+    /// `docs/standards/HARNESS_STANDARD.md` (persistent mode).
+    #[arg(long)]
+    pub(crate) persistent: bool,
 }
 
 /// Controls for emitting harness drafts without execution.
@@ -509,7 +517,7 @@ pub(crate) struct FuzzSwitchArgs {
     /// offline work or hosts without a provider key. The bypass is persisted
     /// as a marked review record and a guardrail audit row, and human
     /// promotion is still required; without the model review, only the
-    /// 13-rule lexical lint and your own approval stand between the generated
+    /// 16-rule lexical lint and your own approval stand between the generated
     /// harness and the sandbox. See `docs/guides/SAFETY_MODEL.md`.
     #[arg(long)]
     pub(crate) no_llm_review: bool,
@@ -2118,5 +2126,88 @@ mod demo_cli_tests {
         assert!(Cli::try_parse_from(&args).is_ok());
         args.extend(["--out", "packet.md"]);
         assert!(Cli::try_parse_from(args).is_err());
+    }
+}
+
+#[cfg(test)]
+mod persistent_cli_tests {
+    use clap::Parser as _;
+
+    use super::{Cli, Commands};
+
+    #[test]
+    fn harness_accepts_persistent_and_defaults_it_off() {
+        let parsed = Cli::try_parse_from([
+            "oxfuzz",
+            "harness",
+            "/p",
+            "--target",
+            "t",
+            "--engine",
+            "afl++",
+            "--persistent",
+        ])
+        .unwrap();
+        let Commands::Harness(crate::args::HarnessArgs {
+            build: crate::args::HarnessBuildArgs { persistent, .. },
+            ..
+        }) = parsed.command
+        else {
+            panic!("expected harness");
+        };
+        assert!(persistent);
+
+        let parsed = Cli::try_parse_from([
+            "oxfuzz", "harness", "/p", "--target", "t", "--engine", "afl++",
+        ])
+        .unwrap();
+        let Commands::Harness(crate::args::HarnessArgs {
+            build: crate::args::HarnessBuildArgs { persistent, .. },
+            ..
+        }) = parsed.command
+        else {
+            panic!("expected harness");
+        };
+        assert!(!persistent, "persistent mode is opt-in");
+    }
+
+    #[test]
+    fn harness_persistent_combines_with_draft_only_and_cmplog() {
+        // Draft-only shows the persistent skeleton without compiling; CmpLog is
+        // an orthogonal companion build of the same source.
+        for extra in [
+            vec!["--draft-only"],
+            vec!["--cmplog"],
+            vec!["--draft-only", "--cmplog"],
+        ] {
+            let mut argv = vec![
+                "oxfuzz",
+                "harness",
+                "/p",
+                "--target",
+                "t",
+                "--engine",
+                "afl++",
+                "--persistent",
+            ];
+            argv.extend(extra.iter().copied());
+            assert!(
+                Cli::try_parse_from(argv).is_ok(),
+                "persistent must combine with {extra:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn harness_help_documents_persistent_mode() {
+        use clap::CommandFactory as _;
+
+        let mut command = Cli::command();
+        let harness = command
+            .find_subcommand_mut("harness")
+            .expect("harness subcommand");
+        let help = harness.render_long_help().to_string();
+        assert!(help.contains("--persistent"), "{help}");
+        assert!(help.contains("__AFL_LOOP"), "{help}");
     }
 }

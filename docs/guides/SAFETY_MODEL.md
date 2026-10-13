@@ -26,7 +26,7 @@ digest-bound review record (`verdict: "bypassed"`, `reviewer: "none"`) and a
 guardrail policy-decision row, and the approval surface shows it as a bypass
 rather than a review. The human promotion gate is unchanged, and a bypass
 never overturns a persisted negative LLM verdict. Residual risk: without the
-model review, only the 13-rule lexical lint and the human promoter's own
+model review, only the 16-rule lexical lint and the human promoter's own
 reading stand between generated harness code and the sandbox.
 
 **Generated harnesses are never run on the host. Human approval authorizes a

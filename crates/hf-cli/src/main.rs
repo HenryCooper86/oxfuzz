@@ -134,7 +134,7 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
             refine,
             promote,
             no_llm_review,
-            build: args::HarnessBuildArgs { sanitizer, cmplog },
+            build,
         }) => {
             let review_bypass = if no_llm_review {
                 hf_service::HarnessReviewBypass::Requested
@@ -152,8 +152,7 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
                 refine,
                 promote,
                 review_bypass,
-                sanitizer.as_deref(),
-                cmplog,
+                &build,
             )
             .await?;
         }

@@ -235,6 +235,7 @@ async fn promote_for_engine(container: &ServiceContainer, project: &Path, engine
             1,
             None,
             false,
+            false,
         )
         .await
         .expect("prepare harness");

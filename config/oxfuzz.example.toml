@@ -103,7 +103,7 @@ max_duration_secs = 7200
 # qualification proceed without the mandatory independent LLM pre-execution
 # review -- the offline / no-provider-key path. Off by default and never
 # implied: the per-invocation `oxfuzz harness --no-llm-review` flag opts in
-# without this setting. Residual risk when enabled: only the 13-rule lexical
+# without this setting. Residual risk when enabled: only the 16-rule lexical
 # lint and the human promotion gate stand between generated harness code and
 # the sandbox. Every bypass is persisted as a marked review record
 # (verdict "bypassed", reviewer "none") and a guardrail policy-decision row;

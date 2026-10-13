@@ -160,6 +160,7 @@ async fn harness_generate_repairs_a_failing_compile() {
             2,
             None,
             false,
+            false,
         )
         .await
         .expect("harness_generate should recover via repair");
@@ -196,6 +197,7 @@ async fn harness_generate_gives_up_after_max_repairs() {
             TargetLanguage::C,
             1,
             None,
+            false,
             false,
         )
         .await;
@@ -323,6 +325,7 @@ async fn new_compilation_requires_store_before_runtime_or_provider() {
             0,
             None,
             false,
+            false,
         )
         .await;
     assert!(generated
@@ -359,6 +362,7 @@ async fn repair_success_records_only_the_successful_attempts_fresh_database_flag
             TargetLanguage::C,
             1,
             None,
+            false,
             false,
         )
         .await

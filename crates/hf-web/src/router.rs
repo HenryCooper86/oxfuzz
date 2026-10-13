@@ -1997,7 +1997,10 @@ async fn harness_draft(
     };
     let draft = state
         .container
-        .harness_draft_with_policy(&project, &req.target, engine, lang, req.ai, None)
+        // The REST surface carries no persistent-flavor request; a
+        // persistent-structured source still compiles driver-less through the
+        // source-derived build variant on the compile route.
+        .harness_draft_with_policy(&project, &req.target, engine, lang, req.ai, None, false)
         .await
         .map_err(classified_api_error)?;
     Ok(Json(serde_json::json!({

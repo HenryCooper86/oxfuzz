@@ -60,6 +60,11 @@ Work Order. The fixtures contain known triggers; time to discover them depends
 on the engine, qualified harness and seed corpus. See the
 [CLI guide](../docs/guides/CLI_REFERENCE.md) for the full review workflow.
 
+The `aflpp_persistent` row fuzzes fine on the stock driver build; for the
+harness-owned loop form (`__AFL_INIT` + `__AFL_LOOP` with an explicit
+per-iteration reset), draft it with `oxfuzz harness --engine afl++
+--persistent` (see "AFL++ persistent mode" in the CLI guide).
+
 `scripts/demo-cve-rediscovery.sh` automates this retained-attempt workflow:
 it displays the imported source and qualification result, then asks for human
 approval before promoting that exact attempt. Failed qualification, declined

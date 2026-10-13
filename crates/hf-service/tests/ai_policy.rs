@@ -42,6 +42,7 @@ async fn require_refuses_to_substitute_the_template() {
             TargetLanguage::C,
             AiPolicy::Require,
             None,
+            false,
         )
         .await
         .expect_err("an AI harness was required and none is available");
@@ -68,6 +69,7 @@ async fn auto_falls_back_and_records_which_generator_answered() {
             TargetLanguage::C,
             AiPolicy::Auto,
             None,
+            false,
         )
         .await
         .expect("auto degrades rather than failing");
@@ -91,6 +93,7 @@ async fn off_uses_the_template_and_the_default_is_auto() {
             TargetLanguage::C,
             AiPolicy::Off,
             None,
+            false,
         )
         .await
         .unwrap();

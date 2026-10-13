@@ -235,6 +235,7 @@ async fn harness_generate_conditions_the_draft_on_promoted_harnesses() {
             0,
             None,
             false,
+            false,
         )
         .await
         .expect("generation should complete");
@@ -273,6 +274,7 @@ async fn harness_generate_without_promotions_drafts_without_the_section() {
             TargetLanguage::C,
             0,
             None,
+            false,
             false,
         )
         .await

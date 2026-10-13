@@ -214,6 +214,39 @@ pub struct HarnessRuleSummary {
     pub languages: Vec<&'static str>,
 }
 
+/// A whole-source structural rule. The persistent-mode hazards are properties
+/// of the harness's overall shape (a missing macro, file-scope mutable state),
+/// not one call site, so they cannot live in the per-line `Rule` table. They
+/// apply only to a source that carries an AFL++ persistent marker: scoping the
+/// heuristic to the shape it describes keeps ordinary driver harnesses free of
+/// these findings.
+struct StructuralRule {
+    id: &'static str,
+    message: &'static str,
+}
+
+const PERSISTENT_STRUCTURAL_RULES: [StructuralRule; 3] = [
+    StructuralRule {
+        id: "persistent-loop-without-shm-init",
+        message: "the __AFL_LOOP persistent loop reads its input through \
+                  __AFL_FUZZ_TESTCASE_BUF/LEN, which only __AFL_FUZZ_INIT() backs; without \
+                  it the harness runs empty iterations. Add `__AFL_FUZZ_INIT();` at file scope.",
+    },
+    StructuralRule {
+        id: "persistent-shm-init-without-loop",
+        message: "__AFL_FUZZ_INIT() without __AFL_LOOP(N) serves one input per forked child \
+                  and re-forks for the next, so the persistent-mode reuse this harness was \
+                  built for never happens. Drive the target from `while (__AFL_LOOP(N))`.",
+    },
+    StructuralRule {
+        id: "persistent-mutable-global",
+        message: "a persistent harness reuses one process for many inputs: re-initialize \
+                  every mutable file-scope variable in the per-iteration reset, or state \
+                  leaks between inputs and findings stop reproducing. Make it const, move \
+                  it into the call, or reset it.",
+    },
+];
+
 /// Every harness rule the lint enforces.
 ///
 /// Exposed so an authoring packet can state the constraints up front instead of
@@ -229,6 +262,16 @@ pub fn harness_rules() -> Vec<HarnessRuleSummary> {
             message: rule.message.to_owned(),
             languages: rule.languages.iter().map(|lang| lang.as_str()).collect(),
         })
+        .chain(
+            PERSISTENT_STRUCTURAL_RULES
+                .iter()
+                .map(|rule| HarnessRuleSummary {
+                    id: rule.id.to_owned(),
+                    severity: LintSeverity::Warning,
+                    message: rule.message.to_owned(),
+                    languages: vec!["c", "cpp"],
+                }),
+        )
         .collect()
 }
 
@@ -249,7 +292,7 @@ fn compiled_rules() -> &'static Vec<Regex> {
 ///
 /// `#` is a comment opener only for Python: in C it opens a preprocessor
 /// directive, which the rules may legitimately need to see.
-fn is_comment_line(line: &str, language: TargetLanguage) -> bool {
+pub(crate) fn is_comment_line(line: &str, language: TargetLanguage) -> bool {
     let trimmed = line.trim_start();
     if language == TargetLanguage::Python {
         return trimmed.starts_with('#');
@@ -292,8 +335,92 @@ pub fn lint_harness_source(source: &str, language: TargetLanguage) -> Vec<LintFi
             }
         }
     }
+    if matches!(language, TargetLanguage::C | TargetLanguage::Cpp) {
+        lint_persistent_structure(source, &mut findings);
+    }
     findings.sort_by(|a, b| a.line.cmp(&b.line).then_with(|| a.rule.cmp(&b.rule)));
     findings
+}
+
+/// The mutable file-scope definition shape: `<type words> <name> = ...` or
+/// `<type words> <name>[...] ;`, at column 0. A `(` right after the name marks
+/// a function, which the shape never matches.
+fn mutable_definition_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        Regex::new(
+            r"^[A-Za-z_][A-Za-z0-9_ ]*\*?\s*[A-Za-z_][A-Za-z0-9_]*\s*(?:\[[^\]]*\])?\s*(?:=[^=]|;)",
+        )
+        .expect("the mutable-definition pattern is a compile-time constant")
+    })
+}
+
+/// Lexical approximation of a mutable file-scope variable definition. Used
+/// only to advise (warning tier): `typedef`/`extern` carry no storage here, a
+/// `const` token anywhere makes the object read-only, and only column-0 lines
+/// are candidates.
+fn is_mutable_file_scope_definition(line: &str) -> bool {
+    if line.is_empty() || line.starts_with([' ', '\t']) || line.starts_with('#') {
+        return false;
+    }
+    let first = line.split([' ', '\t']).next().unwrap_or_default();
+    if first == "typedef" || first == "extern" {
+        return false;
+    }
+    if crate::persistent::line_has_word(line, "const") {
+        return false;
+    }
+    mutable_definition_pattern().is_match(line)
+}
+
+/// Structural rules for an AFL++ persistent-mode harness (one carrying a
+/// `__AFL_LOOP`/`__AFL_FUZZ_INIT` call): the loop and the shared-memory init
+/// need each other, and every mutable file-scope variable is state that must
+/// survive the per-iteration reset. All findings are warnings: the
+/// compiler/linker hard-fails the structurally broken pairings already
+/// (undefined `__afl_fuzz_*` globals), so the lint advises rather than blocks.
+fn lint_persistent_structure(source: &str, findings: &mut Vec<LintFinding>) {
+    let mut loop_line: Option<u32> = None;
+    let mut init_line: Option<u32> = None;
+    for (index, line) in source.lines().enumerate() {
+        if is_comment_line(line, TargetLanguage::C) {
+            continue;
+        }
+        let number = u32::try_from(index + 1).unwrap_or(u32::MAX);
+        if loop_line.is_none() && crate::persistent::line_calls_macro(line, "__AFL_LOOP") {
+            loop_line = Some(number);
+        }
+        if init_line.is_none() && crate::persistent::line_calls_macro(line, "__AFL_FUZZ_INIT") {
+            init_line = Some(number);
+        }
+    }
+    match (loop_line, init_line) {
+        (None, None) => return,
+        (Some(line), None) => findings.push(LintFinding {
+            severity: LintSeverity::Warning,
+            rule: PERSISTENT_STRUCTURAL_RULES[0].id.to_owned(),
+            message: PERSISTENT_STRUCTURAL_RULES[0].message.to_owned(),
+            line,
+        }),
+        (None, Some(line)) => findings.push(LintFinding {
+            severity: LintSeverity::Warning,
+            rule: PERSISTENT_STRUCTURAL_RULES[1].id.to_owned(),
+            message: PERSISTENT_STRUCTURAL_RULES[1].message.to_owned(),
+            line,
+        }),
+        (Some(_), Some(_)) => {}
+    }
+    for (index, line) in source.lines().enumerate() {
+        if is_comment_line(line, TargetLanguage::C) || !is_mutable_file_scope_definition(line) {
+            continue;
+        }
+        findings.push(LintFinding {
+            severity: LintSeverity::Warning,
+            rule: PERSISTENT_STRUCTURAL_RULES[2].id.to_owned(),
+            message: PERSISTENT_STRUCTURAL_RULES[2].message.to_owned(),
+            line: u32::try_from(index + 1).unwrap_or(u32::MAX),
+        });
+    }
 }
 
 /// Whether any finding blocks the build.
@@ -578,5 +705,164 @@ mod tests {
             .find(|rule| rule.id == "no-catch-all")
             .expect("no-catch-all is a rule");
         assert_eq!(catch_all.languages, vec!["cpp"]);
+    }
+
+    // -- AFL++ persistent-mode structural rules -------------------------------
+
+    /// A canonical persistent-mode harness skeleton for these tests.
+    fn persistent_source() -> String {
+        crate::persistent::render_harness_source(&crate::persistent::PersistentHarnessParts {
+            symbol: "parse_entry",
+            location: "src/parse.c:42",
+            signature: Some("int parse_entry(const uint8_t *data, size_t len)"),
+            includes: "",
+            forward_decl: "int parse_entry(const uint8_t *data, size_t len);",
+            body: "    parse_entry((const uint8_t *)data, size);",
+        })
+    }
+
+    #[test]
+    fn a_loop_without_shm_init_is_a_warning() {
+        // The shared-memory input macros have no backing globals without
+        // __AFL_FUZZ_INIT(), so this harness reads no fuzzer input.
+        let source = "int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n);\n\
+                      int main(void) {\n\
+                      \x20   while (__AFL_LOOP(1000)) { }\n\
+                      \x20   return 0;\n\
+                      }\n";
+        let findings = lint_harness_source(source, TargetLanguage::C);
+        let finding = findings
+            .iter()
+            .find(|f| f.rule == "persistent-loop-without-shm-init")
+            .expect("the missing shm init must be named");
+        assert_eq!(finding.severity, LintSeverity::Warning);
+        assert_eq!(finding.line, 3);
+    }
+
+    #[test]
+    fn shm_init_without_a_loop_is_a_warning() {
+        // One input per forked child: the persistent reuse never happens.
+        let source = "__AFL_FUZZ_INIT();\n\
+                      int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n);\n\
+                      int main(void) { return 0; }\n";
+        let findings = lint_harness_source(source, TargetLanguage::C);
+        let finding = findings
+            .iter()
+            .find(|f| f.rule == "persistent-shm-init-without-loop")
+            .expect("the missing loop must be named");
+        assert_eq!(finding.severity, LintSeverity::Warning);
+        assert_eq!(finding.line, 1);
+    }
+
+    #[test]
+    fn a_complete_persistent_structure_draws_no_structural_findings() {
+        let findings = lint_harness_source(&persistent_source(), TargetLanguage::C);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn mutable_file_scope_state_in_a_persistent_harness_is_a_warning() {
+        let source = format!("static int calls_so_far = 0;\n{}", persistent_source());
+        let findings = lint_harness_source(&source, TargetLanguage::C);
+        let finding = findings
+            .iter()
+            .find(|f| f.rule == "persistent-mutable-global")
+            .expect("mutable file-scope state must be named");
+        assert_eq!(finding.severity, LintSeverity::Warning);
+        assert_eq!(finding.line, 1);
+        assert!(finding.message.contains("reset"), "{}", finding.message);
+    }
+
+    #[test]
+    fn mutable_global_variants_match_and_safe_forms_do_not() {
+        let persistent = persistent_source();
+        let flagged = [
+            "int g_state = 0;",
+            "static int g_state;",
+            "static uint8_t g_buf[4096];",
+            "char *g_buf = NULL;",
+            "struct ctx g_ctx = {0};",
+            "volatile unsigned long g_tick;",
+        ];
+        for line in flagged {
+            let source = format!("{line}\n{persistent}");
+            let findings = lint_harness_source(&source, TargetLanguage::C);
+            assert!(
+                findings
+                    .iter()
+                    .any(|f| f.rule == "persistent-mutable-global"),
+                "must flag `{line}`"
+            );
+        }
+        let clean = [
+            // Read-only tables are not leakable state.
+            "static const int TABLE[4] = {0};",
+            "const char *const NAMES[] = {\"a\"};",
+            // A typedef introduces no storage; an extern declaration defines none.
+            "typedef unsigned int u32;",
+            "extern int shared_elsewhere;",
+            // Directives and declarations.
+            "#define LIMIT 5",
+            "int parse_entry(const uint8_t *data, size_t len);",
+            // A local variable inside a function body is per-call state.
+            "    int counter = 0;",
+        ];
+        for line in clean {
+            let source = format!("{line}\n{persistent}");
+            let findings = lint_harness_source(&source, TargetLanguage::C);
+            assert!(
+                !findings
+                    .iter()
+                    .any(|f| f.rule == "persistent-mutable-global"),
+                "must not flag `{line}`"
+            );
+        }
+    }
+
+    #[test]
+    fn the_persistent_rules_do_not_fire_on_driver_style_sources() {
+        // Scoping: the same mutable global in a driver-style harness is the
+        // driver's loop discipline, outside this rule's scope.
+        let source = "static int counter = 0;\n\
+                      int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n) { return 0; }\n";
+        let findings = lint_harness_source(source, TargetLanguage::C);
+        assert!(
+            !findings.iter().any(|f| f.rule.starts_with("persistent-")),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn the_persistent_rules_are_c_family_only() {
+        let findings = lint_harness_source(&persistent_source(), TargetLanguage::Rust);
+        assert!(
+            !findings.iter().any(|f| f.rule.starts_with("persistent-")),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn the_persistent_rules_are_listed_for_authors() {
+        let all = harness_rules();
+        for id in [
+            "persistent-loop-without-shm-init",
+            "persistent-shm-init-without-loop",
+            "persistent-mutable-global",
+        ] {
+            let rule = all.iter().find(|rule| rule.id == id).expect(id);
+            assert_eq!(rule.severity, LintSeverity::Warning);
+            assert_eq!(rule.languages, vec!["c", "cpp"]);
+        }
+    }
+
+    #[test]
+    fn comment_only_marker_mentions_do_not_trigger_structural_rules() {
+        let source = "// while (__AFL_LOOP(1000)) would go here\n\
+                      int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n) { return 0; }\n";
+        let findings = lint_harness_source(source, TargetLanguage::C);
+        assert!(
+            !findings.iter().any(|f| f.rule.starts_with("persistent-")),
+            "{findings:?}"
+        );
     }
 }

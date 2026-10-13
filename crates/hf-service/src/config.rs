@@ -1090,7 +1090,7 @@ impl FuzzingSettings {
 pub struct HarnessSettings {
     /// Permit smoke qualification without the independent LLM pre-execution
     /// review. Off by default and deliberately so: with the review skipped,
-    /// only the 13-rule lexical lint and the human promotion gate stand
+    /// only the 16-rule lexical lint and the human promotion gate stand
     /// between generated harness code and the sandbox. Every bypass -- via
     /// this setting or the per-invocation `--no-llm-review` flag -- persists a
     /// marked review record and a policy-decision row (Engineering Protocol

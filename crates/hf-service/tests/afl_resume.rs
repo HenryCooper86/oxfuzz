@@ -238,6 +238,7 @@ async fn afl_project(
             1,
             None,
             false,
+            false,
         )
         .await
         .expect("generate harness");

@@ -348,6 +348,7 @@ async fn configured_image_movement_stops_generate_before_discovery_or_provider()
             0,
             None,
             false,
+            false,
         )
         .await;
     assert!(result.unwrap_err().to_string().contains("Stale"));
@@ -427,6 +428,7 @@ async fn missing_store_prevents_generation_provider_and_runtime() {
             TargetLanguage::C,
             0,
             None,
+            false,
             false,
         )
         .await
@@ -785,6 +787,7 @@ async fn deleted_configured_database_reports_needs_build_before_dispatch() {
             TargetLanguage::C,
             0,
             None,
+            false,
             false,
         )
         .await

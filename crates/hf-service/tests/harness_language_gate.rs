@@ -120,6 +120,7 @@ async fn harness_draft_refuses_go_and_python_with_the_supported_set() {
                 language,
                 AiPolicy::Off,
                 None,
+                false,
             )
             .await
             .expect_err("a discovery-only language must not be drafted");
@@ -162,6 +163,7 @@ async fn harness_compile_generate_and_refine_refuse_go_through_the_operations() 
             TargetLanguage::Go,
             0,
             None,
+            false,
             false,
         )
         .await

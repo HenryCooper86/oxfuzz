@@ -49,6 +49,9 @@ recorded on the compile outcome and surfaced to the operator without blocking.
 | `no-subprocess` | Error | Python | The `subprocess` module moves execution outside the sandbox that is measuring the target. |
 | `no-random-module` | Warning | Python | A `random` branch makes a crash irreproducible and breaks corpus minimization. |
 | `no-bare-except` | Warning | Python | A bare `except:` hides target failures the fuzzer exists to observe. |
+| `persistent-loop-without-shm-init` | Warning | C, C++ | A `__AFL_LOOP` loop reads input through `__AFL_FUZZ_TESTCASE_BUF/LEN`, which only `__AFL_FUZZ_INIT()` backs; without it the harness runs empty iterations. |
+| `persistent-shm-init-without-loop` | Warning | C, C++ | `__AFL_FUZZ_INIT()` without `__AFL_LOOP(N)` serves one input per forked child; the persistent-mode reuse never happens. |
+| `persistent-mutable-global` | Warning | C, C++ | A persistent harness reuses one process for many inputs: mutable file-scope state that the per-iteration reset does not re-initialize leaks between inputs, and findings stop reproducing. |
 
 Each call rule requires a non-identifier character before the name and an
 opening parenthesis after it, so `exit_code` and `parse_time` are not calls;
@@ -57,6 +60,16 @@ same way. Comment-only lines are skipped (`//` and `/*` for the C family, `#`
 for Python); a rule name in a string literal or a trailing comment still
 matches, which is the safe direction for findings that only advise a repair
 prompt.
+
+The three `persistent-*` rules are structural rather than per-line call
+patterns, and they apply only to a source that carries a `__AFL_LOOP` or
+`__AFL_FUZZ_INIT` call (a persistent-mode harness; see section 7): the mutable
+global scan keys on file-scope definitions (column 0, excluding `const`,
+`typedef`, and `extern` lines), which is exactly the lexical level of the call
+rules, so the warning stays advisory and a false positive costs a read, not a
+blocked build. The structurally broken pairings the first two rules name are
+hard compile or link failures one step later; the lint's early naming exists
+for the repair loop.
 
 Two deliberate omissions. File I/O is not a rule: an AFL++ file-mode harness
 must open `argv[1]`, so the rule would fire on correct code, and a check with
@@ -88,6 +101,12 @@ repository. The harness prompt contains:
 - A placeholder for the LLM to fill the target call.
 - Safety assertions (no `system()`, no file writes). Section 2 enforces these
   rather than trusting the template to have carried them.
+
+The AFL++ persistent-mode draft (section 7) embeds the canonical skeleton
+verbatim instead of describing the shape: the model fills in the target's
+includes, forward declaration, setup/reset bodies, and the target call. The
+skeleton's one home is `hf_harness::persistent::render_harness_source`, which
+the no-model heuristic draft emits directly.
 
 ## 5. Iteration Policy
 
@@ -152,3 +171,109 @@ Every full, scheduled, CI, or agent-started `FuzzRun` must resolve the active
 binary/source record and reject it unless its status is `Promoted`. Recompiling
 or regenerating creates a new active revision and requires smoke qualification
 and approval again. Agents and schedulers never promote revisions implicitly.
+
+## 7. AFL++ Persistent-Mode Harnesses
+
+The stock AFL++ harness exposes `LLVMFuzzerTestOneInput` and links AFL++'s
+libFuzzer-compatible driver, which already loops in the forkserver child over
+shared-memory input (`__afl_fuzz_ptr`/`__afl_fuzz_len`), with one-time init in
+`LLVMFuzzerInitialize` already running before the deferred fork point. That
+driver-owned loop is the right default. The persistent-mode flavor exists for
+the targets it cannot serve well: a stateful target whose per-input state must
+be explicitly reset, or a slow-to-initialize target whose setup placement the
+harness (not the driver) must control.
+
+A persistent-mode harness owns `main` and the forkserver loop. The canonical
+skeleton (`hf_harness::persistent::render_harness_source`, emitted by
+`oxfuzz harness --engine afl++ --persistent` and embedded in the LLM draft
+prompt) is the AFL++ 4.09c `instrumentation/README.persistent_mode.md`
+structure adapted to this pipeline's contracts:
+
+```c
+#include <stdint.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+/* the target's headers / forward declaration */
+
+__AFL_FUZZ_INIT();
+
+static void oxfuzz_target_setup(void) { /* one-time init, before the fork point */ }
+static void oxfuzz_target_reset(void) { /* re-initialize ALL mutable state */ }
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+    oxfuzz_target_reset();
+    /* call the target with (data, size) */
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    oxfuzz_target_setup();
+    __AFL_INIT();                       /* deferred forkserver starts here */
+    if (__afl_fuzz_ptr) {
+        /* afl-fuzz / afl-showmap / afl-cmin attached the shared-memory buffer */
+        unsigned char *buf = __AFL_FUZZ_TESTCASE_BUF;
+        while (__AFL_LOOP(oxfuzz_loop_count())) {
+            size_t len = __AFL_FUZZ_TESTCASE_LEN;
+            LLVMFuzzerTestOneInput(buf, len);
+        }
+        return 0;
+    }
+    /* standalone: replay each argv file once (the crash-replay form) */
+    for (int i = 1; i < argc; i++) { /* read file, call the entry */ }
+    return 0;
+}
+```
+
+The discipline the shape must keep:
+
+- **State reset is the contract.** `__AFL_LOOP(N)` serves N inputs in one
+  process. Every mutable global/static the target or harness keeps between
+  calls must return to its initial value before each target call, or state
+  leaks between inputs and crashes stop reproducing (the classic persistent
+  false-positive class). The `persistent-mutable-global` lint warning names
+  file-scope mutable definitions so the author cannot miss the obligation;
+  the reset body is the one section of the skeleton that is never optional.
+- **One-time setup sits before `__AFL_INIT()`.** The deferred forkserver
+  clones the process at that point, so setup cost is paid once per child (N
+  inputs), not once per input. Setup must not read the fuzzed input, start
+  threads, or open stateful handles the children would share (AFL++'s
+  deferred-forkserver restrictions).
+- **The loop count is named and bounded.** The skeleton defaults to 1000
+  (`hf_harness::persistent::DEFAULT_LOOP_COUNT`, AFL++'s recommended starting
+  point within its 100-10000 guidance) and honors the `AFL_FUZZER_LOOPCOUNT`
+  environment override clamped to 1..=100000 -- the same knob the AFL++ driver
+  documents and the function-coverage proof path already sets to 100 on
+  profiled AFL++ campaigns so forkserver children exit and flush their LLVM
+  profile counters regularly. The harness's own child exit every N iterations
+  provides that flush even where the override is absent (smoke qualification).
+- **The build drops the libFuzzer driver.** `__AFL_FUZZ_INIT()` and the driver
+  both define `__afl_sharedmem_fuzzing` strongly, so a persistent source
+  compiles with afl-clang-fast but WITHOUT `-fsanitize=fuzzer`. The build
+  variant derives from the source's structure
+  (`hf_harness::build_command_for_source` detects the `__AFL_LOOP` /
+  `__AFL_FUZZ_INIT` call markers); every compile path -- CLI draft, GUI/REST
+  source, work-order import -- gets the matching build with no separate flag,
+  and a persistent source paired with the driver or a non-AFL++ engine fails
+  at compile with the fix named rather than at the linker. Both wrong
+  pairings fail loudly; a lint-undetected shape never misbuilds silently.
+
+Run-time contracts a persistent harness must keep (all hold for the skeleton;
+they are why the run path needs no flavor-specific argv):
+
+- Fuzzing runs the unchanged `afl-fuzz ... -- <binary> @@` form
+  (`docs/standards/ENGINE_ADAPTER_STANDARD.md` 3.2): afl-fuzz detects the
+  shared-memory capability in the forkserver handshake, unlinks the `@@`
+  output file, and delivers inputs through shared memory.
+- Crash replay (`binary <input>`), `afl-showmap`, and `afl-cmin` keep working:
+  with no fuzzer attached, `__afl_fuzz_ptr` is null and the standalone branch
+  replays each file argument once; under the showmap/cmin forkserver the
+  shared-memory branch serves one iteration per input.
+
+The flavor is AFL++ + C/C++ only (`require_persistent_support` rejects other
+engines and languages before any drafting), and is a per-invocation opt-in
+with no `[fuzzing]` config default, like CmpLog. Smoke qualification, the
+independent review, and the promotion gate are unchanged: a persistent harness
+earns `SmokePassed` and `Promoted` through exactly the sections above.
+
