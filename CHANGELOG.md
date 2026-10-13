@@ -9,6 +9,16 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ## Unreleased
 
+## 0.6.3 - 2026-10-13
+
+### Fixed
+
+- Release verification isolates Semgrep workspace fixtures from concurrent tests
+  that change the workspace directory. Disposable Git fixtures disable automatic
+  maintenance so strict cleanup cannot race a background Git process.
+- Includes the desktop approval, target identity, and submission fixes documented
+  under 0.6.2; both earlier 0.6.x candidates remained unpublished.
+
 ## 0.6.2 - 2026-10-13
 
 ### Fixed
