@@ -9,6 +9,8 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ## Unreleased
 
+## 0.6.1 - 2026-10-13
+
 ### Added
 
 - AFL++ persistent-mode harness flavor for stateful or slow-to-initialize
@@ -154,6 +156,15 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ### Fixed
 
+- Docker workspace mounts preserve Windows drive-letter paths and literal
+  colons without rewriting matching command arguments. Mount-option delimiters
+  remain rejected, quoted names remain valid, and read-only workspace
+  restrictions remain enforced. AFL++ resume copies meter actual file bytes,
+  refuse to overwrite destinations, and exclude NTFS alternate data streams.
+- Cross-platform regression checks compare resolved config directories, use
+  portable AFL session fixtures, and measure scheduler budgets with a controlled
+  clock. Campaign tests directly check workspace lease ownership instead of
+  imposing a machine-dependent deadline on database and filesystem work.
 - GUI requests retain their project, target, and harness revision ownership:
   delayed responses cannot restore deleted project state, replace current
   artifact inventories, or approve a regenerated harness. Change-review
