@@ -433,6 +433,8 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .route("/harness/compile", post(harness_compile))
         .route("/harness/smoke", post(harness_smoke))
         .route("/harness/promote", post(harness_promote))
+        .route("/harness/promote-with-findings", post(harness_promote_with_findings))
+        .route("/coverage/functions", post(coverage_functions))
         .route("/artifacts/summary", post(artifact_summary))
         .route("/seeds/generate", post(generate_seeds))
         .route("/seeds/generate-llm", post(generate_seeds_llm))
@@ -2104,6 +2106,42 @@ async fn harness_promote(
         "harness_id": harness.id,
         "message": "Harness approved for full campaigns.",
     })))
+}
+
+async fn harness_promote_with_findings(
+    State(state): State<AppState>,
+    Json(req): Json<HarnessQualificationRequest>,
+) -> ApiResult<serde_json::Value> {
+    let engine = parse_engine(&req.engine).map_err(map_err(StatusCode::BAD_REQUEST))?;
+    let project = approved_project(&state, &req.project)?;
+    let harness = state
+        .container
+        .harness_promote_with_findings(&project, &req.target, engine)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(serde_json::json!({
+        "status": format!("{:?}", harness.status),
+        "known_findings": true,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct CoverageFunctionsRequest {
+    project: PathBuf,
+    target: String,
+}
+
+async fn coverage_functions(
+    State(state): State<AppState>,
+    Json(req): Json<CoverageFunctionsRequest>,
+) -> ApiResult<Vec<String>> {
+    let project = approved_project(&state, &req.project)?;
+    Ok(Json(
+        state
+            .container
+            .coverage_functions(&project, &req.target)
+            .await,
+    ))
 }
 
 #[derive(Debug, Deserialize)]

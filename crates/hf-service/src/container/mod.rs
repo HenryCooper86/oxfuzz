@@ -2068,7 +2068,7 @@ pub struct RunOwnerView {
     pub run_id: Uuid,
     /// Canonical retained project root.
     pub project_root: String,
-    /// Harness target symbol, when the run retained one.
+    /// Retained workspace target selector, including its file qualifier when used.
     pub target: Option<String>,
     /// Canonical engine name.
     pub engine: String,

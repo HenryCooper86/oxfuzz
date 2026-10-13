@@ -5,6 +5,7 @@ import { expect, it, vi } from "vitest";
 import { DiscoverView } from "../views/DiscoverView";
 import { DiscoveryProvider } from "../providers/DiscoveryContext";
 import { I18nProvider } from "../i18n";
+import type { TargetCandidate } from "../types";
 const mocks = vi.hoisted(() => ({ invoke: vi.fn(), markDone: vi.fn(), setTarget: vi.fn() }));
 vi.mock("../lib", () => ({ getTransport: () => ({ invoke: mocks.invoke }), pickFolder: vi.fn() }));
 vi.mock("../providers/project", () => ({ useProject: () => ({ activeProject: "/sample", setActiveProject: vi.fn() }) }));
@@ -12,7 +13,13 @@ vi.mock("../providers/target", () => ({ useTarget: () => ({ lang: "c", setLang: 
 vi.mock("../providers/pipeline", () => ({ usePipeline: () => ({ markDone: mocks.markDone }) }));
 it("retains results across navigation and explicitly hands the chosen target to Harness", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  const candidate = { id: "one", symbol: "parse", fit_score: 0.8, kind: "Function", complexity: 2, location: { file: "parse.c", line: 1 } };
+  const candidate: TargetCandidate = {
+    id: "one", project_root: "/sample", language: "C", symbol: "parse",
+    fit_score: 0.8, kind: "Function", complexity: 2,
+    location: { file: "parse.c", line: 1, col: 1 }, signature: null,
+    input_surface: "Bytes", sanitizers: [], rationale: "",
+    reachable_functions: [], accumulated_complexity: 2,
+  };
   const inventory = { candidates: [candidate], call_graph: {} };
   mocks.invoke.mockImplementation(async command => {
     if (command === "ranked_discovery_start") return "op-1";

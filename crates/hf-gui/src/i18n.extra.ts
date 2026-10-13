@@ -1015,6 +1015,7 @@ export const enExtra: Record<string, string> = {
   "discover.description": "Scan a C/C++ project to find functions worth fuzzing. Ranked by input surface, complexity, parser heuristics, and call-graph reachability.",
   "discover.discover": "Discover",
   "discover.noCoverageYet": "no coverage yet — run a campaign for this target",
+  "discover.coverageFailed": "Coverage unavailable: {error}",
   "discover.notCovered": "not covered",
   "discover.reachesBadge": "reaches {n} · acc {acc}",
   "discover.reachesTooltip": "Reaches {n} project functions:\n{fns}",
@@ -1962,6 +1963,8 @@ export const enExtra: Record<string, string> = {
   "workflow.title": "Fuzzing Workflow",
   "workflow.triageHint": "Reproduce, classify, and dedup crashes",
   "workflow.triageLabel": "Triage Crashes",
+  "knowledge.desktopSummaryOnly": "The database overview and cleanup across all projects are available in the desktop app. You can still index and search the selected project here.",
+  "settings.storage.desktopOnly": "Workspace paths and whole-workspace cleanup are available in the desktop app. In the browser, the server manages storage; use Projects to delete data for an individual project.",
 };
 
 export const zhExtra: Record<string, string> = {
@@ -2977,6 +2980,7 @@ export const zhExtra: Record<string, string> = {
   "discover.description": "扫描 C/C++ 项目以寻找值得模糊测试的函数。按输入面、复杂度、解析器启发式规则和调用图可达性排序。",
   "discover.discover": "发现",
   "discover.noCoverageYet": "尚无覆盖率——为该目标运行一次测试活动",
+  "discover.coverageFailed": "覆盖率不可用：{error}",
   "discover.notCovered": "未覆盖",
   "discover.reachesBadge": "可达 {n} · 累计 {acc}",
   "discover.reachesTooltip": "可达 {n} 个项目函数：\n{fns}",
@@ -3922,4 +3926,6 @@ export const zhExtra: Record<string, string> = {
   "workflow.title": "模糊测试流程",
   "workflow.triageHint": "复现、分类并去重崩溃",
   "workflow.triageLabel": "分类定级崩溃",
+  "knowledge.desktopSummaryOnly": "跨项目的数据库概览和清理功能仅在桌面应用中可用。你仍可在此为所选项目建立索引并搜索。",
+  "settings.storage.desktopOnly": "工作区路径和整个工作区的清理功能仅在桌面应用中可用。浏览器模式下，存储由服务器管理；如需删除单个项目的数据，请前往“项目”。",
 };

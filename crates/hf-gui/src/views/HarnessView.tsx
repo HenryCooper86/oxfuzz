@@ -154,6 +154,52 @@ export function HarnessView({
   // shows *why* instead of just a red circle.
   const [harnessError, setHarnessError] = useState<string | null>(null);
   const [seedError, setSeedError] = useState<string | null>(null);
+  const scopeKey = JSON.stringify([activeProject, project, selectedTarget, engine, lang, selectionBlocked]);
+  const [requestScope, setRequestScope] = useState({ key: scopeKey, project, lang });
+  const currentScope = useRef(requestScope);
+  currentScope.current = requestScope;
+  const mounted = useRef(true);
+  const draftGeneration = useRef(0);
+  const canUseExisting = harness === null && harnessStatus === "idle";
+  const qualificationBusy = compileStatus === "loading" || smokeStatus === "loading" || promotionStatus === "loading";
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+
+  // Clear local evidence before rendering controls for a different selection.
+  // A new object also invalidates requests when the user switches away and back.
+  if (requestScope.key !== scopeKey) {
+    setRequestScope({ key: scopeKey, project, lang });
+    if (requestScope.project !== project || requestScope.lang !== lang) {
+      setInventory(null);
+      setDiscoverError(null);
+    }
+    setHarness(null);
+    setExisting(null);
+    setPrevSource(null);
+    setShowDiff(false);
+    setCompileResult(null);
+    setSmokeResult(null);
+    setPromotionResult(null);
+    setSeeds(null);
+    setHarnessStatus("idle");
+    setCompileStatus("idle");
+    setSmokeStatus("idle");
+    setPromotionStatus("idle");
+    setSeedStatus("idle");
+    setHarnessError(null);
+    setSeedError(null);
+  }
+
+  function isCurrentScope() {
+    return mounted.current && currentScope.current === requestScope;
+  }
+
+  function isCurrentDraft(generation: number) {
+    return isCurrentScope() && draftGeneration.current === generation;
+  }
 
   async function browse() {
     const path = await pickFolder();
@@ -196,6 +242,7 @@ export function HarnessView({
   // harness" banner rather than loading it as editable source.
   useEffect(() => {
     let cancelled = false;
+    const generation = draftGeneration.current;
     (async () => {
       if (selectionBlocked || !project || !selectedTarget) {
         if (!cancelled) setExisting(null);
@@ -206,7 +253,7 @@ export function HarnessView({
           project,
           target: selectedTarget,
         });
-        if (cancelled) return;
+        if (cancelled || generation !== draftGeneration.current) return;
         const promotedId = externalPromotion
           && externalPromotion.project === project
           && externalPromotion.target === selectedTarget
@@ -224,7 +271,7 @@ export function HarnessView({
           ? scoped.find((item) => item.harness_id === promotedId) ?? null
           : scoped[0] ?? null;
         setExisting(match);
-        if (!harness) {
+        if (canUseExisting) {
           const promoted = match?.status === "Promoted";
           setCompiled(promoted);
           if (promoted) setPromotionStatus("done");
@@ -239,15 +286,17 @@ export function HarnessView({
           if (promoted) markDone("approve");
         }
       } catch {
-        if (!cancelled) setExisting(null);
+        if (!cancelled && generation === draftGeneration.current) setExisting(null);
       }
     })();
     return () => { cancelled = true; };
-  }, [project, selectedTarget, lang, engine, harness, selectionBlocked, setCompiled, markDone, reviewRefresh, externalPromotion]);
+  }, [project, selectedTarget, lang, engine, harness, canUseExisting, selectionBlocked, setCompiled, markDone, reviewRefresh, externalPromotion]);
 
-  async function generateHarness(target: string): Promise<HarnessResult | null> {
-    if (!fuzzingSettings || selectionBlocked || buildBlocked) return null;
+  async function generateHarness(target: string): Promise<{ draft: HarnessResult; generation: number } | null> {
+    if (!isCurrentScope() || !fuzzingSettings || selectionBlocked || buildBlocked) return null;
+    const generation = ++draftGeneration.current;
     const prior = harness?.source ?? null;
+    setExternalPromotion(null);
     setHarnessStatus("loading");
     setHarnessError(null);
     setCompileStatus("idle");
@@ -265,13 +314,15 @@ export function HarnessView({
       const result = await getTransport().invoke<HarnessResult>("harness_draft", {
         project, target, engine, lang, ai: aiPolicy,
       });
+      if (!isCurrentDraft(generation)) return null;
       setHarness(result);
       // Keep the prior revision so the user can see what regeneration changed.
       setPrevSource(prior && prior !== result.source ? prior : null);
       setHarnessStatus("done");
       markDone("harness");
-      return result;
+      return { draft: result, generation };
     } catch (e) {
+      if (!isCurrentDraft(generation)) return null;
       setHarnessError(e instanceof Error ? e.message : String(e));
       setHarnessStatus("error");
       return null;
@@ -282,14 +333,22 @@ export function HarnessView({
   // just produced without waiting for the `harness` state to settle (the old
   // setTimeout read a stale null and silently skipped compilation).
   async function compileHarness(source?: string): Promise<boolean> {
-    if (!fuzzingSettings || selectionBlocked) return false;
+    if (!isCurrentScope() || !fuzzingSettings || selectionBlocked || qualificationBusy) return false;
     const src = source ?? harness?.source;
     if (!src) return false;
+    const generation = draftGeneration.current;
     setCompileStatus("loading");
+    setCompileResult(null);
+    setSmokeStatus("idle");
+    setSmokeResult(null);
+    setPromotionStatus("idle");
+    setPromotionResult(null);
+    setCompiled(false);
     try {
       const result = await getTransport().invoke<CompileResult>("harness_compile", {
         source: src, project, engine, target: selectedTarget, lang,
       });
+      if (!isCurrentDraft(generation)) return false;
       setCompileResult(result);
       const compiled = result.status === "Compiled";
       setCompileStatus(compiled ? "done" : "error");
@@ -299,6 +358,7 @@ export function HarnessView({
       }
       return compiled;
     } catch (e) {
+      if (!isCurrentDraft(generation)) return false;
       setCompileResult({ status: "Failed", message: String(e) });
       setCompileStatus("error");
       return false;
@@ -306,8 +366,10 @@ export function HarnessView({
   }
 
   async function smokeHarness(): Promise<boolean> {
-    if (!fuzzingSettings || selectionBlocked) return false;
+    if (!isCurrentScope() || !fuzzingSettings || selectionBlocked || qualificationBusy) return false;
+    const generation = draftGeneration.current;
     setSmokeStatus("loading");
+    setSmokeResult(null);
     setPromotionStatus("idle");
     setPromotionResult(null);
     setCompiled(false);
@@ -315,6 +377,7 @@ export function HarnessView({
       const result = await getTransport().invoke<SmokeResult>("harness_smoke", {
         project, target: selectedTarget, engine, lang,
       });
+      if (!isCurrentDraft(generation)) return false;
       setSmokeResult(result);
       // The smoke step is complete once it has run, whether it passed or
       // surfaced crashes (the latter is handled at the approval step).
@@ -322,6 +385,7 @@ export function HarnessView({
       setSmokeStatus(result.status === "SmokePassed" ? "done" : "error");
       return result.passed;
     } catch (error) {
+      if (!isCurrentDraft(generation)) return false;
       const message = error instanceof Error ? error.message : String(error);
       setSmokeResult({ status: "Failed", duration_secs: 0, execs_per_sec: 0, crashes: 0, passed: false, error: message });
       setCompileResult((current) => current ?? { status: "Failed", message: String(error) });
@@ -331,12 +395,14 @@ export function HarnessView({
   }
 
   async function promoteHarness(): Promise<boolean> {
-    if (!fuzzingSettings || selectionBlocked) return false;
+    if (!isCurrentScope() || !fuzzingSettings || selectionBlocked || qualificationBusy) return false;
+    const generation = draftGeneration.current;
     setPromotionStatus("loading");
     try {
       const result = await getTransport().invoke<PromotionResult>("harness_promote", {
         project, target: selectedTarget, engine,
       });
+      if (!isCurrentDraft(generation)) return false;
       setPromotionResult(result);
       const promoted = result.status === "Promoted";
       if (promoted) markDone("approve");
@@ -344,6 +410,7 @@ export function HarnessView({
       setCompiled(promoted);
       return promoted;
     } catch (error) {
+      if (!isCurrentDraft(generation)) return false;
       setPromotionResult({ status: "Failed", harness_id: "", message: String(error) });
       setPromotionStatus("error");
       setCompiled(false);
@@ -352,12 +419,14 @@ export function HarnessView({
   }
 
   async function promoteWithFindings(): Promise<boolean> {
-    if (!fuzzingSettings || selectionBlocked) return false;
+    if (!isCurrentScope() || !fuzzingSettings || selectionBlocked || qualificationBusy) return false;
+    const generation = draftGeneration.current;
     setPromotionStatus("loading");
     try {
       const result = await getTransport().invoke<PromotionResult>("harness_promote_with_findings", {
         project, target: selectedTarget, engine,
       });
+      if (!isCurrentDraft(generation)) return false;
       setPromotionResult(result);
       const promoted = result.status === "Promoted";
       if (promoted) markDone("approve");
@@ -365,6 +434,7 @@ export function HarnessView({
       setCompiled(promoted);
       return promoted;
     } catch (error) {
+      if (!isCurrentDraft(generation)) return false;
       setPromotionResult({ status: "Failed", harness_id: "", message: String(error) });
       setPromotionStatus("error");
       return false;
@@ -372,27 +442,31 @@ export function HarnessView({
   }
 
   async function generateSeeds() {
-    if (!fuzzingSettings || selectionBlocked) return;
+    if (!isCurrentScope() || !fuzzingSettings || selectionBlocked) return;
+    const generation = draftGeneration.current;
     setSeedStatus("loading");
     setSeedError(null);
     try {
       const result = await getTransport().invoke<SeedResult>("generate_seeds", { project, target: selectedTarget });
+      if (!isCurrentDraft(generation)) return;
       setSeeds(result.seeds);
       setSeedStatus("done");
       markDone("seeds");
     } catch (e) {
+      if (!isCurrentDraft(generation)) return;
       setSeedError(e instanceof Error ? e.message : String(e));
       setSeedStatus("error");
     }
   }
 
   async function runAll() {
-    if (selectionBlocked || !selectedTarget) return;
+    if (selectionBlocked || !selectedTarget || qualificationBusy) return;
     const built = await generateHarness(selectedTarget);
-    if (!built) return; // harness draft failed; don't proceed to compile/seed
-    const compiled = await compileHarness(built.source);
-    if (!compiled) return;
+    if (!built || !isCurrentDraft(built.generation)) return;
+    const compiled = await compileHarness(built.draft.source);
+    if (!compiled || !isCurrentDraft(built.generation)) return;
     await smokeHarness();
+    if (!isCurrentDraft(built.generation)) return;
     await generateSeeds();
   }
 
@@ -400,7 +474,7 @@ export function HarnessView({
   // be approved for campaigns directly; a smoke run that surfaced crashes can
   // only be approved WITH known findings.
   const smokeCrashed = !!smokeResult && smokeResult.crashes > 0;
-  const cleanApprovable = Boolean(smokeResult?.passed || (!harness && existing?.smoke_passed));
+  const cleanApprovable = Boolean(smokeResult?.passed || (!smokeResult && canUseExisting && existing?.smoke_passed));
 
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
@@ -460,7 +534,7 @@ export function HarnessView({
       {/* An existing harness for this target (e.g. built in the Fuzzing Workflow),
           surfaced so this view reflects work done elsewhere. Hidden once a fresh
           harness is generated in this session. */}
-      {existing && !harness && (
+      {existing && canUseExisting && (
         <div className="surface-card" style={{ padding: "var(--space-md)", animation: "slideInUp 0.2s ease" }}>
           <div className="flex items-center gap-2">
             <Archive size={16} className="text-text-muted" />
@@ -506,16 +580,6 @@ export function HarnessView({
               onChange={(v) => {
                 setSelectedTarget(v);
                 setExternalPromotion(null);
-                setHarness(null);
-                setCompileResult(null);
-                setSmokeResult(null);
-                setPromotionResult(null);
-                setHarnessStatus("idle");
-                setCompileStatus("idle");
-                setSmokeStatus("idle");
-                setPromotionStatus("idle");
-                setSeedStatus("idle");
-                setSeeds(null);
                 setCompiled(false);
               }}
               options={[...inventory.candidates]
@@ -577,7 +641,7 @@ export function HarnessView({
           <Button
             variant="primary"
             onClick={runAll}
-            disabled={buildBlocked || selectionBlocked || !selectedTarget || engineOptions.length === 0 || harnessStatus === "loading"}
+            disabled={buildBlocked || selectionBlocked || !selectedTarget || engineOptions.length === 0 || harnessStatus === "loading" || qualificationBusy}
             title={t("harness.buildSmokeTitle")}
           >
             <Sparkles size={14} />
@@ -670,7 +734,7 @@ export function HarnessView({
             status={compileStatus}
             actionLabel={t("harness.compile")}
             actionClick={() => compileHarness()}
-            disabled={selectionBlocked || !fuzzingSettings || !harness}
+            disabled={selectionBlocked || !fuzzingSettings || !harness || qualificationBusy}
           >
             {compileResult && (
               <div className="mt-2 flex items-center gap-2 text-xs">
@@ -695,7 +759,7 @@ export function HarnessView({
             status={smokeStatus}
             actionLabel={t("harness.runSmokeTest")}
             actionClick={smokeHarness}
-            disabled={selectionBlocked || !fuzzingSettings || (compileStatus !== "done" && (harness !== null || (existing?.status !== "Compiled" && existing?.status !== "SmokePassed")))}
+            disabled={selectionBlocked || !fuzzingSettings || qualificationBusy || (compileStatus !== "done" && (!canUseExisting || (existing?.status !== "Compiled" && existing?.status !== "SmokePassed")))}
           >
             {smokeResult && (
               <div className="mt-2 text-xs">
@@ -742,6 +806,7 @@ export function HarnessView({
             disabled={
               selectionBlocked ||
               !fuzzingSettings ||
+              qualificationBusy ||
               promotionStatus === "done" ||
               (smokeCrashed ? false : !cleanApprovable)
             }
@@ -841,6 +906,7 @@ export function HarnessView({
           language={lang}
           engine={engine}
           onPromoted={(harnessId, targetSelector) => {
+            draftGeneration.current += 1;
             setSelectedTarget(targetSelector);
             setExternalPromotion({ harnessId, project, target: targetSelector, language: lang, engine });
             setHarness(null);

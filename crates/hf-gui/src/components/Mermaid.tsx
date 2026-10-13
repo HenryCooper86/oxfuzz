@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 type MermaidApi = (typeof import("mermaid"))["default"];
 
@@ -24,34 +24,32 @@ let seq = 0;
  * graph never blanks the report.
  */
 export function Mermaid({ code }: { code: string }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const [error, setError] = useState(false);
+  const [result, setResult] = useState<{ code: string; svg: string | null } | null>(null);
 
   useEffect(() => {
     let alive = true;
     const id = `mmd-${(seq += 1)}`;
     void loadMermaid()
-      .then((mermaid) => mermaid.render(id, code))
-      .then(({ svg }) => {
-        if (alive && ref.current) {
-          ref.current.innerHTML = svg;
-          setError(false);
-        }
+      .then(async (mermaid) => {
+        if (!alive) return;
+        const { svg } = await mermaid.render(id, code);
+        if (alive) setResult({ code, svg });
       })
       .catch(() => {
-        if (alive) setError(true);
+        if (alive) setResult({ code, svg: null });
       });
     return () => {
       alive = false;
     };
   }, [code]);
 
-  if (error) {
+  const current = result?.code === code ? result : null;
+  if (current?.svg === null) {
     return (
       <pre className="text-xs overflow-auto surface-card" style={{ padding: "var(--space-md)" }}>
         <code>{code}</code>
       </pre>
     );
   }
-  return <div ref={ref} className="flex justify-center my-3" style={{ overflowX: "auto" }} />;
+  return <div className="flex justify-center my-3" style={{ overflowX: "auto" }} dangerouslySetInnerHTML={{ __html: current?.svg ?? "" }} />;
 }

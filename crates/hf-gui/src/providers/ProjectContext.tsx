@@ -1,6 +1,7 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { getTransport, emitDataChanged } from "../lib";
 import { ProjectContext } from "./project";
+import { notifyProjectDeleted } from "./projectDeletion";
 
 const STORAGE_KEY = "hf_recent_projects";
 const ACTIVE_KEY = "hf_active_project";
@@ -34,28 +35,28 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
     return saved;
   });
 
-  const persistRecents = useCallback((next: string[]) => {
-    setRecentProjects(next);
+  useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(recentProjects));
     } catch {
-      /* ignore quota / private-mode errors */
+      // Recent projects remain usable in memory when browser storage is unavailable.
     }
-  }, []);
+  }, [recentProjects]);
+
+  useEffect(() => {
+    try {
+      if (activeProject) localStorage.setItem(ACTIVE_KEY, activeProject);
+      else localStorage.removeItem(ACTIVE_KEY);
+    } catch {
+      // Project focus remains usable in memory when browser storage is unavailable.
+    }
+  }, [activeProject]);
 
   const addRecent = useCallback(
     (path: string) => {
       const p = path.trim();
       if (!p) return;
-      setRecentProjects((prev) => {
-        const next = [p, ...prev.filter((x) => x !== p)].slice(0, MAX_RECENTS);
-        try {
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-        } catch {
-          /* ignore */
-        }
-        return next;
-      });
+      setRecentProjects((prev) => [p, ...prev.filter((x) => x !== p)].slice(0, MAX_RECENTS));
     },
     [],
   );
@@ -64,11 +65,6 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
     (path: string) => {
       const p = path.trim();
       setActiveProjectState(p);
-      try {
-        localStorage.setItem(ACTIVE_KEY, p);
-      } catch {
-        /* ignore */
-      }
       addRecent(p);
     },
     [addRecent],
@@ -76,19 +72,12 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
 
   const removeRecent = useCallback(
     (path: string) => {
-      persistRecents(recentProjects.filter((x) => x !== path));
+      setRecentProjects((previous) => previous.filter((item) => item !== path));
       // Removing the active project drops focus, so per-project views (pipeline
       // progress, run output) stop showing the gone project's state.
-      if (path === activeProject) {
-        setActiveProjectState("");
-        try {
-          localStorage.removeItem(ACTIVE_KEY);
-        } catch {
-          /* ignore */
-        }
-      }
+      setActiveProjectState((current) => path === current ? "" : current);
     },
-    [persistRecents, recentProjects, activeProject],
+    [],
   );
 
   const deleteProjectData = useCallback(
@@ -99,6 +88,7 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
       // locally once the backend has actually cleared it, so a failed delete
       // does not silently hide a project whose data still exists.
       await getTransport().invoke("delete_project", { project: p });
+      notifyProjectDeleted(p);
       removeRecent(p);
       emitDataChanged();
     },

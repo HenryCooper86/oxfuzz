@@ -7,7 +7,11 @@ export interface DiscoverySnapshot {
   ranked?: RankedDiscoveryResult | null;
   rankedOperationId?: string | null;
 }
-export interface DiscoveryStore { entries: Record<string, DiscoverySnapshot>; save: (key: string, snapshot: DiscoverySnapshot) => void }
+export interface DiscoveryStore {
+  entries: Record<string, DiscoverySnapshot>;
+  revisions: Record<string, number>;
+  save: (project: string, lang: string, snapshot: DiscoverySnapshot, revision: number) => void;
+}
 export const DiscoveryContext = createContext<DiscoveryStore | null>(null);
 export function useDiscoveryInventory(project: string, lang: string) {
   const shared = useContext(DiscoveryContext);
@@ -15,9 +19,10 @@ export function useDiscoveryInventory(project: string, lang: string) {
   const key = JSON.stringify([project, lang]);
   const snapshot = (shared?.entries ?? local)[key];
   const sharedSave = shared?.save;
+  const revision = shared?.revisions[project] ?? 0;
   const save = useCallback((value: DiscoverySnapshot) => {
-    if (sharedSave) sharedSave(key, value);
+    if (sharedSave) sharedSave(project, lang, value, revision);
     else setLocal(previous => ({ ...previous, [key]: value }));
-  }, [key, sharedSave]);
+  }, [key, lang, project, revision, sharedSave]);
   return { snapshot, save };
 }

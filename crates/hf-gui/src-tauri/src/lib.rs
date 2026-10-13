@@ -92,28 +92,10 @@ pub fn run() {
             return;
         }
     };
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(app_state)
-        .setup(|app| {
-            #[cfg(not(feature = "campaign-health"))]
-            let _ = app;
-            #[cfg(feature = "campaign-health")]
-            {
-                use tauri::Emitter as _;
-                let handle = app.handle().clone();
-                app.state::<AppState>()
-                    .container
-                    .bind_campaign_health_delivery(std::sync::Arc::new(move |owner, event| {
-                        let _event_has_no_listener = handle.emit(
-                            "campaign:health",
-                            serde_json::json!({ "owner": owner, "event": event }),
-                        );
-                    }));
-            }
-            Ok(())
-        })
         .invoke_handler(tauri::generate_handler![
             discover,
             #[cfg(feature = "ai-target-ranking")]
@@ -342,60 +324,83 @@ pub fn run() {
             agent_tools,
             save_agent,
             delete_agent,
-        ])
-        .setup(|app| {
-            let main_window = app.get_webview_window("main").expect("no main window");
+        ]);
+    configure_application_setup(builder, |app| {
+        let main_window = app.get_webview_window("main").expect("no main window");
 
-            // macOS: apply native frosted-glass vibrancy (Apple-style layered
-            // chrome) behind the transparent webview. Requires the
-            // `macos-private-api` feature and a transparent app background in CSS.
-            #[cfg(target_os = "macos")]
-            {
-                use tauri::utils::config::WindowEffectsConfig;
-                use tauri::utils::{WindowEffect, WindowEffectState};
+        // macOS: apply native frosted-glass vibrancy (Apple-style layered
+        // chrome) behind the transparent webview. Requires the
+        // `macos-private-api` feature and a transparent app background in CSS.
+        #[cfg(target_os = "macos")]
+        {
+            use tauri::utils::config::WindowEffectsConfig;
+            use tauri::utils::{WindowEffect, WindowEffectState};
 
-                let effects = WindowEffectsConfig {
-                    effects: vec![WindowEffect::Sidebar],
-                    state: Some(WindowEffectState::FollowsWindowActiveState),
-                    radius: None,
-                    color: None,
-                };
-                if let Err(e) = main_window.set_effects(Some(effects)) {
-                    eprintln!("Failed to apply vibrancy effects: {e}");
-                }
+            let effects = WindowEffectsConfig {
+                effects: vec![WindowEffect::Sidebar],
+                state: Some(WindowEffectState::FollowsWindowActiveState),
+                radius: None,
+                color: None,
+            };
+            if let Err(e) = main_window.set_effects(Some(effects)) {
+                eprintln!("Failed to apply vibrancy effects: {e}");
             }
+        }
 
-            main_window.show().expect("failed to show window");
+        main_window.show().expect("failed to show window");
 
-            // Bind the scheduler's crash notifier now that we have an AppHandle:
-            // a headless scheduled campaign that finds crashes emits a
-            // `campaign:crash` event the frontend toasts on.
-            {
-                use tauri::{Emitter, Manager};
-                let emitter = app.handle().clone();
-                let state = app.state::<AppState>();
-                state.scheduler.set_notifier(std::sync::Arc::new(
-                    move |notice: hf_service::scheduler::CampaignNotice| {
-                        let _ = emitter.emit("campaign:crash", notice);
-                    },
-                ));
-            }
+        // Bind the scheduler's crash notifier now that we have an AppHandle:
+        // a headless scheduled campaign that finds crashes emits a
+        // `campaign:crash` event the frontend toasts on.
+        {
+            use tauri::{Emitter, Manager};
+            let emitter = app.handle().clone();
+            let state = app.state::<AppState>();
+            state.scheduler.set_notifier(std::sync::Arc::new(
+                move |notice: hf_service::scheduler::CampaignNotice| {
+                    let _ = emitter.emit("campaign:crash", notice);
+                },
+            ));
+        }
 
-            // On launch, bring Docker up and ensure the sandbox image is loaded
-            // in the background so the first compile/run "just works". Progress
-            // is reported to the UI via `docker:status` events. DefectDojo rides
-            // on the back of that: it is a Docker stack too, so it can only start
-            // once the daemon is up.
+        // On launch, bring Docker up and ensure the sandbox image is loaded
+        // in the background so the first compile/run "just works". Progress
+        // is reported to the UI via `docker:status` events. DefectDojo rides
+        // on the back of that: it is a Docker stack too, so it can only start
+        // once the daemon is up.
+        let handle = app.handle().clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = commands::ensure_docker_ready(&handle, None).await;
+            commands::autostart_defectdojo(&handle).await;
+        });
+
+        Ok(())
+    })
+    .run(tauri::generate_context!())
+    .expect("error while running oxfuzz GUI");
+}
+
+fn configure_application_setup<R, F>(builder: tauri::Builder<R>, setup: F) -> tauri::Builder<R>
+where
+    R: tauri::Runtime,
+    F: FnOnce(&mut tauri::App<R>) -> Result<(), Box<dyn std::error::Error>> + Send + 'static,
+{
+    builder.setup(move |app| {
+        #[cfg(feature = "campaign-health")]
+        {
+            use tauri::Emitter as _;
             let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                let _ = commands::ensure_docker_ready(&handle, None).await;
-                commands::autostart_defectdojo(&handle).await;
-            });
-
-            Ok(())
-        })
-        .run(tauri::generate_context!())
-        .expect("error while running oxfuzz GUI");
+            app.state::<AppState>()
+                .container
+                .bind_campaign_health_delivery(std::sync::Arc::new(move |owner, event| {
+                    let _event_has_no_listener = handle.emit(
+                        "campaign:health",
+                        serde_json::json!({ "owner": owner, "event": event }),
+                    );
+                }));
+        }
+        setup(app)
+    })
 }
 
 /// Build the `AppState` from the canonical [`hf_service::ServiceContainer::bootstrap`]:
@@ -488,6 +493,99 @@ fn seed_user_provider_config(
 #[cfg(test)]
 mod tests {
     use super::{commands, seed_user_provider_config};
+
+    #[cfg(not(feature = "campaign-health"))]
+    #[test]
+    fn startup_initializes_without_campaign_health() {
+        use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc};
+        use tauri::Manager;
+
+        let started = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&started);
+        let app = super::configure_application_setup(tauri::test::mock_builder(), move |app| {
+            tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default()).build()?;
+            observed.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+        app.run_return(|app, event| {
+            if matches!(event, tauri::RunEvent::Ready) {
+                app.get_webview_window("main").unwrap().destroy().unwrap();
+            }
+        });
+        assert!(started.load(Ordering::SeqCst));
+    }
+
+    #[cfg(feature = "campaign-health")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn startup_delivers_persisted_campaign_health() {
+        use std::sync::{Arc, Mutex};
+        use tauri::{Listener, Manager};
+
+        let (directory, project, run_id, container) =
+            hf_service::test_support::campaign_health_presentation_fixture()
+                .await
+                .unwrap();
+        let scheduler = Arc::new(
+            hf_service::scheduler::CampaignScheduler::try_start(
+                container.clone(),
+                directory.path().join("schedules.json"),
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+        let app = super::configure_application_setup(
+            tauri::test::mock_builder().manage(super::AppState::new(
+                container.clone(),
+                Arc::clone(&scheduler),
+            )),
+            |app| {
+                tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
+                    .build()?;
+                Ok(())
+            },
+        )
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let events = Arc::clone(&received);
+        app.listen("campaign:health", move |event| {
+            events
+                .lock()
+                .unwrap()
+                .push(serde_json::from_str::<serde_json::Value>(event.payload()).unwrap());
+        });
+        app.run_return(|app, event| {
+            if matches!(event, tauri::RunEvent::Ready) {
+                app.get_webview_window("main").unwrap().destroy().unwrap();
+            }
+        });
+
+        let retained = container
+            .assess_and_emit_campaign_health(run_id, chrono::Utc::now())
+            .await
+            .unwrap();
+        scheduler.stop().await;
+
+        assert_eq!(retained.len(), 1);
+        let received = received.lock().unwrap();
+        assert_eq!(
+            received.len(),
+            1,
+            "startup must bind native health delivery"
+        );
+        assert_eq!(
+            received[0]["owner"]["project_root"],
+            project.to_str().unwrap()
+        );
+        assert_eq!(received[0]["owner"]["run_id"], run_id.to_string());
+        assert_eq!(
+            received[0]["event"]["id"],
+            retained[0].id.unwrap().to_string()
+        );
+    }
 
     #[test]
     fn semgrep_availability_requires_the_feature_and_a_unix_host() {

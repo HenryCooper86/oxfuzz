@@ -3,12 +3,25 @@
 import { useEffect, useState } from "react";
 import { AlertTriangle } from "lucide-react";
 import { getTransport, emitDataChanged } from "../../lib";
+import { isTauriEnvironment } from "../../lib/transport";
 import { useI18n } from "../../i18nContext";
 import { useToast } from "../ui/toastContext";
 import { Button, Input } from "../ui";
 import { SettingsGroup, SettingsItem } from "../ui/SettingsGroup";
 
 export function StorageTab() {
+  const { t } = useI18n();
+  if (isTauriEnvironment()) return <DesktopStorageTab />;
+  return (
+    <SettingsGroup title={t("settings.storage.fuzzWorkspace")}>
+      <p role="note" className="settings-item text-sm text-text-secondary">
+        {t("settings.storage.desktopOnly")}
+      </p>
+    </SettingsGroup>
+  );
+}
+
+function DesktopStorageTab() {
   const { t } = useI18n();
   const { toast } = useToast();
 

@@ -885,8 +885,11 @@ describe("Harness repair interactions", () => {
     },
   );
 
-  it("replaces a local draft with the exact externally promoted harness", async () => {
-    const order = { id: "order-exact", schema_version: 2, payload: { target: { symbol: "parse_input", language: "c" }, engine: "lib_fuzzer" } };
+  it.each([false, true])("replaces a local draft with the exact externally promoted harness (pending regeneration: %s)", async (pendingRegeneration) => {
+    const pendingDraft = deferred<ReturnType<typeof draftResult>>();
+    let draftCount = 0;
+    if (pendingRegeneration) window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ [PROJECT]: selection("libfuzzer", "src/parser.c::parse_input") }));
+    const order = { id: "order-exact", schema_version: 2, payload: { target: { symbol: "parse_input", relative_source: "src/parser.c", language: "c" }, engine: "lib_fuzzer" } };
     const submission = { id: "submission-exact", work_order_id: order.id, source: "exact promoted source", source_sha256: "a".repeat(64), origin: "human", parent_submission_id: null, lint: [], submitted_at: "now" };
     const attempt = { id: "attempt-exact", submission_id: submission.id, status: "smoke_passed", current_stage: "smoke", harness_id: "harness-exact", smoke_run_id: "smoke-exact", result: null, failure_code: null, failure_message: null, started_at: "now", updated_at: "now", ended_at: "now" };
     const review = (id: string, source: string, status: string) => ({
@@ -927,7 +930,7 @@ describe("Harness repair interactions", () => {
       if (command === "work_order_submissions") return Promise.resolve([submission]);
       if (command === "work_order_attempts") return Promise.resolve([attempt]);
       if (command === "work_order_promote") return Promise.resolve({ id: "harness-exact", status: "Promoted" });
-      if (command === "harness_draft") return Promise.resolve({ source: "local generated draft", target: "parse_input", engine: "libfuzzer", build_cmd: { compiler: "clang", args: [] }, status: "Draft", generator: "heuristic" });
+      if (command === "harness_draft") return ++draftCount === 1 ? Promise.resolve(draftResult("local generated draft")) : pendingDraft.promise;
       if (command === "system_status_cmd") return Promise.resolve({ docker: true, sandbox_image: true, libfuzzer: true, aflplusplus: true, honggfuzz: true, syzkaller: true, defectdojo: false });
       throw new Error(`unexpected command: ${command}`);
     });
@@ -937,14 +940,11 @@ describe("Harness repair interactions", () => {
       recentProjects: [PROJECT, PROJECT_B],
     });
     mounted.push(view);
-    await flushEffects();
-    await flushEffects();
-    await act(async () => {
-      [...view.container.querySelectorAll("button")].find((item) => item.textContent?.includes("common.generate"))?.click();
-    });
-    await flushEffects();
+    await waitForHarnessReady(view);
+    await harnessButton(view, "common.generate");
     expect(view.container.textContent).toContain("local generated draft");
     expect(view.container.textContent).toContain("harness-old");
+    if (pendingRegeneration) await harnessButton(view, "common.generate");
 
     await act(async () => {
       [...view.container.querySelectorAll("button")].find((item) => item.textContent === "workOrder.promote")?.click();
@@ -954,6 +954,12 @@ describe("Harness repair interactions", () => {
     expect(view.container.textContent).not.toContain("local generated draft");
     expect(view.container.textContent).not.toContain("harness-old");
     expect(view.container.textContent).toContain("exact promoted source");
+    if (pendingRegeneration) {
+      await act(async () => pendingDraft.resolve(draftResult("abandoned regeneration")));
+      await flushEffects();
+      expect(view.container.textContent).not.toContain("abandoned regeneration");
+      expect(view.container.textContent).toContain("exact promoted source");
+    }
 
     await act(async () => {
       [...view.container.querySelectorAll("button")].find((item) => item.textContent === "switch project")?.click();
@@ -963,5 +969,290 @@ describe("Harness repair interactions", () => {
     expect(view.container.textContent).toContain("project B retained source");
     expect(view.container.textContent).not.toContain("exact promoted source");
     expect(view.container.textContent).not.toContain("project B wrong-engine source");
+  });
+});
+
+function HarnessScopeProbe() {
+  const { target, setTarget, setEngine, setLang, compiled } = useTarget();
+  const { setActiveProject } = useProject();
+  return <>
+    <output data-compiled>{String(compiled)}</output>
+    <output data-selected-target>{target}</output>
+    <button onClick={() => setTarget("parse_other")}>select other target</button>
+    <button onClick={() => setTarget("parse_input")}>select original target</button>
+    <button onClick={() => setActiveProject(PROJECT_B)}>select other project</button>
+    <button onClick={() => setEngine("afl++")}>select other engine</button>
+    <button onClick={() => setLang("rust")}>select other language</button>
+  </>;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: Error) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+const draftResult = (source: string) => ({
+  source, target: "parse_input", engine: "libfuzzer",
+  build_cmd: { compiler: "clang", args: [] }, status: "Draft", generator: "heuristic",
+});
+
+async function harnessButton(view: MountedView, label: string) {
+  const button = [...view.container.querySelectorAll("button")].find((item) => item.textContent === label);
+  expect(button, `Missing action ${label}`).toBeTruthy();
+  expect(button!.disabled, `Action ${label} is disabled`).toBe(false);
+  await act(async () => button!.click());
+  await flushEffects();
+}
+
+function configureScopeTransport(operation: (command: string, args: Record<string, unknown>) => Promise<unknown> | undefined) {
+  configureHarnessTransport();
+  const baseline = transportInvoke.getMockImplementation()!;
+  transportInvoke.mockImplementation((command: string, args: Record<string, unknown>) => {
+    const response = operation(command, args);
+    if (response) return response;
+    if (command === "discover") {
+      return Promise.resolve({
+        project_root: args.project,
+        candidates: ["parse_input", "parse_other"].map((symbol, index) => ({
+          id: `candidate-${index}`, project_root: args.project, language: args.lang,
+          symbol, kind: "function", location: { file: "src/parser.c", line: index + 1, col: 1 },
+          signature: `int ${symbol}(void)`, input_surface: "buffer", complexity: 1,
+          fit_score: 1 - index / 10, sanitizers: [], rationale: "test fixture",
+        })),
+      });
+    }
+    return baseline(command, args);
+  });
+  window.localStorage.setItem(STORAGE_KEY, persisted("libfuzzer"));
+}
+
+async function mountHarnessScope() {
+  const view = await mount(<><HarnessScopeProbe /><HarnessView embedded /></>, {
+    recentProjects: [PROJECT, PROJECT_B],
+  });
+  mounted.push(view);
+  await waitForHarnessReady(view);
+  return view;
+}
+
+async function waitForHarnessReady(view: MountedView) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    await flushEffects();
+    const generate = [...view.container.querySelectorAll("button")].find((button) => button.textContent === "common.generate");
+    if (generate && !generate.disabled) break;
+  }
+}
+
+describe("HarnessView request ownership", () => {
+  it.each(["harness.compile", "harness.runSmokeTest"])("requires fresh approval evidence when repeating %s", async (action) => {
+    const pending = deferred<unknown>();
+    let repeating = false;
+    configureScopeTransport((command) => {
+      if (command === "harness_draft") return Promise.resolve(draftResult("current source"));
+      if (command === "harness_compile") return repeating && action === "harness.compile" ? pending.promise : Promise.resolve({ status: "Compiled", message: "compiled" });
+      if (command === "harness_smoke") return repeating && action === "harness.runSmokeTest" ? pending.promise : Promise.resolve({ status: "SmokePassed", passed: true, duration_secs: 10, execs_per_sec: 100, crashes: 0 });
+      if (command === "generate_seeds") return Promise.resolve({ seeds: [] });
+      if (command === "harness_promote") return Promise.resolve({ status: "Promoted", harness_id: "current-harness", message: "previous approval" });
+    });
+    const view = await mountHarnessScope();
+    await harnessButton(view, "harness.buildSmokeTest");
+    await harnessButton(view, "harness.approveForCampaigns");
+    expect(view.container.querySelector("[data-compiled]")?.textContent).toBe("true");
+    repeating = true;
+    await harnessButton(view, action);
+
+    expect(view.container.querySelector("[data-compiled]")?.textContent).toBe("false");
+    expect(view.container.textContent).not.toContain("previous approval");
+    expect(view.container.textContent).not.toContain("harness.smokeClean");
+    for (const label of ["harness.compile", "harness.runSmokeTest", "harness.approveForCampaigns", "harness.buildSmokeTest"]) {
+      expect([...view.container.querySelectorAll("button")].find((button) => button.textContent === label)?.disabled, label).toBe(true);
+    }
+  });
+
+  it.each(["harness_compile", "harness_smoke"])("rejects old %s evidence when regenerating the same target during a combined build", async (pendingCommand) => {
+    const pending = deferred<unknown>();
+    let generation = 0;
+    const smoke = { status: "SmokePassed", passed: true, duration_secs: 10, execs_per_sec: 100, crashes: 0 };
+    configureScopeTransport((command) => {
+      if (command === "harness_draft") return Promise.resolve(draftResult(++generation === 1 ? "original source" : "replacement source"));
+      if (command === pendingCommand) return pending.promise;
+      if (command === "harness_compile") return Promise.resolve({ status: "Compiled", message: "original compilation" });
+      if (command === "harness_smoke") return Promise.resolve(smoke);
+      if (command === "generate_seeds") return Promise.resolve({ seeds: [{ name: "old build seed", size: 1, sha256: "a".repeat(64) }] });
+    });
+    const view = await mountHarnessScope();
+    await harnessButton(view, "harness.buildSmokeTest");
+    expect(invokedMutatingCommands()).toContain(pendingCommand);
+    await harnessButton(view, "common.generate");
+    expect(view.container.textContent).toContain("replacement source");
+    const callsBeforeCompletion = invokedMutatingCommands();
+    await act(async () => pending.resolve(pendingCommand === "harness_compile"
+      ? { status: "Compiled", message: "original compilation" } : smoke));
+    await flushEffects();
+
+    expect(invokedMutatingCommands()).toEqual(callsBeforeCompletion);
+    expect(view.container.textContent).not.toContain("original compilation");
+    expect(view.container.textContent).not.toContain("harness.smokeClean");
+    expect([...view.container.querySelectorAll("button")].find((button) => button.textContent === "harness.runSmokeTest")?.disabled).toBe(true);
+    expect([...view.container.querySelectorAll("button")].find((button) => button.textContent === "harness.approveForCampaigns")?.disabled).toBe(true);
+  });
+
+  it.each([false, true])("keeps a replacement draft unapproved after the earlier promotion completes (with findings: %s)", async (findings) => {
+    const pending = deferred<{ status: string; harness_id: string; message: string }>();
+    let generation = 0;
+    configureScopeTransport((command) => {
+      if (command === "harness_draft") return Promise.resolve(draftResult(++generation === 1 ? "original source" : "replacement source"));
+      if (command === "harness_compile") return Promise.resolve({ status: "Compiled", message: "compiled" });
+      if (command === "harness_smoke") return Promise.resolve({ status: findings ? "SmokeFailed" : "SmokePassed", passed: !findings, duration_secs: 10, execs_per_sec: 100, crashes: findings ? 1 : 0 });
+      if (command === "generate_seeds") return Promise.resolve({ seeds: [] });
+      if (command === "harness_promote" || command === "harness_promote_with_findings") return pending.promise;
+    });
+    const view = await mountHarnessScope();
+    await harnessButton(view, "harness.buildSmokeTest");
+    await harnessButton(view, findings ? "harness.approveWithFindings" : "harness.approveForCampaigns");
+    await harnessButton(view, "common.generate");
+    await act(async () => pending.resolve({ status: "Promoted", harness_id: "old-harness", message: "original draft approved" }));
+    await flushEffects();
+
+    expect(view.container.textContent).toContain("replacement source");
+    expect(view.container.querySelector("[data-compiled]")?.textContent).toBe("false");
+    expect(view.container.textContent).not.toContain("original draft approved");
+  });
+
+  it("does not hydrate previous approval while a replacement draft is pending", async () => {
+    const pending = deferred<ReturnType<typeof draftResult>>();
+    let generation = 0;
+    configureScopeTransport((command) => {
+      if (command === "harness_draft") return ++generation === 1 ? Promise.resolve(draftResult("original source")) : pending.promise;
+      if (command === "harness_review_queue") return Promise.resolve([{
+        harness_id: "retained-harness", target_id: "candidate-0", target_symbol: "parse_input", target_selector: "src/parser.c::parse_input",
+        project_root: PROJECT, engine: "LibFuzzer", language: "C", status: "Promoted", build_output: "fuzz",
+        smoke_passed: true, smoke_execs_per_sec: 100, needs_review: false, next_action: "run", source_preview: "retained promoted source",
+        ai_review: { exercises_target: true, safe_to_execute: true, reasons: [], reviewed_at: "now" },
+        source_sha256: "a".repeat(64), binary_sha256: "b".repeat(64), lint: [],
+      }]);
+    });
+    const view = await mountHarnessScope();
+    await harnessButton(view, "common.generate");
+    await harnessButton(view, "common.generate");
+
+    expect(view.container.querySelector("[data-compiled]")?.textContent).toBe("false");
+    expect(view.container.textContent).not.toContain("retained promoted source");
+    expect([...view.container.querySelectorAll("button")].find((button) => button.textContent === "harness.runSmokeTest")?.disabled).toBe(true);
+  });
+
+  it("does not reuse persisted smoke approval after a new smoke attempt fails", async () => {
+    configureScopeTransport((command) => {
+      if (command === "harness_review_queue") return Promise.resolve([{
+        harness_id: "retained-harness", target_id: "candidate-0", target_symbol: "parse_input", target_selector: "src/parser.c::parse_input",
+        project_root: PROJECT, engine: "LibFuzzer", language: "C", status: "SmokePassed", build_output: "fuzz",
+        smoke_passed: true, smoke_execs_per_sec: 100, needs_review: true, next_action: "promote", source_preview: "retained source",
+        ai_review: { exercises_target: true, safe_to_execute: true, reasons: [], reviewed_at: "now" },
+        source_sha256: "a".repeat(64), binary_sha256: "b".repeat(64), lint: [],
+      }]);
+      if (command === "harness_smoke") return Promise.resolve({ status: "Failed", passed: false, duration_secs: 0, execs_per_sec: 0, crashes: 0, error: "smoke execution unavailable" });
+    });
+    const view = await mountHarnessScope();
+    await harnessButton(view, "harness.runSmokeTest");
+
+    expect([...view.container.querySelectorAll("button")].find((button) => button.textContent === "harness.approveForCampaigns")?.disabled).toBe(true);
+  });
+
+  it.each(["target", "project"])("discards a delayed draft after changing %s and permits a fresh build", async (changed) => {
+    const pending = deferred<ReturnType<typeof draftResult>>();
+    let drafted = false;
+    configureScopeTransport((command) => {
+      if (command === "harness_draft") {
+        if (!drafted) { drafted = true; return pending.promise; }
+        return Promise.resolve(draftResult("current selection source"));
+      }
+      if (command === "harness_compile") return Promise.resolve({ status: "Compiled", message: "current source compiled" });
+    });
+    const view = await mountHarnessScope();
+    await harnessButton(view, "common.generate");
+    expect(invokedMutatingCommands()).toEqual(["harness_draft"]);
+    await harnessButton(view, `select other ${changed}`);
+    await act(async () => pending.resolve(draftResult("previous selection source")));
+    await flushEffects();
+
+    expect(view.container.textContent).not.toContain("previous selection source");
+    expect([...view.container.querySelectorAll("button")].find((button) => button.textContent === "harness.compile")?.disabled).toBe(true);
+    await harnessButton(view, "common.generate");
+    await harnessButton(view, "harness.compile");
+    expect(transportInvoke.mock.calls.find(([command]) => command === "harness_compile")?.[1]).toMatchObject({
+      source: "current selection source",
+      project: changed === "project" ? PROJECT_B : PROJECT,
+      target: changed === "target" ? "parse_other" : "parse_input",
+    });
+    expect(view.container.textContent).toContain("current source compiled");
+  });
+
+  it("does not restore an abandoned draft error after returning to the original target", async () => {
+    const pending = deferred<ReturnType<typeof draftResult>>();
+    configureScopeTransport((command) => command === "harness_draft" ? pending.promise : undefined);
+    const view = await mountHarnessScope();
+    await harnessButton(view, "common.generate");
+    await harnessButton(view, "select other target");
+    await harnessButton(view, "select original target");
+    await act(async () => pending.reject(new Error("abandoned draft failure")));
+    await flushEffects();
+
+    expect(view.container.textContent).not.toContain("abandoned draft failure");
+    expect([...view.container.querySelectorAll("button")].find((button) => button.textContent === "common.generate")?.disabled).toBe(false);
+  });
+
+  it.each(["engine", "language"])("clears completed source when the selected %s changes", async (changed) => {
+    configureScopeTransport((command) => command === "harness_draft"
+      ? Promise.resolve(draftResult("previous selection source")) : undefined);
+    const view = await mountHarnessScope();
+    await harnessButton(view, "common.generate");
+    expect(view.container.textContent).toContain("previous selection source");
+    await harnessButton(view, `select other ${changed}`);
+
+    expect(view.container.textContent).not.toContain("previous selection source");
+    expect([...view.container.querySelectorAll("button")].find((button) => button.textContent === "harness.compile")?.disabled).toBe(true);
+  });
+
+  it("stops the combined build after selection changes while compilation is pending", async () => {
+    const pending = deferred<{ status: string; message: string }>();
+    configureScopeTransport((command) => {
+      if (command === "harness_draft") return Promise.resolve(draftResult("previous selection source"));
+      if (command === "harness_compile") return pending.promise;
+      if (command === "harness_smoke") return Promise.resolve({ status: "SmokePassed", passed: true, duration_secs: 10, execs_per_sec: 100, crashes: 0 });
+      if (command === "generate_seeds") return Promise.resolve({ seeds: [{ name: "previous seed", size: 1, sha256: "a".repeat(64) }] });
+    });
+    const view = await mountHarnessScope();
+    await harnessButton(view, "harness.buildSmokeTest");
+    expect(invokedMutatingCommands()).toEqual(["harness_draft", "harness_compile"]);
+    await harnessButton(view, "select other target");
+    await act(async () => pending.resolve({ status: "Compiled", message: "previous source compiled" }));
+    await flushEffects();
+
+    expect(invokedMutatingCommands()).toEqual(["harness_draft", "harness_compile"]);
+    expect(view.container.textContent).not.toContain("previous source compiled");
+    expect(view.container.textContent).not.toContain("previous seed");
+  });
+
+  it.each([false, true])("does not mark another selection approved after a delayed promotion (with findings: %s)", async (findings) => {
+    const pending = deferred<{ status: string; harness_id: string; message: string }>();
+    configureScopeTransport((command) => {
+      if (command === "harness_draft") return Promise.resolve(draftResult("previous selection source"));
+      if (command === "harness_compile") return Promise.resolve({ status: "Compiled", message: "compiled" });
+      if (command === "harness_smoke") return Promise.resolve({ status: findings ? "SmokeFailed" : "SmokePassed", passed: !findings, duration_secs: 10, execs_per_sec: 100, crashes: findings ? 1 : 0 });
+      if (command === "generate_seeds") return Promise.resolve({ seeds: [] });
+      if (command === "harness_promote" || command === "harness_promote_with_findings") return pending.promise;
+    });
+    const view = await mountHarnessScope();
+    await harnessButton(view, "harness.buildSmokeTest");
+    await harnessButton(view, findings ? "harness.approveWithFindings" : "harness.approveForCampaigns");
+    expect(invokedMutatingCommands()).toContain(findings ? "harness_promote_with_findings" : "harness_promote");
+    await harnessButton(view, "select other target");
+    await act(async () => pending.resolve({ status: "Promoted", harness_id: "old-harness", message: "previous target approved" }));
+    await flushEffects();
+
+    expect(view.container.querySelector("[data-compiled]")?.textContent).toBe("false");
+    expect(view.container.textContent).not.toContain("previous target approved");
   });
 });

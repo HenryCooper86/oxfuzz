@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { GitCompare } from "lucide-react";
 import { Badge, Button, Textarea, ViewHeader } from "../components/ui";
 import { getTransport } from "../lib";
@@ -31,8 +31,12 @@ const FINDING_TONE: Record<FindingChange, "error" | "warning" | "success" | "def
 };
 
 export function ChangesView() {
-  const { t } = useI18n();
   const { activeProject } = useProject();
+  return <ProjectChanges key={activeProject} project={activeProject} />;
+}
+
+function ProjectChanges({ project }: { project: string }) {
+  const { t } = useI18n();
   const [diff, setDiff] = useState("");
   const [base, setBase] = useState("");
   const [head, setHead] = useState("");
@@ -40,65 +44,101 @@ export function ChangesView() {
   const [baseRun, setBaseRun] = useState("");
   const [headRun, setHeadRun] = useState("");
   const [comparison, setComparison] = useState<RevisionComparisonView | null>(null);
+  const [reviewedRequest, setReviewedRequest] = useState<{
+    baseRunId: string; headRunId: string; regressionThresholdPct: number;
+  } | null>(null);
   const [published, setPublished] = useState<PublishedComparison | null>(null);
   const [confirmed, setConfirmed] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [operation, setOperation] = useState<"map" | "compare" | "publish" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const mapRequest = useRef(0);
+  const comparisonRequest = useRef(0);
+  const busy = operation !== null;
+
+  useEffect(() => () => {
+    mapRequest.current += 1;
+    comparisonRequest.current += 1;
+  }, []);
+
+  function invalidateImpact() {
+    mapRequest.current += 1;
+    setImpact(null);
+    setError(null);
+    setOperation(current => current === "map" ? null : current);
+  }
+
+  function invalidateComparison() {
+    comparisonRequest.current += 1;
+    setComparison(null);
+    setReviewedRequest(null);
+    setPublished(null);
+    setConfirmed(false);
+    setError(null);
+    setOperation(current => current === "map" ? current : null);
+  }
 
   async function mapChange() {
-    setBusy(true);
+    const request = ++mapRequest.current;
+    setOperation("map");
     setError(null);
     try {
       const view = await getTransport().invoke<ChangeImpactView>("change_impact", {
-        project: activeProject,
+        project,
         diff: diff.trim() ? diff : undefined,
         base: base.trim() || undefined,
         head: head.trim() || undefined,
       });
-      setImpact(view);
+      if (request === mapRequest.current) setImpact(view);
     } catch (e) {
-      setImpact(null);
-      setError(String(e));
+      if (request === mapRequest.current) {
+        setImpact(null);
+        setError(String(e));
+      }
     } finally {
-      setBusy(false);
+      if (request === mapRequest.current) setOperation(null);
     }
   }
 
   async function compare() {
-    setBusy(true);
+    const request = ++comparisonRequest.current;
+    const inputs = {
+      baseRunId: baseRun.trim(),
+      headRunId: headRun.trim(),
+      regressionThresholdPct: DEFAULT_REGRESSION_THRESHOLD_PCT,
+    };
+    setOperation("compare");
     setError(null);
+    setComparison(null);
+    setReviewedRequest(null);
     setPublished(null);
     setConfirmed(false);
     try {
-      const view = await getTransport().invoke<RevisionComparisonView>("change_compare", {
-        baseRunId: baseRun.trim(),
-        headRunId: headRun.trim(),
-        regressionThresholdPct: DEFAULT_REGRESSION_THRESHOLD_PCT,
-      });
+      const view = await getTransport().invoke<RevisionComparisonView>("change_compare", inputs);
+      if (request !== comparisonRequest.current) return;
       setComparison(view);
+      setReviewedRequest(inputs);
     } catch (e) {
-      setComparison(null);
-      setError(String(e));
+      if (request === comparisonRequest.current) setError(String(e));
     } finally {
-      setBusy(false);
+      if (request === comparisonRequest.current) setOperation(null);
     }
   }
 
   async function publish() {
-    setBusy(true);
+    if (!confirmed || !comparison?.comparable || !reviewedRequest || busy) return;
+    const request = ++comparisonRequest.current;
+    setOperation("publish");
     setError(null);
     try {
       const result = await getTransport().invoke<PublishedComparison>("change_publish", {
-        baseRunId: baseRun.trim(),
-        headRunId: headRun.trim(),
-        regressionThresholdPct: DEFAULT_REGRESSION_THRESHOLD_PCT,
+        ...reviewedRequest,
         destination: "issue_tracker",
       });
-      setPublished(result);
+      if (request === comparisonRequest.current) setPublished(result);
     } catch (e) {
-      setError(String(e));
+      if (request === comparisonRequest.current) setError(String(e));
     } finally {
-      setBusy(false);
+      if (request === comparisonRequest.current) setOperation(null);
     }
   }
 
@@ -114,14 +154,14 @@ export function ChangesView() {
             aria-label={t("changeAware.baseRevision")}
             placeholder={t("changeAware.baseRevision")}
             value={base}
-            onChange={(event) => setBase(event.target.value)}
+            onChange={(event) => { invalidateImpact(); setBase(event.target.value); }}
             className="px-2 py-1 text-11px border border-solid border-[var(--border)] rounded-[var(--radius-md)] bg-[var(--surface-primary)] text-text-primary outline-none"
           />
           <input
             aria-label={t("changeAware.headRevision")}
             placeholder={t("changeAware.headRevision")}
             value={head}
-            onChange={(event) => setHead(event.target.value)}
+            onChange={(event) => { invalidateImpact(); setHead(event.target.value); }}
             className="px-2 py-1 text-11px border border-solid border-[var(--border)] rounded-[var(--radius-md)] bg-[var(--surface-primary)] text-text-primary outline-none"
           />
           <span className="text-xs text-text-muted">{t("changeAware.orDiff")}</span>
@@ -131,14 +171,14 @@ export function ChangesView() {
           rows={6}
           value={diff}
           placeholder={t("changeAware.diffPlaceholder")}
-          onChange={(event) => setDiff(event.target.value)}
+          onChange={(event) => { invalidateImpact(); setDiff(event.target.value); }}
         />
         <Button
           variant="outline"
           size="sm"
           className="self-start"
           loading={busy}
-          disabled={!activeProject}
+          disabled={!project}
           onClick={() => void mapChange()}
         >
           {t("changeAware.mapAction")}
@@ -179,14 +219,14 @@ export function ChangesView() {
             aria-label={t("changeAware.baseRun")}
             placeholder={t("changeAware.baseRun")}
             value={baseRun}
-            onChange={(event) => setBaseRun(event.target.value)}
+            onChange={(event) => { invalidateComparison(); setBaseRun(event.target.value); }}
             className="w-80 px-2 py-1 text-11px font-mono border border-solid border-[var(--border)] rounded-[var(--radius-md)] bg-[var(--surface-primary)] text-text-primary outline-none"
           />
           <input
             aria-label={t("changeAware.headRun")}
             placeholder={t("changeAware.headRun")}
             value={headRun}
-            onChange={(event) => setHeadRun(event.target.value)}
+            onChange={(event) => { invalidateComparison(); setHeadRun(event.target.value); }}
             className="w-80 px-2 py-1 text-11px font-mono border border-solid border-[var(--border)] rounded-[var(--radius-md)] bg-[var(--surface-primary)] text-text-primary outline-none"
           />
           <Button

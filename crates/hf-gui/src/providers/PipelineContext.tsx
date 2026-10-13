@@ -40,18 +40,20 @@ export function PipelineProvider({ children }: { children: React.ReactNode }) {
   const { activeProject, recentProjects } = useProject();
   const key = activeProject || "__none__";
   const [byProject, setByProject] = useState<Record<string, Progress>>(loadProgress);
-  const cur = byProject[key] ?? EMPTY;
+  const retainedProgress = pruneToKeys(byProject, recentProjects);
+  if (retainedProgress !== byProject) setByProject(retainedProgress);
+  const cur = retainedProgress[key] ?? EMPTY;
 
   // Persist progress, but only for projects still in the recents list -- a
   // removed project's completed pipeline must not linger on disk. The active
   // project is cleared on removal, so the live view already drops it.
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(pruneToKeys(byProject, recentProjects)));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(retainedProgress));
     } catch {
       // Best-effort: localStorage may be unavailable or full.
     }
-  }, [byProject, recentProjects]);
+  }, [retainedProgress]);
 
   const update = useCallback(
     (fn: (p: Progress) => Progress) => {

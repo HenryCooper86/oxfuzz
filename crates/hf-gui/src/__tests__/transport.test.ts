@@ -4,6 +4,103 @@ import { createHttpTransport } from "../lib/httpTransport";
 import type { FuzzerRunResult, RunProgressEvent } from "../lib/transport";
 
 describe("transport", () => {
+  it("maps known-findings approval and target coverage to explicit POST requests", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      return new Response(JSON.stringify({}), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const transport = createHttpTransport();
+      await transport.invoke("harness_promote_with_findings", {
+        project: "/tmp/project", target: "parse", engine: "libfuzzer",
+      });
+      await transport.invoke("coverage_functions", { project: "/tmp/project", target: "parse" });
+      expect(calls.map(({ url, init }) => [new URL(url).pathname, init.method])).toEqual([
+        ["/harness/promote-with-findings", "POST"],
+        ["/coverage/functions", "POST"],
+      ]);
+      expect(JSON.parse(String(calls[0].init.body))).toEqual({
+        project: "/tmp/project", target: "parse", engine: "libfuzzer",
+      });
+      expect(JSON.parse(String(calls[1].init.body))).toEqual({ project: "/tmp/project", target: "parse" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("nests the selected revision range in the change impact request", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      return new Response(JSON.stringify({}), { status: 200 });
+    }) as typeof fetch;
+    try {
+      await createHttpTransport().invoke("change_impact", {
+        project: "/tmp/project",
+        base: "main",
+        head: "feature",
+      });
+      expect(calls[0].url).toBe("http://localhost:8081/change/impact");
+      expect(JSON.parse(String(calls[0].init.body))).toEqual({
+        project: "/tmp/project",
+        revisions: { base: "main", head: "feature" },
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("preserves supplied diff input without inventing a revision range", async () => {
+    const calls: RequestInit[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(init ?? {});
+      return new Response(JSON.stringify({}), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const diff = "--- a/parser.c\n+++ b/parser.c\n@@ -1 +1 @@\n-old\n+new\n";
+      await createHttpTransport().invoke("change_impact", {
+        project: "/tmp/project",
+        diff,
+      });
+      expect(JSON.parse(String(calls[0].body))).toEqual({ project: "/tmp/project", diff });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("nests pricing in the durable remediation draft request", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      return new Response(JSON.stringify({ operation_id: "draft-1" }), { status: 200 });
+    }) as typeof fetch;
+    try {
+      await createHttpTransport().invoke("create_remediation_operation", {
+        runId: "11111111-1111-4111-8111-111111111111",
+        findingId: "22222222-2222-4222-8222-222222222222",
+        patch: "reviewed patch",
+        followUpFuzzSeconds: 60,
+        computeUsdPerHour: 2.5,
+        modelCostUsd: 0.25,
+      });
+      expect(calls[0].url).toBe("http://localhost:8081/remediation/operations");
+      expect(JSON.parse(String(calls[0].init.body))).toEqual({
+        run_id: "11111111-1111-4111-8111-111111111111",
+        finding_id: "22222222-2222-4222-8222-222222222222",
+        patch: "reviewed patch",
+        follow_up_fuzz_seconds: 60,
+        pricing: { compute_usd_per_hour: 2.5, model_cost_usd: 0.25 },
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("maps ranked discovery operations to the REST lifecycle", async () => {
     const calls: string[] = [];
     const originalFetch = globalThis.fetch;

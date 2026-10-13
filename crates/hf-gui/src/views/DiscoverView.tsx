@@ -383,9 +383,19 @@ export function DiscoverView({ embedded = false, onNavigate }: { embedded?: bool
     { project, lang },
   );
 
-  function selectCandidate(candidate: TargetCandidate) {
-    const duplicate = semgrepPresentation.candidates.some(item => item.id !== candidate.id && item.symbol === candidate.symbol);
-    setTarget(duplicate ? candidateTargetSelector(candidate) : candidate.symbol);
+  const candidateSelections = useMemo(() => {
+    const symbolCounts = new Map<string, number>();
+    for (const candidate of semgrepPresentation.candidates) {
+      symbolCounts.set(candidate.symbol, (symbolCounts.get(candidate.symbol) ?? 0) + 1);
+    }
+    return semgrepPresentation.candidates.map(candidate => ({
+      candidate,
+      selector: symbolCounts.get(candidate.symbol)! > 1 ? candidateTargetSelector(candidate) : candidate.symbol,
+    }));
+  }, [semgrepPresentation.candidates]);
+
+  function selectCandidate(selector: string) {
+    setTarget(selector);
     markDone("discover");
     onNavigate?.("harness");
   }
@@ -542,11 +552,12 @@ export function DiscoverView({ embedded = false, onNavigate }: { embedded?: bool
           {semgrepPresentation.candidates.length === 0 && <p role="status" className="text-sm">{t("gui.noTargets")}</p>}
           <div className="flex flex-col gap-1">
             {semgrepPresentation.inventory
-              ? semgrepPresentation.candidates.map((candidate) => (
+              ? candidateSelections.map(({ candidate, selector }) => (
                   <CandidateCard
                     key={candidate.id}
                     candidate={candidate}
-                    onSelect={onNavigate && !selectionRepair && !storageError ? () => selectCandidate(candidate) : undefined}
+                    targetSelector={selector}
+                    onSelect={onNavigate && !selectionRepair && !storageError ? () => selectCandidate(selector) : undefined}
                     callGraph={semgrepPresentation.inventory?.call_graph ?? {}}
                     project={
                       semgrepPresentation.inventory?.project_root ?? project
@@ -560,11 +571,12 @@ export function DiscoverView({ embedded = false, onNavigate }: { embedded?: bool
                     recommended={candidate.id === recommendedId}
                   />
                 ))
-              : semgrepPresentation.candidates.map((candidate) => (
+              : candidateSelections.map(({ candidate, selector }) => (
                   <CandidateCard
                     key={candidate.id}
                     candidate={candidate}
-                    onSelect={onNavigate && !selectionRepair && !storageError ? () => selectCandidate(candidate) : undefined}
+                    targetSelector={selector}
+                    onSelect={onNavigate && !selectionRepair && !storageError ? () => selectCandidate(selector) : undefined}
                     callGraph={inventory.call_graph ?? {}}
                     project={discoveryContext?.project ?? project}
                     assessment={assessmentById.get(candidate.id)}
@@ -580,6 +592,7 @@ export function DiscoverView({ embedded = false, onNavigate }: { embedded?: bool
 
 function CandidateCard({
   candidate: c,
+  targetSelector,
   callGraph,
   project,
   semgrepScores,
@@ -588,6 +601,7 @@ function CandidateCard({
   onSelect,
 }: {
   candidate: TargetCandidate;
+  targetSelector: string;
   callGraph: Record<string, string[]>;
   project: string;
   semgrepScores?: SemgrepTargetCandidate;
@@ -605,21 +619,23 @@ function CandidateCard({
   // (rebuilds a coverage harness + replays the corpus; only if a run happened).
   const [covered, setCovered] = useState<Set<string> | null>(null);
   const [covLoading, setCovLoading] = useState(false);
+  const [coverageError, setCoverageError] = useState<string | null>(null);
 
   const loadCoverage = useCallback(async () => {
     setCovLoading(true);
+    setCoverageError(null);
     try {
       const functions = await getTransport().invoke<string[]>("coverage_functions", {
         project,
-        target: c.symbol,
+        target: targetSelector,
       });
       setCovered(new Set(functions));
-    } catch {
-      setCovered(new Set());
+    } catch (cause) {
+      setCoverageError(String(cause));
     } finally {
       setCovLoading(false);
     }
-  }, [c.symbol, project]);
+  }, [targetSelector, project]);
 
   const toggleTree = useCallback(() => {
     const opening = !treeOpen;
@@ -730,6 +746,12 @@ function CandidateCard({
             <span className="text-xs text-text-muted">{t("discover.noCoverageYet")}</span>
           )}
         </div>
+        {coverageError && (
+          <div className="flex items-center gap-2 text-xs">
+            <span role="alert" className="text-text-muted">{t("discover.coverageFailed", { error: coverageError })}</span>
+            <Button size="sm" disabled={covLoading} onClick={() => void loadCoverage()}>{t("common.retry")}</Button>
+          </div>
+        )}
         {(callGraph[c.symbol] ?? []).map((child) => (
           <CallTreeNode key={child} name={child} graph={callGraph} ancestors={new Set([c.symbol])} depth={1} covered={covered} />
         ))}

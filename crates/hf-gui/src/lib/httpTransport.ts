@@ -46,6 +46,8 @@ const COMMAND_MAP: Record<string, CommandEndpoint> = {
   harness_compile: { method: "POST", path: "/harness/compile" },
   harness_smoke: { method: "POST", path: "/harness/smoke" },
   harness_promote: { method: "POST", path: "/harness/promote" },
+  harness_promote_with_findings: { method: "POST", path: "/harness/promote-with-findings" },
+  coverage_functions: { method: "POST", path: "/coverage/functions" },
   work_order_export: { method: "POST", path: "/harness/work-orders" },
   work_order_list: { method: "GET", path: "/harness/work-orders" },
   work_order_get: { method: "GET", path: "/harness/work-orders/{work_order_id}" },
@@ -616,6 +618,21 @@ export function createHttpTransport(options: HttpTransportOptions = {}): Transpo
         const { before, ...rest } = args ?? {};
         const cursor = before as { created_at: string; id: string } | null;
         return request<T>(endpoint, { ...rest, before_created_at: cursor?.created_at, before_id: cursor?.id }, options);
+      }
+      if (command === "change_impact") {
+        const { base, head, ...rest } = args ?? {};
+        const revisions = base != null && head != null ? { base, head } : undefined;
+        return request<T>(endpoint, { ...rest, revisions }, options);
+      }
+      if (command === "create_remediation_operation") {
+        const { computeUsdPerHour, modelCostUsd, ...rest } = args ?? {};
+        return request<T>(endpoint, {
+          ...rest,
+          pricing: {
+            compute_usd_per_hour: computeUsdPerHour,
+            model_cost_usd: modelCostUsd,
+          },
+        }, options);
       }
       const requestArgs = command === "patch_defectdojo_config" || command === "patch_issue_tracker_config"
         ? typedPatchBody(args)

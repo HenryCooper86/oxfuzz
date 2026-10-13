@@ -206,7 +206,7 @@ mod collection {
     /// `function-coverage/raw/`, where [`ServiceContainer::collect_run_function_coverage`]
     /// reads it, and needs no second mount.
     ///
-    /// [`prepare`]: Self::prepare
+    /// [`prepare`]: prepare
     /// [`ServiceContainer::collect_run_function_coverage`]: super::ServiceContainer::collect_run_function_coverage
     pub(in crate::container) fn relocate_profiles_to_run_output(
         config: &mut FuzzRunConfig,

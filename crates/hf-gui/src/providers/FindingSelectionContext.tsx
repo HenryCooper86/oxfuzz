@@ -39,6 +39,7 @@ export function FindingSelectionProvider({ children }: { children: React.ReactNo
     () => pruneToKeys(selections, recentProjects),
     [recentProjects, selections],
   );
+  if (retainedSelections !== selections) setSelections(retainedSelections);
 
   useEffect(() => {
     try {

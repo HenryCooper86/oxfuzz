@@ -1,4 +1,5 @@
 import { RunHealthPages } from "./runHealthPages";
+import { onProjectDeleted } from "./projectDeletion";
 import type { Transport, RunOwner } from "../lib/transport";
 import type { ToastContextValue } from "../components/ui/toastContext";
 import type { RunOutputValue } from "./runOutput";
@@ -55,6 +56,8 @@ export class RunOutputController {
   private lastPersisted: string | null = null;
   private invocation = 0;
   private cancelOnAdmission = false;
+  private deletionSequence = 0;
+  private deletedProjects = new Map<string, number>();
   private toast: ToastContextValue["toast"] = () => {};
   private setEngine: (engine: string | null) => void = () => {};
 
@@ -98,7 +101,7 @@ export class RunOutputController {
   start() {
     this.mounted = true;
     const epoch = ++this.epoch;
-    const disposers: Array<() => void> = [];
+    const disposers: Array<() => void> = [onProjectDeleted(project => this.forgetProject(project))];
     let active = true;
     const listen = (name: string, callback: (payload: unknown) => void) => {
       void this.transport
@@ -141,6 +144,27 @@ export class RunOutputController {
     this.stopPoll();
     this.syncSelection();
     void this.discover();
+  }
+  private forgetProject(project: string) {
+    this.deletedProjects.set(project, ++this.deletionSequence);
+    const runs = { ...this.state.runs };
+    for (const [id, run] of Object.entries(runs)) {
+      if (run.owner?.project_root !== project) continue;
+      delete runs[id];
+      this.statusVersions.delete(id);
+      this.summaryVersions.delete(id);
+    }
+    const latest = { ...this.state.latest };
+    const legacy = { ...this.state.legacy };
+    delete latest[project];
+    delete legacy[project];
+    if (project === this.project) {
+      ++this.scope;
+      ++this.discovery;
+      this.stopPoll();
+    }
+    this.state = { ...this.state, runs, latest, legacy };
+    this.emit();
   }
   private selectedId(): string | null {
     const id = this.state.latest[this.project];
@@ -235,6 +259,7 @@ export class RunOutputController {
       return Promise.resolve();
     if (!this.admit(id)) return Promise.resolve();
     const epoch = this.epoch;
+    const deletionSequence = this.deletionSequence;
     const version = this.statusVersions.get(id) ?? 0;
     const request = this.transport
       .invoke<unknown>("run_owner", { runId: id })
@@ -242,6 +267,7 @@ export class RunOutputController {
         if (!this.mounted || epoch !== this.epoch) return;
         const owner = parseOwner(value, id);
         if (!owner) return;
+        if ((this.deletedProjects.get(owner.project_root) ?? 0) > deletionSequence) return;
         if (version !== (this.statusVersions.get(id) ?? 0) && this.state.runs[id]?.status)
           owner.status = this.state.runs[id].status!;
         this.acceptOwner(owner);
@@ -449,6 +475,13 @@ export class RunOutputController {
     if (!owner) return;
     const event = parseHealth(payload.event, owner.run_id);
     if (!event) return;
+    if (this.deletedProjects.has(owner.project_root) && !this.state.runs[owner.run_id]?.owner) {
+      // A queued event cannot restore deleted evidence without a fresh durable owner read.
+      void this.ensureOwner(owner.run_id).then(() => {
+        if (this.state.runs[owner.run_id]?.owner) this.liveHealth(payload);
+      });
+      return;
+    }
     if (!this.acceptOwner(owner)) return;
     this.healthPages.merge(owner.run_id, [event]);
     if (event.severity === "error" && !this.notified.has(event.id)) {

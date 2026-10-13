@@ -5,6 +5,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useState, 
 import { Button, IconButton, EmptyState, Input, LoadingState, Select, SeverityBadge, Textarea, ViewHeader } from "../components/ui";
 import { Puzzle, BookOpen, Zap, Target, FileCode, Activity, Bug, Crosshair, Play, Loader2, Plus, Trash2, RotateCw, RotateCcw, Copy, Square, Bot, Shield, Database, Pencil, Save, X, Search, FilePlus, FolderOpen, Layers } from "lucide-react";
 import { getTransport, pickFile, pickFolder, emitDataChanged } from "../lib";
+import { isTauriEnvironment } from "../lib/transport";
 import { useI18n } from "../i18nContext";
 import { useConfirm } from "../providers/confirm";
 import { useProject } from "../providers/project";
@@ -1059,6 +1060,18 @@ function KnowledgeBaseSearch() {
 }
 
 export function KnowledgeView() {
+  const { t } = useI18n();
+  if (isTauriEnvironment()) return <DesktopKnowledgeView />;
+  return (
+    <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
+      <ViewHeader title={t("knowledge.title")} description={t("knowledge.description")} />
+      <p role="note" className="text-xs text-text-muted">{t("knowledge.desktopSummaryOnly")}</p>
+      <KnowledgeBaseSearch />
+    </div>
+  );
+}
+
+function DesktopKnowledgeView() {
   const { t } = useI18n();
   const confirm = useConfirm();
   const [data, setData] = useState<KnowledgeSummary | null>(null);

@@ -70,7 +70,7 @@ impl ServiceContainer {
                     "run '{run_id}' target belongs to another project"
                 )));
             }
-            Some(target.symbol)
+            Some(retained_run_target_selector(&run, &target)?)
         } else {
             None
         };

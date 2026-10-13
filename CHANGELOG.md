@@ -154,6 +154,19 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ### Fixed
 
+- GUI requests retain their project, target, and harness revision ownership:
+  delayed responses cannot restore deleted project state, replace current
+  artifact inventories, or approve a regenerated harness. Change-review
+  publication uses the comparison the operator reviewed.
+- Native startup delivers retained campaign-health events. Browser workflows
+  now expose the missing coverage and known-findings routes, send the expected
+  change-impact and remediation request fields, and explain desktop-only
+  storage and global knowledge controls.
+- Discovery and retained runs preserve the selected workspace for both unique
+  and duplicate symbols. Failed coverage reads remain retryable, desktop
+  artifact inventories avoid redundant scans, and corrected diagrams recover
+  from rendering errors. Updated diagram dependencies resolve their reported
+  security advisories.
 - libFuzzer fork-mode runs no longer report phantom leaks: fork children
   misreport the forked snapshot of the parent's heap as leaked, so fork runs
   now pass `-detect_leaks=0` and set `ASAN_OPTIONS=detect_leaks=0` (an

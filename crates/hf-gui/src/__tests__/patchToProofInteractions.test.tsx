@@ -66,7 +66,8 @@ it("reviews exact HTTP operation, separately approves and starts, polls retained
   });
   await act(async () => button("Create draft").click());
   expect(requests[0]).toEqual({ path: "/remediation/operations", method: "POST", body: {
-    run_id: run, finding_id: finding, patch, follow_up_fuzz_seconds: 300, compute_usd_per_hour: 0, model_cost_usd: 0,
+    run_id: run, finding_id: finding, patch, follow_up_fuzz_seconds: 300,
+    pricing: { compute_usd_per_hour: 0, model_cost_usd: 0 },
   } });
   expect(host.querySelector(`[title="${digest}"]`)).toBeTruthy();
   expect(starts()).toHaveLength(0);

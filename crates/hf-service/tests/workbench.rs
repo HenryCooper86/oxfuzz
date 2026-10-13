@@ -106,6 +106,46 @@ fn sample_run(project: &str, harness_id: Uuid) -> RunRecord {
 }
 
 #[tokio::test]
+async fn run_owner_preserves_the_retained_workspace_selector() {
+    let (container, _dir) = test_container().await;
+    let store = container.store().unwrap();
+    let project = Path::new("/owner-project");
+    let target = sample_target("/owner-project");
+    let mut other = target.clone();
+    other.id = Uuid::new_v4();
+    other.location.file = PathBuf::from("src/other.c");
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    store.upsert_target(&other, Utc::now()).await.unwrap();
+    let harness = sample_harness(target.id);
+    store.upsert_harness(&harness).await.unwrap();
+
+    for (retained_selector, expected_selector) in [
+        (
+            Some("src/parser.c::parse_packet"),
+            "src/parser.c::parse_packet",
+        ),
+        (Some("parse_packet"), "parse_packet"),
+        (None, "parse_packet"),
+    ] {
+        let mut run = sample_run("/owner-project", harness.id);
+        run.config.as_mut().unwrap().seed_corpus = retained_selector
+            .map(|selector| hf_service::workspace_dir(project, selector).join("corpus"));
+        store.insert_run(&run).await.unwrap();
+
+        let owner = container.run_owner(run.id).await.unwrap();
+        assert_eq!(owner.target.as_deref(), Some(expected_selector));
+        if retained_selector == Some("src/parser.c::parse_packet") {
+            let dashboard = container
+                .workbench_dashboard(Some(project), owner.target.as_deref())
+                .await
+                .unwrap();
+            assert_eq!(dashboard.totals.targets, 1);
+            assert_eq!(dashboard.top_targets[0].id, target.id.to_string());
+        }
+    }
+}
+
+#[tokio::test]
 async fn dashboard_summarizes_targets_harnesses_runs_and_crashes() {
     let (container, _dir) = test_container().await;
     let store = container.store().unwrap();

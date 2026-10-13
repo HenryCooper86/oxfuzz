@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { getTransport, isTauriEnvironment, emitDataChanged } from "../lib";
 import { useProject } from "../providers/project";
 import { useToast } from "../components/ui/toastContext";
@@ -11,6 +11,11 @@ import { useI18n } from "../i18nContext";
 
 export function ArtifactsView() {
   const { activeProject } = useProject();
+  const desktop = isTauriEnvironment();
+  return <ArtifactInventory key={desktop ? "all-projects" : activeProject} activeProject={activeProject} desktop={desktop} />;
+}
+
+function ArtifactInventory({ activeProject, desktop }: { activeProject: string; desktop: boolean }) {
   const { toast } = useToast();
   const confirm = useConfirm();
   const { t } = useI18n();
@@ -21,12 +26,24 @@ export function ArtifactsView() {
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const [exporting, setExporting] = useState(false);
+  const mounted = useRef(true);
+  const scanGeneration = useRef(0);
+  const inventoryProject = desktop ? undefined : activeProject;
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      scanGeneration.current += 1;
+    };
+  }, []);
 
   const scan = useCallback(async () => {
+    const generation = ++scanGeneration.current;
     setLoading(true);
     setError(null);
     const t = getTransport();
-    const project = isTauriEnvironment() ? undefined : { project: activeProject || undefined };
+    const project = desktop ? undefined : { project: inventoryProject || undefined };
     try {
       // Desktop browses all persisted artifacts; the browser uses the selected
       // project. Surface a failed read rather than showing an empty state.
@@ -34,22 +51,33 @@ export function ArtifactsView() {
         t.invoke<Crash[]>("all_crashes", project),
         t.invoke<CorpusEntry[]>("all_corpus", project),
       ]);
+      if (!mounted.current || generation !== scanGeneration.current) return;
       setCrashes(c);
       setCorpus(k);
     } catch (e) {
+      if (!mounted.current || generation !== scanGeneration.current) return;
       setError(String(e));
       setCrashes([]);
       setCorpus([]);
     } finally {
-      setScanned(true);
-      setLoading(false);
+      if (mounted.current && generation === scanGeneration.current) {
+        setScanned(true);
+        setLoading(false);
+      }
     }
-  }, [activeProject]);
+  }, [desktop, inventoryProject]);
 
   // Auto-scan on mount so the view isn't a dead "Scan" prompt.
   useEffect(() => {
-    queueMicrotask(() => void scan());
+    let active = true;
+    queueMicrotask(() => { if (active) void scan(); });
+    return () => { active = false; };
   }, [scan]);
+
+  function invalidateScan() {
+    scanGeneration.current += 1;
+    setLoading(false);
+  }
 
   async function exportData() {
     setExporting(true);
@@ -67,39 +95,51 @@ export function ArtifactsView() {
 
   async function deleteCrash(c: Crash) {
     if (!(await confirm({ title: t("artifacts.deleteCrashTitle"), message: t("artifacts.deleteCrashMessage", { name: c.input_path.split("/").pop() ?? "" }), danger: true, confirmLabel: t("common.delete") }))) return;
+    if (!mounted.current) return;
     try {
-      await getTransport().invoke("delete_crash", isTauriEnvironment()
+      await getTransport().invoke("delete_crash", desktop
         ? { crashId: c.id }
         : { crashId: c.id, project: activeProject || undefined });
-      setCrashes((cs) => cs.filter((x) => x.id !== c.id));
       emitDataChanged();
+      if (!mounted.current) return;
+      invalidateScan();
+      setCrashes((cs) => cs.filter((x) => x.id !== c.id));
     } catch (e) {
+      if (!mounted.current) return;
       toast({ title: t("artifacts.deleteFailed"), description: String(e), variant: "error" });
     }
   }
 
   async function deleteCorpus(e: CorpusEntry) {
     if (!(await confirm({ title: t("artifacts.deleteCorpusTitle"), message: t("artifacts.deleteCorpusMessage", { name: e.path.split("/").pop() ?? "" }), danger: true, confirmLabel: t("common.delete") }))) return;
+    if (!mounted.current) return;
     try {
-      await getTransport().invoke("delete_corpus_entry", isTauriEnvironment()
+      await getTransport().invoke("delete_corpus_entry", desktop
         ? { sha256: e.sha256, path: e.path }
         : { sha256: e.sha256, targetId: e.target_id, project: activeProject || undefined });
-      setCorpus((cs) => cs.filter((x) => x.sha256 !== e.sha256 || (e.target_id ? x.target_id !== e.target_id : x.path !== e.path)));
       emitDataChanged();
+      if (!mounted.current) return;
+      invalidateScan();
+      setCorpus((cs) => cs.filter((x) => x.sha256 !== e.sha256 || (e.target_id ? x.target_id !== e.target_id : x.path !== e.path)));
     } catch (err) {
+      if (!mounted.current) return;
       toast({ title: t("artifacts.deleteFailed"), description: String(err), variant: "error" });
     }
   }
 
   async function clearAll() {
     if (!(await confirm({ title: t("artifacts.clearAllTitle"), message: t("artifacts.clearAllMessage"), danger: true, confirmLabel: t("common.clearAll") }))) return;
+    if (!mounted.current) return;
     try {
-      await getTransport().invoke("clear_all_artifacts", isTauriEnvironment() ? undefined : { project: activeProject || undefined });
+      await getTransport().invoke("clear_all_artifacts", desktop ? undefined : { project: activeProject || undefined });
+      emitDataChanged();
+      if (!mounted.current) return;
+      invalidateScan();
       setCrashes([]);
       setCorpus([]);
-      emitDataChanged();
       toast({ title: t("artifacts.cleared"), variant: "success" });
     } catch (e) {
+      if (!mounted.current) return;
       toast({ title: t("artifacts.clearFailed"), description: String(e), variant: "error" });
     }
   }
@@ -119,7 +159,7 @@ export function ArtifactsView() {
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <ViewHeader title={t("artifacts.title")} description={t("artifacts.description")} />
         <div className="flex items-center gap-2">
-          {isTauriEnvironment() && (
+          {desktop && (
             <Button variant="outline" onClick={() => void exportData()} loading={exporting} title={t("artifacts.exportTooltip")}>
               {!exporting && <Download size={14} />}
               {t("common.export")}
