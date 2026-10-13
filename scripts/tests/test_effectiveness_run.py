@@ -271,7 +271,10 @@ def make_vendored_target(directory, revision_holder):
     import subprocess as git_subprocess
     root = Path(directory)
     root.mkdir(parents=True)
+    # Background Git maintenance must not race deletion of this disposable checkout.
     for step in (["git", "init", "--quiet", str(root)],
+                 ["git", "-C", str(root), "config", "maintenance.auto", "false"],
+                 ["git", "-C", str(root), "config", "gc.auto", "0"],
                  ["git", "-C", str(root), "config", "user.email", "t@example.org"],
                  ["git", "-C", str(root), "config", "user.name", "t"]):
         git_subprocess.run(step, check=True, capture_output=True)
