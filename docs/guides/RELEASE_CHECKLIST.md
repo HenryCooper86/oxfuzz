@@ -119,9 +119,11 @@ cd ../..
 ./scripts/build-scapy-sidecar.sh
 ```
 
-Automotive support remains disabled by runtime policy until an operator enables
-the subsystem and exact allowlists. Do not connect a physical interface as a
-release test.
+Automotive-enabled builds allow offline PCAP and virtual CAN modes by default,
+subject to the configured sandbox, protocol, and interface allowlists. Physical
+bench access is disabled by default. Enabling that policy does not approve an
+operation: every physical execution still requires fresh scoped human approval.
+Do not connect a physical interface as a release test.
 
 Verify the automotive report path with retained fixture evidence only. The
 deterministic report must work without a provider; the fake-provider tests must
@@ -185,7 +187,9 @@ Launch the fresh bundle and verify:
 - retained triage, report, artifact, run-history, and policy-audit views;
 - Settings enforcement of sandboxing, blocked fuzzer networking, and human
   promotion;
-- optional automotive UI is visibly disabled until policy is configured.
+- automotive Settings reflects the default offline and virtual allowlists, while
+  physical-bench access remains disabled until its separate policy is configured;
+  every physical execution still requires fresh scoped human approval.
 
 ## 6. Review security and operational boundaries
 
