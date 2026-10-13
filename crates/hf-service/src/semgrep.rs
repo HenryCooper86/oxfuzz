@@ -5430,8 +5430,9 @@ mod lifecycle_tests {
         "sha256:1111111111111111111111111111111111111111111111111111111111111111";
 
     pub(super) fn lifecycle_test_lock() -> &'static tokio::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+        // Root readers must share synchronization with fixtures that change
+        // HF_WORKSPACE_DIR, including while admission or a worker is pending.
+        ServiceContainer::workspace_environment_test_gate()
     }
 
     #[derive(Clone)]
@@ -6198,7 +6199,15 @@ mod lifecycle_tests {
                 .await
         });
         tokio::time::sleep(Duration::from_millis(25)).await;
-        assert!(!start.is_finished());
+        if start.is_finished() {
+            let current_workspace = crate::workspace_root();
+            panic!(
+                "admission completed before cleanup released: {:?}; cleanup root: {}; current root: {}",
+                start.await,
+                workspace.display(),
+                current_workspace.display(),
+            );
+        }
         let run_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM semgrep_enrichment_runs WHERE project_root = ?1",
         )
