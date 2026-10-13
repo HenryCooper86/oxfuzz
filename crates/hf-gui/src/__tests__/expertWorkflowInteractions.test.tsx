@@ -402,7 +402,15 @@ describe("expert workflow panels", () => {
       Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(source, "source");
       source.dispatchEvent(new Event("input", { bubbles: true }));
     });
+    expect(host.textContent).not.toContain("External tool name is required.");
+    expect(button("Import submission").disabled).toBe(false);
+
+    const external = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    await act(async () => external.click());
     expect(host.textContent).toContain("External tool name is required.");
+    expect(button("Import submission").disabled).toBe(true);
+    await act(async () => external.click());
+    expect(host.textContent).not.toContain("External tool name is required.");
     expect(button("Import submission").disabled).toBe(false);
 
     await act(async () => {

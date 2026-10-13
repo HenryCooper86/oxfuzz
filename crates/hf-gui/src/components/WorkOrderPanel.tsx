@@ -314,7 +314,7 @@ function WorkOrderPanelSession({
         <div className="flex flex-col gap-2 border-t border-border pt-3">
           <Textarea aria-label={t("workOrder.source")} value={source} onChange={(event) => setSource(event.target.value)} placeholder={t("workOrder.sourcePlaceholder")} rows={8} />
           <label className="text-xs"><input type="checkbox" checked={external} onChange={(event) => setExternal(event.target.checked)} /> {t("workOrder.external")}</label>
-          <p className="text-xs text-text-muted">{t("workOrder.toolRequired")}</p>
+          {external && <p className="text-xs text-text-muted">{t("workOrder.toolRequired")}</p>}
           {external && <div className="grid grid-cols-3 gap-2"><Input aria-label={t("workOrder.tool")} value={tool} onChange={(event) => setTool(event.target.value)} placeholder={t("workOrder.tool")} /><Input aria-label={t("workOrder.model")} value={model} onChange={(event) => setModel(event.target.value)} placeholder={t("workOrder.modelOptional")} /><Input aria-label={t("workOrder.responseId")} value={responseId} onChange={(event) => setResponseId(event.target.value)} placeholder={t("workOrder.responseIdOptional")} /></div>}
           <label className="text-xs">{t("workOrder.parent")}: <select value={parentSubmission ?? ""} onChange={(event) => setParentSubmission(event.target.value || null)} disabled={busy !== null}><option value="">{t("workOrder.noParent")}</option>{submissions.map((item) => <option key={item.id} value={item.id}>{short(item.source_sha256)}</option>)}</select></label>
           <p className="text-xs text-text-muted">{sourceBytes.toLocaleString()} / 65,536 UTF-8 bytes{sourceBytes > 65_536 ? ` · ${t("workOrder.tooLarge")}` : ""}</p>
