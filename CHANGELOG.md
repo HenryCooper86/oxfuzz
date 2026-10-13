@@ -9,6 +9,22 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ## Unreleased
 
+## 0.6.2 - 2026-10-13
+
+### Fixed
+
+- Explicit desktop actions now pass the selected operation's approval to the
+  service, including harness qualification and promotion, corpus tools, builds,
+  tournaments, publication, remediation verification, and virtual CAN tools.
+  Existing workflow and assistant approvals retain configured policies and deny
+  guards. Smoke consent does not approve campaign promotion or unrelated actions.
+- File-qualified targets keep the same harness filename and target lease through
+  generation, refinement, tournament compilation, and smoke qualification.
+- Work-order promotion reports policy refusals as `promotion_denied`, preserving
+  the refusal reason instead of incorrectly reporting stale harness evidence.
+- Human-authored work-order submissions no longer display an external-tool name
+  requirement. External-tool submissions still require that provenance.
+
 ## 0.6.1 - 2026-10-13
 
 ### Added
