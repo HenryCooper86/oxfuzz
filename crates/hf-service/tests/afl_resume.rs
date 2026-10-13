@@ -19,7 +19,10 @@ use hf_service::ServiceContainer;
 const TARGET: &str = "parse_entry";
 /// The queue entry the fake engine "produces"; a resumed run must see the
 /// donor's copy in its own output tree before it starts.
-const MARKER: &str = "id:000000,orig:seed";
+/// Use AFL++'s `SIMPLE_FILES` format so these host-written fixtures are regular
+/// files on Windows too; a colon would select an NTFS alternate data stream.
+const MARKER: &str = "id_000000";
+const CRASH_MARKER: &str = "id_000001_06";
 
 /// What the fake engine observed at launch: the sandbox environment, and
 /// whether its output tree already held the donor session's queue marker.
@@ -66,7 +69,7 @@ impl AflSessionRuntime {
         if self.write_crash.load(std::sync::atomic::Ordering::Relaxed) {
             std::fs::create_dir_all(instance.join("crashes")).unwrap();
             std::fs::write(
-                instance.join("crashes").join("id:000001,sig:06"),
+                instance.join("crashes").join(CRASH_MARKER),
                 b"crashing input",
             )
             .unwrap();
@@ -555,7 +558,7 @@ async fn a_resumed_tree_still_ingests_its_prior_crashes() {
         "one crash row for the resumed run: {resumed_rows:?}"
     );
     assert!(
-        resumed_rows[0].input_path.ends_with("id:000001,sig:06"),
+        resumed_rows[0].input_path.ends_with(CRASH_MARKER),
         "the row is the copied artifact: {:?}",
         resumed_rows[0].input_path
     );

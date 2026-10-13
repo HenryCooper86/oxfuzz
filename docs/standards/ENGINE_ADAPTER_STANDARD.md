@@ -151,7 +151,10 @@ The mechanism is deliberately **not** `-i -`:
 - The service copies the donor tree (instance queues and `.state`
   bookkeeping, `fuzzer_stats`, crashes/hangs, `_resume` leftovers) into the
   new run's fresh `out` directory, bounded to 32 MiB / 100 000 files with
-  symlinks rejected.
+  symlinks rejected. Copies preserve ordinary filenames and file contents;
+  NTFS named streams are not AFL session data and are not copied. Destination
+  files must be new. The copier meters bytes read from the opened source and
+  rejects data beyond the remaining ceiling, including growth during copying.
 - `hf-engine::runner` injects `AFL_AUTORESUME=1` into the sandbox environment
   when `cfg.resume` is set. Per `afl-fuzz`'s `handle_existing_out_dir`, this
   resumes each instance whose directory holds a `fuzzer_stats` and cold-starts

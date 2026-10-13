@@ -8,9 +8,9 @@ establishes implemented behavior, not live engine qualification.
 
 | Target | Discovery | Harness build and smoke | Campaign engine | Run evidence and replay | Host platform scope | Qualification in this checkout |
 | --- | --- | --- | --- | --- | --- | --- |
-| C | Tree-sitter inventory; optional ranking and Semgrep enrichment | Reviewed source, sandbox compile, smoke, exact-revision promotion | AFL++, honggfuzz, libFuzzer | Shared retained corpus; historical retained-input replay; optional LLVM function counters | Docker-backed desktop/CLI paths on Linux, macOS, Windows; live behavior must be qualified per OS | [Ten normal three-engine cycles passed](../acceptance/userspace-2026-09-27.md) for a benign C fixture on macOS arm64; fault, crash and other-platform acceptance remains open |
-| C++ | Tree-sitter inventory; optional ranking and Semgrep enrichment | Same lifecycle with C++ compiler/linker | AFL++, honggfuzz, libFuzzer | Same corpus/replay path; optional LLVM function counters | Docker-backed paths on Linux, macOS, Windows; platform-specific live acceptance open | Implemented and covered by controlled tests; representative real-project acceptance remains open |
-| Rust | Conservative lexical inventory | cargo-fuzz/libFuzzer path in the sandbox | libFuzzer | Userspace run history and replay; C/C++ LLVM function-counter path does not establish Rust function entry | Docker-backed paths on Linux, macOS, Windows; image 0.2.1 vendors libfuzzer-sys for offline builds | [One complete live cycle passed](../acceptance/rust-2026-10-07.md) (build, review, smoke, promotion, campaign, Stop, replay) on macOS arm64; multi-cycle and other-platform acceptance remains open |
+| C | Tree-sitter inventory; optional ranking and Semgrep enrichment | Reviewed source, sandbox compile, smoke, exact-revision promotion | AFL++, honggfuzz, libFuzzer | Shared retained corpus; historical retained-input replay; optional LLVM function counters | Docker-backed desktop/CLI paths on Linux and macOS; Windows execution limitations below | [Ten normal three-engine cycles passed](../acceptance/userspace-2026-09-27.md) for a benign C fixture on macOS arm64; fault, crash and other-platform acceptance remains open |
+| C++ | Tree-sitter inventory; optional ranking and Semgrep enrichment | Same lifecycle with C++ compiler/linker | AFL++, honggfuzz, libFuzzer | Same corpus/replay path; optional LLVM function counters | Docker-backed paths on Linux and macOS; Windows execution limitations below | Implemented and covered by controlled tests; representative real-project acceptance remains open |
+| Rust | Conservative lexical inventory | cargo-fuzz/libFuzzer path in the sandbox | libFuzzer | Userspace run history and replay; C/C++ LLVM function-counter path does not establish Rust function entry | Docker-backed paths on Linux and macOS; Windows execution limitations below; image 0.2.1 vendors libfuzzer-sys for offline builds | [One complete live cycle passed](../acceptance/rust-2026-10-07.md) (build, review, smoke, promotion, campaign, Stop, replay) on macOS arm64; multi-cycle and other-platform acceptance remains open |
 | Go | Conservative lexical inventory | No supported harness engine; [native fuzzing design](../design/go-native-fuzzing-design.md) is planned | Unavailable | No userspace campaign evidence | Discovery code is cross-platform; no campaign platform claim | Discovery only; no campaign claim |
 | Python | Conservative lexical inventory | No supported harness engine; [Atheris design](../design/python-atheris-fuzzing-design.md) is planned | Unavailable | No userspace campaign evidence | Discovery code is cross-platform; no campaign platform claim | Discovery only; no campaign claim |
 | Kernel | Not the userspace function inventory | A reviewed syzkaller manager configuration, not a generated userspace harness | syzkaller on Linux/KVM | Kernel-specific crash and run records; userspace replay claims do not apply | Dedicated Linux/KVM only; no macOS/Windows kernel-campaign claim | Implementation and controlled tests exist; dedicated Linux/KVM acceptance remains open |
@@ -59,6 +59,21 @@ fails loud otherwise. Mechanics and the parallel-mode choice live in
 
 Additional operation limits:
 
+- Native Windows drive-path mount arguments are covered by controlled runtime
+  tests. Windows installers and those tests do not establish live Docker build,
+  smoke, or campaign qualification. UNC and WSL filesystem configurations
+  have not been qualified either.
+- AFL++ output and resume on Windows NTFS remain unqualified. The packaged
+  AFL++ 4.09c uses colon-delimited queue/crash filenames and resume backup
+  directories. Win32 treats colons as
+  [alternate-stream separators](https://learn.microsoft.com/en-us/windows/win32/fileio/file-streams),
+  so host-written fixtures cannot reproduce these as ordinary files.
+  AFL++'s [compile-time `SIMPLE_FILES` option](https://github.com/AFLplusplus/AFLplusplus/blob/v4.09c/include/config.h)
+  uses portable names, but the shipped sandbox does not enable it. Resume
+  tests use that format to exercise copying, byte ceilings, and crash ingestion
+  on every CI host; they do not qualify the packaged engine on NTFS. Production
+  qualification requires a compatible image and actual Windows Docker
+  build/smoke/campaign/resume evidence.
 - Crash ingestion and deduplication are implemented for userspace engines;
   engine-specific minimization may retain the original input when unavailable.
 - Coverage edge counts do not prove entry into a selected function. Optional

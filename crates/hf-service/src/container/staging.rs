@@ -605,8 +605,8 @@ pub(super) fn afl_tree_has_session(tree: &Path) -> bool {
     false
 }
 
-/// Copy one donor AFL++ output tree into a fresh run output directory,
-/// verbatim and bounded.
+/// Copy one donor AFL++ output tree's ordinary filenames and file contents
+/// verbatim into a fresh run output directory, within the byte/file ceilings.
 ///
 /// The copy is what `afl-fuzz` resumes against under `AFL_AUTORESUME`:
 /// instance queues (queue position and `.state` bookkeeping), `fuzzer_stats`
@@ -615,6 +615,9 @@ pub(super) fn afl_tree_has_session(tree: &Path) -> bool {
 /// closed, and the tree must fit [`MAX_AFL_RESUME_TREE_BYTES`] and
 /// [`MAX_AFL_RESUME_TREE_FILES`] -- beyond that the operator gets an error
 /// naming the ceiling rather than a silently cold-started run.
+/// NTFS named streams are not AFL session data and are not copied. Each file
+/// is opened once, copied within the remaining byte budget, and checked for
+/// excess data; destination files must not already exist.
 ///
 /// # Errors
 /// Returns [`ClassifiedError::Validation`] for an unsafe or over-budget donor
@@ -669,27 +672,79 @@ pub(super) fn copy_afl_resume_tree(donor: &Path, output: &Path) -> Result<(), Cl
                 )));
             }
             remaining_files -= 1;
-            let metadata = std::fs::symlink_metadata(&source).map_err(|error| {
-                ClassifiedError::Internal(format!(
-                    "inspect AFL++ resume tree file {}: {error}",
-                    source.display()
-                ))
-            })?;
-            if metadata.len() > remaining_bytes {
-                return Err(ClassifiedError::Validation(format!(
-                    "AFL++ resume tree exceeds the {MAX_AFL_RESUME_TREE_BYTES}-byte ceiling"
-                )));
-            }
-            remaining_bytes -= metadata.len();
-            std::fs::copy(&source, &target).map_err(|error| {
-                ClassifiedError::Internal(format!(
-                    "copy AFL++ resume tree file {}: {error}",
-                    source.display()
-                ))
-            })?;
+            remaining_bytes -= copy_afl_resume_file(&source, &target, remaining_bytes)?;
         }
     }
     Ok(())
+}
+
+fn afl_resume_byte_ceiling_error() -> ClassifiedError {
+    ClassifiedError::Validation(format!(
+        "AFL++ resume tree exceeds the {MAX_AFL_RESUME_TREE_BYTES}-byte ceiling"
+    ))
+}
+
+fn copy_afl_resume_file(
+    source: &Path,
+    target: &Path,
+    remaining_bytes: u64,
+) -> Result<u64, ClassifiedError> {
+    let mut input = std::fs::File::open(source).map_err(|error| {
+        ClassifiedError::Internal(format!(
+            "open AFL++ resume tree file {}: {error}",
+            source.display()
+        ))
+    })?;
+    let metadata = input.metadata().map_err(|error| {
+        ClassifiedError::Internal(format!(
+            "inspect opened AFL++ resume tree file {}: {error}",
+            source.display()
+        ))
+    })?;
+    if !metadata.is_file() {
+        return Err(ClassifiedError::Validation(format!(
+            "opened AFL++ resume tree entry is not a regular file: {}",
+            source.display()
+        )));
+    }
+    if metadata.len() > remaining_bytes {
+        return Err(afl_resume_byte_ceiling_error());
+    }
+    let mut output = std::fs::File::create_new(target).map_err(|error| {
+        ClassifiedError::Internal(format!(
+            "create AFL++ resume tree file {}: {error}",
+            target.display()
+        ))
+    })?;
+    let copied = copy_afl_resume_contents(&mut input, &mut output, remaining_bytes)?;
+    output
+        .set_permissions(metadata.permissions())
+        .map_err(|error| {
+            ClassifiedError::Internal(format!(
+                "set AFL++ resume tree file permissions {}: {error}",
+                target.display()
+            ))
+        })?;
+    Ok(copied)
+}
+
+fn copy_afl_resume_contents(
+    input: &mut impl std::io::Read,
+    output: &mut impl std::io::Write,
+    remaining_bytes: u64,
+) -> Result<u64, ClassifiedError> {
+    let mut bounded = std::io::Read::take(&mut *input, remaining_bytes);
+    let copied = std::io::copy(&mut bounded, output).map_err(|error| {
+        ClassifiedError::Internal(format!("copy AFL++ resume tree file contents: {error}"))
+    })?;
+    let mut excess = [0_u8];
+    if input.read(&mut excess).map_err(|error| {
+        ClassifiedError::Internal(format!("check AFL++ resume tree file length: {error}"))
+    })? != 0
+    {
+        return Err(afl_resume_byte_ceiling_error());
+    }
+    Ok(copied)
 }
 
 /// Find the output tree a resume-enabled AFL++ run should continue: the newest
@@ -1311,12 +1366,24 @@ mod staging_tests {
 
     #[test]
     fn resume_copy_is_verbatim() {
+        // AFL++'s SIMPLE_FILES names remain regular files on Windows, where
+        // colon-delimited names select alternate data streams or are invalid.
+        assert_resume_copy_is_verbatim("id_000000", "id_000001_06");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resume_copy_preserves_colon_delimited_names() {
+        assert_resume_copy_is_verbatim("id:000000,orig:seed", "id:000001,sig:06");
+    }
+
+    fn assert_resume_copy_is_verbatim(queue_name: &str, crash_name: &str) {
         let donor = tempfile::tempdir().unwrap();
         let instance = donor.path().join("main");
         std::fs::create_dir_all(instance.join("queue")).unwrap();
         std::fs::create_dir_all(instance.join("crashes")).unwrap();
-        std::fs::write(instance.join("queue/id:000000,orig:seed"), b"queue input").unwrap();
-        std::fs::write(instance.join("crashes/id:000001,sig:06"), b"crash input").unwrap();
+        std::fs::write(instance.join("queue").join(queue_name), b"queue input").unwrap();
+        std::fs::write(instance.join("crashes").join(crash_name), b"crash input").unwrap();
         std::fs::write(
             instance.join("fuzzer_stats"),
             b"start_time : 1\nlast_update : 2\n",
@@ -1329,11 +1396,11 @@ mod staging_tests {
         copy_afl_resume_tree(donor.path(), &output).unwrap();
 
         assert_eq!(
-            std::fs::read(output.join("main/queue/id:000000,orig:seed")).unwrap(),
+            std::fs::read(output.join("main/queue").join(queue_name)).unwrap(),
             b"queue input"
         );
         assert_eq!(
-            std::fs::read(output.join("main/crashes/id:000001,sig:06")).unwrap(),
+            std::fs::read(output.join("main/crashes").join(crash_name)).unwrap(),
             b"crash input"
         );
         assert_eq!(
@@ -1369,7 +1436,7 @@ mod staging_tests {
         let donor = tempfile::tempdir().unwrap();
         let instance = donor.path().join("default");
         std::fs::create_dir_all(instance.join("queue")).unwrap();
-        std::fs::File::create(instance.join("queue/id:000000"))
+        std::fs::File::create(instance.join("queue/id_000000"))
             .unwrap()
             .set_len(super::MAX_AFL_RESUME_TREE_BYTES + 1)
             .unwrap();
@@ -1379,6 +1446,83 @@ mod staging_tests {
         std::fs::create_dir(&output).unwrap();
         let error = copy_afl_resume_tree(donor.path(), &output).unwrap_err();
         assert!(error.to_string().contains("resume tree"), "{error}");
+    }
+
+    #[test]
+    fn resume_copy_does_not_overwrite_existing_destination_files() {
+        let donor = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        std::fs::write(donor.path().join("fuzzer_stats"), b"donor stats").unwrap();
+        std::fs::write(output.path().join("fuzzer_stats"), b"existing stats").unwrap();
+
+        let error = copy_afl_resume_tree(donor.path(), output.path()).unwrap_err();
+        assert!(error.to_string().contains("resume tree"), "{error}");
+        assert_eq!(
+            std::fs::read(output.path().join("fuzzer_stats")).unwrap(),
+            b"existing stats"
+        );
+    }
+
+    #[test]
+    fn resume_copy_rejects_aggregate_bytes_over_the_ceiling() {
+        let donor = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        std::fs::File::create(donor.path().join("first"))
+            .unwrap()
+            .set_len(super::MAX_AFL_RESUME_TREE_BYTES)
+            .unwrap();
+        std::fs::write(donor.path().join("second"), b"x").unwrap();
+
+        let error = copy_afl_resume_tree(donor.path(), output.path()).unwrap_err();
+        assert!(error.to_string().contains("byte ceiling"), "{error}");
+        assert_eq!(
+            std::fs::metadata(output.path().join("first"))
+                .unwrap()
+                .len(),
+            super::MAX_AFL_RESUME_TREE_BYTES
+        );
+        assert!(!output.path().join("second").exists());
+    }
+
+    #[test]
+    fn resume_copy_stops_writing_at_the_remaining_byte_budget() {
+        let mut input = std::io::Cursor::new(b"grown input");
+        let mut output = Vec::new();
+
+        let error = super::copy_afl_resume_contents(&mut input, &mut output, 4).unwrap_err();
+        assert!(error.to_string().contains("byte ceiling"), "{error}");
+        assert_eq!(output, b"grow");
+        assert_eq!(input.position(), 5, "only one excess byte is inspected");
+    }
+
+    #[test]
+    fn resume_copy_reports_actual_bytes_below_the_remaining_budget() {
+        let mut input = std::io::Cursor::new(b"input");
+        let mut output = Vec::new();
+
+        let copied = super::copy_afl_resume_contents(&mut input, &mut output, 8).unwrap();
+        assert_eq!(copied, 5);
+        assert_eq!(output, b"input");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resume_copy_does_not_copy_ntfs_named_streams() {
+        let donor = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        std::fs::write(donor.path().join("id_000000"), b"queue input").unwrap();
+        std::fs::File::create(donor.path().join("id_000000:hidden"))
+            .unwrap()
+            .set_len(super::MAX_AFL_RESUME_TREE_BYTES + 1)
+            .unwrap();
+
+        copy_afl_resume_tree(donor.path(), output.path()).unwrap();
+        assert_eq!(
+            std::fs::read(output.path().join("id_000000")).unwrap(),
+            b"queue input"
+        );
+        let error = std::fs::File::open(output.path().join("id_000000:hidden")).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
     }
 
     #[test]
