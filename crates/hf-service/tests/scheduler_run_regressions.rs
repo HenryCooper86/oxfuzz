@@ -1,196 +1,18 @@
 //! Real scheduler/run consumers with sandbox execution replaced by a controlled runtime.
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 
 use hf_core::engine::EngineKind;
-use hf_core::error::ClassifiedError;
-use hf_core::runtime::{CommandResult, CommandTermination, RuntimeAdapter};
-use hf_core::target::TargetLanguage;
-use hf_service::scheduler::{CampaignParams, CampaignScheduler};
-use hf_service::{RunLifecycleStatus, ServiceContainer};
+use hf_service as service;
+use hf_service::scheduler::CampaignScheduler;
+use hf_service::RunLifecycleStatus;
 
-fn isolate() {
-    static ROOT: OnceLock<PathBuf> = OnceLock::new();
-    ROOT.get_or_init(|| {
-        let root = tempfile::tempdir().unwrap().keep();
-        std::env::set_var("HF_CONFIG_DIR", root.join("config"));
-        std::env::set_var("HF_WORKSPACE_DIR", root.join("workspace"));
-        // Scheduler campaigns run through the env-gated dispatcher, and these
-        // fixtures exercise scheduling, not the approval gate.
-        std::env::set_var("HF_AUTO_APPROVE", "1");
-        hf_service::initialize_workspace_root().unwrap();
-        root
-    });
-}
-
-struct TestRuntime {
-    delay: Duration,
-    block: bool,
-    release: Option<Arc<tokio::sync::Notify>>,
-    panic_image: AtomicBool,
-    durations: Mutex<Vec<u64>>,
-}
-
-impl TestRuntime {
-    fn new(delay: Duration, block: bool) -> Arc<Self> {
-        Arc::new(Self {
-            delay,
-            block,
-            release: None,
-            panic_image: AtomicBool::new(false),
-            durations: Mutex::new(Vec::new()),
-        })
-    }
-}
-
-fn completed(cwd: &Path, termination: CommandTermination) -> CommandResult {
-    CommandResult {
-        exit_code: 0,
-        stdout: "DONE exec/s: 64".to_owned(),
-        stderr: String::new(),
-        workspace: cwd.to_path_buf(),
-        termination,
-    }
-}
-
-#[async_trait::async_trait]
-impl RuntimeAdapter for TestRuntime {
-    async fn resolve_image_reference(
-        &self,
-        _image: &str,
-    ) -> Result<Option<hf_core::runtime::ImmutableImageReference>, ClassifiedError> {
-        assert!(
-            !self.panic_image.load(Ordering::SeqCst),
-            "controlled image resolver panic"
-        );
-        Ok(Some(hf_test_utils::immutable_test_image()?))
-    }
-    async fn run_command(
-        &self,
-        cmd: &[String],
-        cwd: &Path,
-        _limits: &hf_core::runtime::ResourceLimits,
-    ) -> Result<CommandResult, ClassifiedError> {
-        hf_test_utils::function_coverage::satisfy_function_coverage(cmd, cwd, 64);
-        Ok(completed(cwd, CommandTermination::Completed))
-    }
-
-    /// This runtime blocks until cancelled, which is the campaign shape under
-    /// test. Collection dispatches profiling tooling with a token nothing
-    /// cancels, so routing the tooling here would hang the run instead of
-    /// failing it; the tooling is answered directly.
-    async fn run_command_streaming_opts(
-        &self,
-        cmd: &[String],
-        cwd: &Path,
-        limits: &hf_core::runtime::ResourceLimits,
-        opts: &hf_core::runtime::SandboxOptions,
-        cancel: &tokio_util::sync::CancellationToken,
-        on_line: &hf_core::runtime::LineSink<'_>,
-    ) -> Result<CommandResult, ClassifiedError> {
-        if hf_test_utils::function_coverage::satisfy_function_coverage_with_mounts(cmd, opts, 64) {
-            return Ok(completed(cwd, CommandTermination::Completed));
-        }
-        self.run_command_streaming(cmd, cwd, limits, cancel, on_line)
-            .await
-    }
-    async fn run_command_streaming(
-        &self,
-        cmd: &[String],
-        cwd: &Path,
-        _limits: &hf_core::runtime::ResourceLimits,
-        cancel: &tokio_util::sync::CancellationToken,
-        on_line: &hf_core::runtime::LineSink<'_>,
-    ) -> Result<CommandResult, ClassifiedError> {
-        let duration = cmd
-            .iter()
-            .find_map(|arg| arg.strip_prefix("-max_total_time="))
-            .expect("libFuzzer duration")
-            .parse()
-            .unwrap();
-        self.durations.lock().unwrap().push(duration);
-        on_line("#1024 DONE cov: 137 exec/s: 64");
-        if self.block {
-            cancel.cancelled().await;
-            return Ok(completed(cwd, CommandTermination::Cancelled));
-        }
-        if let Some(release) = &self.release {
-            release.notified().await;
-        }
-        tokio::time::sleep(self.delay).await;
-        Ok(completed(cwd, CommandTermination::Completed))
-    }
-    async fn write_file(&self, _path: &Path, _content: &str) -> Result<(), ClassifiedError> {
-        Ok(())
-    }
-    async fn read_file(&self, _path: &Path) -> Result<String, ClassifiedError> {
-        Ok(String::new())
-    }
-}
-
-struct Fixture {
-    root: tempfile::TempDir,
-    project: PathBuf,
-    service: ServiceContainer,
-    runtime: Arc<TestRuntime>,
-}
+#[path = "common/scheduler_fixture.rs"]
+mod scheduler_fixture;
+use scheduler_fixture::{Fixture, TestRuntime};
 
 impl Fixture {
-    async fn new(runtime: Arc<TestRuntime>) -> Self {
-        isolate();
-        let root = tempfile::tempdir().unwrap();
-        let project = root.path().join("project");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::write(project.join("parse.c"), "#include <stddef.h>\nint parse_background(const unsigned char *data, size_t size) { return size && data[0]; }\n").unwrap();
-        let workspace = hf_service::workspace_dir(&project, "parse_background");
-        std::fs::create_dir_all(workspace.join("corpus")).unwrap();
-        std::fs::write(workspace.join("fuzz_parse_background"), b"#!/bin/true").unwrap();
-        let service = ServiceContainer::new(
-            runtime.clone(),
-            Some(hf_test_utils::approving_harness_review_pool()),
-        )
-        .with_store_path(root.path().join("store.db"))
-        .await
-        .unwrap();
-        service.harness_compile("int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }".to_owned(), &project, EngineKind::LibFuzzer, "parse_background", TargetLanguage::C, None,
-            false,
-        ).await.unwrap();
-        service
-            .harness_smoke(
-                &project,
-                "parse_background",
-                EngineKind::LibFuzzer,
-                TargetLanguage::C,
-            )
-            .await
-            .unwrap();
-        service
-            .harness_promote(&project, "parse_background", EngineKind::LibFuzzer)
-            .await
-            .unwrap();
-        Self {
-            root,
-            project,
-            service,
-            runtime,
-        }
-    }
-
-    fn params(&self) -> CampaignParams {
-        CampaignParams {
-            project: self.project.display().to_string(),
-            target: Some("parse_background".into()),
-            engine: "libfuzzer".into(),
-            lang: "c".into(),
-            duration_secs: 60,
-            max_runs: Some(1),
-            max_total_secs: None,
-            schedule_id: String::new(),
-        }
-    }
-
     async fn scheduler(&self) -> CampaignScheduler {
         CampaignScheduler::try_start(
             self.service.clone().without_provider_pool(),
@@ -307,27 +129,6 @@ async fn one_run_budget_completes_only_one_iteration() {
 }
 
 #[tokio::test]
-async fn time_budget_caps_fuzzer_duration_and_stops_additional_iterations() {
-    let fixture = Fixture::new(TestRuntime::new(Duration::from_millis(1100), false)).await;
-    let scheduler = fixture.scheduler().await;
-    let mut params = fixture.params();
-    params.max_runs = None;
-    params.max_total_secs = Some(2);
-    scheduler
-        .try_create(
-            "two seconds",
-            &params,
-            hf_service::scheduler::parse_trigger("once", "2000-01-01T00:00:00Z").unwrap(),
-        )
-        .await
-        .unwrap();
-    scheduler.arm();
-    wait_for_completed(&scheduler).await;
-    scheduler.stop().await;
-    assert_eq!(*fixture.runtime.durations.lock().unwrap(), vec![2, 1]);
-}
-
-#[tokio::test]
 async fn overlapping_fires_cannot_spend_the_same_run_allowance() {
     let release = Arc::new(tokio::sync::Notify::new());
     let mut runtime = TestRuntime::new(Duration::ZERO, false);
@@ -423,25 +224,4 @@ async fn failed_cron_enable_restores_its_original_calendar_cursor() {
     scheduler.stop().await;
     assert!(!after.enabled);
     assert_eq!(after.last_fire, before.last_fire);
-}
-
-#[tokio::test]
-async fn one_second_allowance_can_launch_a_one_second_run() {
-    let fixture = Fixture::new(TestRuntime::new(Duration::from_millis(1100), false)).await;
-    let scheduler = fixture.scheduler().await;
-    let mut params = fixture.params();
-    params.max_runs = None;
-    params.max_total_secs = Some(1);
-    scheduler
-        .try_create(
-            "one second",
-            &params,
-            hf_service::scheduler::parse_trigger("once", "2000-01-01T00:00:00Z").unwrap(),
-        )
-        .await
-        .unwrap();
-    scheduler.arm();
-    wait_for_completed(&scheduler).await;
-    scheduler.stop().await;
-    assert_eq!(*fixture.runtime.durations.lock().unwrap(), vec![1]);
 }

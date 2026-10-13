@@ -3281,6 +3281,48 @@ mod exact_qualification_tests {
         cleanup.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn campaign_releases_workspace_lease_before_each_independently_guarded_run() {
+        let _gate = qualification_test_gate().lock().await;
+        let (project, _store, container, _runtime, _harness) = promoted_fixture().await;
+        let (_, workspace_gate) = super::super::workspace::workspace_operation_gate(
+            &super::super::workspace::workspace_root(),
+        )
+        .unwrap();
+        let iterations = AtomicUsize::new(0);
+        let progress = |progress| {
+            if matches!(progress, hf_core::engine::FuzzProgress::LogLine(line)
+                if line.starts_with("--- campaign iteration "))
+            {
+                // This synchronous acquisition detects an enclosing read lease
+                // directly, without timing database or filesystem work.
+                let _cleanup = Arc::clone(&workspace_gate).try_write_owned().expect(
+                    "campaign must release its workspace lease before entering a guarded run",
+                );
+                iterations.fetch_add(1, Ordering::SeqCst);
+            }
+        };
+        let outcome = container
+            .without_provider_pool()
+            .run_campaign_observed(
+                project.path(),
+                Some(TARGET),
+                EngineKind::LibFuzzer,
+                TargetLanguage::C,
+                1,
+                None,
+                None,
+                None,
+                None,
+                2,
+                &progress,
+            )
+            .await
+            .expect("campaign stages complete with independent workspace leases");
+        assert_eq!(outcome.iterations, 2);
+        assert_eq!(iterations.load(Ordering::SeqCst), 2);
+    }
+
     async fn promoted_fixture() -> (
         tempfile::TempDir,
         Arc<hf_storage::Store>,

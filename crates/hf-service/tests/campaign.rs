@@ -157,9 +157,8 @@ async fn run_campaign_runs_full_pipeline_and_picks_a_target() {
         .harness_promote(&project, "parse_entry", EngineKind::LibFuzzer)
         .await
         .expect("operator promotes harness");
-    let outcome = tokio::time::timeout(
-        std::time::Duration::from_secs(3),
-        container.run_campaign(
+    let outcome = container
+        .run_campaign(
             &project,
             None, // auto-pick the top-ranked target
             EngineKind::LibFuzzer,
@@ -170,11 +169,9 @@ async fn run_campaign_runs_full_pipeline_and_picks_a_target() {
             None,
             None, // no CmpLog request
             2,    // max iterations
-        ),
-    )
-    .await
-    .expect("campaign must reach its independently guarded stages without a nested workspace lease")
-    .expect("campaign should complete");
+        )
+        .await
+        .expect("campaign should complete");
 
     assert_eq!(outcome.target, "parse_entry", "should auto-pick the target");
     assert_eq!(

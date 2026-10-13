@@ -7,6 +7,8 @@
 //! the background, and persists schedules to JSON so they survive restarts.
 
 mod preview;
+#[cfg(test)]
+mod timing_tests;
 pub use hf_scheduler::manager::SchedulerRuntimeStatus;
 
 /// Service runtime availability, separate from authorization to execute work.
@@ -1705,7 +1707,7 @@ impl FuzzCampaignDispatcher {
         // and charges its actual iterations/measured elapsed time; a failed fire
         // advances the cursor only (no charge) so a target that keeps failing
         // yields to the next instead of pinning the rotation.
-        let started = std::time::Instant::now();
+        let started = tokio::time::Instant::now();
         let campaign = Box::pin(
             self.container.run_campaign_with_limits(
                 Path::new(&params.project),

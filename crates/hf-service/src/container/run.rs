@@ -1660,7 +1660,7 @@ impl ServiceContainer {
                 TargetLanguage::harnessable_ids()
             )));
         }
-        let started = std::time::Instant::now();
+        let started = tokio::time::Instant::now();
         let project_root = canonical_project_root(project)?;
         let project = project_root.as_path();
         // `resume` resolves once and applies to every iteration: iteration N
