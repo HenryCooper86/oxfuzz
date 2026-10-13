@@ -1414,7 +1414,7 @@ mod tests {
             )),
             "{joined}"
         );
-        assert!(joined.contains("/work:ro"), "{joined}");
+        assert!(joined.contains("target=/work,readonly"), "{joined}");
         assert!(
             joined.contains("target=/syzbench/inputs,readonly"),
             "{joined}"

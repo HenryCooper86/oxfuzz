@@ -84,7 +84,7 @@ fn sandbox_mounts_reject_symlink_escape_from_the_workspace() {
 
 #[cfg(unix)]
 #[test]
-fn sandbox_mounts_reject_a_symlink_resolving_to_a_comma_bearing_path() {
+fn sandbox_mounts_reject_symlinks_resolving_to_mount_delimiters() {
     use std::os::unix::fs::symlink;
 
     // A benign-looking mount source (`link`, no comma) that canonicalizes to a
@@ -94,23 +94,27 @@ fn sandbox_mounts_reject_a_symlink_resolving_to_a_comma_bearing_path() {
     // inject arbitrary mount options (e.g. `bind-propagation=rshared`).
     let temp = tempfile::tempdir().expect("temp root");
     let workspace = temp.path().join("workspace");
-    let malicious = workspace.join("x,bind-propagation=rshared");
-    std::fs::create_dir_all(&malicious).unwrap();
-    symlink(&malicious, workspace.join("link")).unwrap();
     let runtime = DockerRuntime::new(RuntimeConfig::default(), &workspace);
-    let options = SandboxOptions {
-        extra_mounts: vec![SandboxMount::writable(
-            workspace.join("link"),
-            "/work/corpus",
-        )],
-        ..SandboxOptions::default()
-    };
-
-    let result = runtime.validate_sandbox_options(&options);
-    assert!(
-        result.is_err(),
-        "a mount resolving to a comma-bearing path must be rejected, got {result:?}"
-    );
+    for (index, name) in ["x,bind-propagation=rshared", "x\n", "x\r"]
+        .into_iter()
+        .enumerate()
+    {
+        let malicious = workspace.join(name);
+        std::fs::create_dir_all(&malicious).unwrap();
+        let link = workspace.join(format!("link-{index}"));
+        symlink(&malicious, &link).unwrap();
+        for source in [malicious, link] {
+            let options = SandboxOptions {
+                extra_mounts: vec![SandboxMount::writable(source, "/work/corpus")],
+                ..SandboxOptions::default()
+            };
+            let result = runtime.validate_sandbox_options(&options);
+            assert!(
+                result.is_err(),
+                "a mount resolving to {name:?} must be rejected, got {result:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -159,7 +163,13 @@ fn sandbox_mount_targets_use_container_not_host_path_rules() {
         );
     }
 
-    for target in ["/work/../etc", "work/output", "/work,out"] {
+    for target in [
+        "/work/../etc",
+        "work/output",
+        "/work,out",
+        "/work\n",
+        "/work\r",
+    ] {
         let options = SandboxOptions {
             extra_mounts: vec![SandboxMount::writable(source.clone(), target)],
             ..SandboxOptions::default()

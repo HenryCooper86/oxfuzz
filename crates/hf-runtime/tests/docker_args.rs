@@ -127,9 +127,29 @@ fn build_exec_args_per_call_env_overrides_default() {
 fn build_exec_args_mounts_workspace() {
     let cfg = cfg_with(limits(1024, 1));
     let args = hf_runtime::docker::build_exec_args(&cfg, &limits(1024, 1), &["ls".to_owned()]);
-    let joined = args.join(" ");
-    assert!(joined.contains("-v"), "missing volume flag: {joined}");
-    assert!(joined.contains(":/work"), "missing mount target: {joined}");
+    assert!(
+        args.windows(2).any(|pair| pair[0] == "--mount"
+            && pair[1] == "type=bind,source=/tmp/oxfuzz_workspace,target=/work"),
+        "workspace mount must retain its complete source and target: {args:?}"
+    );
+}
+
+#[test]
+fn build_exec_args_quotes_extra_mount_csv_fields() {
+    use hf_core::runtime::{SandboxMount, SandboxOptions};
+
+    let cfg = cfg_with(limits(1024, 1));
+    let opts = SandboxOptions {
+        extra_mounts: vec![SandboxMount::read_only("/host/a\"b".into(), "/work/a\"b")],
+        ..SandboxOptions::default()
+    };
+    let args =
+        hf_runtime::docker::build_exec_args_with(&cfg, &limits(1024, 1), &["ls".to_owned()], &opts);
+    assert!(
+        args.windows(2).any(|pair| pair[0] == "--mount"
+            && pair[1] == "type=bind,\"source=/host/a\"\"b\",\"target=/work/a\"\"b\",readonly"),
+        "quoted paths must remain separate CSV fields: {args:?}"
+    );
 }
 
 #[test]
@@ -206,7 +226,7 @@ fn build_exec_args_with_syzkaller_profile() {
         joined.contains("--mount type=bind,source=/host/workdir,target=/syzbench/workdir"),
         "{joined}"
     );
-    assert!(joined.contains("/work:ro"), "{joined}");
+    assert!(joined.contains("target=/work,readonly"), "{joined}");
     // qemu runs inside the normal network and privilege boundary.
     assert!(
         joined.contains("--network=none"),
@@ -269,7 +289,7 @@ fn build_exec_args_supports_read_only_workspace_with_writable_run_mounts() {
     let joined = args.join(" ");
 
     assert!(
-        joined.contains("/tmp/oxfuzz_workspace:/work:ro"),
+        joined.contains("type=bind,source=/tmp/oxfuzz_workspace,target=/work,readonly"),
         "primary workspace must be immutable: {joined}"
     );
     assert!(

@@ -37,6 +37,15 @@ the real filesystem path and proves that it is the root or one of its
 descendants. Missing paths are validated through their nearest existing parent.
 Parent traversal and symlink escapes fail closed.
 
+The primary workspace and extra mounts use Docker's structured `--mount` bind syntax.
+This preserves the colon in Windows drive-qualified paths and Unix filenames
+without confusing it with a volume-option separator. Resolved host sources
+reject comma, NUL, CR, and LF characters before argument construction; container
+mount targets reject the same characters. Embedded double quotes remain supported:
+the complete CSV field is quoted and each embedded quote is doubled. Read-only
+state is an explicit mount option. The runtime supplies the primary source directly
+to the argument builder, without replacing matching text in command arguments.
+
 The service constructs the production runtime with
 `hf_service::workspace_root()`. A caller-controlled project path or target name
 must never cause Docker to bind-mount another host directory.

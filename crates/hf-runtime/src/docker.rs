@@ -301,9 +301,30 @@ impl StreamOutput {
 /// escape upward.
 fn is_valid_container_target(target: &str) -> bool {
     target.starts_with('/')
-        && !target.contains(',')
-        && !target.contains('\0')
+        && !mount_path_has_delimiter(target)
         && target.split('/').all(|segment| segment != "..")
+}
+
+fn mount_path_has_delimiter(path: &str) -> bool {
+    path.contains([',', '\0', '\r', '\n'])
+}
+
+fn mount_csv_field(key: &str, value: &str) -> String {
+    let field = format!("{key}={value}");
+    if field.contains('"') {
+        format!("\"{}\"", field.replace('"', "\"\""))
+    } else {
+        field
+    }
+}
+
+fn bind_mount_argument(source: &Path, target: &str, read_only: bool) -> String {
+    format!(
+        "type=bind,{},{}{}",
+        mount_csv_field("source", &source.to_string_lossy()),
+        mount_csv_field("target", target),
+        if read_only { ",readonly" } else { "" }
+    )
 }
 
 /// Build the `docker run` argument list for a command.
@@ -341,6 +362,22 @@ pub fn build_exec_args_with(
     limits: &hf_core::runtime::ResourceLimits,
     command: &[String],
     opts: &hf_core::runtime::SandboxOptions,
+) -> Vec<String> {
+    build_exec_args_for_workspace(
+        cfg,
+        limits,
+        command,
+        opts,
+        Path::new("/tmp/oxfuzz_workspace"),
+    )
+}
+
+fn build_exec_args_for_workspace(
+    cfg: &RuntimeConfig,
+    limits: &hf_core::runtime::ResourceLimits,
+    command: &[String],
+    opts: &hf_core::runtime::SandboxOptions,
+    host_workspace: &Path,
 ) -> Vec<String> {
     let mut args = vec![
         "run".to_owned(),
@@ -393,26 +430,21 @@ pub fn build_exec_args_with(
         args.push(format!("--env={k}={v}"));
     }
 
-    // Workspace mount: host path -> container_workspace.
-    // We use a placeholder host path here; `DockerRuntime::run_command`
-    // substitutes the real cwd.
-    let host_workspace = "/tmp/oxfuzz_workspace";
-    args.push("-v".to_owned());
-    let read_only = if opts.workspace_read_only { ":ro" } else { "" };
-    args.push(format!(
-        "{host_workspace}:{}{read_only}",
-        cfg.container_workspace
+    args.push("--mount".to_owned());
+    args.push(bind_mount_argument(
+        host_workspace,
+        &cfg.container_workspace,
+        opts.workspace_read_only,
     ));
 
     // Additional structured bind mounts. Runtime execution canonicalizes every
     // source under the approved workspace before this argument list is used.
     for mount in &opts.extra_mounts {
         args.push("--mount".to_owned());
-        args.push(format!(
-            "type=bind,source={},target={}{}",
-            mount.host_path.display(),
-            mount.container_path,
-            if mount.read_only { ",readonly" } else { "" }
+        args.push(bind_mount_argument(
+            &mount.host_path,
+            &mount.container_path,
+            mount.read_only,
         ));
     }
 
@@ -657,9 +689,9 @@ impl DockerRuntime {
                     mount.container_path
                 )));
             }
-            if mount.host_path.to_string_lossy().contains(',') {
+            if mount_path_has_delimiter(&mount.host_path.to_string_lossy()) {
                 return Err(ClassifiedError::Sandbox(format!(
-                    "host mount path contains an unsupported comma: {}",
+                    "host mount path contains an unsupported delimiter: {}",
                     mount.host_path.display()
                 )));
             }
@@ -685,12 +717,10 @@ impl DockerRuntime {
             }
             // Re-check the RESOLVED path: `confined_existing_path` follows
             // symlinks, so a benign-looking source may canonicalize to a path
-            // whose name embeds a comma (or NUL). Because the resolved path is
-            // what gets emitted verbatim as the comma-delimited
-            // `--mount type=bind,source=...` value, an unchecked comma there
-            // would inject arbitrary mount options.
+            // whose name embeds a delimiter. Docker reads one CSV record;
+            // a newline can discard later options, including `readonly`.
             let resolved_str = resolved.to_string_lossy();
-            if resolved_str.contains(',') || resolved_str.contains('\0') {
+            if mount_path_has_delimiter(&resolved_str) {
                 return Err(ClassifiedError::Sandbox(format!(
                     "resolved host mount path contains an unsupported delimiter: {}",
                     resolved.display()
@@ -701,8 +731,8 @@ impl DockerRuntime {
         Ok(validated)
     }
 
-    /// Build the final `docker run` args for a streaming run: substitute the
-    /// real `cwd` into the workspace mount and give the container a unique name
+    /// Build the final `docker run` args for a streaming run: mount the
+    /// real `cwd` and give the container a unique name
     /// (so a deadline/cancel can `docker kill` it). Returns the args and name.
     fn prepare_stream_args(
         &self,
@@ -711,33 +741,22 @@ impl DockerRuntime {
         limits: &ResourceLimits,
         opts: &hf_core::runtime::SandboxOptions,
     ) -> Result<(Vec<String>, String), ClassifiedError> {
-        // The workspace mount uses `-v` short syntax, which Docker splits on
-        // `:` into source/target/mode. A colon in the resolved host cwd would
-        // corrupt that split (redirecting the mount target or mode), so reject
-        // it before substituting the real path into the mount argument.
-        if cwd.to_string_lossy().contains(':') {
+        // Structured mounts use commas, leaving Windows drive colons intact.
+        // Validate the resolved source so symlinks cannot introduce options.
+        let source = cwd.to_string_lossy();
+        if mount_path_has_delimiter(&source) {
             return Err(ClassifiedError::Sandbox(format!(
-                "workspace path contains an unsupported ':' delimiter: {}",
+                "workspace path contains an unsupported mount delimiter: {}",
                 cwd.display()
             )));
         }
-        let mut args = build_exec_args_with(&self.cfg, limits, cmd, opts);
-        let placeholder = "/tmp/oxfuzz_workspace";
-        let placeholder_mount = format!(
-            "{placeholder}:{}{}",
-            self.cfg.container_workspace,
-            if opts.workspace_read_only { ":ro" } else { "" }
-        );
-        for a in &mut args {
-            if a == &placeholder_mount {
-                *a = format!(
-                    "{}:{}{}",
-                    cwd.display(),
-                    self.cfg.container_workspace,
-                    if opts.workspace_read_only { ":ro" } else { "" }
-                );
-            }
+        if !is_valid_container_target(&self.cfg.container_workspace) {
+            return Err(ClassifiedError::Sandbox(format!(
+                "invalid workspace mount target: {}",
+                self.cfg.container_workspace
+            )));
         }
+        let mut args = build_exec_args_for_workspace(&self.cfg, limits, cmd, opts, cwd);
         // `args[0]` is "run"; the name must precede the image/command.
         let container_name = format!("hf-run-{}", uuid::Uuid::new_v4());
         args.insert(1, format!("--name={container_name}"));
@@ -1107,27 +1126,141 @@ mod prepare_args_tests {
     }
 
     #[test]
-    fn prepare_stream_args_rejects_a_colon_in_the_resolved_workspace_path() {
-        // A `:` in the resolved cwd would corrupt the `-v source:target:mode`
-        // short syntax, so the workspace mount must refuse it up front.
+    fn prepare_stream_args_preserves_drive_paths_and_colons_in_workspace_mounts() {
         let runtime = DockerRuntime::new(RuntimeConfig::default(), Path::new("/tmp/ws"));
         let cmd = vec!["echo".to_owned()];
-        let opts = SandboxOptions::default();
+        for (workspace, mount) in [
+            (
+                r"C:\Users\operator\fuzz workspace",
+                r"type=bind,source=C:\Users\operator\fuzz workspace,target=/work",
+            ),
+            (
+                r"\\?\C:\Users\operator\fuzz workspace",
+                r"type=bind,source=\\?\C:\Users\operator\fuzz workspace,target=/work",
+            ),
+            ("/work/a:b", "type=bind,source=/work/a:b,target=/work"),
+            (
+                "/work/a\"b",
+                "type=bind,\"source=/work/a\"\"b\",target=/work",
+            ),
+        ] {
+            for read_only in [false, true] {
+                let opts = SandboxOptions {
+                    workspace_read_only: read_only,
+                    ..SandboxOptions::default()
+                };
+                let (args, _name) = runtime
+                    .prepare_stream_args(&cmd, Path::new(workspace), &limits(), &opts)
+                    .expect("workspace colons must remain part of the mount source");
+                let expected = if read_only {
+                    format!("{mount},readonly")
+                } else {
+                    mount.to_owned()
+                };
+                assert!(
+                    args.windows(2)
+                        .any(|pair| pair[0] == "--mount" && pair[1] == expected),
+                    "the complete mount must be one argument: {args:?}"
+                );
+            }
+        }
+    }
 
-        let rejected = runtime.prepare_stream_args(&cmd, Path::new("/work/a:b"), &limits(), &opts);
-        assert!(
-            rejected.is_err(),
-            "a colon in the workspace path must be rejected"
-        );
+    #[test]
+    fn prepare_stream_args_rejects_workspace_mount_option_injection() {
+        let runtime = DockerRuntime::new(RuntimeConfig::default(), Path::new("/tmp/ws"));
+        let cmd = vec!["echo".to_owned()];
+        for workspace in [
+            "/work/project,readonly",
+            "/work/project\0",
+            "/work/project\n",
+            "/work/project\r",
+        ] {
+            let error = runtime
+                .prepare_stream_args(
+                    &cmd,
+                    Path::new(workspace),
+                    &limits(),
+                    &SandboxOptions::default(),
+                )
+                .expect_err("mount delimiters must be rejected before dispatch");
+            assert!(error.to_string().contains("delimiter"), "{error}");
+        }
+    }
 
-        let accepted =
-            runtime.prepare_stream_args(&cmd, Path::new("/work/clean"), &limits(), &opts);
-        let (args, _name) = accepted.expect("a clean workspace path must build args");
-        assert!(
-            args.join(" ").contains("/work/clean:/work"),
-            "clean workspace path must be mounted: {}",
-            args.join(" ")
+    #[test]
+    fn prepare_stream_args_rejects_invalid_workspace_mount_targets() {
+        for target in [
+            "/work,readonly",
+            "/work\0",
+            "/work\n",
+            "/work\r",
+            "/work/../outside",
+            "work",
+        ] {
+            let runtime = DockerRuntime::new(
+                RuntimeConfig {
+                    container_workspace: target.to_owned(),
+                    ..RuntimeConfig::default()
+                },
+                Path::new("/tmp/ws"),
+            );
+            let error = runtime
+                .prepare_stream_args(
+                    &["echo".to_owned()],
+                    Path::new("/work/clean"),
+                    &limits(),
+                    &SandboxOptions::default(),
+                )
+                .expect_err("primary container target must be validated before dispatch");
+            assert!(error.to_string().contains("mount target"), "{error}");
+        }
+    }
+
+    #[test]
+    fn prepare_stream_args_quotes_complete_mount_target_fields() {
+        let runtime = DockerRuntime::new(
+            RuntimeConfig {
+                container_workspace: "/work/a\"b".to_owned(),
+                ..RuntimeConfig::default()
+            },
+            Path::new("/tmp/ws"),
         );
+        let (args, _name) = runtime
+            .prepare_stream_args(
+                &["echo".to_owned()],
+                Path::new("/work/clean"),
+                &limits(),
+                &SandboxOptions {
+                    workspace_read_only: true,
+                    ..SandboxOptions::default()
+                },
+            )
+            .unwrap();
+        assert!(
+            args.windows(2).any(|pair| pair[0] == "--mount"
+                && pair[1] == "type=bind,source=/work/clean,\"target=/work/a\"\"b\",readonly"),
+            "quoted target must preserve the read-only option: {args:?}"
+        );
+    }
+
+    #[test]
+    fn prepare_stream_args_preserves_command_text_matching_a_placeholder_mount() {
+        let runtime = DockerRuntime::new(RuntimeConfig::default(), Path::new("/tmp/ws"));
+        let cmd = vec![
+            "echo".to_owned(),
+            "/tmp/oxfuzz_workspace:/work".to_owned(),
+            "type=bind,source=/tmp/oxfuzz_workspace,target=/work".to_owned(),
+        ];
+        let (args, _name) = runtime
+            .prepare_stream_args(
+                &cmd,
+                Path::new("/work/clean"),
+                &limits(),
+                &SandboxOptions::default(),
+            )
+            .unwrap();
+        assert!(args.ends_with(&cmd), "command must remain intact: {args:?}");
     }
 }
 
