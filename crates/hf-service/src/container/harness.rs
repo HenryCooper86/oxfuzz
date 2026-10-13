@@ -773,6 +773,7 @@ impl ServiceContainer {
     async fn compile_source_with_repair(
         &self,
         candidate: &TargetCandidate,
+        target: &str,
         engine: EngineKind,
         lang: TargetLanguage,
         workspace: &Path,
@@ -780,7 +781,6 @@ impl ServiceContainer {
         max_repairs: usize,
     ) -> Result<HarnessGenOutcome, ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
-        let target = &candidate.symbol;
         let _target_revision = self
             .acquire_target_revision(&candidate.project_root, target)
             .await?;
@@ -790,6 +790,7 @@ impl ServiceContainer {
             .map_err(|error| fuzzing_policy_error(&error))?;
         self.compile_source_with_repair_locked(
             candidate,
+            target,
             engine,
             lang,
             workspace,
@@ -811,6 +812,7 @@ impl ServiceContainer {
     async fn compile_source_with_repair_locked(
         &self,
         candidate: &TargetCandidate,
+        target: &str,
         engine: EngineKind,
         lang: TargetLanguage,
         workspace: &Path,
@@ -822,7 +824,6 @@ impl ServiceContainer {
         self.compilation_store()?;
         self.admit_harness_build(&candidate.project_root, lang)
             .await?;
-        let target = &candidate.symbol;
         let mut source = initial_source;
         let mut repairs_used = 0usize;
         let mut last_diagnostics = String::new();
@@ -1295,6 +1296,7 @@ impl ServiceContainer {
             .await?;
         self.compile_source_with_repair_locked(
             &candidate,
+            target,
             engine,
             lang,
             &workspace,
@@ -1398,6 +1400,7 @@ impl ServiceContainer {
 
         self.compile_source_with_repair_locked(
             &candidate,
+            target,
             engine,
             lang,
             &workspace,
@@ -2441,6 +2444,7 @@ impl ServiceContainer {
             match self
                 .compile_source_with_repair(
                     &candidate,
+                    &req.target,
                     req.engine,
                     req.lang,
                     &workspace,
@@ -2512,7 +2516,13 @@ impl ServiceContainer {
             {
                 if let Err(error) = self
                     .compile_source_with_repair(
-                        &candidate, req.engine, req.lang, &workspace, source, 0,
+                        &candidate,
+                        &req.target,
+                        req.engine,
+                        req.lang,
+                        &workspace,
+                        source,
+                        0,
                     )
                     .await
                 {
@@ -3395,6 +3405,7 @@ mod exact_qualification_tests {
         container
             .compile_source_with_repair(
                 &candidate,
+                TARGET,
                 EngineKind::LibFuzzer,
                 TargetLanguage::C,
                 &workspace,

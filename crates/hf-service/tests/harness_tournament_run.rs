@@ -24,6 +24,7 @@ fn isolate_workspace() {
 struct FixedRuntime {
     exit_code: i32,
     compiles: AtomicUsize,
+    materialize_artifacts: bool,
 }
 
 impl FixedRuntime {
@@ -31,6 +32,15 @@ impl FixedRuntime {
         Arc::new(Self {
             exit_code,
             compiles: AtomicUsize::new(0),
+            materialize_artifacts: false,
+        })
+    }
+
+    fn with_artifacts() -> Arc<Self> {
+        Arc::new(Self {
+            exit_code: 0,
+            compiles: AtomicUsize::new(0),
+            materialize_artifacts: true,
         })
     }
 }
@@ -47,14 +57,24 @@ impl hf_core::runtime::RuntimeAdapter for FixedRuntime {
 
     async fn run_command(
         &self,
-        _cmd: &[String],
+        cmd: &[String],
         cwd: &std::path::Path,
         _limits: &hf_core::runtime::ResourceLimits,
     ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
         self.compiles.fetch_add(1, Ordering::SeqCst);
+        if self.materialize_artifacts {
+            if let Some((_, output)) = cmd.get(2).and_then(|script| script.rsplit_once("/work/'")) {
+                let (name, _) = output.split_once('\'').expect("quoted compile output");
+                std::fs::write(cwd.join(name), b"inert compiled harness").unwrap();
+            }
+        }
         Ok(hf_core::runtime::CommandResult {
             exit_code: self.exit_code,
-            stdout: String::new(),
+            stdout: if self.materialize_artifacts {
+                "DONE cov: 12 ft: 24 corp: 2/8b exec/s: 128".to_owned()
+            } else {
+                String::new()
+            },
             stderr: if self.exit_code == 0 {
                 String::new()
             } else {
@@ -67,16 +87,23 @@ impl hf_core::runtime::RuntimeAdapter for FixedRuntime {
 
     async fn write_file(
         &self,
-        _path: &std::path::Path,
-        _content: &str,
+        path: &std::path::Path,
+        content: &str,
     ) -> Result<(), hf_core::error::ClassifiedError> {
+        if self.materialize_artifacts {
+            std::fs::write(path, content).unwrap();
+        }
         Ok(())
     }
 
     async fn read_file(
         &self,
-        _path: &std::path::Path,
+        path: &std::path::Path,
     ) -> Result<String, hf_core::error::ClassifiedError> {
+        if self.materialize_artifacts {
+            return std::fs::read_to_string(path)
+                .map_err(|error| hf_core::error::ClassifiedError::Sandbox(error.to_string()));
+        }
         Ok(String::new())
     }
 }
@@ -88,11 +115,14 @@ struct CodeBlockPool;
 impl hf_core::provider::ProviderPool for CodeBlockPool {
     async fn chat_completion(
         &self,
-        _request: &hf_core::provider::ChatRequest,
+        request: &hf_core::provider::ChatRequest,
         _route: &hf_core::provider::RouteRequest,
     ) -> Result<hf_core::provider::ChatResponse, hf_core::provider::ProviderError> {
+        if hf_test_utils::is_harness_review_request(request) {
+            return Ok(hf_test_utils::approving_harness_review_response());
+        }
         Ok(hf_test_utils::fixtures::make_chat_response(
-            "```c\nint LLVMFuzzerTestOneInput(const uint8_t *d, size_t n){ return 0; }\n```",
+            "```c\n#include <stddef.h>\n#include <stdint.h>\nint parse_entry(const uint8_t *, size_t);\nint LLVMFuzzerTestOneInput(const uint8_t *d, size_t n){ return parse_entry(d, n); }\n```",
         ))
     }
     async fn chat_completion_stream(
@@ -244,4 +274,134 @@ async fn the_candidate_count_is_validated_before_any_model_call_or_sandbox_run()
         0,
         "nothing was compiled for a refused tournament"
     );
+}
+
+async fn qualified_fixture() -> (tempfile::TempDir, ServiceContainer) {
+    isolate_workspace();
+    let project = write_sample_project();
+    std::fs::write(
+        project.path().join("compile_commands.json"),
+        serde_json::to_vec(&serde_json::json!([{
+            "directory":project.path(), "file":"parse.c", "arguments":["cc","-c","parse.c"],
+        }]))
+        .unwrap(),
+    )
+    .unwrap();
+    let container = ServiceContainer::new(
+        FixedRuntime::with_artifacts(),
+        Some(Arc::new(CodeBlockPool)),
+    )
+    .with_store(Arc::new(
+        hf_storage::Store::connect(project.path().join("state.db"))
+            .await
+            .unwrap(),
+    ))
+    .with_guardrails(hf_guardrails::Guardrails::new(
+        hf_guardrails::GuardrailPolicy::default(),
+        Arc::new(hf_guardrails::AutoApprove),
+    ));
+    (project, container)
+}
+
+#[tokio::test]
+async fn qualified_tournament_smokes_candidates_and_leaves_a_requalifiable_winner() {
+    let (project, container) = qualified_fixture().await;
+    let mut request = request(project.path(), 2);
+    request.target = "parse.c::parse_entry".to_owned();
+    let result = container
+        .run_harness_tournament(request.clone())
+        .await
+        .unwrap();
+    assert!(
+        result.candidates.iter().all(|candidate| candidate.compiled),
+        "{result:?}"
+    );
+    assert!(
+        result
+            .candidates
+            .iter()
+            .all(|candidate| candidate.smoke.is_some()),
+        "{result:?}"
+    );
+    assert!(!result.promoted);
+    let winner = container
+        .harness_smoke(
+            project.path(),
+            &request.target,
+            request.engine,
+            request.lang,
+        )
+        .await
+        .expect("restored winner uses the same qualified binary name");
+    assert!(winner.summary.passed);
+}
+
+#[tokio::test]
+async fn qualified_generated_harness_can_be_smoke_qualified() {
+    let (project, container) = qualified_fixture().await;
+    let target = "parse.c::parse_entry";
+    let generated = container
+        .harness_generate(
+            project.path(),
+            target,
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+            0,
+            None,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+    assert!(generated.workspace.join(&generated.binary_name).is_file());
+    let smoke = container
+        .harness_smoke(
+            project.path(),
+            target,
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+        )
+        .await
+        .expect("generated artifacts use the requested file-qualified selector");
+    assert!(smoke.summary.passed);
+}
+
+#[tokio::test]
+async fn qualified_refinement_keeps_the_active_binary_name() {
+    let (project, container) = qualified_fixture().await;
+    let target = "parse.c::parse_entry";
+    let source = "#include <stddef.h>\n#include <stdint.h>\nint parse_entry(const uint8_t *, size_t);\nint LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) { return parse_entry(data, size); }";
+    let compiled = container
+        .harness_compile(
+            source.to_owned(),
+            project.path(),
+            EngineKind::LibFuzzer,
+            target,
+            TargetLanguage::C,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+    let refined = container
+        .harness_refine(
+            project.path(),
+            target,
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+            0,
+        )
+        .await
+        .unwrap();
+    assert_eq!(refined.binary_name, compiled.binary_name);
+    let smoke = container
+        .harness_smoke(
+            project.path(),
+            target,
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+        )
+        .await
+        .expect("refined artifacts preserve the file-qualified selector");
+    assert!(smoke.summary.passed);
 }
