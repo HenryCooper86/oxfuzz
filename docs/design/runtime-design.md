@@ -274,28 +274,56 @@ Each `DockerRuntime` command uses a unique `hf-run-` name. Before asking Docker
 to create that container, the runtime durably records the name and a digest of
 its canonical approved workspace root in an owner-only directory beside the
 root, outside the container mount. The container receives the same workspace
-digest as a Docker label. A failed inventory write stops the launch. The record
-is retained until Docker
-confirms that the named container is absent; completing a client process alone
-does not justify erasing ownership evidence.
+digest as a Docker label. A failed inventory write stops the launch.
+
+The runtime supplies Docker's `--cidfile` with a unique path beside that record.
+Docker writes the container ID only after its create request succeeds, before
+starting the container. A bounded regular file containing the complete
+64-character hexadecimal ID is positive creation acknowledgment; an absent or
+empty file is not. The inventory and ID file are never mounted into the target.
+A matching-label container observation also confirms creation. The locked JSON
+identity stays immutable; a separate empty `.created` checkpoint is created and
+synced before forced removal. An interrupted checkpoint write therefore cannot
+truncate the only recoverable name and workspace identity. Legacy records
+without acknowledgment remain unresolved. A malformed CID never overrides a
+matching-label observation or an existing creation confirmation.
+
+The record and creation acknowledgment remain until verified cleanup. Killing or
+reaping the Docker client, including a natural nonzero exit, does not by itself
+prove that the daemon has finished a submitted create request.
+
+Once absence is verified, cleanup durably removes the identity record before
+deleting its acknowledgment files. A crash during metadata retirement can leave
+unused checkpoint files, but cannot erase acknowledgment while retaining an
+unresolved identity.
 
 Before a new invocation, recovery inspects only names from that root's
 inventory. It may remove a surviving container only when Docker reports the
-same workspace label. A missing container clears a stale inventory entry; an
-inspection failure or label mismatch remains unresolved and blocks new sandbox
-work from that root. Recovery never enumerates and removes every `hf-run-`
-container on the host, since other workspaces may be active. It waits for
-removal confirmation before reporting cleanup. An in-process dropped future
-may request best-effort removal, but its durable inventory remains until the
-next verified reconciliation. A per-record file lock distinguishes an active
-invocation in any process from an abandoned record, so concurrent work is not
-selected by reconciliation. Normal completion waits briefly for Docker's
-automatic removal; a still-present container keeps its record and fails the
-operation. If the first inspection finds no container after process loss,
-recovery waits ten seconds and checks again before clearing the record: a
-surviving Docker client might still be completing its create request. Docker
-inspection and removal have bounded deadlines; an unresponsive daemon keeps
-the record and blocks admission.
+same workspace label. An absent container clears an entry only with positive
+creation acknowledgment; an inspection failure, unresolved creation, or label
+mismatch blocks new sandbox work from that root. Recovery never enumerates and
+removes every `hf-run-` container on the host, since other workspaces may be
+active. It waits for
+removal confirmation before reporting cleanup. A forced stop first terminates
+and reaps its owned Docker client, then force-removes only its label-verified
+container, whether running or merely created. The active ownership lock remains
+held throughout this awaited cleanup. A failed inspection, removal, or absence
+confirmation retains the record and returns a sandbox error.
+
+An in-process dropped future may request best-effort label-verified removal, but
+its durable inventory remains until the next verified reconciliation. A
+per-record file lock distinguishes an active invocation in any process from an
+abandoned record, so concurrent work is not selected by reconciliation. Normal
+completion waits briefly for Docker's automatic removal.
+
+An absent container clears a record only when creation was positively
+acknowledged. For unresolved creation, recovery waits ten seconds and checks
+again for a late-created container. If it remains absent without acknowledgment,
+recovery returns a sandbox error and retains the record; repeated absence is not
+evidence that an in-flight daemon request can no longer complete. A later
+matching-label observation permits verified removal. Docker inspection and
+removal have bounded deadlines; an unresponsive daemon or unresolved creation
+blocks new sandbox work from that root.
 
 The service WAL still identifies interrupted runs and preserves their project
 and run IDs. Dismissing one of those reminders acknowledges the interruption;

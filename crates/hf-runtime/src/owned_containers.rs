@@ -94,6 +94,17 @@ pub trait ContainerControl: Send + Sync {
 pub struct ActiveContainer {
     _file: File,
     path: PathBuf,
+    record: Record,
+}
+
+impl ActiveContainer {
+    pub(crate) fn cid_path(&self) -> PathBuf {
+        self.path.with_extension("cid")
+    }
+
+    fn confirmation_path(&self) -> PathBuf {
+        self.path.with_extension("created")
+    }
 }
 
 /// Persisted per-workspace Docker invocation inventory.
@@ -141,6 +152,18 @@ impl OwnedContainerRegistry {
     pub fn register(&self, name: &str) -> Result<ActiveContainer, ClassifiedError> {
         container_name(name)?;
         let path = self.directory.join(format!("{name}.json"));
+        for extension in ["cid", "created"] {
+            let checkpoint = path.with_extension(extension);
+            match fs::symlink_metadata(&checkpoint) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Ok(_) => return Err(sandbox_error("owned container checkpoint already exists")),
+                Err(error) => {
+                    return Err(sandbox_error(format!(
+                        "inspect owned container checkpoint: {error}"
+                    )));
+                }
+            }
+        }
         let mut file = OpenOptions::new()
             .write(true)
             .read(true)
@@ -160,7 +183,11 @@ impl OwnedContainerRegistry {
             .map_err(|error| sandbox_error(format!("sync owned container record: {error}")))?;
         #[cfg(unix)]
         sync_directory(&self.directory)?;
-        Ok(ActiveContainer { _file: file, path })
+        Ok(ActiveContainer {
+            _file: file,
+            path,
+            record,
+        })
     }
 
     /// List the names retained for this exact workspace, including active work.
@@ -221,56 +248,218 @@ impl OwnedContainerRegistry {
                     "owned container record has a different identity",
                 ));
             }
-            self.remove_verified(docker, &name).await?;
-            drop(file);
-            remove_record(&path)?;
+            let mut active = ActiveContainer {
+                _file: file,
+                path,
+                record,
+            };
+            self.finish_stopped(&mut active, docker).await?;
         }
         Ok(())
     }
 
-    /// Clear one completed invocation after Docker confirms the name is absent.
+    /// Clear one completed invocation only after creation and absence are confirmed.
     pub async fn finish(
         &self,
-        active: ActiveContainer,
+        mut active: ActiveContainer,
         docker: &impl ContainerControl,
     ) -> Result<(), ClassifiedError> {
-        let name = active
-            .path
-            .file_stem()
-            .and_then(|part| part.to_str())
-            .ok_or_else(|| sandbox_error("owned container record has no valid name"))?;
-        wait_until_absent(docker, name, AUTO_REMOVAL_TIMEOUT).await?;
-        let path = active.path.clone();
-        drop(active);
-        remove_record(&path)
+        self.finish_active(&mut active, docker).await
     }
 
-    async fn remove_verified(
+    pub(crate) async fn finish_active(
         &self,
+        active: &mut ActiveContainer,
         docker: &impl ContainerControl,
-        name: &str,
     ) -> Result<(), ClassifiedError> {
-        let label = if let Some(label) = inspect_bounded(docker, name).await? {
-            label
-        } else {
-            // A killed owner can leave a Docker client finishing its create
-            // request. Confirm absence again before forgetting its name.
-            tokio::time::sleep(ABSENT_RECHECK_DELAY).await;
-            let Some(label) = inspect_bounded(docker, name).await? else {
-                return Ok(());
-            };
-            label
-        };
-        if label != self.workspace_digest {
+        self.observe_creation(active, docker).await?;
+        wait_until_absent(docker, &active.record.name, AUTO_REMOVAL_TIMEOUT).await?;
+        self.clear(active)
+    }
+
+    pub(crate) async fn finish_stopped(
+        &self,
+        active: &mut ActiveContainer,
+        docker: &impl ContainerControl,
+    ) -> Result<(), ClassifiedError> {
+        if self.observe_creation(active, docker).await? {
+            tokio::time::timeout(REMOVAL_TIMEOUT, docker.remove(&active.record.name))
+                .await
+                .map_err(|_| {
+                    sandbox_error(format!(
+                        "container {} removal timed out",
+                        active.record.name
+                    ))
+                })??;
+            wait_until_absent(docker, &active.record.name, REMOVAL_TIMEOUT).await?;
+        }
+        self.clear(active)
+    }
+
+    /// A spawn failure is the only path that can prove no create was submitted.
+    pub(crate) fn finish_unlaunched(active: &ActiveContainer) -> Result<(), ClassifiedError> {
+        remove_record(&active.path)
+    }
+
+    async fn observe_creation(
+        &self,
+        active: &mut ActiveContainer,
+        docker: &impl ContainerControl,
+    ) -> Result<bool, ClassifiedError> {
+        let mut label = inspect_bounded(docker, &active.record.name).await?;
+        if label
+            .as_ref()
+            .is_some_and(|label| label != &self.workspace_digest)
+        {
             return Err(sandbox_error(format!(
-                "container {name} has a different workspace label"
+                "container {} has a different workspace label",
+                active.record.name
             )));
         }
-        tokio::time::timeout(REMOVAL_TIMEOUT, docker.remove(name))
-            .await
-            .map_err(|_| sandbox_error(format!("container {name} removal timed out")))??;
-        wait_until_absent(docker, name, REMOVAL_TIMEOUT).await
+        let confirmation = active.confirmation_path();
+        let confirmed = creation_confirmed(&confirmation)?;
+        let acknowledged = match cid_acknowledged(&active.cid_path()) {
+            Ok(acknowledged) => acknowledged,
+            Err(error) if label.is_some() || confirmed => {
+                tracing::warn!(%error, container = %active.record.name,
+                    "Ignoring invalid CID after independent creation confirmation");
+                false
+            }
+            Err(error) => return Err(error),
+        };
+        if label.is_none() && !confirmed && !acknowledged {
+            // Elapsed time does not prove an unacknowledged create is finished.
+            tokio::time::sleep(ABSENT_RECHECK_DELAY).await;
+            label = inspect_bounded(docker, &active.record.name).await?;
+            match label.as_deref() {
+                Some(label) if label == self.workspace_digest => {}
+                Some(_) => {
+                    return Err(sandbox_error(format!(
+                        "container {} has a different workspace label",
+                        active.record.name
+                    )))
+                }
+                None => {
+                    return Err(sandbox_error(format!(
+                        "container {} creation is unresolved; ownership retained",
+                        active.record.name
+                    )))
+                }
+            }
+        }
+        confirm_creation(&confirmation)?;
+        Ok(label.is_some())
     }
+
+    fn clear(&self, active: &ActiveContainer) -> Result<(), ClassifiedError> {
+        // Commit retirement before deleting the only positive checkpoints.
+        remove_record(&active.path)?;
+        for checkpoint in [active.cid_path(), active.confirmation_path()] {
+            match fs::remove_file(checkpoint) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(sandbox_error(format!(
+                        "remove owned container checkpoint: {error}"
+                    )));
+                }
+            }
+        }
+        #[cfg(unix)]
+        sync_directory(&self.directory)?;
+        Ok(())
+    }
+}
+
+fn creation_confirmed(path: &Path) -> Result<bool, ClassifiedError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata)
+            if metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() == 0 =>
+        {
+            Ok(true)
+        }
+        Ok(_) => Err(sandbox_error(
+            "owned container confirmation is not an empty regular file",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(sandbox_error(format!(
+            "inspect container confirmation: {error}"
+        ))),
+    }
+}
+
+fn confirm_creation(path: &Path) -> Result<(), ClassifiedError> {
+    let file = match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            if !creation_confirmed(path)? {
+                return Err(sandbox_error("container confirmation disappeared"));
+            }
+            OpenOptions::new()
+                .write(true)
+                .open(path)
+                .map_err(|error| sandbox_error(format!("open container confirmation: {error}")))?
+        }
+        Err(error) => {
+            return Err(sandbox_error(format!(
+                "create container confirmation: {error}"
+            )))
+        }
+    };
+    file.sync_all()
+        .map_err(|error| sandbox_error(format!("sync container confirmation: {error}")))?;
+    #[cfg(unix)]
+    sync_directory(
+        path.parent()
+            .expect("confirmation has an inventory directory"),
+    )?;
+    Ok(())
+}
+
+/// Docker writes the raw ID only after `ContainerCreate` returns successfully.
+/// Missing/empty checkpoints are not evidence that creation never happened.
+fn cid_acknowledged(path: &Path) -> Result<bool, ClassifiedError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(sandbox_error(format!(
+                "inspect owned container CID file: {error}"
+            )))
+        }
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 64 {
+        return Err(sandbox_error(
+            "owned container CID file is not a bounded regular file",
+        ));
+    }
+    if metadata.len() == 0 {
+        return Ok(false);
+    }
+    if metadata.len() != 64 {
+        return Err(sandbox_error(
+            "owned container CID file has an invalid length",
+        ));
+    }
+    let mut file = File::open(path)
+        .map_err(|error| sandbox_error(format!("open owned container CID file: {error}")))?;
+    let mut id = [0_u8; 64];
+    file.read_exact(&mut id)
+        .map_err(|error| sandbox_error(format!("read owned container CID file: {error}")))?;
+    let mut extra = [0_u8; 1];
+    if file
+        .read(&mut extra)
+        .map_err(|error| sandbox_error(format!("read owned container CID file: {error}")))?
+        != 0
+        || !id
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+    {
+        return Err(sandbox_error(
+            "owned container CID file is not a complete container ID",
+        ));
+    }
+    Ok(true)
 }
 
 async fn wait_until_absent(

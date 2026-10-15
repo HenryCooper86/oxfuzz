@@ -72,7 +72,7 @@ async fn recovery_refuses_a_foreign_label_and_preserves_the_record() {
     let root = tempfile::tempdir().unwrap();
     let registry = OwnedContainerRegistry::new(root.path()).unwrap();
     drop(registry.register(FOREIGN).unwrap());
-    let docker = FakeDocker::default();
+    let mut docker = FakeDocker::default();
     docker
         .labels
         .lock()
@@ -82,22 +82,32 @@ async fn recovery_refuses_a_foreign_label_and_preserves_the_record() {
     assert!(registry.reconcile(&docker).await.is_err());
     assert!(docker.removed.lock().unwrap().is_empty());
     assert_eq!(registry.pending_names().unwrap(), vec![FOREIGN]);
-    drop(docker);
-    let docker = FakeDocker::default();
+    docker
+        .labels
+        .get_mut()
+        .unwrap()
+        .insert(FOREIGN.to_owned(), registry.workspace_digest().to_owned());
     registry.reconcile(&docker).await.unwrap();
     cleanup(root.path(), &registry);
 }
 
 #[tokio::test(start_paused = true)]
-async fn recovery_clears_a_record_only_after_the_container_is_absent() {
+async fn recovery_keeps_unacknowledged_absence_until_creation_is_observed() {
     let root = tempfile::tempdir().unwrap();
     let registry = OwnedContainerRegistry::new(root.path()).unwrap();
     drop(registry.register(OWNED).unwrap());
-    let docker = FakeDocker::default();
+    let mut docker = FakeDocker::default();
 
+    assert!(registry.reconcile(&docker).await.is_err());
+    assert_eq!(registry.pending_names().unwrap(), vec![OWNED]);
+    docker
+        .labels
+        .get_mut()
+        .unwrap()
+        .insert(OWNED.to_owned(), registry.workspace_digest().to_owned());
     registry.reconcile(&docker).await.unwrap();
     assert!(registry.pending_names().unwrap().is_empty());
-    assert!(docker.removed.lock().unwrap().is_empty());
+    assert_eq!(*docker.removed.get_mut().unwrap(), vec![OWNED]);
     cleanup(root.path(), &registry);
 }
 
@@ -181,6 +191,7 @@ async fn failed_removal_preserves_ownership_for_a_later_recovery() {
 
 struct DelayedRemoval {
     checks: AtomicUsize,
+    digest: String,
 }
 
 #[async_trait]
@@ -189,7 +200,7 @@ impl ContainerControl for DelayedRemoval {
         &self,
         _name: &str,
     ) -> Result<Option<String>, ClassifiedError> {
-        Ok((self.checks.fetch_add(1, Ordering::SeqCst) == 0).then(|| "owned".to_owned()))
+        Ok((self.checks.fetch_add(1, Ordering::SeqCst) == 0).then(|| self.digest.clone()))
     }
 
     async fn remove(&self, _name: &str) -> Result<(), ClassifiedError> {
@@ -204,6 +215,7 @@ async fn completion_waits_for_docker_auto_removal_before_erasing_ownership() {
     let active = registry.register(OWNED).unwrap();
     let docker = DelayedRemoval {
         checks: AtomicUsize::new(0),
+        digest: registry.workspace_digest().to_owned(),
     };
 
     registry.finish(active, &docker).await.unwrap();
@@ -240,6 +252,115 @@ async fn stalled_docker_inspection_keeps_ownership_and_rejects_admission() {
     .await;
     assert!(matches!(outcome, Ok(Err(ClassifiedError::Sandbox(_)))));
     assert_eq!(registry.pending_names().unwrap(), vec![OWNED]);
+    let mut docker = FakeDocker::default();
+    docker
+        .labels
+        .get_mut()
+        .unwrap()
+        .insert(OWNED.to_owned(), registry.workspace_digest().to_owned());
+    registry.reconcile(&docker).await.unwrap();
+    cleanup(root.path(), &registry);
+}
+
+fn cid_path(root: &std::path::Path, registry: &OwnedContainerRegistry) -> std::path::PathBuf {
+    root.parent()
+        .unwrap()
+        .join(format!(".oxfuzz-runtime-{}", registry.workspace_digest()))
+        .join(format!("{OWNED}.cid"))
+}
+
+#[tokio::test(start_paused = true)]
+async fn recovery_clears_acknowledged_auto_removed_creation_and_cid() {
+    let root = tempfile::tempdir().unwrap();
+    let registry = OwnedContainerRegistry::new(root.path()).unwrap();
+    drop(registry.register(OWNED).unwrap());
+    let cid = cid_path(root.path(), &registry);
+    std::fs::write(&cid, "a".repeat(64)).unwrap();
     registry.reconcile(&FakeDocker::default()).await.unwrap();
+    assert!(!cid.exists());
+    cleanup(root.path(), &registry);
+}
+
+#[tokio::test(start_paused = true)]
+async fn recovery_retains_empty_or_malformed_creation_acknowledgments() {
+    let root = tempfile::tempdir().unwrap();
+    let registry = OwnedContainerRegistry::new(root.path()).unwrap();
+    drop(registry.register(OWNED).unwrap());
+    let cid = cid_path(root.path(), &registry);
+    for contents in [String::new(), "g".repeat(64), "a".repeat(65)] {
+        std::fs::write(&cid, contents).unwrap();
+        assert!(registry.reconcile(&FakeDocker::default()).await.is_err());
+        assert_eq!(registry.pending_names().unwrap(), vec![OWNED]);
+        assert!(cid.exists());
+    }
+    std::fs::write(&cid, "a".repeat(64)).unwrap();
+    registry.reconcile(&FakeDocker::default()).await.unwrap();
+    cleanup(root.path(), &registry);
+}
+
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn recovery_refuses_a_symlink_creation_acknowledgment() {
+    let root = tempfile::tempdir().unwrap();
+    let registry = OwnedContainerRegistry::new(root.path()).unwrap();
+    drop(registry.register(OWNED).unwrap());
+    let cid = cid_path(root.path(), &registry);
+    let target = root.path().join("foreign-cid");
+    std::fs::write(&target, "a".repeat(64)).unwrap();
+    std::os::unix::fs::symlink(&target, &cid).unwrap();
+    assert!(registry.reconcile(&FakeDocker::default()).await.is_err());
+    assert_eq!(registry.pending_names().unwrap(), vec![OWNED]);
+    std::fs::remove_file(&cid).unwrap();
+    std::fs::write(&cid, "a".repeat(64)).unwrap();
+    registry.reconcile(&FakeDocker::default()).await.unwrap();
+    assert!(target.exists());
+    cleanup(root.path(), &registry);
+}
+
+#[tokio::test(start_paused = true)]
+async fn observed_creation_is_durable_before_a_failed_removal() {
+    let root = tempfile::tempdir().unwrap();
+    let registry = OwnedContainerRegistry::new(root.path()).unwrap();
+    drop(registry.register(OWNED).unwrap());
+    let identity_path = cid_path(root.path(), &registry).with_extension("json");
+    let identity = std::fs::read(&identity_path).unwrap();
+    let mut docker = FakeDocker::default();
+    docker
+        .labels
+        .get_mut()
+        .unwrap()
+        .insert(OWNED.to_owned(), registry.workspace_digest().to_owned());
+    docker.remove_error.store(true, Ordering::SeqCst);
+    assert!(registry.reconcile(&docker).await.is_err());
+    assert_eq!(
+        std::fs::read(&identity_path).unwrap(),
+        identity,
+        "confirmation must not rewrite the locked recovery identity"
+    );
+    std::fs::write(cid_path(root.path(), &registry), b"partial").unwrap();
+    // The daemon can finish auto-removal after the failed force-removal call.
+    // A fresh registry must retain the durable positive creation observation.
+    docker.labels.get_mut().unwrap().clear();
+    let recovered = OwnedContainerRegistry::new(root.path()).unwrap();
+    recovered.reconcile(&docker).await.unwrap();
+    cleanup(root.path(), &recovered);
+}
+
+#[tokio::test(start_paused = true)]
+async fn matching_owned_container_is_removed_despite_a_partial_cid() {
+    let root = tempfile::tempdir().unwrap();
+    let registry = OwnedContainerRegistry::new(root.path()).unwrap();
+    drop(registry.register(OWNED).unwrap());
+    std::fs::write(cid_path(root.path(), &registry), b"partial").unwrap();
+    let mut docker = FakeDocker::default();
+    docker
+        .labels
+        .get_mut()
+        .unwrap()
+        .insert(OWNED.to_owned(), registry.workspace_digest().to_owned());
+
+    registry.reconcile(&docker).await.unwrap();
+    assert_eq!(*docker.removed.get_mut().unwrap(), vec![OWNED]);
+    assert!(registry.pending_names().unwrap().is_empty());
     cleanup(root.path(), &registry);
 }

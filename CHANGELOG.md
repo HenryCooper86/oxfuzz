@@ -9,6 +9,21 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ## Unreleased
 
+## 0.6.6 - 2026-10-15
+
+### Fixed
+
+- Sandbox timeout and cancellation now stop and reap the Docker client before
+  verified removal of its owned container, including a container that has been
+  created but not started. An unresolved create request retains its ownership
+  record and blocks further work rather than being forgotten after a delay.
+- Creation acknowledgment no longer rewrites the locked recovery identity.
+  Interrupted cleanup keeps recoverable ownership evidence, and a partial
+  Docker ID file cannot block independently verified owned-container removal.
+- Includes the seed and crash-reporting enhancements documented under 0.6.5.
+  That candidate remains unpublished after live isolation qualification exposed
+  the timeout cleanup defect.
+
 ## 0.6.5 - 2026-10-15
 
 ### Added

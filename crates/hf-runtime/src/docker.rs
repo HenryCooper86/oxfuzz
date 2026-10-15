@@ -11,7 +11,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use crate::config::RuntimeConfig;
-use crate::owned_containers::{ContainerControl, OwnedContainerRegistry};
+use crate::owned_containers::{ActiveContainer, ContainerControl, OwnedContainerRegistry};
 
 /// Maximum bytes retained independently for stdout and stderr.
 const MAX_CAPTURED_OUTPUT_BYTES: usize = 1024 * 1024;
@@ -139,38 +139,83 @@ fn valid_local_image_id(image: &str) -> bool {
     })
 }
 
-/// Best-effort cleanup when an in-flight runtime future is dropped or aborted.
-/// The Docker CLI child has `kill_on_drop`, but killing that client alone does
-/// not stop the named container it launched.
+/// Keep ownership locked through both explicit teardown and dropped-future
+/// cleanup. The fallback uses the same verified protocol, never name-only rm.
 struct ContainerCleanupGuard {
-    name: String,
-    armed: bool,
+    owned: Option<(OwnedContainerRegistry, ActiveContainer)>,
+    child: Option<tokio::process::Child>,
+    fallback: bool,
 }
 
 impl ContainerCleanupGuard {
-    fn new(name: &str) -> Self {
+    fn new(registry: OwnedContainerRegistry, active: ActiveContainer) -> Self {
         Self {
-            name: name.to_owned(),
-            armed: true,
+            owned: Some((registry, active)),
+            child: None,
+            fallback: true,
         }
     }
 
-    fn disarm(&mut self) {
-        self.armed = false;
+    fn finish_unlaunched(&mut self) -> Result<(), ClassifiedError> {
+        let (_, active) = self.owned.as_ref().expect("active ownership");
+        let result = OwnedContainerRegistry::finish_unlaunched(active);
+        self.fallback = false;
+        if result.is_ok() {
+            self.owned = None;
+        }
+        result
+    }
+
+    async fn finish(&mut self, forced: bool) -> Result<(), ClassifiedError> {
+        let (registry, active) = self.owned.as_mut().expect("active ownership");
+        let result = if forced {
+            registry
+                .finish_stopped(active, &DockerContainerControl)
+                .await
+        } else {
+            registry
+                .finish_active(active, &DockerContainerControl)
+                .await
+        };
+        // A completed explicit attempt must not be retried in Drop: in
+        // particular, ownership refusal and genuine Docker errors stay final.
+        // If this await is itself dropped, fallback remains armed.
+        self.fallback = false;
+        if result.is_ok() {
+            self.owned = None;
+        }
+        result
     }
 }
 
 impl Drop for ContainerCleanupGuard {
     fn drop(&mut self) {
-        if !self.armed {
+        if !self.fallback {
             return;
         }
-        let _ = crate::process_env::scrubbed_command(crate::docker_bin())
-            .args(["rm", "-f", &self.name])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
+        let Some((registry, mut active)) = self.owned.take() else {
+            return;
+        };
+        let mut child = self.child.take();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                if let Some(child) = child.as_mut() {
+                    if !matches!(
+                        tokio::time::timeout(CONTAINER_TEARDOWN_TIMEOUT, child.kill()).await,
+                        Ok(Ok(()))
+                    ) {
+                        return;
+                    }
+                }
+                // Drop cannot return cleanup errors; durable ownership remains
+                // for the next verified reconciliation if this attempt fails.
+                let _ = registry
+                    .finish_stopped(&mut active, &DockerContainerControl)
+                    .await;
+            });
+        }
+        // Without a live async runtime, kill_on_drop still stops the client;
+        // the durable record remains for the next verified reconciliation.
     }
 }
 
@@ -733,7 +778,7 @@ impl DockerRuntime {
 
     /// Build the final `docker run` args for a streaming run: mount the
     /// real `cwd` and give the container a unique name
-    /// (so a deadline/cancel can `docker kill` it). Returns the args and name.
+    /// (so a deadline/cancel can remove it reliably). Returns the args and name.
     fn prepare_stream_args(
         &self,
         cmd: &[String],
@@ -765,9 +810,9 @@ impl DockerRuntime {
 
     /// Spawn `docker run` with `args` and stream stdout/stderr line-by-line to
     /// `on_line`, honoring the wall-clock `timeout` and `cancel`. On either a
-    /// deadline or a cancel, `docker kill`s the named container (killing the
-    /// client process alone leaves the container running). Shared by the plain
-    /// and options-bearing streaming entry points.
+    /// deadline or a cancel, stop/reap the client and then force-remove only
+    /// the label-verified owned container, including one still being created.
+    /// Shared by the plain and options-bearing streaming entry points.
     async fn stream_docker_run(
         &self,
         args: &[String],
@@ -796,6 +841,8 @@ impl DockerRuntime {
             2,
             format!("--label={WORKSPACE_LABEL}={}", registry.workspace_digest()),
         );
+        owned_args.insert(2, format!("--cidfile={}", active.cid_path().display()));
+        let mut cleanup = ContainerCleanupGuard::new(registry, active);
         let mut docker = crate::process_env::scrubbed_tokio_command(crate::docker_bin());
         docker
             .args(&owned_args)
@@ -808,9 +855,14 @@ impl DockerRuntime {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
-        let mut child = docker
-            .spawn()
-            .map_err(|e| ClassifiedError::Sandbox(format!("docker spawn: {e}")))?;
+        cleanup.child = Some(match docker.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                cleanup.finish_unlaunched()?;
+                return Err(ClassifiedError::Sandbox(format!("docker spawn: {error}")));
+            }
+        });
+        let child = cleanup.child.as_mut().expect("spawned docker client");
         let child_stdin = if stdin.is_some() {
             Some(
                 child
@@ -821,7 +873,6 @@ impl DockerRuntime {
         } else {
             None
         };
-        let mut cleanup = ContainerCleanupGuard::new(container_name);
         let mut stdout = child
             .stdout
             .take()
@@ -888,16 +939,8 @@ impl DockerRuntime {
             }
         };
 
-        let forced_termination = match &stop {
-            Stop::TimedOut => Some(hf_core::runtime::CommandTermination::TimedOut),
-            Stop::Cancelled => Some(hf_core::runtime::CommandTermination::Cancelled),
-            Stop::Completed | Stop::Failed(_) => None,
-        };
-        let pipe_failure = match &stop {
-            Stop::Failed(error) => Some(error.clone()),
-            Stop::Completed | Stop::TimedOut | Stop::Cancelled => None,
-        };
-        let (exit_code, termination) = match stop {
+        let forced = !matches!(&stop, Stop::Completed);
+        let outcome = match stop {
             Stop::Completed => {
                 let status = tokio::time::timeout(CONTAINER_TEARDOWN_TIMEOUT, child.wait())
                     .await
@@ -907,58 +950,45 @@ impl DockerRuntime {
                         ))
                     })?
                     .map_err(|e| ClassifiedError::Sandbox(format!("wait for docker: {e}")))?;
-                cleanup.disarm();
-                (
+                Ok((
                     status.code().unwrap_or(-1),
                     hf_core::runtime::CommandTermination::Completed,
-                )
+                ))
             }
-            Stop::TimedOut | Stop::Cancelled | Stop::Failed(_) => {
-                let mut kill_command =
-                    crate::process_env::scrubbed_tokio_command(crate::docker_bin());
-                kill_command.arg("kill").arg(container_name);
-                let kill = tokio::time::timeout(CONTAINER_TEARDOWN_TIMEOUT, kill_command.output())
-                    .await
-                    .map_err(|_| {
-                        ClassifiedError::Sandbox(format!(
-                            "timed out killing stopped container {container_name}"
-                        ))
-                    })?
-                    .map_err(|e| {
-                        ClassifiedError::Sandbox(format!(
-                            "failed to kill stopped container {container_name}: {e}"
-                        ))
-                    })?;
-                if !kill.status.success() && child.try_wait().ok().flatten().is_none() {
-                    return Err(ClassifiedError::Sandbox(format!(
-                        "failed to kill stopped container {container_name}: {}",
-                        String::from_utf8_lossy(&kill.stderr).trim()
-                    )));
-                }
-                let _ = child.start_kill();
-                tokio::time::timeout(CONTAINER_TEARDOWN_TIMEOUT, child.wait())
+            stopped => {
+                // Reap the request producer before inspecting/removing. Killing
+                // a CREATED container is invalid, and an absent name can still
+                // belong to an in-flight daemon-side create request.
+                tokio::time::timeout(CONTAINER_TEARDOWN_TIMEOUT, child.kill())
                     .await
                     .map_err(|_| {
                         ClassifiedError::Sandbox(format!(
                             "docker client did not stop for container {container_name}"
                         ))
                     })?
-                    .map_err(|e| ClassifiedError::Sandbox(format!("wait for docker: {e}")))?;
-                cleanup.disarm();
-                if let Some(error) = pipe_failure {
-                    return Err(ClassifiedError::Sandbox(error));
+                    .map_err(|e| ClassifiedError::Sandbox(format!("stop docker client: {e}")))?;
+                match stopped {
+                    Stop::TimedOut => Ok((-1, hf_core::runtime::CommandTermination::TimedOut)),
+                    Stop::Cancelled => Ok((-1, hf_core::runtime::CommandTermination::Cancelled)),
+                    Stop::Failed(error) => Err(ClassifiedError::Sandbox(error)),
+                    Stop::Completed => unreachable!("completed client handled above"),
                 }
-                (
-                    -1,
-                    forced_termination.expect("forced stop has a termination"),
-                )
             }
         };
         let mut forward = |line: &str| on_line(line);
         let stdout = stdout_buf.finish(&mut forward);
         let stderr = stderr_buf.finish(&mut forward);
 
-        registry.finish(active, &DockerContainerControl).await?;
+        if let Err(error) = cleanup.finish(forced).await {
+            let prior = outcome.as_ref().err();
+            return Err(ClassifiedError::Sandbox(match (prior, stderr.is_empty()) {
+                (Some(prior), false) => format!("{error}; {prior}; docker stderr: {stderr}"),
+                (Some(prior), true) => format!("{error}; {prior}"),
+                (None, false) => format!("{error}; docker stderr: {stderr}"),
+                (None, true) => error.to_string(),
+            }));
+        }
+        let (exit_code, termination) = outcome?;
         Ok(CommandResult {
             exit_code,
             stdout,
