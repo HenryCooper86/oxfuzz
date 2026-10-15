@@ -9,6 +9,35 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ## Unreleased
 
+### Fixed
+
+- Browser event streams close oversized incomplete responses before reconnecting,
+  and delayed responses from unsubscribed connections no longer announce
+  connections to replacement subscribers.
+- Project deletion and knowledge clearing reject active workspace operations;
+  discovery and ranking retain that protection through their final writes.
+  Cleanup also removes retained AI discovery results and their prompts, without
+  deleting source projects or another project's records.
+- Desktop Run History clearing respects the selected project instead of clearing
+  every project's runs. The unselected desktop view retains its all-projects
+  operation.
+- Invalid saved workflow progress no longer crashes the GUI or marks unknown
+  stages complete. Superseded and unmounted confirmation dialogs cancel their
+  pending callers instead of leaving them waiting indefinitely.
+- Streaming run logs and health updates no longer repeatedly serialize the full
+  retained-run summary when its persisted fields have not changed.
+- Report and run deletion controls exclude duplicate destructive requests, and
+  successful report deletion refreshes other report listings. Harness comparison
+  read failures now show their cause instead of silently closing the comparison.
+- Reports, triage, and automotive previews offer Markdown downloads in browser
+  mode instead of advertising native-only export formats. Desktop previews retain
+  the formats supported by the service.
+- Saved-report DefectDojo publication resolves the stored report by ID on both
+  hosts instead of sending a redacted browser project path back to the server.
+  Authorization and execution use the same owner/target snapshot; editing the
+  draft cannot switch projects after approval. Publication controls also exclude
+  duplicate requests while an import is pending.
+
 ## 0.6.3 - 2026-10-13
 
 ### Fixed

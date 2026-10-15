@@ -2,6 +2,9 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+// These fixtures share one managed workspace; cleanup requires its exclusive lease.
+static CLEANUP_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn isolate() {
     static ROOT: OnceLock<PathBuf> = OnceLock::new();
     ROOT.get_or_init(|| {
@@ -34,6 +37,7 @@ fn punctuation_distinct_projects_do_not_share_ingested_documents() {
 
 #[tokio::test]
 async fn project_deletion_removes_documents_and_cached_results_only_for_its_owner() {
+    let _cleanup = CLEANUP_GATE.lock().await;
     isolate();
     let root = tempfile::tempdir().unwrap();
     let project = root.path().join("owner");
@@ -82,6 +86,7 @@ fn recreated_document_storage_invalidates_a_cached_generation() {
 
 #[tokio::test]
 async fn legacy_documents_are_reported_preserved_and_excluded_from_search() {
+    let _cleanup = CLEANUP_GATE.lock().await;
     isolate();
     let project = tempfile::tempdir().unwrap();
     let identity = std::fs::canonicalize(project.path()).unwrap();
@@ -127,6 +132,7 @@ fn canonical_aliases_share_documents_and_cache() {
 
 #[tokio::test]
 async fn busy_knowledge_rejects_deletion_and_ingestion_before_mutation() {
+    let _cleanup = CLEANUP_GATE.lock().await;
     isolate();
     let project = tempfile::tempdir().unwrap();
     let source = project.path().join("source.txt");
@@ -145,18 +151,14 @@ async fn busy_knowledge_rejects_deletion_and_ingestion_before_mutation() {
         .unwrap();
     lease.try_lock().unwrap();
     let service = hf_service::ServiceContainer::stubbed();
-    assert!(service
-        .delete_project(project.path())
-        .await
-        .unwrap_err()
-        .to_string()
-        .contains("knowledge is busy"));
-    assert!(service
-        .ingest_document(project.path(), &source)
-        .await
-        .unwrap_err()
-        .to_string()
-        .contains("knowledge is busy"));
+    assert!(matches!(
+        service.delete_project(project.path()).await,
+        Err(hf_core::error::ClassifiedError::Validation(_))
+    ));
+    assert!(matches!(
+        service.ingest_document(project.path(), &source).await,
+        Err(hf_core::error::ClassifiedError::Validation(_))
+    ));
     assert!(docs.exists());
     assert!(hf_service::knowledge::is_indexed(project.path()));
     drop(lease);

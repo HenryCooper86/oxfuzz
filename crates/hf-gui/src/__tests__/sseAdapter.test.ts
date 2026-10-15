@@ -2,6 +2,57 @@ import { describe, expect, it, vi } from "vitest";
 import { SseAdapter } from "../lib/sseAdapter";
 
 describe("SseAdapter", () => {
+  it("closes an oversized incomplete stream before reconnecting", async () => {
+    vi.useFakeTimers();
+    const cancel = vi.fn();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(`data: ${"x".repeat(128 * 1024)}`));
+      },
+      cancel,
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(stream)));
+    const adapter = new SseAdapter("http://localhost:8081");
+    const stop = adapter.listen("run:status", () => {});
+    try {
+      await vi.waitFor(() => expect(cancel).toHaveBeenCalledTimes(1));
+      expect(stream.locked).toBe(false);
+    } finally {
+      stop();
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not announce an aborted connection after subscriptions change", async () => {
+    vi.useFakeTimers();
+    let resolveFirst!: (response: Response) => void;
+    const staleStream = new ReadableStream<Uint8Array>();
+    const fetchMock = vi.fn()
+      // The GUI targets ES2022, before Promise.withResolvers is available.
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => { resolveFirst = resolve; }))
+      .mockImplementationOnce(async () => new Response(new ReadableStream<Uint8Array>()));
+    vi.stubGlobal("fetch", fetchMock);
+    const adapter = new SseAdapter("http://localhost:8081");
+    const staleConnected = vi.fn();
+    const stopFirst = adapter.listen("stream:connected", staleConnected);
+    stopFirst();
+    const connected = vi.fn();
+    const stopSecond = adapter.listen("stream:connected", connected);
+    try {
+      await vi.waitFor(() => expect(connected).toHaveBeenCalledTimes(1));
+      resolveFirst(new Response(staleStream));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(connected).toHaveBeenCalledTimes(1);
+      expect(staleStream.locked).toBe(false);
+      expect(staleConnected).not.toHaveBeenCalled();
+    } finally {
+      stopSecond();
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
+  });
+
   it("isolates failing subscribers and keeps later frames on the same connection", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const encoder = new TextEncoder();

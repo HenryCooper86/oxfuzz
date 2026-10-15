@@ -158,3 +158,47 @@ describe("removed project presentation state", () => {
     expect(state().finding).toEqual({ findingId: "finding:/b", runId: "run:/b" });
   });
 });
+
+describe("malformed persisted pipeline progress", () => {
+  // The suite's beforeEach mounts with empty recents; a focused remount
+  // reproduces a cold start against seeded storage.
+  async function remountWithStorage(pipeline: unknown, project = "/a") {
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    localStorage.setItem("hf_recent_projects", JSON.stringify([project]));
+    localStorage.setItem("hf_active_project", project);
+    localStorage.setItem("hf_pipeline_progress_v1", JSON.stringify(pipeline));
+    await act(async () => root.render(
+      <StrictMode>
+        <ProjectProvider><PipelineProvider><FindingSelectionProvider><Probe /></FindingSelectionProvider></PipelineProvider></ProjectProvider>
+      </StrictMode>,
+    ));
+  }
+
+  it("recovers non-array persisted stage lists instead of crashing the provider", async () => {
+    let crashed = false;
+    try {
+      await remountWithStorage({ "/a": { completed: 5, skipped: [] } });
+    } catch {
+      crashed = true;
+    }
+    expect(crashed).toBe(false);
+    expect(state().completed).toEqual([]);
+    expect(JSON.parse(localStorage.getItem("hf_pipeline_progress_v1")!)["/a"]).toBeUndefined();
+    await click("complete discover");
+    expect(state().completed).toEqual(["discover"]);
+  });
+
+  it("does not treat a poisoned string stage list as completed stages", async () => {
+    await remountWithStorage({ "/a": { completed: "discover", skipped: [] } });
+    expect(state().completed).toEqual([]);
+    expect(JSON.parse(localStorage.getItem("hf_pipeline_progress_v1")!)["/a"]).toBeUndefined();
+  });
+
+  it.each(["unknown-stage", "toString", "constructor"])("rejects an unknown persisted stage %s", async (stage) => {
+    await remountWithStorage({ "/a": { completed: ["discover", stage], skipped: [] } });
+    expect(state().completed).toEqual([]);
+    await click("complete discover");
+    expect(state().completed).toEqual(["discover"]);
+  });
+});

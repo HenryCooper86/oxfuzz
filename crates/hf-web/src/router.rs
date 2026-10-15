@@ -450,6 +450,10 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .route("/reports", get(list_report_drafts))
         .route("/reports/save", post(save_report_draft))
         .route("/reports/delete", post(delete_report_draft))
+        .route(
+            "/reports/{report_id}/defectdojo",
+            post(report_defectdojo_push),
+        )
         .route("/report/formats", get(report_formats))
         .route("/crashes/all", get(all_crashes))
         .route("/corpus/all", get(all_corpus))
@@ -1737,7 +1741,6 @@ async fn campaign_trust_report(
     Ok(Json(public_value(report)))
 }
 
-#[cfg(feature = "run-closeout")]
 async fn require_empty_request_body(request: axum::extract::Request) -> Result<(), ApiError> {
     let bytes = axum::body::to_bytes(request.into_body(), 1)
         .await
@@ -3101,6 +3104,36 @@ async fn delete_report_draft(
         .delete_report_draft(&req.id)
         .map_err(classified_api_error)?;
     Ok(Json(()))
+}
+
+/// Push a saved report's findings to `DefectDojo`, addressed by stable id.
+///
+/// The id is the only client input: the owner and target are resolved
+/// server-side from the stored draft -- the listing DTO redacts `project`,
+/// so no client copy is ever trusted. The resolved snapshot is authorized as
+/// a whole, the policy's canonical owner is bound into that same snapshot,
+/// and it is published without re-reading the editable draft, so a
+/// concurrent draft edit cannot slip a different owner past the approval.
+async fn report_defectdojo_push(
+    State(state): State<AppState>,
+    Path(report_id): Path<String>,
+    request: axum::extract::Request,
+) -> ApiResult<hf_service::PushOutcome> {
+    require_empty_request_body(request).await?;
+    let publication = state
+        .container
+        .resolve_report_publication(&report_id)
+        .map_err(classified_api_error)?;
+    // Approve the resolved owner before any service call can canonicalize
+    // it into a classified (path-bearing) message; the bounded policy error
+    // is the only failure surface a foreign owner sees.
+    let approved_owner = approved_project(&state, publication.project())?;
+    let outcome = state
+        .container
+        .push_report_to_defectdojo(&publication.with_canonical_project(approved_owner))
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(outcome))
 }
 
 async fn provider_statuses(State(state): State<AppState>) -> ApiResult<serde_json::Value> {

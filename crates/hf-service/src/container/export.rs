@@ -618,6 +618,47 @@ impl ServiceContainer {
         crate::report_store::delete_report_draft(id)
     }
 
+    /// Resolve one saved report for publication by its stable id.
+    ///
+    /// The returned snapshot is the single identity a transport authorizes
+    /// and executes; see [`crate::report_store::ReportPublication`].
+    ///
+    /// # Errors
+    /// Returns the resolution errors of
+    /// [`crate::report_store::report_draft`].
+    pub fn resolve_report_publication(
+        &self,
+        report_id: &str,
+    ) -> Result<crate::report_store::ReportPublication, ClassifiedError> {
+        Ok(crate::report_store::ReportPublication::from_draft(
+            crate::report_store::report_draft(report_id)?,
+        ))
+    }
+
+    /// Push a saved report's findings to `DefectDojo`.
+    ///
+    /// `publication` is a snapshot resolved by
+    /// [`Self::resolve_report_publication`] (optionally canonically bound by
+    /// the transport's project authorization via
+    /// [`crate::report_store::ReportPublication::with_canonical_project`]).
+    /// The push publishes that snapshot's owner and target exactly and
+    /// re-reads nothing, so a concurrent draft edit cannot redirect it. The
+    /// findings are the owner's latest retained terminal run's triaged
+    /// crashes, with the same authorization and dedup semantics as
+    /// [`Self::push_to_defectdojo`].
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` when unauthorized, the integration is
+    /// unconfigured, there are no crashes to push, or the `DefectDojo`
+    /// request fails.
+    pub async fn push_report_to_defectdojo(
+        &self,
+        publication: &crate::report_store::ReportPublication,
+    ) -> Result<crate::defectdojo::PushOutcome, ClassifiedError> {
+        self.push_to_defectdojo_for_run(publication.project(), publication.target(), None)
+            .await
+    }
+
     /// Build a human-reviewable issue draft for a crash, targeting the fuzzed
     /// project's configured GitHub/GitLab repository.
     ///

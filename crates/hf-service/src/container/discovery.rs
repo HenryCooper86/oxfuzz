@@ -41,7 +41,10 @@ impl ServiceContainer {
     ) -> Result<TargetInventory, ClassifiedError> {
         self.authorize_recorded(Action::Discover, "discover", Some(project))
             .await?;
+        let _workspace_operation = self.acquire_workspace_operation().await?;
         let inv = hf_discovery::discover(project, lang).await?;
+        #[cfg(test)]
+        project_cleanup_tests::pause_before_persistence(&inv.project_root).await;
         if let Some(store) = &self.store {
             store.save_inventory(&inv, Utc::now()).await?;
         }
@@ -70,7 +73,10 @@ impl ServiceContainer {
     ) -> Result<AnalyzedInventory, ClassifiedError> {
         self.authorize_recorded(Action::Discover, "discover", Some(project))
             .await?;
+        let _workspace_operation = self.acquire_workspace_operation().await?;
         let (inventory, signals) = hf_discovery::discover_with_signals(project, lang).await?;
+        #[cfg(test)]
+        project_cleanup_tests::pause_before_persistence(&inventory.project_root).await;
         if let Some(store) = &self.store {
             store.save_inventory(&inventory, Utc::now()).await?;
         }
@@ -93,6 +99,7 @@ impl ServiceContainer {
         let pool = self.provider_pool().ok_or_else(|| {
             ClassifiedError::Provider("no LLM provider configured for ranking".to_owned())
         })?;
+        let _workspace_operation = self.acquire_workspace_operation().await?;
         let bridge =
             LlmProviderBridge::new(pool).with_diagnostics(Arc::clone(&self.diagnostics), "rank");
         let ranked = hf_discovery::rank(inventory, Box::new(bridge)).await?;
@@ -197,6 +204,157 @@ impl ServiceContainer {
         schedulable.sort_by(|a, b| (&a.target, &a.engine).cmp(&(&b.target, &b.engine)));
         schedulable.dedup_by(|a, b| a.target == b.target && a.engine == b.engine);
         Ok(schedulable)
+    }
+}
+
+#[cfg(test)]
+pub(super) mod project_cleanup_tests {
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, LazyLock};
+
+    use hf_core::target::TargetLanguage;
+    use hf_storage::Store;
+    use tokio::sync::{Mutex, Notify};
+
+    use super::ServiceContainer;
+
+    struct ScanPause {
+        project: PathBuf,
+        reached: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    static PAUSE: LazyLock<Mutex<Option<Arc<ScanPause>>>> = LazyLock::new(|| Mutex::new(None));
+
+    struct PauseGuard(Arc<ScanPause>);
+
+    impl Drop for PauseGuard {
+        fn drop(&mut self) {
+            self.0.release.notify_one();
+        }
+    }
+
+    pub(crate) async fn pause_before_persistence(project: &Path) {
+        let pause = PAUSE
+            .lock()
+            .await
+            .as_ref()
+            .filter(|pause| pause.project == project)
+            .cloned();
+        if let Some(pause) = pause {
+            pause.reached.notify_one();
+            pause.release.notified().await;
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum ScanMode {
+        Deterministic,
+        #[cfg(feature = "native-analysis")]
+        Analyzed,
+        #[cfg(feature = "ai-target-ranking")]
+        Ranked,
+    }
+
+    async fn check_scan_overlap(mode: ScanMode) {
+        let _environment = ServiceContainer::workspace_environment_test_gate()
+            .lock()
+            .await;
+        let root = tempfile::tempdir().unwrap();
+        let project = std::fs::canonicalize(root.path()).unwrap();
+        let source = project.join("parser.c");
+        std::fs::write(
+            &source,
+            "#include <stddef.h>\nint parse_bytes(const unsigned char *data, size_t size) { return size && data[0]; }\n",
+        )
+        .unwrap();
+        let store = Arc::new(Store::connect(project.join("scan.db")).await.unwrap());
+        let service = ServiceContainer::stubbed().with_store(Arc::clone(&store));
+        let pause = Arc::new(ScanPause {
+            project: project.clone(),
+            reached: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+        });
+        *PAUSE.lock().await = Some(Arc::clone(&pause));
+        let _pause_guard = PauseGuard(Arc::clone(&pause));
+        let worker = service.clone();
+        let worker_project = project.clone();
+        let scan = tokio::spawn(async move {
+            match mode {
+                ScanMode::Deterministic => {
+                    worker
+                        .discover(&worker_project, TargetLanguage::C)
+                        .await
+                        .unwrap();
+                }
+                #[cfg(feature = "native-analysis")]
+                ScanMode::Analyzed => {
+                    worker
+                        .discover_analyzed(&worker_project, TargetLanguage::C)
+                        .await
+                        .unwrap();
+                }
+                #[cfg(feature = "ai-target-ranking")]
+                ScanMode::Ranked => {
+                    let id = worker
+                        .start_ranked_discovery(&worker_project, TargetLanguage::C)
+                        .await
+                        .unwrap();
+                    loop {
+                        let status = worker.ranked_discovery_status(id).await.unwrap().unwrap();
+                        if status.revision == 2 {
+                            break;
+                        }
+                        assert!(
+                            matches!(
+                                status.state,
+                                hf_storage::AiDiscoveryState::Scanning
+                                    | hf_storage::AiDiscoveryState::Ranking
+                            ),
+                            "ranked scan terminated before publication: {:?}",
+                            status.state
+                        );
+                        tokio::task::yield_now().await;
+                    }
+                }
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), pause.reached.notified())
+            .await
+            .expect("scan must reach the pre-persistence pause");
+        assert!(store.list_all_targets().await.unwrap().is_empty());
+
+        assert!(service.delete_project(&project).await.is_err());
+        assert!(service.clear_knowledge().await.is_err());
+
+        pause.release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(5), scan)
+            .await
+            .expect("released scan must finish persistence")
+            .unwrap();
+        *PAUSE.lock().await = None;
+        let targets = store.list_all_targets().await.unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].symbol, "parse_bytes");
+        assert_eq!(targets[0].project_root, project);
+        assert!(source.is_file());
+    }
+
+    #[tokio::test]
+    async fn deterministic_scan_excludes_cleanup_before_persistence() {
+        check_scan_overlap(ScanMode::Deterministic).await;
+    }
+
+    #[cfg(feature = "native-analysis")]
+    #[tokio::test]
+    async fn analyzed_scan_excludes_cleanup_before_persistence() {
+        check_scan_overlap(ScanMode::Analyzed).await;
+    }
+
+    #[cfg(feature = "ai-target-ranking")]
+    #[tokio::test]
+    async fn ranked_scan_excludes_cleanup_before_persistence() {
+        check_scan_overlap(ScanMode::Ranked).await;
     }
 }
 

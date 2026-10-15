@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Button } from "../components/ui/Button";
 import { useI18n } from "../i18nContext";
 import {
@@ -17,11 +17,24 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
   const resolver = useRef<((v: boolean) => void) | null>(null);
 
   const confirm = useCallback<ConfirmFn>((options) => {
+    // A newer dialog supersedes any pending one; its caller must not hang.
+    if (resolver.current) {
+      resolver.current(false);
+      resolver.current = null;
+    }
     setOpts(options);
     return new Promise<boolean>((resolve) => {
       resolver.current = resolve;
     });
   }, []);
+
+  // Settle an open dialog when the provider unmounts so no caller hangs.
+  useEffect(
+    () => () => {
+      resolver.current?.(false);
+    },
+    [],
+  );
 
   const settle = useCallback((value: boolean) => {
     resolver.current?.(value);

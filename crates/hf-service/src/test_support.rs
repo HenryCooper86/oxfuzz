@@ -20,6 +20,7 @@ pub use hf_core::types::ProviderId;
 use hf_scheduler::{ExecutionStatus, Schedule, ScheduleExecution, TriggerConfig};
 pub use hf_storage::{HarnessApprovalKind, RunRecord, RunStatus, Store};
 use hf_storage::{NewScheduleOccurrence, ScheduleOccurrenceTransition};
+pub use hf_test_utils::defectdojo_stub;
 
 use crate::scheduler::{CampaignParams, CampaignScheduler};
 use crate::ServiceContainer;

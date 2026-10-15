@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState, lazy, Suspense } from "react";
-import { getTransport, isTauriEnvironment, onDataChanged } from "../lib";
+import { useCallback, useEffect, useRef, useState, lazy, Suspense } from "react";
+import { getTransport, isTauriEnvironment, onDataChanged, emitDataChanged } from "../lib";
 import { useI18n } from "../i18nContext";
 import { useConfirm } from "../providers/confirm";
 import type { ReportDraft } from "../types";
@@ -20,21 +20,28 @@ export function ReportsView({ onNavigate }: { onNavigate?: (view: import("../typ
   const [reports, setReports] = useState<ReportDraft[]>([]);
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState<ReportDraft | null>(null);
-  const [formats, setFormats] = useState<string[]>(["md", "html"]);
+  const [formats, setFormats] = useState<string[]>(isTauriEnvironment() ? ["md", "html"] : ["md"]);
   const [notice, setNotice] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const [pushingId, setPushingId] = useState<string | null>(null);
+  const pushInFlight = useRef(false);
+  // One draft deletion at a time: a queued duplicate would re-delete work that
+  // already succeeded and surface that second failure as an error.
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const deleteInFlight = useRef(false);
 
   // Push the crashes behind a report (its project's latest triaged run) to
   // DefectDojo as findings. Configure the instance in Settings > Integrations.
   const pushReport = useCallback(async (r: ReportDraft) => {
+    if (pushInFlight.current) return;
+    pushInFlight.current = true;
     setNotice(null);
     setPushingId(r.id);
     try {
       const outcome = await getTransport().invoke<{ findings_pushed: number; reimported: boolean; url: string | null }>(
-        "push_to_defectdojo",
-        { project: r.project, target: r.target ?? undefined },
+        "push_report_to_defectdojo",
+        { reportId: r.id },
       );
       const where = outcome.url ? ` (${outcome.url})` : "";
       const reimport = outcome.reimported ? t("reports.reimportSuffix") : "";
@@ -42,6 +49,7 @@ export function ReportsView({ onNavigate }: { onNavigate?: (view: import("../typ
     } catch (e) {
       setNotice(t("reports.pushFailed", { error: String(e) }));
     } finally {
+      pushInFlight.current = false;
       setPushingId(null);
     }
   }, [t]);
@@ -67,6 +75,9 @@ export function ReportsView({ onNavigate }: { onNavigate?: (view: import("../typ
   }, [load]);
 
   useEffect(() => {
+    // Browser sessions can only download the saved Markdown (the web layer has
+    // no report download endpoint), so MD is the only format offered there.
+    // Desktop asks the service which formats its exporter supports.
     if (!isTauriEnvironment()) return;
     getTransport()
       .invoke<string[]>("report_formats")
@@ -76,13 +87,22 @@ export function ReportsView({ onNavigate }: { onNavigate?: (view: import("../typ
 
   const remove = useCallback(
     async (r: ReportDraft) => {
-      if (!(await confirm({ title: t("reports.deleteTitle"), message: t("reports.deleteMsg", { title: r.title }), danger: true, confirmLabel: t("common.delete") }))) return;
+      if (deleteInFlight.current) return;
+      deleteInFlight.current = true;
+      setDeletingId(r.id);
       try {
+        if (!(await confirm({ title: t("reports.deleteTitle"), message: t("reports.deleteMsg", { title: r.title }), danger: true, confirmLabel: t("common.delete") }))) return;
         await getTransport().invoke("delete_report_draft", { id: r.id });
         if (open?.id === r.id) setOpen(null);
+        // Other draft lists (the Workbench reports tab) reload on this event
+        // and must not keep offering the deleted report.
+        emitDataChanged();
         await load();
       } catch (e) {
         setNotice(t("reports.deleteFailed", { error: String(e) }));
+      } finally {
+        deleteInFlight.current = false;
+        setDeletingId(null);
       }
     },
     [open, load, confirm, t],
@@ -183,7 +203,7 @@ export function ReportsView({ onNavigate }: { onNavigate?: (view: import("../typ
                 variant="outline"
                 size="sm"
                 onClick={() => void pushReport(r)}
-                disabled={pushingId === r.id}
+                disabled={pushingId !== null}
                 title={t("reports.pushTitle")}
               >
                 <Share2 size={13} />
@@ -191,6 +211,7 @@ export function ReportsView({ onNavigate }: { onNavigate?: (view: import("../typ
               </Button>
               <IconButton
                 danger
+                disabled={deletingId !== null}
                 onClick={() => void remove(r)}
                 title={t("reports.deleteReport")}
                 aria-label={t("reports.deleteReport")}

@@ -250,7 +250,7 @@ pub use remediation_workflow::{
     RemediationOperationView, RemediationStartRequest,
 };
 pub use report::ReportLanguage;
-pub use report_store::ReportDraft;
+pub use report_store::{ReportDraft, ReportPublication};
 #[cfg(feature = "run-closeout")]
 pub use run_closeout::{
     blocked_by, closeout_ladder, consumes, pending_steps, CloseoutAvailability, CloseoutReport,

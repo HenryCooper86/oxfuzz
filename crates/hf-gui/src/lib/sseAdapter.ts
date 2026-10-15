@@ -28,6 +28,7 @@ export class SseAdapter {
   }
 
   private async consume(controller: AbortController) {
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     try {
       const headers: Record<string, string> = { Accept: "text/event-stream" };
       if (this.token) headers.Authorization = `Bearer ${this.token}`;
@@ -39,9 +40,10 @@ export class SseAdapter {
       if (!response.ok || !response.body) {
         throw new Error(`SSE connection failed: ${response.status}`);
       }
+      reader = response.body.getReader();
+      if (controller.signal.aborted) return;
       this.reconnectDelay = 1000;
       this.dispatch("stream:connected", undefined);
-      const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
 
@@ -61,6 +63,16 @@ export class SseAdapter {
         // of console output; the HTTP status is enough for local diagnostics.
       }
     } finally {
+      if (reader) {
+        try {
+          await reader.cancel();
+        } catch {
+          // Cancellation can fail after a fetch abort or stream error; the
+          // connection is already unusable and its reader is still released.
+        } finally {
+          reader.releaseLock();
+        }
+      }
       if (this.abortController === controller) this.abortController = null;
       if (!controller.signal.aborted && this.hasListeners()) this.scheduleReconnect();
     }

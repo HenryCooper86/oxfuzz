@@ -31,7 +31,7 @@ campaign-health = []
 concolic-enrichment = []
 run-closeout = ["campaign-trust", "campaign-health", "unreached-surface", "coverage-blockers"]
 harness-work-order = ["build-context"]
-test-support = []
+test-support = ["dep:hf-test-utils"]
 
 
 [dependencies]
@@ -55,6 +55,8 @@ hf-storage = { workspace = true }
 hf-runtime = { workspace = true }
 hf-guardrails = { workspace = true }
 hf-automotive = { workspace = true, optional = true }
+# Presentation tests access shared fixtures through the test-support service API.
+hf-test-utils = { workspace = true, optional = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }

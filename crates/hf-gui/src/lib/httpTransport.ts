@@ -170,6 +170,11 @@ const COMMAND_MAP: Record<string, CommandEndpoint> = {
   list_report_drafts: { method: "GET", path: "/reports" },
   save_report_draft: { method: "POST", path: "/reports/save" },
   delete_report_draft: { method: "POST", path: "/reports/delete" },
+  push_report_to_defectdojo: {
+    method: "POST",
+    path: "/reports/{report_id}/defectdojo",
+    emptyBody: true,
+  },
   clear_knowledge: { method: "POST", path: "/knowledge/clear" },
   delete_project: { method: "POST", path: "/projects/delete" },
   delete_crash: { method: "POST", path: "/crashes/delete" },

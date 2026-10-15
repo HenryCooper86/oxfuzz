@@ -65,6 +65,14 @@ REST corpus browse records carry their target ID so deletion can select one
 stored entry by project, target ID, and digest. The server resolves the managed
 path from storage; browser clients do not send a redacted path back as identity.
 
+Saved-report publication uses the bodyless
+`POST /reports/{report_id}/defectdojo` operation, not a redacted project path
+copied from a report DTO. The service resolves that report once; REST authorizes
+its saved owner and binds the approved canonical path before executing the same
+saved-target snapshot. A concurrent edit of the draft cannot replace the
+authorized owner or target. Missing and malformed draft errors do not disclose
+stored paths. Existing publication guardrails still apply.
+
 Schedule definition lists and create/update/delete responses include only projects
 under the router's approved roots. Exact schedule deletion and enable/disable use
 service methods that check stored project ownership under the scheduler mutation
@@ -190,3 +198,8 @@ SSE parsing and subscriber delivery are separate operations. A throwing
 subscriber is logged by event name without payload data, and remaining
 subscribers and subsequent frames continue on the same connection. Subscriber
 exceptions are never retried as raw JSON payloads or treated as transport loss.
+
+The browser cancels and releases each stream reader before reconnecting after
+an incomplete event exceeds the receive limit. A response arriving after its
+subscription was aborted cannot announce a connection or deliver events to
+replacement subscribers.

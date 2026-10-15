@@ -245,9 +245,10 @@ Whole-workspace cleanup is likewise service-owned and fail-closed. The service
 uses a canonical-root lease shared by independent containers, plus a
 root-digest-keyed advisory file lock outside the deletable workspace so separate
 CLI, GUI, TUI, and web processes share the same boundary. All workspace staging,
-build, smoke, fuzz, corpus, crash, coverage, export, and evidence operations hold
-a shared lease for their complete asynchronous lifetime, while whole-root
-cleanup requires the exclusive lease. Cleanup fails busy if an operation is
+build, smoke, fuzz, corpus, crash, coverage, export, evidence, discovery, and
+ranking operations hold a shared lease for their complete asynchronous lifetime.
+Whole-root cleanup, project deletion, and global knowledge clearing require the
+exclusive lease. Cleanup fails busy if an operation is
 already active, including the pre-registration window before a run appears in
 the cancellation registry; an operation arriving after cleanup began cannot
 enter and either waits on the process-local gate or fails busy on the file gate.
@@ -263,6 +264,16 @@ Environment overrides cannot authorize deletion of filesystem, home,
 repository, configuration, or data ancestors. The implicit per-user default may
 be marked during a legacy upgrade, while an unmarked non-empty environment
 override is preserved for explicit operator recovery.
+
+Discovery acquires its lease before scanning or reserving a ranked operation and
+retains it through inventory/result persistence, including provider work, retries,
+and supplied-inventory ranking. Cleanup cannot finish between a scan and its
+inventory write and then have the worker recreate deleted data. Project deletion
+removes that project's retained AI discovery operations and prompts; global
+knowledge clearing removes them across projects while preserving configuration
+and on-disk workspaces. Cleanup exclusion is workspace-wide, including when the
+active operation belongs to another project. Database and filesystem deletion
+remain sequential; a filesystem error is reported, not treated as atomic success.
 
 Campaign lifecycle recovery is fail-closed. Before creating run-owned files or
 launching the sandbox, the service rejects a recovery journal with a replay,
@@ -520,7 +531,7 @@ digest-keyed cross-process project lease for that interval so the one-active
 project rule remains true while a published database row is `done` but not yet
 durably closed. Admission rechecks recovery health after taking both leases.
 Global knowledge deletion takes the exclusive workspace lease before deleting
-Semgrep rows. Project deletion takes the shared workspace lease and then the
+Semgrep rows. Project deletion takes the exclusive workspace lease and then the
 same canonical digest-keyed project lease as admission before deleting that
 project's database rows or workspace. A conflicting explicit deletion fails
 busy. These boundaries prevent deletion from removing an active parent while
@@ -800,6 +811,17 @@ context. That context is a navigation hint, not service readiness or approval.
 Opening a step never starts an operation, and all execution checks remain in
 its owning service operation. Completed workflows offer a findings review.
 
+Persisted GUI progress is validated when loaded: each project's completed and
+skipped stages must be arrays of known stage IDs. Malformed entries are discarded
+and repaired on persistence rather than crashing the provider or claiming a stage
+completed. Replacing a pending confirmation, or unmounting its provider, resolves
+the old request as cancelled instead of leaving its caller suspended.
+
+Streaming run logs and health details remain in the bounded display cache, not
+the persisted summary. Those updates do not rebuild and serialize the entire
+summary projection; owner, status, metrics, and terminal-summary changes still
+persist, and a failed write remains eligible for retry.
+
 ### GUI interruption recovery and launch review
 
 The interruption banner reads the persisted journal and links the exact run ID
@@ -827,6 +849,13 @@ the existing service finding filter, including all dispositions for this review.
 Report navigation opens the owning project's report tools without generating
 or publishing a report. Evidence interpretation remains in service proof and
 closeout reports.
+
+Run History clearing uses the same project selection as its inventory on both
+desktop and browser. Only an unselected desktop view can clear every project's
+history; browser clearing requires a selected project. Confirmations name that
+scope, and duplicate destructive requests are excluded before confirmation.
+Harness comparison failures report the source-read error to the operator instead
+of silently removing the loading dialog.
 
 ### First-use GUI audit corrections
 
@@ -857,3 +886,8 @@ Result empty states distinguish no campaigns from no matching findings and link
 back to the workflow. Composed reports describe the explicit composition action
 and advertise only available exports. Settings expose host-appropriate controls;
 inputs have accessible names, and help navigation collapses at narrow widths.
+
+Reports, triage, and automotive previews offer only Markdown downloads in the
+browser, which has no native document-conversion download operation. Desktop
+previews use the service-supported format list. Deleting a saved report from
+either report surface notifies the other listings to reload.

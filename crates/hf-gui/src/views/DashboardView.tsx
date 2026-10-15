@@ -28,7 +28,7 @@ import { FindingProofCard } from "../components/FindingProofCard";
 import { Button, EmptyState, Input, LoadingState, Select, Textarea, ViewHeader } from "../components/ui";
 import { useToast } from "../components/ui/toastContext";
 import { useConfirm } from "../providers/confirm";
-import { getTransport, onDataChanged, openExternal, useDefectDojo } from "../lib";
+import { getTransport, onDataChanged, emitDataChanged, openExternal, useDefectDojo } from "../lib";
 import {
   dashboardActionDestination,
   isDashboardActionInteractive,
@@ -347,6 +347,9 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
     setError(null);
     try {
       await getTransport().invoke("delete_report_draft", { id: report.id });
+      // The Reports view (and this dashboard's own counters) list the same
+      // drafts; tell them the listing changed instead of leaving stale rows.
+      emitDataChanged();
       const next = await reloadReports();
       setEditor(next[0] ? editorFromReport(next[0]) : emptyEditor(activeProject, target, t));
       setNotice(t("dashboard.reportDeleted"));

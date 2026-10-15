@@ -88,6 +88,7 @@ impl ServiceContainer {
         };
         self.authorize_recorded(Action::Discover, "discover", Some(&inventory.project_root))
             .await?;
+        let _workspace_operation = self.acquire_workspace_operation().await?;
         let id = Uuid::new_v4();
         store
             .create_ai_discovery(id, &inventory.project_root, language)
@@ -150,11 +151,13 @@ impl ServiceContainer {
         self.authorize_recorded(Action::Discover, "discover", Some(project))
             .await?;
         let project = canonical_project_root(project)?;
+        let workspace_operation = self.acquire_workspace_operation().await?;
         let store = self.ai_discovery_store()?;
         let id = Uuid::new_v4();
         store.create_ai_discovery(id, &project, language).await?;
         let worker = self.clone();
         tokio::spawn(async move {
+            let _workspace_operation = workspace_operation;
             if let Err(error) = worker.run_ranked_scan(id, &project, language).await {
                 tracing::error!(operation_id = %id, %error, "ranked discovery failed");
                 if let Err(storage_error) =
@@ -219,6 +222,7 @@ impl ServiceContainer {
     /// # Errors
     /// Returns a classified error if the source scan is missing or authorization fails.
     pub async fn retry_ranked_discovery(&self, id: Uuid) -> Result<Uuid, ClassifiedError> {
+        let workspace_operation = self.acquire_workspace_operation().await?;
         let store = self.ai_discovery_store()?;
         let source = store.get_ai_discovery(id).await?.ok_or_else(|| {
             ClassifiedError::Validation(format!("discovery operation {id} not found"))
@@ -232,6 +236,7 @@ impl ServiceContainer {
         store.copy_ai_scan(id, new_id).await?;
         let worker = self.clone();
         tokio::spawn(async move {
+            let _workspace_operation = workspace_operation;
             if let Err(error) = worker.run_ranked_ai(new_id, &scan).await {
                 tracing::error!(operation_id = %new_id, %error, "retried AI assessment failed");
                 if let Err(storage_error) =
@@ -259,6 +264,9 @@ impl ServiceContainer {
         language: TargetLanguage,
     ) -> Result<(), ClassifiedError> {
         let inventory = hf_discovery::discover(project, language).await?;
+        #[cfg(test)]
+        super::discovery::project_cleanup_tests::pause_before_persistence(&inventory.project_root)
+            .await;
         let store = self.ai_discovery_store()?;
         store.save_inventory(&inventory, chrono::Utc::now()).await?;
         let scan = serde_json::to_string(&inventory)

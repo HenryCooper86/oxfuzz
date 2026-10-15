@@ -22,12 +22,36 @@ const EMPTY: Progress = { completed: [], skipped: [] };
 
 const STORAGE_KEY = "hf_pipeline_progress_v1";
 
+const KNOWN_STAGES: Record<string, true> = Object.fromEntries(
+  PIPELINE_STAGES.map((stage) => [stage.id, true as const]),
+);
+
+function isStageId(value: unknown): value is StageId {
+  return typeof value === "string" && Object.hasOwn(KNOWN_STAGES, value);
+}
+
+/** Validate one untrusted stage list; anything malformed resets the entry. */
+function parseStageList(value: unknown): StageId[] | null {
+  if (!Array.isArray(value) || !value.every(isStageId)) return null;
+  return value;
+}
+
 /** Load per-target progress from localStorage (best-effort). */
 function loadProgress(): Record<string, Progress> {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    const parsed = raw ? (JSON.parse(raw) as unknown) : null;
-    return parsed && typeof parsed === "object" ? (parsed as Record<string, Progress>) : {};
+    const parsed: unknown = raw ? JSON.parse(raw) : null;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+    const entries: Array<[string, Progress]> = [];
+    for (const [project, value] of Object.entries(parsed)) {
+      if (typeof value !== "object" || value === null || Array.isArray(value)) continue;
+      if (!("completed" in value) || !("skipped" in value)) continue;
+      const completed = parseStageList(value.completed);
+      const skipped = parseStageList(value.skipped);
+      if (completed === null || skipped === null) continue;
+      entries.push([project, { completed, skipped }]);
+    }
+    return Object.fromEntries(entries);
   } catch {
     return {};
   }

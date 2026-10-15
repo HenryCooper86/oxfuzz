@@ -6406,10 +6406,7 @@ mod lifecycle_tests {
 
         let error = service.delete_project(&project_alias).await.unwrap_err();
 
-        assert!(matches!(
-            error,
-            ClassifiedError::Validation(message) if message == "Semgrep enrichment: busy"
-        ));
+        assert!(matches!(error, ClassifiedError::Validation(_)));
         assert!(store.semgrep_run(operation_id).await.unwrap().is_some());
         assert_eq!(service.semgrep.journal.interrupted().unwrap().len(), 1);
         assert_eq!(

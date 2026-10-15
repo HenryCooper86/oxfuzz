@@ -64,6 +64,11 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus, onReviewFindings 
     | null
   >(null);
   const [reverting, setReverting] = useState(false);
+  // One destructive run-history operation at a time: a queued duplicate would
+  // re-delete work that already succeeded and report that failure to the user.
+  const destructiveInFlight = useRef(false);
+  const [deletingRunId, setDeletingRunId] = useState<string | null>(null);
+  const [clearingRuns, setClearingRuns] = useState(false);
   const [morning, setMorning] = useState<MorningHealthSummary | null>(null);
   const [morningError, setMorningError] = useState<string | null>(null);
   const [morningLoading, setMorningLoading] = useState(true);
@@ -112,27 +117,51 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus, onReviewFindings 
   }, [activeProject]);
 
   async function deleteRun(r: RunHistoryItem) {
-    if (!(await confirm({ title: t("runs.deleteRunTitle"), message: t("runs.deleteRunMsg", { engine: r.engine, n: r.crashes }), danger: true, confirmLabel: t("common.delete") }))) return;
+    if (destructiveInFlight.current) return;
+    destructiveInFlight.current = true;
+    setDeletingRunId(r.id);
     try {
+      if (!(await confirm({ title: t("runs.deleteRunTitle"), message: t("runs.deleteRunMsg", { engine: r.engine, n: r.crashes }), danger: true, confirmLabel: t("common.delete") }))) return;
       await getTransport().invoke("delete_run", { runId: r.id });
       setRuns((rs) => rs.filter((x) => x.id !== r.id));
       setSelected((s) => s.filter((id) => id !== r.id));
       emitDataChanged();
     } catch (e) {
       toast({ title: t("runs.deleteFailed"), description: formatRunHistoryError(e, t), variant: "error" });
+    } finally {
+      destructiveInFlight.current = false;
+      setDeletingRunId(null);
     }
   }
 
   async function clearAllRuns() {
-    if (!(await confirm({ title: t("runs.clearTitle"), message: t("runs.clearMsg"), danger: true, confirmLabel: t("common.clearAll") }))) return;
+    if (destructiveInFlight.current) return;
+    destructiveInFlight.current = true;
+    setClearingRuns(true);
     try {
-      await getTransport().invoke("clear_all_runs", isTauriEnvironment() ? undefined : { project: activeProject || undefined });
+      // The confirmation must state the exact scope: one project when one is
+      // selected, every project only for an unscoped desktop session.
+      const scoped = activeProject !== "";
+      if (!(await confirm({
+        title: scoped ? t("runs.clearProjectTitle") : t("runs.clearTitle"),
+        message: scoped ? t("runs.clearProjectMsg", { project: activeProject }) : t("runs.clearMsg"),
+        danger: true,
+        confirmLabel: t("common.clearAll"),
+      }))) return;
+      // Both transports scope the clear to the active project; only a desktop
+      // session with no project selected asks for an intentional clear of
+      // every project. The browser route rejects an unscoped request, so the
+      // action is withheld there when no project is active.
+      await getTransport().invoke("clear_all_runs", { project: activeProject || undefined });
       setRuns([]);
       setSelected([]);
       emitDataChanged();
       toast({ title: t("runs.historyCleared"), variant: "success" });
     } catch (e) {
       toast({ title: t("runs.clearFailed"), description: formatRunHistoryError(e, t), variant: "error" });
+    } finally {
+      destructiveInFlight.current = false;
+      setClearingRuns(false);
     }
   }
 
@@ -199,8 +228,9 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus, onReviewFindings 
         oldText,
         newText,
       });
-    } catch {
+    } catch (error) {
       setDiff(null);
+      toast({ title: t("runs.diffFailed"), description: formatInvokeError(error), variant: "error" });
     }
   }
 
@@ -240,8 +270,8 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus, onReviewFindings 
           title={t("runs.title")}
           description={t("runs.description")}
         />
-        {runs.length > 0 && (
-          <Button variant="danger" size="sm" onClick={() => void clearAllRuns()} title={t("runs.clearAllTitle")}>
+        {runs.length > 0 && (isTauriEnvironment() || activeProject !== "") && (
+          <Button variant="danger" size="sm" onClick={() => void clearAllRuns()} title={activeProject ? t("runs.clearProjectAllTitle") : t("runs.clearAllTitle")} loading={clearingRuns} disabled={deletingRunId !== null}>
             <Trash2 size={14} />
             {t("common.clearAll")}
           </Button>
@@ -428,6 +458,7 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus, onReviewFindings 
                     size={26}
                     danger
                     className="shrink-0"
+                    disabled={deletingRunId !== null}
                     onClick={() => void deleteRun(r)}
                     title={t("runs.deleteRunTip")}
                     aria-label={t("runs.deleteRunAria")}

@@ -13,7 +13,8 @@ import { ConfirmContext } from "../providers/confirm";
 import { ToastContext } from "../components/ui/toastContext";
 import { TriageView } from "../views/TriageView";
 import { DashboardView } from "../views/DashboardView";
-import type { FindingReviewItem } from "../types";
+import { ReportsView } from "../views/ReportsView";
+import type { FindingReviewItem, ReportDraft } from "../types";
 
 const invoke = vi.hoisted(() => vi.fn());
 const environment = vi.hoisted(() => ({ tauri: false }));
@@ -139,6 +140,32 @@ function NavigationHost() {
 async function flush() {
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
 }
+
+// The report preview is a fixed overlay; scope control lookups to the newest
+// one so a hidden duplicate elsewhere in the tree cannot satisfy a selector.
+function previewOverlay(root: HTMLElement): HTMLElement | null {
+  const overlays = [...root.querySelectorAll<HTMLElement>("div")].filter(
+    (node) => typeof node.className === "string" && node.className.includes("fixed inset-0"),
+  );
+  return overlays[overlays.length - 1] ?? null;
+}
+
+async function untilOverlay(root: HTMLElement): Promise<HTMLElement> {
+  for (let attempt = 0; attempt < 25 && previewOverlay(root) === null; attempt += 1) await flush();
+  const overlay = previewOverlay(root);
+  if (!overlay) throw new Error(`report preview never appeared: ${root.textContent}`);
+  return overlay;
+}
+
+const draft: ReportDraft = {
+  id: "draft-1",
+  title: "Parser findings",
+  project: PROJECT_A,
+  target: "src/parser.c::parse",
+  status: "Reviewed",
+  updated_at: "2026-10-01T00:00:00Z",
+  content: "# Parser findings",
+};
 
 describe("retained finding navigation", () => {
   let container: HTMLDivElement;
@@ -473,5 +500,96 @@ describe("retained finding navigation", () => {
       status: "Draft",
       content: "# 中文分类报告",
     });
+  });
+
+  it("offers only Markdown export for a browser-composed triage report", async () => {
+    const selected = {
+      ...newer,
+      latest_scoped_actions_allowed: true,
+      latest_scoped_action_reason: null,
+    };
+    localStorage.setItem(FINDING_SELECTION_STORAGE_KEY, JSON.stringify({
+      [PROJECT_A]: { findingId: selected.crash.id, runId: selected.crash.run_id },
+    }));
+    invoke.mockImplementation((command: string) => {
+      if (command === "finding_review_queue") return Promise.resolve([selected]);
+      if (command === "finding_review") return Promise.resolve(selected);
+      // The service may support native-only formats; the browser has no
+      // matching export endpoint, so the menu must not offer them.
+      if (command === "report_formats") return Promise.resolve(["md", "pdf"]);
+      if (command === "generate_report") return Promise.resolve("# Report");
+      if (command === "save_report_draft") return Promise.resolve({ id: "draft-id" });
+      throw new Error(`unexpected command ${command}`);
+    });
+
+    await act(async () => root.render(<Providers><TriageView /></Providers>));
+    await flush();
+    const compose = [...container.querySelectorAll("button")]
+      .find((button) => button.textContent?.includes("triage.composeReport"));
+    if (!compose) throw new Error(`compose button not found: ${container.textContent}`);
+    await act(async () => compose.click());
+
+    // The preview chunk is lazy-loaded; await its overlay as a concrete signal
+    // instead of guessing how many ticks the import needs.
+    const overlay = await untilOverlay(container);
+    const exportTrigger = [...overlay.querySelectorAll("button")]
+      .find((button) => button.textContent?.includes("common.export"));
+    if (!exportTrigger) throw new Error(`export button not found: ${overlay.textContent}`);
+    await act(async () => exportTrigger.click());
+    await flush();
+
+    const options = [...overlay.querySelectorAll('[role="option"]')].map((option) => option.textContent);
+    expect(options).toContain("Markdown (.md)");
+    expect(options.join(" ")).not.toContain("HTML");
+    expect(options.join(" ")).not.toContain("PDF");
+  });
+
+  it("notifies sibling report listings when the workbench deletes a draft", async () => {
+    let deleted = false;
+    invoke.mockImplementation((command: string) => {
+      if (command === "workbench_dashboard") return Promise.resolve({
+        active_project: PROJECT_A,
+        active_target: null,
+        totals: { projects: 1, targets: 1, harnesses: 1, harnesses_needing_review: 0, runs: 2, active_runs: 0, crashes: 1, crashes_needing_triage: 1, corpus_entries: 0 },
+        recent_runs: [], top_targets: [], harness_reviews: [], crash_reviews: [],
+        readiness: { state: "active", score: 90, headline: "active", detail: "active", blockers: [], blocker_items: [] },
+        next_actions: [], next_action_items: [],
+      });
+      if (command === "list_report_drafts") return Promise.resolve(deleted ? [] : [draft]);
+      if (command === "delete_report_draft") {
+        deleted = true;
+        return Promise.resolve(undefined);
+      }
+      if (command === "report_formats") return Promise.resolve(["md", "html"]);
+      if (command === "system_status_cmd") return Promise.resolve(null);
+      if (command === "effective_auto_revert_policy") return Promise.reject(new Error("unconfigured"));
+      return Promise.resolve(null);
+    });
+
+    // The Workbench reports tab and the Reports page list the same drafts.
+    await act(async () => root.render(
+      <Providers>
+        <DashboardView />
+        <ReportsView />
+      </Providers>,
+    ));
+    await flush();
+    expect(container.textContent).toContain("Parser findings");
+
+    const reportsTab = [...container.querySelectorAll<HTMLElement>('[role="tab"]')]
+      .find((tab) => tab.textContent?.includes("dashboard.tabReports"));
+    if (!reportsTab) throw new Error(`reports tab not found: ${container.textContent}`);
+    await act(async () => reportsTab.click());
+    await flush();
+
+    const remove = [...container.querySelectorAll("button")]
+      .find((button) => button.textContent?.includes("common.delete"));
+    if (!remove) throw new Error(`delete button not found: ${container.textContent}`);
+    await act(async () => remove.click());
+    await flush();
+
+    // The deleting surface reloads itself; the Reports listing must also drop
+    // the draft through the data-change event instead of keeping stale rows.
+    expect(container.textContent).not.toContain("Parser findings");
   });
 });

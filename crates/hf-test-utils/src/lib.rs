@@ -2,6 +2,7 @@
 //! y-agent's y-test-utils (`mock_runtime` deferred until the tool runtime lands).
 
 pub mod assert_helpers;
+pub mod defectdojo_stub;
 pub mod fixtures;
 pub mod function_coverage;
 mod harness_review;

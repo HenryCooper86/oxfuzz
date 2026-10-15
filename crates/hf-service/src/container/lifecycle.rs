@@ -499,15 +499,16 @@ impl ServiceContainer {
     /// Delete every trace of a single project: its persisted records (targets,
     /// runs, harnesses, corpus entries, crashes) and its on-disk workspace
     /// (compiled harnesses, corpora, crash reproducers, coverage builds). Other
-    /// projects are untouched. The DB delete and the disk delete are done
-    /// together so a project never lingers in one place after being cleared from
-    /// the other. A no-op when no store is configured.
+    /// projects and the original source repository are untouched. Deletion is
+    /// refused while a workspace-backed operation is active, before records or
+    /// artifacts are removed.
     ///
     /// # Errors
-    /// Returns `ClassifiedError` if either the DB delete or the workspace
-    /// removal fails.
+    /// Returns `ClassifiedError` if a workspace operation is active, or either
+    /// the DB delete or the workspace removal fails.
     pub async fn delete_project(&self, project: &Path) -> Result<(), ClassifiedError> {
-        let _workspace_operation = self.acquire_workspace_operation().await?;
+        let workspace = workspace_root();
+        let _workspace_cleanup = Self::try_acquire_workspace_cleanup(&workspace)?;
         // The DB stores canonical project roots (discovery/run inserts go through
         // `canonical_project_root`), and the on-disk workspace slug canonicalizes
         // too. Delete both halves under one canonical identity so a raw, symlinked,
@@ -564,6 +565,58 @@ impl ServiceContainer {
     pub fn clear_workspace(&self) -> Result<(), ClassifiedError> {
         let (root, uses_trusted_default) = configured_workspace_root();
         self.clear_workspace_at_with_adoption(&root, uses_trusted_default)
+    }
+}
+
+#[cfg(test)]
+mod project_cleanup_tests {
+    use super::ServiceContainer;
+    use hf_core::engine::EngineKind;
+    use hf_storage::{RunRecord, Store};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn project_deletion_rejects_an_active_workspace_operation_before_mutation() {
+        let _environment = ServiceContainer::workspace_environment_test_gate()
+            .lock()
+            .await;
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let project = std::fs::canonicalize(project).unwrap();
+        let source = project.join("source.c");
+        std::fs::write(&source, "original source").unwrap();
+        let store = Arc::new(
+            Store::connect(root.path().join("cleanup.db"))
+                .await
+                .unwrap(),
+        );
+        let run = RunRecord::new(
+            project.to_string_lossy().as_ref(),
+            EngineKind::LibFuzzer,
+            None,
+            chrono::Utc::now(),
+        );
+        store.insert_run(&run).await.unwrap();
+        let operation_service = ServiceContainer::stubbed();
+        let cleanup_service = ServiceContainer::stubbed().with_store(Arc::clone(&store));
+        let operation = operation_service
+            .acquire_workspace_operation()
+            .await
+            .unwrap();
+
+        let error = cleanup_service.delete_project(&project).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            hf_core::error::ClassifiedError::Validation(_)
+        ));
+        assert!(store.get_run(run.id).await.unwrap().is_some());
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), "original source");
+        drop(operation);
+        cleanup_service.delete_project(&project).await.unwrap();
+        assert!(store.get_run(run.id).await.unwrap().is_none());
+        assert_eq!(std::fs::read_to_string(source).unwrap(), "original source");
     }
 }
 

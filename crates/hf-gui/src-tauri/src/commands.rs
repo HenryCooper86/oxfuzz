@@ -1031,6 +1031,25 @@ pub async fn push_to_defectdojo(
         .map_err(|e| e.to_string())
 }
 
+/// Push a saved report's findings to `DefectDojo` by its stable report id.
+///
+/// The saved owner and target are resolved from the stored draft, so the
+/// push never depends on a presentation-layer copy of the report.
+#[tauri::command]
+pub async fn push_report_to_defectdojo(
+    state: tauri::State<'_, crate::state::AppState>,
+    report_id: String,
+) -> Result<hf_service::PushOutcome, String> {
+    let publication = state
+        .container
+        .resolve_report_publication(&report_id)
+        .map_err(|e| e.to_string())?;
+    with_user_approval(&state.container, ExplicitAction::PublishFindings)
+        .push_report_to_defectdojo(&publication)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Saved editable report drafts.
 #[tauri::command]
 pub fn list_report_drafts(
@@ -1165,12 +1184,20 @@ pub async fn delete_run(
         .map_err(Into::into)
 }
 
-/// Clear every persisted run and the crashes it produced.
+/// Clear persisted runs in the selected project, or all projects when unselected.
 #[tauri::command]
 pub async fn clear_all_runs(
     state: tauri::State<'_, crate::state::AppState>,
+    project: Option<String>,
 ) -> Result<(), NativeRunHistoryError> {
-    state.container.clear_all_runs().await.map_err(Into::into)
+    match project {
+        Some(project) => state
+            .container
+            .clear_project_runs(std::path::Path::new(&project))
+            .await
+            .map_err(Into::into),
+        None => state.container.clear_all_runs().await.map_err(Into::into),
+    }
 }
 
 /// Delete every on-disk fuzz workspace (compiled harnesses, corpora, crash

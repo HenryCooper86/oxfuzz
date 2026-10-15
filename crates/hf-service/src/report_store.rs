@@ -1,6 +1,6 @@
 //! File-backed editable report drafts for the internal workbench.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use hf_core::error::ClassifiedError;
@@ -24,6 +24,56 @@ pub struct ReportDraft {
     pub updated_at: String,
     /// Markdown body.
     pub content: String,
+}
+
+/// A saved report resolved once for publication.
+///
+/// Captures the stored owner and target before authorization. Execution does not
+/// reload the editable draft, so replacing its saved project or target cannot
+/// change an in-flight publication.
+#[derive(Debug, Clone)]
+pub struct ReportPublication {
+    project: PathBuf,
+    target: Option<String>,
+}
+
+impl ReportPublication {
+    /// Wrap a draft loaded from the store.
+    pub(crate) fn from_draft(report: ReportDraft) -> Self {
+        Self {
+            project: PathBuf::from(report.project),
+            target: report.target,
+        }
+    }
+
+    /// The saved owning project root. A transport authorizes this value (or
+    /// its canonical resolution) before publishing.
+    #[must_use]
+    pub fn project(&self) -> &Path {
+        &self.project
+    }
+
+    /// The saved target selector, when the report summarizes one target.
+    #[must_use]
+    pub fn target(&self) -> Option<&str> {
+        self.target.as_deref()
+    }
+
+    /// Bind an authorization resolver's canonical owner into this snapshot.
+    ///
+    /// Consumes and returns the publication with `project` replaced by
+    /// `canonical`, preserving the saved target: the value a transport
+    /// executes is then exactly the canonical owner its project
+    /// policy approved -- no alias spelling, and no re-read of the editable
+    /// draft. `canonical` is a trusted same-process resolver result and is
+    /// deliberately not re-validated here.
+    #[must_use]
+    pub fn with_canonical_project(self, canonical: PathBuf) -> Self {
+        Self {
+            project: canonical,
+            ..self
+        }
+    }
 }
 
 /// Return every saved report draft, newest first.
@@ -128,6 +178,32 @@ pub fn delete_report_draft(id: &str) -> Result<(), ClassifiedError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(storage_err(&e)),
     }
+}
+
+/// Load one saved report draft by its stable id.
+///
+/// A direct `{id}.json` lookup -- no directory listing -- so resolving one
+/// report never depends on (or walks) the other stored drafts.
+///
+/// # Errors
+/// Returns a validation error for an unsafe id or an unknown report id, and
+/// a storage error when the stored draft cannot be read or decoded. Decode
+/// failures report bounded text only: serde's own detail can echo field
+/// literals from the stored file, and those carry the saved owner path.
+pub fn report_draft(id: &str) -> Result<ReportDraft, ClassifiedError> {
+    let path = report_path(id)?;
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ClassifiedError::Validation(format!(
+                "report '{id}' not found"
+            )));
+        }
+        Err(e) => return Err(storage_err(&e)),
+    };
+    serde_json::from_str(&text).map_err(|_| {
+        ClassifiedError::Storage(format!("report drafts: report '{id}' could not be decoded"))
+    })
 }
 
 fn ensure_reports_dir() -> Result<PathBuf, ClassifiedError> {

@@ -9,6 +9,8 @@ mod approval_ipc_tests;
 mod closeout_commands;
 mod commands;
 mod coverage_experiment_commands;
+#[cfg(test)]
+mod history_ipc_tests;
 #[cfg(feature = "ai-target-ranking")]
 mod ranked_discovery_commands;
 mod state;
@@ -58,17 +60,17 @@ use commands::{
     list_skills, open_defectdojo, open_file_dialog, open_folder_dialog, open_path, open_url,
     oracle_scaffold, oracle_violation, patch_defectdojo_config, patch_issue_tracker_config,
     policy_decisions, project_auto_revert_override, project_auto_revert_overrides,
-    promote_automotive_state_artifact, provider_test, push_to_defectdojo, read_config, read_skill,
-    remediation_operation, replay_review, replay_run, report_formats, reveal_path,
-    revert_harness_from_run, run_comparison, run_coverage_series, run_function_coverage,
-    run_fuzzer, run_harness_source, run_history, run_owner, run_syzkaller, save_agent,
-    save_report_draft, save_skill, schedule_concurrency_limits, schedule_concurrency_set,
-    schedule_create, schedule_delete, schedule_history, schedule_history_clear, schedule_list,
-    schedule_recovery_acknowledge, schedule_recovery_list, schedule_runtime, schedule_set_enabled,
-    schedule_targets, seed_survival, semgrep_available, set_automotive_settings,
-    set_project_auto_revert_override, set_providers, setup_providers, setup_readiness,
-    start_remediation_verification, system_snapshot, system_status_cmd, triage, verify_crash,
-    workbench_dashboard, write_config,
+    promote_automotive_state_artifact, provider_test, push_report_to_defectdojo,
+    push_to_defectdojo, read_config, read_skill, remediation_operation, replay_review, replay_run,
+    report_formats, reveal_path, revert_harness_from_run, run_comparison, run_coverage_series,
+    run_function_coverage, run_fuzzer, run_harness_source, run_history, run_owner, run_syzkaller,
+    save_agent, save_report_draft, save_skill, schedule_concurrency_limits,
+    schedule_concurrency_set, schedule_create, schedule_delete, schedule_history,
+    schedule_history_clear, schedule_list, schedule_recovery_acknowledge, schedule_recovery_list,
+    schedule_runtime, schedule_set_enabled, schedule_targets, seed_survival, semgrep_available,
+    set_automotive_settings, set_project_auto_revert_override, set_providers, setup_providers,
+    setup_readiness, start_remediation_verification, system_snapshot, system_status_cmd, triage,
+    verify_crash, workbench_dashboard, write_config,
 };
 use work_order_commands::{
     work_order_attempt, work_order_attempts, work_order_export, work_order_get, work_order_import,
@@ -302,6 +304,7 @@ pub fn run() {
             list_report_drafts,
             save_report_draft,
             delete_report_draft,
+            push_report_to_defectdojo,
             interrupted_runs,
             dismiss_interrupted_run,
             schedule_list,

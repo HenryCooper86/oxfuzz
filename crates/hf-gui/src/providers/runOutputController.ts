@@ -54,6 +54,8 @@ export class RunOutputController {
   private summaryVersions = new Map<string, number>();
   private notified = new Set<string>();
   private lastPersisted: string | null = null;
+  /** True when the persisted projection changed since the last successful write. */
+  private persistDirty = true;
   private invocation = 0;
   private cancelOnAdmission = false;
   private deletionSequence = 0;
@@ -84,14 +86,20 @@ export class RunOutputController {
     this.syncSelection();
   }
   private persist() {
+    if (!this.persistDirty) return;
     const serialized = serializeOutput(this.state);
-    if (serialized === this.lastPersisted) return;
+    if (serialized === this.lastPersisted) {
+      this.persistDirty = false;
+      return;
+    }
     try {
       localStorage.setItem(V2_KEY, serialized);
       this.lastPersisted = serialized;
+      this.persistDirty = false;
       if (!this.state.keepLegacySource) localStorage.removeItem(V1_KEY);
     } catch {
-      // Summary persistence is best effort; a failed v2 write leaves v1 recoverable.
+      // Summary persistence is best effort; a failed v2 write leaves v1
+      // recoverable and the retained dirty flag retries on the next change.
     }
   }
   configure(toast: ToastContextValue["toast"], setEngine: (engine: string | null) => void) {
@@ -163,6 +171,7 @@ export class RunOutputController {
       ++this.discovery;
       this.stopPoll();
     }
+    this.persistDirty = true;
     this.state = { ...this.state, runs, latest, legacy };
     this.emit();
   }
@@ -195,14 +204,29 @@ export class RunOutputController {
       );
       this.statusVersions.delete(evicted);
       this.summaryVersions.delete(evicted);
+      this.persistDirty = true;
       this.state = { ...this.state, runs, latest };
     }
+    this.persistDirty = true;
     this.state = { ...this.state, runs: { ...this.state.runs, [id]: emptyRun() } };
     return true;
   }
   private patch(id: string, update: (run: RunData) => RunData) {
     if (!this.mounted || !this.state.runs[id]) return;
-    this.state = { ...this.state, runs: { ...this.state.runs, [id]: update(this.state.runs[id]) } };
+    const before = this.state.runs[id];
+    const after = update(before);
+    // serializeOutput persists only these fields; log/health patches skip the write.
+    if (
+      before.owner !== after.owner ||
+      before.stats !== after.stats ||
+      before.summary !== after.summary ||
+      before.lastTarget !== after.lastTarget ||
+      before.lastEngine !== after.lastEngine ||
+      before.status !== after.status ||
+      before.observedAt !== after.observedAt
+    )
+      this.persistDirty = true;
+    this.state = { ...this.state, runs: { ...this.state.runs, [id]: after } };
     this.emit();
   }
   private acceptOwner(owner: RunOwner): boolean {
@@ -245,6 +269,7 @@ export class RunOutputController {
         ? { ...this.state.latest, [owner.project_root]: owner.run_id }
         : this.state.latest,
     };
+    this.persistDirty = true;
     this.emit();
     return true;
   }

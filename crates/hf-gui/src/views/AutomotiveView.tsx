@@ -99,7 +99,7 @@ export function AutomotiveView() {
   const [reporting, setReporting] = useState<"deterministic" | "ai" | null>(null);
   const [report, setReport] = useState<AutomotiveCampaignReport | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
-  const [reportFormats, setReportFormats] = useState<string[]>(["md", "html"]);
+  const [reportFormats, setReportFormats] = useState<string[]>(desktop ? ["md", "html"] : ["md"]);
   const [error, setError] = useState<string | null>(null);
   const [unavailable, setUnavailable] = useState(false);
   const [enabling, setEnabling] = useState(false);
@@ -157,11 +157,15 @@ export function AutomotiveView() {
   }, []);
 
   useEffect(() => {
+    // Browser sessions can only download the composed Markdown (the web layer
+    // has no report download endpoint), so MD is the only format offered
+    // there. Desktop asks the service which formats its exporter supports.
+    if (!desktop) return;
     getTransport()
       .invoke<string[]>("report_formats")
       .then(setReportFormats)
       .catch(() => setReportFormats(["md", "html"]));
-  }, []);
+  }, [desktop]);
 
   useEffect(() => {
     queueMicrotask(() => void refreshOperations());

@@ -61,7 +61,7 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
   const [message, setMessage] = useState<string | null>(null);
   const [reportMd, setReportMd] = useState<string | null>(null);
   const [verdicts, setVerdicts] = useState<Record<string, CrashVerdict | "loading" | "none">>({});
-  const [formats, setFormats] = useState<string[]>(["md", "html"]);
+  const [formats, setFormats] = useState<string[]>(isTauriEnvironment() ? ["md", "html"] : ["md"]);
   const queueRequest = useRef(0);
   const detailRequest = useRef(0);
   const actionRequest = useRef(0);
@@ -105,6 +105,9 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
   }, []);
 
   useEffect(() => {
+    // Browser sessions can only download the composed Markdown (the web layer
+    // has no report download endpoint), so MD is the only format offered
+    // there. Desktop asks the service which formats its exporter supports.
     if (!isTauriEnvironment()) return;
     getTransport().invoke<string[]>("report_formats").then(setFormats).catch(() => setFormats(["md", "html"]));
   }, []);

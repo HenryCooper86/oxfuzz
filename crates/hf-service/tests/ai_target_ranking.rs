@@ -151,7 +151,7 @@ async fn wait_for_revision(service: &ServiceContainer, id: Uuid, revision: u8) {
             {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await
@@ -200,6 +200,98 @@ async fn scan_is_visible_while_model_is_still_running() {
             .state,
         RankedDiscoveryState::Completed
     );
+}
+
+#[tokio::test]
+async fn active_ranked_discovery_and_retry_exclude_project_cleanup() {
+    let project = sample_project();
+    let store = Arc::new(
+        hf_storage::Store::connect(project.path().join("rank.db"))
+            .await
+            .unwrap(),
+    );
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let service = ServiceContainer::stubbed()
+        .with_store(Arc::clone(&store))
+        .with_provider_pool(Arc::new(PausedPool {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        }));
+    let id = service
+        .start_ranked_discovery(project.path(), TargetLanguage::C)
+        .await
+        .unwrap();
+
+    for retry in [false, true] {
+        let active_id = if retry {
+            service.retry_ranked_discovery(id).await.unwrap()
+        } else {
+            id
+        };
+        entered.notified().await;
+        assert!(service.delete_project(project.path()).await.is_err());
+        assert!(service.clear_knowledge().await.is_err());
+        assert!(service
+            .ranked_discovery_result(active_id)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(!store.list_all_targets().await.unwrap().is_empty());
+        assert!(project.path().join("parser.c").is_file());
+        release.notify_one();
+        wait_for_revision(&service, active_id, 2).await;
+    }
+}
+
+async fn check_supplied_inventory_cleanup(legacy: bool) {
+    let project = sample_project();
+    let inventory = hf_discovery::discover(project.path(), TargetLanguage::C)
+        .await
+        .unwrap();
+    let store = Arc::new(
+        hf_storage::Store::connect(project.path().join("rank.db"))
+            .await
+            .unwrap(),
+    );
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let service = ServiceContainer::stubbed()
+        .with_store(store)
+        .with_provider_pool(Arc::new(PausedPool {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        }));
+    let worker = service.clone();
+    let ranking = tokio::spawn(async move {
+        if legacy {
+            worker.rank(inventory).await.unwrap()
+        } else {
+            worker
+                .rank_discovered_inventory(inventory, TargetLanguage::C, AiPolicy::Auto)
+                .await
+                .unwrap()
+                .inventory
+        }
+    });
+    entered.notified().await;
+
+    assert!(service.delete_project(project.path()).await.is_err());
+    assert!(service.clear_knowledge().await.is_err());
+
+    release.notify_one();
+    assert!(!ranking.await.unwrap().candidates.is_empty());
+    assert!(project.path().join("parser.c").is_file());
+}
+
+#[tokio::test]
+async fn supplied_inventory_ranking_excludes_project_cleanup() {
+    check_supplied_inventory_cleanup(false).await;
+}
+
+#[tokio::test]
+async fn legacy_inventory_ranking_excludes_project_cleanup() {
+    check_supplied_inventory_cleanup(true).await;
 }
 
 #[tokio::test]
