@@ -9,6 +9,8 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ## Unreleased
 
+## 0.6.4 - 2026-10-15
+
 ### Fixed
 
 - Browser event streams close oversized incomplete responses before reconnecting,
