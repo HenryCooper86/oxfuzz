@@ -151,7 +151,7 @@ function previewOverlay(root: HTMLElement): HTMLElement | null {
 }
 
 async function untilOverlay(root: HTMLElement): Promise<HTMLElement> {
-  for (let attempt = 0; attempt < 25 && previewOverlay(root) === null; attempt += 1) await flush();
+  await act(async () => { await vi.dynamicImportSettled(); });
   const overlay = previewOverlay(root);
   if (!overlay) throw new Error(`report preview never appeared: ${root.textContent}`);
   return overlay;

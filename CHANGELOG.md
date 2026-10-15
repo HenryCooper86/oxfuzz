@@ -39,6 +39,8 @@ Versions match the release commits that bump `Cargo.toml`.
   Authorization and execution use the same owner/target snapshot; editing the
   draft cannot switch projects after approval. Publication controls also exclude
   duplicate requests while an import is pending.
+- Release verification waits for lazy report-preview imports before checking
+  export actions, avoiding timing-dependent frontend CI failures.
 
 ## 0.6.3 - 2026-10-13
 
