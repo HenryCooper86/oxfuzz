@@ -2652,6 +2652,7 @@ mod smoke_config_tests {
             resume: false,
             cmplog: false,
             sanitizer: None,
+            seed: None,
         };
         let config =
             smoke_qualification_config(&harness(), resolved, std::path::Path::new("/work"));
@@ -3342,6 +3343,8 @@ mod exact_qualification_tests {
                 1,
                 None,
                 None,
+                None,
+                // The lease probe carries no explicit seed.
                 None,
                 None,
                 2,

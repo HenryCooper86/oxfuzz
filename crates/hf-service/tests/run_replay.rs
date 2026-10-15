@@ -341,7 +341,6 @@ async fn run_records_a_seed_and_replay_reexecutes_with_it() {
 
     // A campaign run records a deterministic seed, derived from its run id by
     // default, and the engine adapter receives exactly that seed.
-    let workspace = hf_service::workspace_dir(&project, "parse_value");
     std::fs::write(
         workspace.join("tokens.c"),
         "const char *magic = \"REPLAY_DICTIONARY\";",
@@ -353,6 +352,9 @@ async fn run_records_a_seed_and_replay_reexecutes_with_it() {
             "parse_value",
             EngineKind::LibFuzzer,
             60,
+            // This run derives its seed from the run id; the explicit-seed
+            // path is covered by tests/seed_selection.rs.
+            None,
             None,
             None,
             None,

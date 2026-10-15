@@ -88,9 +88,14 @@ pub fn build_reproduction_args(binary: &str, input: &str) -> Vec<String> {
 /// hand-passed `-c` in `cfg.extra_args` is rejected in both cmplog states,
 /// since it would be a second, unrecorded source of `CmpLog` truth.
 ///
+/// The RNG seed (`afl-fuzz -s`) is likewise owned by the typed
+/// `FuzzRunConfig.seed` -- the value the run records and a replay
+/// re-executes -- so a hand-passed `-s` in `cfg.extra_args` is rejected in
+/// both seed states rather than allowed to override it.
+///
 /// # Errors
 /// Returns [`ClassifiedError::Validation`] when `cfg.extra_args` carries a
-/// hand-passed `-i -` / `-i-` or `-c`.
+/// hand-passed `-i -` / `-i-`, `-c`, or `-s`.
 pub fn build_run_args(
     cfg: &FuzzRunConfig,
     binary: &str,
@@ -99,6 +104,7 @@ pub fn build_run_args(
 ) -> Result<Vec<String>, ClassifiedError> {
     reject_hand_passed_resume(&cfg.extra_args)?;
     reject_hand_passed_cmplog(&cfg.extra_args)?;
+    reject_hand_passed_seed(&cfg.extra_args)?;
     if cfg.max_cpus > 1 {
         return Ok(build_parallel_run_args(cfg, binary, corpus, out));
     }
@@ -185,6 +191,27 @@ fn reject_hand_passed_resume(extra_args: &[String]) -> Result<(), ClassifiedErro
             ));
         }
         previous_is_input_flag = arg == "-i";
+    }
+    Ok(())
+}
+
+/// Reject a hand-passed AFL++ RNG seed (`-s <seed>`, bare or with an attached
+/// value) in the escape hatch. `FuzzRunConfig.seed` is the single source of
+/// seed truth -- it is what the run records and what a replay re-executes --
+/// so a hand-passed `-s` would be a second, unrecorded source. Rejected in
+/// both seed states, exactly like the resume and `CmpLog` rules; in the
+/// multi-cpu coordinator it would additionally re-seed the deliberately
+/// seedless secondaries.
+fn reject_hand_passed_seed(extra_args: &[String]) -> Result<(), ClassifiedError> {
+    for arg in extra_args {
+        if arg == "-s" || (arg.starts_with("-s") && arg.len() > 2) {
+            return Err(ClassifiedError::Validation(
+                "extra_args must not carry the AFL++ RNG seed flag (`-s`): the seed is owned by \
+                 the typed run config (`FuzzRunConfig.seed`, CLI `--seed`), which the run \
+                 records and a replay re-executes"
+                    .to_owned(),
+            ));
+        }
     }
     Ok(())
 }

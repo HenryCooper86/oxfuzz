@@ -868,7 +868,7 @@ impl ServiceContainer {
             sanitizer: qualified.sanitizer,
             env: Vec::new(),
             extra_args,
-            seed: None,
+            seed: resolved.seed,
             replay_of: None,
             input_manifest_sha256: None,
             input_timeout: Some(std::time::Duration::from_millis(resolved.timeout_ms)),
@@ -886,12 +886,13 @@ impl ServiceContainer {
             None,
             Utc::now(),
         );
-        match &replay {
-            Some(provenance) => {
-                config.seed = Some(provenance.seed);
-                config.replay_of = Some(provenance.original_run_id);
-            }
-            None => config.seed = Some(hf_engine::seed::derive_run_seed(record.id)),
+        if let Some(provenance) = &replay {
+            config.seed = Some(provenance.seed);
+            config.replay_of = Some(provenance.original_run_id);
+        } else {
+            config
+                .seed
+                .get_or_insert_with(|| hf_engine::seed::derive_run_seed(record.id));
         }
         let (artifacts, sandbox_image) = if let Some(provenance) = replay
             .as_ref()
@@ -1567,6 +1568,7 @@ impl ServiceContainer {
         resume: Option<bool>,
         sanitizer: Option<hf_core::target::Sanitizer>,
         cmplog: Option<bool>,
+        seed: Option<u64>,
         max_iterations: usize,
     ) -> Result<CampaignOutcome, ClassifiedError> {
         let sink = |_: FuzzProgress| {};
@@ -1580,6 +1582,7 @@ impl ServiceContainer {
             resume,
             sanitizer,
             cmplog,
+            seed,
             CampaignRunLimits {
                 iterations: max_iterations.max(1),
                 time: None,
@@ -1612,6 +1615,7 @@ impl ServiceContainer {
         resume: Option<bool>,
         sanitizer: Option<hf_core::target::Sanitizer>,
         cmplog: Option<bool>,
+        seed: Option<u64>,
         max_iterations: usize,
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
     ) -> Result<CampaignOutcome, ClassifiedError> {
@@ -1625,6 +1629,7 @@ impl ServiceContainer {
             resume,
             sanitizer,
             cmplog,
+            seed,
             CampaignRunLimits {
                 iterations: max_iterations.max(1),
                 time: None,
@@ -1645,6 +1650,7 @@ impl ServiceContainer {
         resume: Option<bool>,
         sanitizer: Option<hf_core::target::Sanitizer>,
         cmplog: Option<bool>,
+        seed: Option<u64>,
         limits: CampaignRunLimits,
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
     ) -> Result<CampaignOutcome, ClassifiedError> {
@@ -1668,7 +1674,9 @@ impl ServiceContainer {
         // what a long AFL++ campaign wants from session resume. The sanitizer
         // constraint resolves once too: every iteration runs the same promoted
         // harness revision. CmpLog likewise resolves once: every iteration
-        // drives the same recorded companion.
+        // drives the same recorded companion. An explicit seed likewise
+        // survives every iteration; omitted, each iteration's run derives
+        // its own run-id seed.
         let resolved = resolve_fuzzing_run(
             engine,
             duration_secs,
@@ -1677,6 +1685,7 @@ impl ServiceContainer {
             resume,
             sanitizer,
             cmplog,
+            seed,
         )?;
         let engine = resolved.engine;
         // 1. Choose a target: the caller's, else the top-ranked candidate.
@@ -1835,6 +1844,7 @@ impl ServiceContainer {
         target: String,
         engine: EngineKind,
         duration_secs: u64,
+        seed: Option<u64>,
         on_progress: Arc<dyn Fn(Uuid, FuzzProgress) + Send + Sync + 'static>,
         on_status: Arc<dyn Fn(Uuid, RunLifecycleStatus) + Send + Sync + 'static>,
     ) -> Result<Uuid, ClassifiedError> {
@@ -1842,8 +1852,10 @@ impl ServiceContainer {
         // sanitizer, or CmpLog override; the configured
         // `fuzzing.default_timeout_ms` / `fuzzing.default_resume` apply, CmpLog
         // stays off (per-run opt-in only), and the run records the harness's
-        // own sanitizer.
-        let resolved = resolve_fuzzing_run(engine, duration_secs, None, None, None, None, None)?;
+        // own sanitizer. A seed arrives as decimal text from the wire callers
+        // so browser clients keep all 64 bits.
+        let resolved =
+            resolve_fuzzing_run(engine, duration_secs, None, None, None, None, None, seed)?;
         self.start_run_launch(
             RunLaunch {
                 project,
@@ -2086,6 +2098,7 @@ impl ServiceContainer {
         resume: Option<bool>,
         sanitizer: Option<hf_core::target::Sanitizer>,
         cmplog: Option<bool>,
+        seed: Option<u64>,
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
     ) -> Result<RunSummary, ClassifiedError> {
         let resolved = resolve_fuzzing_run(
@@ -2096,6 +2109,7 @@ impl ServiceContainer {
             resume,
             sanitizer,
             cmplog,
+            seed,
         )?;
         self.run_fuzzer_with_started(project, target, resolved, on_progress, &|_| {}, None)
             .await
@@ -2117,6 +2131,7 @@ impl ServiceContainer {
         resume: Option<bool>,
         sanitizer: Option<hf_core::target::Sanitizer>,
         cmplog: Option<bool>,
+        seed: Option<u64>,
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
         on_started: &(dyn Fn(Uuid) + Send + Sync),
     ) -> Result<RunSummary, ClassifiedError> {
@@ -2128,6 +2143,7 @@ impl ServiceContainer {
             resume,
             sanitizer,
             cmplog,
+            seed,
         )?;
         self.run_fuzzer_with_started(project, target, resolved, on_progress, on_started, None)
             .await
@@ -2296,6 +2312,9 @@ impl ServiceContainer {
             None,
             // CmpLog replays exactly like the sanitizer: the recorded config's
             // `cmplog` governs, and the retained inputs carry the companion.
+            None,
+            // Replay never carries an explicit seed request: the original
+            // run's recorded seed governs (see `ReplayProvenance`).
             None,
         )?;
         if config.max_mem_mb > resolved.max_mem_mb || config.max_cpus > resolved.max_cpus {
@@ -2480,6 +2499,8 @@ impl ServiceContainer {
             None,
             None,
             // Kernel campaigns have no CmpLog companion concept.
+            None,
+            // The operator seed knob is a userspace-engine concern.
             None,
         )?;
         let duration_secs = resolved.duration_secs;
@@ -3207,6 +3228,7 @@ mod semgrep_ranking_consumer_tests {
                 None,
                 None,
                 None,
+                None,
                 1,
             )
             .await
@@ -3219,6 +3241,7 @@ mod semgrep_ranking_consumer_tests {
                 EngineKind::LibFuzzer,
                 TargetLanguage::C,
                 1,
+                None,
                 None,
                 None,
                 None,
@@ -3374,8 +3397,17 @@ mod allocation_preparation_tests {
             service.prepare_userspace_run(
                 root.path(),
                 "parse",
-                resolve_fuzzing_run(EngineKind::LibFuzzer, 10, None, None, None, None, None)
-                    .unwrap(),
+                resolve_fuzzing_run(
+                    EngineKind::LibFuzzer,
+                    10,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap(),
                 &harness,
                 root.path(),
                 root.path().join("corpus"),
@@ -3436,8 +3468,17 @@ mod allocation_preparation_tests {
                 .prepare_userspace_run(
                     root.path(),
                     "parse",
-                    resolve_fuzzing_run(EngineKind::LibFuzzer, 11, None, None, None, None, None)
-                        .unwrap(),
+                    resolve_fuzzing_run(
+                        EngineKind::LibFuzzer,
+                        11,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .unwrap(),
                     &harness,
                     root.path(),
                     root.path().join("corpus"),
@@ -3458,8 +3499,17 @@ mod allocation_preparation_tests {
                 .prepare_userspace_run(
                     root.path(),
                     "parse",
-                    resolve_fuzzing_run(EngineKind::LibFuzzer, 10, None, None, None, None, None)
-                        .unwrap(),
+                    resolve_fuzzing_run(
+                        EngineKind::LibFuzzer,
+                        10,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .unwrap(),
                     &harness,
                     root.path(),
                     root.path().join("corpus"),
@@ -3471,8 +3521,17 @@ mod allocation_preparation_tests {
                 .prepare_userspace_run(
                     root.path(),
                     "parse",
-                    resolve_fuzzing_run(EngineKind::LibFuzzer, 10, None, None, None, None, None)
-                        .unwrap(),
+                    resolve_fuzzing_run(
+                        EngineKind::LibFuzzer,
+                        10,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .unwrap(),
                     &harness,
                     root.path(),
                     root.path().join("corpus"),

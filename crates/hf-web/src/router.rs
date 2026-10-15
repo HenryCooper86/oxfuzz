@@ -2254,6 +2254,10 @@ struct RunStartRequest {
     engine: String,
     #[serde(alias = "duration")]
     duration_secs: u64,
+    /// Decimal text, not a JSON number: browser clients lose bits above
+    /// 2^53 through JavaScript's float numbers, so the seed travels as a
+    /// string exactly like `ReplayReview.seed`.
+    seed: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2268,6 +2272,7 @@ enum CampaignLaunch {
         target: String,
         engine: EngineKind,
         duration_secs: u64,
+        seed: Option<u64>,
     },
     Replay(hf_service::ReplayReview),
 }
@@ -2353,9 +2358,18 @@ async fn run_start(
             target: req.target,
             engine,
             duration_secs: req.duration_secs,
+            seed: parse_seed(req.seed.as_deref()).map_err(map_err(StatusCode::BAD_REQUEST))?,
         },
     )
     .await
+}
+
+/// Parse the decimal-text seed, rejecting non-numeric and out-of-range text
+/// so every wire seed is an exact `u64`.
+fn parse_seed(seed: Option<&str>) -> Result<Option<u64>, String> {
+    seed.map(str::parse)
+        .transpose()
+        .map_err(|error| format!("invalid seed: {error}"))
 }
 
 async fn launch_campaign(
@@ -2395,6 +2409,7 @@ async fn launch_campaign(
             target,
             engine,
             duration_secs,
+            seed,
         } => {
             state
                 .container
@@ -2403,6 +2418,7 @@ async fn launch_campaign(
                     target,
                     engine,
                     duration_secs,
+                    seed,
                     on_progress,
                     on_status,
                 )

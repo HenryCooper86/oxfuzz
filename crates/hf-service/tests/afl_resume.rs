@@ -280,6 +280,7 @@ async fn run_end_captures_the_runs_covered_edge_set() {
             None,
             None,
             None,
+            None,
             &sink,
         )
         .await
@@ -314,6 +315,7 @@ async fn resume_continues_the_prior_session_tree() {
             Some(true),
             None,
             None,
+            None,
             &sink,
         )
         .await
@@ -327,6 +329,7 @@ async fn resume_continues_the_prior_session_tree() {
             None,
             None,
             Some(true),
+            None,
             None,
             None,
             &sink,
@@ -392,6 +395,7 @@ async fn without_resume_every_run_cold_starts() {
             None,
             None,
             None,
+            None,
             &sink,
         )
         .await
@@ -402,6 +406,7 @@ async fn without_resume_every_run_cold_starts() {
             TARGET,
             EngineKind::AflPlusPlus,
             1,
+            None,
             None,
             None,
             None,
@@ -445,6 +450,7 @@ async fn resume_on_a_non_afl_engine_fails_loud() {
             Some(true),
             None,
             None,
+            None,
             &|_: hf_service::FuzzProgress| {},
         )
         .await
@@ -468,6 +474,7 @@ async fn campaign_iterations_chain_through_resume() {
             1,
             None,
             Some(true),
+            None,
             None,
             None,
             2,
@@ -502,6 +509,7 @@ async fn a_resumed_tree_still_ingests_its_prior_crashes() {
             None,
             None,
             None,
+            None,
             &sink,
         )
         .await
@@ -526,6 +534,7 @@ async fn a_resumed_tree_still_ingests_its_prior_crashes() {
             None,
             None,
             Some(true),
+            None,
             None,
             None,
             &sink,

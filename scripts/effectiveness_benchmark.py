@@ -141,6 +141,10 @@ def validate_cohort(value):
         if nonempty(trial["selected_function"], "selected_function") not in functions_by_project[trial["project_id"]]:
             raise ValueError("unknown selected_function")
         integer(trial["seed"], "seed", 0)
+        if trial["seed"] > 2 ** 64 - 1:
+            raise ValueError("seed must fit an unsigned 64-bit integer")
+        if engine == "libfuzzer" and trial["seed"] & (2 ** 32 - 1) == 0:
+            raise ValueError("seed must have nonzero low 32 bits for libFuzzer; zero randomizes")
     unique_ids(trials, "trial")
     return value
 

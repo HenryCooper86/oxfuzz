@@ -31,7 +31,12 @@ Each condition fixes the engine, selection
 strategy, provider family and model ID, sanitizer, top-k cutoff, campaign
 duration, memory and CPU ceilings, model-call and dollar ceilings, and full
 sandbox image SHA-256. Each trial names one project, condition, selected
-function, deterministic seed, and unique trial ID.
+function, unsigned 64-bit campaign seed, and unique trial ID. libFuzzer seeds
+must have nonzero low 32 bits; the engine truncates to that width before
+checking its zero/randomize sentinel. The runner avoids that sentinel when
+deriving trial seeds and forwards the frozen `u64` with `--seed`, without
+converting it through floating point. Seeds differing only in higher bits
+select the same libFuzzer RNG state.
 
 `source_sha256` must be the service's `oxfuzz-run-source-v1` digest of the
 staged build inputs. A repository archive hash is useful for source review but
@@ -193,7 +198,7 @@ one trial. The trial command is one pipeline invocation:
 ```bash
 oxfuzz fuzz <target dir> --target <function> --engine <condition engine> \
   --lang <language> --duration-secs <condition duration> --iterations 1 \
-  --sanitizer <condition sanitizer> --ai require --json
+  --sanitizer <condition sanitizer> --seed <trial seed> --ai require --json
 ```
 
 (`--ai off --no-llm-review` instead for the `none` provider leg.) One campaign
@@ -202,7 +207,7 @@ cohort, not from `--iterations`. A trial whose CLI exits non-zero, times out
 (frozen duration plus a 900 s grace, `--trial-timeout-grace-secs`), or yields
 no campaign run is recorded `failed` with the reason; failures stay in every
 artifact. Per trial the runner checks conformance of each recorded campaign
-run against the cohort (engine, duration, memory, CPUs, sanitizer, staged
+run against the cohort (engine, duration, memory, CPUs, sanitizer, seed, staged
 source digest, sandbox image digest) and names every mismatch in
 `results.json`.
 
@@ -210,7 +215,7 @@ After the campaign, the runner collects `oxfuzz coverage` output, reads the
 trial database read-only for runs, deduplicated crashes, and model cost, and
 -- unless `--no-evidence-export` -- starts a short-lived
 `oxfuzz serve` on the loopback interface with a fresh token and the trial's
-own state to export the service's schema-2 campaign evidence manifest
+own state to export the service's schema-3 campaign evidence manifest
 (`POST /campaign/evidence`, model cost from the trial's own diagnostics
 ledger) and the exact function-coverage export
 (`GET /runs/{id}/function-coverage`). Each exported manifest is pre-checked
@@ -249,20 +254,19 @@ targets or finding publication are part of this baseline.
 
 ## 5. Known gaps
 
-- **Trial seeds cannot be pinned through the CLI.** Every run derives its seed
-  from its random run id (`hf_engine::seed::derive_run_seed`), so a frozen
-  trial seed never equals the recorded `run_config.seed`, and the report
-  reader's seed equality check rejects the manifest. The runner detects this
-  at binding time, keeps the trial's metrics complete in `results.json`, and
-  withholds the observation reference. Reproducibility meanwhile comes from
-  the retained run: `oxfuzz run . --replay <run-id>` re-executes the recorded
-  seed exactly. Restoring the strict binding needs a seed-pinning CLI flag
-  (deliberate future work, not a workaround).
+- **Fixed seeds do not make engines deterministic.** New campaigns accept
+  the frozen trial seed through `--seed`; the retained configuration and
+  exported manifest must match it exactly. Replay keeps the original seed.
+  honggfuzz records this value but has no fixed-RNG control, and scheduling
+  and concurrent workers can change outcomes under any engine. Smoke
+  qualification retains its own run-derived seed.
 - **The evidence export requires the default feature set**
   (`proof-carrying`) on the `oxfuzz serve` binary and a loopback port for the
   short-lived server; `--no-evidence-export` skips it and says so per trial.
-- **Time-to-first-crash is an upper bound** (crash artifact file timestamp
-  minus persisted run start); engines do not persist discovery timestamps.
+- **Time-to-first-crash in `results.json` is an upper bound** (crash artifact
+  file timestamp minus persisted run start); engines do not persist exact
+  discovery timestamps. The bound report marks exact discovery time unavailable
+  rather than treating this filesystem estimate as retained discovery evidence.
 - **honggfuzz reports no edge count**; edge coverage stays unavailable for
   honggfuzz conditions.
 - **Model budgets are post-hoc** (flagged by the runner, enforced by the
@@ -291,14 +295,21 @@ integer types as well as their frozen values; equal decimal or boolean values
 are not accepted as the same settings.
 
 Current summaries cover terminal trial outcomes, peak edges, attributable
-model-plus-compute cost, and selected-function entry when measured. The report
-retains each trial's project ID and provides project-by-condition and overall
-condition summaries. Every numeric summary includes the sorted measured
-samples, an unavailable count, and a median; a project with no campaign
-measurement therefore remains visible rather than contributing a false zero.
-Discovery top-k usefulness, qualification rate, time to useful campaign, branch coverage
-over time, and reproducible versus harness-caused crashes remain unavailable
-until their retained inputs and classification are added. The report reader
-checks the whole-file hash supplied by the observation index; review the
-service-produced manifest and its own digest at export time before archiving
-that file.
+model-plus-compute cost, selected-function entry when measured, and distinct
+normalized crash signatures with retained target/harness/runtime/unknown
+attribution. Repeated artifacts with the same signature count once. Mixed
+attribution cannot establish a target fault. Signature counts are not confirmed
+independent bugs, and target attribution or minimization does not prove replay.
+Exact time-to-first-crash and independently reproduced target-defect counts
+remain unavailable because campaign manifests retain neither measurement.
+
+The report retains each trial's project ID and provides project-by-condition
+and overall condition summaries. Every numeric summary includes the sorted
+measured samples, an unavailable count, and a median; a project with no
+campaign measurement therefore remains visible rather than contributing a
+false zero. An actual empty finding list measures zero crash signatures.
+Discovery top-k usefulness, qualification rate, time to useful campaign, and
+branch coverage over time remain unavailable until their retained inputs are
+added. The report reader checks the whole-file hash supplied by the observation
+index; review the service-produced manifest and its own digest at export time
+before archiving that file.

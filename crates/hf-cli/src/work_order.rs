@@ -589,6 +589,7 @@ mod tests {
                         resume,
                         sanitizer,
                         cmplog,
+                        seed: _,
                         replay,
                     }),
                 ) => {

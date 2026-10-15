@@ -168,6 +168,7 @@ async fn run_campaign_runs_full_pipeline_and_picks_a_target() {
             None,
             None,
             None, // no CmpLog request
+            None, // no explicit seed: each run derives its own
             2,    // max iterations
         )
         .await
@@ -346,6 +347,7 @@ async fn run_campaign_observed_forwards_markers_and_stats_but_not_engine_log_lin
             EngineKind::LibFuzzer,
             TargetLanguage::C,
             1,
+            None,
             None,
             None,
             None,

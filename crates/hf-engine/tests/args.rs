@@ -653,6 +653,105 @@ fn explicit_input_timeout_wins_over_extra_args() {
 }
 
 #[test]
+fn libfuzzer_seed_follows_extra_args_so_the_recorded_seed_wins() {
+    // `FuzzRunConfig.seed` is the recorded reproducibility contract; a
+    // hand-passed `-seed=` in the escape hatch must not silently override it.
+    // libFuzzer applies the last occurrence of a repeated flag, so the
+    // recorded seed is emitted after `extra_args`.
+    let wide = 9_223_372_036_854_775_809_u64; // 2^63+1: every bit must survive
+    let mut c = cfg(EngineKind::LibFuzzer, 60);
+    c.seed = Some(wide);
+    c.extra_args.push("-seed=9".to_owned());
+    let args =
+        hf_engine::libfuzzer::build_run_args(&c, "/work/fuzz_bin", "/work/corpus", "/work/out")
+            .unwrap();
+    let recorded = args
+        .iter()
+        .rposition(|a| a == &format!("-seed={wide}"))
+        .unwrap();
+    let hatch = args.iter().position(|a| a == "-seed=9").unwrap();
+    assert!(
+        hatch < recorded,
+        "the recorded seed must follow extra_args so it wins: {args:?}"
+    );
+}
+
+#[test]
+fn afl_rejects_a_hand_passed_seed_flag_in_extra_args() {
+    // `-s` is owned by the typed `FuzzRunConfig.seed` (what the run records
+    // and what replay re-executes). A hand-passed one is rejected in both
+    // seed states and in the multi-cpu coordinator shape, where it would
+    // otherwise re-seed the deliberately seedless secondaries.
+    for extra_args in [
+        vec!["-s".to_owned(), "9".to_owned()],
+        vec!["-s9".to_owned()],
+        vec![
+            "-x".to_owned(),
+            "/work/d.dict".to_owned(),
+            "-s".to_owned(),
+            "9".to_owned(),
+        ],
+    ] {
+        for seed in [None, Some(9_u64)] {
+            let mut c = cfg(EngineKind::AflPlusPlus, 60);
+            c.seed = seed;
+            c.extra_args = extra_args.clone();
+            let error =
+                hf_engine::afl::build_run_args(&c, "/work/fuzz_bin", "/work/corpus", "/work/out")
+                    .expect_err("a hand-passed AFL++ -s must be rejected");
+            assert!(
+                error.to_string().contains("seed"),
+                "the error must name the owned seed path: {error}"
+            );
+        }
+    }
+
+    let mut parallel = cfg(EngineKind::AflPlusPlus, 60);
+    parallel.max_cpus = 3;
+    parallel.seed = Some(42);
+    parallel.extra_args = vec!["-s".to_owned(), "9".to_owned()];
+    assert!(
+        hf_engine::afl::build_run_args(&parallel, "/work/fuzz_bin", "/work/corpus", "/work/out")
+            .is_err(),
+        "the coordinator shape rejects a hand-passed -s too"
+    );
+}
+
+#[test]
+fn engine_seed_knobs_map_the_recorded_seed_honestly() {
+    // AFL++'s fixed-seed knob is `-s <seed>` on the single-instance argv (the
+    // multi-cpu coordinator test covers its primary-only placement).
+    let wide = 9_223_372_036_854_775_809_u64; // 2^63+1: every bit must survive
+    let mut afl = cfg(EngineKind::AflPlusPlus, 60);
+    afl.seed = Some(wide);
+    let args = hf_engine::afl::build_run_args(&afl, "/work/fuzz_bin", "/work/corpus", "/work/out")
+        .unwrap();
+    let flag = args.iter().position(|arg| arg == "-s").expect("-s flag");
+    assert_eq!(
+        args.get(flag + 1),
+        Some(&wide.to_string()),
+        "afl-fuzz must receive the recorded seed verbatim: {args:?}"
+    );
+
+    // honggfuzz has no user-specified RNG seed (its RNG is seeded from
+    // arc4random//dev/urandom). The adapter records the seed in the run
+    // config but MUST NOT invent a flag the engine does not have.
+    let mut honggfuzz = cfg(EngineKind::Honggfuzz, 60);
+    honggfuzz.seed = Some(wide);
+    let args = hf_engine::honggfuzz::build_run_args(
+        &honggfuzz,
+        "/work/fuzz_bin",
+        "/work/corpus",
+        "/work/out",
+    )
+    .unwrap();
+    assert!(
+        !args.iter().any(|arg| arg.contains("seed")),
+        "no invented seed flag may reach honggfuzz: {args:?}"
+    );
+}
+
+#[test]
 fn syzkaller_ignores_input_timeout() {
     // syz-manager has no per-input timeout knob in its manager config; the
     // adapter must not fabricate one.

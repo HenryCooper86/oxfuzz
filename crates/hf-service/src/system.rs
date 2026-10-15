@@ -256,6 +256,8 @@ pub async fn fuzzing_preflight(
         // Preflight answers "may this engine run"; CmpLog is a per-run build
         // detail, not a policy gate.
         None,
+        // Preflight carries no seed: a seed pins an RNG, not a permission.
+        None,
     )
     .map(|_| ());
     let provider_configured = require_provider.then(|| {

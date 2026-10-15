@@ -14,7 +14,7 @@ Pipeline (every step except `run` is offline):
           iteration of the frozen duration), one isolated HF_CONFIG_DIR /
           HF_DB_PATH / HF_WORKSPACE_DIR per trial so runs, crashes, and LLM
           cost attribute to exactly one trial. Collect metrics from the
-          trial database and `oxfuzz coverage`, export the schema-2 campaign
+          trial database and `oxfuzz coverage`, export the schema-3 campaign
           evidence manifest and the function-coverage export through a
           runner-managed `oxfuzz serve`, pre-check each manifest against the
           cohort binding, then write results.json + summary.md and, when
@@ -53,6 +53,7 @@ from scripts.effectiveness_benchmark import (
     HEX_40, HEX_64, PROJECT_ENGINES, digest, no_duplicate_keys, nonempty,
     nonempty_list, record, unique_ids, validate_cohort,
 )
+from scripts.effectiveness_report import crash_measurements
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -301,7 +302,8 @@ def cmd_fetch(args):
 
 def derive_trial_seed(cohort_id, trial_id):
     material = "{}\0{}\0{}".format(SEED_DOMAIN, cohort_id, trial_id).encode("utf-8")
-    return int.from_bytes(hashlib.sha256(material).digest()[:8], "little")
+    seed = int.from_bytes(hashlib.sha256(material).digest()[:8], "little")
+    return seed if seed & (2 ** 32 - 1) else seed | 1
 
 
 def slug(text):
@@ -657,6 +659,7 @@ def fuzz_command(binary, project_dir, project, trial, condition):
         "--duration-secs", str(condition["duration_secs"]),
         "--iterations", "1",
         "--sanitizer", condition["sanitizer"],
+        "--seed", str(trial["seed"]),
         "--json",
     ]
     if condition["provider_family"] == NO_PROVIDER:
@@ -724,7 +727,7 @@ def collect_db_metrics(db_path):
     }
 
 
-def collect_run_metrics(data, condition, source_sha256, image_sha256):
+def collect_run_metrics(data, condition, source_sha256, image_sha256, trial_seed):
     """Project raw rows into per-run records with cohort conformance checks."""
     campaign_runs = []
     crashes_by_run = {}
@@ -762,6 +765,8 @@ def collect_run_metrics(data, condition, source_sha256, image_sha256):
             mismatches.append("source_rev does not equal the frozen source_sha256")
         if sandbox_rev != SANDBOX_REV_PREFIX + image_sha256:
             mismatches.append("sandbox_rev does not carry the frozen image digest")
+        if type(config.get("seed")) is not int or config["seed"] != trial_seed:
+            mismatches.append("seed {!r} != {!r}".format(config.get("seed"), trial_seed))
         campaign_runs.append({
             "run_id": run_id,
             "engine": engine,
@@ -890,7 +895,7 @@ def stop_serve(process):
 
 def export_trial_evidence(binary, trial_env, approved_root, campaign_runs,
                           model_cost_usd, compute_rate, evidence_dir, serve_log):
-    """Export schema-2 campaign manifests and function coverage via REST.
+    """Export schema-3 campaign manifests and function coverage via REST.
 
     The serve process shares the trial's config, database, and workspace so
     the manifests bind the exact retained run. Read-only endpoints only.
@@ -942,8 +947,8 @@ def binding_mismatches(manifest, trial, project, condition, outcome):
     if not isinstance(manifest, dict) or not isinstance(manifest.get("body"), dict):
         return ["campaign manifest needs a body"]
     body = manifest["body"]
-    if body.get("schema_version") != 2:
-        problems.append("manifest schema_version is not 2")
+    if body.get("schema_version") != 3:
+        problems.append("manifest schema_version is not 3")
     expected = {
         "target": trial["selected_function"],
         "engine": condition["engine"],
@@ -967,9 +972,8 @@ def binding_mismatches(manifest, trial, project, condition, outcome):
         seed = run_config.get("seed")
         if type(seed) is not int or seed != trial["seed"]:
             problems.append(
-                "manifest run_config.seed is {!r} but the frozen trial seed is {!r}; "
-                "the CLI derives seeds from run ids and cannot pin a frozen seed "
-                "yet (see the protocol's known gaps)".format(seed, trial["seed"]))
+                "manifest run_config.seed is {!r} but the frozen trial seed is {!r}"
+                .format(seed, trial["seed"]))
         if run_config.get("sanitizer") != condition["sanitizer"]:
             problems.append("manifest sanitizer is {!r}, cohort wants {!r}".format(
                 run_config.get("sanitizer"), condition["sanitizer"]))
@@ -996,6 +1000,10 @@ def binding_mismatches(manifest, trial, project, condition, outcome):
         elif model_cost > condition["model_cost_budget_usd"]:
             problems.append("manifest model cost {} exceeds the frozen budget {}".format(
                 model_cost, condition["model_cost_budget_usd"]))
+    try:
+        crash_measurements(body.get("findings"))
+    except ValueError as error:
+        problems.append(str(error))
     return problems
 
 
@@ -1044,7 +1052,7 @@ def render_summary_markdown(cohort, results):
         "-> smoke -> human-approved promote -> one bounded campaign iteration per "
         "trial). A clean bounded run does not prove the absence of vulnerabilities.",
         "",
-        "| Trial | Project | Function | Engine | Outcome | TTFC (s) | Unique crashes | Peak edges | Lines | Regions | Wall (s) | LLM cost (USD) |",
+        "| Trial | Project | Function | Engine | Outcome | TTFC upper bound (s) | Unique crash signatures | Peak edges | Lines | Regions | Wall (s) | LLM cost (USD) |",
         "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for trial in results["trials"]:
@@ -1114,13 +1122,14 @@ def render_summary_markdown(cohort, results):
         "",
         "- Operator / reviewer: (fill in at review time)",
         "- Limitations:",
-        "  - Trial seeds are frozen in the cohort, but the CLI derives each run's "
-        "seed from its random run id (`hf_engine::seed::derive_run_seed`); a "
-        "manifest can therefore not bind the frozen seed today. Reproduce a run "
-        "with `oxfuzz run . --replay <run-id>`, which re-executes the recorded "
-        "seed exactly.",
+        "  - Campaign seeds are passed with `--seed` and must match the retained "
+        "run and exported evidence. Fixed seeds do not guarantee deterministic "
+        "engine scheduling or results; honggfuzz records the seed but has no "
+        "fixed-RNG control.",
         "  - Time-to-first-crash is the crash artifact's file timestamp minus "
         "the persisted run start -- an upper bound on true discovery time.",
+        "  - Crash signatures are observations, not confirmed independent bugs; "
+        "origin attribution and independent reproduction require their own evidence.",
         "  - honggfuzz reports no edge count; edge coverage stays unavailable "
         "for honggfuzz conditions rather than reading as zero.",
         "  - The LLM smoke-review bypass (`--no-llm-review`) is used for "
@@ -1232,7 +1241,7 @@ def run_trial(binary, args, trial, condition, project):
     if data["available"]:
         campaign_runs, signatures, crash_files = collect_run_metrics(
             data, condition, project["source_sha256"],
-            condition["sandbox_image_sha256"])
+            condition["sandbox_image_sha256"], trial["seed"])
         record_data["campaign_runs"] = campaign_runs
         record_data["runs_executed"] = len(campaign_runs)
         # Zero campaign runs means nothing was measured: crash and timing

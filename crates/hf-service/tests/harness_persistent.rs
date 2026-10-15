@@ -331,9 +331,13 @@ struct Fixture {
 
 impl Fixture {
     async fn new(pool: Option<Arc<dyn hf_core::provider::ProviderPool>>) -> Self {
-        let _workspace_root = common::install_managed_workspace("oxfuzz_persistent_it");
+        // The process-global config must outlive every concurrent fixture.
+        static ENVIRONMENT: std::sync::Once = std::sync::Once::new();
+        ENVIRONMENT.call_once(|| {
+            let root = common::install_managed_workspace("oxfuzz_persistent_it");
+            write_fuzzing_policy(&root.parent().unwrap().join("config"));
+        });
         let dir = tempfile::tempdir().unwrap();
-        write_fuzzing_policy(&dir.path().join("config"));
         let project = Self::project_of(dir.path());
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(project.join("parser.c"), FIXTURE).unwrap();

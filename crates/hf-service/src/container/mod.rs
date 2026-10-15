@@ -237,6 +237,7 @@ fn resolve_fuzzing_run(
     resume: Option<bool>,
     sanitizer: Option<hf_core::target::Sanitizer>,
     cmplog: Option<bool>,
+    seed: Option<u64>,
 ) -> Result<crate::config::ResolvedFuzzingRun, ClassifiedError> {
     crate::config::resolve_fuzzing_run(
         Some(engine),
@@ -246,6 +247,7 @@ fn resolve_fuzzing_run(
         resume,
         sanitizer,
         cmplog,
+        seed,
     )
     .map_err(|error| fuzzing_policy_error(&error))
 }

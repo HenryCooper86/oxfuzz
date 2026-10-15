@@ -63,10 +63,16 @@ engine where possible.
 
 ### 3.1 Deterministic Seeds
 
-Every persisted run records a deterministic `FuzzRunConfig.seed` (derived from
-the run id by default, so every run is reproducible) and may be re-executed
-through `ServiceContainer::replay_run`. An adapter MUST translate a recorded
-seed into its engine's genuine fixed-seed knob -- and MUST NOT invent a flag
+Every persisted run records a `FuzzRunConfig.seed` (derived from the run id by
+default) and may be re-executed through `ServiceContainer::replay_run`.
+New userspace campaigns may select an explicit `u64` seed with `--seed`;
+campaign iterations retain that value unchanged. Replay uses the original
+value and refuses a CLI override. libFuzzer uses the low 32 bits and rejects
+explicit values whose truncated result is zero, which requests randomization.
+Seeds differing only in higher bits select the same libFuzzer RNG state.
+Fixed seeds do not guarantee deterministic outcomes.
+An adapter MUST translate a recorded seed into its engine's genuine fixed-seed
+knob -- and MUST NOT invent a flag
 the engine does not have:
 
 | Engine | Seed knob | Form |

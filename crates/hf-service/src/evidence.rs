@@ -8,6 +8,7 @@ use std::fs::File;
 use std::io::{Read as _, Seek as _};
 use std::path::Path;
 
+use hf_core::crash::CrashOrigin;
 use hf_core::engine::EngineKind;
 use hf_core::error::ClassifiedError;
 use hf_runtime::SANDBOX_IMAGE;
@@ -20,7 +21,7 @@ use uuid::Uuid;
 use crate::container::ServiceContainer;
 
 /// Current evidence-manifest schema.
-pub const EVIDENCE_SCHEMA_VERSION: u32 = 2;
+pub const EVIDENCE_SCHEMA_VERSION: u32 = 3;
 
 /// Lifecycle captured in a proof-carrying manifest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,6 +99,9 @@ pub struct EvidenceFinding {
     pub reproducer_sha256: String,
     /// Whether the bound input is the minimized artifact.
     pub minimized: bool,
+    /// Retained attribution of the fault layer. This is the persisted crash
+    /// classification, not a replay verification or a confirmed root cause.
+    pub origin: CrashOrigin,
 }
 
 /// Attributable campaign economics.
@@ -348,6 +352,7 @@ impl ServiceContainer {
                     stack_signature,
                     reproducer_sha256,
                     minimized: crash.minimized,
+                    origin: crash.origin,
                 })
             })
             .collect::<Result<Vec<_>, ClassifiedError>>()?;
@@ -372,7 +377,7 @@ impl ServiceContainer {
 
         EvidenceManifest::new(EvidenceManifestBody {
             schema_version: EVIDENCE_SCHEMA_VERSION,
-            manifest_id: Uuid::new_v5(&run.id, b"oxfuzz-evidence-manifest-v2"),
+            manifest_id: Uuid::new_v5(&run.id, b"oxfuzz-evidence-manifest-v3"),
             generated_at: ended_at.to_rfc3339(),
             project: project_display_name(&run.project_root),
             target: target.symbol,

@@ -104,6 +104,7 @@ pub(crate) async fn cmd_fuzz(args: crate::args::FuzzArgs) -> anyhow::Result<()> 
         duration_secs,
         iterations,
         timeout_ms,
+        seed,
         sanitizer,
         ai,
         cmplog,
@@ -160,6 +161,9 @@ pub(crate) async fn cmd_fuzz(args: crate::args::FuzzArgs) -> anyhow::Result<()> 
                 // it in every campaign iteration; a companion-less promoted
                 // harness is rebuilt, not reused.
                 cmplog,
+                // An explicit --seed applies to every campaign iteration;
+                // omitted, each iteration's run derives its own run-id seed.
+                seed,
             },
             &on_stage,
             on_progress.as_ref(),

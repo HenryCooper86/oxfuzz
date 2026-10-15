@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use hf_core::crash::CrashOrigin;
 use hf_core::engine::EngineKind;
 use hf_service::evidence::{
     EvidenceApproval, EvidenceCost, EvidenceCoverage, EvidenceError, EvidenceFinding,
@@ -60,6 +61,7 @@ fn body() -> EvidenceManifestBody {
             stack_signature: digest('1'),
             reproducer_sha256: digest('2'),
             minimized: true,
+            origin: CrashOrigin::Target,
         }],
         cost: EvidenceCost {
             compute_cost_usd: 1.25,
@@ -70,7 +72,6 @@ fn body() -> EvidenceManifestBody {
 
 #[test]
 fn manifest_digest_is_canonical_and_detects_mutation() {
-    assert_eq!(EVIDENCE_SCHEMA_VERSION, 2);
     let first = EvidenceManifest::new(body()).expect("valid manifest");
     let mut reordered = body();
     reordered.run_config.environment = BTreeMap::new();
@@ -92,14 +93,26 @@ fn manifest_digest_is_canonical_and_detects_mutation() {
 }
 
 #[test]
-fn legacy_v1_evidence_is_not_accepted_as_exact_image_provenance() {
-    let mut legacy = body();
-    legacy.schema_version = 1;
+fn legacy_evidence_schemas_are_not_accepted_as_exact_image_provenance() {
+    for legacy_version in [1, 2] {
+        let mut legacy = body();
+        legacy.schema_version = legacy_version;
 
-    assert_eq!(
-        EvidenceManifest::new(legacy),
-        Err(EvidenceError::UnsupportedSchema)
-    );
+        assert_eq!(
+            EvidenceManifest::new(legacy),
+            Err(EvidenceError::UnsupportedSchema),
+            "schema {legacy_version} must not validate as current evidence"
+        );
+    }
+}
+
+#[test]
+fn manifest_digest_covers_finding_origin_attribution() {
+    let manifest = EvidenceManifest::new(body()).expect("valid manifest");
+
+    let mut tampered = manifest;
+    tampered.body.findings[0].origin = CrashOrigin::Harness;
+    assert_eq!(tampered.verify(), Err(EvidenceError::DigestMismatch));
 }
 
 #[test]
@@ -287,7 +300,7 @@ async fn service_assembles_a_manifest_from_durable_run_and_approval_evidence() {
         minimized: false,
         bug_report: None,
         casr: None,
-        origin: hf_core::crash::CrashOrigin::Unknown,
+        origin: CrashOrigin::Target,
     };
     let store = Arc::new(store);
     store.upsert_crash(&crash).await.unwrap();
@@ -332,6 +345,22 @@ async fn service_assembles_a_manifest_from_durable_run_and_approval_evidence() {
     std::fs::write(&crash.input_path, b"crash").unwrap();
     store.upsert_crash(&crash).await.unwrap();
 
+    let harness_crash = Crash {
+        id: Uuid::from_u128(13),
+        run_id: run.id,
+        target_id,
+        input_path: run_output.join("crash-input-harness"),
+        stack_signature: digest('3'),
+        kind: CrashKind::Asan,
+        summary: "harness dereference".to_owned(),
+        minimized: true,
+        bug_report: None,
+        casr: None,
+        origin: CrashOrigin::Harness,
+    };
+    std::fs::write(&harness_crash.input_path, b"harness crash").unwrap();
+    store.upsert_crash(&harness_crash).await.unwrap();
+
     let patch = "--- a/parser.c\n+++ b/parser.c\n@@ -1 +1 @@\n-old\n+fixed\n";
     let error = container
         .remediation_draft(
@@ -363,7 +392,9 @@ async fn service_assembles_a_manifest_from_durable_run_and_approval_evidence() {
     manifest.verify().unwrap();
     assert_eq!(manifest.body.target, "parse_header");
     assert_eq!(manifest.body.approval.harness_id, harness_id);
-    assert_eq!(manifest.body.findings.len(), 1);
+    assert_eq!(manifest.body.findings.len(), 2);
+    assert_eq!(manifest.body.findings[0].origin, CrashOrigin::Target);
+    assert_eq!(manifest.body.findings[1].origin, CrashOrigin::Harness);
     assert!((manifest.body.cost.compute_cost_usd - 0.05).abs() < EPS);
     assert_eq!(manifest.body.sandbox_image_sha256, digest('f'));
 

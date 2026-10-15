@@ -98,6 +98,7 @@ async fn qualify_engine(container: Arc<ServiceContainer>, root: &Path, engine: E
                     None,
                     None,
                     None,
+                    None,
                     &|event| {
                         if matches!(event, FuzzProgress::ExecsPerSec(value) if value > 0.0) {
                             progress.notify_one();

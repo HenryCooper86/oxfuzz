@@ -166,6 +166,7 @@ async fn approved_rust_workspace_completes_userspace_lifecycle() {
                     None,
                     None,
                     None,
+                    None,
                     &|event| {
                         if matches!(event, FuzzProgress::ExecsPerSec(value) if value > 0.0) {
                             progress.notify_one();

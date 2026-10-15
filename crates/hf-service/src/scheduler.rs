@@ -1151,6 +1151,8 @@ fn validate_campaign_fuzzing_policy(params: &CampaignParams) -> Result<(), Campa
         None,
         // Scheduled campaigns carry no per-run CmpLog request.
         None,
+        // ...and no per-run seed: every scheduled run derives its own.
+        None,
     )
     .map(|_| ())
     .map_err(CampaignSchedulerError::Validation)
@@ -1721,7 +1723,9 @@ impl FuzzCampaignDispatcher {
                 // sanitizer, or CmpLog override; the configured
                 // `fuzzing.default_timeout_ms` / `fuzzing.default_resume`
                 // apply, CmpLog stays off (per-run opt-in only), and the run
-                // records the harness's own sanitizer.
+                // records the harness's own sanitizer. They carry no seed
+                // pin either: every scheduled run derives its own.
+                None,
                 None,
                 None,
                 None,

@@ -311,6 +311,7 @@ async fn engines_share_one_canonical_corpus_and_absorbed_crashes() {
             None,
             None,
             None,
+            None,
             &|_| {},
         )
         .await
@@ -330,6 +331,7 @@ async fn engines_share_one_canonical_corpus_and_absorbed_crashes() {
             "parse_value",
             EngineKind::AflPlusPlus,
             60,
+            None,
             None,
             None,
             None,
@@ -383,6 +385,7 @@ async fn engines_share_one_canonical_corpus_and_absorbed_crashes() {
             "parse_value",
             EngineKind::LibFuzzer,
             60,
+            None,
             None,
             None,
             None,

@@ -9,6 +9,25 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ## Unreleased
 
+## 0.6.5 - 2026-10-15
+
+### Added
+
+- `run`, `campaign`, and `fuzz` accept an explicit `--seed <u64>` for new
+  userspace campaigns. The selected value is retained in execution inputs and
+  evidence; campaign iterations reuse it, while replay preserves its original
+  seed. libFuzzer rejects seeds whose low 32 bits are zero because its
+  truncated value requests randomization.
+  The effectiveness runner now passes each frozen trial seed and checks it
+  against retained settings and exported evidence.
+- Campaign evidence schema 3 includes each crash's retained origin.
+  Effectiveness reports count distinct stack signatures and separate target,
+  harness, runtime, unknown, and ambiguous attribution without claiming
+  confirmed independent bugs. Conflicting attribution never increases the
+  target count; absent timing or independent replay evidence remains
+  unavailable. Older manifest schemas are refused rather than silently
+  acquiring origin data.
+
 ## 0.6.4 - 2026-10-15
 
 ### Fixed

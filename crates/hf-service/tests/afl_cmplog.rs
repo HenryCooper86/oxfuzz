@@ -381,6 +381,8 @@ async fn cmplog_build_compiles_a_companion_and_the_run_drives_it() {
             None,
             None,
             Some(true),
+            // CmpLog probe carries no explicit seed.
+            None,
             &|_| {},
         )
         .await
@@ -432,6 +434,7 @@ async fn cmplog_run_against_a_companionless_harness_fails_loud() {
             None,
             None,
             Some(true),
+            None,
             &|_| {},
         )
         .await
@@ -475,6 +478,7 @@ async fn cmplog_request_on_a_non_afl_engine_fails_at_policy_resolution() {
             None,
             None,
             Some(true),
+            None,
             &|_| {},
         )
         .await
@@ -501,6 +505,7 @@ async fn fuzz_cmplog_rebuilds_a_companionless_promoted_harness() {
         fresh: false,
         sanitizer: None,
         cmplog,
+        seed: None,
     };
 
     let plain = container

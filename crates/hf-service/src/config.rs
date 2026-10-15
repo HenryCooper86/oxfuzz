@@ -400,6 +400,13 @@ pub struct ResolvedFuzzingRun {
     /// the promoted harness's own sanitizer (the binary is the truth), and the
     /// configured `fuzzing.default_sanitizer` never applies at run time.
     pub sanitizer: Option<hf_core::target::Sanitizer>,
+    /// The operator's explicit campaign seed (the CLI's `--seed`). `None`
+    /// means no pin: the run derives a fresh nonzero seed from its run id.
+    /// An explicit seed survives every campaign iteration and the persisted
+    /// `FuzzRunConfig`; engines without a fixed-seed knob (honggfuzz, go)
+    /// record it without dispatching an invented flag. A fixed seed does not
+    /// by itself promise deterministic coverage.
+    pub seed: Option<u64>,
 }
 
 /// Resource and evidence ceilings for one automotive sidecar operation.
@@ -920,8 +927,9 @@ impl FuzzingSettings {
     /// the duration is zero or above the configured ceiling, the requested
     /// CPU allocation is zero or above the configured ceiling, the requested
     /// per-input timeout is outside `1..=3600000` milliseconds, an explicit
-    /// resume or `CmpLog` request names an engine other than AFL++, or the
-    /// requested sanitizer is not selectable.
+    /// resume or `CmpLog` request names an engine other than AFL++, the
+    /// requested sanitizer is not selectable, or an explicit seed of zero
+    /// names libFuzzer (which reads `-seed=0` as "generate a random seed").
     pub fn resolve(
         &self,
         engine: Option<EngineKind>,
@@ -931,6 +939,7 @@ impl FuzzingSettings {
         resume: Option<bool>,
         sanitizer: Option<hf_core::target::Sanitizer>,
         cmplog: Option<bool>,
+        seed: Option<u64>,
     ) -> Result<ResolvedFuzzingRun, String> {
         self.validate()?;
         let enabled = self.enabled_engine_set()?;
@@ -991,6 +1000,18 @@ impl FuzzingSettings {
         }
         let cmplog = engine == EngineKind::AflPlusPlus && cmplog.unwrap_or(false);
         let sanitizer = sanitizer.map(require_selectable_sanitizer).transpose()?;
+        // libFuzzer truncates to unsigned 32 bits before checking for its
+        // zero/randomize sentinel. Retain the requested u64, but reject every
+        // value that would silently request a random engine seed.
+        if engine == EngineKind::LibFuzzer
+            && seed.is_some_and(|value| value & u64::from(u32::MAX) == 0)
+        {
+            return Err(
+                "the libfuzzer engine uses the low 32 bits of --seed; zero after truncation \
+                 requests a random seed; choose a value with nonzero low 32 bits or omit --seed"
+                    .to_owned(),
+            );
+        }
         Ok(ResolvedFuzzingRun {
             engine,
             duration_secs,
@@ -1000,6 +1021,7 @@ impl FuzzingSettings {
             resume,
             cmplog,
             sanitizer,
+            seed,
         })
     }
 
@@ -1029,6 +1051,8 @@ impl FuzzingSettings {
             Some(false),
             None,
             Some(false),
+            // Internal maintenance budgets never carry an operator seed.
+            None,
         )
     }
 
@@ -1037,7 +1061,7 @@ impl FuzzingSettings {
     /// # Errors
     /// Returns an error for an invalid policy or a disabled engine.
     pub fn require_engine(&self, engine: EngineKind) -> Result<(), String> {
-        self.resolve(Some(engine), None, None, None, None, None, None)
+        self.resolve(Some(engine), None, None, None, None, None, None, None)
             .map(|_| ())
     }
 
@@ -1403,8 +1427,9 @@ pub fn effective_automotive_settings() -> Result<AutomotiveSettings, String> {
 /// Returns an error for an invalid policy, disabled engine, invalid duration,
 /// a CPU request outside `(0, sandbox.max_cpus]`, a per-input timeout
 /// outside `1..=3600000` milliseconds, an explicit resume or `CmpLog` request
-/// naming an engine other than AFL++, or a requested sanitizer outside the
-/// selectable set.
+/// naming an engine other than AFL++, a requested sanitizer outside the
+/// selectable set, or an explicit seed of zero naming libFuzzer (which reads
+/// `-seed=0` as "generate a random seed").
 pub fn resolve_fuzzing_run(
     engine: Option<EngineKind>,
     duration_secs: Option<u64>,
@@ -1413,6 +1438,7 @@ pub fn resolve_fuzzing_run(
     resume: Option<bool>,
     sanitizer: Option<hf_core::target::Sanitizer>,
     cmplog: Option<bool>,
+    seed: Option<u64>,
 ) -> Result<ResolvedFuzzingRun, String> {
     effective_fuzzing_settings()?.resolve(
         engine,
@@ -1422,6 +1448,7 @@ pub fn resolve_fuzzing_run(
         resume,
         sanitizer,
         cmplog,
+        seed,
     )
 }
 
@@ -3955,6 +3982,7 @@ product_name = "old-product"
                 None,
                 None,
                 None,
+                None,
             )
             .expect("enabled engine and bounded duration should resolve");
         assert_eq!(run.engine, hf_core::engine::EngineKind::AflPlusPlus);
@@ -4258,7 +4286,7 @@ default_duration_secs = 22
         };
 
         let resolved = settings
-            .resolve(None, None, None, None, None, None, None)
+            .resolve(None, None, None, None, None, None, None, None)
             .expect("defaults should resolve");
         assert_eq!(resolved.engine, hf_core::engine::EngineKind::Honggfuzz);
         assert_eq!(resolved.duration_secs, 30);
@@ -4274,6 +4302,7 @@ default_duration_secs = 22
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap_err()
             .contains("disabled"));
@@ -4281,6 +4310,7 @@ default_duration_secs = 22
             .resolve(
                 Some(hf_core::engine::EngineKind::Honggfuzz),
                 Some(61),
+                None,
                 None,
                 None,
                 None,
@@ -4303,23 +4333,23 @@ default_duration_secs = 22
 
         // No request keeps the configured allocation (existing behavior).
         let resolved = settings
-            .resolve(None, None, None, None, None, None, None)
+            .resolve(None, None, None, None, None, None, None, None)
             .expect("defaults should resolve");
         assert_eq!(resolved.max_cpus, 8);
 
         // A within-ceiling request is honored.
         let requested = settings
-            .resolve(None, None, Some(4), None, None, None, None)
+            .resolve(None, None, Some(4), None, None, None, None, None)
             .expect("within-ceiling cpu request should resolve");
         assert_eq!(requested.max_cpus, 4);
 
         // Zero and over-ceiling requests fail loud, mirroring duration.
         assert!(settings
-            .resolve(None, None, Some(0), None, None, None, None,)
+            .resolve(None, None, Some(0), None, None, None, None, None,)
             .unwrap_err()
             .contains("greater than zero"));
         assert!(settings
-            .resolve(None, None, Some(9), None, None, None, None,)
+            .resolve(None, None, Some(9), None, None, None, None, None,)
             .unwrap_err()
             .contains("exceeds the configured maximum"));
     }
@@ -4335,7 +4365,7 @@ default_duration_secs = 22
 
         // No request resolves to the configured default.
         let resolved = settings
-            .resolve(None, None, None, None, None, None, None)
+            .resolve(None, None, None, None, None, None, None, None)
             .expect("defaults should resolve");
         assert_eq!(resolved.timeout_ms, 1000);
 
@@ -4346,7 +4376,7 @@ default_duration_secs = 22
         };
         assert_eq!(
             configured
-                .resolve(None, None, None, None, None, None, None,)
+                .resolve(None, None, None, None, None, None, None, None,)
                 .expect("configured default should resolve")
                 .timeout_ms,
             250
@@ -4354,14 +4384,14 @@ default_duration_secs = 22
 
         // An explicit per-run request overrides the configured default.
         let requested = settings
-            .resolve(None, None, None, Some(2500), None, None, None)
+            .resolve(None, None, None, Some(2500), None, None, None, None)
             .expect("explicit timeout should resolve");
         assert_eq!(requested.timeout_ms, 2500);
 
         // Zero and absurdly large budgets are misconfiguration, not policy:
         // they fail loud instead of reaching an engine flag.
         assert!(settings
-            .resolve(None, None, None, Some(0), None, None, None,)
+            .resolve(None, None, None, Some(0), None, None, None, None,)
             .unwrap_err()
             .contains("per-input timeout"));
         assert!(settings
@@ -4370,6 +4400,7 @@ default_duration_secs = 22
                 None,
                 None,
                 Some(HARD_MAX_INPUT_TIMEOUT_MS + 1),
+                None,
                 None,
                 None,
                 None,
@@ -4385,7 +4416,7 @@ default_duration_secs = 22
 
         // No request resolves to the configured default (off).
         let resolved = settings
-            .resolve(None, None, None, None, None, None, None)
+            .resolve(None, None, None, None, None, None, None, None)
             .expect("defaults should resolve");
         assert!(!resolved.resume);
 
@@ -4403,6 +4434,7 @@ default_duration_secs = 22
                 None,
                 None,
                 None,
+                None,
             )
             .expect("afl++ with a configured resume default resolves");
         assert!(resolved.resume);
@@ -4410,6 +4442,7 @@ default_duration_secs = 22
         let resolved = configured
             .resolve(
                 Some(hf_core::engine::EngineKind::LibFuzzer),
+                None,
                 None,
                 None,
                 None,
@@ -4431,6 +4464,7 @@ default_duration_secs = 22
                     Some(true),
                     None,
                     None,
+                    None,
                 )
                 .expect("explicit resume resolves")
                 .resume
@@ -4443,6 +4477,7 @@ default_duration_secs = 22
                     None,
                     None,
                     Some(false),
+                    None,
                     None,
                     None,
                 )
@@ -4459,6 +4494,7 @@ default_duration_secs = 22
                 None,
                 None,
                 Some(true),
+                None,
                 None,
                 None,
             )
@@ -4504,6 +4540,7 @@ default_duration_secs = 22
                 None,
                 None,
                 None,
+                None,
             )
             .expect("defaults should resolve");
         assert!(!resolved.cmplog);
@@ -4519,6 +4556,7 @@ default_duration_secs = 22
                     None,
                     None,
                     Some(true),
+                    None,
                 )
                 .expect("explicit cmplog resolves")
                 .cmplog
@@ -4533,6 +4571,7 @@ default_duration_secs = 22
                     None,
                     None,
                     Some(false),
+                    None,
                 )
                 .expect("an explicit non-cmplog run resolves")
                 .cmplog
@@ -4549,6 +4588,7 @@ default_duration_secs = 22
                 None,
                 None,
                 Some(true),
+                None,
             )
             .unwrap_err();
         assert!(
@@ -4573,6 +4613,125 @@ default_duration_secs = 22
         let error = parse_oxfuzz_runtime_config("[fuzzing]\ndefault_cmplog = true\n")
             .expect_err("there is no default_cmplog setting");
         assert!(error.contains("default_cmplog"), "{error}");
+    }
+
+    #[test]
+    fn fuzzing_policy_resolves_an_explicit_seed() {
+        use hf_core::engine::EngineKind;
+        // 2^63+1: above the JavaScript safe-integer range and above i64::MAX,
+        // so the resolution must carry every bit of the request.
+        let wide = 9_223_372_036_854_775_809_u64;
+        let settings = FuzzingSettings::default();
+
+        // Omitted: no operator seed; the run derives its own from its run id.
+        assert_eq!(
+            settings
+                .resolve(
+                    Some(EngineKind::LibFuzzer),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None
+                )
+                .expect("defaults resolve")
+                .seed,
+            None
+        );
+
+        // An explicit seed survives resolution for every userspace engine.
+        // honggfuzz (and go) have no fixed-seed knob: the seed is still
+        // recorded -- an honest limitation, not a rejection -- and their
+        // adapters invent no flag for it.
+        for engine in [
+            EngineKind::LibFuzzer,
+            EngineKind::AflPlusPlus,
+            EngineKind::Honggfuzz,
+        ] {
+            assert_eq!(
+                settings
+                    .resolve(Some(engine), None, None, None, None, None, None, Some(wide))
+                    .unwrap_or_else(|e| panic!("{engine:?} accepts an explicit seed: {e}"))
+                    .seed,
+                Some(wide)
+            );
+        }
+
+        // Zero is a genuine fixed value for afl-fuzz -s (no engine-side
+        // randomize semantics), so it resolves.
+        assert_eq!(
+            settings
+                .resolve(
+                    Some(EngineKind::AflPlusPlus),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(0)
+                )
+                .expect("afl++ accepts seed zero")
+                .seed,
+            Some(0)
+        );
+
+        // Internal maintenance budgets never carry an operator seed.
+        assert_eq!(
+            settings
+                .resolve_internal(EngineKind::LibFuzzer, 60)
+                .expect("internal budget resolves")
+                .seed,
+            None
+        );
+    }
+
+    #[test]
+    fn fuzzing_policy_rejects_a_seed_that_libfuzzer_truncates_to_zero() {
+        for seed in [1_u64 << 32, 1_u64 << 63] {
+            let error = FuzzingSettings::default()
+                .resolve(
+                    Some(EngineKind::LibFuzzer),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(seed),
+                )
+                .expect_err("a zero 32-bit engine seed would randomize the campaign");
+            assert!(error.contains("seed"), "{error}");
+        }
+    }
+
+    #[test]
+    fn fuzzing_policy_rejects_a_libfuzzer_seed_of_zero() {
+        use hf_core::engine::EngineKind;
+        // libFuzzer reads -seed=0 as "generate a random seed", so recording
+        // zero would promise a pin the engine ignores.
+        let error = FuzzingSettings::default()
+            .resolve(
+                Some(EngineKind::LibFuzzer),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(0),
+            )
+            .expect_err("libFuzzer seed zero must be refused");
+        assert!(
+            error.contains("seed") && error.to_lowercase().contains("libfuzzer"),
+            "the error must name the seed and the engine: {error}"
+        );
+        assert!(
+            error.to_lowercase().contains("random"),
+            "the error must say why zero is refused: {error}"
+        );
     }
 
     #[test]
@@ -4662,7 +4821,7 @@ default_duration_secs = 22
         let settings = FuzzingSettings::default();
         // No request: no constraint -- the harness binary is the truth.
         let resolved = settings
-            .resolve(None, None, None, None, None, None, None)
+            .resolve(None, None, None, None, None, None, None, None)
             .expect("defaults should resolve");
         assert_eq!(resolved.sanitizer, None);
 
@@ -4675,6 +4834,7 @@ default_duration_secs = 22
                 None,
                 None,
                 Some(hf_core::target::Sanitizer::Undefined),
+                None,
                 None,
             )
             .expect("undefined is a selectable constraint");
@@ -4692,6 +4852,7 @@ default_duration_secs = 22
                 None,
                 None,
                 Some(hf_core::target::Sanitizer::Memory),
+                None,
                 None,
             )
             .unwrap_err();
@@ -4747,6 +4908,7 @@ default_duration_secs = 22
             .resolve(
                 Some(hf_core::engine::EngineKind::LibFuzzer),
                 Some(60),
+                None,
                 None,
                 None,
                 None,

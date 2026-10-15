@@ -33,7 +33,7 @@ verification status, or safety gates.
 
 ## 3. Canonical Evidence Manifest
 
-Schema version 1 contains:
+Schema version 3 contains:
 
 - manifest id, schema version, generation time, project display name, target,
   run id, and run status;
@@ -42,6 +42,7 @@ Schema version 1 contains:
   sandbox-image digests;
 - explicit human harness-promotion evidence tied to the exact source and binary;
 - coverage totals and delta, crash identities, minimized reproducer digests,
+  retained crash origin (`target`, `harness`, `runtime`, or `unknown`),
   and model/compute cost inputs when available; and
 - a manifest SHA-256 computed over the schema body without the digest field.
 
@@ -58,9 +59,17 @@ without full provenance return an explicit incomplete-evidence error instead of
 a partially trusted manifest. In storage, exact Docker provenance is tagged as
 `docker-image-id-sha256:<digest>` so a historical hash of a mutable image name
 cannot be mistaken for a resolved image ID. Evidence emits the validated raw
-digest only after removing that exact type marker. This provenance guarantee is
-evidence schema v2; schema-v1 manifests fail verification instead of being
-silently upgraded.
+digest only after removing that exact type marker. Schema v2 introduced exact
+image provenance; schema v3 adds retained crash origin. Older schemas fail
+verification instead of silently acquiring attribution they never retained.
+
+Benchmark reports count distinct normalized stack signatures, not confirmed
+bugs or independent root causes. Origin-specific counts require consistent
+attribution for a signature; mixed attribution must not increase the target
+count. An empty retained finding list measures zero signatures. Missing
+evidence is unavailable rather than zero. Exact discovery time and independent
+crash reproduction are unavailable unless separate retained evidence supports
+them; minimized inputs and target attribution do not establish either.
 
 ### 3.1 Promotion provenance
 

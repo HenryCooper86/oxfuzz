@@ -373,6 +373,8 @@ impl ServiceContainer {
                     None,
                     // The agent tool surface carries no per-run CmpLog request.
                     None,
+                    // ...and no explicit seed: the run derives its own.
+                    None,
                 )
                 .map_err(ClassifiedError::Validation)?;
                 let summary = self
@@ -384,6 +386,9 @@ impl ServiceContainer {
                         None,
                         None,
                         None,
+                        None,
+                        // The agent tool surface carries no per-run CmpLog
+                        // request or explicit seed.
                         None,
                         None,
                         &|_| {},

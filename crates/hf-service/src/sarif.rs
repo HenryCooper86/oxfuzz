@@ -99,6 +99,9 @@ impl ServiceContainer {
             // The gate verdict measures the plain build; CmpLog is pinned off
             // so a gate run stays comparable with prior gate runs.
             None,
+            // No seed pin either, for the same comparability reason: each
+            // gate run derives its own seed.
+            None,
             on_progress,
         )
         .await?;

@@ -1935,6 +1935,8 @@ pub async fn run_fuzzer(
     target: String,
     engine: String,
     duration: u64,
+    // Decimal text preserves all 64 seed bits, matching `ReplayReview.seed`.
+    seed: Option<String>,
     on_run_started: Option<tauri::ipc::JavaScriptChannelId>,
 ) -> Result<serde_json::Value, String> {
     use tauri::Emitter;
@@ -2025,11 +2027,16 @@ pub async fn run_fuzzer(
             // sanitizer, or CmpLog override; the configured
             // `fuzzing.default_timeout_ms` / `fuzzing.default_resume` apply,
             // CmpLog stays off (per-run opt-in only), and the run records the
-            // harness's own sanitizer.
+            // harness's own sanitizer. The seed arrives as decimal text so
+            // the webview keeps every bit above 2^53.
             None,
             None,
             None,
             None,
+            seed.as_deref()
+                .map(str::parse)
+                .transpose()
+                .map_err(|e| format!("invalid seed: {e}"))?,
             &(on_progress),
             &(on_started),
         )

@@ -339,6 +339,7 @@ pub(crate) async fn cmd_campaign(
     resume: bool,
     sanitizer: Option<&str>,
     cmplog: bool,
+    seed: Option<u64>,
     iterations: usize,
     ai: AiOption,
 ) -> anyhow::Result<()> {
@@ -367,6 +368,9 @@ pub(crate) async fn cmd_campaign(
             sanitizer,
             // CmpLog has no configured default: the flag is the only opt-in.
             cmplog.then_some(true),
+            // An explicit --seed applies to every iteration; omitted, each
+            // iteration's run derives its own run-id seed.
+            seed,
             iterations,
             &on_progress,
         )

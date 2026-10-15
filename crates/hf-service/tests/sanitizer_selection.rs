@@ -324,6 +324,7 @@ async fn requested_ubsan_reaches_the_build_script_and_the_run_identity() {
             None,
             Some(Sanitizer::Undefined),
             None,
+            None,
             &|_| {},
         )
         .await
@@ -352,6 +353,7 @@ async fn run_with_a_mismatched_sanitizer_request_fails_loud() {
             None,
             None,
             Some(Sanitizer::Address),
+            None,
             None,
             &|_| {},
         )
@@ -472,6 +474,7 @@ async fn fuzz_redrafts_when_the_promoted_harness_has_a_different_sanitizer() {
         fresh: false,
         sanitizer,
         cmplog: false,
+        seed: None,
     };
 
     let first = container

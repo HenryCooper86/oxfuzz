@@ -93,6 +93,7 @@ def cohort(source_sha256=SOURCE_DIGEST, seed=None):
 
 
 STUB = r"""#!/usr/bin/env python3
+import hashlib
 import json
 import os
 import re
@@ -112,6 +113,10 @@ def env(name, default=""):
 def rfc3339(epoch):
     return datetime.fromtimestamp(epoch, timezone.utc).isoformat(timespec="milliseconds")
 
+
+def requested_seed():
+    value = sys.argv[sys.argv.index("--seed") + 1] if "--seed" in sys.argv else "1"
+    return int(env("STUB_SEED", value))
 
 def cmd_fuzz():
     db_path = env("HF_DB_PATH")
@@ -142,7 +147,7 @@ def cmd_fuzz():
         "max_mem_mb": int(env("STUB_MEM", "1024")),
         "max_cpus": int(env("STUB_CPUS", "2")),
         "sanitizer": env("STUB_SANITIZER", "Address"),
-        "seed": int(env("STUB_SEED", "1")),
+        "seed": requested_seed(),
     }
     connection.execute(
         "INSERT INTO runs VALUES (?, 'campaign', ?, 'done', ?, ?, 42, 500.0, 1, ?, ?, ?)",
@@ -150,11 +155,13 @@ def cmd_fuzz():
          env("STUB_SOURCE_REV"), "docker-image-id-sha256:" + env("STUB_IMAGE"),
          json.dumps(config)))
     connection.execute(
-        "INSERT INTO crashes VALUES ('c1', ?, 't1', 'sig-1', 'segv', 'summary', 0,"
-        " NULL, ?)", (RUN_ID, json.dumps({"input_path": crash})))
+        "INSERT INTO crashes VALUES ('00000000-0000-0000-0000-000000000001',"
+        " ?, 't1', 'sig-1', 'segv', 'summary', 0, NULL, ?)",
+        (RUN_ID, json.dumps({"input_path": crash, "origin": "target"})))
     connection.execute(
-        "INSERT INTO crashes VALUES ('c2', ?, 't1', 'sig-1', 'segv', 'dup', 0,"
-        " NULL, ?)", (RUN_ID, json.dumps({"input_path": crash})))
+        "INSERT INTO crashes VALUES ('00000000-0000-0000-0000-000000000002',"
+        " ?, 't1', 'sig-1', 'segv', 'dup', 0, NULL, ?)",
+        (RUN_ID, json.dumps({"input_path": crash, "origin": "target"})))
     connection.execute(
         "INSERT INTO diag_observations VALUES ('o1', 'generation', 0.25, 100, 50)")
     connection.commit()
@@ -164,8 +171,25 @@ def cmd_fuzz():
 
 
 def manifest_body():
+    with sqlite3.connect(env("HF_DB_PATH")) as connection:
+        retained_seed = json.loads(connection.execute(
+            "SELECT config_json FROM runs WHERE run_kind='campaign'").fetchone()[0])["seed"]
+        findings = []
+        for crash_id, signature, minimized, data in connection.execute(
+                "SELECT id, stack_signature, minimized, data_json FROM crashes WHERE run_id=?",
+                (RUN_ID,)):
+            crash = json.loads(data)
+            with open(crash["input_path"], "rb") as source:
+                reproducer = hashlib.sha256(source.read()).hexdigest()
+            findings.append({
+                "crash_id": crash_id,
+                "stack_signature": hashlib.sha256(signature.encode()).hexdigest(),
+                "reproducer_sha256": reproducer,
+                "minimized": bool(minimized),
+                "origin": crash["origin"],
+            })
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "run_id": RUN_ID,
         "target": env("STUB_TARGET", "parse_record"),
         "status": "done",
@@ -178,11 +202,11 @@ def manifest_body():
             "max_mem_mb": int(env("STUB_MEM", "1024")),
             "max_cpus": int(env("STUB_CPUS", "2")),
             "sanitizer": env("STUB_SANITIZER_ID", "address"),
-            "seed": int(env("STUB_SEED", "1")),
+            "seed": retained_seed,
         },
         "coverage": {"edges": 42, "delta_edges": 42},
         "cost": {"compute_cost_usd": 0.0, "model_cost_usd": 0.25},
-        "findings": [],
+        "findings": findings,
     }
 
 
@@ -404,7 +428,7 @@ class MetricsTests(unittest.TestCase):
         data = collect_db_metrics(self.make_db())
         self.assertTrue(data["available"])
         runs, signatures, crash_files = collect_run_metrics(
-            data, condition(), SOURCE_DIGEST, IMAGE_DIGEST)
+            data, condition(), SOURCE_DIGEST, IMAGE_DIGEST, 7)
         self.assertEqual(len(runs), 1)
         self.assertEqual(runs[0]["conformance"], [])
         self.assertEqual(runs[0]["edges"], 42)
@@ -415,7 +439,7 @@ class MetricsTests(unittest.TestCase):
     def test_ttfc_uses_the_earliest_crash_artifact_timestamp(self):
         data = collect_db_metrics(self.make_db())
         runs, _signatures, crash_files = collect_run_metrics(
-            data, condition(), SOURCE_DIGEST, IMAGE_DIGEST)
+            data, condition(), SOURCE_DIGEST, IMAGE_DIGEST, 7)
         self.assertEqual(len(runs), 1)
         ttfc = time_to_first_crash(crash_files)
         self.assertIsNotNone(ttfc)
@@ -424,11 +448,12 @@ class MetricsTests(unittest.TestCase):
     def test_conformance_names_each_mismatch(self):
         data = collect_db_metrics(self.make_db())
         drifted = dict(condition(), duration_secs=120)
-        runs, _s, _c = collect_run_metrics(data, drifted, "0" * 64, "0" * 64)
+        runs, _s, _c = collect_run_metrics(data, drifted, "0" * 64, "0" * 64, 8)
         problems = runs[0]["conformance"]
         self.assertTrue(any("duration" in problem for problem in problems))
         self.assertTrue(any("source_rev" in problem for problem in problems))
         self.assertTrue(any("sandbox_rev" in problem for problem in problems))
+        self.assertTrue(any("seed" in problem for problem in problems))
 
     def test_missing_database_is_unavailable_not_zero(self):
         data = collect_db_metrics(self.root / "absent.db")
@@ -534,7 +559,6 @@ class EndToEndTests(unittest.TestCase):
         write_json(self.cohort_path, self.cohort)
         self.out = self.root / "out"
         self.env = {
-            "STUB_SEED": str(self.cohort["trials"][0]["seed"]),
             "STUB_SOURCE_REV": SOURCE_DIGEST,
             "STUB_IMAGE": IMAGE_DIGEST,
             "STUB_TTFC": "30",
@@ -570,6 +594,8 @@ class EndToEndTests(unittest.TestCase):
         trial = results["trials"][0]
         self.assertEqual(trial["outcome"], "completed")
         self.assertEqual(trial["runs_executed"], 1)
+        self.assertEqual(trial["campaign_runs"][0]["seed"],
+                         self.cohort["trials"][0]["seed"])
         self.assertEqual(trial["unique_crashes"], 1)
         self.assertEqual(trial["peak_edges"], 42)
         self.assertIsNotNone(trial["time_to_first_crash_secs"])
@@ -594,6 +620,10 @@ class EndToEndTests(unittest.TestCase):
                          "observed")
         self.assertEqual(report["trials"][0]["total_cost_usd"],
                          {"status": "available", "value": 0.25})
+        self.assertEqual(report["trials"][0]["unique_crash_signatures"],
+                         {"status": "available", "value": 1})
+        self.assertEqual(report["trials"][0]["crash_signature_origins"]["value"]["target"], 1)
+        self.assertEqual(report["trials"][0]["crash_reproducibility"]["status"], "unavailable")
 
     def test_a_seed_mismatch_keeps_metrics_but_blocks_the_observation_index(self):
         result = self.run_cli(*self.run_args(), env={"STUB_SEED": "12345"})
@@ -630,9 +660,9 @@ class EndToEndTests(unittest.TestCase):
         self.assertIsNone(trial["evidence"])
         self.assertTrue(any("disabled" in l for l in trial["limitations"]))
 
-    def test_binding_check_names_the_seed_gap(self):
+    def test_binding_check_rejects_an_exported_seed_mismatch(self):
         manifest_doc = {"body": {
-            "schema_version": 2,
+            "schema_version": 3,
             "run_id": RUN_ID,
             "target": "parse_record",
             "status": "done",
@@ -644,6 +674,7 @@ class EndToEndTests(unittest.TestCase):
                            "sanitizer": "address", "seed": 1},
             "coverage": {"edges": 0, "delta_edges": 0},
             "cost": {"compute_cost_usd": 0.0, "model_cost_usd": 0.0},
+            "findings": [],
         }, "manifest_sha256": "f" * 64}
         problems = binding_mismatches(
             manifest_doc, self.cohort["trials"][0], self.cohort["projects"][0],

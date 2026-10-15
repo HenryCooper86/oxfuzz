@@ -17,12 +17,31 @@ from scripts.tests.test_effectiveness_benchmark import DIGEST, cohort
 
 
 RUN_ID = "11111111-1111-4111-8111-111111111111"
+TARGET_SIGNATURE = "1" * 64
+HARNESS_SIGNATURE = "2" * 64
+RUNTIME_SIGNATURE = "3" * 64
+UNKNOWN_SIGNATURE = "4" * 64
 
 
-def campaign_manifest(edges=0):
+def numbered_crash_id(index):
+    return "00000000-0000-4000-8000-{:012d}".format(index)
+
+
+def finding(signature=TARGET_SIGNATURE, origin="target", identifier=1, minimized=True,
+            crash_id=None):
+    return {
+        "crash_id": crash_id if crash_id is not None else numbered_crash_id(identifier),
+        "stack_signature": signature,
+        "reproducer_sha256": "5" * 64,
+        "minimized": minimized,
+        "origin": origin,
+    }
+
+
+def campaign_manifest(edges=0, findings=None):
     return {
         "body": {
-            "schema_version": 2,
+            "schema_version": 3,
             "run_id": RUN_ID,
             "target": "parse_record",
             "status": "done",
@@ -39,7 +58,7 @@ def campaign_manifest(edges=0):
             },
             "coverage": {"edges": edges, "delta_edges": 0},
             "cost": {"compute_cost_usd": 0.0, "model_cost_usd": 0.0},
-            "findings": [],
+            "findings": [] if findings is None else findings,
         },
         "manifest_sha256": DIGEST,
     }
@@ -151,6 +170,99 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(trial["total_cost_usd"], {"status": "available", "value": 0.0})
         self.assertEqual(trial["selected_function_entry"]["status"], "unavailable")
         self.assertEqual(report["conditions"]["ranked-libfuzzer"]["peak_edges_median"], 0)
+
+    def test_campaign_without_crashes_measures_zero_signature_counts(self):
+        manifest = self.artifact("manifest.json", campaign_manifest())
+        report = assemble_report(cohort(), self.observations(manifest), self.root)
+        trial = report["trials"][0]
+        self.assertEqual(trial["unique_crash_signatures"],
+                         {"status": "available", "value": 0})
+        origins = trial["crash_signature_origins"]
+        self.assertEqual(origins["status"], "available")
+        self.assertEqual(
+            {name: origins["value"][name]
+             for name in ("target", "harness", "runtime", "unknown", "ambiguous")},
+            {"target": 0, "harness": 0, "runtime": 0, "unknown": 0, "ambiguous": 0},
+        )
+
+    def test_duplicate_signatures_deduplicate_to_one_unique_observation(self):
+        findings = [finding(), finding(identifier=2)]
+        manifest = self.artifact(
+            "manifest.json", campaign_manifest(findings=findings))
+        report = assemble_report(cohort(), self.observations(manifest), self.root)
+        trial = report["trials"][0]
+        self.assertEqual(trial["unique_crash_signatures"],
+                         {"status": "available", "value": 1})
+        self.assertEqual(trial["crash_signature_origins"]["value"]["target"], 1)
+        self.assertEqual(trial["crash_signature_origins"]["value"]["ambiguous"], 0)
+
+    def test_mixed_origin_signature_counts_ambiguous_and_never_target(self):
+        findings = [
+            finding(origin="target"),
+            finding(origin="harness", identifier=2),
+        ]
+        manifest = self.artifact(
+            "manifest.json", campaign_manifest(findings=findings))
+        report = assemble_report(cohort(), self.observations(manifest), self.root)
+        trial = report["trials"][0]
+        self.assertEqual(trial["unique_crash_signatures"]["value"], 1)
+        origins = trial["crash_signature_origins"]["value"]
+        self.assertEqual(origins["ambiguous"], 1)
+        self.assertEqual(origins["target"], 0)
+        self.assertEqual(origins["harness"], 0)
+
+    def test_retained_origins_are_counted_per_layer(self):
+        findings = [
+            finding(signature=TARGET_SIGNATURE, origin="target"),
+            finding(signature=HARNESS_SIGNATURE, origin="harness", identifier=2),
+            finding(signature=RUNTIME_SIGNATURE, origin="runtime", identifier=3),
+            finding(signature=UNKNOWN_SIGNATURE, origin="unknown", identifier=4),
+        ]
+        manifest = self.artifact(
+            "manifest.json", campaign_manifest(findings=findings))
+        report = assemble_report(cohort(), self.observations(manifest), self.root)
+        trial = report["trials"][0]
+        self.assertEqual(trial["unique_crash_signatures"]["value"], 4)
+        origins = trial["crash_signature_origins"]["value"]
+        self.assertEqual(origins["target"], 1)
+        self.assertEqual(origins["harness"], 1)
+        self.assertEqual(origins["runtime"], 1)
+        self.assertEqual(origins["unknown"], 1)
+        self.assertEqual(origins["ambiguous"], 0)
+
+    def test_signature_counts_carry_a_nonempty_limitation_note(self):
+        manifest = self.artifact(
+            "manifest.json", campaign_manifest(findings=[finding()]))
+        report = assemble_report(cohort(), self.observations(manifest), self.root)
+        limitation = report["trials"][0]["crash_signature_origins"]["value"]["limitation"]
+        self.assertIsInstance(limitation, str)
+        self.assertTrue(limitation.strip())
+
+    def test_timing_and_replay_stay_unavailable_even_with_crash_evidence(self):
+        manifest = self.artifact(
+            "manifest.json", campaign_manifest(findings=[finding()]))
+        report = assemble_report(cohort(), self.observations(manifest), self.root)
+        trial = report["trials"][0]
+        for field in ("time_to_first_crash_secs", "crash_reproducibility"):
+            measurement = trial[field]
+            self.assertEqual(measurement["status"], "unavailable", field)
+            self.assertIsInstance(measurement["reason"], str)
+            self.assertTrue(measurement["reason"].strip(), field)
+
+    def test_crash_metrics_without_manifest_stay_unavailable_not_zero(self):
+        for outcome in ("failed", "unavailable"):
+            with self.subTest(outcome=outcome):
+                report = assemble_report(cohort(), self.observations(
+                    outcome=outcome, reason="qualification stopped"), self.root)
+                trial = report["trials"][0]
+                self.assertEqual(trial["unique_crash_signatures"]["status"],
+                                 "unavailable")
+                self.assertEqual(trial["crash_signature_origins"]["status"],
+                                 "unavailable")
+                self.assertEqual(trial["time_to_first_crash_secs"]["status"],
+                                 "unavailable")
+                self.assertEqual(trial["crash_reproducibility"]["status"],
+                                 "unavailable")
 
     def test_project_condition_summary_keeps_failed_and_unmeasured_samples(self):
         plan = cohort()
@@ -324,6 +436,81 @@ class ReportTests(unittest.TestCase):
         plan["conditions"][0]["model_cost_budget_usd"] = 1e308
         with self.assertRaisesRegex(ValueError, "total_cost"):
             assemble_report(plan, self.observations(manifest), self.root)
+
+    def test_report_refuses_schema_two_manifests(self):
+        value = campaign_manifest(findings=[finding()])
+        value["body"]["schema_version"] = 2
+        manifest = self.artifact("manifest.json", value)
+        with self.assertRaisesRegex(ValueError, "schema_version"):
+            assemble_report(cohort(), self.observations(manifest), self.root)
+
+    def test_report_refuses_malformed_finding_evidence(self):
+        missing_origin = {key: value for key, value in finding().items()
+                          if key != "origin"}
+        unknown_field = dict(finding(), duplicate_stack="1" * 64)
+        cases = [
+            ("origin", [finding(origin="mystery")]),
+            ("stack_signature", [finding(signature="z" * 64)]),
+            ("reproducer_sha256", [dict(finding(), reproducer_sha256="not-a-digest")]),
+            ("crash_id", [finding(crash_id="not-a-uuid", identifier=2)]),
+            ("minimized", [dict(finding(), minimized="yes")]),
+            ("campaign finding", [missing_origin]),
+            ("campaign finding", [unknown_field]),
+            ("duplicate crash id", [finding(), finding()]),
+            ("duplicate crash id", [
+                finding(crash_id=numbered_crash_id(1).replace("-", "")), finding()]),
+            ("campaign finding", [{"unrelated": True}]),
+        ]
+        for pattern, findings in cases:
+            with self.subTest(pattern=pattern):
+                value = campaign_manifest(findings=findings)
+                manifest = self.artifact("manifest.json", value)
+                with self.assertRaisesRegex(ValueError, pattern):
+                    assemble_report(cohort(), self.observations(manifest), self.root)
+        not_a_list = campaign_manifest(findings={"sig": "target"})
+        manifest = self.artifact("manifest.json", not_a_list)
+        with self.assertRaisesRegex(ValueError, "findings"):
+            assemble_report(cohort(), self.observations(manifest), self.root)
+
+    def test_signature_distributions_summarize_conditions_and_projects(self):
+        plan = cohort()
+        second_project = copy.deepcopy(plan["projects"][0])
+        second_project["id"] = "other-parser"
+        plan["projects"].append(second_project)
+        second_trial = copy.deepcopy(plan["trials"][0])
+        second_trial["id"] = "other-parser-ranked-1"
+        second_trial["project_id"] = "other-parser"
+        plan["trials"].append(second_trial)
+        findings = [
+            finding(signature=TARGET_SIGNATURE, origin="target"),
+            finding(signature=HARNESS_SIGNATURE, origin="target", identifier=2),
+            finding(signature=HARNESS_SIGNATURE, origin="harness", identifier=3),
+        ]
+        observations = self.observations(
+            self.artifact("manifest.json", campaign_manifest(findings=findings)))
+        observations["trials"].append({
+            "id": second_trial["id"],
+            "outcome": "failed",
+            "reason": "qualification stopped before campaign",
+            "campaign_manifest": None,
+            "function_coverage": None,
+        })
+
+        report = assemble_report(plan, observations, self.root)
+
+        condition = report["conditions"]["ranked-libfuzzer"]
+        self.assertEqual(condition["unique_crash_signatures"],
+                         {"samples": [2], "unavailable": 1, "median": 2})
+        self.assertEqual(condition["unique_crash_signatures_median"], 2)
+        self.assertEqual(condition["target_origin_signatures"],
+                         {"samples": [1], "unavailable": 1, "median": 1})
+        parser_summary = report["projects"]["parser"]["ranked-libfuzzer"]
+        self.assertEqual(parser_summary["unique_crash_signatures"]["samples"], [2])
+        self.assertEqual(parser_summary["target_origin_signatures"]["samples"], [1])
+        other = report["projects"]["other-parser"]["ranked-libfuzzer"]
+        self.assertEqual(other["unique_crash_signatures"],
+                         {"samples": [], "unavailable": 1, "median": None})
+        self.assertEqual(other["target_origin_signatures"]["unavailable"], 1)
 
 
 if __name__ == "__main__":

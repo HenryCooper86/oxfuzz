@@ -128,6 +128,19 @@ Presentation defaults are advisory only;
 the service preflight is the authoritative enforcement boundary for direct,
 scheduled, agent, CLI, REST, and desktop runs.
 
+New userspace campaigns accept an optional explicit `u64` campaign seed.
+`run`, `campaign`, and `fuzz` expose it as `--seed`; omission preserves the
+run-ID-derived value. A multi-iteration campaign uses the explicit value for
+every iteration. The value is retained unchanged in the run configuration,
+execution-input manifest, and campaign evidence. Replay always uses its
+retained seed and rejects a CLI override. libFuzzer uses the low 32 bits of
+the selected value; a zero result requests randomization and is refused before
+staging or provider calls. Seeds differing only in higher bits select the same
+libFuzzer RNG state.
+Smoke qualification keeps its independent run-derived seed. honggfuzz records
+the selection but has no fixed-RNG option; neither fixed seeds nor retained
+inputs guarantee deterministic campaign outcomes.
+
 Engine-backed corpus operations use the same preflight. AFL++ coverage pruning
 validates its 600-second operation budget and libFuzzer corpus minimization
 validates its 300-second budget before reading or staging workspace artifacts.

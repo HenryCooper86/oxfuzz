@@ -164,6 +164,7 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
             duration,
             cpus,
             timeout_ms,
+            seed,
             resume,
             sanitizer,
             cmplog,
@@ -180,6 +181,7 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
                 resume,
                 sanitizer.as_deref(),
                 cmplog,
+                seed,
                 replay.as_deref(),
             )
             .await?;
@@ -208,6 +210,7 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
             resume,
             sanitizer,
             cmplog,
+            seed,
             iterations,
             ai,
         }) => {
@@ -221,6 +224,7 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
                 resume,
                 sanitizer.as_deref(),
                 cmplog,
+                seed,
                 iterations,
                 ai,
             )

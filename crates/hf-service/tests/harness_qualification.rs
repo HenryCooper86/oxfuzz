@@ -614,6 +614,7 @@ async fn campaign_rejects_a_binary_changed_after_promotion() {
             None,
             None,
             None,
+            None,
             &|_| {},
         )
         .await
@@ -699,6 +700,7 @@ async fn campaign_run_rejects_an_unpromoted_active_revision() {
             "parse_entry",
             EngineKind::LibFuzzer,
             60,
+            None,
             None,
             None,
             None,

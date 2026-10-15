@@ -209,6 +209,8 @@ async fn approved_campaign_survives_service_process_loss() {
             "qualification_parse",
             EngineKind::LibFuzzer,
             10,
+            // The recovery probe carries no per-run overrides, seed included.
+            None,
             None,
             None,
             None,
@@ -395,6 +397,8 @@ async fn live_campaign_child() {
             "qualification_parse",
             EngineKind::LibFuzzer,
             120,
+            // The recovery probe carries no per-run overrides, seed included.
+            None,
             None,
             None,
             None,

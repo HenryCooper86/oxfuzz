@@ -73,6 +73,11 @@ pub struct FuzzRequest<'a> {
     /// the companion, and the campaign drives it via `-c`. A promoted harness
     /// without a recorded companion is not reused for a `CmpLog` request.
     pub cmplog: bool,
+    /// Per-invocation campaign seed (the CLI's `--seed`); `None` lets every
+    /// iteration's run derive its own run-id seed. An explicit seed survives
+    /// every campaign iteration and the persisted run config; engines
+    /// without a fixed-seed knob record it without dispatching a flag.
+    pub seed: Option<u64>,
 }
 
 /// A stage boundary of the onboarding pipeline, reported through the stage
@@ -201,6 +206,16 @@ impl ServiceContainer {
     ) -> Result<FuzzOutcome, ClassifiedError> {
         let project = request.project;
         let engine = request.engine;
+        super::resolve_fuzzing_run(
+            engine,
+            request.duration_secs,
+            None,
+            request.timeout_ms,
+            request.resume,
+            request.sanitizer,
+            request.cmplog.then_some(true),
+            request.seed,
+        )?;
 
         // Stage 1: discover targets and pick one (explicit or top-ranked).
         on_stage(FuzzStage::Discover { lang: request.lang });
@@ -357,6 +372,7 @@ impl ServiceContainer {
                 request.resume,
                 request.sanitizer,
                 request.cmplog.then_some(true),
+                request.seed,
                 request.iterations,
                 on_progress,
             )

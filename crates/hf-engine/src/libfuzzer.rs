@@ -24,11 +24,6 @@ pub fn build_run_args(
     if duration > 0 {
         args.push(format!("-max_total_time={duration}"));
     }
-    // `-seed=N` pins the RNG seed; libFuzzer's default (-seed=0) is "generate
-    // a random seed", so the flag is emitted only when a seed was recorded.
-    if let Some(seed) = cfg.seed {
-        args.push(format!("-seed={seed}"));
-    }
     // Leak detection is left at libFuzzer's default (on). Memory leaks are a bug
     // class the triage pipeline explicitly ingests (`leak-*` artifacts), and the
     // smoke step also runs with leak detection on, so a run must match. A caller
@@ -72,6 +67,15 @@ pub fn build_run_args(
     // the container. An `env K=V` wrapper here would be a second home for one
     // meaning and would displace the fuzzer program from argv[0].
     args.extend(cfg.extra_args.iter().cloned());
+    // `-seed=N` pins the RNG seed; libFuzzer's default (-seed=0) is "generate
+    // a random seed", so the flag is emitted only when a seed was recorded.
+    // It follows `extra_args` because libFuzzer applies the last occurrence
+    // of a repeated flag: the recorded seed is the reproducibility contract
+    // (what replay re-executes), so the escape hatch must not silently
+    // override it.
+    if let Some(seed) = cfg.seed {
+        args.push(format!("-seed={seed}"));
+    }
     // The explicit per-input timeout is emitted after `extra_args`: libFuzzer
     // applies the last occurrence of a repeated flag, so a configured timeout
     // is never silently overridden by the escape hatch. libFuzzer takes whole

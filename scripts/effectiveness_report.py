@@ -16,6 +16,16 @@ from scripts.effectiveness_benchmark import (
 
 MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
 OUTCOMES = {"completed", "failed", "cancelled", "unavailable"}
+FINDING_ORIGINS = ("target", "harness", "runtime", "unknown")
+SIGNATURE_LIMITATION = (
+    "unique stack signatures are retained crash observations, not confirmed "
+    "independent bugs; origins are persisted attribution, not replay verification")
+TIMING_UNAVAILABLE = (
+    "exact crash discovery timestamps are not retained in campaign evidence; "
+    "the runner's artifact-mtime estimate remains a separate upper bound")
+REPLAY_UNAVAILABLE = (
+    "campaign evidence retains no independent replay results; origins are "
+    "persisted attribution, not replay verification")
 
 
 def unavailable(reason):
@@ -67,11 +77,53 @@ def measured_number(value, name):
     return value
 
 
-def checked_run_id(value):
+def checked_uuid(value, name):
     try:
         return str(uuid.UUID(value))
     except (TypeError, ValueError, AttributeError) as error:
-        raise ValueError("invalid run_id") from error
+        raise ValueError("invalid {}".format(name)) from error
+
+
+def checked_run_id(value):
+    return checked_uuid(value, "run_id")
+
+
+def crash_measurements(findings):
+    """Validate schema-3 findings and count unique signatures per origin.
+
+    Signatures are deduplicated by their normalized digest. A signature the
+    retained evidence attributes to more than one origin is counted as
+    ambiguous only, never as a confirmed target signature.
+    """
+    if not isinstance(findings, list):
+        raise ValueError("campaign manifest findings must be a list")
+    origins_by_signature = {}
+    crash_ids = set()
+    for finding in findings:
+        record(finding, "campaign finding", (
+            "crash_id", "stack_signature", "reproducer_sha256", "minimized", "origin",
+        ))
+        crash_id = checked_uuid(finding["crash_id"], "crash_id")
+        if crash_id in crash_ids:
+            raise ValueError("duplicate crash id: {}".format(finding["crash_id"]))
+        crash_ids.add(crash_id)
+        digest(finding["stack_signature"], "stack_signature", HEX_64)
+        digest(finding["reproducer_sha256"], "reproducer_sha256", HEX_64)
+        if type(finding["minimized"]) is not bool:
+            raise ValueError("minimized must be a boolean")
+        if finding["origin"] not in FINDING_ORIGINS:
+            raise ValueError(
+                "origin must be one of {}".format(", ".join(FINDING_ORIGINS)))
+        origins_by_signature.setdefault(finding["stack_signature"], set()).add(
+            finding["origin"])
+    counts = {origin: 0 for origin in FINDING_ORIGINS}
+    counts["ambiguous"] = 0
+    for origins in origins_by_signature.values():
+        if len(origins) == 1:
+            counts[next(iter(origins))] += 1
+        else:
+            counts["ambiguous"] += 1
+    return len(origins_by_signature), counts
 
 
 def validate_manifest(manifest, trial, project, condition, outcome):
@@ -79,7 +131,7 @@ def validate_manifest(manifest, trial, project, condition, outcome):
         raise ValueError("campaign_manifest needs a body")
     digest(manifest.get("manifest_sha256"), "manifest_sha256", HEX_64)
     body = manifest["body"]
-    if body.get("schema_version") != 2:
+    if body.get("schema_version") != 3:
         raise ValueError("unsupported campaign manifest schema_version")
     run_id = checked_run_id(body.get("run_id"))
     expected = {
@@ -117,7 +169,8 @@ def validate_manifest(manifest, trial, project, condition, outcome):
     total_cost = compute_cost + model_cost
     if not math.isfinite(total_cost):
         raise ValueError("total_cost_usd must be finite")
-    return run_id, binary_sha256, edges, total_cost
+    unique_signatures, origin_counts = crash_measurements(body.get("findings"))
+    return run_id, binary_sha256, edges, total_cost, unique_signatures, origin_counts
 
 
 def function_entry(evidence, run_id, binary_sha256, symbol):
@@ -152,14 +205,21 @@ def function_entry(evidence, run_id, binary_sha256, symbol):
     return {"status": "not_observed", "limitation": "zero counters do not prove non-entry"}
 
 
-def metric_distribution(trials, field):
-    samples = sorted(trial[field]["value"] for trial in trials
+def metric_distribution(trials, field, value_of=None):
+    if value_of is None:
+        def value_of(trial):
+            return trial[field]["value"]
+    samples = sorted(value_of(trial) for trial in trials
                      if trial[field]["status"] == "available")
     return {
         "samples": samples,
         "unavailable": len(trials) - len(samples),
         "median": statistics.median(samples) if samples else None,
     }
+
+
+def target_origin_count(trial):
+    return trial["crash_signature_origins"]["value"]["target"]
 
 
 def summarize_members(members):
@@ -169,6 +229,10 @@ def summarize_members(members):
                      for name in sorted(OUTCOMES)},
         "peak_edges": metric_distribution(members, "peak_edges"),
         "total_cost_usd": metric_distribution(members, "total_cost_usd"),
+        "unique_crash_signatures": metric_distribution(
+            members, "unique_crash_signatures"),
+        "target_origin_signatures": metric_distribution(
+            members, "crash_signature_origins", value_of=target_origin_count),
     }
 
 
@@ -217,7 +281,11 @@ def assemble_report(cohort, observations, root):
             "reason": entry["reason"],
             "peak_edges": unavailable("no terminal campaign manifest"),
             "total_cost_usd": unavailable("no terminal campaign manifest"),
+            "unique_crash_signatures": unavailable("no terminal campaign manifest"),
+            "crash_signature_origins": unavailable("no terminal campaign manifest"),
             "selected_function_entry": unavailable("no exact function coverage export"),
+            "time_to_first_crash_secs": unavailable(TIMING_UNAVAILABLE),
+            "crash_reproducibility": unavailable(REPLAY_UNAVAILABLE),
         }
         reference = entry["campaign_manifest"]
         if reference is None:
@@ -227,12 +295,17 @@ def assemble_report(cohort, observations, root):
             if outcome == "unavailable":
                 raise ValueError("unavailable trial cannot have campaign evidence")
             manifest = read_artifact(root, reference)
-            run_id, binary_sha256, edges, cost = validate_manifest(
+            (run_id, binary_sha256, edges, cost, unique_signatures,
+             origin_counts) = validate_manifest(
                 manifest, trial, projects[trial["project_id"]],
                 conditions[trial["condition_id"]], outcome,
             )
             result["peak_edges"] = available(edges)
             result["total_cost_usd"] = available(cost)
+            result["unique_crash_signatures"] = available(unique_signatures)
+            origin_value = dict(origin_counts)
+            origin_value["limitation"] = SIGNATURE_LIMITATION
+            result["crash_signature_origins"] = available(origin_value)
             function_reference = entry["function_coverage"]
             function_evidence = (read_artifact(root, function_reference)
                                  if function_reference is not None else None)
@@ -246,6 +319,10 @@ def assemble_report(cohort, observations, root):
         summary = summarize_members(members)
         summary["peak_edges_median"] = summary["peak_edges"]["median"]
         summary["total_cost_usd_median"] = summary["total_cost_usd"]["median"]
+        summary["unique_crash_signatures_median"] = summary[
+            "unique_crash_signatures"]["median"]
+        summary["target_origin_signatures_median"] = summary[
+            "target_origin_signatures"]["median"]
         condition_reports[condition_id] = summary
     project_reports = {
         project_id: {

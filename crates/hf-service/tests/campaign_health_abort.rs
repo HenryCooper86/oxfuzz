@@ -174,6 +174,7 @@ async fn aborting_the_run_caller_stops_future_health_ticks_and_repairs_the_run()
                     None,
                     None,
                     None,
+                    None,
                     &|_| {},
                 )
                 .await

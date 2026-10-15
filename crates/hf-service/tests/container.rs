@@ -439,6 +439,7 @@ async fn admitted_runtime_failure_awaits_final_health_without_replacing_the_erro
                     None,
                     None,
                     None,
+                    None,
                     &|_| {},
                 )
                 .await
@@ -612,6 +613,7 @@ async fn cancel_run_stops_an_in_flight_fuzz_run() {
                     target,
                     hf_core::engine::EngineKind::LibFuzzer,
                     60,
+                    None,
                     None,
                     None,
                     None,
@@ -791,6 +793,7 @@ async fn terminal_status_write_failure_still_awaits_monitor_cleanup() {
                     target,
                     hf_core::engine::EngineKind::LibFuzzer,
                     60,
+                    None,
                     None,
                     None,
                     None,
@@ -988,6 +991,7 @@ async fn a_wall_clock_killed_run_persists_the_coverage_it_measured() {
             None,
             None,
             None,
+            None,
             &|_| {},
         )
         .await
@@ -1096,6 +1100,7 @@ async fn background_start_returns_a_durable_cancellable_run_id() {
             target.to_owned(),
             hf_core::engine::EngineKind::LibFuzzer,
             60,
+            None,
             Arc::new(|_, _| {}),
             status_sink,
         )
@@ -1218,6 +1223,7 @@ async fn completed_run_merges_discoveries_without_writable_live_corpus() {
             target,
             hf_core::engine::EngineKind::LibFuzzer,
             1,
+            None,
             None,
             None,
             None,
@@ -1654,6 +1660,7 @@ async fn corpus_minimize_uses_the_promoted_revision_and_an_isolated_snapshot() {
     let resolved = hf_service::config::resolve_fuzzing_run(
         Some(hf_core::engine::EngineKind::LibFuzzer),
         Some(300),
+        None,
         None,
         None,
         None,
@@ -3099,6 +3106,7 @@ async fn run_persists_the_input_timeout_and_surfaces_hangs() {
             target,
             hf_core::engine::EngineKind::LibFuzzer,
             60,
+            None,
             None,
             None,
             None,

@@ -296,6 +296,14 @@ pub(crate) struct RunArgs {
     /// Overrides the configured `fuzzing.default_timeout_ms` for this run.
     #[arg(long, conflicts_with = "replay")]
     pub(crate) timeout_ms: Option<u64>,
+    /// RNG seed for this run (libFuzzer `-seed=`, `afl-fuzz -s`). Omitted, the
+    /// service derives a fresh nonzero seed from the run id. Zero is refused
+    /// for libFuzzer, which reads `-seed=0` as "generate a random seed".
+    /// Engines without a fixed-seed knob (honggfuzz) record the seed without
+    /// dispatching an invented flag. A fixed seed does not promise
+    /// deterministic coverage.
+    #[arg(long, conflicts_with = "replay")]
+    pub(crate) seed: Option<u64>,
     /// AFL++ only: continue the most recent compatible AFL++ session (same
     /// target and harness binary) instead of cold-starting -- the prior output
     /// tree is copied into this run's staging and afl-fuzz resumes it in place
@@ -413,6 +421,14 @@ pub(crate) struct CampaignArgs {
     /// `fuzzing.default_timeout_ms`.
     #[arg(long)]
     pub(crate) timeout_ms: Option<u64>,
+    /// RNG seed applied to every iteration of this campaign (libFuzzer
+    /// `-seed=`, `afl-fuzz -s`). Omitted, each iteration's run derives a
+    /// fresh nonzero seed from its run id. Zero is refused for libFuzzer,
+    /// which reads `-seed=0` as "generate a random seed"; honggfuzz records
+    /// the seed without a flag. A fixed seed does not promise deterministic
+    /// coverage.
+    #[arg(long)]
+    pub(crate) seed: Option<u64>,
     /// AFL++ only: continue the most recent compatible AFL++ session (same
     /// target and harness binary) instead of cold-starting. Applies to every
     /// iteration: iteration N continues the output tree iteration N-1
@@ -481,6 +497,14 @@ pub(crate) struct FuzzArgs {
     /// `fuzzing.default_timeout_ms`.
     #[arg(long)]
     pub(crate) timeout_ms: Option<u64>,
+    /// RNG seed applied to every iteration of the campaign stage (libFuzzer
+    /// `-seed=`, `afl-fuzz -s`). Omitted, each iteration's run derives a
+    /// fresh nonzero seed from its run id. Zero is refused for libFuzzer,
+    /// which reads `-seed=0` as "generate a random seed"; honggfuzz records
+    /// the seed without a flag. A fixed seed does not promise deterministic
+    /// coverage.
+    #[arg(long)]
+    pub(crate) seed: Option<u64>,
     /// Sanitizer for a freshly built harness, and the asserted sanitizer of a
     /// reused promoted one: `address` (default) or `undefined` (`UBSan`,
     /// halt-on-error). A promoted harness built with the other sanitizer is
@@ -1629,7 +1653,8 @@ mod fuzz_cli_tests {
             duration_secs,
             iterations,
             timeout_ms,
-            sanitizer,
+            seed,
+            sanitizer: _,
             ai,
             cmplog,
             switches:
@@ -1650,7 +1675,7 @@ mod fuzz_cli_tests {
         assert_eq!(duration_secs, 60);
         assert_eq!(iterations, 3);
         assert_eq!(timeout_ms, None);
-        assert_eq!(sanitizer, None, "no flag: the config default applies");
+        assert_eq!(seed, None, "no seed: each run derives its own");
         assert!(!resume, "resume is opt-in");
         assert!(!cmplog, "cmplog is opt-in");
         assert_eq!(ai, AiOption::Auto);
@@ -2055,6 +2080,107 @@ mod timeout_cli_tests {
             "fast",
         ])
         .is_err());
+    }
+}
+
+#[cfg(test)]
+mod seed_cli_tests {
+    use clap::Parser as _;
+
+    use super::{Cli, Commands};
+
+    /// 2^63+1: above the JavaScript safe-integer range and above `i64::MAX`.
+    /// The CLI parses argv text straight into `u64`, so every bit survives.
+    const WIDE_SEED: &str = "9223372036854775809";
+
+    #[test]
+    fn run_campaign_and_fuzz_accept_a_seed_and_default_it_to_none() {
+        let parsed = Cli::try_parse_from([
+            "oxfuzz", "run", "/p", "--target", "t", "--engine", "afl++", "--seed", WIDE_SEED,
+        ])
+        .unwrap();
+        let Commands::Run(crate::args::RunArgs { seed, .. }) = parsed.command else {
+            panic!("expected run");
+        };
+        assert_eq!(seed, Some(9_223_372_036_854_775_809));
+
+        let parsed =
+            Cli::try_parse_from(["oxfuzz", "campaign", "/p", "--seed", WIDE_SEED]).unwrap();
+        let Commands::Campaign(crate::args::CampaignArgs { seed, .. }) = parsed.command else {
+            panic!("expected campaign");
+        };
+        assert_eq!(seed, Some(9_223_372_036_854_775_809));
+
+        let parsed = Cli::try_parse_from(["oxfuzz", "fuzz", "/p", "--seed", WIDE_SEED]).unwrap();
+        let Commands::Fuzz(crate::args::FuzzArgs { seed, .. }) = parsed.command else {
+            panic!("expected fuzz");
+        };
+        assert_eq!(seed, Some(9_223_372_036_854_775_809));
+
+        // Omitted: the service derives a fresh nonzero seed from the run id.
+        let parsed =
+            Cli::try_parse_from(["oxfuzz", "run", "/p", "--target", "t", "--engine", "afl++"])
+                .unwrap();
+        let Commands::Run(crate::args::RunArgs { seed, .. }) = parsed.command else {
+            panic!("expected run");
+        };
+        assert_eq!(seed, None);
+
+        let parsed = Cli::try_parse_from(["oxfuzz", "campaign", "/p"]).unwrap();
+        let Commands::Campaign(crate::args::CampaignArgs { seed, .. }) = parsed.command else {
+            panic!("expected campaign");
+        };
+        assert_eq!(seed, None);
+
+        let parsed = Cli::try_parse_from(["oxfuzz", "fuzz", "/p"]).unwrap();
+        let Commands::Fuzz(crate::args::FuzzArgs { seed, .. }) = parsed.command else {
+            panic!("expected fuzz");
+        };
+        assert_eq!(seed, None);
+    }
+
+    #[test]
+    fn replay_conflicts_with_an_explicit_seed() {
+        // Replay re-executes the recorded run configuration, deterministic
+        // seed included; a CLI seed cannot combine with it.
+        assert!(Cli::try_parse_from([
+            "oxfuzz", "run", "/p", "--replay", "a1b2c3d4", "--seed", "7"
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn seed_rejects_non_numeric_and_out_of_range_values() {
+        for bad in ["fast", "-1", "18446744073709551616"] {
+            assert!(
+                Cli::try_parse_from([
+                    "oxfuzz",
+                    "run",
+                    "/p",
+                    "--target",
+                    "t",
+                    "--engine",
+                    "libfuzzer",
+                    "--seed",
+                    bad,
+                ])
+                .is_err(),
+                "seed must reject {bad:?}"
+            );
+        }
+        // u64::MAX itself is a valid seed.
+        assert!(Cli::try_parse_from([
+            "oxfuzz",
+            "run",
+            "/p",
+            "--target",
+            "t",
+            "--engine",
+            "libfuzzer",
+            "--seed",
+            "18446744073709551615",
+        ])
+        .is_ok());
     }
 }
 

@@ -61,6 +61,16 @@ class CohortValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported engine"):
             validate_cohort(value)
 
+    def test_seed_stays_within_u64_and_does_not_randomize_libfuzzer(self):
+        for seed in (True, -1, 0, 2 ** 32, 2 ** 63, 2 ** 64):
+            value = cohort()
+            value["trials"][0]["seed"] = seed
+            with self.subTest(seed=seed), self.assertRaisesRegex(ValueError, "seed"):
+                validate_cohort(value)
+        value = cohort()
+        value["trials"][0]["seed"] = 2 ** 64 - 1
+        self.assertEqual(validate_cohort(value)["trials"][0]["seed"], 2 ** 64 - 1)
+
     def test_rejects_a_trial_with_an_unsupported_language_engine_pair(self):
         value = cohort()
         value["projects"][0]["language"] = "rust"

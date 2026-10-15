@@ -415,6 +415,7 @@ async fn discover_harness_run_triage_end_to_end() {
             None,
             None,
             None,
+            None,
             &|_| {},
         )
         .await
@@ -575,6 +576,7 @@ async fn full_pipeline_minimizes_the_crash_it_found() {
             "parse_value",
             EngineKind::LibFuzzer,
             1,
+            None,
             None,
             None,
             None,

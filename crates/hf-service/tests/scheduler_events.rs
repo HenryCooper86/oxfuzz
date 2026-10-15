@@ -571,6 +571,7 @@ async fn run_completed_fires_matching_event_schedule() {
             None,
             None,
             None,
+            None,
             1,
         )
         .await
@@ -618,6 +619,7 @@ async fn run_failed_fires_matching_event_schedule() {
             EngineKind::LibFuzzer,
             TargetLanguage::C,
             1,
+            None,
             None,
             None,
             None,

@@ -285,6 +285,7 @@ pub(crate) async fn cmd_run(
     resume: bool,
     sanitizer: Option<&str>,
     cmplog: bool,
+    seed: Option<u64>,
     replay: Option<&str>,
 ) -> anyhow::Result<()> {
     let on_progress = crate::commands::status::printing_sink();
@@ -332,6 +333,9 @@ pub(crate) async fn cmd_run(
             resume,
             sanitizer,
             cmplog,
+            // An explicit --seed pins the run's RNG; omitted, the service
+            // derives a fresh nonzero seed from the run id.
+            seed,
         )
         .map_err(anyhow::Error::msg)?;
         let duration_secs = resolved.duration_secs;
@@ -362,6 +366,7 @@ pub(crate) async fn cmd_run(
                         resume,
                         sanitizer,
                         cmplog,
+                        seed,
                         &on_progress,
                     )
                     .await
