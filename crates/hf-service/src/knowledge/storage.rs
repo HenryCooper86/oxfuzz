@@ -112,6 +112,7 @@ mod tests {
 
     #[test]
     fn indexing_and_deletion_require_exclusive_project_ownership() {
+        let _environment = super::super::workspace_test_gate().blocking_lock();
         let _guard = super::super::test_guard();
         let project = tempfile::tempdir().unwrap();
         let lease = KnowledgeOperation::acquire(project.path()).unwrap();

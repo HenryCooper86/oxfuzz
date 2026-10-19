@@ -611,6 +611,22 @@ fn test_guard() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// The shared workspace-environment gate. Knowledge tests are "root readers":
+/// `docs_dir` (and therefore the cache key `current_index` uses) re-reads
+/// process-global `HF_WORKSPACE_DIR` on every call, so a test that publishes
+/// under a frozen `KnowledgeOperation::docs` key and then searches via a freshly
+/// recomputed `docs_dir` can miss the index if a sibling fixture flips the
+/// variable in between. Root readers must therefore share synchronization with
+/// those fixtures (mirrors semgrep's `lifecycle_test_lock`).
+///
+/// Async tests acquire it with `lock().await`; sync tests use `blocking_lock`
+/// (which is safe on a non-runtime harness thread but panics inside a runtime,
+/// so it must not be used by the `#[tokio::test]` cases).
+#[cfg(test)]
+fn workspace_test_gate() -> &'static tokio::sync::Mutex<()> {
+    crate::ServiceContainer::workspace_environment_test_gate()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -668,6 +684,7 @@ mod tests {
 
     #[test]
     fn index_and_search_finds_code_symbol() {
+        let _environment = super::workspace_test_gate().blocking_lock();
         let _guard = super::test_guard();
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -689,6 +706,7 @@ mod tests {
 
     #[test]
     fn source_labels_are_slash_separated_on_every_host() {
+        let _environment = super::workspace_test_gate().blocking_lock();
         let _guard = super::test_guard();
         // The chunk source label is presented to users and matched against
         // queries, so a nested file must be labeled `sub/inner.c` even where
@@ -730,6 +748,7 @@ mod tests {
 
     #[test]
     fn stats_after_index_reports_counts_time_and_config() {
+        let _environment = super::workspace_test_gate().blocking_lock();
         let _guard = super::test_guard();
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -757,6 +776,7 @@ mod tests {
 
     #[test]
     fn stats_counts_ingested_documents_on_disk() {
+        let _environment = super::workspace_test_gate().blocking_lock();
         let _guard = super::test_guard();
         // A unique tempdir project gives a unique (and isolated) docs dir.
         let dir = tempfile::tempdir().unwrap();
@@ -788,6 +808,7 @@ mod tests {
 
     #[test]
     fn ensured_search_indexes_on_demand() {
+        let _environment = super::workspace_test_gate().blocking_lock();
         let _guard = super::test_guard();
         // Fresh project, never indexed (mirrors a server restarted between an
         // index call and a search). The plain lookup is empty; the ensured
@@ -829,6 +850,7 @@ mod tests {
 
     #[test]
     fn configured_chunk_limit_reaches_project_index() {
+        let _environment = super::workspace_test_gate().blocking_lock();
         let _guard = super::test_guard();
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -854,6 +876,7 @@ mod tests {
 
     #[test]
     fn ingested_documents_are_indexed_and_searchable() {
+        let _environment = super::workspace_test_gate().blocking_lock();
         let _guard = super::test_guard();
         // A unique tempdir project gives a unique (and isolated) docs dir.
         let dir = tempfile::tempdir().unwrap();
@@ -883,6 +906,7 @@ mod tests {
 
     #[test]
     fn harness_related_context_surfaces_call_sites_and_excludes_own_definition() {
+        let _environment = super::workspace_test_gate().blocking_lock();
         let _guard = super::test_guard();
         let dir = tempfile::tempdir().unwrap();
         index_fixture_project(dir.path());
@@ -933,6 +957,7 @@ mod tests {
 
     #[test]
     fn harness_prompt_carries_related_context_when_indexed() {
+        let _environment = super::workspace_test_gate().blocking_lock();
         let _guard = super::test_guard();
         let dir = tempfile::tempdir().unwrap();
         index_fixture_project(dir.path());
@@ -953,6 +978,7 @@ mod tests {
 
     #[test]
     fn triage_related_context_finds_target_references() {
+        let _environment = super::workspace_test_gate().blocking_lock();
         let _guard = super::test_guard();
         let dir = tempfile::tempdir().unwrap();
         index_fixture_project(dir.path());
