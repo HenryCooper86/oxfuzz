@@ -5,7 +5,10 @@ import { Button } from "../ui/Button";
 import { Input } from "../ui/Input";
 import { Select } from "../ui/Select";
 import type { Provider } from "../settings/providerTypes";
-import { resolveWizardProvider, wizardProviderPreset, WIZARD_PROVIDER_TYPES, type WizardProviderInput } from "./wizardProvider";
+import { resolveWizardProvider, type WizardProviderInput } from "./wizardProvider";
+import { providerPreset, PROVIDER_OPTIONS } from "../../lib/providerPresets";
+
+const WIZARD_PROVIDER_OPTIONS = PROVIDER_OPTIONS.filter(option => option.value !== "azure");
 
 export function ProviderSetup({ onContinue }: { onContinue: () => void }) {
   const { t } = useI18n();
@@ -34,7 +37,7 @@ export function ProviderSetup({ onContinue }: { onContinue: () => void }) {
 
 function NewProviderSetup({ onContinue }: { onContinue: () => void }) {
   const { t } = useI18n();
-  const initial = wizardProviderPreset("openai");
+  const initial = providerPreset("openai");
   const [input, setInput] = useState<WizardProviderInput>({ providerType: "openai", apiKey: "", model: initial.model, baseUrl: initial.baseUrl });
   const [probe, setProbe] = useState<"idle" | "testing" | "passed">("idle");
   const [error, setError] = useState<string | null>(null);
@@ -43,7 +46,7 @@ function NewProviderSetup({ onContinue }: { onContinue: () => void }) {
   const active = useRef(true);
   const writing = useRef(false);
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
-  const preset = wizardProviderPreset(input.providerType);
+  const preset = providerPreset(input.providerType);
   const keyOptional = preset.keyOptional;
   const canTest = input.model.trim() !== "" && input.baseUrl.trim() !== "" && (keyOptional || input.apiKey.trim() !== "");
   function update(patch: Partial<WizardProviderInput>) {
@@ -78,7 +81,7 @@ function NewProviderSetup({ onContinue }: { onContinue: () => void }) {
     <details><summary className="cursor-pointer text-sm">{t("gui.keyHelpTitle")}</summary><p className="text-sm">{t("gui.keyHelp")}</p><p className="text-sm">{t("gui.modelHelp")}</p></details>
     <div>
       <label htmlFor="setup-provider" className="block text-sm mb-1">{t("setup.provider")}</label>
-      <Select id="setup-provider" value={input.providerType} disabled={saving} options={WIZARD_PROVIDER_TYPES} className="w-full" onChange={providerType => { const next = wizardProviderPreset(providerType); update({ providerType, apiKey: "", model: next.model, baseUrl: next.baseUrl }); }} />
+      <Select id="setup-provider" value={input.providerType} disabled={saving} options={WIZARD_PROVIDER_OPTIONS} className="w-full" onChange={providerType => { const next = providerPreset(providerType); update({ providerType, apiKey: "", model: next.model, baseUrl: next.baseUrl }); }} />
       {preset.helpKey && <p className="mt-1 mb-0 text-sm text-text-secondary">{t(preset.helpKey)}</p>}
     </div>
     <div><label htmlFor="setup-key" className="block text-sm mb-1">{t("setup.apiKey")}{keyOptional ? ` (${t("setup.optional")})` : ""}</label>

@@ -11,12 +11,19 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ### Added
 
-- Getting-started provider presets for DeepSeek, Kimi API and Coding
-  subscriptions, and GLM API and Coding Plans on BigModel.cn and Z.AI.
+- Shared getting-started and Settings provider presets for DeepSeek, Kimi API
+  and Coding subscriptions, and GLM API and Coding Plans on BigModel.cn and Z.AI.
   Dedicated coding endpoints, editable models, and English/Chinese credential
   guidance distinguish subscriptions from pay-as-you-go API accounts.
 
 ### Fixed
+
+- Settings now includes the Kimi and GLM provider choices previously offered
+  only in setup. Saved compatible providers recover their branded selection
+  from the endpoint without changing custom models or URLs.
+- Changing a provider preset clears its prior credentials and headers. Browser
+  saves preserve hidden credentials only when provider type and base URL are
+  unchanged, preventing implicit reuse against a different service.
 
 - Harness controls keep long qualified targets inside their selector and align
   engine, generator, and language fields at narrow panel widths. Truncated

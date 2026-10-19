@@ -19,36 +19,13 @@ import { getTransport } from "../../lib";
 import { useI18n } from "../../i18nContext";
 import { isSecretHeaderName } from "../../lib/secretFields";
 import { normalizeProvider, type Provider } from "./providerTypes";
+import { applyProviderPreset, providerPreset, providerPresetId, PROVIDER_OPTIONS } from "../../lib/providerPresets";
 
 export type { Provider } from "./providerTypes";
 
-const PROVIDER_TYPES = [
-  { value: "openai", label: "OpenAI (Response API)" },
-  { value: "openai-compat", label: "OpenAI-compatible (vLLM, LiteLLM…)" },
-  { value: "anthropic", label: "Anthropic" },
-  { value: "deepseek", label: "DeepSeek" },
-  { value: "gemini", label: "Gemini" },
-  { value: "ollama", label: "Ollama (local)" },
-  { value: "ollama-cloud", label: "Ollama Cloud" },
-  { value: "azure", label: "Azure OpenAI" },
-];
 
 const PROMPT_BASED = ["openai-compat", "custom", "ollama", "ollama-cloud"];
 
-const BASE_URL_PLACEHOLDERS: Record<string, string> = {
-  openai: "https://api.openai.com/v1",
-  "openai-compat": "e.g. https://api.example.ai/v1",
-  anthropic: "https://api.anthropic.com/v1",
-  deepseek: "https://api.deepseek.com/v1",
-  gemini: "https://generativelanguage.googleapis.com/v1beta",
-  ollama: "http://localhost:11434",
-  "ollama-cloud": "https://ollama.com",
-  azure: "https://{resource}.openai.azure.com/openai",
-};
-
-function emptyProvider(): Provider {
-  return normalizeProvider({});
-}
 
 export function ProvidersTab({
   value,
@@ -65,7 +42,7 @@ export function ProvidersTab({
     onChange(providers.map((p, idx) => (idx === i ? { ...p, ...patch } : p)));
   }
   function add() {
-    onChange([...providers, emptyProvider()]);
+    onChange([...providers, normalizeProvider({})]);
     setActive(providers.length);
   }
   function duplicate() {
@@ -273,6 +250,8 @@ function ProviderForm({ provider, onChange }: { provider: Provider; onChange: (p
   const effectiveMode = provider.tool_calling_mode || (PROMPT_BASED.includes(provider.provider_type) ? "prompt_based" : "native");
   const isNative = effectiveMode === "native";
   const isAzure = provider.provider_type === "azure";
+  const selection = providerPresetId(provider);
+  const preset = providerPreset(selection);
   const numOrNull = (s: string): number | null => (s.trim() === "" ? null : Number(s));
 
   return (
@@ -294,13 +273,14 @@ function ProviderForm({ provider, onChange }: { provider: Provider; onChange: (p
             <span className="inline-flex items-center justify-center shrink-0" style={{ width: "18px", height: "18px", color: "var(--text-primary)" }}>
               <ProviderBrandIcon type={provider.icon || provider.provider_type} size={17} />
             </span>
-            <Select value={provider.provider_type} onChange={(v) => onChange({ provider_type: v })} options={PROVIDER_TYPES} className="w-[230px]" />
+            <Select ariaLabel={t("settings.providers.providerType")} value={selection} onChange={(v) => onChange(applyProviderPreset(provider, v))} options={PROVIDER_OPTIONS} className="w-[230px]" />
           </div>
         </SettingsItem>
         <SettingsItem title={t("settings.providers.icon")} description={t("settings.providers.iconDesc")}>
           <Input className="w-[200px]" value={provider.icon ?? ""} onChange={(e) => onChange({ icon: e.target.value || null })} placeholder={t("settings.providers.autoFromType")} mono />
         </SettingsItem>
       </SettingsGroup>
+      {preset.helpKey && <p className="mt-0 mb-4 text-sm text-text-secondary">{t(preset.helpKey)}</p>}
 
       <SettingsGroup title={t("settings.providers.toolCalling")}>
         <SettingsItem
@@ -318,17 +298,17 @@ function ProviderForm({ provider, onChange }: { provider: Provider; onChange: (p
 
       <SettingsGroup title={t("settings.providers.connection")}>
         <SettingsItem title={t("settings.providers.modelId")}>
-          <Input className="w-[260px]" value={provider.model} onChange={(e) => onChange({ model: e.target.value })} placeholder="e.g. gpt-4o" mono />
+          <Input aria-label={t("settings.providers.modelId")} className="w-[260px]" value={provider.model} onChange={(e) => onChange({ model: e.target.value })} placeholder="e.g. gpt-4o" mono />
         </SettingsItem>
         <SettingsItem title={t("settings.providers.baseUrl")}>
-          <Input className="w-[260px]" value={provider.base_url ?? ""} onChange={(e) => onChange({ base_url: e.target.value || null })} placeholder={BASE_URL_PLACEHOLDERS[provider.provider_type] ?? "Default"} mono />
+          <Input aria-label={t("settings.providers.baseUrl")} className="w-[260px]" value={provider.base_url ?? ""} onChange={(e) => onChange({ base_url: e.target.value || null })} placeholder={preset.baseUrl || (isAzure ? "https://{resource}.openai.azure.com/openai" : "e.g. https://api.example.ai/v1")} mono />
         </SettingsItem>
         <SettingsItem
           title={t("settings.providers.apiKey")}
           description={provider.api_key_configured && !provider.api_key ? t("settings.providers.hiddenValuePreserved") : undefined}
         >
           <div className="relative w-[260px]">
-            <Input autoComplete="new-password" className="pr-8" type={showKey ? "text" : "password"} value={provider.api_key ?? ""} onChange={(e) => onChange({ api_key: e.target.value || null })} placeholder={provider.api_key_configured && !provider.api_key ? t("settings.providers.configuredUnchanged") : t("settings.providers.directKeyOptional")} spellCheck={false} />
+            <Input aria-label={t("settings.providers.apiKey")} autoComplete="new-password" className="pr-8" type={showKey ? "text" : "password"} value={provider.api_key ?? ""} onChange={(e) => onChange({ api_key: e.target.value || null })} placeholder={provider.api_key_configured && !provider.api_key ? t("settings.providers.configuredUnchanged") : t("settings.providers.directKeyOptional")} spellCheck={false} />
             <button
               type="button"
               onClick={() => setShowKey((s) => !s)}
@@ -345,7 +325,7 @@ function ProviderForm({ provider, onChange }: { provider: Provider; onChange: (p
           title={t("settings.providers.apiKeyEnv")}
           description={provider.api_key_env_configured && !provider.api_key_env ? t("settings.providers.hiddenValuePreserved") : undefined}
         >
-          <Input className="w-[260px]" value={provider.api_key_env ?? ""} onChange={(e) => onChange({ api_key_env: e.target.value || null })} placeholder={provider.api_key_env_configured && !provider.api_key_env ? t("settings.providers.configuredUnchanged") : "e.g. OPENAI_API_KEY"} mono />
+          <Input aria-label={t("settings.providers.apiKeyEnv")} className="w-[260px]" value={provider.api_key_env ?? ""} onChange={(e) => onChange({ api_key_env: e.target.value || null })} placeholder={provider.api_key_env_configured && !provider.api_key_env ? t("settings.providers.configuredUnchanged") : "e.g. OPENAI_API_KEY"} mono />
         </SettingsItem>
         <SettingsItem title={t("settings.providers.httpProtocol")}>
           <Select

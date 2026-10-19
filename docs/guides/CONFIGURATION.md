@@ -20,6 +20,24 @@ locations are overridden with documented environment variables such as
 Unsupported legacy section files are rejected by the config API instead of
 being accepted as apparently editable settings.
 
+## Provider presets and credentials
+
+Setup and **Settings -> Providers** share the same service/plan presets.
+Kimi and GLM coding subscriptions use dedicated endpoints rather than their
+pay-as-you-go API endpoints. The saved `provider_type` remains the supported
+adapter (`openai-compat` for these services); the endpoint determines which
+service/plan the Settings selector displays. Selecting a preset sets its
+endpoint, model, and tool-calling mode without changing provider ID, routing
+tags, or limits. Editing a custom endpoint does not rewrite it on reload.
+
+A preset change clears the previous API key, environment-variable reference,
+and custom headers. Enter credentials for the selected service before testing
+or saving. Browser responses omit stored credentials; the service restores
+those omitted values only when both `provider_type` and `base_url` are
+unchanged. Editing the model or other metadata at the same endpoint retains
+hidden credentials. Changing the endpoint or adapter does not silently reuse
+them. Native desktop saves continue to write the explicitly edited values.
+
 ## Config directory resolution
 
 Every entry point (CLI, web server, desktop app) resolves the config directory

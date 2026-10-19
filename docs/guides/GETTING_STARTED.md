@@ -131,13 +131,21 @@ belong in **Settings -> Providers**.
 Public API accounts and coding subscriptions use different credentials or
 endpoints. Choose the matching API or coding-plan option for Kimi or GLM
 (BigModel.cn or Z.AI), rather than pasting a subscription key into a public API
-configuration. DeepSeek is also available directly in the wizard.
-The model remains editable; expand **Advanced connection settings** to edit the
-base URL.
+configuration. DeepSeek and these Kimi/GLM choices are available in both setup
+and **Settings -> Providers -> Provider Type**. In Settings, choosing a preset
+fills its model and endpoint and clears the previous credentials and headers;
+enter the new service's key before testing or saving. Existing provider IDs
+and routing settings are retained.
+
+The model and base URL remain editable. Setup puts the base URL under
+**Advanced connection settings**; Settings shows it directly. Saved compatible
+providers display their matching preset when using its standard endpoint.
+Custom endpoints remain editable as **OpenAI-compatible**.
 
 A chat subscription alone does not imply API access. Coding-plan quotas,
-eligible clients, and permitted usage are set by the provider; a failed
-connection test does not save the provider. Use your client's real identity:
+eligible clients, and permitted usage are set by the provider. Setup requires a
+successful connection test before saving; Settings uses **Save Changes**.
+Use your client's real identity:
 [Kimi's integration guidance](https://www.kimi.com/code/docs/en/)
 explicitly prohibits impersonating another tool.
 

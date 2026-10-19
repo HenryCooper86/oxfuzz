@@ -2968,6 +2968,13 @@ fn merge_provider_secrets(incoming: &mut [ProviderConfig], existing: &[ProviderC
         let Some(prior) = existing.get(provider.id.as_str()) else {
             continue;
         };
+        // Hidden credentials belong to one upstream connection. A preset
+        // switch that changes the backend type or endpoint must not silently
+        // reattach the previous provider's secrets; only edits that keep the
+        // same connection preserve them.
+        if provider.provider_type != prior.provider_type || provider.base_url != prior.base_url {
+            continue;
+        }
         if provider.api_key.as_deref().is_none_or(str::is_empty) {
             provider.api_key.clone_from(&prior.api_key);
         }
@@ -2985,6 +2992,10 @@ fn merge_provider_secrets(incoming: &mut [ProviderConfig], existing: &[ProviderC
 
 /// Persist provider edits from a redacted presentation DTO without erasing
 /// existing credentials or secret headers omitted by that DTO.
+///
+/// Preservation only applies while the provider keeps the same upstream
+/// connection (backend type and base URL); a switch to a different provider
+/// preset does not inherit the prior connection's credentials.
 ///
 /// Trusted local presentations that need to clear a credential explicitly use
 /// [`set_providers`] instead. An explicit non-empty incoming secret replaces the
@@ -3426,6 +3437,112 @@ cpus = 2\n";
         )];
         let mut incoming = vec![parse(
             "[[providers]]\nid = \"primary\"\nprovider_type = \"openai\"\nmodel = \"new\"\napi_key = \"\"\napi_key_env = \"\"\n[providers.headers]\nX-Public = \"new\"\n",
+        )];
+
+        merge_provider_secrets(&mut incoming, &existing);
+
+        assert_eq!(incoming[0].model, "new");
+        assert_eq!(incoming[0].api_key.as_deref(), Some("secret"));
+        assert_eq!(incoming[0].api_key_env.as_deref(), Some("HF_PROVIDER_KEY"));
+        assert_eq!(
+            incoming[0].headers.get("X-Secret").map(String::as_str),
+            Some("hidden")
+        );
+        assert_eq!(
+            incoming[0].headers.get("X-Public").map(String::as_str),
+            Some("new")
+        );
+    }
+
+    #[test]
+    fn provider_type_change_does_not_restore_prior_secrets() {
+        let parse = |raw: &str| {
+            toml::from_str::<hf_provider::ProviderPoolConfig>(raw)
+                .unwrap()
+                .providers
+                .into_iter()
+                .next()
+                .unwrap()
+        };
+        let existing = vec![parse(
+            "[[providers]]\nid = \"primary\"\nprovider_type = \"openai\"\nmodel = \"old\"\nbase_url = \"https://api.openai.com/v1\"\napi_key = \"secret\"\napi_key_env = \"HF_PROVIDER_KEY\"\n[providers.headers]\nX-Secret = \"hidden\"\n",
+        )];
+        let mut incoming = vec![parse(
+            "[[providers]]\nid = \"primary\"\nprovider_type = \"deepseek\"\nmodel = \"new\"\nbase_url = \"https://api.openai.com/v1\"\napi_key = \"replacement\"\n",
+        )];
+        let mut cleared = incoming.clone();
+        cleared[0].api_key = None;
+        merge_provider_secrets(&mut cleared, &existing);
+        assert!(cleared[0].api_key.is_none());
+
+        merge_provider_secrets(&mut incoming, &existing);
+
+        assert_eq!(incoming[0].model, "new");
+        assert_eq!(incoming[0].api_key.as_deref(), Some("replacement"));
+        assert!(
+            incoming[0].api_key_env.is_none(),
+            "prior env key must not be reattached after a backend-type change"
+        );
+        assert!(
+            !incoming[0].headers.contains_key("X-Secret"),
+            "prior auth header must not be reattached after a backend-type change"
+        );
+    }
+
+    #[test]
+    fn provider_base_url_change_does_not_restore_prior_secrets() {
+        let parse = |raw: &str| {
+            toml::from_str::<hf_provider::ProviderPoolConfig>(raw)
+                .unwrap()
+                .providers
+                .into_iter()
+                .next()
+                .unwrap()
+        };
+        let existing = vec![parse(
+            "[[providers]]\nid = \"primary\"\nprovider_type = \"openai-compat\"\nmodel = \"old\"\nbase_url = \"https://api.openai.com/v1\"\napi_key = \"secret\"\napi_key_env = \"HF_PROVIDER_KEY\"\n[providers.headers]\nX-Secret = \"hidden\"\n",
+        )];
+        let mut incoming = vec![parse(
+            "[[providers]]\nid = \"primary\"\nprovider_type = \"openai-compat\"\nmodel = \"new\"\nbase_url = \"https://api.moonshot.cn/v1\"\napi_key = \"replacement\"\n[providers.headers]\nX-New = \"fresh\"\n",
+        )];
+        let mut cleared = incoming.clone();
+        cleared[0].api_key = None;
+        merge_provider_secrets(&mut cleared, &existing);
+        assert!(cleared[0].api_key.is_none());
+
+        merge_provider_secrets(&mut incoming, &existing);
+
+        assert_eq!(incoming[0].model, "new");
+        assert_eq!(incoming[0].api_key.as_deref(), Some("replacement"));
+        assert!(
+            incoming[0].api_key_env.is_none(),
+            "prior env key must not be reattached after an endpoint change"
+        );
+        assert_eq!(
+            incoming[0].headers.get("X-New").map(String::as_str),
+            Some("fresh")
+        );
+        assert!(
+            !incoming[0].headers.contains_key("X-Secret"),
+            "prior auth header must not be reattached after an endpoint change"
+        );
+    }
+
+    #[test]
+    fn provider_same_endpoint_update_preserves_hidden_secrets() {
+        let parse = |raw: &str| {
+            toml::from_str::<hf_provider::ProviderPoolConfig>(raw)
+                .unwrap()
+                .providers
+                .into_iter()
+                .next()
+                .unwrap()
+        };
+        let existing = vec![parse(
+            "[[providers]]\nid = \"primary\"\nprovider_type = \"openai-compat\"\nmodel = \"old\"\nbase_url = \"https://api.deepseek.com/v1\"\napi_key = \"secret\"\napi_key_env = \"HF_PROVIDER_KEY\"\n[providers.headers]\nX-Secret = \"hidden\"\n",
+        )];
+        let mut incoming = vec![parse(
+            "[[providers]]\nid = \"primary\"\nprovider_type = \"openai-compat\"\nmodel = \"new\"\nbase_url = \"https://api.deepseek.com/v1\"\napi_key = \"\"\napi_key_env = \"\"\n[providers.headers]\nX-Public = \"new\"\n",
         )];
 
         merge_provider_secrets(&mut incoming, &existing);

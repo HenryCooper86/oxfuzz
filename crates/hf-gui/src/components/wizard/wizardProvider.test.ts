@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { resolveWizardProvider, WIZARD_PROVIDER_PRESETS } from "./wizardProvider";
+import { resolveWizardProvider } from "./wizardProvider";
+import { PROVIDER_PRESETS } from "../../lib/providerPresets";
 
 describe("resolveWizardProvider", () => {
   it("persists a native Ollama provider from defaults with no API key", () => {
@@ -10,7 +11,7 @@ describe("resolveWizardProvider", () => {
     expect(p?.base_url).toBe("http://localhost:11434");
     expect(p?.base_url).not.toContain("/v1");
     expect(p?.api_key).toBeNull();
-    expect(p?.model).toBe(WIZARD_PROVIDER_PRESETS.ollama.model);
+    expect(p?.model).toBe(PROVIDER_PRESETS.ollama.model);
   });
 
   it("honors an explicit Ollama base URL the user typed", () => {
@@ -30,7 +31,7 @@ describe("resolveWizardProvider", () => {
     expect(p?.provider_type).toBe("ollama-cloud");
     expect(p?.base_url).toBe("https://ollama.com");
     expect(p?.api_key).toBe("sk-cloud");
-    expect(p?.model).toBe(WIZARD_PROVIDER_PRESETS["ollama-cloud"].model);
+    expect(p?.model).toBe(PROVIDER_PRESETS["ollama-cloud"].model);
   });
 
   it("keeps the selected provider type instead of guessing from the URL", () => {
