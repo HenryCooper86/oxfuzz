@@ -9,6 +9,8 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ## Unreleased
 
+## 0.6.7 - 2026-10-19
+
 ### Fixed
 
 - The command palette keeps keyboard focus inside its dialog, restores the
