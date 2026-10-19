@@ -126,6 +126,9 @@ export function SettingsView({ onBack, onRunWizard }: { onBack?: () => void; onR
   const [saving, setSaving] = useState(false);
   const loadRequestRef = useRef(0);
   const activeSectionRef = useRef<SectionId>("general");
+  // Bumped on every user edit of the active draft (form or raw), so save() can
+  // tell whether a newer edit arrived while its write was in flight.
+  const draftRevisionRef = useRef(0);
   const { toast } = useToast();
   const confirm = useConfirm();
 
@@ -240,17 +243,18 @@ export function SettingsView({ onBack, onRunWizard }: { onBack?: () => void; onR
       requestId: draft.requestId,
       sectionId: active,
     };
+    const revision = draftRevisionRef.current;
     try {
       if (m === "raw") {
         const nextRaw = await serializeValue(value, token.sectionId);
-        if (!isCurrentRequest(token)) return;
+        if (!isCurrentRequest(token) || draftRevisionRef.current !== revision) return;
         setDraft((current) => isMatchingSettingsLoad(current, token)
           && current.loadedSection === token.sectionId
           ? { ...current, raw: nextRaw }
           : current);
       } else {
         const nextValue = await parseToValue(raw, token.sectionId);
-        if (!isCurrentRequest(token)) return;
+        if (!isCurrentRequest(token) || draftRevisionRef.current !== revision) return;
         setDraft((current) => isMatchingSettingsLoad(current, token)
           && current.loadedSection === token.sectionId
           ? { ...current, value: nextValue }
@@ -263,6 +267,7 @@ export function SettingsView({ onBack, onRunWizard }: { onBack?: () => void; onR
   }
 
   function onFormChange(next: unknown) {
+    draftRevisionRef.current += 1;
     setDraft((current) => current.loadedSection === active
       && current.requestedSection === active
       ? { ...current, value: next, dirty: true }
@@ -301,6 +306,7 @@ export function SettingsView({ onBack, onRunWizard }: { onBack?: () => void; onR
       requestId: draft.requestId,
       sectionId: targetSection.id,
     };
+    const revision = draftRevisionRef.current;
     setSaving(true);
     try {
       const T = getTransport();
@@ -326,7 +332,10 @@ export function SettingsView({ onBack, onRunWizard }: { onBack?: () => void; onR
         await T.invoke("write_config", { name: targetSection.config, content });
       }
       toast({ title: t("settings.saved"), description: t("settings.savedDesc", { section: t(`settings.tab.${targetSection.id}`) }), variant: "success" });
-      if (isCurrentRequest(token)) {
+      // The clicked snapshot is always persisted; skip the reload only when a
+      // newer edit arrived while saving, so that edit stays in the draft (dirty)
+      // instead of being overwritten by the just-saved value.
+      if (isCurrentRequest(token) && draftRevisionRef.current === revision) {
         await load(targetSection);
       }
     } catch (e) {
@@ -447,6 +456,7 @@ export function SettingsView({ onBack, onRunWizard }: { onBack?: () => void; onR
                 value={raw}
                 onChange={(e) => {
                   const nextRaw = e.target.value;
+                  draftRevisionRef.current += 1;
                   setDraft((current) => current.loadedSection === active
                     && current.requestedSection === active
                     ? { ...current, raw: nextRaw, dirty: true }

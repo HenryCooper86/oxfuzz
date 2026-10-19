@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import * as Dialog from "@radix-ui/react-dialog";
 import { Search } from "lucide-react";
 import type { ViewType } from "../types";
 import { useI18n } from "../i18nContext";
@@ -17,6 +18,7 @@ const VIEWS: ViewType[] = [
   "artifacts",
   "reports",
   "runs",
+  "changes",
   "audit",
   "agents",
   "skills",
@@ -37,26 +39,23 @@ export function CommandPalette({ onNavigate }: { onNavigate: (view: ViewType) =>
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const activeItem = useRef<HTMLButtonElement | null>(null);
+  const previousFocus = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
+        if (!open) {
+          previousFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+          setQuery("");
+          setActive(0);
+        }
         setOpen((o) => !o);
       }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
-
-  useEffect(() => {
-    if (!open) return;
-    queueMicrotask(() => {
-      setQuery("");
-      setActive(0);
-    });
-    // Focus after the element mounts.
-    requestAnimationFrame(() => inputRef.current?.focus());
   }, [open]);
 
   const items = useMemo(() => {
@@ -66,7 +65,9 @@ export function CommandPalette({ onNavigate }: { onNavigate: (view: ViewType) =>
     );
   }, [query, t]);
 
-  if (!open) return null;
+  useEffect(() => {
+    if (open) activeItem.current?.scrollIntoView({ block: "nearest" });
+  }, [open, active, items]);
 
   const choose = (view: ViewType) => {
     onNavigate(view);
@@ -74,33 +75,34 @@ export function CommandPalette({ onNavigate }: { onNavigate: (view: ViewType) =>
   };
 
   return (
-    <div
-      className="fixed inset-0 z-9999 flex items-start justify-center"
-      style={{ background: "rgba(0,0,0,0.4)", backdropFilter: "blur(2px)", paddingTop: "12vh" }}
-      onClick={() => setOpen(false)}
-    >
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label={t("palette.ariaLabel")}
-        className="surface-card flex flex-col overflow-hidden"
-        style={{ width: "min(560px, 92vw)", padding: 0, boxShadow: "var(--shadow-lg)", animation: "dialogContentIn 0.14s ease" }}
-        onClick={(e) => e.stopPropagation()}
-        onKeyDown={(e) => {
-          if (e.key === "Escape") setOpen(false);
-          else if (e.key === "ArrowDown") {
-            e.preventDefault();
-            setActive((a) => Math.min(items.length - 1, a + 1));
-          } else if (e.key === "ArrowUp") {
-            e.preventDefault();
-            setActive((a) => Math.max(0, a - 1));
-          } else if (e.key === "Enter" && items[active]) {
-            e.preventDefault();
-            choose(items[active].view);
-          }
-        }}
+    <Dialog.Root open={open} onOpenChange={setOpen}>
+      <Dialog.Portal>
+        <Dialog.Overlay
+          className="fixed inset-0 z-9999"
+          style={{ background: "rgba(0,0,0,0.4)", backdropFilter: "blur(2px)" }}
+        />
+        <Dialog.Content
+          aria-describedby={undefined}
+          className="surface-card fixed z-9999 flex flex-col overflow-hidden"
+          style={{ width: "min(560px, 92vw)", left: 0, right: 0, margin: "0 auto", top: "12vh", padding: 0, boxShadow: "var(--shadow-lg)", animation: "dialogContentIn 0.14s ease" }}
+          onOpenAutoFocus={(event) => { event.preventDefault(); inputRef.current?.focus(); }}
+          onCloseAutoFocus={(event) => { event.preventDefault(); previousFocus.current?.focus(); }}
+          onKeyDown={(e) => {
+            if (e.target !== inputRef.current) return;
+            if (e.key === "ArrowDown") {
+              e.preventDefault();
+              setActive((a) => Math.max(0, Math.min(items.length - 1, a + 1)));
+            } else if (e.key === "ArrowUp") {
+              e.preventDefault();
+              setActive((a) => Math.max(0, a - 1));
+            } else if (e.key === "Enter" && items[active]) {
+              e.preventDefault();
+              choose(items[active].view);
+            }
+          }}
       >
         <div className="flex items-center gap-2 border-b border-border" style={{ padding: "10px 14px" }}>
+          <Dialog.Title className="sr-only">{t("palette.ariaLabel")}</Dialog.Title>
           <Search size={15} className="text-text-muted" />
           <input
             ref={inputRef}
@@ -122,6 +124,7 @@ export function CommandPalette({ onNavigate }: { onNavigate: (view: ViewType) =>
             items.map((item, i) => (
               <button
                 key={item.view}
+                ref={i === active ? activeItem : undefined}
                 onMouseEnter={() => setActive(i)}
                 onClick={() => choose(item.view)}
                 className="flex items-center w-full text-left text-sm transition-colors"
@@ -138,7 +141,8 @@ export function CommandPalette({ onNavigate }: { onNavigate: (view: ViewType) =>
             ))
           )}
         </div>
-      </div>
-    </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }

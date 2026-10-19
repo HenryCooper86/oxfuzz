@@ -1,6 +1,6 @@
 // Transport singleton -- selects Tauri or HTTP based on environment.
 
-import { isTauriEnvironment, type Transport } from "./transport";
+import { isTauriEnvironment, usesHttpBackend, type Transport } from "./transport";
 import { createTauriTransport } from "./tauriTransport";
 import { createHttpTransport } from "./httpTransport";
 
@@ -8,7 +8,7 @@ let transport: Transport | null = null;
 
 export function getTransport(): Transport {
   if (!transport) {
-    if (import.meta.env.VITE_BACKEND === "http" || !isTauriEnvironment()) {
+    if (usesHttpBackend()) {
       transport = createHttpTransport();
     } else {
       transport = createTauriTransport();
@@ -17,7 +17,7 @@ export function getTransport(): Transport {
   return transport;
 }
 
-export { isTauriEnvironment };
+export { isTauriEnvironment, usesHttpBackend };
 export type { Transport, UnlistenFn } from "./transport";
 export { pickFolder, pickFile, openExternal } from "./platform";
 export { emitDataChanged, onDataChanged } from "./events";

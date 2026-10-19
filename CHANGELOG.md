@@ -9,6 +9,39 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ## Unreleased
 
+### Fixed
+
+- The command palette keeps keyboard focus inside its dialog, restores the
+  opening control on dismissal, and scrolls keyboard-selected results into view.
+  Change Review is included, and Enter on a tab-focused result opens that result
+  rather than the separate search highlight.
+- Removed obsolete browser-native file-dialog and silent report-save transport
+  fallbacks. Browser path selection uses the server-path picker; unsupported
+  native commands now report their absence instead of pretending to succeed.
+- Settings saves persist the clicked snapshot without reloading over newer
+  in-flight edits. Those edits remain visible and unsaved until the next Save.
+- Provider connection-test results disappear when their configuration changes;
+  late success and failure replies no longer describe an edited provider.
+- Report saves preserve newer editor changes and selections while pending,
+  retain the first saved ID, and exclude duplicate requests from one editor.
+- FORM/RAW settings conversions no longer replace edits made while conversion
+  is pending or switch the operator into a stale editor.
+- Run progress is recorded against the launched project's identity, even when
+  another project was previously selected or becomes active before completion.
+- Browser report updates preserve the saved owner, including its original path
+  spelling, unless an explicit replacement is approved. Content edits cannot
+  save a redaction marker as ownership or take over a report outside approved
+  project roots.
+- Concurrent report saves use independent, exclusively owned staging files
+  before atomic replacement; failed writes remove their own staging files.
+  Public storage errors expose only the I/O category, with private paths kept
+  in diagnostic logs.
+- Native file dialogs and external links remain native when a desktop host uses
+  the HTTP backend; report editing follows the selected backend's owner policy.
+- Standalone Harness registers the project it actually qualifies or hydrates,
+  preserving its project-scoped progress. Passive late replies do not restore
+  removed recents, and hydration admission no longer loops on rerender.
+
 ## 0.6.6 - 2026-10-15
 
 ### Fixed

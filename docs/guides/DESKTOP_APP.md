@@ -33,6 +33,11 @@ Opening a specialist page expands its navigation group. Help and Settings
 remain available at the bottom. The workflow's **Next** button opens the
 current stage; starting work still requires that stage's action and approvals.
 
+Use **Cmd-K** on macOS or **Ctrl-K** to open the command palette, including
+Change Review. Type to filter, use arrow keys to select a visible result, and
+press Enter to open it. Tab stays within the palette; Escape closes it and
+returns focus to the control that opened it.
+
 ### A campaign, end to end
 
 **0. Confirm readiness and the next operator action.** The Dashboard summarizes
@@ -59,6 +64,13 @@ drafts a harness, compiles it in the sandbox, runs bounded smoke qualification,
 and prepares a seed corpus. You then review and explicitly promote that exact
 revision before any full campaign can start. Regeneration invalidates the prior
 promotion.
+
+Standalone Harness progress belongs to the project shown in its path field.
+Choosing a folder, starting qualification, or loading a matching retained harness
+registers that project without switching another project's target selection.
+Removing it from recents discards its cached progress; a late retained-harness
+reply does not restore the removed entry. An explicit new action can register it
+again.
 
 ![Harness -- promoted revision and five-step sandbox qualification flow](../screenshots/harness.png)
 
@@ -334,6 +346,13 @@ owning project and applies the exact run filter with all dispositions visible.
 **Open project reports** opens the owning project's report tools without
 generating or publishing anything.
 
+In **Dashboard → Reports**, **Save draft** stores the clicked revision. Edits
+made while saving remain in the editor for another save, and selecting a
+different report does not switch back when the earlier save finishes. Browser
+content edits retain the report's saved project, even when another project is
+active. Editing the **Project** field explicitly requests reassignment; the
+server must approve both the existing owner and any nonempty replacement.
+
 **Review retained evidence.** The Artifacts view collects persisted crash
 reproducers and corpus inputs across the selected project in one place. Reports,
 run history, policy audit, and evidence export provide the wider audit trail.
@@ -386,6 +405,12 @@ LLM providers, enabled fuzzing engines, run defaults, sandboxed campaign limits,
 storage cleanup, and external integrations. Mandatory sandboxing, blocked
 fuzzer networking, and human promotion before full campaigns are displayed as
 enforced guarantees rather than switches.
+
+**Save Changes** persists the values present when you clicked it. If you edit
+again while that save is pending, the newer values stay in the editor and the
+Save button remains enabled; save again to persist them. A provider connection
+test describes only the configuration that was tested. Editing that provider
+clears its result, including replies that arrive after the edit.
 
 ![Fuzzing settings -- engine availability, campaign limits, and mandatory protections](../screenshots/settings.png)
 

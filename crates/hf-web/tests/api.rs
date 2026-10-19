@@ -1367,31 +1367,57 @@ async fn finding_review_routes_require_an_approved_project_and_do_not_start_work
 
 #[tokio::test]
 async fn report_drafts_can_be_saved_listed_and_deleted() {
-    let dir = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
     // SAFETY: this integration test owns the report-dir override for the
     // duration of the process and uses a unique temp directory.
     unsafe {
-        std::env::set_var("HF_REPORTS_DIR", dir.path());
+        std::env::set_var("HF_REPORTS_DIR", reports.path());
     }
 
-    let (status, saved) = post_json(
-        "/reports/save",
-        serde_json::json!({
-            "title": "Parser campaign",
-            "project": "/tmp/project",
-            "target": "parse_packet",
-            "status": "Draft",
-            "content": "# Parser campaign\n\nFinding details."
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
+    // The draft names an owner the router actually approves: `/reports/save`
+    // authorizes an explicit project against the web project policy, so the
+    // owner must be a real directory inside that policy's roots.
+    let project = tempfile::tempdir().unwrap();
+    let security =
+        hf_web::WebSecurityConfig::new(None, true, Vec::new(), vec![project.path().to_path_buf()])
+            .unwrap();
+    let app = hf_web::router::build_with_state_and_security(
+        hf_web::router::AppState::new(hf_service::ServiceContainer::stubbed()),
+        security,
+    );
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/reports/save")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "title": "Parser campaign",
+                        "project": project.path(),
+                        "target": "parse_packet",
+                        "status": "Draft",
+                        "content": "# Parser campaign\n\nFinding details."
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let saved: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let id = saved["id"].as_str().unwrap();
     assert_eq!(saved["title"], "Parser campaign");
+    assert_eq!(saved["project"], "<redacted-path>");
 
-    allow_open_dev_mode();
-    let app = hf_web::router::build();
     let resp = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/reports")
@@ -1404,12 +1430,22 @@ async fn report_drafts_can_be_saved_listed_and_deleted() {
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .unwrap();
-    let reports: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(reports.as_array().map(Vec::len), Some(1));
-    assert_eq!(reports[0]["id"], id);
+    let listing: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(listing.as_array().map(Vec::len), Some(1));
+    assert_eq!(listing[0]["id"], id);
 
-    let (status, _) = post_json("/reports/delete", serde_json::json!({ "id": id })).await;
-    assert_eq!(status, StatusCode::OK);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/reports/delete")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({ "id": id }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]

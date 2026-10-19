@@ -184,6 +184,11 @@ export function isTauriEnvironment(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
+/** Whether service operations use HTTP rather than native IPC. */
+export function usesHttpBackend(): boolean {
+  return import.meta.env.VITE_BACKEND === "http" || !isTauriEnvironment();
+}
+
 export interface ReplayReview {
   run_id: string;
   project: string;

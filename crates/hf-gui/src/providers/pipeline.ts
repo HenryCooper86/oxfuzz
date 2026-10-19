@@ -35,8 +35,8 @@ export interface PipelineContextValue {
   currentStage: StageId | null;
   coreStages: CoreStageProgress[];
   isSkipped: (id: StageId) => boolean;
-  markDone: (id: StageId) => void;
-  markSkipped: (id: StageId) => void;
+  markDone: (id: StageId, project?: string) => void;
+  markSkipped: (id: StageId, project?: string) => void;
   reset: () => void;
 }
 

@@ -246,31 +246,29 @@ function ProviderForm({ provider, onChange }: { provider: Provider; onChange: (p
   const { t } = useI18n();
   const [showKey, setShowKey] = useState(false);
   const [testing, setTesting] = useState(false);
-  const [testOk, setTestOk] = useState<boolean | null>(null);
-  const [testMsg, setTestMsg] = useState("");
+  // One probe result bound to the provider snapshot it was started with. The
+  // form derives visibility from the *current* provider reference, so a reply
+  // (or prior result) that targeted an edited provider is never shown — with no
+  // ref or effect, and no timing window for a stale "Connected" to linger.
+  const [probe, setProbe] = useState<{ provider: Provider; ok: boolean; msg: string } | null>(null);
 
   async function test() {
+    const snapshot = provider;
     setTesting(true);
-    setTestOk(null);
-    setTestMsg("");
+    setProbe(null);
     try {
-      const msg = await getTransport().invoke<string>("provider_test", { provider });
-      setTestOk(true);
-      setTestMsg(msg);
+      const msg = await getTransport().invoke<string>("provider_test", { provider: snapshot });
+      setProbe({ provider: snapshot, ok: true, msg });
     } catch (e) {
-      setTestOk(false);
-      // In browser (web) mode the connection test runs only in the desktop app;
-      // surface that plainly instead of a raw "Unsupported command" string.
-      const raw = String(e);
-      setTestMsg(
-        raw.includes("Unsupported command")
-          ? t("settings.providers.testDesktopOnly")
-          : raw,
-      );
+      setProbe({ provider: snapshot, ok: false, msg: String(e) });
     } finally {
       setTesting(false);
     }
   }
+
+  const visibleProbe = probe && probe.provider === provider ? probe : null;
+  const testOk = visibleProbe?.ok ?? null;
+  const testMsg = visibleProbe?.msg ?? "";
 
   const effectiveMode = provider.tool_calling_mode || (PROMPT_BASED.includes(provider.provider_type) ? "prompt_based" : "native");
   const isNative = effectiveMode === "native";

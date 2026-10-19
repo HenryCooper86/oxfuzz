@@ -591,26 +591,8 @@ export function createHttpTransport(options: HttpTransportOptions = {}): Transpo
       }
       const endpoint = COMMAND_MAP[command];
       if (!endpoint) {
-        // Lifecycle/noop commands return undefined in web mode.
-        if (["show_window", "heartbeat_pong", "toggle_devtools", "open_folder_dialog", "open_file_dialog", "save_report"].includes(command)) {
-          if (command === "open_folder_dialog") {
-            // Web fallback: use <input type="file" webkitdirectory>
-            return new Promise((resolve) => {
-              const input = document.createElement("input");
-              input.type = "file";
-              input.webkitdirectory = true;
-              input.onchange = () => {
-                if (input.files && input.files.length > 0) {
-                  const file = input.files[0] as File & { webkitRelativePath?: string };
-                  const path = file.webkitRelativePath?.split("/")[0] ?? "";
-                  resolve(path as T);
-                } else {
-                  resolve(undefined as T);
-                }
-              };
-              input.click();
-            });
-          }
+        // Window lifecycle commands have no browser-side work to perform.
+        if (["show_window", "heartbeat_pong", "toggle_devtools"].includes(command)) {
           return undefined as T;
         }
         // Fail loudly for commands without an HTTP equivalent so callers can

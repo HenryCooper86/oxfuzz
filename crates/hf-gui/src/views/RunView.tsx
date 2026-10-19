@@ -177,9 +177,9 @@ export function RunView({
             engine,
             duration: durationSeconds,
           });
-      markDone("run");
+      markDone("run", project);
       // If the run found no crashes, there is nothing to triage.
-      if (crashes === 0) markSkipped("triage");
+      if (crashes === 0) markSkipped("triage", project);
     } catch {
       // The error is already surfaced in the run output log.
       // `activeEngine` is cleared centrally in RunOutputContext's run paths.

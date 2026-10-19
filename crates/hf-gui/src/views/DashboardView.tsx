@@ -28,7 +28,7 @@ import { FindingProofCard } from "../components/FindingProofCard";
 import { Button, EmptyState, Input, LoadingState, Select, Textarea, ViewHeader } from "../components/ui";
 import { useToast } from "../components/ui/toastContext";
 import { useConfirm } from "../providers/confirm";
-import { getTransport, onDataChanged, emitDataChanged, openExternal, useDefectDojo } from "../lib";
+import { getTransport, onDataChanged, emitDataChanged, openExternal, useDefectDojo, usesHttpBackend } from "../lib";
 import {
   dashboardActionDestination,
   isDashboardActionInteractive,
@@ -83,6 +83,7 @@ interface ReportEditorState {
   id: string | null;
   title: string;
   project: string;
+  projectEdited: boolean;
   target: string;
   status: string;
   content: string;
@@ -140,6 +141,7 @@ function emptyEditor(project: string, target: string, t: TFn): ReportEditorState
     id: null,
     title: target ? t("reports.targetDraftTitle", { target }) : t("reports.untitledDraftTitle"),
     project,
+    projectEdited: true,
     target,
     status: "Draft",
     content: "",
@@ -158,6 +160,9 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
   const [dashboard, setDashboard] = useState<WorkbenchDashboard>(() => emptyDashboard(activeProject, target));
   const [reports, setReports] = useState<ReportDraft[]>([]);
   const [editor, setEditor] = useState<ReportEditorState>(() => emptyEditor(activeProject, target, t));
+  const editorSession = useRef(0);
+  const savePending = useRef(false);
+  const [savingReport, setSavingReport] = useState(false);
   const [system, setSystem] = useState<SystemStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState<string | null>(null);
@@ -277,12 +282,14 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
   }, [activeProject, loadDashboard, reloadReports]);
 
   function selectReport(report: ReportDraft) {
+    editorSession.current += 1;
     setEditor(editorFromReport(report));
     setNotice(null);
     setError(null);
   }
 
   function startBlankReport() {
+    editorSession.current += 1;
     setEditor(emptyEditor(activeProject, target, t));
     setNotice(null);
     setError(null);
@@ -303,12 +310,14 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
         target,
         language: locale,
       });
+      editorSession.current += 1;
       setEditor({
         id: null,
         // Persisted with the draft and shown in the Reports list, so it follows
         // the interface language the body was just composed in.
         title: t("reports.targetDraftTitle", { target }),
         project: activeProject,
+        projectEdited: true,
         target,
         status: "Draft",
         content,
@@ -322,22 +331,33 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
   }
 
   async function saveDraft() {
+    if (savePending.current) return;
+    savePending.current = true;
+    setSavingReport(true);
+    const snapshot = editor;
+    const session = editorSession.current;
     setNotice(null);
     setError(null);
     try {
       const saved = await getTransport().invoke<ReportDraft>("save_report_draft", {
         id: editor.id ?? undefined,
         title: editor.title,
-        project: editor.project,
+        project: !usesHttpBackend() || !editor.id || editor.projectEdited ? editor.project : undefined,
         target: editor.target || null,
         status: editor.status,
         content: editor.content,
       });
-      setEditor(editorFromReport(saved));
+      setEditor((current) => {
+        if (editorSession.current !== session || current.id !== snapshot.id) return current;
+        return current === snapshot ? editorFromReport(saved) : { ...current, id: saved.id };
+      });
       await reloadReports();
       setNotice(t("dashboard.reportSaved"));
     } catch (e) {
       setError(t("dashboard.saveFailed", { error: String(e) }));
+    } finally {
+      savePending.current = false;
+      setSavingReport(false);
     }
   }
 
@@ -351,6 +371,7 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
       // drafts; tell them the listing changed instead of leaving stale rows.
       emitDataChanged();
       const next = await reloadReports();
+      editorSession.current += 1;
       setEditor(next[0] ? editorFromReport(next[0]) : emptyEditor(activeProject, target, t));
       setNotice(t("dashboard.reportDeleted"));
     } catch (e) {
@@ -489,6 +510,7 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
             <ReportStudio
               reports={reports}
               editor={editor}
+              saving={savingReport}
               onEditor={setEditor}
               onSelect={selectReport}
               onBlank={startBlankReport}
@@ -644,6 +666,7 @@ function ReadinessSummary({ readiness }: { readiness: WorkbenchReadiness }) {
 function ReportStudio({
   reports,
   editor,
+  saving,
   onEditor,
   onSelect,
   onBlank,
@@ -653,6 +676,7 @@ function ReportStudio({
 }: {
   reports: ReportDraft[];
   editor: ReportEditorState;
+  saving: boolean;
   onEditor: (next: ReportEditorState) => void;
   onSelect: (report: ReportDraft) => void;
   onBlank: () => void;
@@ -728,7 +752,7 @@ function ReportStudio({
         <div className="grid gap-3" style={{ gridTemplateColumns: "minmax(0, 1fr) minmax(120px, 240px)" }}>
           <label className="flex flex-col gap-1 min-w-0">
             <span className="text-xs text-text-muted">{t("dashboard.labelProject")}</span>
-            <Input value={editor.project} onChange={(e) => onEditor({ ...editor, project: e.target.value })} mono />
+            <Input value={editor.project} onChange={(e) => onEditor({ ...editor, project: e.target.value, projectEdited: true })} mono />
           </label>
           <label className="flex flex-col gap-1">
             <span className="text-xs text-text-muted">{t("dashboard.labelTarget")}</span>
@@ -749,7 +773,7 @@ function ReportStudio({
               <Copy size={13} />
               {t("common.copy")}
             </Button>
-            <Button variant="primary" size="sm" onClick={onSave} disabled={!editor.content.trim() || !editor.title.trim()}>
+            <Button variant="primary" size="sm" onClick={onSave} disabled={saving || !editor.content.trim() || !editor.title.trim()}>
               <Save size={13} />
               {t("common.saveDraft")}
             </Button>
@@ -1491,6 +1515,7 @@ function editorFromReport(report: ReportDraft): ReportEditorState {
     id: report.id,
     title: report.title,
     project: report.project,
+    projectEdited: false,
     target: report.target ?? "",
     status: report.status,
     content: report.content,

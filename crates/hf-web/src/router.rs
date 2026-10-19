@@ -3081,23 +3081,79 @@ struct SaveReportDraftRequest {
     #[serde(default)]
     id: Option<String>,
     title: String,
-    project: String,
+    /// The owning project. Omitted means "keep the owner saved under `id`";
+    /// an explicit value replaces it (an empty string clears it, keeping
+    /// manually authored unowned drafts possible).
+    #[serde(default)]
+    project: Option<String>,
     #[serde(default)]
     target: Option<String>,
     status: String,
     content: String,
 }
 
+/// Save or update one editable report draft over HTTP.
+///
+/// The listing DTO redacts `project`, so a browser cannot resend the owner it
+/// never saw. An update by stable id resolves the saved owner server-side
+/// and authorizes it before anything is written: an omitted project
+/// preserves that saved owner's exact stored spelling, an explicit nonempty
+/// project must itself be a real approved path -- a redaction marker fails
+/// that authorization like any other non-path -- and only an explicit
+/// replacement stores the canonical approved spelling. A new report must
+/// name its owner explicitly.
 async fn save_report_draft(
     State(state): State<AppState>,
     Json(req): Json<SaveReportDraftRequest>,
 ) -> ApiResult<serde_json::Value> {
+    let id = req
+        .id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    // Resolve the stored draft first: an update by id may only touch a
+    // report whose saved owner the web project policy approves, and that
+    // saved owner -- not a client copy -- is what an omitted project
+    // preserves.
+    let stored = match id {
+        Some(id) => Some(hf_service::report_store::report_draft(id).map_err(classified_api_error)?),
+        None => None,
+    };
+    if let Some(draft) = &stored {
+        if !draft.project.is_empty() {
+            // Authorization canonicalizes the saved owner to approve it;
+            // the stored spelling itself is preserved verbatim below, and
+            // publication re-canonicalizes when it executes.
+            approved_project(&state, std::path::Path::new(&draft.project))?;
+        }
+    }
+    let project = match (&stored, req.project.as_deref().map(str::trim)) {
+        // A new report must name its owner explicitly; there is no saved
+        // owner an omitted project could preserve.
+        (None, None) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "project is required for a new report draft".to_owned(),
+                }),
+            ));
+        }
+        // An omitted project preserves the saved owner's exact stored
+        // spelling, including the empty owner of an unowned draft.
+        (Some(draft), None) => draft.project.clone(),
+        // An explicit value replaces the owner: empty clears it, nonempty
+        // must be a real approved path and is stored canonically.
+        (_, Some("")) => String::new(),
+        (_, Some(replacement)) => approved_project(&state, std::path::Path::new(replacement))?
+            .to_string_lossy()
+            .into_owned(),
+    };
     let report = state
         .container
         .save_report_draft(
             req.id,
             &req.title,
-            &req.project,
+            &project,
             req.target.as_deref(),
             &req.status,
             &req.content,

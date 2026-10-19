@@ -22,7 +22,7 @@ to logs, URLs, error bodies, or tracing fields.
 
 Browser cross-origin access is denied except for exact origins in
 `HF_WEB_CORS_ORIGINS`. The default allowlist contains only the standard local
-Vite origins. CORS permits `GET`, `POST`, `PATCH`, `DELETE`, and `OPTIONS`, plus
+Vite origins. CORS permits `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, and `OPTIONS`, plus
 the `Authorization` and `Content-Type` headers; it never uses a wildcard origin. Actual requests
 carrying an unlisted cross-origin `Origin` header are rejected before handler
 execution, so CORS is not treated as response-only CSRF protection.
@@ -72,6 +72,15 @@ its saved owner and binds the approved canonical path before executing the same
 saved-target snapshot. A concurrent edit of the draft cannot replace the
 authorized owner or target. Missing and malformed draft errors do not disclose
 stored paths. Existing publication guardrails still apply.
+
+Report saves distinguish content editing from project reassignment. A new draft
+includes an explicit `project`; an empty string retains support for an unowned,
+manually authored report. An update identifies an existing report by `id` and
+may omit `project` to preserve its saved owner. The server authorizes a saved
+nonempty owner before updating it, and authorizes any nonempty explicit
+replacement against its configured project roots. A browser editor does not
+resubmit an unchanged project value from the redacted DTO. Explicit replacement
+uses an actual approved project path, never a public redaction marker.
 
 Schedule definition lists and create/update/delete responses include only projects
 under the router's approved roots. Exact schedule deletion and enable/disable use

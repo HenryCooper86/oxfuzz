@@ -94,7 +94,7 @@ export function HarnessView({
   stepPrefix?: string;
 }) {
   const { t } = useI18n();
-  const { activeProject, setActiveProject } = useProject();
+  const { activeProject, recentProjects, setActiveProject, addRecent } = useProject();
   const { markDone } = usePipeline();
   const {
     target: selectedTarget,
@@ -203,12 +203,25 @@ export function HarnessView({
 
   async function browse() {
     const path = await pickFolder();
-    if (path) setLocalProject(path);
+    if (path) {
+      setLocalProject(path);
+      addRecent(path);
+    }
   }
 
   const { snapshot: discovery, save: saveDiscovery } = useDiscoveryInventory(project, lang);
   const selectedTargetRef = useRef(selectedTarget);
   selectedTargetRef.current = selectedTarget;
+  // Retain admission across hydration retries; late replies cannot restore a removed project.
+  const registrationRef = useRef<{ project: string; wasInRecents: boolean }>({
+    project,
+    wasInRecents: recentProjects.includes(project),
+  });
+  if (registrationRef.current.project !== project) {
+    registrationRef.current = { project, wasInRecents: recentProjects.includes(project) };
+  } else if (recentProjects.includes(project)) {
+    registrationRef.current.wasInRecents = true;
+  }
 
   // Auto-run discover when project is set.
   useEffect(() => {
@@ -243,6 +256,7 @@ export function HarnessView({
   useEffect(() => {
     let cancelled = false;
     const generation = draftGeneration.current;
+    const registration = registrationRef.current;
     (async () => {
       if (selectionBlocked || !project || !selectedTarget) {
         if (!cancelled) setExisting(null);
@@ -278,23 +292,28 @@ export function HarnessView({
           if (match?.smoke_passed) setSmokeStatus("done");
           // Reflect an already-qualified harness (built in a prior session) in
           // the pipeline so the Progress panel / Workflow don't show it as unfinished.
-          if (match?.smoke_passed) {
-            markDone("harness");
-            markDone("compile");
-            markDone("smoke");
+          if (match && !registration.wasInRecents) {
+            registration.wasInRecents = true;
+            addRecent(project);
           }
-          if (promoted) markDone("approve");
+          if (match?.smoke_passed) {
+            markDone("harness", project);
+            markDone("compile", project);
+            markDone("smoke", project);
+          }
+          if (promoted) markDone("approve", project);
         }
       } catch {
         if (!cancelled && generation === draftGeneration.current) setExisting(null);
       }
     })();
     return () => { cancelled = true; };
-  }, [project, selectedTarget, lang, engine, harness, canUseExisting, selectionBlocked, setCompiled, markDone, reviewRefresh, externalPromotion]);
+  }, [project, selectedTarget, lang, engine, harness, canUseExisting, selectionBlocked, setCompiled, markDone, addRecent, reviewRefresh, externalPromotion]);
 
   async function generateHarness(target: string): Promise<{ draft: HarnessResult; generation: number } | null> {
     if (!isCurrentScope() || !fuzzingSettings || selectionBlocked || buildBlocked) return null;
     const generation = ++draftGeneration.current;
+    addRecent(project);
     const prior = harness?.source ?? null;
     setExternalPromotion(null);
     setHarnessStatus("loading");
@@ -319,7 +338,7 @@ export function HarnessView({
       // Keep the prior revision so the user can see what regeneration changed.
       setPrevSource(prior && prior !== result.source ? prior : null);
       setHarnessStatus("done");
-      markDone("harness");
+      markDone("harness", project);
       return { draft: result, generation };
     } catch (e) {
       if (!isCurrentDraft(generation)) return null;
@@ -337,6 +356,7 @@ export function HarnessView({
     const src = source ?? harness?.source;
     if (!src) return false;
     const generation = draftGeneration.current;
+    addRecent(project);
     setCompileStatus("loading");
     setCompileResult(null);
     setSmokeStatus("idle");
@@ -353,7 +373,7 @@ export function HarnessView({
       const compiled = result.status === "Compiled";
       setCompileStatus(compiled ? "done" : "error");
       if (compiled) {
-        markDone("compile");
+        markDone("compile", project);
         setCompiled(false);
       }
       return compiled;
@@ -368,6 +388,7 @@ export function HarnessView({
   async function smokeHarness(): Promise<boolean> {
     if (!isCurrentScope() || !fuzzingSettings || selectionBlocked || qualificationBusy) return false;
     const generation = draftGeneration.current;
+    addRecent(project);
     setSmokeStatus("loading");
     setSmokeResult(null);
     setPromotionStatus("idle");
@@ -381,7 +402,7 @@ export function HarnessView({
       setSmokeResult(result);
       // The smoke step is complete once it has run, whether it passed or
       // surfaced crashes (the latter is handled at the approval step).
-      markDone("smoke");
+      markDone("smoke", project);
       setSmokeStatus(result.status === "SmokePassed" ? "done" : "error");
       return result.passed;
     } catch (error) {
@@ -397,6 +418,7 @@ export function HarnessView({
   async function promoteHarness(): Promise<boolean> {
     if (!isCurrentScope() || !fuzzingSettings || selectionBlocked || qualificationBusy) return false;
     const generation = draftGeneration.current;
+    addRecent(project);
     setPromotionStatus("loading");
     try {
       const result = await getTransport().invoke<PromotionResult>("harness_promote", {
@@ -405,7 +427,7 @@ export function HarnessView({
       if (!isCurrentDraft(generation)) return false;
       setPromotionResult(result);
       const promoted = result.status === "Promoted";
-      if (promoted) markDone("approve");
+      if (promoted) markDone("approve", project);
       setPromotionStatus(promoted ? "done" : "error");
       setCompiled(promoted);
       return promoted;
@@ -421,6 +443,7 @@ export function HarnessView({
   async function promoteWithFindings(): Promise<boolean> {
     if (!isCurrentScope() || !fuzzingSettings || selectionBlocked || qualificationBusy) return false;
     const generation = draftGeneration.current;
+    addRecent(project);
     setPromotionStatus("loading");
     try {
       const result = await getTransport().invoke<PromotionResult>("harness_promote_with_findings", {
@@ -429,7 +452,7 @@ export function HarnessView({
       if (!isCurrentDraft(generation)) return false;
       setPromotionResult(result);
       const promoted = result.status === "Promoted";
-      if (promoted) markDone("approve");
+      if (promoted) markDone("approve", project);
       setPromotionStatus(promoted ? "done" : "error");
       setCompiled(promoted);
       return promoted;
@@ -444,6 +467,7 @@ export function HarnessView({
   async function generateSeeds() {
     if (!isCurrentScope() || !fuzzingSettings || selectionBlocked) return;
     const generation = draftGeneration.current;
+    addRecent(project);
     setSeedStatus("loading");
     setSeedError(null);
     try {
@@ -451,7 +475,7 @@ export function HarnessView({
       if (!isCurrentDraft(generation)) return;
       setSeeds(result.seeds);
       setSeedStatus("done");
-      markDone("seeds");
+      markDone("seeds", project);
     } catch (e) {
       if (!isCurrentDraft(generation)) return;
       setSeedError(e instanceof Error ? e.message : String(e));
@@ -925,7 +949,7 @@ export function HarnessView({
             setPromotionStatus("done");
             setReviewRefresh((value) => value + 1);
             setCompiled(true);
-            markDone("approve");
+            markDone("approve", project);
           }}
         />
       )}

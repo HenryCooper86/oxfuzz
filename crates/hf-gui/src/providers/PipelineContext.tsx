@@ -80,27 +80,33 @@ export function PipelineProvider({ children }: { children: React.ReactNode }) {
   }, [retainedProgress]);
 
   const update = useCallback(
-    (fn: (p: Progress) => Progress) => {
-      setByProject((prev) => ({ ...prev, [key]: fn(prev[key] ?? EMPTY) }));
+    (fn: (p: Progress) => Progress, projectKey: string = key) => {
+      setByProject((prev) => ({ ...prev, [projectKey]: fn(prev[projectKey] ?? EMPTY) }));
     },
     [key],
   );
 
   const markDone = useCallback(
-    (id: StageId) =>
-      update((p) => ({
-        completed: p.completed.includes(id) ? p.completed : [...p.completed, id],
-        skipped: p.skipped.filter((s) => s !== id),
-      })),
+    (id: StageId, projectKey?: string) =>
+      update(
+        (p) => ({
+          completed: p.completed.includes(id) ? p.completed : [...p.completed, id],
+          skipped: p.skipped.filter((s) => s !== id),
+        }),
+        projectKey,
+      ),
     [update],
   );
 
   const markSkipped = useCallback(
-    (id: StageId) =>
-      update((p) => ({
-        completed: p.completed.includes(id) ? p.completed : [...p.completed, id],
-        skipped: p.skipped.includes(id) ? p.skipped : [...p.skipped, id],
-      })),
+    (id: StageId, projectKey?: string) =>
+      update(
+        (p) => ({
+          completed: p.completed.includes(id) ? p.completed : [...p.completed, id],
+          skipped: p.skipped.includes(id) ? p.skipped : [...p.skipped, id],
+        }),
+        projectKey,
+      ),
     [update],
   );
 

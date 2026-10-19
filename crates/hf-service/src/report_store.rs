@@ -156,12 +156,7 @@ pub fn save_report_draft(
     };
 
     let dir = ensure_reports_dir()?;
-    let path = report_path(&draft.id)?;
-    let temp_path = dir.join(format!("{}.tmp", draft.id));
-    let json = serde_json::to_string_pretty(&draft)
-        .map_err(|e| ClassifiedError::Internal(format!("encode report draft: {e}")))?;
-    std::fs::write(&temp_path, json).map_err(|e| storage_err(&e))?;
-    std::fs::rename(temp_path, path).map_err(|e| storage_err(&e))?;
+    stage_draft(&dir, &draft)?.publish()?;
     Ok(draft)
 }
 
@@ -248,5 +243,115 @@ fn normalize_status(status: &str) -> String {
 }
 
 fn storage_err(error: &std::io::Error) -> ClassifiedError {
-    ClassifiedError::Storage(format!("report drafts: {error}"))
+    tracing::warn!(error = %error, "report draft storage operation failed");
+    ClassifiedError::Storage(format!("report drafts: {}", error.kind()))
+}
+
+/// One save's staged-but-unpublished draft bytes.
+///
+/// Owns an exclusive same-directory temporary file, so two saves of one id
+/// never share staging: each publishes exactly the bytes it staged, and
+/// dropping the owner on any error path removes the staging file.
+struct StagedDraft {
+    temporary: tempfile::NamedTempFile,
+    dest_path: PathBuf,
+}
+
+/// Stage one save's encoded bytes in this save's own exclusive temporary
+/// file (`.{id}.<random>.tmp`) inside `dir`.
+fn stage_draft(dir: &Path, draft: &ReportDraft) -> Result<StagedDraft, ClassifiedError> {
+    use std::io::Write as _;
+
+    let json = serde_json::to_string_pretty(draft)
+        .map_err(|e| ClassifiedError::Internal(format!("encode report draft: {e}")))?;
+    let mut temporary = tempfile::Builder::new()
+        .prefix(&format!(".{}.", draft.id))
+        .suffix(".tmp")
+        .tempfile_in(dir)
+        .map_err(|e| storage_err(&e))?;
+    temporary
+        .write_all(json.as_bytes())
+        .map_err(|e| storage_err(&e))?;
+    Ok(StagedDraft {
+        temporary,
+        dest_path: dir.join(format!("{}.json", draft.id)),
+    })
+}
+
+impl StagedDraft {
+    /// Atomically replace the stored draft with the staged bytes.
+    ///
+    /// `persist` renames this save's own temporary over `{id}.json`
+    /// (complete-file replacement, last writer wins). A failed persist
+    /// returns the error and drops the owned temporary, removing the
+    /// staging file; the previously stored draft is left untouched.
+    fn publish(self) -> Result<(), ClassifiedError> {
+        self.temporary
+            .persist(&self.dest_path)
+            .map(|_| ())
+            .map_err(|e| storage_err(&e.error))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{stage_draft, ReportDraft};
+
+    fn draft(id: &str, content: &str) -> ReportDraft {
+        ReportDraft {
+            id: id.to_owned(),
+            title: "Campaign report".to_owned(),
+            project: "/proj".to_owned(),
+            target: None,
+            status: "Draft".to_owned(),
+            updated_at: "2026-10-19T00:00:00Z".to_owned(),
+            content: content.to_owned(),
+        }
+    }
+
+    /// Overlapping saves of one report id must each publish exactly the bytes
+    /// they staged, and neither save may fail because the other's rename
+    /// consumed its temporary file. The two saves interleave deterministically
+    /// at the write/rename seam -- no threads, no retries, no timing
+    /// dependence.
+    #[test]
+    fn overlapping_same_id_saves_each_publish_their_own_content() {
+        let dir = tempfile::tempdir().expect("create reports dir");
+        let staged_first =
+            stage_draft(dir.path(), &draft("shared", "first body")).expect("stage first save");
+        let staged_second =
+            stage_draft(dir.path(), &draft("shared", "second body")).expect("stage second save");
+
+        // The second save completes fully while the first is still staged.
+        staged_second.publish().expect("second save publishes");
+        let after_second = std::fs::read_to_string(dir.path().join("shared.json"))
+            .expect("read stored draft after second save");
+        let after_second: ReportDraft =
+            serde_json::from_str(&after_second).expect("second save publishes a complete draft");
+        assert_eq!(after_second.content, "second body");
+
+        // The first save must still publish its own staged bytes afterwards.
+        staged_first
+            .publish()
+            .expect("first save publishes its own staged content");
+        let after_first = std::fs::read_to_string(dir.path().join("shared.json"))
+            .expect("read stored draft after first save");
+        let after_first: ReportDraft =
+            serde_json::from_str(&after_first).expect("first save publishes a complete draft");
+        assert_eq!(after_first.content, "first body");
+    }
+
+    #[test]
+    fn staging_errors_do_not_disclose_the_storage_directory() {
+        let root = tempfile::tempdir().expect("create test root");
+        let missing = root.path().join("private-report-storage");
+        let Err(error) = stage_draft(&missing, &draft("private-report", "body")) else {
+            panic!("staging into a missing directory must fail");
+        };
+        assert!(matches!(error, hf_core::error::ClassifiedError::Storage(_)));
+        let public = error.to_string();
+        assert!(!public.contains(root.path().to_string_lossy().as_ref()));
+        assert!(!public.contains("private-report"));
+        assert!(public.contains(&std::io::ErrorKind::NotFound.to_string()));
+    }
 }

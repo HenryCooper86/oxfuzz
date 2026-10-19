@@ -891,3 +891,12 @@ Reports, triage, and automotive previews offer only Markdown downloads in the
 browser, which has no native document-conversion download operation. Desktop
 previews use the service-supported format list. Deleting a saved report from
 either report surface notifies the other listings to reload.
+
+Report draft saves stage each complete serialized draft in an exclusively owned
+temporary file in the reports directory, then atomically replace the report's
+stable-ID file. Concurrent saves use independent staging files and retain
+last-writer-wins semantics; a failed publication removes only its own temporary
+file and leaves the previously published draft intact.
+Report-storage I/O failures return only their error category to callers.
+Underlying OS and temporary-file details, which can contain private paths,
+remain in diagnostic tracing rather than HTTP responses.
