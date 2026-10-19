@@ -34,8 +34,8 @@ export function ProviderSetup({ onContinue }: { onContinue: () => void }) {
 
 function NewProviderSetup({ onContinue }: { onContinue: () => void }) {
   const { t } = useI18n();
-  const preset = wizardProviderPreset("openai");
-  const [input, setInput] = useState<WizardProviderInput>({ providerType: "openai", apiKey: "", model: preset.model, baseUrl: preset.baseUrl });
+  const initial = wizardProviderPreset("openai");
+  const [input, setInput] = useState<WizardProviderInput>({ providerType: "openai", apiKey: "", model: initial.model, baseUrl: initial.baseUrl });
   const [probe, setProbe] = useState<"idle" | "testing" | "passed">("idle");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -43,7 +43,8 @@ function NewProviderSetup({ onContinue }: { onContinue: () => void }) {
   const active = useRef(true);
   const writing = useRef(false);
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
-  const keyOptional = wizardProviderPreset(input.providerType).keyOptional;
+  const preset = wizardProviderPreset(input.providerType);
+  const keyOptional = preset.keyOptional;
   const canTest = input.model.trim() !== "" && input.baseUrl.trim() !== "" && (keyOptional || input.apiKey.trim() !== "");
   function update(patch: Partial<WizardProviderInput>) {
     revision.current++;
@@ -75,8 +76,10 @@ function NewProviderSetup({ onContinue }: { onContinue: () => void }) {
   return <div className="flex flex-col gap-4">
     <p className="m-0 text-sm text-text-secondary">{t("setup.providerHint")}</p>
     <details><summary className="cursor-pointer text-sm">{t("gui.keyHelpTitle")}</summary><p className="text-sm">{t("gui.keyHelp")}</p><p className="text-sm">{t("gui.modelHelp")}</p></details>
-    <div><label htmlFor="setup-provider" className="block text-sm mb-1">{t("setup.provider")}</label>
-      <Select id="setup-provider" value={input.providerType} disabled={saving} options={WIZARD_PROVIDER_TYPES} className="w-full" onChange={providerType => { const preset = wizardProviderPreset(providerType); update({ providerType, apiKey: "", model: preset.model, baseUrl: preset.baseUrl }); }} />
+    <div>
+      <label htmlFor="setup-provider" className="block text-sm mb-1">{t("setup.provider")}</label>
+      <Select id="setup-provider" value={input.providerType} disabled={saving} options={WIZARD_PROVIDER_TYPES} className="w-full" onChange={providerType => { const next = wizardProviderPreset(providerType); update({ providerType, apiKey: "", model: next.model, baseUrl: next.baseUrl }); }} />
+      {preset.helpKey && <p className="mt-1 mb-0 text-sm text-text-secondary">{t(preset.helpKey)}</p>}
     </div>
     <div><label htmlFor="setup-key" className="block text-sm mb-1">{t("setup.apiKey")}{keyOptional ? ` (${t("setup.optional")})` : ""}</label>
       <Input id="setup-key" type="password" autoComplete="off" disabled={saving} value={input.apiKey} onChange={event => update({ apiKey: event.target.value })} />
@@ -85,7 +88,7 @@ function NewProviderSetup({ onContinue }: { onContinue: () => void }) {
       <Input id="setup-model" aria-describedby="setup-model-hint" disabled={saving} value={input.model} onChange={event => update({ model: event.target.value })} />
       <p id="setup-model-hint" className="mt-1 mb-0 text-sm text-text-secondary">{t("setup.modelHint")}</p>
     </div>
-    <details open={input.providerType === "openai-compat" ? true : undefined}>
+    <details open={input.providerType === "openai-compat" || preset.codingPlan ? true : undefined}>
       <summary className="cursor-pointer text-sm">{t("setup.advanced")}</summary>
       <label htmlFor="setup-url" className="block text-sm mt-2 mb-1">{t("setup.baseUrl")}</label>
       <Input id="setup-url" type="url" disabled={saving} value={input.baseUrl} onChange={event => update({ baseUrl: event.target.value })} />

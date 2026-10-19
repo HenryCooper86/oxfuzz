@@ -9,6 +9,19 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ## Unreleased
 
+### Added
+
+- Getting-started provider presets for DeepSeek, Kimi API and Coding
+  subscriptions, and GLM API and Coding Plans on BigModel.cn and Z.AI.
+  Dedicated coding endpoints, editable models, and English/Chinese credential
+  guidance distinguish subscriptions from pay-as-you-go API accounts.
+
+### Fixed
+
+- Harness controls keep long qualified targets inside their selector and align
+  engine, generator, and language fields at narrow panel widths. Truncated
+  selections retain their full text in tooltips and the dropdown.
+
 ## 0.6.7 - 2026-10-19
 
 ### Fixed

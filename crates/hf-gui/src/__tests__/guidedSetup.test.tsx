@@ -29,6 +29,19 @@ async function mount() {
   };
   return { host, complete, click, fill };
 }
+// Radix Select opens on a plain click in jsdom (its pointer-type ref defaults
+// to "touch" when no pointer events are dispatched) and its options select on
+// click; jsdom itself lacks scrollIntoView, which Radix calls for focus.
+Element.prototype.scrollIntoView = () => {};
+async function chooseProvider(host: HTMLElement, label: string) {
+  const trigger = host.querySelector<HTMLElement>("#setup-provider");
+  expect(trigger, host.textContent ?? "").toBeTruthy();
+  await act(async () => { trigger!.click(); });
+  const option = [...document.querySelectorAll<HTMLElement>('[role="option"]')]
+    .find(node => node.textContent === label);
+  expect(option, [...document.querySelectorAll('[role="option"]')].map(node => node.textContent).join(" | ")).toBeTruthy();
+  await act(async () => { option!.click(); });
+}
 it("defers setup explicitly without saving providers or claiming completion", async () => {
   const { host, complete, click } = await mount();
   expect(host.textContent).toContain("AI connection");
@@ -90,4 +103,37 @@ it("does not overwrite a provider pool added while the connection was being test
   expect(host.querySelector('[role="alert"]')?.textContent).toContain("Provider configuration already exists");
   expect(mocks.invoke.mock.calls.filter(([command]) => command === "initialize_provider")).toHaveLength(1);
   expect(host.textContent).toContain("AI connection");
+});
+it("routes a coding-plan selection through test and save to its dedicated endpoint", async () => {
+  const { host, click, fill } = await mount();
+  await chooseProvider(host, "GLM Coding Plan (Z.AI)");
+  await fill("API key", "plan-key"); await click("Test connection");
+  expect(host.textContent).toContain("Connection verified");
+  await click("Save and continue");
+  const tested = mocks.invoke.mock.calls.find(([command]) => command === "provider_test")?.[1]?.provider;
+  const saved = mocks.invoke.mock.calls.find(([command]) => command === "initialize_provider")?.[1]?.provider;
+  for (const provider of [tested, saved]) {
+    // The subscription key reaches only the coding endpoint, never the
+    // pay-as-you-go API URL, and the compat adapter gets native tool calling.
+    expect(provider).toMatchObject({
+      provider_type: "openai-compat",
+      base_url: "https://api.z.ai/api/coding/paas/v4",
+      tool_calling_mode: "native",
+    });
+    expect(provider?.base_url).not.toBe("https://api.z.ai/api/paas/v4");
+  }
+});
+it("invalidates a verified probe and clears the key when the provider selection changes", async () => {
+  const { host, click, fill } = await mount();
+  await fill("API key", "fixture-key"); await click("Test connection");
+  expect(host.textContent).toContain("Connection verified");
+  await chooseProvider(host, "Kimi Coding (subscription)");
+  expect(host.textContent).not.toContain("Connection verified");
+  expect([...host.querySelectorAll("button")].find(button => button.textContent === "Save and continue")?.disabled).toBe(true);
+  // The previously typed key must not leak into the subscription selection.
+  expect(host.querySelector<HTMLInputElement>("#setup-key")?.value).toBe("");
+  await fill("API key", "sub-key"); await click("Test connection");
+  await click("Save and continue");
+  const saved = mocks.invoke.mock.calls.find(([command]) => command === "initialize_provider")?.[1]?.provider;
+  expect(saved).toMatchObject({ base_url: "https://api.kimi.ai/coding/v1", api_key: "sub-key" });
 });
