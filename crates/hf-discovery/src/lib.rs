@@ -15,3 +15,6 @@ pub mod semgrep;
 
 pub use ranking::rank;
 pub use scanner::{discover, discover_with_signals, discoverable_source_files};
+
+#[cfg(feature = "clang-analysis")]
+pub mod clang_analysis;
