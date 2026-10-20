@@ -173,6 +173,11 @@ pub(crate) struct DiscoverArgs {
     /// scores when none is configured, `require` fails instead.
     #[arg(long, value_enum, default_value_t = AiOption::Auto)]
     pub(crate) ai: AiOption,
+    /// Analyze C/C++ calls and types with the sandboxed Clang helper.
+    #[cfg(feature = "clang-analysis")]
+    #[arg(long, conflicts_with_all = ["rank", "ai"])]
+    #[cfg_attr(feature = "semgrep-enrichment", arg(conflicts_with = "semgrep"))]
+    pub(crate) clang: bool,
     /// Enrich persisted C/C++ targets with advisory Semgrep signals.
     #[cfg(feature = "semgrep-enrichment")]
     #[arg(long)]
@@ -2335,5 +2340,55 @@ mod persistent_cli_tests {
         let help = harness.render_long_help().to_string();
         assert!(help.contains("--persistent"), "{help}");
         assert!(help.contains("__AFL_LOOP"), "{help}");
+    }
+}
+
+#[cfg(all(test, feature = "clang-analysis"))]
+mod clang_cli_tests {
+    use super::*;
+    use clap::Parser;
+    #[test]
+    fn explicit_clang_analysis_conflicts_with_other_discovery_producers() {
+        let base = ["oxfuzz", "discover", ".", "--lang", "c", "--clang"];
+        assert!(Cli::try_parse_from(base).is_ok());
+        for extra in [vec!["--rank"], vec!["--ai", "require"]] {
+            let mut args = base.to_vec();
+            args.extend(extra);
+            assert_eq!(
+                Cli::try_parse_from(args)
+                    .err()
+                    .expect("analysis flags must be rejected")
+                    .kind(),
+                clap::error::ErrorKind::ArgumentConflict
+            );
+        }
+        #[cfg(feature = "semgrep-enrichment")]
+        {
+            let mut args = base.to_vec();
+            args.push("--semgrep");
+            assert_eq!(
+                Cli::try_parse_from(args)
+                    .err()
+                    .expect("analysis flags must be rejected")
+                    .kind(),
+                clap::error::ErrorKind::ArgumentConflict
+            );
+        }
+    }
+}
+
+#[cfg(all(test, not(feature = "clang-analysis")))]
+mod clang_disabled_cli_tests {
+    use super::*;
+    use clap::Parser;
+    #[test]
+    fn absent_clang_feature_does_not_advertise_or_accept_analysis() {
+        assert_eq!(
+            Cli::try_parse_from(["oxfuzz", "discover", ".", "--lang", "c", "--clang"])
+                .err()
+                .expect("analysis flags must be rejected")
+                .kind(),
+            clap::error::ErrorKind::UnknownArgument
+        );
     }
 }

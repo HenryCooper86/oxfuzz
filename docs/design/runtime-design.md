@@ -414,3 +414,21 @@ The run's `input/source-context` tree retains launch-time source-context bytes.
 Like the harness and starting corpus, it is covered by the read-only workspace
 mount and is never exposed through a writable run mount. Copying files out of
 the live workspace prevents later source edits from changing this retained tree.
+
+## Clang Analysis Execution Profile
+
+The optional compiler analysis uses the image-bundled LLVM 18 helper through
+`hf-runtime` streaming execution. The service resolves the image to an immutable
+content ID, grants only read-only source/input mounts and a separate writable
+output mount, disables network/capability additions/ptrace, and applies explicit
+configured CPU, memory, deadline, output-file, graph, and snapshot limits.
+There is no host analyzer fallback. The helper parses source and never executes
+it. Terminal runtime outcome is checked before process exit status; output is
+strictly normalized before atomic publication. Cancellation awaits teardown.
+A per-operation OS owner lease prevents startup recovery from interrupting a
+live process. Abandoned records become interrupted without automatic restart.
+Snapshots and helper output live under the project workspace at
+`.service/clang-analysis/OPERATION_ID`; project deletion removes them after the
+shared workspace lease confirms quiescence. Knowledge cleanup removes durable
+analysis evidence while preserving workspaces, as for other operations.
+See [Clang Harness Analysis](clang-harness-analysis-design.md).

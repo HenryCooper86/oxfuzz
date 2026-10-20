@@ -40,13 +40,14 @@ class Visitor : public RecursiveASTVisitor<Visitor> {
 
   J::Value location(SourceLocation source) {
     auto &sm = context.getSourceManager();
-    auto loc = sm.getPresumedLoc(sm.getExpansionLoc(source));
-    if (!loc.isValid()) return nullptr;
-    std::string file = loc.getFilename();
+    auto loc = sm.getExpansionLoc(source);
+    if (loc.isInvalid()) return nullptr;
+    std::string file = sm.getFilename(loc).str();
     constexpr const char *prefix = "/work/source/";
     if (file.rfind(prefix, 0) != 0) return nullptr;
     return J::Object{{"file", file.substr(std::string(prefix).size())},
-                     {"line", loc.getLine()}, {"column", loc.getColumn()}};
+                     {"line", sm.getSpellingLineNumber(loc)},
+                     {"column", sm.getSpellingColumnNumber(loc)}};
   }
 
 public:
@@ -60,7 +61,13 @@ public:
     std::string id = output.unit + ":" + usr.str().str();
     auto *definition = decl->getDefinition();
     auto *record = definition ? definition : decl;
-    auto loc = location(record->getLocation());
+    auto loc = location(record->getBeginLoc());
+    J::Array declarations;
+    for (auto *redecl : record->redecls()) {
+      auto declaration = location(redecl->getBeginLoc());
+      if (!declaration.getAsNull()) declarations.push_back(std::move(declaration));
+      if (declarations.size() > 1024) throw std::runtime_error("declaration limit exceeded");
+    }
     bool hasBody = definition && !loc.getAsNull();
     J::Array parameters;
     for (auto *p : record->parameters())
@@ -79,11 +86,11 @@ public:
     output.functions.insert_or_assign(id, J::Object{
       {"id", id}, {"unit", output.unit}, {"usr", usr.str().str()},
       {"name", record->getQualifiedNameAsString()}, {"location", std::move(loc)},
+      {"declarations", std::move(declarations)},
       {"result_type", record->getReturnType().getCanonicalType().getAsString()},
       {"parameters", std::move(parameters)}, {"variadic", record->isVariadic()},
       {"linkage", record->isExternallyVisible() ? "external" : "internal"},
-      {"access", access}, {"method", method != nullptr},
-      {"static_method", method && method->isStatic()}, {"definition", hasBody}});
+      {"access", access}, {"method_kind", !method ? "function" : method->isStatic() ? "static" : "instance"}, {"definition", hasBody}});
     if (output.functions.size() > output.maxFunctions)
       throw std::runtime_error("function limit exceeded");
     return id;
@@ -170,6 +177,7 @@ int main(int argc, char **argv) {
         args.push_back(arg->str());
       }
       output.units.push_back(J::Object{{"id", output.unit}, {"file", file}, {"scope", required(*unit, "scope")}});
+      args.push_back("-resource-dir=/usr/lib/llvm-18/lib/clang/18");
       FixedCompilationDatabase database(directory, args);
       ClangTool tool(database, {"/work/source/" + file});
       Factory factory(output);

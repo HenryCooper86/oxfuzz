@@ -22,9 +22,8 @@ fn limits() -> ClangLimits {
 fn function(id: &str, file: &str, name: &str) -> Value {
     json!({"id": id, "unit": "a", "usr": id, "name": name,
         "location": {"file": file, "line": 1, "column": 1},
-        "result_type": "int", "parameters": [], "variadic": false,
-        "linkage": "internal", "access": "none", "method": false,
-        "static_method": false, "definition": true})
+        "declarations": [], "result_type": "int", "parameters": [], "variadic": false,
+        "linkage": "internal", "access": "none", "method_kind": "function", "definition": true})
 }
 
 fn index() -> Value {
@@ -108,5 +107,63 @@ fn external_definitions_join_only_in_an_explicit_shared_scope() {
     assert_eq!(
         reachable_functions(&graph, "entry"),
         vec!["definition", "leaf", "setup:a"]
+    );
+}
+
+#[tokio::test]
+async fn context_keeps_transitive_reverse_paths_and_reports_unknown_dispatch() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("a.c"), "int entry(char*x){return *x;}").unwrap();
+    let inventory = hf_discovery::discover(root.path(), hf_core::target::TargetLanguage::C)
+        .await
+        .unwrap();
+    let target = inventory
+        .candidates
+        .iter()
+        .find(|c| c.symbol == "entry")
+        .unwrap();
+    let mut data = index();
+    data["functions"].as_array_mut().unwrap().extend([
+        function("outer", "a.c", "outer"),
+        function("caller", "a.c", "caller"),
+    ]);
+    for (caller, callee) in [("outer", "caller"), ("caller", "entry")] {
+        data["calls"].as_array_mut().unwrap().push(json!({"caller":caller,"callee":callee,"dispatch":"direct","location":{"file":"a.c","line":8,"column":1}}));
+    }
+    let graph = normalize_index(&serde_json::to_vec(&data).unwrap(), &limits()).unwrap();
+    let context = hf_discovery::clang_analysis::target_context(&graph, target, &limits()).unwrap();
+    assert!(context
+        .paths
+        .contains(&vec!["outer".into(), "caller".into(), "entry".into()]));
+    assert_eq!(context.unresolved_calls, 2);
+}
+
+#[tokio::test]
+async fn same_line_overloads_associate_by_definition_coordinates() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("a.cpp"),
+        "int parse(int x){return x;} int parse(char*x){return *x;}",
+    )
+    .unwrap();
+    let inventory = hf_discovery::discover(root.path(), hf_core::target::TargetLanguage::Cpp)
+        .await
+        .unwrap();
+    let mut data = index();
+    data["units"][0]["file"] = json!("a.cpp");
+    let first = function("first", "a.cpp", "parse");
+    let mut second = function("second", "a.cpp", "parse");
+    second["location"]["column"] = json!(28);
+    data["functions"] = json!([first, second]);
+    data["calls"] = json!([]);
+    let graph = normalize_index(&serde_json::to_vec(&data).unwrap(), &limits()).unwrap();
+    let first_candidate = inventory
+        .candidates
+        .iter()
+        .find(|c| c.location.col == 1)
+        .unwrap();
+    assert_eq!(
+        hf_discovery::clang_analysis::associate_target(&graph, first_candidate),
+        hf_core::clang_analysis::ClangTargetAssociation::Exact("first".into())
     );
 }

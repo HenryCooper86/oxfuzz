@@ -72,3 +72,8 @@ pub use work_order_store::{
     HarnessWorkOrderAttemptStatus, HarnessWorkOrderRecord, HarnessWorkOrderSubmissionInsertError,
     HarnessWorkOrderSubmissionRecord, MAX_WORK_ORDER_RANK_ATTEMPTS, MAX_WORK_ORDER_SUBMISSIONS,
 };
+
+mod clang_analysis_store;
+pub use clang_analysis_store::{
+    ClangOperationRecord, ClangOperationState, ClangResultRecord, HarnessClangContextRecord,
+};

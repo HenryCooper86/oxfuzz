@@ -42,3 +42,5 @@ pub use section::{
 };
 pub use store::{SectionStore, StoreError};
 pub use template::{EffectiveSection, ModeOverlay, PromptTemplate, SectionRef};
+
+pub use render::render_clang_context;

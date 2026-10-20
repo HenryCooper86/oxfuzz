@@ -205,7 +205,7 @@ jobs:
   gates-passed:
     name: All gates passed
     runs-on: ubuntu-latest
-    needs: [rust, cross-platform, frontend, supply-chain, coverage]
+    needs: [rust, cross-platform, frontend, supply-chain, coverage, clang-analysis]
     if: always()
     steps:
       - name: Fail if any gate did not succeed
@@ -216,9 +216,25 @@ jobs:
                  && needs['cross-platform'].result == 'success'
                  && needs.frontend.result == 'success'
                  && needs['supply-chain'].result == 'success'
-                 && needs.coverage.result == 'success' }}" != "true" ]; then
+                 && needs.coverage.result == 'success'
+                 && needs['clang-analysis'].result == 'success' }}" != "true" ]; then
             echo "One or more gate jobs did not succeed:"
             echo '${{ toJSON(needs) }}'
             exit 1
           fi
           echo "All gate jobs succeeded."
+
+  clang-analysis:
+    name: Clang semantic pipeline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Linux build dependencies
+        run: scripts/ci/install-linux-deps.sh
+      - uses: Swatinem/rust-cache@v2
+      - name: Build isolated optional CLI feature
+        run: cargo build -p hf-cli --no-default-features --features clang-analysis
+      - name: Build LLVM 18 qualification image
+        run: docker build --build-arg BASE_IMAGE=ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90 -f tools/clang-analysis/Dockerfile -t oxfuzz/clang-analysis:test tools/clang-analysis
+      - name: Qualify extraction and persisted model input
+        run: scripts/tests/gates.sh clang-analysis

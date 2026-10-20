@@ -30,7 +30,7 @@ class GateDispatcherTests(unittest.TestCase):
                 self.assertIn("target/coverage/*.json", source)
         github = (REPOSITORY_ROOT / ".github/workflows/ci.yml").read_text()
         gitlab = (REPOSITORY_ROOT / ".gitlab-ci.yml").read_text()
-        self.assertIn("needs: [rust, cross-platform, frontend, supply-chain, coverage]", github)
+        self.assertIn("needs: [rust, cross-platform, frontend, supply-chain, coverage, clang-analysis]", github)
         self.assertIn("needs.coverage.result == 'success'", github)
         self.assertNotIn("allow_failure: true", gitlab)
 
@@ -103,6 +103,10 @@ class GateDispatcherTests(unittest.TestCase):
             "test -p hf-service --no-default-features --test coverage_experiments",
             "test -p hf-service --no-default-features --features proof-carrying --test run_replay",
             "test -p hf-service --no-default-features --features patch-to-proof --test finding_review",
+            "test -p hf-service --no-default-features --features clang-analysis --test clang_analysis",
+            "test -p hf-service --no-default-features --features clang-analysis --lib clang_analysis",
+            "test -p hf-discovery --features clang-analysis --test clang_analysis",
+            "test -p hf-cli --no-default-features --features clang-analysis --bin oxfuzz clang_cli_tests",
         ])
 
     def test_feature_behavior_gate_keeps_test_failure_status(self) -> None:
@@ -219,15 +223,15 @@ class GateDispatcherTests(unittest.TestCase):
         self.assertEqual(recorded[3], "cargo clippy")
         test_index = recorded.index("cargo test")
         self.assertEqual(recorded[4:test_index], ["cargo clippy"] * (test_index - 4))
-        self.assertEqual(recorded[test_index + 1:test_index + 6], ["cargo test"] * 5)
-        self.assertEqual(recorded[test_index + 6], "cargo doc")
-        self.assertEqual(recorded[test_index + 7], "cargo-deny")
-        self.assertEqual(recorded[test_index + 8:test_index + 12], ["cargo-llvm-cov"] * 4)
-        self.assertEqual(recorded[test_index + 12], "python3")
-        self.assertEqual(recorded[test_index + 13], "cargo bench")
-        self.assertEqual(recorded[test_index + 14:test_index + 17], ["python3"] * 3)
-        self.assertEqual(recorded[test_index + 17], "npm --prefix crates/hf-gui ci")
-        self.assertEqual(recorded[test_index + 21], "npm --prefix crates/hf-gui run lint")
+        self.assertEqual(recorded[test_index + 1:test_index + 10], ["cargo test"] * 9)
+        self.assertEqual(recorded[test_index + 10], "cargo doc")
+        self.assertEqual(recorded[test_index + 11], "cargo-deny")
+        self.assertEqual(recorded[test_index + 12:test_index + 16], ["cargo-llvm-cov"] * 4)
+        self.assertEqual(recorded[test_index + 16], "python3")
+        self.assertEqual(recorded[test_index + 17], "cargo bench")
+        self.assertEqual(recorded[test_index + 18:test_index + 21], ["python3"] * 3)
+        self.assertEqual(recorded[test_index + 21], "npm --prefix crates/hf-gui ci")
+        self.assertEqual(recorded[test_index + 25], "npm --prefix crates/hf-gui run lint")
 
     def test_named_subset_runs_only_those_gates(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -267,6 +271,7 @@ class GateDispatcherTests(unittest.TestCase):
             recorded = log.read_text(encoding="utf-8").splitlines()
         self.assertEqual(result.returncode, 0, result.stderr)
         features = [
+            "clang-analysis",
             "ai-target-ranking",
             "campaign-allocation",
             "automotive-lab",

@@ -648,8 +648,9 @@ impl ServiceContainer {
     }
 
     /// Draft the harness source for a candidate: LLM-authored when a provider is
-    /// configured, otherwise the heuristic template. Never fails -- an LLM error
-    /// degrades to the heuristic draft so generation can proceed.
+    /// configured, otherwise the heuristic template. Provider errors degrade to
+    /// the heuristic draft; build-context and durable analysis-input errors stop
+    /// dispatch before any model call.
     ///
     /// `sanitizer` is the already-resolved build sanitizer: the draft's recorded
     /// build command must match the compile that follows. `persistent` selects
@@ -669,29 +670,24 @@ impl ServiceContainer {
             let related = crate::knowledge::harness_related_context(project, candidate);
             let build = project_build_context(self, project, candidate.language).await?;
             let examples = self.accepted_examples(project, candidate).await;
-            let drafted = if persistent {
-                hf_harness::draft_persistent_with_examples(
-                    candidate,
-                    engine,
-                    &related,
-                    build.as_ref(),
-                    &examples,
-                    sanitizer,
-                    Box::new(provider),
-                )
-                .await
-            } else {
-                hf_harness::draft_with_examples(
-                    candidate,
-                    engine,
-                    &related,
-                    build.as_ref(),
-                    &examples,
-                    sanitizer,
-                    Box::new(provider),
-                )
-                .await
-            };
+            #[cfg(feature = "clang-analysis")]
+            let analysis = self.retained_clang_context(project, candidate).await?;
+            #[cfg(not(feature = "clang-analysis"))]
+            let analysis: Option<String> = None;
+            let drafted = hf_harness::generator::draft_analyzed(
+                candidate,
+                engine,
+                &hf_harness::generator::HarnessDraftContext {
+                    related: &related,
+                    build: build.as_ref(),
+                    examples: &examples,
+                    analysis: analysis.as_deref(),
+                },
+                sanitizer,
+                persistent,
+                Box::new(provider),
+            )
+            .await;
             match drafted {
                 Ok(draft) => return Ok(draft.source),
                 Err(e) => tracing::warn!(
@@ -1073,28 +1069,24 @@ impl ServiceContainer {
             // the un-augmented prompt.
             let related = crate::knowledge::harness_related_context(project, &candidate);
             let build = project_build_context(self, project, candidate.language).await?;
-            let drafted = if persistent {
-                hf_harness::draft_persistent_with_examples(
-                    &candidate,
-                    engine,
-                    &related,
-                    build.as_ref(),
-                    &[],
-                    sanitizer,
-                    Box::new(provider),
-                )
-                .await
-            } else {
-                hf_harness::draft_with_context(
-                    &candidate,
-                    engine,
-                    &related,
-                    build.as_ref(),
-                    sanitizer,
-                    Box::new(provider),
-                )
-                .await
-            };
+            #[cfg(feature = "clang-analysis")]
+            let analysis = self.retained_clang_context(project, &candidate).await?;
+            #[cfg(not(feature = "clang-analysis"))]
+            let analysis: Option<String> = None;
+            let drafted = hf_harness::generator::draft_analyzed(
+                &candidate,
+                engine,
+                &hf_harness::generator::HarnessDraftContext {
+                    related: &related,
+                    build: build.as_ref(),
+                    examples: &[],
+                    analysis: analysis.as_deref(),
+                },
+                sanitizer,
+                persistent,
+                Box::new(provider),
+            )
+            .await;
             match drafted {
                 Ok(draft) => Ok(draft),
                 // The LLM is configured but the call failed (provider down,

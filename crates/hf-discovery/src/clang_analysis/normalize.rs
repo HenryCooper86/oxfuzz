@@ -73,6 +73,8 @@ pub fn normalize_index(
                 .any(|v| !bounded(v, 4096))
             || f.location.as_ref().is_some_and(|v| !location(v))
             || (f.definition && f.location.is_none())
+            || f.declarations.len() > 1024
+            || f.declarations.iter().any(|l| !location(l))
             || f.parameters.len() > 1024
             || f.parameters
                 .iter()

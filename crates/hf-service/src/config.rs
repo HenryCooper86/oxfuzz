@@ -1211,6 +1211,8 @@ struct OxfuzzRuntimeConfig {
     build_profiles: BuildProfileSettings,
     campaign_health: CampaignHealthSettings,
     concolic: ConcolicSettings,
+    #[cfg(feature = "clang-analysis")]
+    clang_analysis: crate::clang_analysis::ClangAnalysisSettings,
     automotive: AutomotiveSettings,
     knowledge: KnowledgeRuntimeConfig,
     session: hf_session::SessionConfig,
@@ -1232,6 +1234,8 @@ impl Default for OxfuzzRuntimeConfig {
             build_profiles: BuildProfileSettings::default(),
             campaign_health: CampaignHealthSettings::default(),
             concolic: ConcolicSettings::default(),
+            #[cfg(feature = "clang-analysis")]
+            clang_analysis: crate::clang_analysis::ClangAnalysisSettings::default(),
             automotive: AutomotiveSettings::default(),
             knowledge: KnowledgeRuntimeConfig::default(),
             session: hf_session::SessionConfig::default(),
@@ -1259,6 +1263,8 @@ impl OxfuzzRuntimeConfig {
         self.build_profiles.validate()?;
         self.campaign_health.validate()?;
         self.concolic.validate()?;
+        #[cfg(feature = "clang-analysis")]
+        self.clang_analysis.resolve()?;
         self.automotive.validate()?;
         self.knowledge.validate()?;
         if self.session.max_depth == 0 {
@@ -5574,4 +5580,24 @@ mod grep_resolution_tests {
         std::fs::create_dir(&file).unwrap();
         assert!(super::resolve_grep_limits_at(directory.path()).is_err());
     }
+}
+
+/// Parse deployment settings for optional Clang analysis.
+///
+/// # Errors
+/// Returns configuration parse and validation errors.
+#[cfg(feature = "clang-analysis")]
+pub fn parse_clang_analysis_settings(
+    raw: &str,
+) -> Result<crate::clang_analysis::ClangAnalysisSettings, String> {
+    Ok(parse_oxfuzz_runtime_config(raw)?.clang_analysis)
+}
+/// Load and validate settings before each explicit analysis request.
+///
+/// # Errors
+/// Returns read, parse, or validation errors without a fallback.
+#[cfg(feature = "clang-analysis")]
+pub fn effective_clang_analysis_settings(
+) -> Result<crate::clang_analysis::ClangAnalysisSettings, String> {
+    parse_clang_analysis_settings(&read_config("oxfuzz")?)
 }

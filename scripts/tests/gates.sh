@@ -27,6 +27,7 @@ COVERAGE_INFRASTRUCTURE_CRATES=(
 # hf-web and hf-service. Checking them one at a time catches undeclared feature
 # coupling that default and all-feature builds both hide.
 PRODUCT_FEATURES=(
+  clang-analysis
   ai-target-ranking
   campaign-allocation
   automotive-lab
@@ -107,6 +108,10 @@ gate_feature_behavior() {
     --features proof-carrying --test run_replay
   ./scripts/cargo-test-filtered.sh -p hf-service --no-default-features \
     --features patch-to-proof --test finding_review
+  ./scripts/cargo-test-filtered.sh -p hf-service --no-default-features --features clang-analysis --test clang_analysis
+  ./scripts/cargo-test-filtered.sh -p hf-service --no-default-features --features clang-analysis --lib clang_analysis
+  ./scripts/cargo-test-filtered.sh -p hf-discovery --features clang-analysis --test clang_analysis
+  ./scripts/cargo-test-filtered.sh -p hf-cli --no-default-features --features clang-analysis --bin oxfuzz clang_cli_tests
 }
 
 gate_doc() {
@@ -189,6 +194,12 @@ gate_performance() {
   # formats. Timing thresholds run only on a named stable runner.
   cargo bench -p hf-tools --bench dispatch --no-run
   python3 -m unittest scripts.tests.test_dispatch_samples scripts.tests.test_history_samples
+}
+
+# Requires a built LLVM 18 qualification image and a clang-analysis CLI.
+gate_clang_analysis() {
+  python3 scripts/tests/qualify_clang_extractor.py
+  python3 scripts/tests/qualify_clang_pipeline.py --cli "${CARGO_TARGET_DIR:-target}/debug/oxfuzz" --image "${OXFUZZ_CLANG_TEST_IMAGE:-oxfuzz/clang-analysis:test}"
 }
 
 gate_script_tests() {

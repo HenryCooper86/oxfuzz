@@ -1,6 +1,6 @@
 # Clang Harness Analysis
 
-Status: **proposed**. Owner: `hf-service`, `hf-discovery`, and `hf-harness`.
+Status: **active; first milestone delivered**. Owner: `hf-service`, `hf-discovery`, and `hf-harness`.
 Risk: **High**, because analysis changes model input and the harness pipeline.
 
 ## 1. Goal and First Milestone
@@ -68,6 +68,12 @@ Reuse service-owned build-profile selection and the existing four-location
 database search. A missing, empty, malformed, or unsupported database refuses
 explicit Clang analysis; do not synthesize generic compiler flags. Selection
 of a saved profile never falls back to another database.
+
+Direct Clang/GCC/cc and C++ driver names, including numeric version suffixes,
+are recognized; C++ driver language is made explicit before ordered arguments.
+Wrappers and target-prefixed drivers are rejected because their implicit
+configuration is unavailable. Source coordinates use physical expansion-file
+positions so `#line` directives cannot replace discovery coordinates.
 
 Compilation databases do not identify linked programs. An optional
 `clang_analysis.scope_file` is a project-relative path to a strict version-1
@@ -219,6 +225,7 @@ Validated `[clang_analysis]` configuration initially defaults to:
 | `memory_mb` | 2048 | 128..=16384 |
 | `cpus` | 1 | 1..=8 |
 | `max_context_bytes` | 16384 | 1024..=65536 |
+| `image` | `oxfuzz/fuzz-sandbox:0.2.1` | nonempty image reference, at most 256 bytes |
 
 String fields have fixed wire ceilings: IDs 1024 bytes, paths 4096 bytes,
 names/types/diagnostics 4096 bytes; identifiers are encoded data, not commands.
@@ -267,6 +274,33 @@ entry, downstream coverage, executions per second, analysis seconds, and model
 tokens separately. No generated harness runs on the host. Before release, the
 LLVM 18 helper and the service must pass a real sandbox smoke test in addition
 to mock-based Rust tests and repository quality gates.
+
+### Local qualification (2026-10-20)
+
+The five implementation tasks are delivered behind the optional feature.
+Local verification on macOS passed formatting, fixing and verifying Clippy
+(default, disabled defaults, and isolated Clang), workspace compilation,
+3,963 tests, and documentation with warnings denied. The suite retained its
+21 existing ignored tests; this change adds none. All 23 isolated product
+feature builds and the feature-behavior gate passed. Script, dependency,
+translation, performance-build/parser, and frontend gates passed, including
+696 frontend tests, production bundle budgets, lint, and dependency audit.
+Coverage collection/validation passed in diagnostic macOS mode; storage line
+coverage was 92.18%. Linux baseline enforcement remains in CI.
+
+Nine real LLVM 18 container fixtures cover compiler identities, macro/build
+variants, zero-parameter helpers, dispatch, declarations, physical locations,
+and rejected parses/collection limits. The minimal pinned Ubuntu qualification
+image is built separately from the existing fuzz sandbox. A real CLI/runtime/
+container pipeline with a local fixture HTTP provider exercises ordinary and
+persistent drafts, exact retained provider input, rejection before dispatch on
+context-write failure, C++ driver language for a `.c` file, and stale/deleted
+source exclusion. No generated harness is built or executed by qualification.
+
+The fixture provider verifies integration rather than model effectiveness.
+Comparative harness compilation, observed target entry, downstream coverage,
+throughput, and real model token/quality measurements remain unavailable.
+These measurements require a separately approved sandbox harness campaign.
 
 ## 9. Rejected Alternatives and Later Work
 

@@ -1811,6 +1811,54 @@ fn sh_quote(s: &str) -> String {
     out
 }
 
+/// Explicit context sections for an analysis-conditioned draft.
+pub struct HarnessDraftContext<'a> {
+    /// Retrieved project examples.
+    pub related: &'a [RelatedContext],
+    /// Validated project build flags.
+    pub build: Option<&'a BuildContext>,
+    /// Previously promoted project harnesses.
+    pub examples: &'a [hf_prompt::AcceptedExample],
+    /// Exact analysis section already retained by the service before dispatch.
+    pub analysis: Option<&'a str>,
+}
+
+/// Draft with explicit persisted semantic context for either supported harness flavor.
+///
+/// # Errors
+/// Returns unsupported-flavor, provider, extraction, and build-configuration errors.
+pub async fn draft_analyzed(
+    target: &TargetCandidate,
+    engine: EngineKind,
+    context: &HarnessDraftContext<'_>,
+    sanitizer: hf_core::target::Sanitizer,
+    persistent: bool,
+    llm: Box<dyn LlmProvider>,
+) -> Result<HarnessDraft, ClassifiedError> {
+    let mut prompt = if persistent {
+        crate::persistent::require_persistent_support(engine, target.language)?;
+        hf_prompt::render_persistent_harness_prompt_with_examples(
+            target,
+            context.related,
+            context.build,
+            context.examples,
+            &persistent_prompt_skeleton(target),
+        )
+    } else {
+        render_harness_prompt_with_examples(
+            target,
+            engine,
+            context.related,
+            context.build,
+            context.examples,
+        )
+    };
+    if let Some(section) = context.analysis {
+        prompt.push_str(section);
+    }
+    complete_draft(target, engine, prompt, sanitizer, llm).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

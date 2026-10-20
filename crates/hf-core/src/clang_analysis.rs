@@ -71,6 +71,18 @@ pub struct ClangParameter {
 /// Unit-qualified USR identity.
 pub type ClangFunctionId = String;
 
+/// Whether a declaration requires a C++ receiver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClangMethodKind {
+    /// An ordinary function.
+    Function,
+    /// An instance method requiring a receiver.
+    Instance,
+    /// A static method with no receiver.
+    Static,
+}
+
 /// A function declaration, optionally carrying a project definition.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -85,6 +97,8 @@ pub struct ClangFunction {
     pub name: String,
     /// Project definition/declaration location, absent for external headers.
     pub location: Option<ClangLocation>,
+    /// Project declaration locations, including headers, separate from the definition.
+    pub declarations: Vec<ClangLocation>,
     /// Canonical result type.
     pub result_type: String,
     /// Ordered parameter declarations.
@@ -95,10 +109,8 @@ pub struct ClangFunction {
     pub linkage: String,
     /// C++ access specifier, or none.
     pub access: String,
-    /// Whether a receiver is required.
-    pub method: bool,
-    /// Whether this is a static C++ method.
-    pub static_method: bool,
+    /// Function, instance method, or static method.
+    pub method_kind: ClangMethodKind,
     /// Whether the indexed project contains this body in this unit.
     pub definition: bool,
 }
@@ -173,6 +185,10 @@ pub struct ClangTargetContext {
     pub paths: Vec<Vec<ClangFunctionId>>,
     /// Declarations needed to interpret routes and direct callers.
     pub functions: Vec<ClangFunction>,
+    /// Bounded located call sites supporting the static routes.
+    pub calls: Vec<ClangCall>,
+    /// Call-site records omitted from context.
+    pub omitted_calls: usize,
     /// Virtual, indirect, unresolved, or externally undefined calls in the slice.
     pub unresolved_calls: usize,
     /// Records omitted from bounded context.

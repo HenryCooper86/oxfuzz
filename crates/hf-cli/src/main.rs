@@ -112,7 +112,14 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
             ai,
             #[cfg(feature = "semgrep-enrichment")]
             semgrep,
+            #[cfg(feature = "clang-analysis")]
+            clang,
         }) => {
+            #[cfg(feature = "clang-analysis")]
+            if clang {
+                commands::discovery::cmd_discover_clang(project, &lang).await?;
+                return Ok(());
+            }
             cmd_discover(
                 project,
                 &lang,
