@@ -24,6 +24,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     llvm \
     lld \
     libclang-rt-18-dev \
+    libclang-18-dev \
+    llvm-18-dev \
     make \
     cmake \
     ninja-build \
@@ -278,3 +280,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends bear \
 WORKDIR /work
 
 CMD ["true"]
+
+# Compiler-resolved C/C++ declarations and call graph metadata. LLVM C++ APIs
+# remain inside this immutable image; the Rust service consumes versioned JSON.
+COPY tools/clang-analysis /tmp/oxfuzz-clang-analysis
+RUN cmake -S /tmp/oxfuzz-clang-analysis -B /tmp/oxfuzz-clang-build \
+      -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR=/usr/lib/llvm-18/lib/cmake/llvm \
+      -DClang_DIR=/usr/lib/llvm-18/lib/cmake/clang \
+    && cmake --build /tmp/oxfuzz-clang-build -j2 \
+    && cmake --install /tmp/oxfuzz-clang-build \
+    && rm -rf /tmp/oxfuzz-clang-analysis /tmp/oxfuzz-clang-build
