@@ -33,6 +33,10 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ### Fixed
 
+- Allocation-dispatch qualification now shares the workspace configuration lock
+  with concurrent fixtures, keeping proposal writes and denial checks in the
+  same test workspace.
+
 - Clang analysis runs as its staged workspace owner on Unix, allowing private
   Linux input and output directories to work with capabilities dropped and
   without broadening filesystem permissions.

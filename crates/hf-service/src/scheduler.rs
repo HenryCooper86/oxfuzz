@@ -8212,6 +8212,10 @@ mod allocation_dispatch_tests {
     use super::*;
     #[tokio::test]
     async fn direct_dispatch_denies_an_unreviewed_project_allocation() {
+        // Proposal writes and dispatcher reads must use the same configured workspace.
+        let _workspace = ServiceContainer::workspace_environment_test_gate()
+            .lock()
+            .await;
         let root = tempfile::tempdir().unwrap();
         let project = std::fs::canonicalize(root.path()).unwrap();
         let candidate = crate::campaign_allocation::AllocationCandidate {
