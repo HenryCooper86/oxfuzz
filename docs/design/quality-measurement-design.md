@@ -30,6 +30,13 @@ selection or platform-specific source require an explicit review of the
 measurement definition and baseline. The JSON reports are CI artifacts, and
 the human-readable result appears in the job log.
 
+Each coverage gate starts with `cargo llvm-cov clean --workspace` before either
+package group. The two-phase `--no-report` invocation disables automatic cleanup,
+so restored profiles and workspace executables can introduce earlier counters
+or another feature selection into the report. Cleaning removes that prior
+workspace instrumentation while retaining external dependency artifacts. The
+two groups still run sequentially within one fresh measurement.
+
 ## Feature behavior
 
 Compilation of each product feature remains in the existing feature matrix.
@@ -69,7 +76,10 @@ gate.
 
 Parser tests cover missing packages, malformed or duplicate files, zero-line
 reports, invalid baselines, and a measured regression. The same tests establish
-that a complete report at or above baseline passes. Gate tests assert the
-selected cargo arguments and CI invocation. A deliberately lowered report must
-fail locally and in CI; the retained Linux artifact must permit recomputation
+that a complete report at or above baseline passes. Coverage-tool changes must
+also be exercised with a real isolated workspace: measure a default package,
+then a dependent package enabling an optional source file, then repeat the
+default measurement after fresh-gate cleanup. Its source set must match the
+first measurement even with a populated cache. A deliberately lowered report
+must fail locally and in CI; retained Linux artifacts must permit recomputation
 of every reported percentage.

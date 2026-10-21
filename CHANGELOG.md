@@ -33,6 +33,10 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ### Fixed
 
+- Coverage qualification clears cached workspace instrumentation before measuring,
+  preventing earlier feature selections and counters from entering current
+  reports without changing the checked-in baseline.
+
 - Allocation-dispatch qualification now shares the workspace configuration lock
   with concurrent fixtures, keeping proposal writes and denial checks in the
   same test workspace.

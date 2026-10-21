@@ -154,6 +154,8 @@ gate_coverage() {
   local coverage_target="${CARGO_TARGET_DIR:-target}/llvm-cov-target"
   local coverage_reports="${CARGO_TARGET_DIR:-target}/coverage"
   mkdir -p "${coverage_reports}"
+  # --no-report retains old profiles and objects, including other feature sets.
+  "${binary}" llvm-cov clean --workspace
   coverage_group() {
     local report="$1"
     shift
