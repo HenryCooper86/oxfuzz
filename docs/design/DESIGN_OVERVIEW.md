@@ -28,7 +28,7 @@ all under human-in-the-loop supervision.
 | --- | --- | --- | --- |
 | LLM provider pool | hf-provider | `LlmProvider`, `ProviderPool` | [provider-response-resources.md](provider-response-resources.md); other pool behavior documented in crate docs |
 | Target discovery | hf-discovery | `TargetCandidate`, `TargetInventory` | target-discovery-design.md |
-| Optional Clang harness analysis | hf-service + hf-discovery + hf-harness | optional semantic index and persisted typed harness context | [clang-harness-analysis-design.md](clang-harness-analysis-design.md) |
+| Optional Clang harness analysis | hf-service + hf-discovery + hf-harness | semantic graph, opt-in LLVM CFG/path observations and persisted evidence-linked plans | [clang-harness-analysis-design.md](clang-harness-analysis-design.md), [symbolic evidence](clang-symbolic-harness-design.md) |
 | AI target recommendations | hf-discovery + hf-prompt + hf-service + hf-storage | `TargetAssessment`, durable `RankedDiscoveryStatus` and `RankedDiscoveryResult` | ai-target-ranking-gui-design.md + target-discovery-design.md |
 | Semgrep target enrichment | hf-discovery + hf-service | `SemgrepFinding`, `SemgrepTargetScore`, `SemgrepInventoryView` | target-discovery-design.md + service-orchestration-design.md |
 | Project build context | hf-service + hf-discovery + hf-core | optional legacy context; authoritative configured input resolution, `BuildContext`, `CompileEntry` | harness-generation-design.md |

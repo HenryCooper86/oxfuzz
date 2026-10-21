@@ -15,7 +15,7 @@ import tempfile
 import threading
 
 
-def qualify(cli, image):
+def qualify(cli, image, exploration=False):
     requests = []
 
     class Provider(http.server.BaseHTTPRequestHandler):
@@ -54,7 +54,10 @@ def qualify(cli, image):
                 "arguments": ["clang++", "-std=c++17", "-include", "model.h", "-c", "parser.c", "-o", "parser.o"]}]))
             config = root / "config"
             config.mkdir()
-            (config / "oxfuzz.toml").write_text(f"[clang_analysis]\nimage = {json.dumps(image)}\n")
+            configuration = f"[clang_analysis]\nimage = {json.dumps(image)}\n"
+            if exploration:
+                configuration += "[clang_analysis.exploration]\n"
+            (config / "oxfuzz.toml").write_text(configuration)
             env = os.environ.copy()
             env.update(HF_CONFIG_DIR=str(config), HF_DB_PATH=str(root / "state.db"),
                        HF_WORKSPACE_DIR=str(root / "workspace"), HF_USE_DOCKER="1",
@@ -75,6 +78,10 @@ def qualify(cli, image):
             assert any(f["name"] == "parse" for f in result["analysis"]["index"]["functions"])
             names = {f["name"] for f in result["analysis"]["index"]["functions"]}
             assert "cpp_leaf" in names and "c_leaf" not in names, "C++ driver language was lost for .c source"
+            if exploration:
+                evidence = result["analysis"]["index"]["exploration"]
+                assert evidence["engine"] == "clang-static-analyzer-range-v1"
+                assert evidence["cfgs"] and evidence["calls"] and evidence["branches"]
             run("harness", str(project), "--target", "parse", "--engine", "libfuzzer", "--lang", "c", "--draft-only", "--ai", "require")
             run("harness", str(project), "--target", "parse", "--engine", "afl++", "--persistent", "--lang", "c", "--draft-only", "--ai", "require")
             database = sqlite3.connect(root / "state.db")
@@ -85,6 +92,8 @@ def qualify(cli, image):
                 assert any(section[0] in message["content"] for message in request["messages"]), "provider request differs from durable section"
             assert '"name":"parse"' in sections[-1][0]
             assert "potential static call" in sections[-1][0]
+            if exploration:
+                assert '"plan":' in sections[-1][0] and "modeled LLVM" in sections[-1][0]
             before = len(sections)
             provider_calls = len(requests)
             database.execute("CREATE TRIGGER refuse_context BEFORE INSERT ON harness_clang_contexts BEGIN SELECT RAISE(ABORT, 'fixture persistence failure'); END")
@@ -93,6 +102,12 @@ def qualify(cli, image):
             assert len(requests) == provider_calls, "provider called before durable context write"
             database.execute("DROP TRIGGER refuse_context")
             database.commit()
+            if exploration:
+                (config / "oxfuzz.toml").write_text(configuration.replace("[clang_analysis.exploration]\n", ""))
+                run("harness", str(project), "--target", "parse", "--engine", "libfuzzer", "--lang", "c", "--draft-only", "--ai", "require")
+                assert database.execute("SELECT count(*) FROM harness_clang_contexts").fetchone()[0] == before
+                assert all("<clang_analysis_data>" not in m["content"] for m in requests[-1]["messages"])
+                (config / "oxfuzz.toml").write_text(configuration)
             source.write_text(source.read_text() + "/* changed source */\n")
             run("harness", str(project), "--target", "parse", "--engine", "libfuzzer", "--lang", "c", "--draft-only", "--ai", "require")
             assert database.execute("SELECT count(*) FROM harness_clang_contexts").fetchone()[0] == before
@@ -112,5 +127,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--cli", required=True, type=Path)
     parser.add_argument("--image", default="oxfuzz/clang-analysis:test")
+    parser.add_argument("--exploration", action="store_true")
     arguments = parser.parse_args()
-    qualify(arguments.cli.resolve(), arguments.image)
+    qualify(arguments.cli.resolve(), arguments.image, arguments.exploration)

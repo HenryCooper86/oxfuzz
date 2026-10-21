@@ -1,5 +1,5 @@
 //! Validated deployment limits for optional Clang analysis.
-use hf_core::clang_analysis::ClangLimits;
+use hf_core::clang_analysis::{ClangExplorationLimits, ClangLimits};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -31,6 +31,8 @@ pub struct ClangAnalysisSettings {
     pub image: String,
     /// Optional project-relative linked-program manifest.
     pub scope_file: Option<PathBuf>,
+    /// Optional bounded path-sensitive analysis; absent keeps graph-only mode.
+    pub exploration: Option<ClangExplorationSettings>,
 }
 impl Default for ClangAnalysisSettings {
     fn default() -> Self {
@@ -47,6 +49,7 @@ impl Default for ClangAnalysisSettings {
             max_context_bytes: 16_384,
             image: hf_runtime::SANDBOX_IMAGE.to_owned(),
             scope_file: None,
+            exploration: None,
         }
     }
 }
@@ -56,6 +59,7 @@ impl ClangAnalysisSettings {
     /// # Errors
     /// Rejects out-of-range settings or unsafe manifest paths.
     pub fn resolve(&self) -> Result<ClangLimits, String> {
+        self.resolve_exploration()?;
         if !(1..=64).contains(&self.max_targets) {
             return Err("clang_analysis.max_targets is outside its accepted range".into());
         }
@@ -116,5 +120,60 @@ impl ClangAnalysisSettings {
             cpus: self.cpus,
             max_context_bytes: self.max_context_bytes,
         })
+    }
+
+    /// Resolve optional exploration before capturing an immutable helper request.
+    ///
+    /// # Errors
+    /// Rejects any exploration limit outside its accepted range.
+    pub fn resolve_exploration(&self) -> Result<Option<ClangExplorationLimits>, String> {
+        self.exploration
+            .as_ref()
+            .map(ClangExplorationSettings::resolve)
+            .transpose()
+    }
+}
+
+/// Deployment choices for optional LLVM exploration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ClangExplorationSettings {
+    /// Accepted range: 1 through 1000000 nodes per top-level function.
+    pub max_nodes: u32,
+    /// Accepted range: 1 through 64 block visits on a path.
+    pub max_block_visits: u32,
+    /// Accepted range: 1 through 10000 combined call/branch records.
+    pub max_records: usize,
+    /// Accepted range: 1 through 100000 CFG blocks.
+    pub max_cfg_blocks: usize,
+    /// Accepted range: 1 through 16 inline frames.
+    pub max_inline_depth: u32,
+}
+impl Default for ClangExplorationSettings {
+    fn default() -> Self {
+        Self {
+            max_nodes: 10_000,
+            max_block_visits: 4,
+            max_records: 256,
+            max_cfg_blocks: 2048,
+            max_inline_depth: 4,
+        }
+    }
+}
+impl ClangExplorationSettings {
+    /// Resolve and validate all analyzer choices before dispatch.
+    ///
+    /// # Errors
+    /// Returns an out-of-range limit error.
+    pub fn resolve(&self) -> Result<ClangExplorationLimits, String> {
+        let limits = ClangExplorationLimits {
+            max_nodes: self.max_nodes,
+            max_block_visits: self.max_block_visits,
+            max_records: self.max_records,
+            max_cfg_blocks: self.max_cfg_blocks,
+            max_inline_depth: self.max_inline_depth,
+        };
+        limits.validate()?;
+        Ok(limits)
     }
 }

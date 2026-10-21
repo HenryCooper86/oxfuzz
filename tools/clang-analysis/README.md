@@ -1,8 +1,9 @@
 # Clang semantic extractor
 
 `oxfuzz-clang-analyze` parses C/C++ compiler invocations and emits version-1
-JSON declarations and call sites. It does not execute target code or solve
-path constraints. Production builds require LLVM 18; Rust uses bounded JSON
+JSON declarations and call sites. Optional version-2 analysis adds compiler CFGs
+and real LLVM Static Analyzer path/flow observations. It never executes target
+code. Production builds require LLVM 18; Rust uses bounded JSON
 rather than linking LLVM libraries.
 
 The service invokes the fixed executable in `hf-runtime` with read-only
@@ -64,3 +65,30 @@ The current extractor records explicit calls, declarations, and project header
 locations. Implicit C++ constructors/destructors, runtime virtual overrides,
 and arbitrary function-pointer destinations are not fully resolved. Context
 labels static routes accordingly and retains unknown and omitted counts.
+
+To collect bounded path-sensitive observations for shortlisted roots, add:
+
+```toml
+[clang_analysis.exploration]
+max_nodes = 10000
+max_block_visits = 4
+max_records = 256
+max_cfg_blocks = 2048
+max_inline_depth = 4
+```
+
+This configures the actual LLVM analyzer's node, block-visit and inline limits.
+Located CFG conditions contain syntactic parameter references. Modeled call
+observations retain argument origins, original input ranges, branch assumptions
+and symbolic producer/use relations. The generator receives a bounded plan
+whose indices refer to these retained records. Producer/use does not establish
+ownership or cleanup duties. Missing witnesses remain unknown; pruned branch
+states depend on the full analyzer state. Retained ranges/nullness are an
+incomplete projection and may omit holes or input relations. Symbolic cross-unit
+exploration, arbitrary indirect targets and full C++ lifecycle modeling are
+unsupported. Every record remains advisory and all execution approvals apply.
+
+The qualification gate tests graph-only and exploration delivery through both
+ordinary and persistent drafts, using a local transport fixture. It does not
+measure model effectiveness. See the [design](../../docs/design/clang-symbolic-harness-design.md)
+for evidence semantics, persistence and comparison criteria.

@@ -43,6 +43,8 @@ struct Admission {
     profile_sha256: Option<String>,
     image_id: String,
     target_files: Vec<String>,
+    #[serde(default)]
+    targets: Vec<hf_core::clang_analysis::ClangTargetSelector>,
 }
 
 fn operation_relative(project: &Path, id: Uuid) -> PathBuf {
@@ -115,7 +117,14 @@ fn capture_inputs(
     if admission.settings.scope_file.is_some() {
         crate::clang_analysis::inputs::validate_scope_selection(&units, &admission.target_files)?;
     }
-    let request = serde_json::json!({"schema_version":1,"max_functions":limits.max_functions,"max_calls":limits.max_calls,"max_output_bytes":limits.max_output_bytes,"units":units});
+    let mut request = serde_json::json!({"schema_version":1,"max_functions":limits.max_functions,"max_calls":limits.max_calls,"max_output_bytes":limits.max_output_bytes,"units":units});
+    if let Some(exploration) = admission.settings.resolve_exploration().map_err(invalid)? {
+        request["schema_version"] = serde_json::json!(2);
+        request["exploration"] =
+            serde_json::to_value(exploration).map_err(|e| invalid(e.to_string()))?;
+        request["targets"] =
+            serde_json::to_value(&admission.targets).map_err(|e| invalid(e.to_string()))?;
+    }
     let files = capture(project, source, limits.max_snapshot_bytes)?;
     let database_relative = hf_core::runtime::posix_relative(&admission.database);
     if files.get(&database_relative) != Some(&database_sha) {
@@ -225,6 +234,11 @@ impl ServiceContainer {
             .collect();
         let admission = Admission {
             target_files,
+            targets: candidates
+                .iter()
+                .filter(|c| request.target_ids.contains(&c.id))
+                .map(hf_core::clang_analysis::ClangTargetSelector::from)
+                .collect(),
             request,
             settings,
             database,
@@ -388,6 +402,24 @@ impl ServiceContainer {
         let bytes = read_bounded(&output.join("index.json"), resolved.max_output_bytes)?;
         let index = hf_discovery::clang_analysis::normalize_index(&bytes, &resolved)
             .map_err(|e| invalid(e.to_string()))?;
+        if serde_json::json!(index.schema_version) != request["schema_version"] {
+            return Err(invalid("helper output version does not match request"));
+        }
+        if let Some(exploration) = &index.exploration {
+            let expected = admission.settings.resolve_exploration().map_err(invalid)?;
+            if expected.as_ref() != Some(&exploration.limits)
+                || exploration
+                    .roots
+                    .iter()
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    != hf_discovery::clang_analysis::selected_roots(&index, &admission.targets)
+            {
+                return Err(invalid(
+                    "helper exploration limits or roots do not match request",
+                ));
+            }
+        }
         let major = index
             .clang_version
             .split_whitespace()
@@ -530,6 +562,8 @@ impl ServiceContainer {
             });
         if profile_sha != admission.profile_sha256
             || settings.scope_file != admission.settings.scope_file
+            || settings.resolve_exploration().map_err(invalid)?
+                != admission.settings.resolve_exploration().map_err(invalid)?
         {
             tracing::warn!(operation_id=%operation.id,"stale Clang profile or scope excluded");
             return Ok(None);
@@ -703,6 +737,10 @@ mod executor_tests {
     #[derive(Clone, Copy)]
     enum Mode {
         Success,
+        AdvancedSuccess,
+        BadLimits,
+        MissingRoot,
+        UnexpectedAdvanced,
         Timeout,
         BadJson,
         UnsupportedVersion,
@@ -787,9 +825,27 @@ mod executor_tests {
             } else {
                 "18.1.3"
             };
-            let output = serde_json::json!({"schema_version":1,"clang_version":version,"helper_sha256":"b".repeat(64),
+            let mut output = serde_json::json!({"schema_version":1,"clang_version":version,"helper_sha256":"b".repeat(64),
                 "units":[{"id":id,"file":"a.c","scope":unit["scope"]}],
                 "functions":[{"id":format!("{id}:parse"),"unit":id,"usr":"parse","name":"parse","location":{"file":"a.c","line":1,"column":1},"declarations":[],"result_type":"int","parameters":[{"name":"x","type_name":"int"}],"variadic":false,"linkage":"external","access":"none","method_kind":"function","definition":true}],"calls":[]});
+            if request["schema_version"] == 2 || matches!(self.mode, Mode::UnexpectedAdvanced) {
+                output["schema_version"] = serde_json::json!(2);
+                let limits = if request["exploration"].is_null() {
+                    serde_json::json!({"max_nodes":123,"max_block_visits":4,"max_records":256,"max_cfg_blocks":2048,"max_inline_depth":4})
+                } else {
+                    request["exploration"].clone()
+                };
+                output["exploration"] = serde_json::json!({"engine":"clang-static-analyzer-range-v1","limits":limits,
+                    "roots":[format!("{id}:parse")],"cfgs":[{"function":format!("{id}:parse"),"status":"complete","blocks":[{"id":0,"successors":[],"condition":null}]}],
+                    "calls":[],"branches":[],"exhausted":false,"omitted_records":0});
+                if matches!(self.mode, Mode::BadLimits) {
+                    output["exploration"]["limits"]["max_nodes"] = serde_json::json!(1);
+                }
+                if matches!(self.mode, Mode::MissingRoot) {
+                    output["exploration"]["roots"] = serde_json::json!([]);
+                    output["exploration"]["cfgs"] = serde_json::json!([]);
+                }
+            }
             let bytes = if matches!(self.mode, Mode::BadJson) {
                 b"{bad json".to_vec()
             } else {
@@ -870,6 +926,10 @@ mod executor_tests {
             .unwrap();
         for mode in [
             Mode::Success,
+            Mode::AdvancedSuccess,
+            Mode::BadLimits,
+            Mode::MissingRoot,
+            Mode::UnexpectedAdvanced,
             Mode::Timeout,
             Mode::BadJson,
             Mode::UnsupportedVersion,
@@ -877,6 +937,15 @@ mod executor_tests {
             Mode::Cancel,
             Mode::TeardownFailure,
         ] {
+            let configuration = if matches!(
+                mode,
+                Mode::AdvancedSuccess | Mode::BadLimits | Mode::MissingRoot
+            ) {
+                "[clang_analysis.exploration]\nmax_nodes = 123\n"
+            } else {
+                ""
+            };
+            std::fs::write(config.join("oxfuzz.toml"), configuration).unwrap();
             let runtime = Arc::new(ControlledRuntime {
                 mode,
                 started: tokio::sync::Notify::new(),
@@ -916,7 +985,7 @@ mod executor_tests {
                 }
                 result.expect("analysis did not reach terminal state")
             };
-            let expected = if matches!(mode, Mode::Success) {
+            let expected = if matches!(mode, Mode::Success | Mode::AdvancedSuccess) {
                 State::Done
             } else if matches!(mode, Mode::Cancel) {
                 State::Cancelled
@@ -924,7 +993,7 @@ mod executor_tests {
                 State::Failed
             };
             assert_eq!(final_state.state, expected);
-            if matches!(mode, Mode::Success) {
+            if matches!(mode, Mode::Success | Mode::AdvancedSuccess) {
                 assert!(
                     workspace::project_workspace_dir(&project)
                         .join(".service/clang-analysis")
@@ -937,6 +1006,24 @@ mod executor_tests {
                     .await
                     .unwrap()
                     .is_some());
+                std::fs::write(
+                    config.join("oxfuzz.toml"),
+                    if configuration.is_empty() {
+                        "[clang_analysis.exploration]\n"
+                    } else {
+                        ""
+                    },
+                )
+                .unwrap();
+                assert!(
+                    service
+                        .retained_clang_context(&project, &inventory.candidates[0])
+                        .await
+                        .unwrap()
+                        .is_none(),
+                    "changed exploration mode must exclude retained evidence"
+                );
+                std::fs::write(config.join("oxfuzz.toml"), configuration).unwrap();
                 runtime.image_available.store(false, Ordering::Release);
                 assert!(service
                     .retained_clang_context(&project, &inventory.candidates[0])
@@ -951,9 +1038,10 @@ mod executor_tests {
                     .await
                     .unwrap()
                     .is_some(),
-                matches!(mode, Mode::Success)
+                matches!(mode, Mode::Success | Mode::AdvancedSuccess)
             );
         }
+        std::fs::write(config.join("oxfuzz.toml"), "").unwrap();
 
         std::fs::write(
             project.join("not_compiled.h"),

@@ -211,3 +211,11 @@ timeout_secs = 30
 # max_context_bytes = 16384
 # image = "oxfuzz/fuzz-sandbox:0.2.1"
 # scope_file = "oxfuzz-clang-scope.json"
+# Opt into actual bounded LLVM Static Analyzer exploration and CFG evidence.
+# Omit this nested table for graph-only analysis.
+# [clang_analysis.exploration]
+# max_nodes = 10000
+# max_block_visits = 4
+# max_records = 256
+# max_cfg_blocks = 2048
+# max_inline_depth = 4

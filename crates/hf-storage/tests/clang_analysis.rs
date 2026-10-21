@@ -118,6 +118,7 @@ async fn newer_analysis_for_another_target_does_not_hide_a_current_result() {
                     units: vec![],
                     functions: vec![],
                     calls: vec![],
+                    exploration: None,
                 },
             })
             .await
@@ -169,6 +170,7 @@ async fn published_evidence_survives_reopen_and_rejects_conflicting_or_unowned_w
             units: vec![],
             functions: vec![],
             calls: vec![],
+            exploration: None,
         },
     };
     assert!(store

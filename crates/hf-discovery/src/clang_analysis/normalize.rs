@@ -2,7 +2,7 @@ use super::ClangAnalysisError;
 use hf_core::clang_analysis::{ClangIndex, ClangLimits, ClangLocation};
 use std::collections::HashSet;
 
-fn bounded(value: &str, max: usize) -> bool {
+pub(super) fn bounded(value: &str, max: usize) -> bool {
     value.len() <= max && !value.contains('\0')
 }
 
@@ -15,7 +15,7 @@ fn relative(value: &str) -> bool {
             .all(|part| !part.is_empty() && part != "." && part != "..")
 }
 
-fn location(value: &ClangLocation) -> bool {
+pub(super) fn location(value: &ClangLocation) -> bool {
     relative(&value.file) && value.line > 0 && value.column > 0
 }
 
@@ -33,8 +33,10 @@ pub fn normalize_index(
     }
     let mut index: ClangIndex =
         serde_json::from_slice(bytes).map_err(|e| ClangAnalysisError(e.to_string()))?;
-    if index.schema_version != 1
-        || index.units.is_empty()
+    if !matches!(
+        (index.schema_version, index.exploration.is_some()),
+        (1, false) | (2, true)
+    ) || index.units.is_empty()
         || index.units.len() > limits.max_translation_units
         || index.functions.len() > limits.max_functions
         || index.calls.len() > limits.max_calls
@@ -93,6 +95,7 @@ pub fn normalize_index(
             return Err(invalid());
         }
     }
+    super::exploration::validate(&index)?;
     index.units.sort_by(|a, b| a.id.cmp(&b.id));
     index.functions.sort_by(|a, b| a.id.cmp(&b.id));
     index.calls.sort_by(|a, b| {

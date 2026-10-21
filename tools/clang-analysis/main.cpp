@@ -1,4 +1,5 @@
 // Compiler-resolved declarations and call sites; target code is never executed.
+#include "exploration.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/Basic/Version.h"
 #include "clang/Frontend/FrontendActions.h"
@@ -19,14 +20,6 @@ using namespace clang;
 using namespace clang::tooling;
 namespace J = llvm::json;
 
-struct Output {
-  std::map<std::string, J::Object> functions;
-  J::Array calls;
-  J::Array units;
-  size_t maxFunctions, maxCalls;
-  std::string unit;
-};
-
 static std::string required(const J::Object &o, llvm::StringRef key) {
   auto value = o.getString(key);
   if (!value) throw std::runtime_error("missing string field");
@@ -39,19 +32,30 @@ class Visitor : public RecursiveASTVisitor<Visitor> {
   FunctionDecl *current = nullptr;
 
   J::Value location(SourceLocation source) {
-    auto &sm = context.getSourceManager();
-    auto loc = sm.getExpansionLoc(source);
-    if (loc.isInvalid()) return nullptr;
-    std::string file = sm.getFilename(loc).str();
-    constexpr const char *prefix = "/work/source/";
-    if (file.rfind(prefix, 0) != 0) return nullptr;
-    return J::Object{{"file", file.substr(std::string(prefix).size())},
-                     {"line", sm.getSpellingLineNumber(loc)},
-                     {"column", sm.getSpellingColumnNumber(loc)}};
+    return projectLocation(context.getSourceManager(), source);
   }
 
 public:
   Visitor(ASTContext &context, Output &output) : context(context), output(output) {}
+  bool shouldVisitTemplateInstantiations() const { return true; }
+
+  bool TraverseLambdaExpr(LambdaExpr *expression, DataRecursionQueue * = nullptr) {
+    for (auto *capture : expression->capture_inits())
+      if (!TraverseStmt(capture)) return false;
+    std::vector<FunctionDecl *> operators{expression->getCallOperator()};
+    if (auto *templated = expression->getCallOperator()->getDescribedFunctionTemplate())
+      for (auto *specialization : templated->specializations()) operators.push_back(specialization);
+    for (auto *function : operators) {
+      auto *previous = current;
+      current = function;
+      add(function);
+      collectCFG(function, context, output);
+      bool result = TraverseStmt(function->getBody());
+      current = previous;
+      if (!result) return false;
+    }
+    return true;
+  }
 
   std::string add(FunctionDecl *decl) {
     auto *canonical = decl->getCanonicalDecl();
@@ -103,6 +107,7 @@ public:
     auto *previous = current;
     current = function;
     add(function);
+    collectCFG(function, context, output);
     bool result = RecursiveASTVisitor<Visitor>::TraverseDecl(decl);
     current = previous;
     return result;
@@ -122,6 +127,11 @@ public:
     output.calls.push_back(J::Object{{"caller", add(current)},
       {"callee", std::move(callee)}, {"dispatch", dispatch}, {"location", std::move(loc)}});
     if (output.calls.size() > output.maxCalls) throw std::runtime_error("call limit exceeded");
+    return true;
+  }
+
+  bool VisitDeclRefExpr(DeclRefExpr *expression) {
+    if (auto *function = dyn_cast<FunctionDecl>(expression->getDecl())) add(function);
     return true;
   }
 };
@@ -159,11 +169,13 @@ int main(int argc, char **argv) {
     auto parsed = J::parse((*input)->getBuffer());
     if (!parsed) { llvm::consumeError(parsed.takeError()); throw std::runtime_error("invalid request JSON"); }
     auto *request = parsed->getAsObject();
-    if (!request || request->getInteger("schema_version") != 1) throw std::runtime_error("unsupported schema");
+    if (!request || (request->getInteger("schema_version") != 1 && request->getInteger("schema_version") != 2)) throw std::runtime_error("unsupported schema");
     auto functions = request->getInteger("max_functions"), calls = request->getInteger("max_calls"), bytes = request->getInteger("max_output_bytes");
     auto *units = request->getArray("units");
     if (!functions || *functions < 1 || !calls || *calls < 1 || !bytes || *bytes < 1 || !units || units->empty()) throw std::runtime_error("invalid limits or units");
-    Output output; output.maxFunctions = *functions; output.maxCalls = *calls;
+    Output output;
+    if (request->getInteger("schema_version") == 2) configureExploration(*request, output);
+    output.maxFunctions = *functions; output.maxCalls = *calls;
     for (const auto &unitValue : *units) {
       auto *unit = unitValue.getAsObject();
       if (!unit) throw std::runtime_error("invalid unit");
@@ -182,15 +194,17 @@ int main(int argc, char **argv) {
       ClangTool tool(database, {"/work/source/" + file});
       Factory factory(output);
       if (tool.run(&factory) != 0) throw std::runtime_error("translation unit parse failed");
+      runExploration(database, "/work/source/" + file, output);
     }
     auto executable = llvm::MemoryBuffer::getFile(argv[0]);
     if (!executable) throw std::runtime_error("helper identity unavailable");
     auto hash = llvm::SHA256::hash(llvm::arrayRefFromStringRef((*executable)->getBuffer()));
     J::Array records;
     for (auto &entry : output.functions) records.push_back(std::move(entry.second));
-    J::Object result{{"schema_version", 1}, {"clang_version", getClangFullVersion()},
+    J::Object result{{"schema_version", *request->getInteger("schema_version")}, {"clang_version", getClangFullVersion()},
       {"helper_sha256", llvm::toHex(hash, true)}, {"units", std::move(output.units)},
       {"functions", std::move(records)}, {"calls", std::move(output.calls)}};
+    if (output.exploration) result["exploration"] = explorationJSON(*output.exploration);
     std::string encoded; llvm::raw_string_ostream stream(encoded); stream << J::Value(std::move(result)); stream.flush();
     if (encoded.size() > static_cast<size_t>(*bytes)) throw std::runtime_error("output limit exceeded");
     std::ofstream outputFile("/work/output/index.json", std::ios::binary | std::ios::trunc);

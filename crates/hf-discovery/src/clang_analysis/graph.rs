@@ -1,7 +1,7 @@
 use super::ClangAnalysisError;
 use hf_core::clang_analysis::{
     ClangCall, ClangDispatch, ClangFunction, ClangIndex, ClangLimits, ClangTargetAssociation,
-    ClangTargetContext,
+    ClangTargetContext, ClangTargetSelector,
 };
 use hf_core::target::TargetCandidate;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -93,30 +93,36 @@ pub fn reachable_functions(index: &ClangIndex, start: &str) -> Vec<String> {
 /// Associate by defining file, declaration range, and qualified or terminal name.
 #[must_use]
 pub fn associate_target(index: &ClangIndex, target: &TargetCandidate) -> ClangTargetAssociation {
-    let file = hf_core::runtime::posix_relative(std::path::Path::new(&target.relative_file()));
+    let selector = ClangTargetSelector::from(target);
     let matches: Vec<_> = index
         .functions
         .iter()
-        .filter(|f| {
-            f.definition
-                && f.location.as_ref().is_some_and(|l| {
-                    let position = (l.line, l.column);
-                    let start = (target.location.line, target.location.col);
-                    let end = (
-                        target.location.end_line.unwrap_or(target.location.line),
-                        target.location.end_col.unwrap_or(u32::MAX),
-                    );
-                    l.file == file && position >= start && position < end
-                })
-                && (f.name == target.symbol
-                    || f.name.rsplit("::").next() == Some(target.symbol.as_str()))
-        })
+        .filter(|f| matches_selector(f, &selector))
         .collect();
     match matches.as_slice() {
         [f] => ClangTargetAssociation::Exact(f.id.clone()),
         [] => ClangTargetAssociation::Unavailable,
         _ => ClangTargetAssociation::Ambiguous,
     }
+}
+fn matches_selector(f: &ClangFunction, target: &ClangTargetSelector) -> bool {
+    f.definition
+        && f.location.as_ref().is_some_and(|l| {
+            l.file == target.file
+                && (l.line, l.column) >= (target.line, target.column)
+                && (l.line, l.column) < (target.end_line, target.end_column)
+        })
+        && (f.name == target.symbol || f.name.rsplit("::").next() == Some(target.symbol.as_str()))
+}
+/// Resolve every selected root, preserving separate build variants.
+#[must_use]
+pub fn selected_roots(index: &ClangIndex, targets: &[ClangTargetSelector]) -> BTreeSet<String> {
+    index
+        .functions
+        .iter()
+        .filter(|f| targets.iter().any(|t| matches_selector(f, t)))
+        .map(|f| f.id.clone())
+        .collect()
 }
 fn encoded_size<T: serde::Serialize>(value: &T) -> Result<usize, ClangAnalysisError> {
     Ok(serde_json::to_vec(value)
@@ -142,6 +148,8 @@ pub fn target_context(
         omitted_calls: 0,
         unresolved_calls: 0,
         omitted_functions: 0,
+        exploration: None,
+        plan: None,
     };
     let ClangTargetAssociation::Exact(id) = association else {
         return Ok(context);
@@ -156,11 +164,18 @@ pub fn target_context(
         }
     }
     let reverse = parents(&reversed, &id);
+    let extra = super::exploration::referenced_functions(index, &id);
     let selected: BTreeSet<_> = forward
         .keys()
         .chain(reverse.keys())
         .map(String::as_str)
+        .chain(extra.iter().map(String::as_str))
         .collect();
+    let graph_budget = if index.exploration.is_some() {
+        limits.max_context_bytes / 2
+    } else {
+        limits.max_context_bytes
+    };
     context.target = resolution.functions.get(id.as_str()).map(|f| (*f).clone());
     context.unresolved_calls = index
         .calls
@@ -168,7 +183,7 @@ pub fn target_context(
         .filter(|c| selected.contains(c.caller.as_str()) && resolution.callee(c).is_none())
         .count();
     let mut used = encoded_size(&context)?;
-    if used > limits.max_context_bytes / 2 {
+    if used > graph_budget / 2 {
         return Err(ClangAnalysisError("target exceeds context budget".into()));
     }
     for f in &index.functions {
@@ -176,7 +191,7 @@ pub fn target_context(
             continue;
         }
         let bytes = encoded_size(f)? + 1;
-        if used + bytes > limits.max_context_bytes / 2 {
+        if used + bytes > graph_budget / 2 {
             context.omitted_functions += 1;
             continue;
         }
@@ -191,6 +206,9 @@ pub fn target_context(
         .collect();
     let mut paths_used = 0;
     for node in &retained {
+        if !forward.contains_key(*node) && !reverse.contains_key(*node) {
+            continue;
+        }
         let (map, backwards) = if forward.contains_key(*node) {
             (&forward, true)
         } else {
@@ -205,7 +223,7 @@ pub fn target_context(
                 break;
             }
             bytes += step.len() + 4;
-            if bytes + paths_used > limits.max_context_bytes / 4 {
+            if bytes + paths_used > graph_budget / 4 {
                 route.clear();
                 break;
             }
@@ -228,14 +246,13 @@ pub fn target_context(
             continue;
         }
         let bytes = encoded_size(call)? + 1;
-        if calls_used + bytes > limits.max_context_bytes / 8
-            || !retained.contains(call.caller.as_str())
-        {
+        if calls_used + bytes > graph_budget / 8 || !retained.contains(call.caller.as_str()) {
             context.omitted_calls += 1;
             continue;
         }
         calls_used += bytes;
         context.calls.push(call.clone());
     }
+    super::exploration::attach(index, &mut context, limits.max_context_bytes)?;
     Ok(context)
 }

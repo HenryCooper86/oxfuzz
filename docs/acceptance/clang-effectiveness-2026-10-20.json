@@ -1,0 +1,841 @@
+{
+  "cohort_size": 3,
+  "identity": {
+    "analyzer_image": "sha256:6d9bff621330ac6c0c0644d35b3b57759b16da1035c8741d95c4ff6f6f07526a",
+    "duration_secs": 30,
+    "endpoint": "https://open.bigmodel.cn/api/paas/v4",
+    "engine": "libfuzzer",
+    "max_cpus": 1,
+    "max_mem_mb": 2048,
+    "max_model_calls": 12,
+    "max_output_tokens": 8192,
+    "model": "glm-5.3",
+    "provider": "bigmodel-standard",
+    "reasoning_effort": "low",
+    "sandbox_image": "sha256:b4465af62a3fc3a3f03f0a05c167f1ce2b2faa9ae0035512001e6c6c2900b37f",
+    "sanitizer": "address",
+    "seed": 1337,
+    "temperature": 0.2
+  },
+  "interpretation": "Small fixed cohort; measured differences do not establish general effectiveness.",
+  "packet_id": "80299cda666da97b8676385b0ad2abaafe951ba6aac6abcf30452f403073c564",
+  "qualification": {
+    "cli": {
+      "cli_sha256": "9910e573dd385faacf2c8fe38b6fac8b040734c469604c54f48ed5c3fa5621fc",
+      "default_features": false,
+      "features": [
+        "clang-analysis",
+        "harness-work-order",
+        "proof-carrying"
+      ]
+    },
+    "draft_calls": 6,
+    "final_helper_equivalence": [
+      {
+        "same_normalized_evidence_except_helper_hash": true,
+        "trial": "record-enriched"
+      },
+      {
+        "same_normalized_evidence_except_helper_hash": true,
+        "trial": "handle-enriched"
+      },
+      {
+        "same_normalized_evidence_except_helper_hash": true,
+        "trial": "command-enriched"
+      }
+    ],
+    "host_workload": "Concurrent Rust quality checks; execution rates are descriptive, not isolated performance estimates.",
+    "model_calls": 12,
+    "replicates_per_condition": 1,
+    "review_calls": 6
+  },
+  "schema_version": 1,
+  "trials": [
+    {
+      "evidence": {
+        "corpus_rev": "834fe95696bedae02019ba1169e1c089d1f6f9a28661b4c5b05f40bbfb47d7cf",
+        "downstream_function_counters": [
+          {
+            "count": 6837914,
+            "name": "parser.c:parse_payload"
+          }
+        ],
+        "execution_evidence": {
+          "binary_sha256": "617e5ef89d661f89bf02c2ae7e8949e00fba5b8c9013832549bca007e86bd211",
+          "harness_id": "4b530675-3b41-49d4-a3d5-bfdd9c57ccff",
+          "human_approved": true,
+          "review_approved": true,
+          "review_binary_sha256": "617e5ef89d661f89bf02c2ae7e8949e00fba5b8c9013832549bca007e86bd211",
+          "review_source_sha256": "88d6cdb58c47a2f2f7b94434d6bcf6052c648b30a65172e6fffc45406009317a",
+          "run_id": "0a5e480e-1833-4e43-9a46-6015fa77ac9f",
+          "source_sha256": "88d6cdb58c47a2f2f7b94434d6bcf6052c648b30a65172e6fffc45406009317a"
+        },
+        "llvm_export_sha256": "7c7a3442060cef28887c708f88dca554166fc0044b2ff90adf74ccf590b88ddd",
+        "model_usage": {
+          "draft": {
+            "call_id": 1,
+            "response_id": "2026102018320297fd4e3c8bb64f39",
+            "usage": {
+              "completion_tokens": 62,
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "prompt_tokens": 218,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              },
+              "total_tokens": 280
+            }
+          },
+          "review": {
+            "call_id": 7,
+            "response_id": "20261020183356a18d5bfdb976429f",
+            "usage": {
+              "completion_tokens": 64,
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "prompt_tokens": 244,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              },
+              "total_tokens": 308
+            }
+          }
+        },
+        "notes": "One sample per condition; concurrent Rust validation ran on the host. Timing is descriptive.",
+        "packet_id": "80299cda666da97b8676385b0ad2abaafe951ba6aac6abcf30452f403073c564",
+        "target_file_summary": {
+          "branches": {
+            "count": 26,
+            "covered": 25,
+            "notcovered": 1,
+            "percent": 96.15384615384616
+          },
+          "functions": {
+            "count": 2,
+            "covered": 2,
+            "percent": 100
+          },
+          "instantiations": {
+            "count": 2,
+            "covered": 2,
+            "percent": 100
+          },
+          "lines": {
+            "count": 16,
+            "covered": 16,
+            "percent": 100
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0
+          },
+          "regions": {
+            "count": 36,
+            "covered": 36,
+            "notcovered": 0,
+            "percent": 100
+          }
+        },
+        "target_function": {
+          "count": 24787757,
+          "name": "parse_record"
+        },
+        "trial_id": "record-baseline",
+        "trial_identity": {
+          "config_sha256": "74fba4ba380e5b3999bb650f681e3cfa62e732a65d797957a33738a9928e30ff",
+          "directory": "record-baseline",
+          "fixture": "record",
+          "id": "record-baseline",
+          "language": "c",
+          "mode": "baseline",
+          "seed_sha256": "8e7fb47842f761d1ebf2f7c1adb35cbb6258cfa0b1a5c78679f807cded8ab514",
+          "source_file": "parser.c",
+          "source_sha256": "4a5127f6e41c037935a0b49aa73c52418c9878353eb0553f97c56cc456cfeb84",
+          "target": "parser.c::parse_record"
+        }
+      },
+      "fixture": "record",
+      "metrics": {
+        "analysis_secs": 0.0,
+        "compiled": true,
+        "covered_functions": 1,
+        "draft_input_tokens": 218,
+        "draft_output_tokens": 62,
+        "edges": 18,
+        "execs_per_sec": 799605.0,
+        "review_input_tokens": 244,
+        "review_output_tokens": 64,
+        "target_branches_covered": 25,
+        "target_branches_total": 26,
+        "target_entered": true,
+        "total_functions": 1,
+        "wall_secs": 33.106397
+      },
+      "mode": "baseline",
+      "trial_id": "record-baseline"
+    },
+    {
+      "evidence": {
+        "corpus_rev": "834fe95696bedae02019ba1169e1c089d1f6f9a28661b4c5b05f40bbfb47d7cf",
+        "downstream_function_counters": [
+          {
+            "count": 4968706,
+            "name": "parser.c:parse_payload"
+          }
+        ],
+        "execution_evidence": {
+          "binary_sha256": "741a75aafacb00f9cad4d27721c8a859f49d51c3bcc5dd516cdf5b515b20f51f",
+          "harness_id": "76a596e2-7988-464d-b7a7-f5b0be1b7b63",
+          "human_approved": true,
+          "review_approved": true,
+          "review_binary_sha256": "741a75aafacb00f9cad4d27721c8a859f49d51c3bcc5dd516cdf5b515b20f51f",
+          "review_source_sha256": "5087dc162e1c3e3be022a73374829cf87eca5113be91d2294ae1ecb4e4a35dfc",
+          "run_id": "43b59cb3-8f85-4edb-aea9-95b08df62aad",
+          "source_sha256": "5087dc162e1c3e3be022a73374829cf87eca5113be91d2294ae1ecb4e4a35dfc"
+        },
+        "llvm_export_sha256": "e380bee11d50729c67be05572b27dd187a050ea01b31d29a134fe734a3318d81",
+        "model_usage": {
+          "draft": {
+            "call_id": 2,
+            "response_id": "20261020183206f131647c155343c5",
+            "usage": {
+              "completion_tokens": 180,
+              "completion_tokens_details": {
+                "reasoning_tokens": 21
+              },
+              "prompt_tokens": 12658,
+              "prompt_tokens_details": {
+                "cached_tokens": 128
+              },
+              "total_tokens": 12838
+            }
+          },
+          "review": {
+            "call_id": 8,
+            "response_id": "20261020183400fc273812635d4cab",
+            "usage": {
+              "completion_tokens": 138,
+              "completion_tokens_details": {
+                "reasoning_tokens": 36
+              },
+              "prompt_tokens": 341,
+              "prompt_tokens_details": {
+                "cached_tokens": 128
+              },
+              "total_tokens": 479
+            }
+          }
+        },
+        "notes": "One sample per condition; concurrent Rust validation ran on the host. Timing is descriptive.",
+        "packet_id": "80299cda666da97b8676385b0ad2abaafe951ba6aac6abcf30452f403073c564",
+        "target_file_summary": {
+          "branches": {
+            "count": 26,
+            "covered": 26,
+            "notcovered": 0,
+            "percent": 100
+          },
+          "functions": {
+            "count": 2,
+            "covered": 2,
+            "percent": 100
+          },
+          "instantiations": {
+            "count": 2,
+            "covered": 2,
+            "percent": 100
+          },
+          "lines": {
+            "count": 16,
+            "covered": 16,
+            "percent": 100
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0
+          },
+          "regions": {
+            "count": 36,
+            "covered": 36,
+            "notcovered": 0,
+            "percent": 100
+          }
+        },
+        "target_function": {
+          "count": 137461252,
+          "name": "parse_record"
+        },
+        "trial_id": "record-enriched",
+        "trial_identity": {
+          "config_sha256": "0a1a845863ceb1f90117a8e6e29ddb9c7dbc8f49fc73ae5e4a0fd3b138977aff",
+          "directory": "record-enriched",
+          "fixture": "record",
+          "id": "record-enriched",
+          "language": "c",
+          "mode": "enriched",
+          "seed_sha256": "8e7fb47842f761d1ebf2f7c1adb35cbb6258cfa0b1a5c78679f807cded8ab514",
+          "source_file": "parser.c",
+          "source_sha256": "4a5127f6e41c037935a0b49aa73c52418c9878353eb0553f97c56cc456cfeb84",
+          "target": "parser.c::parse_record"
+        }
+      },
+      "fixture": "record",
+      "metrics": {
+        "analysis_secs": 0.219534,
+        "compiled": true,
+        "covered_functions": 1,
+        "draft_input_tokens": 12658,
+        "draft_output_tokens": 180,
+        "edges": 26,
+        "execs_per_sec": 636737.0,
+        "review_input_tokens": 341,
+        "review_output_tokens": 138,
+        "target_branches_covered": 26,
+        "target_branches_total": 26,
+        "target_entered": true,
+        "total_functions": 1,
+        "wall_secs": 33.143646
+      },
+      "mode": "enriched",
+      "trial_id": "record-enriched"
+    },
+    {
+      "evidence": {
+        "corpus_rev": "70b2f542a11e83923c25095e206f02c6a437be7df7474d25e11d2f324cdd3961",
+        "downstream_function_counters": [
+          {
+            "count": 14241815,
+            "name": "handle.c:decoder_create"
+          },
+          {
+            "count": 14241815,
+            "name": "handle.c:decoder_feed"
+          },
+          {
+            "count": 14241815,
+            "name": "handle.c:decoder_release"
+          }
+        ],
+        "execution_evidence": {
+          "binary_sha256": "1e3d23768745689e4c88b402e465cecf73e3a2455cd2d5bff684c9fdb2afb5a2",
+          "harness_id": "bad23b59-4d87-4786-b3e0-fc1213030add",
+          "human_approved": true,
+          "review_approved": true,
+          "review_binary_sha256": "1e3d23768745689e4c88b402e465cecf73e3a2455cd2d5bff684c9fdb2afb5a2",
+          "review_source_sha256": "3e5f2cf2f5fd9a84580d91f6ad427214d493a10c190b1af7eb8f2cbba698fc72",
+          "run_id": "6573ede6-b18d-4ac6-a5eb-fcc197519efc",
+          "source_sha256": "3e5f2cf2f5fd9a84580d91f6ad427214d493a10c190b1af7eb8f2cbba698fc72"
+        },
+        "llvm_export_sha256": "2bc2dccd2a2c012a352471ac2ba193687ac156a4fd428d77429bee1194b1bff3",
+        "model_usage": {
+          "draft": {
+            "call_id": 3,
+            "response_id": "20261020183219078318cc347d4264",
+            "usage": {
+              "completion_tokens": 185,
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "prompt_tokens": 219,
+              "prompt_tokens_details": {
+                "cached_tokens": 64
+              },
+              "total_tokens": 404
+            }
+          },
+          "review": {
+            "call_id": 9,
+            "response_id": "2026102018341060c191ad6cf549bb",
+            "usage": {
+              "completion_tokens": 63,
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "prompt_tokens": 317,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              },
+              "total_tokens": 380
+            }
+          }
+        },
+        "notes": "One sample per condition; concurrent Rust validation ran on the host. Timing is descriptive.",
+        "packet_id": "80299cda666da97b8676385b0ad2abaafe951ba6aac6abcf30452f403073c564",
+        "target_file_summary": {
+          "branches": {
+            "count": 18,
+            "covered": 13,
+            "notcovered": 5,
+            "percent": 72.22222222222221
+          },
+          "functions": {
+            "count": 4,
+            "covered": 4,
+            "percent": 100
+          },
+          "instantiations": {
+            "count": 4,
+            "covered": 4,
+            "percent": 100
+          },
+          "lines": {
+            "count": 25,
+            "covered": 25,
+            "percent": 100
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0
+          },
+          "regions": {
+            "count": 28,
+            "covered": 26,
+            "notcovered": 2,
+            "percent": 92.85714285714286
+          }
+        },
+        "target_function": {
+          "count": 14673107,
+          "name": "decode_message"
+        },
+        "trial_id": "handle-baseline",
+        "trial_identity": {
+          "config_sha256": "74fba4ba380e5b3999bb650f681e3cfa62e732a65d797957a33738a9928e30ff",
+          "directory": "handle-baseline",
+          "fixture": "handle",
+          "id": "handle-baseline",
+          "language": "c",
+          "mode": "baseline",
+          "seed_sha256": "716c1768873c3745901f341c04cd0848e6438dc0c9136ab76396941046280c61",
+          "source_file": "handle.c",
+          "source_sha256": "96c919a70dbf88dbb0738c07725c905596e87d539552715b8d86b69a444131af",
+          "target": "handle.c::decode_message"
+        }
+      },
+      "fixture": "handle",
+      "metrics": {
+        "analysis_secs": 0.0,
+        "compiled": true,
+        "covered_functions": 3,
+        "draft_input_tokens": 219,
+        "draft_output_tokens": 185,
+        "edges": 15,
+        "execs_per_sec": 473326.0,
+        "review_input_tokens": 317,
+        "review_output_tokens": 63,
+        "target_branches_covered": 13,
+        "target_branches_total": 18,
+        "target_entered": true,
+        "total_functions": 3,
+        "wall_secs": 32.808384
+      },
+      "mode": "baseline",
+      "trial_id": "handle-baseline"
+    },
+    {
+      "evidence": {
+        "corpus_rev": "70b2f542a11e83923c25095e206f02c6a437be7df7474d25e11d2f324cdd3961",
+        "downstream_function_counters": [
+          {
+            "count": 8063564,
+            "name": "handle.c:decoder_create"
+          },
+          {
+            "count": 8063564,
+            "name": "handle.c:decoder_feed"
+          },
+          {
+            "count": 8063564,
+            "name": "handle.c:decoder_release"
+          }
+        ],
+        "execution_evidence": {
+          "binary_sha256": "bcfb72b52de70800e45aa792a8a13839a58713e615c8a4026157bdd8da341693",
+          "harness_id": "c3b9b52c-cf9b-48ac-a9be-707d6b7c17cd",
+          "human_approved": true,
+          "review_approved": true,
+          "review_binary_sha256": "bcfb72b52de70800e45aa792a8a13839a58713e615c8a4026157bdd8da341693",
+          "review_source_sha256": "b1bbcb44220b4f78ae73ac6a6e07dc91047170c87c4487c5579e68cf17a9ae02",
+          "run_id": "36cd3358-f62a-44f9-8007-45c32f31b1c7",
+          "source_sha256": "b1bbcb44220b4f78ae73ac6a6e07dc91047170c87c4487c5579e68cf17a9ae02"
+        },
+        "llvm_export_sha256": "29595cb45b070f895f5af2a0957754b639626258cc049f506b369ad781ba8c25",
+        "model_usage": {
+          "draft": {
+            "call_id": 4,
+            "response_id": "20261020183232c041664bb54345fc",
+            "usage": {
+              "completion_tokens": 62,
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "prompt_tokens": 14880,
+              "prompt_tokens_details": {
+                "cached_tokens": 128
+              },
+              "total_tokens": 14942
+            }
+          },
+          "review": {
+            "call_id": 10,
+            "response_id": "20261020183414aec567f4e36d4783",
+            "usage": {
+              "completion_tokens": 58,
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "prompt_tokens": 244,
+              "prompt_tokens_details": {
+                "cached_tokens": 128
+              },
+              "total_tokens": 302
+            }
+          }
+        },
+        "notes": "One sample per condition; concurrent Rust validation ran on the host. Timing is descriptive.",
+        "packet_id": "80299cda666da97b8676385b0ad2abaafe951ba6aac6abcf30452f403073c564",
+        "target_file_summary": {
+          "branches": {
+            "count": 18,
+            "covered": 13,
+            "notcovered": 5,
+            "percent": 72.22222222222221
+          },
+          "functions": {
+            "count": 4,
+            "covered": 4,
+            "percent": 100
+          },
+          "instantiations": {
+            "count": 4,
+            "covered": 4,
+            "percent": 100
+          },
+          "lines": {
+            "count": 25,
+            "covered": 25,
+            "percent": 100
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0
+          },
+          "regions": {
+            "count": 28,
+            "covered": 26,
+            "notcovered": 2,
+            "percent": 92.85714285714286
+          }
+        },
+        "target_function": {
+          "count": 8288022,
+          "name": "decode_message"
+        },
+        "trial_id": "handle-enriched",
+        "trial_identity": {
+          "config_sha256": "0a1a845863ceb1f90117a8e6e29ddb9c7dbc8f49fc73ae5e4a0fd3b138977aff",
+          "directory": "handle-enriched",
+          "fixture": "handle",
+          "id": "handle-enriched",
+          "language": "c",
+          "mode": "enriched",
+          "seed_sha256": "716c1768873c3745901f341c04cd0848e6438dc0c9136ab76396941046280c61",
+          "source_file": "handle.c",
+          "source_sha256": "96c919a70dbf88dbb0738c07725c905596e87d539552715b8d86b69a444131af",
+          "target": "handle.c::decode_message"
+        }
+      },
+      "fixture": "handle",
+      "metrics": {
+        "analysis_secs": 0.25018,
+        "compiled": true,
+        "covered_functions": 3,
+        "draft_input_tokens": 14880,
+        "draft_output_tokens": 62,
+        "edges": 13,
+        "execs_per_sec": 267355.0,
+        "review_input_tokens": 244,
+        "review_output_tokens": 58,
+        "target_branches_covered": 13,
+        "target_branches_total": 18,
+        "target_entered": true,
+        "total_functions": 3,
+        "wall_secs": 33.485752
+      },
+      "mode": "enriched",
+      "trial_id": "handle-enriched"
+    },
+    {
+      "evidence": {
+        "corpus_rev": "d5b4509684b47502facdc725fce2d934503c06316914528a5a4831ce0def1119",
+        "downstream_function_counters": [
+          {
+            "count": 13523018,
+            "name": "_ZN13CommandParser5parseEPKhm"
+          },
+          {
+            "count": 7551108,
+            "name": "_ZN13CommandParser16evaluate_payloadEPKhm"
+          }
+        ],
+        "execution_evidence": {
+          "binary_sha256": "2911dcd3aa3e85a0b9a65d3edea9ae2335ae0d9f64e32046828f6a0926569dd6",
+          "harness_id": "1c08c259-c7b9-4961-8cb6-459f30889cd1",
+          "human_approved": true,
+          "review_approved": true,
+          "review_binary_sha256": "2911dcd3aa3e85a0b9a65d3edea9ae2335ae0d9f64e32046828f6a0926569dd6",
+          "review_source_sha256": "a522cf2180f6ce6c8e1106705c82e2e194de2a3ad3ba954b436e92d0088bbe66",
+          "run_id": "9e352545-da1c-464a-99ff-749fe76bc0cd",
+          "source_sha256": "a522cf2180f6ce6c8e1106705c82e2e194de2a3ad3ba954b436e92d0088bbe66"
+        },
+        "llvm_export_sha256": "2adedd95a3d1e332ac6de4c1489493edc97af877146ec6e2c81b3f224400047f",
+        "model_usage": {
+          "draft": {
+            "call_id": 5,
+            "response_id": "202610201832426c33cfd0c98644d4",
+            "usage": {
+              "completion_tokens": 128,
+              "completion_tokens_details": {
+                "reasoning_tokens": 12
+              },
+              "prompt_tokens": 223,
+              "prompt_tokens_details": {
+                "cached_tokens": 64
+              },
+              "total_tokens": 351
+            }
+          },
+          "review": {
+            "call_id": 11,
+            "response_id": "2026102018342144e739ca26584020",
+            "usage": {
+              "completion_tokens": 67,
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "prompt_tokens": 298,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              },
+              "total_tokens": 365
+            }
+          }
+        },
+        "notes": "One sample per condition; concurrent Rust validation ran on the host. Timing is descriptive.",
+        "packet_id": "80299cda666da97b8676385b0ad2abaafe951ba6aac6abcf30452f403073c564",
+        "target_file_summary": {
+          "branches": {
+            "count": 22,
+            "covered": 21,
+            "notcovered": 1,
+            "percent": 95.45454545454545
+          },
+          "functions": {
+            "count": 3,
+            "covered": 3,
+            "percent": 100
+          },
+          "instantiations": {
+            "count": 3,
+            "covered": 3,
+            "percent": 100
+          },
+          "lines": {
+            "count": 18,
+            "covered": 18,
+            "percent": 100
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0
+          },
+          "regions": {
+            "count": 32,
+            "covered": 31,
+            "notcovered": 1,
+            "percent": 96.875
+          }
+        },
+        "target_function": {
+          "count": 13523018,
+          "name": "_Z13parse_commandPKhm"
+        },
+        "trial_id": "command-baseline",
+        "trial_identity": {
+          "config_sha256": "74fba4ba380e5b3999bb650f681e3cfa62e732a65d797957a33738a9928e30ff",
+          "directory": "command-baseline",
+          "fixture": "command",
+          "id": "command-baseline",
+          "language": "cpp",
+          "mode": "baseline",
+          "seed_sha256": "21a5756909350f4387c8d9be7facf8d99eb75da45d972781100a825c80be8d59",
+          "source_file": "command.cpp",
+          "source_sha256": "daafa398db3868f2dd48e45ae4605b69ee12f4da3c4309820eeedf1930dcaaf5",
+          "target": "command.cpp::parse_command"
+        }
+      },
+      "fixture": "command",
+      "metrics": {
+        "analysis_secs": 0.0,
+        "compiled": true,
+        "covered_functions": 2,
+        "draft_input_tokens": 223,
+        "draft_output_tokens": 128,
+        "edges": 33,
+        "execs_per_sec": 436226.0,
+        "review_input_tokens": 298,
+        "review_output_tokens": 67,
+        "target_branches_covered": 21,
+        "target_branches_total": 22,
+        "target_entered": true,
+        "total_functions": 2,
+        "wall_secs": 34.427228
+      },
+      "mode": "baseline",
+      "trial_id": "command-baseline"
+    },
+    {
+      "evidence": {
+        "corpus_rev": "d5b4509684b47502facdc725fce2d934503c06316914528a5a4831ce0def1119",
+        "downstream_function_counters": [
+          {
+            "count": 24535765,
+            "name": "_ZN13CommandParser5parseEPKhm"
+          },
+          {
+            "count": 13971722,
+            "name": "_ZN13CommandParser16evaluate_payloadEPKhm"
+          }
+        ],
+        "execution_evidence": {
+          "binary_sha256": "91645c62e91f1699b9e10a21b55ac1944e9f1e5fcc1ef5c87dec7675c24ca704",
+          "harness_id": "dc552811-bb13-413f-88ee-1f106f3bcd8a",
+          "human_approved": true,
+          "review_approved": true,
+          "review_binary_sha256": "91645c62e91f1699b9e10a21b55ac1944e9f1e5fcc1ef5c87dec7675c24ca704",
+          "review_source_sha256": "a1b63f055fd956464b412e55f7d5960c02bdfca10288ae7fb8033585952ee73d",
+          "run_id": "1d444486-a845-4d53-8f2d-c761417a50dc",
+          "source_sha256": "a1b63f055fd956464b412e55f7d5960c02bdfca10288ae7fb8033585952ee73d"
+        },
+        "llvm_export_sha256": "f78faa1290baa8557b829632743157ce70f024484ea0ea69e3ebd2dcaf9c27fd",
+        "model_usage": {
+          "draft": {
+            "call_id": 6,
+            "response_id": "2026102018324956cce4de31064dec",
+            "usage": {
+              "completion_tokens": 69,
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "prompt_tokens": 9075,
+              "prompt_tokens_details": {
+                "cached_tokens": 128
+              },
+              "total_tokens": 9144
+            }
+          },
+          "review": {
+            "call_id": 12,
+            "response_id": "202610201834252b577b19cd2f4e6e",
+            "usage": {
+              "completion_tokens": 62,
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "prompt_tokens": 251,
+              "prompt_tokens_details": {
+                "cached_tokens": 128
+              },
+              "total_tokens": 313
+            }
+          }
+        },
+        "notes": "One sample per condition; concurrent Rust validation ran on the host. Timing is descriptive.",
+        "packet_id": "80299cda666da97b8676385b0ad2abaafe951ba6aac6abcf30452f403073c564",
+        "target_file_summary": {
+          "branches": {
+            "count": 22,
+            "covered": 20,
+            "notcovered": 2,
+            "percent": 90.9090909090909
+          },
+          "functions": {
+            "count": 3,
+            "covered": 3,
+            "percent": 100
+          },
+          "instantiations": {
+            "count": 3,
+            "covered": 3,
+            "percent": 100
+          },
+          "lines": {
+            "count": 18,
+            "covered": 18,
+            "percent": 100
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0
+          },
+          "regions": {
+            "count": 32,
+            "covered": 31,
+            "notcovered": 1,
+            "percent": 96.875
+          }
+        },
+        "target_function": {
+          "count": 24535765,
+          "name": "_Z13parse_commandPKhm"
+        },
+        "trial_id": "command-enriched",
+        "trial_identity": {
+          "config_sha256": "0a1a845863ceb1f90117a8e6e29ddb9c7dbc8f49fc73ae5e4a0fd3b138977aff",
+          "directory": "command-enriched",
+          "fixture": "command",
+          "id": "command-enriched",
+          "language": "cpp",
+          "mode": "enriched",
+          "seed_sha256": "21a5756909350f4387c8d9be7facf8d99eb75da45d972781100a825c80be8d59",
+          "source_file": "command.cpp",
+          "source_sha256": "daafa398db3868f2dd48e45ae4605b69ee12f4da3c4309820eeedf1930dcaaf5",
+          "target": "command.cpp::parse_command"
+        }
+      },
+      "fixture": "command",
+      "metrics": {
+        "analysis_secs": 0.226001,
+        "compiled": true,
+        "covered_functions": 2,
+        "draft_input_tokens": 9075,
+        "draft_output_tokens": 69,
+        "edges": 17,
+        "execs_per_sec": 791476.0,
+        "review_input_tokens": 251,
+        "review_output_tokens": 62,
+        "target_branches_covered": 20,
+        "target_branches_total": 22,
+        "target_entered": true,
+        "total_functions": 2,
+        "wall_secs": 33.103431
+      },
+      "mode": "enriched",
+      "trial_id": "command-enriched"
+    }
+  ]
+}

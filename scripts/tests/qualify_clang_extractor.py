@@ -112,7 +112,7 @@ class ClangAnalysisTests(unittest.TestCase):
 
     def test_parse_protocol_and_collection_failures_publish_no_result(self):
         for overrides, source, error in [
-            ({"schema_version": 2}, "int a;", "unsupported schema"),
+            ({"schema_version": 3}, "int a;", "unsupported schema"),
             ({"max_functions": 1}, "void a(void){} void b(void){}", "function limit"),
             ({"max_calls": 1}, "void a(void){} void b(void){a();a();}", "call limit"),
             ({"max_output_bytes": 1}, "void a(void){}", "output limit"),
@@ -120,6 +120,93 @@ class ClangAnalysisTests(unittest.TestCase):
         ]:
             with self.subTest(error=error):
                 self.analyze(source, overrides=overrides, failure=error)
+
+
+    def symbolic(self, source, extension="c", **limits):
+        resolved = dict(max_nodes=10000, max_block_visits=4, max_records=256,
+                        max_cfg_blocks=2048, max_inline_depth=4)
+        resolved.update(limits)
+        line = next(i for i, text in enumerate(source.splitlines(), 1) if "int entry(" in text)
+        return self.analyze(source, extension, overrides={"schema_version": 2,
+            "exploration": resolved, "targets": [{"file": f"unit.{extension}", "symbol": "entry",
+            "line": line, "column": 1, "end_line": len(source.splitlines()) + 1, "end_column": 1}]})
+
+    def test_symbolic_call_retains_cfg_input_flow_and_guard_range(self):
+        result = self.symbolic("extern int sink(int);\nint entry(int n){if(n>4)return sink(n+1);return 0;}\n")
+        names = {f["id"]: f["name"] for f in result["functions"]}
+        analysis = result["exploration"]
+        self.assertEqual(analysis["engine"], "clang-static-analyzer-range-v1")
+        call = next(c for c in analysis["calls"] if names.get(c["callee"]) == "sink")
+        self.assertEqual(names[call["root"]], "entry")
+        self.assertEqual(call["arguments"][0]["parameters"], [0])
+        self.assertEqual(call["constraints"][0]["min"], "5")
+        self.assertTrue(any(b["condition"] and b["condition"]["parameters"] == [0]
+                            for cfg in analysis["cfgs"] for b in cfg["blocks"]))
+
+    def test_contradictory_guards_prune_a_branch_without_claiming_whole_call_unreachable(self):
+        result = self.symbolic("extern int sink(int);\nint entry(int n){if(n>4){if(n<2)return sink(n);}return 0;}\n")
+        names = {f["id"]: f["name"] for f in result["functions"]}
+        self.assertTrue(any(names.get(c["callee"]) == "sink" for c in result["calls"]))
+        analysis = result["exploration"]
+        self.assertFalse(any(names.get(c["callee"]) == "sink" for c in analysis["calls"]))
+        self.assertTrue(any(not b["true_state"] and b["false_state"]
+                            and b["constraints"][0]["min"] == "5" for b in analysis["branches"]))
+
+    def test_overwritten_inputs_are_concrete_and_pointer_loads_keep_parameter_origin(self):
+        result = self.symbolic("extern int sink(int);\nint entry(int n){n=7;return sink(n);}\n")
+        argument = result["exploration"]["calls"][0]["arguments"][0]
+        self.assertEqual(argument["parameters"], [])
+        self.assertEqual(argument["constant"], "7")
+        result = self.symbolic("extern int sink(int);\nint entry(const unsigned char *data,unsigned n){if(n<1)return 0;return sink(data[0]);}\n")
+        self.assertEqual(result["exploration"]["calls"][0]["arguments"][0]["parameters"], [0])
+
+    def test_modeled_function_pointer_resolution_does_not_rewrite_the_static_graph(self):
+        result = self.symbolic("int leaf(int n){return n;}\nint entry(int n){int(*fp)(int)=leaf;return fp(n);}\n")
+        names = {f["id"]: f["name"] for f in result["functions"]}
+        self.assertTrue(any(c["callee"] is None and c["dispatch"] == "indirect" for c in result["calls"]))
+        self.assertTrue(any(names.get(c["callee"]) == "leaf" for c in result["exploration"]["calls"]))
+
+    def test_library_function_pointer_declarations_remain_interpretable(self):
+        result = self.symbolic("#include <stdlib.h>\nint entry(int n){void*(*fp)(size_t)=malloc;void*p=fp((size_t)n);free(p);return 0;}\n")
+        ids = {f["id"] for f in result["functions"]}
+        for witness in result["exploration"]["calls"]:
+            if witness["callee"] is not None:
+                self.assertIn(witness["callee"], ids)
+
+    def test_cpp_instantiations_and_lambdas_retain_matching_call_sites(self):
+        for source in [
+            "extern int sink(int);template<class T> int helper(T n){return sink(n);}\nint entry(int n){return helper(n);}\n",
+            "extern int sink(int);\nint entry(int n){auto helper=[](int v){return sink(v);};return helper(n);}\n",
+            "extern int sink(int);\nint entry(int n){auto helper=[](auto v){return sink(v);};return helper(n);}\n",
+        ]:
+            with self.subTest(source=source):
+                result = self.symbolic(source, "cpp")
+                ids = {f["id"] for f in result["functions"]}
+                for witness in result["exploration"]["calls"]:
+                    self.assertIn(witness["caller"], ids)
+                    self.assertTrue(any(c["caller"] == witness["caller"] and c["location"] == witness["location"]
+                        and c["callee"] in (None, witness["callee"]) for c in result["calls"]), witness)
+
+    def test_branch_decisions_can_depend_on_constraints_missing_from_range_projection(self):
+        result = self.symbolic("extern int sink(int);\nint entry(int n){if(n!=0){if(n==0)return sink(n);}return 0;}\n")
+        inner = next(b for b in result["exploration"]["branches"] if b["condition"]["text"] == "n==0")
+        self.assertFalse(inner["true_state"])
+        self.assertEqual(inner["constraints"][0]["min"], "-2147483648")
+        self.assertEqual(inner["constraints"][0]["max"], "2147483647")
+
+    def test_symbolic_producer_identity_and_collection_exhaustion(self):
+        source = "extern void *make(void);void consume(void*);void release(void*);\nint entry(int n){void*p=make();consume(p);release(p);return n;}\n"
+        result = self.symbolic(source)
+        names = {f["id"]: f["name"] for f in result["functions"]}
+        call = next(c for c in result["exploration"]["calls"] if names.get(c["callee"]) == "consume")
+        producer = call["arguments"][0]["producer"]
+        self.assertEqual(names[producer["function"]], "make")
+        self.assertEqual(producer["location"]["line"], 2)
+        result = self.symbolic(source, max_records=1)
+        self.assertTrue(result["exploration"]["exhausted"])
+        self.assertGreater(result["exploration"]["omitted_records"], 0)
+        result = self.symbolic(source, max_nodes=1)
+        self.assertTrue(result["exploration"]["exhausted"])
 
 
 if __name__ == "__main__":

@@ -7,6 +7,8 @@
 //! | [`ClangTargetContext`] | Advisory target facts supplied to a provider |
 
 use serde::{Deserialize, Serialize};
+mod exploration;
+pub use exploration::*;
 
 /// Explicitly resolved collection and execution limits.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,6 +72,36 @@ pub struct ClangParameter {
 
 /// Unit-qualified USR identity.
 pub type ClangFunctionId = String;
+
+/// Exact retained discovery source span used to select analyzer roots.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClangTargetSelector {
+    /// Project-relative file.
+    pub file: String,
+    /// Plain or qualified function name.
+    pub symbol: String,
+    /// Inclusive start line.
+    pub line: u32,
+    /// Inclusive start column.
+    pub column: u32,
+    /// Exclusive end line.
+    pub end_line: u32,
+    /// Exclusive end column.
+    pub end_column: u32,
+}
+impl From<&crate::target::TargetCandidate> for ClangTargetSelector {
+    fn from(target: &crate::target::TargetCandidate) -> Self {
+        Self {
+            file: crate::runtime::posix_relative(std::path::Path::new(&target.relative_file())),
+            symbol: target.symbol.clone(),
+            line: target.location.line,
+            column: target.location.col,
+            end_line: target.location.end_line.unwrap_or(target.location.line),
+            end_column: target.location.end_col.unwrap_or(u32::MAX),
+        }
+    }
+}
 
 /// Whether a declaration requires a C++ receiver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,11 +175,11 @@ pub struct ClangCall {
     pub location: ClangLocation,
 }
 
-/// Strict version-1 helper output, independent of discovery candidate scores.
+/// Versioned helper output, independent of discovery candidate scores.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClangIndex {
-    /// Wire version, currently one.
+    /// Wire version: one for graph-only, two for exploration.
     pub schema_version: u32,
     /// Full Clang toolchain version.
     pub clang_version: String,
@@ -159,6 +191,9 @@ pub struct ClangIndex {
     pub functions: Vec<ClangFunction>,
     /// Located call records, including unresolved calls.
     pub calls: Vec<ClangCall>,
+    /// Required for version two; absent in retained version-one results.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exploration: Option<ClangExploration>,
 }
 
 /// Association between a discovery candidate and compiler declarations.
@@ -173,7 +208,7 @@ pub enum ClangTargetAssociation {
     Ambiguous,
 }
 
-/// Bounded advisory metadata for a selected target; not path-feasibility evidence.
+/// Bounded advisory compiler and optional modeled path evidence for a target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClangTargetContext {
@@ -193,4 +228,10 @@ pub struct ClangTargetContext {
     pub unresolved_calls: usize,
     /// Records omitted from bounded context.
     pub omitted_functions: usize,
+    /// Root-specific observations with explicit limits and unknowns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exploration: Option<ClangExploration>,
+    /// Authoring guidance referencing only records retained in this context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<ClangHarnessPlan>,
 }

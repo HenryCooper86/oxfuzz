@@ -200,6 +200,7 @@ gate_performance() {
 gate_clang_analysis() {
   python3 scripts/tests/qualify_clang_extractor.py
   python3 scripts/tests/qualify_clang_pipeline.py --cli "${CARGO_TARGET_DIR:-target}/debug/oxfuzz" --image "${OXFUZZ_CLANG_TEST_IMAGE:-oxfuzz/clang-analysis:test}"
+  python3 scripts/tests/qualify_clang_pipeline.py --cli "${CARGO_TARGET_DIR:-target}/debug/oxfuzz" --image "${OXFUZZ_CLANG_TEST_IMAGE:-oxfuzz/clang-analysis:test}" --exploration
 }
 
 gate_script_tests() {

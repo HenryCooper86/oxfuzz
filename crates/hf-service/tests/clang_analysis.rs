@@ -1,5 +1,31 @@
 #![cfg(feature = "clang-analysis")]
 use hf_service::clang_analysis::{parse_clang_analysis_settings, StartClangAnalysisRequest};
+
+#[test]
+fn symbolic_settings_are_opt_in_and_reject_unused_or_out_of_range_limits() {
+    let settings =
+        parse_clang_analysis_settings("[clang_analysis.exploration]\nmax_nodes = 123").unwrap();
+    let value = serde_json::to_value(settings).unwrap();
+    assert_eq!(value["exploration"]["max_nodes"], 123);
+    assert_eq!(value["exploration"]["max_records"], 256);
+    for setting in [
+        "max_nodes = 0",
+        "max_records = 10001",
+        "max_cfg_blocks = 0",
+        "max_block_visits = 65",
+        "max_inline_depth = 17",
+        "unsupported = 1",
+    ] {
+        assert!(
+            parse_clang_analysis_settings(&format!("[clang_analysis.exploration]\n{setting}"))
+                .is_err()
+        );
+    }
+    assert!(
+        serde_json::to_value(parse_clang_analysis_settings("").unwrap()).unwrap()["exploration"]
+            .is_null()
+    );
+}
 use hf_service::{ServiceContainer, TargetLanguage};
 use std::sync::Arc;
 

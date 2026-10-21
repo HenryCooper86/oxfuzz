@@ -1,6 +1,6 @@
 # Clang Harness Analysis
 
-Status: **active; first milestone delivered**. Owner: `hf-service`, `hf-discovery`, and `hf-harness`.
+Status: **active; compiler and symbolic milestones delivered**. Owner: `hf-service`, `hf-discovery`, and `hf-harness`.
 Risk: **High**, because analysis changes model input and the harness pipeline.
 
 ## 1. Goal and First Milestone
@@ -15,6 +15,10 @@ taint solving, automatic API lifecycle inference, or solver-generated seeds.
 It must deliver an executable helper, bounded Rust parsing, durable service
 operations, a CLI entry point, and persisted context used by harness drafting.
 An extractor without a service-to-provider path does not finish this milestone.
+
+The subsequent [symbolic milestones](clang-symbolic-harness-design.md) add
+opt-in LLVM CFGs, real bounded Static Analyzer observations and evidence-linked
+harness plans. Graph-only version-one behavior remains available.
 
 Success means fewer symbol/type/setup guesses in generated harnesses, measured
 by compilation, observed target entry, downstream function coverage, and cost.
@@ -298,9 +302,10 @@ context-write failure, C++ driver language for a `.c` file, and stale/deleted
 source exclusion. No generated harness is built or executed by qualification.
 
 The fixture provider verifies integration rather than model effectiveness.
-Comparative harness compilation, observed target entry, downstream coverage,
-throughput, and real model token/quality measurements remain unavailable.
-These measurements require a separately approved sandbox harness campaign.
+The subsequent [GLM comparison](../acceptance/clang-effectiveness-2026-10-20.md)
+retains actual baseline/enriched compilation, target entry, downstream coverage,
+throughput and token measurements from separately approved sandbox campaigns.
+It found no aggregate target-branch coverage gain on the three small fixtures.
 
 ## 9. Rejected Alternatives and Later Work
 
@@ -315,9 +320,10 @@ These measurements require a separately approved sandbox harness campaign.
   incompatible builds.
 - Claiming unreachable from absent graph edges or empty diagnostics: unsupported.
 
-Later designs can add CFG conditions, input-flow summaries, explicit library
-models, whole-program indirect-call analysis, and bounded custom Static
-Analyzer queries/CTU exploration. They must preserve `unknown` results and
+CFG conditions, modeled parameter flow and bounded custom Static Analyzer
+queries are delivered by the [symbolic extension](clang-symbolic-harness-design.md).
+Explicit library models, whole-program indirect-call analysis and symbolic CTU
+exploration remain later work. They must preserve `unknown` results and
 validate useful path hypotheses with retained runtime coverage. Existing
 concolic corpus enrichment remains a separate execution capability.
 

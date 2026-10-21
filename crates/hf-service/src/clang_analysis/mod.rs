@@ -11,7 +11,7 @@ pub(crate) mod snapshot;
 pub use crate::config::parse_clang_analysis_settings;
 use hf_core::target::TargetLanguage;
 use serde::{Deserialize, Serialize};
-pub use settings::ClangAnalysisSettings;
+pub use settings::{ClangAnalysisSettings, ClangExplorationSettings};
 use std::path::PathBuf;
 use uuid::Uuid;
 
