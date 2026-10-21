@@ -18,6 +18,11 @@ Versions match the release commits that bump `Cargo.toml`.
   Dedicated coding endpoints, editable models, and English/Chinese credential
   guidance distinguish subscriptions from pay-as-you-go API accounts.
 
+- Source builds enabling `clang-analysis` can explicitly collect sandboxed
+  LLVM 18 declarations, call graphs, CFGs and bounded modeled path evidence.
+  Current evidence is retained before harness drafting; the feature remains
+  opt-in and does not weaken source review or human execution approval.
+
 - Clang harness context now renders compactly for modeled exploration: each
   unit-qualified declaration identity is stated once behind prompt-local symbol
   indices, exact-duplicate call and branch observations are coalesced, and
