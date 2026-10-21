@@ -128,6 +128,15 @@ pub struct SandboxMount {
     pub read_only: bool,
 }
 
+/// Numeric execution identity inside a Linux sandbox container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SandboxUser {
+    /// Container user ID.
+    pub uid: u32,
+    /// Container primary group ID.
+    pub gid: u32,
+}
+
 /// Network namespace exposed to a sandboxed command.
 ///
 /// The default is [`Self::None`]. Automotive physical-bench operations are the
@@ -336,6 +345,8 @@ pub struct SandboxOptions {
     /// Optional pinned image selected by a service-owned specialized adapter.
     /// The runtime validates its syntax and rejects unpinned `latest` values.
     pub image: Option<String>,
+    /// Explicit container UID/GID. Absent retains the image's configured user.
+    pub user: Option<SandboxUser>,
     /// Target platform for the image (e.g. `"linux/amd64"`); maps to `--platform`.
     pub platform: Option<String>,
     /// Network namespace exposed to the container. Defaults to no network.

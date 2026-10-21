@@ -188,6 +188,7 @@ fn build_exec_args_with_syzkaller_profile() {
             SandboxMount::writable("/host/workdir".into(), "/syzbench/workdir"),
         ],
         image: None,
+        user: None,
         platform: Some("linux/amd64".to_owned()),
         network_mode: hf_core::runtime::SandboxNetworkMode::None,
         workdir: Some("/syzbench".to_owned()),

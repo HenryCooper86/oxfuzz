@@ -33,6 +33,10 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ### Fixed
 
+- Clang analysis runs as its staged workspace owner on Unix, allowing private
+  Linux input and output directories to work with capabilities dropped and
+  without broadening filesystem permissions.
+
 - Updated Vite to 7.3.7 to address the editor-launch command-injection
   advisories and restore the frontend dependency-audit gate.
 

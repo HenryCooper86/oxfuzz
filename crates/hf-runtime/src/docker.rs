@@ -435,6 +435,10 @@ fn build_exec_args_for_workspace(
         format!("--cpus={}", limits.max_cpus),
     ];
 
+    if let Some(user) = opts.user {
+        args.push(format!("--user={}:{}", user.uid, user.gid));
+    }
+
     if opts.stdin.is_some() {
         args.push("-i".to_owned());
     }

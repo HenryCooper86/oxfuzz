@@ -363,8 +363,20 @@ impl ServiceContainer {
             max_duration_secs: resolved.timeout_secs,
             ..ResourceLimits::default()
         };
+        #[cfg(unix)]
+        let user = {
+            use std::os::unix::fs::MetadataExt;
+            let owner = std::fs::metadata(root).map_err(|e| invalid(e.to_string()))?;
+            Some(hf_core::runtime::SandboxUser {
+                uid: owner.uid(),
+                gid: owner.gid(),
+            })
+        };
+        #[cfg(not(unix))]
+        let user = None;
         let options = SandboxOptions {
             image: Some(admission.image_id.clone()),
+            user,
             extra_mounts: vec![
                 SandboxMount::read_only(source, "/work/source"),
                 SandboxMount::read_only(input, "/work/input"),

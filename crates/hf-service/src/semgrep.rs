@@ -1313,6 +1313,7 @@ impl crate::ServiceContainer {
                 SandboxMount::writable(snapshot.output_dir.clone(), "/work/output"),
             ],
             image: Some(image_reference),
+            user: None,
             platform: None,
             network_mode: SandboxNetworkMode::None,
             workdir: None,

@@ -102,6 +102,54 @@ async fn live_sandbox_denies_network_and_input_writes_but_retains_bounded_output
     cleanup_inventory(root.path());
 }
 
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "requires the pinned Docker image and disposable host workspace"]
+async fn live_explicit_user_accesses_private_inputs_and_creates_owned_output() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let root = tempfile::tempdir().unwrap();
+    let output = root.path().join("output");
+    std::fs::create_dir(&output).unwrap();
+    let input = root.path().join("input.txt");
+    std::fs::write(&input, "private input").unwrap();
+    std::fs::set_permissions(&input, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let owner = std::fs::metadata(root.path()).unwrap();
+    let runtime = DockerRuntime::new(RuntimeConfig::default(), root.path());
+    let options = SandboxOptions {
+        user: Some(hf_core::runtime::SandboxUser {
+            uid: owner.uid(),
+            gid: owner.gid(),
+        }),
+        workspace_read_only: true,
+        extra_mounts: vec![SandboxMount::writable(output.clone(), "/work/output")],
+        ..SandboxOptions::default()
+    };
+    let command = vec![
+        "sh".to_owned(),
+        "-c".to_owned(),
+        "set -e; id -u; id -g; cat /work/input.txt; umask 077; printf retained > /work/output/result.txt".to_owned(),
+    ];
+    let result = runtime
+        .run_command_opts(&command, root.path(), &limits(10), &options)
+        .await
+        .unwrap();
+    assert_eq!(result.termination, CommandTermination::Completed);
+    assert_eq!(result.exit_code, 0, "{}", result.stderr);
+    assert_eq!(
+        result.stdout.trim_end(),
+        format!("{}\n{}\nprivate input", owner.uid(), owner.gid())
+    );
+    let retained = output.join("result.txt");
+    assert_eq!(std::fs::read_to_string(&retained).unwrap(), "retained");
+    let metadata = std::fs::metadata(retained).unwrap();
+    assert_eq!(metadata.uid(), owner.uid());
+    assert_eq!(metadata.gid(), owner.gid());
+    assert_eq!(metadata.mode() & 0o777, 0o600);
+    cleanup_inventory(root.path());
+}
+
 #[tokio::test]
 #[ignore = "requires the pinned Docker image and disposable host workspace"]
 async fn live_timeout_waits_for_owned_container_cleanup() {
