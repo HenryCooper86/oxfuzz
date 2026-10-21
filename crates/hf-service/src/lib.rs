@@ -34,6 +34,8 @@ pub mod change_comparison;
 #[cfg(feature = "change-aware")]
 pub mod change_impact;
 pub mod checkpoints;
+#[cfg(feature = "clang-analysis")]
+pub mod clang_analysis;
 #[cfg(feature = "concolic-enrichment")]
 pub mod concolic;
 pub mod config;

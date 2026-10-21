@@ -2268,6 +2268,9 @@ impl Store {
         // `automotive_state_corpus` is deleted before `automotive_operations`
         // because it holds a foreign key into it.
         for table in [
+            "harness_clang_contexts",
+            "clang_analysis_results",
+            "clang_analysis_operations",
             "ai_discovery_operations",
             "coverage_experiments",
             "harness_build_inputs",
@@ -2311,6 +2314,9 @@ impl Store {
     pub async fn delete_project(&self, project_root: &str) -> Result<(), StorageError> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         for table in [
+            "harness_clang_contexts",
+            "clang_analysis_results",
+            "clang_analysis_operations",
             "ai_discovery_operations",
             "coverage_experiments",
             "harness_build_inputs",

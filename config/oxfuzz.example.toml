@@ -194,3 +194,28 @@ output_bytes = 10000
 heap_bytes = 16777216
 # Cooperative cancellation, 1..=300 seconds.
 timeout_secs = 30
+
+# Explicit compiler analysis: requires the clang-analysis Cargo feature and a
+# sandbox image containing oxfuzz-clang-analyze. Does not start during discovery
+# unless --clang is supplied. Omit this table in feature-disabled builds.
+# [clang_analysis]
+# max_targets = 16
+# max_translation_units = 1024
+# max_snapshot_bytes = 268435456
+# max_output_bytes = 16777216
+# max_functions = 100000
+# max_calls = 500000
+# timeout_secs = 600
+# memory_mb = 2048
+# cpus = 1
+# max_context_bytes = 16384
+# image = "oxfuzz/fuzz-sandbox:0.2.1"
+# scope_file = "oxfuzz-clang-scope.json"
+# Opt into actual bounded LLVM Static Analyzer exploration and CFG evidence.
+# Omit this nested table for graph-only analysis.
+# [clang_analysis.exploration]
+# max_nodes = 10000
+# max_block_visits = 4
+# max_records = 256
+# max_cfg_blocks = 2048
+# max_inline_depth = 4

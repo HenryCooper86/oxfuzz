@@ -19,6 +19,8 @@ mod campaign_trust;
 mod chat;
 #[cfg(feature = "ai-target-ranking")]
 pub use ai_target_ranking::{RankedDiscoveryResult, RankedDiscoveryStatus, RankedInventoryAdvice};
+#[cfg(feature = "clang-analysis")]
+mod clang_analysis;
 #[cfg(feature = "concolic-enrichment")]
 mod concolic;
 mod corpus;
@@ -695,6 +697,8 @@ pub struct ServiceContainer {
     /// Cancellation tokens for in-flight fuzz runs, keyed by run id. A run
     /// registers its token on start and removes it on completion;
     /// [`Self::cancel_run`] fires the token to stop the run cooperatively.
+    #[cfg(feature = "clang-analysis")]
+    pub(crate) clang: Arc<clang_analysis::ClangCoordinator>,
     active_runs: Arc<std::sync::Mutex<std::collections::HashMap<Uuid, CancellationToken>>>,
     #[cfg(feature = "campaign-health")]
     campaign_telemetry: Arc<health_monitor::RunTelemetryRegistry>,
@@ -1029,7 +1033,8 @@ impl ServiceContainer {
         feature = "automotive-scapy",
         feature = "build-doctor",
         feature = "semgrep-enrichment",
-        feature = "patch-to-proof"
+        feature = "patch-to-proof",
+        feature = "clang-analysis"
     ))]
     pub(crate) fn runtime_adapter(&self) -> &Arc<dyn RuntimeAdapter> {
         &self.runtime

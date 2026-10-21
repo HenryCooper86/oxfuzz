@@ -122,9 +122,32 @@ next blocked or incomplete action.
 
 ### 0. Connect your AI provider
 
-Go to **Settings -> Providers**, add your provider, and paste your API key.
-Without this, the AI cannot write harnesses or reports. (Settings shows sensible
-defaults out of the box; you only need to fill in the key.)
+On first launch, use the **AI connection** step in the getting-started wizard.
+Choose your provider, enter its API key and an available model, then click
+**Test connection**. **Save and continue** becomes available only after that
+configuration passes the test. Existing providers are preserved; later changes
+belong in **Settings -> Providers**.
+
+Public API accounts and coding subscriptions use different credentials or
+endpoints. Choose the matching API or coding-plan option for Kimi or GLM
+(BigModel.cn or Z.AI), rather than pasting a subscription key into a public API
+configuration. DeepSeek and these Kimi/GLM choices are available in both setup
+and **Settings -> Providers -> Provider Type**. In Settings, choosing a preset
+fills its model and endpoint and clears the previous credentials and headers;
+enter the new service's key before testing or saving. Existing provider IDs
+and routing settings are retained.
+
+The model and base URL remain editable. Setup puts the base URL under
+**Advanced connection settings**; Settings shows it directly. Saved compatible
+providers display their matching preset when using its standard endpoint.
+Custom endpoints remain editable as **OpenAI-compatible**.
+
+A chat subscription alone does not imply API access. Coding-plan quotas,
+eligible clients, and permitted usage are set by the provider. Setup requires a
+successful connection test before saving; Settings uses **Save Changes**.
+Use your client's real identity:
+[Kimi's integration guidance](https://www.kimi.com/code/docs/en/)
+explicitly prohibits impersonating another tool.
 
 ### 1. Pick a project
 

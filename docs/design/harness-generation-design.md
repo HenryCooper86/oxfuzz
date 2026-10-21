@@ -402,3 +402,16 @@ qualify the new binary.
 - Integration: read-only corpus readiness invokes no runtime/image/provider
   and names missing diagnosis evidence; feature-off builds retain configured
   enforcement and accept unconfigured historical harnesses without input rows.
+
+## Optional Clang Context
+
+With the `clang-analysis` feature, ordinary and persistent drafts may consume a
+previous explicit compiler analysis. The service selects successful evidence
+by canonical project, target ID, and language, verifies source/database/profile/
+scope/image freshness, and retains the exact rendered section in
+`harness_clang_contexts` before provider dispatch. Storage errors stop dispatch;
+stale or absent analysis preserves baseline drafting. Drafting starts no scan.
+The section supplies typed declarations, header locations, call sites, potential
+forward/reverse routes, and explicit unresolved/omitted counts. It establishes
+neither symbolic feasibility nor observed target entry. See
+[Clang Harness Analysis](clang-harness-analysis-design.md).

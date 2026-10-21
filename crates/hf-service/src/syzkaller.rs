@@ -281,6 +281,7 @@ pub(crate) fn sandbox_options(
     SandboxOptions {
         extra_mounts: stage.mounts.clone(),
         image: None,
+        user: None,
         platform: Some(platform.to_owned()),
         network_mode: hf_core::runtime::SandboxNetworkMode::None,
         workdir: Some("/syzbench".to_owned()),

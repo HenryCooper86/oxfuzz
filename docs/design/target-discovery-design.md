@@ -186,3 +186,14 @@ ranking without reachability annotation. Language-specific rules:
 - Unit: parse a fixture C project, assert `parse_value` is ranked highest.
 - Unit: filter removes `printf` wrappers.
 - Integration: discovery on a sample project produces a non-empty inventory.
+
+## Optional Clang Semantic Analysis
+
+The optional `clang-analysis` feature adds `discover --clang` for an explicit
+sandboxed operation after persisted heuristic discovery. The service selects a
+bounded deterministic shortlist, indexes all compiler units in the selected
+scope (including zero-parameter and low-scoring helpers), and persists a separate
+semantic graph. Candidate IDs, heuristic scores, the name-keyed scanner graph,
+and native/Semgrep overlays remain independent. Cross-unit definition joins
+require a declared linked scope. See
+[Clang Harness Analysis](clang-harness-analysis-design.md).

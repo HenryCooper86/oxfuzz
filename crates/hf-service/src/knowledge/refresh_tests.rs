@@ -2,6 +2,7 @@ use super::*;
 
 #[test]
 fn ensured_search_refreshes_same_length_edits_and_deletions() {
+    let _environment = super::workspace_test_gate().blocking_lock();
     let _guard = super::test_guard();
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("parser.c");
@@ -18,6 +19,7 @@ fn ensured_search_refreshes_same_length_edits_and_deletions() {
 
 #[test]
 fn refresh_reuses_unchanged_entries_and_replaces_only_changed_entries() {
+    let _environment = super::workspace_test_gate().blocking_lock();
     let _guard = super::test_guard();
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -61,6 +63,7 @@ fn refresh_reuses_unchanged_entries_and_replaces_only_changed_entries() {
 
 #[test]
 fn index_status_reports_captured_configuration_and_detects_changes() {
+    let _environment = super::workspace_test_gate().blocking_lock();
     let _guard = super::test_guard();
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -94,6 +97,7 @@ fn index_status_reports_captured_configuration_and_detects_changes() {
 
 #[test]
 fn concurrent_refreshes_share_one_completed_index() {
+    let _environment = super::workspace_test_gate().blocking_lock();
     let _guard = super::test_guard();
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -134,6 +138,7 @@ fn concurrent_refreshes_share_one_completed_index() {
 
 #[test]
 fn an_unreadable_source_does_not_leave_its_old_text_searchable() {
+    let _environment = super::workspace_test_gate().blocking_lock();
     let _guard = super::test_guard();
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("one.c");
@@ -182,6 +187,7 @@ impl EmbeddingProvider for TestEmbedder {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn malformed_vectors_fall_back_to_real_keyword_search() {
+    let _environment = super::workspace_test_gate().lock().await;
     let _guard = super::test_guard();
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -210,6 +216,7 @@ async fn malformed_vectors_fall_back_to_real_keyword_search() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cached_queries_use_the_indexed_provider_not_current_configuration() {
+    let _environment = super::workspace_test_gate().lock().await;
     let _guard = super::test_guard();
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -244,6 +251,7 @@ async fn cached_queries_use_the_indexed_provider_not_current_configuration() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn query_embedding_failure_is_reported_without_hiding_keyword_hits() {
+    let _environment = super::workspace_test_gate().lock().await;
     let _guard = super::test_guard();
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(

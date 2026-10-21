@@ -592,10 +592,12 @@ export function HarnessView({
       <p className="text-sm text-text-secondary">{t("gui.harnessIntro")}</p>
       {buildBlocked && <p role="status" className="text-sm">{t("gui.buildBlocked")}</p>}
 
-      {/* Target + Engine selection */}
+      {/* Target + Engine selection. The qualified target symbol is by far the
+          longest value, so it owns a full row and truncates; the remaining
+          controls wrap as a row below it at narrow panel widths. */}
       {inventory && inventory.candidates.length > 0 && (
-        <div className="flex flex-wrap gap-3 items-end">
-          <div className="flex flex-col gap-1 flex-1 min-w-0" style={{ minWidth: 180 }}>
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-1 min-w-0">
             <label className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>{t("harness.target")}</label>
             <Select
               mono
@@ -616,61 +618,63 @@ export function HarnessView({
                 })}
             />
           </div>
-          <div className="flex flex-col gap-1 w-40">
-            <label className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>{t("harness.engine")}</label>
-            <Select
-              ariaLabel={t("harness.engine")}
-              value={selectionBlocked ? "" : engine}
-              onChange={(v) => setEngine(v)}
-              options={engineOptions}
-            />
+          <div className="flex flex-wrap gap-3 items-end">
+            <div className="flex flex-col gap-1 w-40 min-w-0">
+              <label className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>{t("harness.engine")}</label>
+              <Select
+                ariaLabel={t("harness.engine")}
+                value={selectionBlocked ? "" : engine}
+                onChange={(v) => setEngine(v)}
+                options={engineOptions}
+              />
+            </div>
+            <div className="flex flex-col gap-1 w-56 min-w-0">
+              <label className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>{t("harness.generator")}</label>
+              <Select
+                ariaLabel={t("harness.generator")}
+                value={aiPolicy}
+                onChange={(v) => setAiPolicy(v as AiPolicy)}
+                options={[
+                  { value: "auto", label: t("harness.generatorAuto") },
+                  { value: "require", label: t("harness.generatorRequire") },
+                  { value: "off", label: t("harness.generatorOff") },
+                ]}
+              />
+            </div>
+            <div className="flex flex-col gap-1 w-32 min-w-0">
+              <label className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>{t("harness.language")}</label>
+              <Select
+                ariaLabel={t("harness.language")}
+                value={lang}
+                onChange={(v) => {
+                  setLang(v);
+                  if (selectionBlocked) return;
+                  const supported = fuzzingSettings
+                    ? enabledEngineOptions(fuzzingSettings, { language: v })
+                    : [];
+                  if (!supported.some((option) => option.value === engine) && supported[0]) {
+                    setEngine(supported[0].value);
+                  }
+                }}
+                options={[
+                  { value: "c", label: "C" },
+                  { value: "cpp", label: "C++" },
+                  { value: "rust", label: "Rust" },
+                  { value: "go", label: "Go" },
+                  { value: "python", label: "Python" },
+                ]}
+              />
+            </div>
+            <Button
+              variant="primary"
+              onClick={runAll}
+              disabled={buildBlocked || selectionBlocked || !selectedTarget || engineOptions.length === 0 || harnessStatus === "loading" || qualificationBusy}
+              title={t("harness.buildSmokeTitle")}
+            >
+              <Sparkles size={14} />
+              {t("harness.buildSmokeTest")}
+            </Button>
           </div>
-          <div className="flex flex-col gap-1 w-36">
-            <label className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>{t("harness.generator")}</label>
-            <Select
-              ariaLabel={t("harness.generator")}
-              value={aiPolicy}
-              onChange={(v) => setAiPolicy(v as AiPolicy)}
-              options={[
-                { value: "auto", label: t("harness.generatorAuto") },
-                { value: "require", label: t("harness.generatorRequire") },
-                { value: "off", label: t("harness.generatorOff") },
-              ]}
-            />
-          </div>
-          <div className="flex flex-col gap-1 w-32">
-            <label className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>{t("harness.language")}</label>
-            <Select
-              ariaLabel={t("harness.language")}
-              value={lang}
-              onChange={(v) => {
-                setLang(v);
-                if (selectionBlocked) return;
-                const supported = fuzzingSettings
-                  ? enabledEngineOptions(fuzzingSettings, { language: v })
-                  : [];
-                if (!supported.some((option) => option.value === engine) && supported[0]) {
-                  setEngine(supported[0].value);
-                }
-              }}
-              options={[
-                { value: "c", label: "C" },
-                { value: "cpp", label: "C++" },
-                { value: "rust", label: "Rust" },
-                { value: "go", label: "Go" },
-                { value: "python", label: "Python" },
-              ]}
-            />
-          </div>
-          <Button
-            variant="primary"
-            onClick={runAll}
-            disabled={buildBlocked || selectionBlocked || !selectedTarget || engineOptions.length === 0 || harnessStatus === "loading" || qualificationBusy}
-            title={t("harness.buildSmokeTitle")}
-          >
-            <Sparkles size={14} />
-            {t("harness.buildSmokeTest")}
-          </Button>
         </div>
       )}
 

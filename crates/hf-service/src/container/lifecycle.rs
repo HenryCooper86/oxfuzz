@@ -110,6 +110,8 @@ impl ServiceContainer {
             run_journal: Arc::new(crate::recovery::RunJournal::in_memory()),
             #[cfg(feature = "semgrep-enrichment")]
             semgrep: Arc::new(crate::semgrep::SemgrepCoordinator::in_memory()),
+            #[cfg(feature = "clang-analysis")]
+            clang: Arc::new(super::clang_analysis::ClangCoordinator::default()),
             active_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             #[cfg(feature = "campaign-health")]
             campaign_telemetry: Arc::new(super::health_monitor::RunTelemetryRegistry::new(
@@ -327,6 +329,19 @@ impl ServiceContainer {
                 (None, PersistenceAvailability::Unavailable)
             }
         };
+        #[cfg(feature = "clang-analysis")]
+        if let Some(store) = &store {
+            match super::workspace::prepare_configured_workspace_root() {
+                Ok(root) => {
+                    if let Err(error) =
+                        super::clang_analysis::recover_clang_operations(store, &root).await
+                    {
+                        tracing::error!(%error,"Clang operation recovery failed");
+                    }
+                }
+                Err(error) => tracing::error!(%error,"Clang recovery workspace unavailable"),
+            }
+        }
         #[cfg(feature = "ai-target-ranking")]
         if let Some(store) = &store {
             if let Err(error) = store.interrupt_active_ai_discoveries().await {
@@ -438,6 +453,8 @@ impl ServiceContainer {
             run_journal,
             #[cfg(feature = "semgrep-enrichment")]
             semgrep,
+            #[cfg(feature = "clang-analysis")]
+            clang: Arc::new(super::clang_analysis::ClangCoordinator::default()),
             active_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             #[cfg(feature = "campaign-health")]
             campaign_telemetry: Arc::new(super::health_monitor::RunTelemetryRegistry::new(

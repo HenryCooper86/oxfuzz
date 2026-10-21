@@ -1322,6 +1322,8 @@ bounded deterministic history, and both cleanup operations.
 | `0036_ai_rank_resolved_model.sql` | records the resolved provider model for each AI batch |
 | `0037_build_profile_systems.sql` | widens saved build profiles to Meson and Autotools by rebuilding the profile table's system check |
 | `0038_run_edge_sets.sql` | retains one immutable, bounded per-run covered edge set (64 KiB AFL map bitmap) for exact run-to-run edge diffs |
+| `0039_clang_analysis.sql` | retains Clang operation lifecycle, immutable semantic results, and exact provider context |
+| `0040_harness_clang_context_v2.sql` | widens the harness context renderer version check to accept compact advanced rendering (version 2) |
 
 ## 7. Read failure contract
 
@@ -1371,3 +1373,64 @@ bounded to 65,536 bytes. Identity/time/digest validation follows 0031. Exact ret
 are accepted; differing retries, UPDATE and duplicate INSERT/REPLACE are refused.
 Project deletion and clear_knowledge delete these records explicitly. They have no
 harness foreign key because drafting precedes compilation and may fail.
+
+## Clang Analysis Evidence
+
+Migration `0039_clang_analysis.sql` adds unconditional storage for the optional
+compiler analysis feature:
+
+- `clang_analysis_operations`: service-owned operation UUID, canonical project,
+  language, exact resolved admission JSON, lifecycle state, timestamps, and a
+  failure category. State transitions use compare-and-swap.
+- `clang_analysis_results`: one immutable normalized index per successful
+  operation, exact versioned input fingerprint, its SHA-256, and immutable
+  runtime image identity. Result insertion and the successful terminal state
+  commit atomically. Identical publication retries are accepted.
+- `harness_clang_contexts`: immutable context UUID, owning result, project and
+  target, renderer version 1 or 2, exact rendered provider section (at most
+  64 KiB), and creation timestamp. Version 1 is the full `ClangTargetContext`
+  JSON; version 2 is the compact advanced projection. The record commits before
+  provider dispatch. Migration `0040_harness_clang_context_v2.sql` widens the
+  renderer version check in place.
+
+Reads strictly decode retained values. Context/result children are deleted
+before operation parents during project deletion and knowledge cleanup; that
+cleanup remains available without the feature. Historical evidence is retained
+when source or configuration becomes stale. See
+[Clang Harness Analysis](../design/clang-harness-analysis-design.md).
+
+### `clang_analysis_operations`
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | operation UUID |
+| `project_root` | `TEXT NOT NULL` | canonical project root |
+| `language` | `TEXT NOT NULL` | c or cpp |
+| `state` | `TEXT NOT NULL` | staging, analyzing, validating, done, failed, cancelled, interrupted |
+| `request_json` | `TEXT NOT NULL` | exact admission JSON, at most 64 MiB |
+| `started_at` | `TEXT NOT NULL` | UTC admission time |
+| `ended_at` | `TEXT` | present exactly for terminal operations |
+| `failure` | `TEXT` | optional failure category |
+
+### `clang_analysis_results`
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `operation_id` | `TEXT PRIMARY KEY` | owning successful operation, cascading foreign key |
+| `project_root` | `TEXT NOT NULL` | canonical project root |
+| `input_sha256` | `TEXT NOT NULL` | 64-character input fingerprint digest |
+| `image_id` | `TEXT NOT NULL` | immutable sandbox image identity |
+| `inputs_json` | `TEXT NOT NULL` | exact fingerprint JSON, at most 64 MiB |
+| `index_json` | `TEXT NOT NULL` | normalized semantic index, at most 64 MiB |
+
+### `harness_clang_contexts`
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | context UUID |
+| `operation_id` | `TEXT NOT NULL` | owning result, cascading foreign key |
+| `project_root` | `TEXT NOT NULL` | canonical project root |
+| `target_id` | `TEXT NOT NULL` | associated discovery candidate |
+| `renderer_version` | `INTEGER NOT NULL` | version 1 (full JSON) or 2 (compact advanced) |
+| `rendered` | `TEXT NOT NULL` | exact provider section, at most 64 KiB |
+| `created_at` | `TEXT NOT NULL` | UTC capture time |

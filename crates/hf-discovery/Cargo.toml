@@ -11,6 +11,7 @@ ai-target-ranking = []
 build-context = ["dep:shlex"]
 native-analysis = ["dep:hf-analysis"]
 semgrep-enrichment = []
+clang-analysis = []
 
 [dependencies]
 hf-core = { workspace = true }

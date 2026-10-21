@@ -9,6 +9,56 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ## Unreleased
 
+## 0.6.8 - 2026-10-21
+
+### Added
+
+- Shared getting-started and Settings provider presets for DeepSeek, Kimi API
+  and Coding subscriptions, and GLM API and Coding Plans on BigModel.cn and Z.AI.
+  Dedicated coding endpoints, editable models, and English/Chinese credential
+  guidance distinguish subscriptions from pay-as-you-go API accounts.
+
+- Source builds enabling `clang-analysis` can explicitly collect sandboxed
+  LLVM 18 declarations, call graphs, CFGs and bounded modeled path evidence.
+  Current evidence is retained before harness drafting; the feature remains
+  opt-in and does not weaken source review or human execution approval.
+
+- Clang harness context now renders compactly for modeled exploration: each
+  unit-qualified declaration identity is stated once behind prompt-local symbol
+  indices, exact-duplicate call and branch observations are coalesced, and
+  distinct guard observations are retained ahead of repeated call/CFG records.
+  On the retained effectiveness cohort this reduced provider-section bytes by
+  51.1% and restored the decoder trial's 32 distinct guard observations that
+  repetition had previously crowded out. Graph-only context is unchanged.
+
+### Fixed
+
+- Coverage qualification clears cached workspace instrumentation before measuring,
+  preventing earlier feature selections and counters from entering current
+  reports without changing the checked-in baseline.
+
+- Allocation-dispatch qualification now shares the workspace configuration lock
+  with concurrent fixtures, keeping proposal writes and denial checks in the
+  same test workspace.
+
+- Clang analysis runs as its staged workspace owner on Unix, allowing private
+  Linux input and output directories to work with capabilities dropped and
+  without broadening filesystem permissions.
+
+- Updated Vite to 7.3.7 to address the editor-launch command-injection
+  advisories and restore the frontend dependency-audit gate.
+
+- Settings now includes the Kimi and GLM provider choices previously offered
+  only in setup. Saved compatible providers recover their branded selection
+  from the endpoint without changing custom models or URLs.
+- Changing a provider preset clears its prior credentials and headers. Browser
+  saves preserve hidden credentials only when provider type and base URL are
+  unchanged, preventing implicit reuse against a different service.
+
+- Harness controls keep long qualified targets inside their selector and align
+  engine, generator, and language fields at narrow panel widths. Truncated
+  selections retain their full text in tooltips and the dropdown.
+
 ## 0.6.7 - 2026-10-19
 
 ### Fixed

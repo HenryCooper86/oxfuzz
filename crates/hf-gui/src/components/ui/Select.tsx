@@ -32,16 +32,20 @@ export function Select({
   ariaLabel,
   placeholder,
 }: SelectProps) {
+  const selectedLabel = options.find((o) => o.value === value)?.label;
   return (
     <RadixSelect.Root value={value} onValueChange={onChange} disabled={disabled}>
       <RadixSelect.Trigger
         id={id}
         aria-labelledby={ariaLabelledBy}
         aria-label={ariaLabel}
-        className={`inline-flex items-center justify-between gap-2 px-2 py-1.5 text-12px border border-solid border-[var(--border)] rounded-[var(--radius-md)] bg-[var(--surface-primary)] text-text-primary transition-colors duration-150 outline-none focus:border-[var(--border-focus)] cursor-pointer data-[disabled]:cursor-not-allowed data-[disabled]:opacity-50 ${mono ? "font-[var(--font-mono)]" : "font-sans"} ${className ?? ""}`}
+        title={selectedLabel ?? placeholder}
+        className={`inline-flex h-9 min-w-0 max-w-full items-center justify-between gap-2 px-2 py-1.5 text-12px border border-solid border-[var(--border)] rounded-[var(--radius-md)] bg-[var(--surface-primary)] text-text-primary transition-colors duration-150 outline-none focus:border-[var(--border-focus)] cursor-pointer data-[disabled]:cursor-not-allowed data-[disabled]:opacity-50 ${mono ? "font-[var(--font-mono)]" : "font-sans"} ${className ?? ""}`}
       >
-        <RadixSelect.Value placeholder={placeholder} />
-        <RadixSelect.Icon style={{ opacity: 0.7 }}>
+        <span className="min-w-0 flex-1 truncate text-left">
+          <RadixSelect.Value placeholder={placeholder} />
+        </span>
+        <RadixSelect.Icon className="shrink-0" style={{ opacity: 0.7 }}>
           <ChevronDown size={14} />
         </RadixSelect.Icon>
       </RadixSelect.Trigger>
@@ -50,14 +54,14 @@ export function Select({
           position="popper"
           sideOffset={4}
           className={`overflow-hidden border border-solid border-[var(--border)] rounded-[var(--radius-md)] bg-[var(--surface-primary)] text-text-primary z-50 ${mono ? "font-[var(--font-mono)]" : "font-sans"}`}
-          style={{ boxShadow: "0 8px 24px rgba(0,0,0,0.25)", maxHeight: "300px" }}
+          style={{ boxShadow: "0 8px 24px rgba(0,0,0,0.25)", maxHeight: "300px", maxWidth: "var(--radix-select-content-available-width)" }}
         >
           <RadixSelect.Viewport className="p-1" style={{ maxHeight: "300px" }}>
             {options.map((o) => (
               <RadixSelect.Item
                 key={o.value}
                 value={o.value}
-                className="relative flex items-center pl-7 pr-2 py-1.5 text-12px rounded-[var(--radius-sm)] cursor-pointer outline-none select-none data-[highlighted]:bg-[var(--surface-hover)]"
+                className="relative flex min-w-0 items-center whitespace-normal [overflow-wrap:anywhere] pl-7 pr-2 py-1.5 text-12px rounded-[var(--radius-sm)] cursor-pointer outline-none select-none data-[highlighted]:bg-[var(--surface-hover)]"
               >
                 <RadixSelect.ItemIndicator className="absolute left-2 inline-flex items-center text-[var(--accent)]">
                   <Check size={13} />
@@ -71,3 +75,4 @@ export function Select({
     </RadixSelect.Root>
   );
 }
+

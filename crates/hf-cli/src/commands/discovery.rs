@@ -1275,3 +1275,53 @@ mod semgrep_cli_tests {
         );
     }
 }
+
+/// Run explicit semantic analysis through the service and render its retained result.
+#[cfg(feature = "clang-analysis")]
+pub(crate) async fn cmd_discover_clang(project: PathBuf, lang: &str) -> anyhow::Result<()> {
+    let language = parse_lang(lang)?;
+    if !matches!(language, TargetLanguage::C | TargetLanguage::Cpp) {
+        anyhow::bail!("Clang analysis supports c and cpp only");
+    }
+    let service = crate::approval::bootstrap().await;
+    let inventory = service.discover(&project, language).await?;
+    let operation = service
+        .start_clang_analysis(hf_service::clang_analysis::StartClangAnalysisRequest {
+            project,
+            language,
+            target_ids: vec![],
+        })
+        .await?;
+    let mut previous = String::new();
+    loop {
+        let status = service
+            .clang_analysis_operation(operation.id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Clang operation disappeared"))?;
+        if previous != status.state.as_str() {
+            eprintln!("Clang analysis: {}", status.state.as_str());
+            status.state.as_str().clone_into(&mut previous);
+        }
+        if status.state.terminal() {
+            if status.state != hf_service::clang_analysis::ClangOperationState::Done {
+                anyhow::bail!(
+                    "Clang analysis {}: {}",
+                    status.state.as_str(),
+                    status.failure.as_deref().unwrap_or("no successful result")
+                );
+            }
+            let analysis = service
+                .clang_analysis_result(operation.id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("Clang result unavailable"))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({"inventory":inventory,"analysis":analysis})
+                )?
+            );
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
