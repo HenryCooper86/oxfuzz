@@ -28,6 +28,9 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ### Fixed
 
+- Updated Vite to 7.3.7 to address the editor-launch command-injection
+  advisories and restore the frontend dependency-audit gate.
+
 - Settings now includes the Kimi and GLM provider choices previously offered
   only in setup. Saved compatible providers recover their branded selection
   from the endpoint without changing custom models or URLs.
