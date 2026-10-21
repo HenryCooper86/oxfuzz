@@ -9,6 +9,8 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ## Unreleased
 
+## 0.6.8 - 2026-10-21
+
 ### Added
 
 - Shared getting-started and Settings provider presets for DeepSeek, Kimi API
