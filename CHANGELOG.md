@@ -16,6 +16,14 @@ Versions match the release commits that bump `Cargo.toml`.
   Dedicated coding endpoints, editable models, and English/Chinese credential
   guidance distinguish subscriptions from pay-as-you-go API accounts.
 
+- Clang harness context now renders compactly for modeled exploration: each
+  unit-qualified declaration identity is stated once behind prompt-local symbol
+  indices, exact-duplicate call and branch observations are coalesced, and
+  distinct guard observations are retained ahead of repeated call/CFG records.
+  On the retained effectiveness cohort this reduced provider-section bytes by
+  51.1% and restored the decoder trial's 32 distinct guard observations that
+  repetition had previously crowded out. Graph-only context is unchanged.
+
 ### Fixed
 
 - Settings now includes the Kimi and GLM provider choices previously offered

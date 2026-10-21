@@ -606,8 +606,8 @@ impl ServiceContainer {
         let limits = settings.resolve().map_err(invalid)?;
         let target_snapshot = target.clone();
         let retained_index = result.index;
-        let rendered =
-            tokio::task::spawn_blocking(move || -> Result<Option<String>, ClassifiedError> {
+        let rendered = tokio::task::spawn_blocking(
+            move || -> Result<Option<(String, u32)>, ClassifiedError> {
                 let normalized = hf_discovery::clang_analysis::normalize_index(
                     &serde_json::to_vec(&retained_index).map_err(|e| invalid(e.to_string()))?,
                     &limits,
@@ -626,14 +626,17 @@ impl ServiceContainer {
                     tracing::warn!("Clang target association unavailable or ambiguous");
                     return Ok(None);
                 }
-                Ok(Some(
+                let version = u32::from(hf_prompt::clang_renderer_version(&context));
+                Ok(Some((
                     hf_prompt::render_clang_context(&context, limits.max_context_bytes)
                         .map_err(|e| invalid(e.to_string()))?,
-                ))
-            })
-            .await
-            .map_err(|e| invalid(e.to_string()))??;
-        let Some(rendered) = rendered else {
+                    version,
+                )))
+            },
+        )
+        .await
+        .map_err(|e| invalid(e.to_string()))??;
+        let Some((rendered, renderer_version)) = rendered else {
             return Ok(None);
         };
         store
@@ -642,7 +645,7 @@ impl ServiceContainer {
                 operation_id: result.operation_id,
                 project_root: project.to_string_lossy().into_owned(),
                 target_id: target.id,
-                renderer_version: 1,
+                renderer_version,
                 rendered: rendered.clone(),
                 created_at: chrono::Utc::now().to_rfc3339(),
             })

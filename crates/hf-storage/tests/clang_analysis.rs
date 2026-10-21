@@ -255,9 +255,22 @@ async fn published_evidence_survives_reopen_and_rejects_conflicting_or_unowned_w
         .await
         .is_err());
     let mut unsupported = context.clone();
-    unsupported.renderer_version = 2;
+    unsupported.renderer_version = 3;
     assert!(store
         .append_harness_clang_context(&unsupported)
+        .await
+        .is_err());
+    let mut compact = context.clone();
+    compact.id = Uuid::new_v4();
+    compact.renderer_version = 2;
+    compact.rendered = "compact advanced projection".into();
+    store.append_harness_clang_context(&compact).await.unwrap();
+    // A version-only retry of an already retained record is a conflict, not
+    // an accepted identical retry.
+    let mut version_conflict = context.clone();
+    version_conflict.renderer_version = 2;
+    assert!(store
+        .append_harness_clang_context(&version_conflict)
         .await
         .is_err());
     drop(store);
@@ -267,11 +280,15 @@ async fn published_evidence_survives_reopen_and_rejects_conflicting_or_unowned_w
         store.clang_operation(id).await.unwrap().unwrap().state,
         ClangOperationState::Done
     );
-    let retained: Vec<String> = sqlx::query_scalar("SELECT rendered FROM harness_clang_contexts")
-        .fetch_all(store.pool())
-        .await
-        .unwrap();
-    assert_eq!(retained, [context.rendered]);
+    let mut retained: Vec<String> =
+        sqlx::query_scalar("SELECT rendered FROM harness_clang_contexts")
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+    retained.sort();
+    let mut expected = vec![context.rendered.clone(), compact.rendered.clone()];
+    expected.sort();
+    assert_eq!(retained, expected);
 
     let abandoned = ClangOperationRecord {
         id: Uuid::new_v4(),

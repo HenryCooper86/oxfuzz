@@ -1323,6 +1323,7 @@ bounded deterministic history, and both cleanup operations.
 | `0037_build_profile_systems.sql` | widens saved build profiles to Meson and Autotools by rebuilding the profile table's system check |
 | `0038_run_edge_sets.sql` | retains one immutable, bounded per-run covered edge set (64 KiB AFL map bitmap) for exact run-to-run edge diffs |
 | `0039_clang_analysis.sql` | retains Clang operation lifecycle, immutable semantic results, and exact provider context |
+| `0040_harness_clang_context_v2.sql` | widens the harness context renderer version check to accept compact advanced rendering (version 2) |
 
 ## 7. Read failure contract
 
@@ -1386,8 +1387,11 @@ compiler analysis feature:
   runtime image identity. Result insertion and the successful terminal state
   commit atomically. Identical publication retries are accepted.
 - `harness_clang_contexts`: immutable context UUID, owning result, project and
-  target, renderer version 1, exact rendered provider section (at most 64 KiB),
-  and creation timestamp. The record commits before provider dispatch.
+  target, renderer version 1 or 2, exact rendered provider section (at most
+  64 KiB), and creation timestamp. Version 1 is the full `ClangTargetContext`
+  JSON; version 2 is the compact advanced projection. The record commits before
+  provider dispatch. Migration `0040_harness_clang_context_v2.sql` widens the
+  renderer version check in place.
 
 Reads strictly decode retained values. Context/result children are deleted
 before operation parents during project deletion and knowledge cleanup; that
@@ -1427,6 +1431,6 @@ when source or configuration becomes stale. See
 | `operation_id` | `TEXT NOT NULL` | owning result, cascading foreign key |
 | `project_root` | `TEXT NOT NULL` | canonical project root |
 | `target_id` | `TEXT NOT NULL` | associated discovery candidate |
-| `renderer_version` | `INTEGER NOT NULL` | version 1 |
+| `renderer_version` | `INTEGER NOT NULL` | version 1 (full JSON) or 2 (compact advanced) |
 | `rendered` | `TEXT NOT NULL` | exact provider section, at most 64 KiB |
 | `created_at` | `TEXT NOT NULL` | UTC capture time |

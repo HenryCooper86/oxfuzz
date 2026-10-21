@@ -83,3 +83,34 @@ sources, independent reviews, human approval, request ledger, provider
 responses, stdout/stderr, run evidence and LLVM exports. The public result
 contains their immutable identities and counters; no credential is included.
 Missing measurements remain null rather than being converted to zero.
+
+## Follow-up: planning and context cost (2026-10-21)
+
+Re-rendering the exact retained context of all three enriched trials through the
+improved planner and compact renderer, with no new provider calls or harness
+executions, reduced the retained provider-section bytes and corrected a
+selection failure:
+
+| Fixture | Section bytes before | Section bytes after | Modeled calls before | Modeled calls after | Branch observations before | Branch observations after | Omitted records |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| C record parser | 31,267 | 12,148 | 2 | 2 | 53 (23 distinct) | 23 | 0 |
+| C decoder handles | 32,411 | 17,817 | 26 (5 distinct) | 5 | 1 | 32 (all distinct) | 73 |
+| C++ command parser | 21,394 | 11,616 | 2 | 2 | 29 (22 distinct) | 22 | 0 |
+
+Total section bytes fell from 85,072 to 41,581 (51.1%). The decoder trial
+previously retained 26 repeated call witnesses and a single guard observation
+while omitting 302 records; it now retains all 32 distinct guard observations
+and only the 73 helper-side omissions, so guard guidance that the model did not
+previously see is present in a smaller section. The compact renderer
+states each unit-qualified declaration identity once behind prompt-local symbol
+indices, and exact-duplicate call/branch observations are coalesced before
+budgeting, with guards selected ahead of calls and raw CFGs. Plan references
+were re-validated against the retained observations.
+
+These final measurements include the complete target declaration in the symbol
+table and the renderer's exact wrapper allowance during planning.
+
+This is a byte measurement on retained contexts, not a re-run of the frozen
+coverage comparison. It establishes no coverage improvement; a repeated
+like-for-like coverage run would require fresh provider calls and human
+approvals under the comparison protocol.

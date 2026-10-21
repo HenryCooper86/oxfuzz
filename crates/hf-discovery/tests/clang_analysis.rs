@@ -170,6 +170,33 @@ async fn advanced_context_and_plan_refer_to_retained_evidence_only() {
     assert!(serde_json::to_value(context).unwrap()["exploration"].is_null());
 }
 
+#[tokio::test]
+async fn planner_accepted_context_always_renders_within_budget() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("a.c"), "int entry(int n){return n;}").unwrap();
+    let inventory = hf_discovery::discover(root.path(), hf_core::target::TargetLanguage::C)
+        .await
+        .unwrap();
+    let target = inventory
+        .candidates
+        .iter()
+        .find(|c| c.symbol == "entry")
+        .unwrap();
+    let graph = normalize_index(&serde_json::to_vec(&explored()).unwrap(), &limits()).unwrap();
+    for budget in [1024usize, 2048, 4096, 8192, 16_384, 32_768] {
+        let mut small = limits();
+        small.max_context_bytes = budget;
+        let Ok(context) = hf_discovery::clang_analysis::target_context(&graph, target, &small)
+        else {
+            continue;
+        };
+        assert!(
+            hf_prompt::render_clang_context(&context, budget).is_ok(),
+            "planner accepted a context the renderer rejects at {budget} bytes"
+        );
+    }
+}
+
 fn hf_prompt_size(context: &hf_core::clang_analysis::ClangTargetContext) -> usize {
     serde_json::to_string(context)
         .unwrap()
@@ -177,7 +204,7 @@ fn hf_prompt_size(context: &hf_core::clang_analysis::ClangTargetContext) -> usiz
         .replace('>', "\\u003e")
         .replace('&', "\\u0026")
         .len()
-        + 1024
+        + hf_prompt::clang_context_wrapper_bytes(context)
 }
 
 #[test]
@@ -306,4 +333,288 @@ async fn same_line_overloads_associate_by_definition_coordinates() {
         hf_discovery::clang_analysis::associate_target(&graph, first_candidate),
         hf_core::clang_analysis::ClangTargetAssociation::Exact("first".into())
     );
+}
+
+async fn entry_target(source: &str) -> (tempfile::TempDir, hf_core::target::TargetCandidate) {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("a.c"), source).unwrap();
+    let inventory = hf_discovery::discover(root.path(), hf_core::target::TargetLanguage::C)
+        .await
+        .unwrap();
+    (
+        root,
+        inventory
+            .candidates
+            .iter()
+            .find(|c| c.symbol == "entry")
+            .unwrap()
+            .clone(),
+    )
+}
+
+fn duplicated_observations() -> Value {
+    let mut data = explored();
+    let call = data["exploration"]["calls"][0].clone();
+    data["exploration"]["calls"]
+        .as_array_mut()
+        .unwrap()
+        .push(call);
+    let branch = data["exploration"]["branches"][0].clone();
+    data["exploration"]["branches"]
+        .as_array_mut()
+        .unwrap()
+        .push(branch);
+    data
+}
+
+#[tokio::test]
+async fn repeated_exact_observations_collapse_without_omission_or_duplicate_plan_entries() {
+    let (_root, target) = entry_target("int entry(int n){return n;}").await;
+    let graph = normalize_index(
+        &serde_json::to_vec(&duplicated_observations()).unwrap(),
+        &limits(),
+    )
+    .unwrap();
+    let context = hf_discovery::clang_analysis::target_context(&graph, &target, &limits()).unwrap();
+    let exploration = context.exploration.as_ref().unwrap();
+    assert_eq!(exploration.calls.len(), 1);
+    assert_eq!(exploration.branches.len(), 1);
+    assert_eq!(exploration.omitted_records, 0);
+    let encoded = serde_json::to_value(&context).unwrap();
+    assert_eq!(encoded["plan"]["inputs"], json!([{"call":0,"argument":0}]));
+    assert_eq!(encoded["plan"]["guards"], json!([0]));
+    assert_eq!(
+        encoded["plan"]["producer_uses"],
+        json!([{"call":0,"argument":0}])
+    );
+}
+
+fn alternative_observations() -> Value {
+    let mut data = explored();
+    let branch = data["exploration"]["branches"][0].clone();
+    let mut range_alt = branch.clone();
+    range_alt["constraints"][0]["min"] = json!("8");
+    let mut outcome_alt = branch.clone();
+    outcome_alt["true_state"] = json!(true);
+    outcome_alt["false_state"] = json!(false);
+    let mut caller_alt = branch.clone();
+    caller_alt["caller"] = json!("setup:b");
+    caller_alt["condition"] =
+        json!({"location":{"file":"a.c","line":7,"column":1},"text":"flag","parameters":[]});
+    data["exploration"]["branches"] =
+        json!([branch.clone(), branch, range_alt, outcome_alt, caller_alt]);
+    let call = data["exploration"]["calls"][0].clone();
+    let mut site_range_alt = call.clone();
+    site_range_alt["constraints"][0]["min"] = json!("8");
+    let mut site_alt = call.clone();
+    site_alt["caller"] = json!("setup:a");
+    site_alt["callee"] = json!("leaf");
+    site_alt["location"] = json!({"file":"a.c","line":3,"column":1});
+    site_alt["path"] = json!(["entry", "setup:a", "leaf"]);
+    site_alt["arguments"] =
+        json!([{"argument":0,"parameters":[0],"constant":null,"producer":null}]);
+    data["exploration"]["calls"] = json!([call.clone(), call, site_range_alt, site_alt]);
+    data
+}
+
+#[tokio::test]
+async fn distinct_alternative_observations_stay_separate_records() {
+    let (_root, target) = entry_target("int entry(int n){return n;}").await;
+    let graph = normalize_index(
+        &serde_json::to_vec(&alternative_observations()).unwrap(),
+        &limits(),
+    )
+    .unwrap();
+    let context = hf_discovery::clang_analysis::target_context(&graph, &target, &limits()).unwrap();
+    let exploration = context.exploration.as_ref().unwrap();
+    assert_eq!(exploration.calls.len(), 3);
+    assert_eq!(exploration.branches.len(), 4);
+    assert_eq!(exploration.omitted_records, 0);
+    let calls = &exploration.calls;
+    assert_ne!(calls[0].constraints, calls[1].constraints);
+    let branches = &exploration.branches;
+    assert_ne!(branches[0].constraints, branches[1].constraints);
+    assert_ne!(branches[0].true_state, branches[2].true_state);
+    assert_ne!(branches[0].caller, branches[3].caller);
+    let encoded = serde_json::to_value(&context).unwrap();
+    assert_eq!(encoded["plan"]["guards"], json!([0, 1, 2, 3]));
+    assert_eq!(
+        encoded["plan"]["inputs"],
+        json!([{"call":0,"argument":0},{"call":1,"argument":0},{"call":2,"argument":0}])
+    );
+    assert_eq!(
+        encoded["plan"]["producer_uses"],
+        json!([{"call":0,"argument":0},{"call":1,"argument":0}])
+    );
+}
+
+fn guarded_root() -> Value {
+    let mut data = index();
+    data["schema_version"] = json!(2);
+    data["functions"] = json!([function("entry", "a.c", "entry")]);
+    data["functions"][0]["parameters"] = json!([{"name": "n", "type_name": "int"}]);
+    data["calls"] = json!([{"caller":"entry","callee":null,"dispatch":"indirect",
+        "location":{"file":"a.c","line":9,"column":1}}]);
+    let blocks: Vec<Value> = (0..60)
+        .map(|i| {
+            let successors = if i + 1 < 60 {
+                json!([i + 1])
+            } else {
+                json!([])
+            };
+            json!({"id": i, "successors": successors,
+                "condition": {"location": {"file":"a.c","line": i + 2,"column":1},
+                    "text":"n != 0","parameters":[0]}})
+        })
+        .collect();
+    let call = json!({"root":"entry","caller":"entry","callee":null,
+        "location":{"file":"a.c","line":9,"column":1},
+        "arguments":[{"argument":0,"parameters":[0],"constant":"5","producer":null}],
+        "constraints":[{"parameter":0,"min":"5","max":"2147483647","nonnull":null}],
+        "path":["entry"]});
+    let branches: Vec<Value> = ["5", "7", "9"]
+        .into_iter()
+        .map(|min| json!({"root":"entry","caller":"entry",
+            "condition":{"location":{"file":"a.c","line":2,"column":1},"text":"n != 0","parameters":[0]},
+            "constraints":[{"parameter":0,"min":min,"max":"2147483647","nonnull":null}],
+            "true_state":false,"false_state":true}))
+        .collect();
+    data["exploration"] = json!({
+        "engine":"clang-static-analyzer-range-v1",
+        "limits":{"max_nodes":10000,"max_block_visits":4,"max_records":256,"max_cfg_blocks":2048,"max_inline_depth":4},
+        "roots":["entry"],
+        "cfgs":[{"function":"entry","status":"complete","blocks":blocks}],
+        "calls":[call.clone(), call.clone(), call.clone(), call.clone(), call],
+        "branches":branches,
+        "exhausted":true,"omitted_records":73});
+    data
+}
+
+#[tokio::test]
+async fn tight_budgets_keep_distinct_guards_behind_redundant_raw_evidence() {
+    let (_root, target) = entry_target("int entry(int n){return n;}").await;
+    let graph = normalize_index(&serde_json::to_vec(&guarded_root()).unwrap(), &limits()).unwrap();
+    let mut roomy = limits();
+    roomy.max_context_bytes = 1 << 20;
+    let reference = hf_discovery::clang_analysis::target_context(&graph, &target, &roomy).unwrap();
+    let value = serde_json::to_value(&reference).unwrap();
+    assert_eq!(
+        value["exploration"]["cfgs"].as_array().map(Vec::len),
+        Some(1)
+    );
+    let cfg_len = serde_json::to_vec(&value["exploration"]["cfgs"][0])
+        .unwrap()
+        .len();
+    let mut tight = limits();
+    tight.max_context_bytes = hf_prompt_size(&reference) - cfg_len + 512;
+    let context = hf_discovery::clang_analysis::target_context(&graph, &target, &tight).unwrap();
+    assert!(hf_prompt_size(&context) <= tight.max_context_bytes);
+    let exploration = context.exploration.as_ref().unwrap();
+    assert_eq!(exploration.branches.len(), 3);
+    assert_eq!(exploration.calls.len(), 1);
+    assert_eq!(
+        exploration.calls.len() + exploration.branches.len() + exploration.cfgs.len(),
+        4
+    );
+    assert_eq!(exploration.omitted_records, 73 + 1);
+    assert!(exploration.exhausted);
+    let plan = context.plan.as_ref().unwrap();
+    assert_eq!(plan.guards, &[0, 1, 2]);
+    for guard in &plan.guards {
+        assert!(*guard < exploration.branches.len());
+    }
+    for input in &plan.inputs {
+        let call = exploration.calls.get(input.call).expect("plan call ref");
+        assert!(!call.arguments[input.argument].parameters.is_empty());
+    }
+}
+
+fn pressured_root() -> Value {
+    let mut data = index();
+    data["schema_version"] = json!(2);
+    data["functions"] = json!([
+        function("entry", "a.c", "entry"),
+        function("setup:b", "b.c", "setup")
+    ]);
+    data["functions"][0]["parameters"] = json!([{"name": "n", "type_name": "int"}]);
+    data["calls"] = json!([
+        {"caller":"entry","callee":null,"dispatch":"indirect",
+            "location":{"file":"a.c","line":9,"column":1}},
+        {"caller":"entry","callee":"setup:b","dispatch":"direct",
+            "location":{"file":"a.c","line":5,"column":1}}]);
+    let calls: Vec<Value> = (0..12)
+        .map(|i| json!({"root":"entry","caller":"entry","callee":null,
+            "location":{"file":"a.c","line":9,"column":1},
+            "arguments":[{"argument":0,"parameters":[0],"constant":null,
+                "producer":{"function":"setup:b","location":{"file":"a.c","line":5,"column":1}}}],
+            "constraints":[{"parameter":0,"min":(i * 7).to_string(),"max":"2147483647","nonnull":null}],
+            "path":["entry"]}))
+        .collect();
+    data["exploration"] = json!({
+        "engine":"clang-static-analyzer-range-v1",
+        "limits":{"max_nodes":10000,"max_block_visits":4,"max_records":256,"max_cfg_blocks":2048,"max_inline_depth":4},
+        "roots":["entry"],
+        "cfgs":[{"function":"entry","status":"complete",
+            "blocks":[{"id":0,"successors":[],"condition":null}]}],
+        "calls":calls,
+        "branches":[
+            {"root":"entry","caller":"entry",
+                "condition":{"location":{"file":"a.c","line":2,"column":1},"text":"n != 0","parameters":[0]},
+                "constraints":[{"parameter":0,"min":"5","max":"2147483647","nonnull":null}],
+                "true_state":false,"false_state":true},
+            {"root":"entry","caller":"entry",
+                "condition":{"location":{"file":"a.c","line":2,"column":1},"text":"n != 0","parameters":[0]},
+                "constraints":[{"parameter":0,"min":"5","max":"2147483647","nonnull":null}],
+                "true_state":true,"false_state":false}],
+        "exhausted":false,"omitted_records":0});
+    data
+}
+
+#[tokio::test]
+async fn plan_references_survive_budget_selection_pressure() {
+    let (_root, target) = entry_target("int entry(int n){return n;}").await;
+    let graph =
+        normalize_index(&serde_json::to_vec(&pressured_root()).unwrap(), &limits()).unwrap();
+    let mut roomy = limits();
+    roomy.max_context_bytes = 1 << 20;
+    let reference = hf_discovery::clang_analysis::target_context(&graph, &target, &roomy).unwrap();
+    let value = serde_json::to_value(&reference).unwrap();
+    let call_len = serde_json::to_vec(&value["exploration"]["calls"][0])
+        .unwrap()
+        .len();
+    let mut tight = limits();
+    tight.max_context_bytes = hf_prompt_size(&reference) - 7 * call_len;
+    let context = hf_discovery::clang_analysis::target_context(&graph, &target, &tight).unwrap();
+    assert!(hf_prompt_size(&context) <= tight.max_context_bytes);
+    let exploration = context.exploration.as_ref().unwrap();
+    assert!((1..12).contains(&exploration.calls.len()));
+    assert_eq!(exploration.branches.len(), 2);
+    let retained = exploration.calls.len() + exploration.branches.len() + exploration.cfgs.len();
+    assert!(retained < 15);
+    assert_eq!(exploration.omitted_records, 15 - retained);
+    let plan = context.plan.as_ref().unwrap();
+    for guard in &plan.guards {
+        assert!(*guard < exploration.branches.len());
+    }
+    for path in &plan.caller_paths {
+        assert!(*path < context.paths.len());
+    }
+    for plan_ref in plan.inputs.iter().chain(&plan.producer_uses) {
+        let call = exploration
+            .calls
+            .get(plan_ref.call)
+            .expect("plan call reference retained");
+        let argument = call
+            .arguments
+            .get(plan_ref.argument)
+            .expect("plan argument reference retained");
+        if plan.inputs.contains(plan_ref) {
+            assert!(!argument.parameters.is_empty());
+        }
+        if plan.producer_uses.contains(plan_ref) {
+            assert!(argument.producer.is_some());
+        }
+    }
+    assert!(!plan.inputs.is_empty());
+    assert!(!plan.producer_uses.is_empty());
 }

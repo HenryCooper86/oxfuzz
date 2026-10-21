@@ -100,7 +100,8 @@ pub struct HarnessClangContextRecord {
     pub project_root: String,
     /// Discovery target owner.
     pub target_id: Uuid,
-    /// Renderer version, currently one.
+    /// Renderer version: one (full `ClangTargetContext` JSON) or two (compact
+    /// advanced projection).
     pub renderer_version: u32,
     /// Exact rendered section.
     pub rendered: String,
@@ -260,7 +261,7 @@ impl Store {
         &self,
         record: &HarnessClangContextRecord,
     ) -> Result<(), StorageError> {
-        if record.renderer_version != 1 || record.rendered.len() > 65536 {
+        if !matches!(record.renderer_version, 1 | 2) || record.rendered.len() > 65536 {
             return Err(invalid("invalid Clang context"));
         }
         let mut tx = self.pool().begin_with("BEGIN IMMEDIATE").await?;
@@ -274,6 +275,7 @@ impl Store {
                 || old.try_get::<String, _>("target_id")? != record.target_id.to_string()
                 || old.try_get::<String, _>("project_root")? != record.project_root
                 || old.try_get::<String, _>("created_at")? != record.created_at
+                || old.try_get::<i64, _>("renderer_version")? != i64::from(record.renderer_version)
             {
                 return Err(invalid("Clang context is immutable"));
             }

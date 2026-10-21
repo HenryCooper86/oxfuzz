@@ -279,13 +279,22 @@ fn argument_plan(
     }
     (inputs, producers)
 }
+fn encoded<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, ClangAnalysisError> {
+    serde_json::to_vec(value).map_err(|e| ClangAnalysisError(e.to_string()))
+}
+
+/// Prompt-escaped JSON length without rebuilding the serialized record.
+fn escaped_len(bytes: &[u8]) -> usize {
+    bytes.len()
+        + 5 * bytes
+            .iter()
+            .copied()
+            .filter(|b| *b == b'<' || *b == b'>' || *b == b'&')
+            .count()
+}
+
 fn size<T: serde::Serialize>(value: &T) -> Result<usize, ClangAnalysisError> {
-    Ok(serde_json::to_string(value)
-        .map_err(|e| ClangAnalysisError(e.to_string()))?
-        .replace('<', "\\u003c")
-        .replace('>', "\\u003e")
-        .replace('&', "\\u0026")
-        .len())
+    Ok(escaped_len(&encoded(value)?))
 }
 
 pub(super) fn attach(
@@ -339,7 +348,7 @@ pub(super) fn attach(
         }
     }
     context.plan = Some(plan.clone());
-    let mut used = size(context)?.saturating_add(1024);
+    let mut used = size(context)?.saturating_add(hf_prompt::clang_context_wrapper_bytes(context));
     if used > budget {
         return Err(ClangAnalysisError(
             "exploration metadata exceeds context budget".into(),
@@ -347,18 +356,35 @@ pub(super) fn attach(
     }
     // Reserve decimal growth of omitted counters and array separators once.
     used += 64;
-    for cfg in all.cfgs.iter().filter(|c| c.function == id) {
-        let cost = size(cfg)? + 1;
-        if used + cost <= budget {
+    // Under budget pressure select distinct branch guards first, then call
+    // witnesses carrying root-input provenance, then raw CFG blocks. Exact
+    // duplicate observations add no evidence: they coalesce silently without
+    // consuming budget or counting as omitted records. The upstream helper's
+    // omitted_records total is preserved verbatim; only distinct records this
+    // attachment excludes are added to it.
+    let mut seen = BTreeSet::new();
+    for branch in all.branches.iter().filter(|b| b.root == id) {
+        let bytes = encoded(branch)?;
+        let cost = escaped_len(&bytes) + 24;
+        if !seen.insert(bytes) {
+            continue;
+        }
+        if retained.contains(&branch.caller) && used + cost <= budget {
             used += cost;
-            evidence.cfgs.push(cfg.clone());
+            plan.guards.push(evidence.branches.len());
+            evidence.branches.push(branch.clone());
         } else {
             evidence.omitted_records = evidence.omitted_records.saturating_add(1);
         }
     }
     for call in all.calls.iter().filter(|c| c.root == id) {
+        let bytes = encoded(call)?;
+        let mut cost = escaped_len(&bytes) + 4;
+        if !seen.insert(bytes) {
+            continue;
+        }
         let (inputs, producers) = argument_plan(call, evidence.calls.len());
-        let cost = size(call)? + size(&inputs)? + size(&producers)? + 4;
+        cost += size(&inputs)? + size(&producers)?;
         let references = std::iter::once(&call.caller)
             .chain(call.callee.iter())
             .chain(call.path.iter())
@@ -376,12 +402,15 @@ pub(super) fn attach(
             evidence.omitted_records = evidence.omitted_records.saturating_add(1);
         }
     }
-    for branch in all.branches.iter().filter(|b| b.root == id) {
-        let cost = size(branch)? + 24;
-        if retained.contains(&branch.caller) && used + cost <= budget {
+    for cfg in all.cfgs.iter().filter(|c| c.function == id) {
+        let bytes = encoded(cfg)?;
+        let cost = escaped_len(&bytes) + 1;
+        if !seen.insert(bytes) {
+            continue;
+        }
+        if used + cost <= budget {
             used += cost;
-            plan.guards.push(evidence.branches.len());
-            evidence.branches.push(branch.clone());
+            evidence.cfgs.push(cfg.clone());
         } else {
             evidence.omitted_records = evidence.omitted_records.saturating_add(1);
         }

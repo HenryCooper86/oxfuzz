@@ -97,7 +97,9 @@ results remain readable as historical graph evidence. The decoder never
 silently treats malformed advanced output as graph-only success.
 
 Use existing immutable operation/result rows and model-context records; no
-parallel persistence path or unlogged model input. Changes in mode, limits,
+parallel persistence path or unlogged model input. Advanced compact sections
+persist as renderer version 2; historical version-1 full JSON rows remain
+readable. Changes in mode, limits,
 source, invocation, selected roots or helper image invalidate current use.
 Retain exact toolchain and helper/image identity. Existing cancellation,
 ownership, recovery, project cleanup and knowledge cleanup apply unchanged.
@@ -106,19 +108,32 @@ ownership, recovery, project cleanup and knowledge cleanup apply unchanged.
 
 hf-discovery owns pure evidence slicing and planning. A selected root receives
 bounded whole-record evidence only for its own exploration. Plans retain source
-IDs/locations rather than free-form uncited claims. Guidance includes observed
-input bindings, guard conditions, return-value producer/use relations and
-accessible caller paths. Do not infer pointer/length pairing or object ownership
-from identifier names. Different witnessed branches are alternatives; never
-instruct the generator to fix all fuzzed inputs to one value.
+IDs/locations rather than free-form uncited claims. Exact duplicate call and
+branch observations contribute no additional guidance: retain each once, while
+preserving distinct retained constraints, outcomes, locations and callers.
+Select branch alternatives before modeled calls and raw CFGs so repetitive
+exploration cannot crowd all guard guidance out of a bounded context. Preserve
+the helper's omission count, whose missing contents are unknown; context selection
+adds excluded distinct records, not coalesced duplicate observations.
+
+Guidance includes observed input bindings, guard conditions, return-value
+producer/use relations and accessible caller paths. Do not infer pointer/length
+pairing or object ownership from identifier names. Keep an unmodified fuzz-input
+path; exercise evidenced guard cases as alternatives rather than reject inputs
+that fail them. Include empty/truncated cases when valid for the API, and null
+cases only when its declarations or usage establish that they are permitted.
+Never replace every fuzzed input with fixed values or fabricate solved seeds.
 
 hf-prompt labels CFG uses as syntax, ranges/flow/branch states as modeled
-Static Analyzer evidence, and graph routes as potential calls. Project strings
-remain escaped data. Unknown, unsupported and exhausted categories are visible.
-The existing whole-section byte limit and omitted counts include advanced
-records and plans. Persist the exact rendered section before either draft mode
-calls a provider. Missing evidence preserves ordinary drafting. Storage failures
-still stop analysis-bearing dispatch.
+Static Analyzer evidence, and graph routes as potential calls. Advanced context
+uses a deterministic prompt-local declaration table instead of repeating long
+unit-qualified identities at every reference; each original identity remains
+mapped once, and overloads/build variants remain separate. Graph-only rendering
+is unchanged. Project strings remain escaped data. Unknown, unsupported and
+exhausted categories are visible. The existing whole-section byte limit and
+omitted counts include advanced records and plans. Persist the exact rendered
+section before either draft mode calls a provider. Missing evidence preserves
+ordinary drafting. Storage failures still stop analysis-bearing dispatch.
 
 ## Evaluation
 

@@ -7,6 +7,8 @@
 
 pub mod agent;
 
+mod clang_compact;
+
 pub mod render;
 
 pub mod budget;
@@ -16,10 +18,10 @@ pub mod store;
 pub mod template;
 
 pub use render::{
-    render_accepted_examples_section, render_ai_ranking_prompt, render_build_context_section,
-    render_crash_verify_prompt, render_dictionary_prompt, render_discovery_prompt,
-    render_harness_pre_execution_review_prompt, render_harness_prompt,
-    render_harness_prompt_with_context, render_harness_prompt_with_examples,
+    clang_context_wrapper_bytes, clang_renderer_version, render_accepted_examples_section,
+    render_ai_ranking_prompt, render_build_context_section, render_crash_verify_prompt,
+    render_dictionary_prompt, render_discovery_prompt, render_harness_pre_execution_review_prompt,
+    render_harness_prompt, render_harness_prompt_with_context, render_harness_prompt_with_examples,
     render_harness_refine_prompt, render_harness_repair_prompt, render_persistent_harness_prompt,
     render_persistent_harness_prompt_with_examples, render_persistent_harness_refine_prompt,
     render_persistent_harness_repair_prompt, render_related_context_section, render_seed_prompt,
