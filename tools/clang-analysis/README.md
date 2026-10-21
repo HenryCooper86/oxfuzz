@@ -24,6 +24,10 @@ The qualification Dockerfile defaults to the existing local fuzz sandbox for
 fast development. CI selects the pinned Ubuntu base explicitly. The main
 `docker/sandbox/Dockerfile` installs this executable in the production image.
 
+The extractor fixture runs its container with the invoking user's UID/GID so
+the helper can read the private temporary directory on Linux without restoring
+capabilities or broadening filesystem permissions.
+
 Enable the optional Cargo feature and select the packaged image in
 `[clang_analysis]` configuration, then run:
 

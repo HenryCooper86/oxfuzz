@@ -29,6 +29,7 @@ class ClangAnalysisTests(unittest.TestCase):
             (root / "input" / "request.json").write_text(json.dumps(request))
             result = subprocess.run(["docker", "run", "--rm", "--network=none",
                                      "--cap-drop=ALL", "--security-opt=no-new-privileges",
+                                     "--user", f"{os.getuid()}:{os.getgid()}",
                                      "-v", f"{root}:/work", "--entrypoint",
                                      "/usr/local/bin/oxfuzz-clang-analyze",
                                      os.environ.get("OXFUZZ_CLANG_TEST_IMAGE", "oxfuzz/clang-analysis:test")],
