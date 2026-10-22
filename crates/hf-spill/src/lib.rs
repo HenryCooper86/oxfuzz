@@ -649,7 +649,11 @@ mod tests {
     #[test]
     fn a_multibyte_result_is_previewed_on_character_boundaries() {
         let content = "\u{65e5}".repeat(5_000);
-        let replacement = preview_replacing(&content, 300, "at /tmp/x").expect("capped");
-        assert!(replacement.len() <= 300);
+        for cap in 300..303 {
+            let replacement = preview_replacing(&content, cap, "at /tmp/x").expect("capped");
+            assert!(replacement.len() <= cap);
+            assert!(replacement.starts_with('\u{65e5}'));
+            assert!(replacement.ends_with('\u{65e5}'));
+        }
     }
 }
