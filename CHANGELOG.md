@@ -9,6 +9,8 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ## Unreleased
 
+## 0.6.9 - 2026-10-22
+
 ### Fixed
 
 - Spill retention ignores directory and file symlinks instead of traversing
