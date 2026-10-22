@@ -62,6 +62,11 @@ small frames never count as one large frame. UTF-8 split sequences are retained
 in at most three bytes; decoded text is checked before appending. No missing
 terminator can grow the unfinished frame beyond its budget.
 
+OpenAI-compatible streamed tool calls use an explicit `index` when present.
+Without one, a repeated call ID selects the existing call, an anonymous argument
+fragment continues the latest call, and a new identity starts a separate call.
+Fragments for parallel calls with the same tool name remain separate by call ID.
+
 A limit violation drops receive buffers and the HTTP stream, emits one typed
 error naming only the budget and limit, and then ends. It cannot flush pending
 tool calls or turn into clean completion. Previously emitted deltas are

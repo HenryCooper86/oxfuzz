@@ -22,17 +22,15 @@ const MAX_TOOL_CALLS: usize = 1024;
 #[derive(Debug, Default)]
 pub(crate) struct ToolCallAccumulatorSet {
     entries: Vec<Entry>,
+    current_indexless: Option<usize>,
 }
 
 impl ToolCallAccumulatorSet {
     /// Process a tool-call delta from a streaming chunk.
     ///
-    /// When `index` is `None`, the delta is assigned the next sequential
-    /// slot (`entries.len()`). This matches the behavior of the Vercel
-    /// `@ai-sdk/openai-compatible` reference and is required for providers
-    /// (e.g. Google Gemini's OpenAI-compat surface) that omit `index` for
-    /// parallel tool calls. Defaulting to `0` would merge every call into
-    /// a single corrupt entry.
+    /// Without an `index`, a repeated call id selects its existing entry and
+    /// an anonymous argument fragment continues the latest selected entry. A new
+    /// identity opens a sequential slot so parallel calls stay distinct.
     pub fn process_delta(
         &mut self,
         index: Option<usize>,
@@ -40,22 +38,39 @@ impl ToolCallAccumulatorSet {
         name: Option<&str>,
         args: Option<&str>,
     ) {
-        let index = index.unwrap_or(self.entries.len());
+        let id = id.filter(|value| !value.is_empty());
+        let name = name.filter(|value| !value.is_empty());
+        let index = if let Some(index) = index {
+            index
+        } else if let Some(id) = id {
+            self.entries
+                .iter()
+                .position(|entry| entry.id == id)
+                .unwrap_or(self.entries.len())
+        } else if name.is_some() {
+            self.entries.len()
+        } else if let Some(index) = self.current_indexless {
+            index
+        } else {
+            return;
+        };
         // Drop deltas whose index would grow the set past the sane cap: a
         // malicious/buggy provider could otherwise force an unbounded allocation.
         if index >= MAX_TOOL_CALLS {
+            self.current_indexless = None;
             tracing::warn!(index, "dropping tool-call delta with out-of-range index");
             return;
         }
+        self.current_indexless = Some(index);
         while self.entries.len() <= index {
             self.entries.push(Entry::default());
         }
         let entry = &mut self.entries[index];
-        if let Some(id) = id.filter(|s| !s.is_empty()) {
+        if let Some(id) = id {
             entry.id.clear();
             entry.id.push_str(id);
         }
-        if let Some(name) = name.filter(|s| !s.is_empty()) {
+        if let Some(name) = name {
             entry.name.clear();
             entry.name.push_str(name);
         }
@@ -65,6 +80,7 @@ impl ToolCallAccumulatorSet {
     }
 
     pub fn drain_completed(&mut self) -> Vec<ToolCallRequest> {
+        self.current_indexless = None;
         self.entries
             .drain(..)
             .filter(|e| !e.id.is_empty() && !e.name.is_empty())
@@ -203,6 +219,35 @@ mod tests {
         let calls = acc.drain_completed();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].id, "call_1");
+    }
+
+    #[test]
+    fn rejected_indexless_calls_cannot_corrupt_accepted_arguments() {
+        let mut acc = ToolCallAccumulatorSet::default();
+        for index in 0..MAX_TOOL_CALLS {
+            acc.process_delta(
+                None,
+                Some(&format!("call_{index}")),
+                Some("search"),
+                Some(r#"{"q":"#),
+            );
+        }
+        acc.process_delta(None, Some("excess"), Some("search"), Some("{"));
+        acc.process_delta(None, None, None, Some("rejected fragment"));
+        acc.process_delta(
+            None,
+            Some(&format!("call_{}", MAX_TOOL_CALLS - 1)),
+            Some("search"),
+            Some(""),
+        );
+        acc.process_delta(None, None, None, Some(r#""rust"}"#));
+
+        let calls = acc.drain_completed();
+        assert_eq!(calls.len(), MAX_TOOL_CALLS);
+        assert_eq!(
+            calls.last().unwrap().arguments,
+            serde_json::json!({"q":"rust"})
+        );
     }
 
     /// Regression: when a provider omits `index` (e.g. Gemini's OpenAI-compat

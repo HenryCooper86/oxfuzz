@@ -9,6 +9,26 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ## Unreleased
 
+### Fixed
+
+- Spill retention ignores directory and file symlinks instead of traversing
+  linked directories and deleting unrelated files. Spill saves also reject
+  symlinked root and owner directories rather than writing through them.
+- OpenAI-compatible streams reassemble tool-call fragments that omit `index`,
+  including repeated call IDs, without duplicating calls or losing arguments.
+  Azure streaming no longer allocates an unused provider ID for every chunk.
+- Recovered transcript counts now skip malformed JSONL records consistently
+  with reads, so checkpoint positions do not preserve messages from a rolled-back
+  turn. Reading recent messages no longer lets a torn record displace valid
+  history.
+- Updated Vitest to 4.1.12 to clear the development-dependency audit findings for
+  [manual mock registration](https://github.com/advisories/GHSA-qxg6-89mg-rqv8)
+  and [Windows redirect traversal](https://github.com/advisories/GHSA-xp26-3454-mjgp).
+- Scheduler event publication no longer deadlocks store reads and execution when
+  the trigger queue is full. Historical backfill reservations now consume the
+  hourly admission limit, and shutdown cancels interrupted recurring admissions
+  without bypassing one-time receipt handling after schedule removal.
+
 ## 0.6.8 - 2026-10-21
 
 ### Added

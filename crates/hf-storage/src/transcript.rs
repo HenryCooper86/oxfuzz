@@ -127,31 +127,7 @@ impl TranscriptStore for JsonlTranscriptStore {
             return Ok(0);
         }
 
-        let file =
-            tokio::fs::File::open(&path)
-                .await
-                .map_err(|e| SessionError::TranscriptError {
-                    message: format!("open transcript: {e}"),
-                })?;
-
-        let reader = tokio::io::BufReader::new(file);
-        let mut lines = reader.lines();
-        let mut count = 0;
-
-        while let Some(line) =
-            lines
-                .next_line()
-                .await
-                .map_err(|e| SessionError::TranscriptError {
-                    message: format!("read line: {e}"),
-                })?
-        {
-            if !line.trim().is_empty() {
-                count += 1;
-            }
-        }
-
-        Ok(count)
+        count_messages_from_file(&path).await
     }
 
     #[instrument(skip(self), fields(session_id = %session_id, keep_count = keep_count))]
@@ -251,8 +227,11 @@ pub(crate) fn transcript_file_stem(session_id: &SessionId) -> Result<&str, Sessi
     Ok(value)
 }
 
-/// Read all messages from a JSONL file.
-pub(crate) async fn read_messages_from_file(path: &Path) -> Result<Vec<Message>, SessionError> {
+/// Visit valid messages in file order, using the same recovery rules for every read.
+async fn visit_messages_from_file(
+    path: &Path,
+    mut visit: impl FnMut(Message),
+) -> Result<(), SessionError> {
     let file = tokio::fs::File::open(path)
         .await
         .map_err(|e| SessionError::TranscriptError {
@@ -261,7 +240,6 @@ pub(crate) async fn read_messages_from_file(path: &Path) -> Result<Vec<Message>,
 
     let reader = tokio::io::BufReader::new(file);
     let mut lines = reader.lines();
-    let mut messages = Vec::new();
 
     while let Some(line) = lines
         .next_line()
@@ -278,7 +256,7 @@ pub(crate) async fn read_messages_from_file(path: &Path) -> Result<Vec<Message>,
         // a torn final line; erroring would make the whole session permanently
         // unloadable instead of dropping just the corrupt record.
         match serde_json::from_str::<Message>(trimmed) {
-            Ok(msg) => messages.push(msg),
+            Ok(msg) => visit(msg),
             Err(e) => tracing::warn!(
                 path = %path.display(),
                 error = %e,
@@ -287,12 +265,26 @@ pub(crate) async fn read_messages_from_file(path: &Path) -> Result<Vec<Message>,
         }
     }
 
+    Ok(())
+}
+
+/// Read all recoverable messages from a JSONL file.
+pub(crate) async fn read_messages_from_file(path: &Path) -> Result<Vec<Message>, SessionError> {
+    let mut messages = Vec::new();
+    visit_messages_from_file(path, |message| messages.push(message)).await?;
     Ok(messages)
+}
+
+/// Count the same recoverable messages returned by transcript reads.
+pub(crate) async fn count_messages_from_file(path: &Path) -> Result<usize, SessionError> {
+    let mut count = 0;
+    visit_messages_from_file(path, |_| count += 1).await?;
+    Ok(count)
 }
 
 /// Read only the last `count` messages from a JSONL file.
 ///
-/// Collects all non-empty lines first, then deserializes only the tail.
+/// Retains at most `count` parsed messages, ignoring torn records before trimming.
 async fn read_last_messages_from_file(
     path: &Path,
     count: usize,
@@ -306,48 +298,15 @@ async fn read_last_messages_from_file(
         return Ok(Vec::new());
     }
 
-    let file = tokio::fs::File::open(path)
-        .await
-        .map_err(|e| SessionError::TranscriptError {
-            message: format!("open transcript {}: {e}", path.display()),
-        })?;
-
-    let reader = tokio::io::BufReader::new(file);
-    let mut lines = reader.lines();
-    let mut ring: VecDeque<String> = VecDeque::with_capacity(count + 1);
-
-    while let Some(line) = lines
-        .next_line()
-        .await
-        .map_err(|e| SessionError::TranscriptError {
-            message: format!("read line: {e}"),
-        })?
-    {
-        if line.trim().is_empty() {
-            continue;
-        }
+    let mut ring = VecDeque::new();
+    visit_messages_from_file(path, |message| {
         if ring.len() == count {
             ring.pop_front();
         }
-        ring.push_back(line);
-    }
-
-    // Skip unparseable lines rather than failing the whole read (see
-    // `read_messages_from_file`).
-    Ok(ring
-        .into_iter()
-        .filter_map(|line| match serde_json::from_str::<Message>(line.trim()) {
-            Ok(msg) => Some(msg),
-            Err(e) => {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %e,
-                    "skipping unparseable transcript line"
-                );
-                None
-            }
-        })
-        .collect())
+        ring.push_back(message);
+    })
+    .await?;
+    Ok(ring.into_iter().collect())
 }
 
 #[cfg(test)]
@@ -514,10 +473,43 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].content, "first");
         assert_eq!(messages[1].content, "third");
+        assert_eq!(store.message_count(&session_id).await.unwrap(), 2);
 
         // read_last is just as resilient.
         let last = store.read_last(&session_id, 5).await.unwrap();
         assert_eq!(last.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn read_last_skips_a_torn_tail_without_losing_valid_messages() {
+        let (dir, store) = temp_store();
+        let session_id = SessionId::new();
+        store
+            .append(&session_id, &test_message("first"))
+            .await
+            .unwrap();
+        store
+            .append(&session_id, &test_message("second"))
+            .await
+            .unwrap();
+        let path = dir.path().join(format!("{}.jsonl", session_id.as_str()));
+        let mut file = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .await
+            .unwrap();
+        file.write_all(b"{\"role\":\n").await.unwrap();
+        file.flush().await.unwrap();
+
+        let messages = store.read_last(&session_id, 2).await.unwrap();
+
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second"]
+        );
     }
 
     #[tokio::test]

@@ -154,10 +154,14 @@ what `std` gives for free. `hf-corpus`, `hf-crash`, `hf-discovery`, `hf-engine`,
 `metadata` when a link must not be followed; that is the pattern for any walk
 this workspace writes itself.
 
-The one production recursion over tool-created content is the syzkaller staging
-cleanup in `hf-service::syzkaller`, which removes `inputs`, `scratch`, and
-`workdir`. It is safe today because it uses `std`. It would stop being safe the
-moment it were reimplemented.
+Syzkaller staging cleanup in `hf-service::syzkaller` removes `inputs`,
+`scratch`, and `workdir` using `std::fs::remove_dir_all`. Spill retention in
+`hf-spill` has its own recursive walk: it descends only into real directories
+and includes only regular files in eviction decisions. Symlinks and special
+files are ignored, so a linked directory cannot redirect retention into
+unrelated files. Spill root and owner-directory creation also reject a symlink
+at the directory being adopted. These metadata checks do not close concurrent
+ancestor-replacement races; the spill root must remain private.
 
 ## 8. Check and use the same object
 

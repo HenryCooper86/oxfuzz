@@ -136,11 +136,18 @@ the scheduler-wide semaphore bounds active workflow execution.
 
 The scheduler retains every spawned workflow task. `stop` first stops trigger
 production and queue consumption, then aborts and joins active campaign tasks and
-reconciles recurring execution records from `Running` to `Cancelled`. For
-one-time tasks, cancellation uses the paired terminal receipt-and-execution
-transaction; a failed terminal transition leaves the receipt non-terminal for
-acknowledgement after its lease expires. The service-level `CampaignScheduler::stop`
-exposes this lifecycle boundary.
+reconciles recurring execution records from `Running` or `Pending` to `Cancelled`.
+This includes reservations recorded before interrupted dispatch-task creation.
+The recorded trigger identifies recurring work even if its schedule was removed.
+One-time executions never enter that generic sweep: cancellation uses the paired
+terminal receipt-and-execution transaction; a failed terminal transition leaves
+the receipt non-terminal for acknowledgement after its lease expires.
+The service-level `CampaignScheduler::stop` exposes this lifecycle operation.
+
+Event matching prepares only matching triggers while the schedule store is
+borrowed, then releases the store before awaiting queue capacity. The event
+bridge remains serialized across preparation and sending, and consumes debounce
+windows only for successful sends.
 
 ## Schedule policy enforcement
 
@@ -156,7 +163,8 @@ enforced before a workflow starts:
 - `cancel_previous` cancels and records the displaced execution before starting
   the newer one;
 - `max_executions_per_hour` is a rolling one-hour admission limit over started
-  executions; policy skips do not consume it.
+  executions plus all live queued reservations, including historical backfill;
+  policy skips do not consume it.
 
 Queued work remains `Pending` until it owns both its per-schedule queue position
 and a global execution slot. Pending/running rows and started rows still needed

@@ -35,7 +35,7 @@ pub struct IncomingEvent {
     /// A schedule is never fired by an event its own execution emitted: a
     /// campaign schedule triggered by `run.completed` runs a campaign whose run
     /// phase emits `run.completed`, so without this it re-fires itself for as
-    /// long as the process lives. See [`EventBridge::process_event`].
+    /// long as the process lives. See [`EventBridge::prepare_triggers`].
     pub source_schedule_id: Option<String>,
 }
 
@@ -53,16 +53,16 @@ impl EventBridge {
         }
     }
 
-    /// Process an incoming event against registered schedules.
+    /// Match an incoming event against registered schedules without sending.
     ///
-    /// Returns the list of schedule IDs that matched and were enqueued.
-    pub async fn process_event(
-        &mut self,
+    /// Apply enabled/type/filter/provenance/debounce checks synchronously so
+    /// the caller can release the schedule store before waiting for queue space.
+    pub fn prepare_triggers(
+        &self,
         event: &IncomingEvent,
         store: &ScheduleStore,
-        tx: &TriggerSender,
-    ) -> Vec<String> {
-        let mut matched = Vec::new();
+    ) -> Vec<FiredTrigger> {
+        let mut prepared = Vec::new();
 
         for schedule in store.list_enabled() {
             if let TriggerConfig::Event {
@@ -119,9 +119,9 @@ impl EventBridge {
                     }
                 }
 
-                // Match! Enqueue trigger, carrying the event payload so
+                // Match! Prepare the trigger, carrying the event payload so
                 // `{{ event.payload.* }}` expressions resolve at dispatch.
-                let trigger = FiredTrigger {
+                prepared.push(FiredTrigger {
                     cascade_depth: if event.source_schedule_id.is_some() {
                         event.cascade_depth.saturating_add(1)
                     } else {
@@ -132,16 +132,33 @@ impl EventBridge {
                     trigger_type: TriggerType::Event,
                     is_recovery: false,
                     event_payload: event.payload.clone(),
-                };
-
-                if tx.send(trigger).await.is_ok() {
-                    info!(schedule_id = %schedule.id, event_type = %event.event_type, "Event trigger fired");
-                    self.last_event.insert(schedule.id.clone(), event.timestamp);
-                    matched.push(schedule.id.clone());
-                }
+                });
             }
         }
 
+        prepared
+    }
+
+    /// Enqueue previously prepared triggers.
+    ///
+    /// Release the schedule store before awaiting this method. Serialize
+    /// preparation and sending through the same bridge so debounce remains
+    /// consistent; only successful sends consume a debounce window.
+    pub async fn send_triggers(
+        &mut self,
+        event: &IncomingEvent,
+        prepared: Vec<FiredTrigger>,
+        tx: &TriggerSender,
+    ) -> Vec<String> {
+        let mut matched = Vec::new();
+        for trigger in prepared {
+            let schedule_id = trigger.schedule_id.clone();
+            if tx.send(trigger).await.is_ok() {
+                info!(schedule_id = %schedule_id, event_type = %event.event_type, "Event trigger fired");
+                self.last_event.insert(schedule_id.clone(), event.timestamp);
+                matched.push(schedule_id);
+            }
+        }
         matched
     }
 }
@@ -186,7 +203,8 @@ mod tests {
             source_schedule_id: None,
         };
 
-        let matched = bridge.process_event(&event, &store, &tx).await;
+        let prepared = bridge.prepare_triggers(&event, &store);
+        let matched = bridge.send_triggers(&event, prepared, &tx).await;
         assert_eq!(matched, vec!["s1"]);
 
         let trigger = rx.recv().await.unwrap();
@@ -213,8 +231,9 @@ mod tests {
             source_schedule_id: Some("s1".to_owned()),
         };
 
+        let prepared = bridge.prepare_triggers(&own, &store);
         assert!(
-            bridge.process_event(&own, &store, &tx).await.is_empty(),
+            bridge.send_triggers(&own, prepared, &tx).await.is_empty(),
             "a schedule must not be fired by an event its own execution produced"
         );
     }
@@ -236,7 +255,11 @@ mod tests {
             source_schedule_id: Some("s2".to_owned()),
         };
 
-        assert_eq!(bridge.process_event(&other, &store, &tx).await, vec!["s1"]);
+        let prepared = bridge.prepare_triggers(&other, &store);
+        assert_eq!(
+            bridge.send_triggers(&other, prepared, &tx).await,
+            vec!["s1"]
+        );
     }
 
     #[tokio::test]
@@ -254,7 +277,8 @@ mod tests {
             source_schedule_id: None,
         };
 
-        let matched = bridge.process_event(&event, &store, &tx).await;
+        let prepared = bridge.prepare_triggers(&event, &store);
+        let matched = bridge.send_triggers(&event, prepared, &tx).await;
         assert!(matched.is_empty());
     }
 
@@ -275,7 +299,8 @@ mod tests {
             timestamp: now,
             source_schedule_id: None,
         };
-        let matched1 = bridge.process_event(&event1, &store, &tx).await;
+        let prepared = bridge.prepare_triggers(&event1, &store);
+        let matched1 = bridge.send_triggers(&event1, prepared, &tx).await;
         assert_eq!(matched1.len(), 1);
 
         // Second event 2s later — should be debounced.
@@ -286,7 +311,8 @@ mod tests {
             timestamp: now + Duration::seconds(2),
             source_schedule_id: None,
         };
-        let matched2 = bridge.process_event(&event2, &store, &tx).await;
+        let prepared = bridge.prepare_triggers(&event2, &store);
+        let matched2 = bridge.send_triggers(&event2, prepared, &tx).await;
         assert!(matched2.is_empty());
 
         // Third event 10s later — should fire.
@@ -297,7 +323,8 @@ mod tests {
             timestamp: now + Duration::seconds(10),
             source_schedule_id: None,
         };
-        let matched3 = bridge.process_event(&event3, &store, &tx).await;
+        let prepared = bridge.prepare_triggers(&event3, &store);
+        let matched3 = bridge.send_triggers(&event3, prepared, &tx).await;
         assert_eq!(matched3.len(), 1);
 
         // Should have 2 triggers total.
@@ -324,7 +351,8 @@ mod tests {
             source_schedule_id: None,
         };
 
-        let matched = bridge.process_event(&event, &store, &tx).await;
+        let prepared = bridge.prepare_triggers(&event, &store);
+        let matched = bridge.send_triggers(&event, prepared, &tx).await;
         assert!(matched.is_empty());
     }
 
@@ -354,8 +382,9 @@ mod tests {
             timestamp: Utc::now(),
             source_schedule_id: None,
         };
+        let prepared = bridge.prepare_triggers(&non_matching, &store);
         assert!(bridge
-            .process_event(&non_matching, &store, &tx)
+            .send_triggers(&non_matching, prepared, &tx)
             .await
             .is_empty());
 
@@ -366,8 +395,9 @@ mod tests {
             timestamp: Utc::now(),
             source_schedule_id: None,
         };
+        let prepared = bridge.prepare_triggers(&matching, &store);
         assert_eq!(
-            bridge.process_event(&matching, &store, &tx).await,
+            bridge.send_triggers(&matching, prepared, &tx).await,
             vec!["s1"]
         );
 

@@ -9,14 +9,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use tracing::instrument;
 
 use hf_core::session::{DisplayTranscriptStore, SessionError};
 use hf_core::types::{Message, SessionId};
 
-use crate::transcript::{read_messages_from_file, transcript_file_stem};
+use crate::transcript::{count_messages_from_file, read_messages_from_file, transcript_file_stem};
 
 /// JSONL file-based display transcript store.
 ///
@@ -119,31 +119,7 @@ impl DisplayTranscriptStore for JsonlDisplayTranscriptStore {
             return Ok(0);
         }
 
-        let file =
-            tokio::fs::File::open(&path)
-                .await
-                .map_err(|e| SessionError::TranscriptError {
-                    message: format!("open display transcript: {e}"),
-                })?;
-
-        let reader = tokio::io::BufReader::new(file);
-        let mut lines = reader.lines();
-        let mut count = 0;
-
-        while let Some(line) =
-            lines
-                .next_line()
-                .await
-                .map_err(|e| SessionError::TranscriptError {
-                    message: format!("read line: {e}"),
-                })?
-        {
-            if !line.trim().is_empty() {
-                count += 1;
-            }
-        }
-
-        Ok(count)
+        count_messages_from_file(&path).await
     }
 
     #[instrument(skip(self), fields(session_id = %session_id, keep_count = keep_count))]
@@ -252,6 +228,36 @@ mod tests {
 
         let count = store.message_count(&session_id).await.unwrap();
         assert_eq!(count, 5);
+    }
+
+    #[tokio::test]
+    async fn recovered_message_count_is_a_valid_rollback_position() {
+        let (dir, store) = temp_store();
+        let session_id = SessionId::new();
+        store
+            .append(&session_id, &test_message("first"))
+            .await
+            .unwrap();
+        let path = dir
+            .path()
+            .join(format!("{}.display.jsonl", session_id.as_str()));
+        let mut file = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .await
+            .unwrap();
+        file.write_all(b"{\"role\":\n").await.unwrap();
+        file.flush().await.unwrap();
+        let keep = store.message_count(&session_id).await.unwrap();
+        store
+            .append(&session_id, &test_message("next turn"))
+            .await
+            .unwrap();
+
+        assert_eq!(store.truncate(&session_id, keep).await.unwrap(), 1);
+        let messages = store.read_all(&session_id).await.unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content, "first");
     }
 
     #[tokio::test]

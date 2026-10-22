@@ -557,10 +557,16 @@ impl SchedulerManager {
 
     /// Feed an external event into the scheduler.
     ///
-    /// The event is matched synchronously against every enabled event-driven
-    /// schedule (event type, optional payload filter, debounce); matching
-    /// schedules are fired through the same trigger queue and executor loop a
-    /// cron fire uses, so `last_fire` and execution history behave identically.
+    /// The event is matched against every enabled event-driven schedule
+    /// (event type, optional payload filter, debounce); matching schedules
+    /// are fired through the same trigger queue and executor loop a cron
+    /// fire uses, so `last_fire` and execution history behave identically.
+    ///
+    /// Matching happens in two phases so the schedule store is never held
+    /// across an awaited queue send: triggers are prepared while the store
+    /// is synchronously borrowed, then enqueued after the guard is released.
+    /// A full trigger queue can delay an enqueue but never blocks store
+    /// reads or executor progress.
     ///
     /// Returns the IDs of the schedules that fired. Events emitted while the
     /// scheduler is not running are dropped (nothing can consume them).
@@ -572,9 +578,18 @@ impl SchedulerManager {
             );
             return Vec::new();
         };
-        let store = self.store.lock().await;
         let mut bridge = self.event_bridge.lock().await;
-        bridge.process_event(&event, &store, &tx).await
+        // Phase 1: synchronous matching under the store guard. Nothing is
+        // awaited while it is held, so queue backpressure can never stall
+        // store readers (including the executor loop's schedule loads).
+        let prepared = {
+            let store = self.store.lock().await;
+            bridge.prepare_triggers(&event, &store)
+        };
+        // Phase 2: enqueue with the store released. The bridge stays locked
+        // across both phases, serializing events so debounce windows remain
+        // consistent while sends wait for queue capacity.
+        bridge.send_triggers(&event, prepared, &tx).await
     }
 
     /// Inject the workflow dispatcher used to run real executions.
@@ -2194,7 +2209,7 @@ impl SchedulerManager {
                 let executions = execution_store.lock().await;
                 (
                     executions.started_since(&schedule.id, since),
-                    executions.pending_since(&schedule.id, since),
+                    executions.pending_count(&schedule.id),
                 )
             };
             let persisted_started = if let Some(adapter) = persistence {
@@ -2576,6 +2591,41 @@ impl SchedulerManager {
                     );
                 }
             }
+        }
+
+        // Admission can be interrupted after recording Pending but before
+        // tracking its task. Classify by the retained trigger, not the current
+        // registry: removing a one-time schedule must not bypass receipt handling.
+        let abandoned: Vec<ScheduleExecution> = self
+            .execution_store
+            .lock()
+            .await
+            .pending_records()
+            .filter(|record| {
+                matches!(
+                    record.request_summary["trigger"]["type"].as_str(),
+                    Some("cron" | "interval" | "event")
+                )
+            })
+            .cloned()
+            .collect();
+        for mut cancelled_execution in abandoned {
+            let execution_id = cancelled_execution.execution_id.clone();
+            cancelled_execution.status = ExecutionStatus::Cancelled;
+            cancelled_execution.completed_at = Some(Utc::now());
+            cancelled_execution.error_message =
+                Some("scheduler stopped before completion".to_owned());
+            cancelled_execution.response_summary = serde_json::json!({
+                "status": "cancelled",
+                "reason": "scheduler stopped before completion",
+            });
+            self.execution_store
+                .lock()
+                .await
+                .update(&execution_id, |stored| {
+                    *stored = cancelled_execution.clone();
+                });
+            Self::persist_update(persistence.as_ref(), &cancelled_execution).await;
         }
 
         info!("Scheduler stopped");
@@ -4056,6 +4106,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn removed_one_time_schedule_keeps_receipt_and_pending_execution_consistent_on_stop() {
+        let (manager, persistence) = manager_and_persistence(OccurrenceFailure::Cursor).await;
+        let dispatcher = attached_counting_dispatcher(&manager).await;
+        manager.register(due_one_time("removed-pending")).await;
+        manager.start(Duration::from_millis(10)).await;
+        wait_for_one_time_recovery(&manager, "removed-pending").await;
+
+        assert!(manager.remove("removed-pending").await);
+        manager.stop().await;
+
+        let receipt = persistence.occurrence.lock().await.clone().unwrap();
+        let execution = persistence.execution.lock().await.clone().unwrap();
+        assert_eq!(receipt.state, OneTimeOccurrenceState::Reserved);
+        assert_eq!(execution.status, ExecutionStatus::Pending);
+        assert_eq!(
+            manager.execution_history("removed-pending").await[0].status,
+            ExecutionStatus::Pending
+        );
+        assert_eq!(dispatcher.total_calls().await, 0);
+    }
+
+    #[tokio::test]
     async fn running_transition_failure_makes_zero_dispatch_calls() {
         let (manager, persistence) = manager_and_persistence(OccurrenceFailure::Running).await;
         let dispatcher = attached_counting_dispatcher(&manager).await;
@@ -4886,6 +4958,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn backfill_reservations_consume_the_rolling_hourly_admission_limit() {
+        // Regression: hourly admission used to count queued reservations by
+        // *trigger* time. Recovery backfill carries historical trigger times,
+        // so every queued occurrence was invisible to the limit and a whole
+        // backfill batch bypassed `max_executions_per_hour`.
+        let mgr = SchedulerManager::new(SchedulerConfig {
+            max_concurrent_executions: 1,
+            ..SchedulerConfig::default()
+        });
+        let dispatcher = Arc::new(BlockingDispatcher::new());
+        let dispatcher_trait: Arc<dyn WorkflowDispatcher> = dispatcher.clone();
+        mgr.set_dispatcher(dispatcher_trait).await;
+        let mut schedule = Schedule::new(
+            "bf",
+            "bf",
+            TriggerConfig::Interval {
+                interval_secs: 3600,
+            },
+            "wf",
+        )
+        .with_policies(SchedulePolicies {
+            missed_policy: Some(MissedPolicy::Backfill),
+            concurrency_policy: Some(ConcurrencyPolicy::Queue),
+            max_executions_per_hour: 2,
+        });
+        // Three missed hourly occurrences, all older than the rolling
+        // one-hour admission window.
+        schedule.last_fire = Some(Utc::now() - TimeDelta::seconds(3 * 3600 + 30));
+        mgr.register(schedule).await;
+
+        // Restored work needs an armed scheduler; this test intends it to run.
+        mgr.arm();
+        mgr.start(Duration::from_mins(1)).await;
+
+        // The first occurrence occupies the single execution slot forever;
+        // the others must queue or be skipped by the hourly limit.
+        wait_for_history(&mgr, "bf", 3).await;
+        mgr.stop().await;
+
+        let history = mgr.execution_history("bf").await;
+        assert!(
+            history
+                .iter()
+                .any(|execution| execution.status == ExecutionStatus::Skipped),
+            "queued backfill reservations must consume the rolling hourly admission limit"
+        );
+        assert!(
+            history
+                .iter()
+                .filter(|execution| execution.status != ExecutionStatus::Skipped)
+                .count()
+                <= 2,
+            "at most max_executions_per_hour occurrences may start or queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_reconciles_untracked_pending_reservations_to_cancelled() {
+        // `handle_fired_trigger` records its Pending reservation and persists
+        // it *before* the dispatch task is spawned and tracked. Aborting the
+        // executor inside that persistence window leaves a Pending row no
+        // tracked task owns; stop must reconcile it so it cannot consume
+        // hourly admission budget forever.
+        let mgr = SchedulerManager::with_defaults();
+        let persistence = Arc::new(GatedPersistence::new());
+        let persistence_trait: Arc<dyn SchedulerPersistence> = persistence.clone();
+        mgr.set_persistence(persistence_trait).await;
+        let dispatcher = Arc::new(CountingDispatcher::default());
+        let dispatcher_trait: Arc<dyn WorkflowDispatcher> = dispatcher.clone();
+        mgr.set_dispatcher(dispatcher_trait).await;
+        mgr.register(policy_schedule("interrupted", ConcurrencyPolicy::Allow, 0))
+            .await;
+        mgr.start(Duration::from_mins(1)).await;
+
+        send_now(&mgr, "interrupted").await;
+        // The in-memory Pending reservation exists; the executor parks inside
+        // record persistence before spawning or registering its dispatch task.
+        persistence.wait_for_record().await;
+
+        mgr.stop().await;
+
+        let history = mgr.execution_history("interrupted").await;
+        assert_eq!(
+            history.len(),
+            1,
+            "exactly the parked reservation is recorded"
+        );
+        assert_eq!(
+            history[0].status,
+            ExecutionStatus::Cancelled,
+            "an untracked Pending reservation must be reconciled by stop"
+        );
+        assert!(history[0]
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("stopped")));
+    }
+
+    #[tokio::test]
     async fn skip_if_running_rejects_overlapping_dispatch() {
         let mgr = SchedulerManager::new(SchedulerConfig {
             max_concurrent_executions: 1,
@@ -5339,6 +5510,124 @@ mod tests {
             .await;
         assert!(matched.is_empty());
         assert_eq!(mgr.execution_count().await, 0);
+    }
+
+    /// Persistence double that can park the executor inside
+    /// [`SchedulerPersistence::record_execution`].
+    struct GatedPersistence {
+        /// Signals that `record_execution` was entered.
+        record_started: Notify,
+        /// One-shot release for the parked `record_execution` call.
+        release: Notify,
+        gate_open: AtomicBool,
+    }
+
+    impl GatedPersistence {
+        fn new() -> Self {
+            Self {
+                record_started: Notify::new(),
+                release: Notify::new(),
+                gate_open: AtomicBool::new(false),
+            }
+        }
+
+        /// Let every current and future `record_execution` call complete.
+        fn open_gate(&self) {
+            self.gate_open.store(true, Ordering::SeqCst);
+            self.release.notify_one();
+        }
+
+        async fn wait_for_record(&self) {
+            tokio::time::timeout(Duration::from_secs(2), self.record_started.notified())
+                .await
+                .expect("record persistence was not reached");
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SchedulerPersistence for GatedPersistence {
+        async fn record_execution(
+            &self,
+            _execution: &ScheduleExecution,
+        ) -> Result<(), PersistenceError> {
+            if !self.gate_open.load(Ordering::SeqCst) {
+                self.record_started.notify_one();
+                self.release.notified().await;
+            }
+            Ok(())
+        }
+
+        async fn update_execution(
+            &self,
+            _execution: &ScheduleExecution,
+        ) -> Result<(), PersistenceError> {
+            Ok(())
+        }
+
+        async fn update_schedule(&self, _schedule: &Schedule) -> Result<(), PersistenceError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn emit_event_backpressure_does_not_block_store_reads_or_executor_progress() {
+        // Regression: `emit_event` used to hold the schedule-store mutex
+        // across every awaited trigger-queue send. With a full queue and two
+        // event schedules matching one event, the executor's first action for
+        // the next dequeued trigger (`load_unblocked_schedule`) needs that
+        // same mutex: send #2 can never obtain a queue slot and the executor
+        // can never obtain the store, so the scheduler deadlocks.
+        let mgr = Arc::new(SchedulerManager::with_defaults());
+        let persistence = Arc::new(GatedPersistence::new());
+        let persistence_trait: Arc<dyn SchedulerPersistence> = persistence.clone();
+        mgr.set_persistence(persistence_trait).await;
+        let dispatcher = Arc::new(CountingDispatcher::default());
+        let dispatcher_trait: Arc<dyn WorkflowDispatcher> = dispatcher.clone();
+        mgr.set_dispatcher(dispatcher_trait).await;
+        mgr.register(event_schedule("evt-a", "evt", 0, None)).await;
+        mgr.register(event_schedule("evt-b", "evt", 0, None)).await;
+        mgr.register(policy_schedule("stall", ConcurrencyPolicy::Allow, 0))
+            .await;
+        mgr.start(Duration::from_mins(1)).await;
+
+        // Park the executor inside record persistence for the first trigger;
+        // it holds no store lock there, so the queue fills deterministically.
+        send_now(&mgr, "stall").await;
+        persistence.wait_for_record().await;
+        let queue_capacity = mgr.trigger_sender().unwrap().capacity();
+        for _ in 0..queue_capacity {
+            send_now(&mgr, "stall").await;
+        }
+
+        // Two schedules match, so `emit_event` sends twice into a full queue.
+        let emit = mgr.emit_event(incoming("evt", serde_json::json!({"target": "t"})));
+        tokio::pin!(emit);
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(
+                std::future::Future::poll(emit.as_mut(), cx).is_pending()
+            ))
+            .await,
+            "event publication must wait for the full queue"
+        );
+        tokio::time::timeout(Duration::from_secs(1), mgr.get_schedule("stall"))
+            .await
+            .expect("store reads must not block on event queue backpressure");
+
+        // Resume the executor: it must keep dequeuing while the event sends
+        // still wait for queue capacity.
+        persistence.open_gate();
+
+        let mut matched = tokio::time::timeout(Duration::from_secs(2), emit)
+            .await
+            .expect("emit_event must not deadlock against the executor's store reads");
+        matched.sort();
+        assert_eq!(matched, vec!["evt-a".to_owned(), "evt-b".to_owned()]);
+
+        // The event triggers sit behind a full queue; their history rows only
+        // appear once the executor has drained it.
+        wait_for_history(&mgr, "evt-a", 1).await;
+        wait_for_history(&mgr, "evt-b", 1).await;
+        mgr.stop().await;
     }
 
     struct DropSignal(Arc<AtomicBool>);

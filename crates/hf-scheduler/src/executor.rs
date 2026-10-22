@@ -170,14 +170,20 @@ impl ExecutionStore {
         })
     }
 
-    /// Count queued reservations that have not reached their actual start.
-    pub fn pending_since(&self, schedule_id: &str, since: DateTime<Utc>) -> usize {
+    /// Count live queued reservations, including historical backfill triggers.
+    pub fn pending_count(&self, schedule_id: &str) -> usize {
         self.records
             .iter()
             .filter(|execution| execution.schedule_id == schedule_id)
             .filter(|execution| execution.status == ExecutionStatus::Pending)
-            .filter(|execution| execution.triggered_at >= since)
             .count()
+    }
+
+    /// Queued reservations to reconcile when shutdown interrupts admission.
+    pub(crate) fn pending_records(&self) -> impl Iterator<Item = &ScheduleExecution> {
+        self.records
+            .iter()
+            .filter(|execution| execution.status == ExecutionStatus::Pending)
     }
 
     /// List the most recent executions across all schedules.

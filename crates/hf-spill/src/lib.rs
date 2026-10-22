@@ -208,10 +208,13 @@ fn collect_entries(root: &Path) -> Vec<Entry> {
         return entries;
     };
     for item in dir.flatten() {
+        let Ok(meta) = item.metadata() else {
+            continue;
+        };
         let path = item.path();
-        if path.is_dir() {
+        if meta.is_dir() {
             entries.extend(collect_entries(&path));
-        } else if let Ok(meta) = item.metadata() {
+        } else if meta.is_file() {
             entries.push(Entry {
                 bytes: meta.len(),
                 modified: meta.modified().unwrap_or(std::time::UNIX_EPOCH),
@@ -229,9 +232,13 @@ fn prune_empty_dirs(root: &Path) {
         return;
     };
     for item in dir.flatten() {
-        let path = item.path();
-        if path.is_dir() && fs::read_dir(&path).is_ok_and(|mut d| d.next().is_none()) {
-            let _ = fs::remove_dir(&path);
+        if item.file_type().is_ok_and(|kind| kind.is_dir()) {
+            let path = item.path();
+            if fs::read_dir(&path).is_ok_and(|mut dir| dir.next().is_none()) {
+                if let Err(error) = fs::remove_dir(&path) {
+                    tracing::warn!(%error, path = %path.display(), "could not prune an empty spill directory");
+                }
+            }
         }
     }
 }
@@ -327,21 +334,23 @@ fn safe_name(suggested_name: &str) -> String {
     }
 }
 
-#[cfg(unix)]
 fn create_private_dir(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::DirBuilderExt;
-    if path.is_dir() {
-        return Ok(());
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
     }
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(path)
-}
-
-#[cfg(not(unix))]
-fn create_private_dir(path: &Path) -> io::Result<()> {
-    fs::create_dir_all(path)
+    builder.create(path)?;
+    if fs::symlink_metadata(path)?.is_dir() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "spill path is not a regular directory",
+        ))
+    }
 }
 
 /// Create `path` exclusively and write `bytes`.
@@ -349,25 +358,17 @@ fn create_private_dir(path: &Path) -> io::Result<()> {
 /// `create_new` is the point: it fails if anything already exists at the path,
 /// including a symbolic link, so a planted link cannot redirect the write
 /// somewhere else.
-#[cfg(unix)]
 fn write_private_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(bytes)
-}
 
-#[cfg(not(unix))]
-fn write_private_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    use std::io::Write;
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
     file.write_all(bytes)
 }
 
@@ -444,6 +445,51 @@ mod tests {
             .mode();
         assert_eq!(root_mode & 0o777, 0o700, "spill root must be private");
         assert_eq!(file_mode & 0o777, 0o600, "spilled artifact must be private");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_rejects_a_symlinked_owner_directory() {
+        use std::os::unix::fs::symlink;
+
+        let (dir, store) = store();
+        let outside = dir.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        symlink(
+            &outside,
+            store.root().join(format!("session-{}", digest_of("s"))),
+        )
+        .unwrap();
+
+        assert!(store.save_text("s", "out.txt", "retained output").is_err());
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retention_does_not_delete_files_through_directory_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            SpillStore::with_retention(dir.path().join("spill"), Retention { max_total_bytes: 0 })
+                .unwrap();
+        let outside = dir.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        let unrelated = outside.join("unrelated.txt");
+        fs::write(&unrelated, "not a spilled artifact").unwrap();
+        symlink(&outside, store.root().join("linked-directory")).unwrap();
+
+        let saved = store.save_text("s", "out.txt", "retained output").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&unrelated).unwrap(),
+            "not a spilled artifact"
+        );
+        assert_eq!(
+            fs::read_to_string(saved.locator).unwrap(),
+            "retained output"
+        );
     }
 
     // -- retention ---------------------------------------------------------

@@ -1,3 +1,4 @@
+use std::fmt::Write;
 use std::sync::atomic::Ordering;
 
 use futures::StreamExt;
@@ -192,6 +193,64 @@ async fn clean_eof_releases_pool_permits_even_when_stream_is_retained() {
     .unwrap()
     .unwrap();
     drop(response);
+}
+
+#[tokio::test]
+async fn indexless_tool_fragments_preserve_arguments_and_distinct_call_ids() {
+    let deltas = [
+        serde_json::json!({"id":"call_1","function":{"name":"search","arguments":"{\"q\":"}}),
+        serde_json::json!({"function":{"arguments":"\"rust\""}}),
+        serde_json::json!({"id":"call_2","function":{"name":"search","arguments":"{\"q\":"}}),
+        serde_json::json!({"id":"call_1","function":{"name":"search"}}),
+        serde_json::json!({"function":{"arguments":"}"}}),
+        serde_json::json!({"id":"call_2","function":{"name":"search","arguments":"\"cargo\"}"}}),
+    ];
+    let mut body = String::new();
+    for delta in deltas {
+        write!(
+            body,
+            "data: {}\n\n",
+            serde_json::json!({"choices":[{"delta":{"tool_calls":[delta]}}]})
+        )
+        .unwrap();
+    }
+    body.push_str("data: [DONE]\n\n");
+
+    for backend in ["openai", "azure"] {
+        let fixture = server(200, vec![body.as_bytes().to_vec()]).await;
+        let pool = ProviderPoolImpl::from_config(&config(
+            &fixture.url,
+            backend,
+            body.len(),
+            body.len(),
+            body.len(),
+        ))
+        .unwrap();
+        let mut stream = pool
+            .chat_completion_stream(&request(), &RouteRequest::default())
+            .await
+            .unwrap()
+            .stream;
+        let mut calls = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            calls.extend(chunk.unwrap().delta_tool_calls);
+        }
+        assert_eq!(calls.len(), 2, "{backend}");
+        assert_eq!(calls[0].id, "call_1", "{backend}");
+        assert_eq!(calls[0].name, "search", "{backend}");
+        assert_eq!(
+            calls[0].arguments,
+            serde_json::json!({"q":"rust"}),
+            "{backend}"
+        );
+        assert_eq!(calls[1].id, "call_2", "{backend}");
+        assert_eq!(calls[1].name, "search", "{backend}");
+        assert_eq!(
+            calls[1].arguments,
+            serde_json::json!({"q":"cargo"}),
+            "{backend}"
+        );
+    }
 }
 
 #[tokio::test]

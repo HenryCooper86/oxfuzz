@@ -807,7 +807,6 @@ impl LlmProvider for AzureOpenAiProvider {
 
         // Parse SSE stream -- same format as OpenAI.
         let byte_stream = response.bytes_stream();
-        let provider_id = self.metadata.id.to_string();
 
         let inter_stream = futures::stream::unfold(
             (
@@ -819,100 +818,97 @@ impl LlmProvider for AzureOpenAiProvider {
                 ToolCallAccumulatorSet::default(),
                 VecDeque::<InterStreamEvent>::new(),
             ),
-            move |mut composite| {
-                let _provider_id = provider_id.clone();
-                async move {
-                    let (ref mut state, ref mut tool_acc, ref mut pending) = composite;
+            move |mut composite| async move {
+                let (ref mut state, ref mut tool_acc, ref mut pending) = composite;
 
-                    if let Some(event) = pending.pop_front() {
-                        return Some((Ok(event), composite));
-                    }
+                if let Some(event) = pending.pop_front() {
+                    return Some((Ok(event), composite));
+                }
 
-                    if state.done {
-                        return None;
-                    }
+                if state.done {
+                    return None;
+                }
 
-                    loop {
-                        if let Some(event) = crate::sse::extract_sse_data(&mut state.buffer) {
-                            let trimmed = event.trim();
-                            if trimmed.is_empty() {
-                                continue;
+                loop {
+                    if let Some(event) = crate::sse::extract_sse_data(&mut state.buffer) {
+                        let trimmed = event.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        if trimmed == "[DONE]" {
+                            state.done = true;
+                            for tc in tool_acc.drain_completed() {
+                                pending.push_back(InterStreamEvent::ToolCall(tc));
                             }
-                            if trimmed == "[DONE]" {
-                                state.done = true;
-                                for tc in tool_acc.drain_completed() {
-                                    pending.push_back(InterStreamEvent::ToolCall(tc));
-                                }
-                                if let Some(event) = pending.pop_front() {
-                                    return Some((Ok(event), composite));
-                                }
-                                return None;
+                            if let Some(event) = pending.pop_front() {
+                                return Some((Ok(event), composite));
                             }
+                            return None;
+                        }
 
-                            match serde_json::from_str::<AzureStreamChunk>(trimmed) {
-                                Ok(chunk) => {
-                                    if let Some(err) = &chunk.error {
-                                        // Mid-stream error frame: fail the stream
-                                        // so the pool can freeze/fail over instead
-                                        // of returning a truncated success.
-                                        state.done = true;
-                                        return Some((
-                                            Err(crate::error_classifier::stream_error_to_provider_error(
+                        match serde_json::from_str::<AzureStreamChunk>(trimmed) {
+                            Ok(chunk) => {
+                                if let Some(err) = &chunk.error {
+                                    // Mid-stream error frame: fail the stream
+                                    // so the pool can freeze/fail over instead
+                                    // of returning a truncated success.
+                                    state.done = true;
+                                    return Some((
+                                        Err(
+                                            crate::error_classifier::stream_error_to_provider_error(
                                                 "azure", err,
-                                            )),
-                                            composite,
-                                        ));
-                                    }
-                                    let mut events = map_to_inter_events(&chunk, tool_acc);
-                                    if events.is_empty() {
-                                        continue;
-                                    }
-                                    let first = events.remove(0);
-                                    pending.extend(events);
-                                    return Some((Ok(first), composite));
+                                            ),
+                                        ),
+                                        composite,
+                                    ));
                                 }
-                                Err(e) => {
-                                    // Tolerate non-conforming events from
-                                    // OpenAI-compat relays — see openai.rs
-                                    // for the rationale.
-                                    tracing::warn!(
-                                        error = %e,
-                                        data = %trimmed,
-                                        "Skipping unparseable Azure SSE event"
-                                    );
+                                let mut events = map_to_inter_events(&chunk, tool_acc);
+                                if events.is_empty() {
                                     continue;
                                 }
+                                let first = events.remove(0);
+                                pending.extend(events);
+                                return Some((Ok(first), composite));
+                            }
+                            Err(e) => {
+                                // Tolerate non-conforming events from
+                                // OpenAI-compat relays — see openai.rs
+                                // for the rationale.
+                                tracing::warn!(
+                                    error = %e,
+                                    data = %trimmed,
+                                    "Skipping unparseable Azure SSE event"
+                                );
+                                continue;
                             }
                         }
+                    }
 
-                        match state.read_next().await {
-                            Ok(true) => {}
-                            Ok(false) => {
-                                while let Some(event) =
-                                    crate::sse::extract_sse_data(&mut state.buffer)
+                    match state.read_next().await {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            while let Some(event) = crate::sse::extract_sse_data(&mut state.buffer)
+                            {
+                                let trimmed = event.trim();
+                                if trimmed.is_empty() || trimmed == "[DONE]" {
+                                    continue;
+                                }
+                                if let Ok(chunk) = serde_json::from_str::<AzureStreamChunk>(trimmed)
                                 {
-                                    let trimmed = event.trim();
-                                    if trimmed.is_empty() || trimmed == "[DONE]" {
-                                        continue;
-                                    }
-                                    if let Ok(chunk) =
-                                        serde_json::from_str::<AzureStreamChunk>(trimmed)
-                                    {
-                                        for ev in map_to_inter_events(&chunk, tool_acc) {
-                                            pending.push_back(ev);
-                                        }
+                                    for ev in map_to_inter_events(&chunk, tool_acc) {
+                                        pending.push_back(ev);
                                     }
                                 }
-                                for tc in tool_acc.drain_completed() {
-                                    pending.push_back(InterStreamEvent::ToolCall(tc));
-                                }
-                                if let Some(event) = pending.pop_front() {
-                                    return Some((Ok(event), composite));
-                                }
-                                return None;
                             }
-                            Err(e) => return Some((Err(e), composite)),
+                            for tc in tool_acc.drain_completed() {
+                                pending.push_back(InterStreamEvent::ToolCall(tc));
+                            }
+                            if let Some(event) = pending.pop_front() {
+                                return Some((Ok(event), composite));
+                            }
+                            return None;
                         }
+                        Err(e) => return Some((Err(e), composite)),
                     }
                 }
             },

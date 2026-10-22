@@ -892,6 +892,12 @@ Indexes: `idx_session_parent(parent_id)`, `idx_session_root(root_id)`,
 Constraints/indexes: unique `(session_id, turn_number)` and
 `idx_chat_cp_session(session_id, turn_number DESC)`.
 
+JSONL transcript counts and checkpoint positions refer to successfully parsed
+`Message` records, not non-empty file lines. Context and display counts use the
+same recovery rules as transcript reads: torn or malformed records are skipped
+with a warning. Reading the last N messages retains N valid messages when
+available; malformed records do not consume a position in that tail.
+
 ## 4. Diagnostics tables
 
 ### `diag_traces`
