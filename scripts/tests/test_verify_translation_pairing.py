@@ -5,6 +5,8 @@ only guards if the regression actually turns it red
 (docs/standards/DEFENSIVE_PATTERNS.md, Verification).
 """
 
+import contextlib
+import io
 import os
 import pathlib
 import subprocess
@@ -164,6 +166,58 @@ class DiscoveryTraversalTest(unittest.TestCase):
             with mock.patch.object(pairing, "REPOSITORY_ROOT", root):
                 with mock.patch("os.scandir", side_effect=guarded_scandir):
                     self.assertEqual(pairing.tracked_files(), ["README.md", "docs/guide.md"])
+
+
+class WriteSelectionTest(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = pathlib.Path(self.directory.name)
+        for relative in ("README.md", "docs/README.md", ".superpowers/archive/README.md"):
+            english = self.root / relative
+            english.parent.mkdir(parents=True, exist_ok=True)
+            english.write_text(ENGLISH, encoding="utf-8")
+            english.with_name("README.zh.md").write_text(CHINESE, encoding="utf-8")
+            english.with_name("README.i18n.yaml").write_text("unchanged", encoding="utf-8")
+        self.patch = mock.patch.object(pairing, "REPOSITORY_ROOT", self.root)
+        self.patch.start()
+        self.addCleanup(self.patch.stop)
+
+    def invoke(self, *paths):
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            return pairing.main(["--write", *paths])
+
+    def changed_records(self):
+        return {
+            record.relative_to(self.root).as_posix()
+            for record in self.root.rglob("*.i18n.yaml")
+            if record.read_text(encoding="utf-8") != "unchanged"
+        }
+
+    def test_root_readme_does_not_confirm_same_basename_in_nested_or_ignored_directories(self):
+        self.assertEqual(self.invoke("README.md"), 0)
+        self.assertEqual(self.changed_records(), {"README.i18n.yaml"})
+
+    def test_nested_path_only_confirms_its_requested_pair_and_names_it_in_guidance(self):
+        self.assertEqual(self.invoke("docs/README.md"), 0)
+        self.assertEqual(self.changed_records(), {"docs/README.i18n.yaml"})
+        record = (self.root / "docs/README.i18n.yaml").read_text(encoding="utf-8")
+        self.assertIn("--write docs/README.md", record)
+        self.assertEqual(pairing.verify_pair(self.root / "docs/README.md", self.root / "docs/README.zh.md", self.root / "docs/README.i18n.yaml"), [])
+
+    def test_dot_prefix_selects_the_same_repository_relative_path(self):
+        self.assertEqual(self.invoke("./docs/README.md"), 0)
+        self.assertEqual(self.changed_records(), {"docs/README.i18n.yaml"})
+
+    def test_unmatched_nested_name_never_falls_back_to_basename(self):
+        self.assertEqual(self.invoke("missing/README.md"), 2)
+        self.assertEqual(self.changed_records(), set())
+
+    def test_invalid_or_unknown_paths_do_not_partially_confirm_a_batch(self):
+        for path in ("missing/README.md", "../README.md", str(self.root / "README.md")):
+            with self.subTest(path=path):
+                self.assertEqual(self.invoke("README.md", path), 2)
+                self.assertEqual(self.changed_records(), set())
 
 
 class RepositoryCorpusTest(unittest.TestCase):

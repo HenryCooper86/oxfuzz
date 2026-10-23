@@ -19,6 +19,10 @@ Usage:
 
     scripts/verify_translation_pairing.py                 # verify every pair
     scripts/verify_translation_pairing.py --write README.md
+
+Write selections are exact repository-relative English-side paths. An optional
+``./`` prefix is accepted; absolute paths and parent traversal are rejected.
+Every requested pair must exist before any consistency record is updated.
 """
 
 from __future__ import annotations
@@ -273,7 +277,7 @@ def parse_record(text: str) -> dict[str, str]:
 
 def render_record(english: pathlib.Path, chinese: pathlib.Path) -> str:
     return (
-        RECORD_HEADER.format(name=english.name)
+        RECORD_HEADER.format(name=english.relative_to(REPOSITORY_ROOT).as_posix())
         + f"{english.name}: {blob_hash(english)}\n"
         + f"{chinese.name}: {blob_hash(chinese)}\n"
     )
@@ -396,24 +400,36 @@ def main(argv: list[str] | None = None) -> int:
         "--write",
         metavar="PAIR",
         nargs="+",
-        help="re-record the named English-side paths as confirmed consistent",
+        help="re-record exact repository-relative English-side paths (optional ./ prefix; no absolute paths or ..)",
     )
     arguments = parser.parse_args(argv)
 
     pairs = discover_pairs(tracked_files())
 
     if arguments.write:
-        wanted = {pathlib.Path(entry).name for entry in arguments.write}
+        wanted = set()
+        for entry in arguments.write:
+            path = pathlib.Path(entry)
+            if path.is_absolute() or ".." in path.parts:
+                print(
+                    f"pair path must be repository-relative without parent traversal: {entry}",
+                    file=sys.stderr,
+                )
+                return 2
+            wanted.add(path.as_posix())
+        available = {
+            english.relative_to(REPOSITORY_ROOT).as_posix()
+            for english, _, _ in pairs
+        }
+        missing = wanted - available
+        if missing:
+            print(f"no pair matched {sorted(missing)}", file=sys.stderr)
+            return 2
         written = []
         for english, chinese, record in pairs:
-            if english.name in wanted or str(english.relative_to(REPOSITORY_ROOT)) in set(
-                arguments.write
-            ):
+            if english.relative_to(REPOSITORY_ROOT).as_posix() in wanted:
                 record.write_text(render_record(english, chinese), encoding="utf-8")
                 written.append(str(record.relative_to(REPOSITORY_ROOT)))
-        if not written:
-            print(f"no pair matched {arguments.write}", file=sys.stderr)
-            return 2
         for entry in written:
             print(f"recorded {entry}")
         return 0
