@@ -117,10 +117,32 @@ finding's fix-verification determination.
 - A triage pass attempts at most 20 unique crashes. Only AFL++ and libFuzzer
   use their native minimizers; unsupported engines retain the original input
   and `minimized = false`.
-- `minimized = true` means the sandbox completed with status zero and produced
-  a non-empty regular file within the crash-input size ceiling. Timeout,
-  cancellation, non-zero exit, missing/oversized output, or atomic publication
-  failure leaves the original crash unchanged and is surfaced in diagnostics.
+- `minimized = true` requires successful native minimization followed by
+  repeated independent sandbox confirmation of both original and candidate.
+  Replay uses the retained binary and content-addressed image, read-only inputs,
+  and no network. The original and candidate must reproduce the same nonempty
+  normalized stack signature, crash kind, failure class, and origin on every
+  attempt, and that identity must match the retained log and classification of
+  the finding being minimized. The report retains that bounded reference log,
+  run/finding identities, version, and requested repetition count. CASR findings
+  without a comparable original sanitizer log remain explicitly unconfirmed.
+  Failure categories exclude variable process IDs, addresses, and operand values;
+  unrecognized categories cannot support confirmation. Clean exits, different failures, incomplete runs, and frameless
+  reports cannot confirm identity. Native minimizer success alone is insufficient.
+- `[triage] confirmation_runs` defaults to 3 (range 2–10), and
+  `replay_timeout_secs` defaults to 10 (range 1–30). The existing total triage
+  deadline still bounds the operation. Legacy runs without an immutable image
+  remain classified but cannot receive confirmed minimized evidence.
+- Crash records retain original/candidate paths and digests, binary/image
+  identity, individual bounded replay logs and observed outcomes. Reproduction
+  counts describe observations, never a promise of future determinism. Failed
+  confirmation keeps the original input and log. Confirmed candidates use their
+  actual replay logs; original logs are never relabelled as candidate evidence.
+- Proof cards and markdown use one assessment of durable replay evidence. It
+  recomputes matching from completed nonzero outcomes and actual logs, validates
+  reference identity, count completeness, artifact identifiers and run-owned
+  paths, and treats saved booleans only as consistency checks. A clean exit or
+  missing reference cannot become confirmed by changing saved flags.
 - Ingestion and report parsing enforce entry, per-file, and aggregate byte
   limits before allocating or replaying data. Truncation is surfaced rather
   than silently treating an unbounded directory as fully triaged.

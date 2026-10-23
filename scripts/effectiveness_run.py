@@ -30,6 +30,7 @@ Invoke from the repository root as `python3 -m scripts.effectiveness_run`.
 """
 
 import argparse
+from decimal import Decimal
 import hashlib
 import json
 import os
@@ -38,6 +39,7 @@ import re
 import secrets
 import shutil
 import signal
+import stat
 import socket
 import sqlite3
 import subprocess
@@ -51,7 +53,7 @@ from pathlib import Path
 
 from scripts.effectiveness_benchmark import (
     HEX_40, HEX_64, PROJECT_ENGINES, digest, no_duplicate_keys, nonempty,
-    nonempty_list, record, unique_ids, validate_cohort,
+    nonempty_list, record, unique_ids, validate_cohort, trial_source_digest,
 )
 from scripts.effectiveness_report import crash_measurements
 
@@ -417,6 +419,14 @@ def cmd_freeze(args):
     cohort = freeze_cohort(
         manifest, conditions, args.cohort_id, candidate_commit, source_digests,
         args.sandbox_image_sha256, args.replicates)
+    if args.prepared_harnesses is not None:
+        prepared = read_json(args.prepared_harnesses)
+        if not isinstance(prepared, dict) or set(prepared) != {t["id"] for t in cohort["trials"]}:
+            raise RunnerError("prepared harness mapping must name every frozen trial exactly once")
+        cohort["schema_version"] = 2
+        for trial in cohort["trials"]:
+            trial["prepared_harness"] = prepared[trial["id"]]
+        validate_cohort(cohort)
     write_json(args.output, cohort)
     print("[freeze] wrote {}: {} project(s), {} condition(s), {} trial(s)".format(
         args.output, len(cohort["projects"]), len(cohort["conditions"]),
@@ -587,6 +597,11 @@ def dry_run(cohort, manifest, binary, args):
     print("[check] run matrix:")
     for trial in cohort["trials"]:
         condition = conditions[trial["condition_id"]]
+        if "prepared_harness" in trial:
+            try:
+                read_prepared_harness(args.cohort.parent, trial["prepared_harness"])
+            except (OSError, RunnerError) as error:
+                failures.append("trial {} prepared harness: {}".format(trial["id"], error))
         total_fuzz += condition["duration_secs"]
         print("  {}: project={} function={} engine={} sanitizer={} "
               "duration={}s seed={} provider={}/{}".format(
@@ -630,7 +645,7 @@ def trial_environment(trial_dir):
     return env, config_dir, workspace_dir
 
 
-def write_trial_config(config_dir, operator_config, condition):
+def write_trial_config(config_dir, operator_config, condition, scope_id):
     lines = [
         "[fuzzing]",
         'default_engine = "{}"'.format(condition["engine"]),
@@ -643,6 +658,17 @@ def write_trial_config(config_dir, operator_config, condition):
         "max_duration_secs = {}".format(max(7200, condition["duration_secs"])),
         "",
     ]
+    if condition["provider_family"] != NO_PROVIDER:
+        cost_microusd = int(Decimal(str(condition["model_cost_budget_usd"])) * 1000000)
+        if condition["model_call_budget"] < 1 or cost_microusd < 1:
+            raise RunnerError("provider-backed trials require positive runtime call and microdollar budgets")
+        lines += [
+            "[model_budget]",
+            "scope_id = {}".format(json.dumps(scope_id)),
+            "max_calls = {}".format(condition["model_call_budget"]),
+            "max_cost_microusd = {}".format(cost_microusd),
+            "max_output_tokens = 4096", "",
+        ]
     (config_dir / "oxfuzz.toml").write_text("\n".join(lines), encoding="utf-8")
     if operator_config is not None:
         providers = operator_config / "providers.toml"
@@ -667,6 +693,46 @@ def fuzz_command(binary, project_dir, project, trial, condition):
     else:
         command += ["--ai", "require"]
     return command
+
+
+def read_prepared_harness(cohort_dir, prepared):
+    """Read bounded reviewed source without executing or modifying anything."""
+    source = cohort_dir / prepared["path"]
+    root = cohort_dir.resolve(strict=True)
+    resolved = source.resolve(strict=True)
+    if root not in resolved.parents or source.is_symlink():
+        raise RunnerError("prepared harness path escapes cohort directory or is a symlink")
+    descriptor = os.open(source, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(descriptor, "rb") as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise RunnerError("prepared harness must be a regular file")
+        content = stream.read(1048576 + 1)
+    if not content or len(content) > 1048576 or b"\0" in content:
+        raise RunnerError("prepared harness must contain 1..1048576 non-NUL UTF-8 bytes")
+    try:
+        content.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise RunnerError("prepared harness is not UTF-8") from error
+    if hashlib.sha256(content).hexdigest() != prepared["sha256"]:
+        raise RunnerError("prepared harness digest differs from frozen cohort")
+    return content
+
+
+def stage_prepared_harness(cohort_dir, trial_dir, prepared):
+    """Retain verified source bytes before any command can execute them."""
+    content = read_prepared_harness(cohort_dir, prepared)
+    destination = trial_dir / "prepared-harness.c"
+    # Exclusive creation prevents overwriting retained or redirected trial inputs.
+    if destination.exists():
+        if destination.is_symlink() or not destination.is_file() or destination.stat().st_size != len(content):
+            raise RunnerError("retained prepared harness differs from frozen cohort")
+        with destination.open("rb") as stream:
+            if stream.read(1048576 + 1) != content:
+                raise RunnerError("retained prepared harness differs from frozen cohort")
+    else:
+        with destination.open("xb") as stream:
+            stream.write(content)
+    return destination
 
 
 def tail_text(text, limit=2000):
@@ -952,7 +1018,7 @@ def binding_mismatches(manifest, trial, project, condition, outcome):
     expected = {
         "target": trial["selected_function"],
         "engine": condition["engine"],
-        "source_revision": project["source_sha256"],
+        "source_revision": trial_source_digest(trial, project),
         "sandbox_image_sha256": condition["sandbox_image_sha256"],
         "status": "done" if outcome == "completed" else outcome,
     }
@@ -1158,7 +1224,8 @@ def run_trial(binary, args, trial, condition, project):
     log_dir = trial_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     env, config_dir, _workspace_dir = trial_environment(trial_dir)
-    write_trial_config(config_dir, args.config, condition)
+    budget_scope = "effectiveness-" + hashlib.sha256(trial["id"].encode("utf-8")).hexdigest()
+    write_trial_config(config_dir, args.config, condition, budget_scope)
 
     record_data = {
         "id": trial["id"],
@@ -1193,6 +1260,11 @@ def run_trial(binary, args, trial, condition, project):
 
     project_dir = args.workspace / "targets" / project["id"]
     command = fuzz_command(binary, project_dir, project, trial, condition)
+    if "prepared_harness" in trial:
+        prepared = trial["prepared_harness"]
+        staged = stage_prepared_harness(args.cohort.parent, trial_dir, prepared)
+        command += ["--harness-source", str(staged), "--harness-sha256", prepared["sha256"]]
+        record_data["prepared_harness"] = dict(prepared, retained_path=str(staged))
     print("[run] {}: {} on {} ({}) for {}s".format(
         trial["id"], trial["selected_function"], project["id"],
         condition["engine"], condition["duration_secs"]))
@@ -1240,7 +1312,7 @@ def run_trial(binary, args, trial, condition, project):
     model_cost = None
     if data["available"]:
         campaign_runs, signatures, crash_files = collect_run_metrics(
-            data, condition, project["source_sha256"],
+            data, condition, trial_source_digest(trial, project),
             condition["sandbox_image_sha256"], trial["seed"])
         record_data["campaign_runs"] = campaign_runs
         record_data["runs_executed"] = len(campaign_runs)
@@ -1328,8 +1400,19 @@ def bind_trial_evidence(out_dir, record_data, exported, trial, project, conditio
     record_data["evidence"] = evidence
 
 
+def require_prepared_approval(cohort, args):
+    """Prepared-source execution requires the operator's explicit approval."""
+    if cohort["schema_version"] == 2 and not args.dry_run and not args.approve_prepared_harnesses:
+        raise RunnerError("review the exact source files and bounded matrix, then pass --approve-prepared-harnesses")
+
+
 def cmd_run(args):
     cohort = validate_cohort(read_json(args.cohort))
+    require_prepared_approval(cohort, args)
+    if cohort["schema_version"] == 2:
+        # Check the complete selected matrix before any provider/runtime dispatch.
+        for trial in cohort["trials"]:
+            read_prepared_harness(args.cohort.parent, trial["prepared_harness"])
     manifest = validate_manifest(read_json(args.manifest))
     cross_check(cohort, manifest)
     binary = resolve_binary(args.oxfuzz)
@@ -1440,6 +1523,8 @@ def build_parser():
     freeze.add_argument("--replicates", type=int, default=1,
                         help="trials per project/function/condition cell")
     freeze.add_argument("--output", type=Path, required=True)
+    freeze.add_argument("--prepared-harnesses", type=Path,
+                        help="per-trial source path/digests/origin mapping for schema 2")
     freeze.set_defaults(handler=cmd_freeze)
 
     run = subcommands.add_parser("run", help="execute the cohort and collect metrics")
@@ -1462,6 +1547,8 @@ def build_parser():
     run.add_argument("--dry-run", action="store_true",
                      help="validate everything and print the matrix without Docker, "
                           "providers, or execution")
+    run.add_argument("--approve-prepared-harnesses", action="store_true",
+                     help="approve the exact reviewed schema-2 sources and bounded trial matrix")
     run.set_defaults(handler=cmd_run)
     return parser
 

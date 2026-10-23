@@ -80,6 +80,7 @@ async fn fixture(store: &Store, project: &str, start: DateTime<Utc>) -> RunRecor
         sanitizer: Sanitizer::Address,
         status: HarnessStatus::Draft,
         smoke_run: None,
+        custom_mutator: None,
         cmplog: None,
     };
     store.upsert_harness(&harness).await.unwrap();

@@ -63,6 +63,7 @@ fn completed(exit_code: i32, stdout: &str, cwd: &Path) -> CommandResult {
 /// campaign run streams libFuzzer progress lines.
 #[derive(Default)]
 struct RecordingRuntime {
+    recovery_store: Option<Arc<hf_storage::Store>>,
     commands: Mutex<Vec<Vec<String>>>,
 }
 
@@ -189,6 +190,18 @@ impl RuntimeAdapter for RecordingRuntime {
             || cmd.iter().any(|value| value.contains("llvm-cov-18 export"))
         {
             return self.run_command_opts(cmd, cwd, limits, opts).await;
+        }
+        if let Some(store) = &self.recovery_store {
+            assert_eq!(
+                hf_service::recovery::reconcile_interrupted_run_statuses(
+                    store,
+                    &hf_service::recovery::RunJournal::in_memory(),
+                )
+                .await
+                .unwrap(),
+                0,
+                "a dispatched guided run must retain its owner lease"
+            );
         }
         self.commands.lock().unwrap().push(cmd.to_vec());
         if let Some(mount) = opts
@@ -662,4 +675,145 @@ fn legacy_config_json_without_a_seed_still_deserializes() {
         serde_json::from_value(seeded_json).expect("seeded config_json must deserialize");
     assert_eq!(parsed.seed, Some(42));
     assert_eq!(parsed.replay_of, Some(Uuid::nil()));
+}
+#[cfg(feature = "coverage-experiments")]
+#[tokio::test]
+async fn guided_experiment_rejects_stale_inputs_and_attaches_its_run() {
+    use hf_service::coverage_experiments::*;
+    common::install_managed_workspace("oxfuzz_guided_replay_it");
+    let dir = tempfile::tempdir().unwrap();
+    std::env::set_var("HF_CONFIG_DIR", dir.path().join("config"));
+    write_fuzzing_policy(&["libfuzzer"], 120);
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("parser.c"), FIXTURE).unwrap();
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("runs.db"))
+            .await
+            .unwrap(),
+    );
+    let runtime = Arc::new(RecordingRuntime {
+        recovery_store: Some(Arc::new(
+            hf_storage::Store::connect(dir.path().join("runs.db"))
+                .await
+                .unwrap(),
+        )),
+        ..RecordingRuntime::default()
+    });
+    let service = ServiceContainer::new(runtime.clone(), Some(Arc::new(HarnessDraftPool)))
+        .with_store(store.clone());
+    service
+        .harness_generate(
+            &project,
+            "parse_value",
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+            1,
+            None,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+    let workspace = hf_service::workspace_dir(&project, "parse_value");
+    std::fs::create_dir_all(workspace.join("corpus")).unwrap();
+    std::fs::write(workspace.join("corpus/seed"), b"FUZZ").unwrap();
+    service
+        .harness_smoke(
+            &project,
+            "parse_value",
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+        )
+        .await
+        .unwrap();
+    service
+        .harness_promote(&project, "parse_value", EngineKind::LibFuzzer)
+        .await
+        .unwrap();
+    let baseline = service
+        .run_fuzzer(
+            &project,
+            "parse_value",
+            EngineKind::LibFuzzer,
+            60,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &|_| {},
+        )
+        .await
+        .unwrap();
+    let evidence = store
+        .coverage_experiment_run_evidence(baseline.run_id)
+        .await
+        .unwrap();
+    let request = CreateCoverageExperimentRequest {
+        project: project.clone(),
+        target_id: evidence.target_id,
+        baseline_run_id: baseline.run_id,
+        kind: CoverageExperimentKind::GrowCorpus,
+        goal_function: "parse_value".into(),
+        hypothesis: "More seeds may enter the parser".into(),
+        duration_secs: 60,
+    };
+    let scope = CoverageExperimentScope {
+        project,
+        target_id: evidence.target_id,
+    };
+    let experiment = service.create_coverage_experiment(request).await.unwrap();
+    let review = service
+        .coverage_experiment_replay_review(experiment.id, scope.clone())
+        .await
+        .unwrap();
+    std::fs::write(workspace.join("corpus/extra"), b"FUZZ-more").unwrap();
+    let before = runtime.campaign_count();
+    assert!(service
+        .replay_run_reviewed(review, &|_| {}, &|_| {})
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("changed"));
+    assert_eq!(before, runtime.campaign_count());
+    let review = service
+        .coverage_experiment_replay_review(experiment.id, scope.clone())
+        .await
+        .unwrap();
+    assert_eq!(review.experiment_id, Some(experiment.id));
+    assert_eq!(review.seed, evidence.seed.unwrap().to_string());
+    let denied = service
+        .clone()
+        .with_guardrails(hf_guardrails::Guardrails::new(
+            hf_guardrails::GuardrailPolicy::default(),
+            Arc::new(hf_guardrails::DenyAll),
+        ));
+    assert!(denied
+        .replay_run_reviewed(review.clone(), &|_| {}, &|_| {})
+        .await
+        .is_err());
+    assert_eq!(runtime.campaign_count(), before);
+    assert!(store
+        .coverage_experiment_execution(experiment.id)
+        .await
+        .unwrap()
+        .is_none());
+    let result = service
+        .replay_run_reviewed(review.clone(), &|_| {}, &|_| {})
+        .await
+        .unwrap();
+    let retained = service
+        .coverage_experiment(experiment.id, scope)
+        .await
+        .unwrap();
+    assert_eq!(retained.status, CoverageExperimentStatus::Completed);
+    assert_eq!(retained.result.unwrap().run.run_id, result.run_id);
+    assert_eq!(retained.execution.unwrap().run_id, result.run_id);
+    assert!(service
+        .replay_run_reviewed(review, &|_| {}, &|_| {})
+        .await
+        .is_err());
+    assert_eq!(before + 1, runtime.campaign_count());
 }

@@ -1,3 +1,4 @@
+import { extraTranslationDictionariesJson } from "./translationDictionaryScan";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { HELP_SECTIONS } from "../views/help/helpContent";
@@ -102,7 +103,7 @@ describe("in-app documentation", () => {
     const helpView = source("../views/HelpView.tsx");
     const aboutTab = source("../components/settings/AboutTab.tsx");
     const projectLinks = source("../lib/projectLinks.ts");
-    const messages = source("../i18n.extra.ts");
+    const messages = extraTranslationDictionariesJson;
 
     // The public repository is the only repository an external user can reach.
     // Pin the host positively rather than denying a specific one: this fails for

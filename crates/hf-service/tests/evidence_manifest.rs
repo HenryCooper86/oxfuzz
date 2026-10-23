@@ -238,6 +238,7 @@ async fn service_assembles_a_manifest_from_durable_run_and_approval_evidence() {
             binary_sha256: Some(binary_sha256.clone()),
             run_id: Some(Uuid::new_v4()),
         }),
+        custom_mutator: None,
         cmplog: None,
     };
     store.upsert_harness(&harness).await.unwrap();
@@ -290,6 +291,7 @@ async fn service_assembles_a_manifest_from_durable_run_and_approval_evidence() {
     let crash_input = directory.path().join("crash-input");
     std::fs::write(&crash_input, b"crash").unwrap();
     let mut crash = Crash {
+        reproduction: None,
         id: Uuid::from_u128(12),
         run_id: run.id,
         target_id,
@@ -346,6 +348,7 @@ async fn service_assembles_a_manifest_from_durable_run_and_approval_evidence() {
     store.upsert_crash(&crash).await.unwrap();
 
     let harness_crash = Crash {
+        reproduction: None,
         id: Uuid::from_u128(13),
         run_id: run.id,
         target_id,

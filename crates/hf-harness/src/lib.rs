@@ -22,3 +22,6 @@ pub use generator::{
     try_compile_with_options, CompileFailure, CompileResult, AFL_LLVM_CMPLOG_ENV,
     MAX_DISTINCT_DIAGNOSTIC_LINES, MAX_REPAIR_DIAGNOSTICS_CHARS,
 };
+
+/// Native mutator source composition and sandbox build helpers.
+pub mod managed_mutator;

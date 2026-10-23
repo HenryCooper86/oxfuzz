@@ -51,6 +51,7 @@ impl hf_core::provider::ProviderPool for VerdictPool {
 
 fn asan_crash() -> Crash {
     Crash {
+        reproduction: None,
         id: Uuid::nil(),
         run_id: Uuid::nil(),
         target_id: Uuid::nil(),

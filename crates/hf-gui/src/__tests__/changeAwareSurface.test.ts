@@ -1,3 +1,4 @@
+import { extraTranslationDictionariesJson } from "./translationDictionaryScan";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
@@ -71,7 +72,7 @@ describe("service-owned change-aware surface", () => {
   });
 
   it("keeps English and Chinese change-aware labels paired", () => {
-    const translations = source("../i18n.extra.ts");
+    const translations = extraTranslationDictionariesJson;
     expect(translations).toContain('"changeAware.title": "Change Review"');
     expect(translations).toContain('"changeAware.title": "变更审查"');
     expect(translations).toContain('"changeAware.impact.changed": "Changed"');

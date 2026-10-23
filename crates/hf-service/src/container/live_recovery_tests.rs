@@ -581,6 +581,7 @@ async fn seed_terminal_closeout_run(store: &Store, project: &Path) -> Uuid {
         sanitizer: Sanitizer::Address,
         status: HarnessStatus::SmokePassed,
         smoke_run: None,
+        custom_mutator: None,
         cmplog: None,
     };
     store.upsert_harness(&harness).await.unwrap();

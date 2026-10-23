@@ -155,6 +155,7 @@ async fn harness_refine_recompiles_from_existing_harness() {
             sanitizer: hf_core::target::Sanitizer::Address,
             status: hf_core::harness::HarnessStatus::Compiled,
             smoke_run: None,
+            custom_mutator: None,
             cmplog: None,
         })
         .await

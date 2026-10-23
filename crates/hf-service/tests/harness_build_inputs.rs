@@ -1257,13 +1257,13 @@ async fn campaign_pending_seed_preserves_corpus(provider_fails: bool) {
 #[cfg(feature = "build-doctor")]
 #[tokio::test]
 async fn campaign_pending_seed_success_rechecks_inputs_before_publication() {
-    campaign_pending_seed_preserves_corpus(false).await;
+    Box::pin(campaign_pending_seed_preserves_corpus(false)).await;
 }
 
 #[cfg(feature = "build-doctor")]
 #[tokio::test]
 async fn campaign_pending_seed_failure_rechecks_inputs_before_heuristic_publication() {
-    campaign_pending_seed_preserves_corpus(true).await;
+    Box::pin(campaign_pending_seed_preserves_corpus(true)).await;
 }
 
 #[cfg(feature = "build-doctor")]

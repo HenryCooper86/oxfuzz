@@ -726,6 +726,13 @@ impl Store {
     /// # Errors
     /// Returns an error on a SQL failure or if the config cannot be serialized.
     pub async fn insert_run(&self, run: &RunRecord) -> Result<(), StorageError> {
+        Self::insert_run_on(&mut *self.pool.acquire().await?, run).await
+    }
+
+    pub(crate) async fn insert_run_on(
+        connection: &mut sqlx::SqliteConnection,
+        run: &RunRecord,
+    ) -> Result<(), StorageError> {
         let config_json = match &run.config {
             Some(c) => Some(serde_json::to_string(c)?),
             None => None,
@@ -752,7 +759,7 @@ impl Store {
         .bind(run.source_rev.as_deref())
         .bind(run.corpus_rev.as_deref())
         .bind(run.sandbox_rev.as_deref())
-        .execute(&self.pool)
+        .execute(connection)
         .await?;
         Ok(())
     }

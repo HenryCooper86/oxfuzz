@@ -1,4 +1,8 @@
 export const enExperiments: Record<string, string> = {
+  "experiments.guided": "Review the modified inputs and approve a budgeted rerun. Its terminal result is associated and compared automatically; failed and unchanged attempts remain in history.",
+  "experiments.execution": "Associated campaign",
+  "experiments.cancelExecution": "Cancel campaign execution",
+  "experiments.cancellationSeparate": "Cancelling the experiment record does not stop its campaign. Use Cancel campaign execution to stop the active run.",
   "experiments.title": "Coverage experiments",
   "experiments.manual": "Prepare an investigation from retained campaign evidence. Preparation grants no execution permission.",
   "experiments.target": "Retained target ID",
@@ -90,6 +94,10 @@ export const enExperiments: Record<string, string> = {
   "experiments.role.result": "result"
 };
 export const zhExperiments: Record<string, string> = {
+  "experiments.guided": "审阅修改后的输入并批准限时重跑。运行结束后自动关联和比较结果；失败或无变化的尝试仍保留在历史中。",
+  "experiments.execution": "关联的模糊测试运行",
+  "experiments.cancelExecution": "取消运行执行",
+  "experiments.cancellationSeparate": "取消实验记录不会停止运行。请使用“取消运行执行”停止正在执行的任务。",
   "experiments.title": "覆盖率实验",
   "experiments.manual": "基于保留的活动证据准备调查。准备记录不授予执行权限。",
   "experiments.target": "已保留的目标 ID",

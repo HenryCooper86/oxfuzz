@@ -30,6 +30,12 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand)]
 pub(crate) enum Commands {
+    /// Import native custom-mutator source or inspect its retained qualification.
+    #[cfg(feature = "managed-mutators")]
+    Mutator(MutatorArgs),
+    /// Inspect durable spending for the configured model-budget workflow.
+    #[cfg(feature = "model-budgets")]
+    ModelBudget,
     /// Initialize configuration.
     Init,
     /// Check whether the mandatory sandbox and at least one fuzzing engine are ready.
@@ -280,10 +286,10 @@ pub(crate) struct RunArgs {
     pub(crate) project: PathBuf,
     /// Target symbol. Required unless `--replay` is given (the recorded
     /// run carries its target).
-    #[arg(long, required_unless_present = "replay")]
+    #[arg(long, required_unless_present_any = ["replay", "experiment"])]
     pub(crate) target: Option<String>,
     /// Fuzzing engine. Required unless `--replay` is given.
-    #[arg(long, required_unless_present = "replay")]
+    #[arg(long, required_unless_present_any = ["replay", "experiment"])]
     pub(crate) engine: Option<String>,
     /// Target language (c, cpp, rust, go, python). Defaults to c.
     #[arg(long, default_value = "c")]
@@ -333,6 +339,9 @@ pub(crate) struct RunArgs {
     /// deterministic seed.
     #[arg(long)]
     pub(crate) replay: Option<String>,
+    /// Review and launch the current inputs for a prepared coverage experiment.
+    #[arg(long, conflicts_with_all = ["replay", "target", "engine", "duration", "cpus", "timeout_ms", "resume", "sanitizer", "cmplog", "seed"])]
+    pub(crate) experiment: Option<uuid::Uuid>,
 }
 
 /// List, inspect, and stop fuzz runs.
@@ -483,6 +492,12 @@ pub(crate) struct FuzzArgs {
     /// auto-picked.
     #[arg(long)]
     pub(crate) target: Option<String>,
+    /// Frozen UTF-8 harness source; compile exactly these bytes without drafting or repair.
+    #[arg(long, requires_all = ["target", "harness_sha256"])]
+    pub(crate) harness_source: Option<PathBuf>,
+    /// Expected lowercase SHA-256 of the frozen source bytes.
+    #[arg(long, requires_all = ["target", "harness_source"])]
+    pub(crate) harness_sha256: Option<String>,
     /// Fuzzing engine.
     #[arg(long, default_value = "libfuzzer")]
     pub(crate) engine: String,
@@ -1648,9 +1663,58 @@ mod fuzz_cli_tests {
     use super::{AiOption, Cli, Commands};
 
     #[test]
+    fn fuzz_prepared_source_requires_hash_and_target() {
+        let hash = "a".repeat(64);
+        assert!(Cli::try_parse_from([
+            "oxfuzz",
+            "fuzz",
+            "/p",
+            "--target",
+            "parse",
+            "--harness-source",
+            "/frozen.c",
+            "--harness-sha256",
+            &hash
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "oxfuzz",
+            "fuzz",
+            "/p",
+            "--harness-source",
+            "/frozen.c",
+            "--harness-sha256",
+            &hash
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "oxfuzz",
+            "fuzz",
+            "/p",
+            "--target",
+            "parse",
+            "--harness-source",
+            "/frozen.c"
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "oxfuzz",
+            "fuzz",
+            "/p",
+            "--target",
+            "parse",
+            "--harness-sha256",
+            &hash
+        ])
+        .is_err());
+    }
+
+    #[test]
     fn fuzz_parses_with_only_a_project_and_sensible_defaults() {
         let parsed = Cli::try_parse_from(["oxfuzz", "fuzz", "/p"]).unwrap();
         let Commands::Fuzz(crate::args::FuzzArgs {
+            harness_source: _,
+            harness_sha256: _,
             project,
             target,
             engine,
@@ -2145,6 +2209,30 @@ mod seed_cli_tests {
     }
 
     #[test]
+    fn guided_experiment_uses_recorded_target_and_settings() {
+        assert!(Cli::try_parse_from([
+            "oxfuzz",
+            "run",
+            "/p",
+            "--experiment",
+            "30000000-0000-4000-8000-000000000001"
+        ])
+        .is_ok());
+        for flag in ["--seed", "--duration", "--cpus", "--engine", "--target"] {
+            assert!(Cli::try_parse_from([
+                "oxfuzz",
+                "run",
+                "/p",
+                "--experiment",
+                "30000000-0000-4000-8000-000000000001",
+                flag,
+                "7"
+            ])
+            .is_err());
+        }
+    }
+
+    #[test]
     fn replay_conflicts_with_an_explicit_seed() {
         // Replay re-executes the recorded run configuration, deterministic
         // seed included; a CLI seed cannot combine with it.
@@ -2391,4 +2479,76 @@ mod clang_disabled_cli_tests {
             clap::error::ErrorKind::UnknownArgument
         );
     }
+}
+
+#[cfg(all(test, feature = "model-budgets"))]
+mod model_budget_cli_tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn model_budget_status_command_uses_selected_configuration() {
+        let cli = Cli::try_parse_from(["oxfuzz", "--config", "/tmp/trial-config", "model-budget"])
+            .unwrap();
+        assert_eq!(
+            cli.config,
+            Some(std::path::PathBuf::from("/tmp/trial-config"))
+        );
+        assert!(matches!(cli.command, Commands::ModelBudget));
+    }
+}
+
+#[cfg(all(test, feature = "managed-mutators"))]
+mod mutator_cli_tests {
+    use super::*;
+    #[test]
+    fn native_mutator_import_requires_an_explicit_source_file() {
+        assert!(Cli::try_parse_from([
+            "oxfuzz", "mutator", "/project", "--target", "parse", "attach"
+        ])
+        .is_err());
+        assert!(matches!(
+            Cli::try_parse_from([
+                "oxfuzz",
+                "mutator",
+                "/project",
+                "--target",
+                "parse",
+                "attach",
+                "--source",
+                "mutator.c"
+            ])
+            .unwrap()
+            .command,
+            Commands::Mutator(_)
+        ));
+    }
+}
+
+#[cfg(feature = "managed-mutators")]
+#[derive(clap::Args)]
+pub(crate) struct MutatorArgs {
+    pub(crate) project: PathBuf,
+    #[arg(long)]
+    pub(crate) target: String,
+    #[arg(long, default_value = "afl++")]
+    pub(crate) engine: String,
+    #[command(subcommand)]
+    pub(crate) command: MutatorCommand,
+}
+
+#[cfg(feature = "managed-mutators")]
+#[derive(Subcommand)]
+pub(crate) enum MutatorCommand {
+    /// Compile a new unpromoted harness revision containing this native source.
+    Attach {
+        #[arg(long)]
+        source: PathBuf,
+    },
+    /// Run the existing independent review and bounded sandbox smoke qualification.
+    Qualify,
+    /// Approve the exact qualified revision through the existing human gate.
+    Promote,
+    /// Read source, artifact, image and bounded smoke evidence.
+    Status,
 }

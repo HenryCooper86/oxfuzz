@@ -51,9 +51,31 @@ provider family is `none`); `selection_strategy` and `top_k` record how the
 cohort's `selected_functions` were chosen (for `ranked`, from
 `oxfuzz discover --rank`) and do not change a trial run, because every trial
 passes its function explicitly with `--target`. `model_call_budget` and
-`model_cost_budget_usd` are enforced post-hoc: the runner flags exceeded
-budgets per trial and the report reader rejects an over-budget manifest. The
-CLI has no runtime model-budget cutoff.
+`model_cost_budget_usd` are installed as durable `[model_budget]` limits before
+each provider-backed trial. Each isolated trial has a stable scope identifier;
+retries and restarts retain its accounting. The runner also checks observed
+cost afterward. Dollar limits require configured upper-bound provider prices.
+
+### Prepared-harness trials
+
+Schema 2 cohorts add a required `prepared_harness` object to each trial:
+`path` (relative to the cohort file), `sha256` (exact reviewed source),
+`source_sha256` (that trial's staged source identity), and `origin`
+(`generated`, `upstream`, or `reference`). The per-trial staged digest overrides
+the project's schema-1 digest for evidence comparison, permitting different
+harnesses for one pinned project. Schema 1 remains readable for existing records.
+
+The runner validates each bounded regular source file and copies it into trial
+evidence before dispatch. `fuzz --harness-source --harness-sha256` compiles that
+source without drafting, repair, or promoted-harness substitution. Normal model
+review, human approval, smoke and campaign admission remain mandatory.
+Schema-2 live execution requires `--approve-prepared-harnesses` after the operator
+reviews the exact sources and bounded matrix; `--dry-run` never grants execution.
+Preparation costs and failed preparations are reported separately from fixed
+harness execution costs. Human approval covers the concrete source files and
+bounded runs; freezing a cohort grants no execution authority.
+
+The operator handoff is [Manual Qualification](../guides/MANUAL_QUALIFICATION.md).
 
 ## 2. The held-out target manifest
 

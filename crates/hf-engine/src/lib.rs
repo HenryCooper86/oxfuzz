@@ -13,6 +13,7 @@ pub mod dict;
 pub mod go_native;
 pub mod honggfuzz;
 pub mod libfuzzer;
+pub mod managed_mutator;
 pub mod progress;
 pub mod registry;
 pub mod runner;

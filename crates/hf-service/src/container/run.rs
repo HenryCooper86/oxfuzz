@@ -1,4 +1,5 @@
 //! Campaign execution, replay, and cooperative cancellation.
+mod experiments;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -57,6 +58,12 @@ pub enum ReplayInputs {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReplayReview {
+    /// Experiment owning this reviewed execution, if any.
+    #[serde(default)]
+    pub experiment_id: Option<Uuid>,
+    /// Exact current workspace and corpus reviewed for an experiment.
+    #[serde(default)]
+    pub current_input_sha256: Option<String>,
     /// Original retained run.
     pub run_id: Uuid,
     /// Canonical owning project.
@@ -160,6 +167,7 @@ where
 }
 
 struct PreparedUserspaceRun {
+    guided_owner: Option<std::fs::File>,
     config: FuzzRunConfig,
     record: RunRecord,
     artifacts: RunArtifacts,
@@ -285,6 +293,35 @@ fn userspace_harness_binary(workspace: &Path, target: &str) -> Result<PathBuf, C
         )));
     }
     Ok(binary)
+}
+
+fn verify_current_run_harness(
+    target: &str,
+    resolved: &crate::config::ResolvedFuzzingRun,
+    qualified: &Harness,
+) -> Result<(), ClassifiedError> {
+    super::fuzz::verify_prepared_harness(qualified)?;
+    crate::campaign_allocation::verify_granted_harness(qualified, resolved.duration_secs)?;
+    // The sanitizer is baked into the harness binary at build time, so the
+    // run records the harness's own sanitizer -- never the configured
+    // default. An explicit per-run request (`--sanitizer`) is a constraint
+    // on which harness may run: a mismatch means the binary in the
+    // workspace is not the build the operator asked for.
+    if let Some(requested) = resolved.sanitizer {
+        if requested != qualified.sanitizer {
+            return Err(ClassifiedError::Validation(format!(
+                "the promoted harness for '{target}' was built with sanitizer '{}' but this \
+                 run requested '{}'; rebuild and re-promote it with `oxfuzz harness --target \
+                 {target} --engine {} --sanitizer {}`, or drop --sanitizer to run the \
+                 existing harness",
+                qualified.sanitizer.as_str(),
+                requested.as_str(),
+                resolved.engine.as_str(),
+                requested.as_str(),
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Resolve the AFL++ `CmpLog` companion for a run that opted in, failing loud
@@ -742,6 +779,11 @@ impl ServiceContainer {
         // name it.
         let started_run = std::sync::Arc::new(std::sync::Mutex::new(None));
         let captured = std::sync::Arc::clone(&started_run);
+        #[cfg(feature = "coverage-experiments")]
+        let experiment_id = replay
+            .as_ref()
+            .and_then(|value| value.experiment_review.as_ref())
+            .and_then(|review| review.experiment_id);
         let replay_note = replay.clone();
         let tracked_started = move |run_id: Uuid| {
             if let Ok(mut slot) = captured.lock() {
@@ -804,6 +846,12 @@ impl ServiceContainer {
                 }
             }
         }
+        #[cfg(feature = "coverage-experiments")]
+        if let Some(id) = experiment_id {
+            if let Err(error) = self.reconcile_coverage_experiment(id).await {
+                tracing::error!(%id, code = error.code(), "experiment terminal comparison needs reconciliation");
+            }
+        }
         result
     }
 
@@ -817,27 +865,8 @@ impl ServiceContainer {
         corpus_dir: PathBuf,
         replay: Option<ReplayProvenance>,
     ) -> Result<PreparedUserspaceRun, ClassifiedError> {
-        crate::campaign_allocation::verify_granted_harness(qualified, resolved.duration_secs)?;
+        verify_current_run_harness(target, &resolved, qualified)?;
         let engine = resolved.engine;
-        // The sanitizer is baked into the harness binary at build time, so the
-        // run records the harness's own sanitizer -- never the configured
-        // default. An explicit per-run request (`--sanitizer`) is a constraint
-        // on which harness may run: a mismatch means the binary in the
-        // workspace is not the build the operator asked for.
-        if let Some(requested) = resolved.sanitizer {
-            if requested != qualified.sanitizer {
-                return Err(ClassifiedError::Validation(format!(
-                    "the promoted harness for '{target}' was built with sanitizer '{}' but this \
-                     run requested '{}'; rebuild and re-promote it with `oxfuzz harness --target \
-                     {target} --engine {} --sanitizer {}`, or drop --sanitizer to run the \
-                     existing harness",
-                    qualified.sanitizer.as_str(),
-                    requested.as_str(),
-                    engine.as_str(),
-                    requested.as_str(),
-                )));
-            }
-        }
         // CmpLog is a build-and-run pair: the run opts in, and the promoted
         // harness revision must carry the recorded companion build. Checked
         // before any staging so an opted-in run without one fails fast.
@@ -852,7 +881,10 @@ impl ServiceContainer {
         let historical = replay
             .as_ref()
             .is_some_and(|value| value.inputs == ReplayInputs::Retained);
-        let extra_args = if historical {
+        let guided = replay
+            .as_ref()
+            .is_some_and(|value| value.experiment_review.is_some());
+        let extra_args = if historical || guided {
             Vec::new()
         } else {
             self.build_run_dictionary_args(project, target, workspace, engine)
@@ -886,14 +918,7 @@ impl ServiceContainer {
             None,
             Utc::now(),
         );
-        if let Some(provenance) = &replay {
-            config.seed = Some(provenance.seed);
-            config.replay_of = Some(provenance.original_run_id);
-        } else {
-            config
-                .seed
-                .get_or_insert_with(|| hf_engine::seed::derive_run_seed(record.id));
-        }
+        experiments::assign_replay_settings(store, record.id, replay.as_ref(), &mut config).await?;
         let (artifacts, sandbox_image) = if let Some(provenance) = replay
             .as_ref()
             .filter(|value| value.inputs == ReplayInputs::Retained)
@@ -951,6 +976,16 @@ impl ServiceContainer {
             }
             (artifacts, image)
         };
+        super::managed_mutator::stage(
+            qualified,
+            &artifacts,
+            &mut config,
+            sandbox_image.reference(),
+            historical,
+            false,
+        )?;
+        #[cfg(feature = "coverage-experiments")]
+        experiments::verify_inputs(replay.as_ref(), &artifacts, &sandbox_image, &config)?;
         let context = match captured_run_context_digests(
             &artifacts.source_context_host,
             &artifacts.initial_corpus_host,
@@ -1070,7 +1105,9 @@ impl ServiceContainer {
         record.binary_rev = Some(artifacts.binary_sha256.clone());
         record.evidence_dir = Some(workspace_relative_record(&artifacts.output_relative));
         let run_id = record.id;
-        if let Err(error) = store.insert_run(&record).await {
+        let guided_owner = experiments::acquire_owner(store, run_id, replay.as_ref())?;
+        let reservation = experiments::reserve_run(store, &record, replay.as_ref()).await;
+        if let Err(error) = reservation {
             if let Some(run_root) = artifacts.output_host.parent() {
                 let _ignored_cleanup_error = std::fs::remove_dir_all(run_root);
             }
@@ -1132,6 +1169,7 @@ impl ServiceContainer {
             return Err(ClassifiedError::Storage(error.to_string()));
         }
         Ok(PreparedUserspaceRun {
+            guided_owner,
             config,
             record,
             artifacts,
@@ -1190,6 +1228,7 @@ impl ServiceContainer {
             ClassifiedError::Validation("fuzz runs require the persistent service store".to_owned())
         })?;
         let PreparedUserspaceRun {
+            guided_owner: _guided_owner,
             config: run_cfg,
             record: run_record,
             artifacts,
@@ -2223,6 +2262,37 @@ impl ServiceContainer {
 
     async fn reviewed_replay(&self, review: ReplayReview) -> Result<RunLaunch, ClassifiedError> {
         let (current, launch) = self.resolve_replay(review.run_id, review.inputs).await?;
+        #[cfg(feature = "coverage-experiments")]
+        let (mut current, mut launch) = (current, launch);
+        if let Some(id) = review.experiment_id {
+            #[cfg(feature = "coverage-experiments")]
+            {
+                let owner = self
+                    .coverage_experiment_owner(id)
+                    .await
+                    .map_err(|error| ClassifiedError::Validation(error.code().into()))?;
+                current = self
+                    .coverage_experiment_replay_review(
+                        id,
+                        crate::coverage_experiments::CoverageExperimentScope {
+                            project: current.project.clone(),
+                            target_id: owner.target_id,
+                        },
+                    )
+                    .await?;
+                experiments::configure_launch(self, review.run_id, &mut launch).await?;
+                if let Some(provenance) = &mut launch.replay {
+                    provenance.experiment_review = Some(review.clone());
+                }
+            }
+            #[cfg(not(feature = "coverage-experiments"))]
+            {
+                let _ = id;
+                return Err(ClassifiedError::Validation(
+                    crate::coverage_experiments::COVERAGE_EXPERIMENT_UNAVAILABLE.into(),
+                ));
+            }
+        }
         if current != review {
             return Err(ClassifiedError::Validation(
                 "Replay settings changed. Review the replay again before starting.".to_owned(),
@@ -2347,6 +2417,8 @@ impl ServiceContainer {
             ClassifiedError::Validation("immutable replay requires a recorded seed".to_owned())
         })?;
         let review = ReplayReview {
+            experiment_id: None,
+            current_input_sha256: None,
             run_id,
             project: project.clone(),
             target: target.clone(),
@@ -2365,6 +2437,7 @@ impl ServiceContainer {
                 target,
                 resolved,
                 replay: Some(ReplayProvenance {
+                    experiment_review: None,
                     original_run_id: run_id,
                     seed,
                     input_manifest_sha256,
@@ -3291,6 +3364,7 @@ mod cmplog_companion_tests {
             status: HarnessStatus::Promoted,
             smoke_run: None,
             cmplog,
+            custom_mutator: None,
         }
     }
 
@@ -3367,6 +3441,7 @@ mod allocation_preparation_tests {
             sanitizer: hf_core::target::Sanitizer::Address,
             status: HarnessStatus::Promoted,
             smoke_run: None,
+            custom_mutator: None,
             cmplog: None,
             build_cmd: hf_core::harness::BuildCommand {
                 compiler: "clang".into(),
@@ -3438,6 +3513,7 @@ mod allocation_preparation_tests {
             sanitizer: hf_core::target::Sanitizer::Address,
             status: HarnessStatus::Promoted,
             smoke_run: None,
+            custom_mutator: None,
             cmplog: None,
             build_cmd: hf_core::harness::BuildCommand {
                 compiler: "clang".into(),

@@ -204,6 +204,7 @@ async fn harness_generate_conditions_the_draft_on_promoted_harnesses() {
         sanitizer: hf_core::target::Sanitizer::Address,
         status: HarnessStatus::Promoted,
         smoke_run: None,
+        custom_mutator: None,
         cmplog: None,
     };
     let not_promoted = Harness {
@@ -221,6 +222,7 @@ async fn harness_generate_conditions_the_draft_on_promoted_harnesses() {
         sanitizer: hf_core::target::Sanitizer::Address,
         status: HarnessStatus::Draft,
         smoke_run: None,
+        custom_mutator: None,
         cmplog: None,
     };
     store.upsert_harness(&promoted).await.unwrap();

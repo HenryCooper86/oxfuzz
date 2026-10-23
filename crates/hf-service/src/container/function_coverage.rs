@@ -547,6 +547,7 @@ mod staging_tests {
             sanitizer: Sanitizer::Address,
             status: HarnessStatus::Promoted,
             smoke_run: None,
+            custom_mutator: None,
             cmplog: None,
         };
         configure(&mut run_config, &harness, false);

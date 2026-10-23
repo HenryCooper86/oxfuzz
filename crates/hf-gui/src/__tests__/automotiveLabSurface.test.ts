@@ -1,3 +1,4 @@
+import { extraTranslationDictionariesJson } from "./translationDictionaryScan";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
@@ -88,7 +89,7 @@ describe("service-owned stateful automotive lab surface", () => {
   });
 
   it("keeps English and Chinese lab labels paired", () => {
-    const translations = source("../i18n.extra.ts");
+    const translations = extraTranslationDictionariesJson;
     expect(translations).toContain('"automotiveLab.title": "Stateful Lab"');
     expect(translations).toContain('"automotiveLab.title": "状态实验室"');
     expect(translations).toContain(

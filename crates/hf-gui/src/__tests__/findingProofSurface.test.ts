@@ -1,3 +1,4 @@
+import { extraTranslationDictionariesJson } from "./translationDictionaryScan";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
@@ -30,7 +31,7 @@ describe("service-owned finding proof card", () => {
   });
 
   it("keeps English and Chinese proof labels paired", () => {
-    const translations = source("../i18n.extra.ts");
+    const translations = extraTranslationDictionariesJson;
     expect(translations).toContain('"findingProof.title": "Finding Proof"');
     expect(translations).toContain('"findingProof.title": "发现证据"');
   });

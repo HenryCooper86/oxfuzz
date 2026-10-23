@@ -98,6 +98,12 @@ class GateDispatcherTests(unittest.TestCase):
             recorded = log.read_text().splitlines() if log.exists() else []
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(recorded, [
+            "test -p hf-harness --no-default-features --test managed_mutator_feature_off",
+            "test -p hf-engine --no-default-features --test managed_mutators feature_disabled_dispatch_rejects_native_plugin_requests",
+            "test -p hf-service --no-default-features --features managed-mutators --test managed_mutators",
+            "test -p hf-service --no-default-features --features model-budgets --test model_budgets",
+            "test -p hf-service --no-default-features --lib model_budget::tests",
+            "test -p hf-service --no-default-features --features harness-behavior --test harness_qualification stable_sequence_is_measured_and_promotable",
             "test -p hf-web --no-default-features --test build_doctor_disabled_api",
             "test -p hf-web --no-default-features --test coverage_experiments_api",
             "test -p hf-service --no-default-features --test coverage_experiments",
@@ -212,6 +218,9 @@ class GateDispatcherTests(unittest.TestCase):
             recorded = log.read_text(encoding="utf-8").splitlines()
         self.assertEqual(result.returncode, 0, result.stderr)
         features = [
+            "managed-mutators",
+            "model-budgets",
+            "harness-behavior",
             "clang-analysis",
             "ai-target-ranking",
             "campaign-allocation",

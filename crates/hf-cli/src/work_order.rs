@@ -590,6 +590,7 @@ mod tests {
                         sanitizer,
                         cmplog,
                         seed: _,
+                        experiment: _,
                         replay,
                     }),
                 ) => {

@@ -12,6 +12,7 @@ import { DiffView } from "../components/DiffView";
 import { buildRunComparisons } from "../lib/runComparison";
 import { RunComparison } from "../components/RunComparison";
 import { RunEvidenceSummary } from "../components/RunEvidenceSummary";
+import { RetainedHarnessBehavior } from "../components/RetainedHarnessBehavior";
 import { RunFunctionCoverage } from "../components/RunFunctionCoverage";
 import { ReplayRun } from "../components/ReplayRun";
 import { RunCloseoutPanel } from "../components/RunCloseoutPanel";
@@ -482,6 +483,7 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus, onReviewFindings 
                     )}
                     <div className="mt-4 border-t border-border pt-3">
                       {r.kind.toLowerCase() === "campaign" && r.ended_at && <><ReplayRun runId={r.id} onNavigate={onNavigate} /><RunFunctionCoverage runId={r.id} /></>}
+                      {r.kind.toLowerCase() === "smoke" && r.ended_at && <RetainedHarnessBehavior runId={r.id} project={r.project_root} target={r.target_selector ?? r.target ?? ""} />}
                       <RunCloseoutPanel runId={r.id} runKind={r.kind} runStatus={r.status} />
                     </div>
                   </div>

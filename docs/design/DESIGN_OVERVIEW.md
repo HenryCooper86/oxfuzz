@@ -27,12 +27,15 @@ all under human-in-the-loop supervision.
 | Concept | Owner Crate | Contract | Design Doc |
 | --- | --- | --- | --- |
 | LLM provider pool | hf-provider | `LlmProvider`, `ProviderPool` | [provider-response-resources.md](provider-response-resources.md); other pool behavior documented in crate docs |
+| Workflow model budgets | hf-service + hf-storage | per-attempt durable reservations, immutable scope limits, typed denial | [model-budgets-design.md](model-budgets-design.md) |
 | Target discovery | hf-discovery | `TargetCandidate`, `TargetInventory` | target-discovery-design.md |
 | Optional Clang harness analysis | hf-service + hf-discovery + hf-harness | semantic graph, opt-in LLVM CFG/path observations and persisted evidence-linked plans | [clang-harness-analysis-design.md](clang-harness-analysis-design.md), [symbolic evidence](clang-symbolic-harness-design.md) |
 | AI target recommendations | hf-discovery + hf-prompt + hf-service + hf-storage | `TargetAssessment`, durable `RankedDiscoveryStatus` and `RankedDiscoveryResult` | ai-target-ranking-gui-design.md + target-discovery-design.md |
 | Semgrep target enrichment | hf-discovery + hf-service | `SemgrepFinding`, `SemgrepTargetScore`, `SemgrepInventoryView` | target-discovery-design.md + service-orchestration-design.md |
 | Project build context | hf-service + hf-discovery + hf-core | optional legacy context; authoritative configured input resolution, `BuildContext`, `CompileEntry` | harness-generation-design.md |
 | Harness generation | hf-harness | `Harness`, `HarnessDraft` | harness-generation-design.md |
+| Managed native mutators | hf-service + hf-harness + hf-engine | versioned native source, sandbox artifact/image identity, bounded qualification, retained replay, Harness GUI | managed-mutators-design.md |
+| Behavioral harness qualification | hf-service + hf-storage | bounded fresh-input and AFL persistent sequence observations, immutable run evidence, promotion denial for instability | harness-generation-design.md |
 | Engine integration | hf-engine | `EngineAdapter`, `FuzzRunConfig`, `FuzzProgress` | engine-integration-design.md |
 | Planned Go native fuzzing | hf-service + hf-harness + hf-engine + hf-runtime | generated Go fuzz test, offline module inputs, separate engine evidence | go-native-fuzzing-design.md |
 | Planned Python Atheris fuzzing | hf-service + hf-harness + hf-engine + hf-runtime | generated Atheris script, offline wheels, separate engine evidence | python-atheris-fuzzing-design.md |
@@ -56,7 +59,7 @@ all under human-in-the-loop supervision.
 | Build diagnosis and optional profiles | hf-service + hf-storage | `ProjectBuildDiagnosis`, `SaveBuildProfileRequest`, reviewed CMake/Make plan and retained output | build-doctor-design.md |
 | Harness build inputs | hf-service + hf-storage | immutable per-attempt input capture, atomic harness/input persistence, shared executor checks | harness-generation-design.md + ../standards/DATABASE_SCHEMA.md |
 | Coverage blockers | hf-service | ranked uncovered blockers, advisory next experiment | coverage-blocker-design.md |
-| Coverage experiments | hf-service + hf-storage | immutable reviewed proposal, bounded evidence, manual result attachment, CAS lifecycle, retained run references | [coverage-experiments-design.md](coverage-experiments-design.md) |
+| Coverage experiments | hf-service + hf-storage | immutable reviewed proposal, bounded evidence, reviewed budgeted replay, automatic comparison, CAS lifecycle, retained run references | [coverage-experiments-design.md](coverage-experiments-design.md) |
 | Non-crash oracles | hf-service | typed oracle specification, scaffold, violation | oracle-studio-design.md |
 | Crash disposition | hf-service | ordered disposition, next action, claim ceiling | triage-disposition-design.md |
 | Campaign trust | hf-service | per-run claim gates and overall determination | campaign-trust-report-design.md |
@@ -137,17 +140,19 @@ contexts;
 evidence, while explicit project deletion clears all build record families.
 
 The implemented `coverage-experiments` feature records a reviewed investigation against a retained
-terminal campaign, then accepts one explicitly selected later terminal campaign
-or an explicit cancellation. Create/read/list/attach/cancel execute no discovery,
-provider, runtime, coverage calculation, or promotion. Setup comparison uses
-retained run settings/content identities plus immutable Phase 6 build inputs;
-legacy absence stays unavailable. No-op, failed, cancelled, and missing-edge
-attempts remain visible; aggregate edges never prove goal-function entry. The
-feature is standalone in service and forwarded by CLI/web/Tauri; storage
-migration 0033 and run retention are unconditional. REST uses configured roots
-and ID-owner authorization; trusted-local Tauri validates selected project/target
-scope against persisted owners. Explicit project/knowledge cleanup removes
-experiments before referenced runs. See
+terminal campaign. Existing corpus/harness modification and human promotion lead
+into a reviewed current-input replay with the baseline seed and budget. The
+executor rechecks exact inputs and reserves one associated run atomically before
+sandbox dispatch. Terminal results are compared automatically; scoped reads
+reconcile interrupted completion. Record cancellation does not cancel execution,
+and both controls are explicit in the GUI. Manual attachment remains available
+for unassociated historical proposals. Failed, cancelled, unchanged and
+incomparable outcomes remain inspectable. Aggregate edges never prove function
+entry. The feature is standalone and forwarded by CLI/web/Tauri; storage
+migrations 0033 and 0042 and run retention are unconditional. REST uses configured
+roots and ID-owner authorization; native IPC validates selected project/target
+scope. Explicit project/knowledge cleanup removes experiments before referenced
+runs. See
 [Coverage Experiments](coverage-experiments-design.md).
 
 Automotive protocol support follows the same split. Product crates enable the

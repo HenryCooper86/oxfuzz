@@ -1,3 +1,4 @@
+import { extraTranslationDictionariesJson } from "./translationDictionaryScan";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
@@ -87,7 +88,7 @@ describe("report draft titles follow the interface language", () => {
   });
 
   it("translates every draft-title key in both dictionaries", () => {
-    const extra = source("../i18n.extra.ts");
+    const extra = extraTranslationDictionariesJson;
     for (const key of [
       "reports.targetDraftTitle",
       "reports.triageDraftTitle",
@@ -183,7 +184,7 @@ describe("the automotive report follows the interface language", () => {
   });
 
   it("translates the document title in both dictionaries", () => {
-    const extra = source("../i18n.extra.ts");
+    const extra = extraTranslationDictionariesJson;
     // Once in the English block, once in the Chinese one -- a key present only
     // in the English block renders as the raw key string to a Chinese reader.
     expect(extra.match(/"automotive\.report\.documentTitle":/g)).toHaveLength(2);

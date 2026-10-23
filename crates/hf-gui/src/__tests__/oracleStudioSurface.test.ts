@@ -1,3 +1,4 @@
+import { extraTranslationDictionariesJson } from "./translationDictionaryScan";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
@@ -82,7 +83,7 @@ describe("service-owned oracle studio surface", () => {
   });
 
   it("keeps English and Chinese oracle labels paired", () => {
-    const translations = source("../i18n.extra.ts");
+    const translations = extraTranslationDictionariesJson;
     expect(translations).toContain('"oracleStudio.title": "Oracle Studio"');
     expect(translations).toContain('"oracleStudio.title": "断言工作台"');
     expect(translations).toContain('"oracleStudio.kind.round_trip": "Round trip"');

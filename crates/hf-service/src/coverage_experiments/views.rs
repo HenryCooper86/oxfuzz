@@ -166,6 +166,8 @@ impl From<hf_storage::CoverageExperimentResultEvidenceV1> for CoverageExperiment
 /// Public retained evidence with redacted environment values.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CoverageExperimentView {
+    /// Guided campaign association, independent of experiment cancellation.
+    pub execution: Option<CoverageExperimentExecutionView>,
     /// Immutable proposal identifier.
     pub id: Uuid,
     /// Exact durable evidence version, currently 1.
@@ -206,9 +208,23 @@ pub struct CoverageExperimentView {
     /// Hypotheses are operator-supplied intent, never observed facts.
     pub hypothesis_origin: CoverageExperimentHypothesisOrigin,
 }
+/// Durable guided campaign and the outcome of automatic comparison.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CoverageExperimentExecutionView {
+    /// Exact service-allocated campaign.
+    pub run_id: Uuid,
+    /// Current retained campaign status.
+    pub status: RunStatus,
+    /// Stable comparison refusal; the run remains retained.
+    pub comparison_error: Option<&'static str>,
+    /// Digest accepted at human launch and rechecked against captured inputs.
+    pub reviewed_input_sha256: String,
+}
+
 impl From<hf_storage::CoverageExperimentRecord> for CoverageExperimentView {
     fn from(value: hf_storage::CoverageExperimentRecord) -> Self {
         Self {
+            execution: None,
             id: value.id,
             schema_version: value.schema_version,
             project_root: value.project_root,

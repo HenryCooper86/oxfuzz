@@ -1,3 +1,4 @@
+import { ModelBudgetPanel } from "../components/ModelBudgetPanel";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
@@ -405,11 +406,11 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
     onNavigate?.("triage");
   }
 
-  if (!activeProject) return <section className="surface-card flex flex-col items-start gap-4 p-6">
+  if (!activeProject) return <div className="flex flex-col gap-4"><ModelBudgetPanel /><section className="surface-card flex flex-col items-start gap-4 p-6">
     <FolderOpen size={28} className="text-text-secondary" aria-hidden="true" />
     <ViewHeader title={t("setup.emptyTitle")} description={t("setup.emptyHint")} />
     <Button variant="primary" onClick={() => onNavigate?.("workflow")} disabled={!onNavigate}>{t("setup.openWorkflow")}</Button>
-  </section>;
+  </section></div>;
 
   const tabs = workbenchTabs(dashboard, t);
 
@@ -489,6 +490,8 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
           </button>
         ))}
       </div>
+
+      {tab === "overview" && <ModelBudgetPanel />}
 
       {notice && <InlineNotice tone="ok" text={notice} />}
       {error && <InlineNotice tone="error" text={error} />}

@@ -358,7 +358,7 @@ qualify the new binary.
 
 ## 7. Open Questions
 
-- Should we support custom mutators (libFuzzer `custom_mutator`)?
+- Native AFL++ and libFuzzer mutators use the existing review/qualification/promotion lifecycle; see [Managed native mutators](managed-mutators-design.md).
 - How to share harness scaffolding across engines for the same target?
 
 ## 8. Tests
@@ -415,3 +415,89 @@ The section supplies typed declarations, header locations, call sites, potential
 forward/reverse routes, and explicit unresolved/omitted counts. It establishes
 neither symbolic feasibility nor observed target entry. See
 [Clang Harness Analysis](clang-harness-analysis-design.md).
+
+## 9. Behavioral qualification
+
+The `hf-service/harness-behavior` feature extends the reviewed, human-authorized
+smoke operation with bounded AFL++ observations on the exact retained binary.
+One versioned immutable report belongs to the smoke run, source digest, binary
+digest, and immutable image. The smoke response and historical read API expose
+that report. Unsupported engines and incomplete measurements report unavailable.
+
+The service retains deterministic input A and a same-length mutation B, sampled
+from the initial corpus when possible, and an empty baseline. Independent
+`afl-showmap -I` invocations measure fresh A, repeated fresh A, and fresh B. An
+ordered three-file list measures A, B, A in one forkserver session when the
+executable advertises AFL persistent support. `AFL_FUZZER_LOOPCOUNT=100` keeps the
+canonical driver alive across this three-input sequence. Per-file maps, exact
+inputs, invocation arguments, limits, and outcome are retained. The AFL cmin
+output mode (`-Z`) leaves an empty map for each crashed or timed-out input, so
+an earlier B failure cannot disappear behind the final A exit status. Its
+single-digit count class and following edge identifier are strictly decoded. A missing map,
+nonzero exit, timeout, malformed/oversized map, or absent persistent signature
+never counts as a successful observation. The empty-input observation uses the
+single-file showmap form because AFL's file-list reader skips empty files.
+
+Comparisons distinguish input-sensitive coverage, no observed variation, fresh
+repeat instability, and A-B-A contamination. Identical maps only establish that
+these samples did not distinguish behavior; they do not prove the harness ignores
+all input. Comparing nonempty maps with empty input is an entry-rejection proxy,
+not a target return-code measurement. The forkserver may restart a child that exits normally; equal maps establish
+only no observed contamination under that protocol, not proof of process reuse
+or complete state reset. AFL maps include harness code, so target-only
+coverage growth remains explicitly unavailable; existing exact function profiles
+continue to measure target entry. Repeated-input instability or measured A-B-A
+contamination refuses promotion through both promotion executors; inconclusive
+input variation remains advisory. Feature-off and historical runs retain explicit
+unavailable reports and existing human approval requirements.
+
+Each command receives a validated `harness.behavior_probe_timeout_secs` ceiling
+(default five seconds, range 1–60), capped by the resolved smoke duration and
+fuzzing resource policy. There are at most five commands and seven input
+observations. Inputs and list files are immutable sandbox mounts; only map output
+is writable. Before every dispatch the exact binary/source and image are checked
+again. All commands execute through `hf-runtime`, never on the host. This uses
+AFL++ 4.09c's documented ordered `-I` reader and persistent forkserver, avoiding a
+second diagnostic build with different instrumentation or unreviewed source.
+
+## Exact operator-supplied source in onboarding
+
+The existing onboarding pipeline accepts `FuzzRequest.prepared_harness:
+Option<PreparedHarnessSource>`, with exact UTF-8 `source` and lowercase full
+`sha256`. Its executor requires an explicit target and validates a nonempty
+source of at most 1 MiB, no NUL, and exact SHA-256 before any discovery, model
+request or sandbox operation. This is a hard ingress ceiling, not a replacement
+for sandbox resource limits.
+
+For supplied source, onboarding never reuses a promoted harness and never calls
+drafting or repair. It calls the existing `harness_compile` exactly once; a
+compile error or failed status terminates the pipeline. Smoke/model review and
+promotion use the exact compiled harness ID/source. Campaign dispatch checks
+that same ID/source digest inside the executor, including every campaign
+iteration, so a concurrent active-revision replacement cannot silently run a
+different harness. Existing sandbox, independent model-review/audited-bypass,
+and human approval checks remain mandatory.
+
+CLI `oxfuzz fuzz PROJECT --target SELECTOR --harness-source FILE
+--harness-sha256 SHA256` reads the frozen file with a bounded reader. Both flags
+and the explicit target are required together. Service validation is authoritative
+for direct callers as well. `--ai require` still requires the model for independent
+review and other configured enrichment; `--ai off` needs the existing explicit
+review bypass. Supplying a source never implies approval. Stage/output provenance
+labels it supplied and records its digest, without claiming model authorship.
+
+The existing Harness editor/import flow continues to compile supplied source and
+then review/smoke/promote it through these same service methods. This extension
+adds an exact-source entry to onboarding for repeatable trials, not a competing
+editor or a new execution permission.
+
+### Retained behavioral evidence in the workbench
+
+Harness review items expose the retained qualification run ID. The Harness view
+loads that run's behavioral report on hydration through the existing read-only
+service API; History exposes the same panel for qualification runs. Before
+showing results, presentation checks the service-owned run project/target and
+report run identity, plus source/binary identity when supplied by the harness
+review item. Missing evidence and read errors remain explicit. Selection changes
+invalidate pending reads. Each check displays its translated name separately
+from its observed/suspect/unavailable status.

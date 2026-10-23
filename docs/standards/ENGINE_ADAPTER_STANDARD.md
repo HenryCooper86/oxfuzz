@@ -515,3 +515,14 @@ source coverage, or normalized engine crash directories unless a later service
 workflow independently validates and classifies an actual crash artifact. Raw
 sidecar commands, Python imports in Rust, host execution, and direct physical
 interface access are contract violations.
+
+## 8. Managed native mutators
+
+The `managed-mutators` feature reuses AFL++ native shared libraries and
+libFuzzer callbacks embedded in reviewed harnesses. The engine dispatcher
+validates AFL++'s actual sandbox-mapped library bytes, captured immutable image,
+read-only input mounts and unique mount destinations before runtime dispatch.
+Arbitrary paths, Python modules, duplicate plugin settings and unsupported
+engines fail explicitly. The service stages the reviewed artifact and retains
+its manifest; adapters must not load plugins on the host. See
+[managed-mutators-design.md](../design/managed-mutators-design.md).

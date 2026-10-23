@@ -183,6 +183,7 @@ async fn fixture() -> (
             binary_sha256: Some(original_binary_sha256.clone()),
             run_id: Some(Uuid::new_v4()),
         }),
+        custom_mutator: None,
         cmplog: None,
     };
     store.upsert_harness(&harness).await.unwrap();
@@ -252,6 +253,7 @@ async fn fixture() -> (
     let crash_path = run_root.join("out/crash-proof");
     std::fs::write(&crash_path, b"crash").unwrap();
     let crash = Crash {
+        reproduction: None,
         id: Uuid::new_v4(),
         run_id: run.id,
         target_id: target.id,

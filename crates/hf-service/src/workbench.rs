@@ -98,6 +98,8 @@ pub struct HarnessReviewItem {
     pub language: String,
     pub status: String,
     pub build_output: String,
+    /// Retained qualification run, absent for legacy or unqualified revisions.
+    pub smoke_run_id: Option<Uuid>,
     pub smoke_passed: bool,
     pub smoke_execs_per_sec: f64,
     pub needs_review: bool,
@@ -651,6 +653,7 @@ fn harness_review_items(
                 language: format!("{:?}", h.language),
                 status: format!("{:?}", h.status),
                 build_output: h.build_cmd.output.to_string_lossy().to_string(),
+                smoke_run_id: smoke.and_then(|s| s.run_id),
                 smoke_passed: smoke.is_some_and(|s| s.passed),
                 smoke_execs_per_sec: smoke.map_or(0.0, |s| s.execs_per_sec),
                 needs_review,

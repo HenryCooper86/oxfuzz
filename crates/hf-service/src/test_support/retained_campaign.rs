@@ -53,6 +53,7 @@ pub async fn retained_campaign(store: &Store, project: &str, start: DateTime<Utc
         sanitizer: Sanitizer::Address,
         status: HarnessStatus::Draft,
         smoke_run: None,
+        custom_mutator: None,
         cmplog: None,
     };
     store.upsert_harness(&harness).await.unwrap();

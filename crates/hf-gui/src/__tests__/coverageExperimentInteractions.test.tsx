@@ -163,3 +163,23 @@ it("does not offer attachable replay for a baseline without a retained seed", as
  expect(host.textContent).not.toContain("Review current-input rerun");
  expect(calls.some(call => /start|replay/.test(call))).toBe(false);
 });
+
+it("reviews the experiment association rather than an unassociated rerun", async () => {
+ await mount(); await prepare();
+ await click("Review current-input rerun");
+ expect(calls).toContain(`GET /coverage/experiments/${experimentId}/replay`);
+ expect(calls).not.toContain(`GET /runs/${baseline}/replay`);
+});
+
+it("keeps record cancellation distinct from cancelling the associated execution", async () => {
+ await mount(); await prepare();
+ records[0].execution = { run_id: later, status: "running", comparison_error: null, reviewed_input_sha256: "a".repeat(64) };
+ await click("New experiment"); await field("Experiment history", experimentId); await flush();
+ expect(host.textContent).toContain("Associated campaign");
+ expect(host.querySelector('[aria-label="Result campaign"]')).toBeNull();
+ await field("Cancellation reason", "Stop this investigation"); await click("Cancel experiment");
+ expect(host.textContent).toContain("Associated campaign");
+ expect(calls).not.toContain(`POST /runs/${later}/cancel`);
+ await click("Cancel campaign execution");
+ expect(calls).toContain(`POST /runs/${later}/cancel`);
+});

@@ -89,6 +89,31 @@ pub async fn coverage_experiment_get(
         Err(CoverageExperimentError::new(Code::FeatureUnavailable))
     }
 }
+/// Review current inputs for a guided experiment without executing them.
+#[tauri::command]
+pub async fn coverage_experiment_replay_review(
+    state: tauri::State<'_, AppState>,
+    request: Request<'_>,
+) -> Result<hf_service::ReplayReview, CoverageExperimentError> {
+    let request: GetRequest = decode(&request)?;
+    let id = parse_coverage_experiment_id(&request.id)?;
+    state
+        .container
+        .validate_coverage_experiment_scope(id, request.scope.clone(), None)
+        .await?;
+    #[cfg(feature = "coverage-experiments")]
+    {
+        state
+            .container
+            .coverage_experiment_replay_review(id, request.scope)
+            .await
+            .map_err(|_| CoverageExperimentError::new(Code::InvalidRequest))
+    }
+    #[cfg(not(feature = "coverage-experiments"))]
+    {
+        Err(CoverageExperimentError::new(Code::FeatureUnavailable))
+    }
+}
 /// Attach one retained campaign after validating selected owners and scope.
 #[tauri::command]
 pub async fn coverage_experiment_complete(

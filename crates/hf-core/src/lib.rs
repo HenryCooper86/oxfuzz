@@ -37,6 +37,7 @@ pub mod error;
 pub mod exec;
 pub mod grep_limits;
 pub mod harness;
+pub mod mutator;
 pub mod provider;
 pub mod retired_engine;
 pub mod runtime;

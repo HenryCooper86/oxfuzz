@@ -522,6 +522,7 @@ pub async fn try_compile_with_options(
     workspace: &Path,
     options: &hf_core::runtime::SandboxOptions,
 ) -> Result<CompileResult, ClassifiedError> {
+    crate::managed_mutator::validate_build(&harness, options)?;
     // The companion record is constructed only for AFL++ C/C++ harnesses; the
     // compile operation refuses anything else rather than silently dropping or
     // honoring a misplaced one (Engineering Protocol 2.19). The language arm
@@ -641,6 +642,11 @@ pub async fn try_compile_with_options(
         {
             return Ok(CompileResult::Failed(failure));
         }
+    }
+    if let Some(failure) =
+        crate::managed_mutator::compile_artifact(&mut harness, rt, workspace, options).await?
+    {
+        return Ok(CompileResult::Failed(failure));
     }
     Ok(CompileResult::Ok(Box::new(harness)))
 }
@@ -1093,6 +1099,13 @@ pub async fn smoke_fuzz_in_paths_with_config_and_sandbox_image(
         image: sandbox_image,
         ..hf_core::runtime::SandboxOptions::default()
     };
+    crate::managed_mutator::validate_smoke(
+        &harness,
+        workspace,
+        &binary_relative,
+        sandbox.image.as_deref(),
+    )?;
+    hf_engine::managed_mutator::validate(harness.engine, config, workspace, &sandbox)?;
     let result = rt
         .run_command_opts(&cmd, workspace, &limits, &sandbox)
         .await?;
@@ -1111,6 +1124,8 @@ pub async fn smoke_fuzz_in_paths_with_config_and_sandbox_image(
     }
     // Fuzzers write progress/crashes to stderr (libFuzzer) or stdout; parse both.
     let combined = format!("{}\n{}", result.stdout, result.stderr);
+    let mutator_exercised =
+        crate::managed_mutator::observe_smoke(&mut harness, &combined, result.exit_code);
     let execs = parse_execs_per_sec(&combined);
     let crashes = parse_crashes(&combined).max(count_smoke_artifacts(harness.engine, &out_dir));
     // The harness is valid only if the fuzzer actually exercised the target. A
@@ -1140,13 +1155,13 @@ pub async fn smoke_fuzz_in_paths_with_config_and_sandbox_image(
             || lower.contains("iterations")
             || lower.contains("speed")
     };
-    if !ran {
+    if !ran && harness.custom_mutator.is_none() {
         return Err(ClassifiedError::Harness(format!(
             "smoke fuzz: no fuzzer activity detected; output: {}",
             combined.chars().take(800).collect::<String>()
         )));
     }
-    let passed = crashes == 0;
+    let passed = crashes == 0 && ran && mutator_exercised;
     let summary = SmokeRunSummary {
         duration_secs,
         execs_per_sec: execs,
@@ -1164,7 +1179,11 @@ pub async fn smoke_fuzz_in_paths_with_config_and_sandbox_image(
     // signal lives in `smoke_run.passed`/`crashes`, not in the status. Only a
     // harness the fuzzer could not run at all is `Failed`, and that path already
     // returned `Err` above.
-    harness.status = HarnessStatus::SmokePassed;
+    harness.status = if ran && mutator_exercised {
+        HarnessStatus::SmokePassed
+    } else {
+        HarnessStatus::Failed
+    };
     Ok(harness)
 }
 
@@ -2421,6 +2440,7 @@ mod tests {
             sanitizer: hf_core::target::Sanitizer::Address,
             status: HarnessStatus::Draft,
             smoke_run: None,
+            custom_mutator: None,
             cmplog: None,
         }
     }
@@ -2492,6 +2512,7 @@ mod tests {
             sanitizer: hf_core::target::Sanitizer::Address,
             status: HarnessStatus::Draft,
             smoke_run: None,
+            custom_mutator: None,
             cmplog: None,
         }
     }
@@ -3170,6 +3191,7 @@ mod tests {
             sanitizer: hf_core::target::Sanitizer::Address,
             status: HarnessStatus::Draft,
             smoke_run: None,
+            custom_mutator: None,
             cmplog: Some(hf_core::harness::CmpLogCompanion {
                 build_cmd: cmplog_build_command(
                     EngineKind::AflPlusPlus,

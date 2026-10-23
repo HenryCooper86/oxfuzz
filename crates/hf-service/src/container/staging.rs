@@ -51,6 +51,7 @@ pub(super) struct RunArtifacts {
 #[derive(Clone)]
 pub(super) struct ReplayProvenance {
     pub(super) original_run_id: Uuid,
+    pub(super) experiment_review: Option<super::run::ReplayReview>,
     pub(super) seed: u64,
     pub(super) input_manifest_sha256: Option<String>,
     pub(super) inputs: super::run::ReplayInputs,
@@ -1083,6 +1084,7 @@ pub(super) fn verify_run_artifacts(artifacts: &RunArtifacts) -> Result<(), Class
 pub(super) fn qualification_evidence(
     harness: &Harness,
 ) -> Result<(Uuid, &str, &str), ClassifiedError> {
+    super::managed_mutator::require_self_test(harness)?;
     let smoke = harness.smoke_run.as_ref().ok_or_else(|| {
         ClassifiedError::Validation("harness has no persisted smoke qualification".to_owned())
     })?;

@@ -132,6 +132,7 @@ async fn fixture(name: &str) -> Fixture {
         sanitizer: Sanitizer::Address,
         status: hf_core::harness::HarnessStatus::Promoted,
         smoke_run: None,
+        custom_mutator: None,
         cmplog: None,
     };
     let mut run = hf_storage::RunRecord::new(

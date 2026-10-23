@@ -310,6 +310,7 @@ impl ServiceContainer {
         harness: &Harness,
         image: Option<&str>,
     ) -> Result<(), ClassifiedError> {
+        super::managed_mutator::verify_image(harness, image)?;
         if self.configured_build_profile(project).await?.is_none() {
             return Ok(());
         }
@@ -332,6 +333,10 @@ impl ServiceContainer {
         project: &Path,
         harness: &Harness,
     ) -> Result<Option<String>, ClassifiedError> {
+        if let Some(mutator) = &harness.custom_mutator {
+            super::managed_mutator::verify_live(harness)?;
+            return Ok(Some(mutator.sandbox_image_id.clone()));
+        }
         if self.configured_build_profile(project).await?.is_none() {
             return Ok(None);
         }
@@ -392,6 +397,7 @@ impl ServiceContainer {
         harness: &Harness,
         live: bool,
     ) -> Result<(), ClassifiedError> {
+        super::managed_mutator::verify_live(harness)?;
         if self.configured_build_profile(project).await?.is_none() {
             return Ok(());
         }

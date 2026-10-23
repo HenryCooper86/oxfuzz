@@ -41,6 +41,7 @@ fn sample_target() -> TargetCandidate {
 
 fn sample_crash() -> Crash {
     Crash {
+        reproduction: None,
         id: Uuid::nil(),
         run_id: Uuid::nil(),
         target_id: Uuid::nil(),
@@ -126,6 +127,122 @@ fn report_has_title_and_core_sections() {
     assert!(md.contains("## Coverage"));
     assert!(md.contains("## Corpus"));
     assert!(md.contains("## Findings"));
+}
+
+#[test]
+fn report_distinguishes_observed_reproduction_counts_from_advisory_determinism() {
+    use hf_core::crash::{CrashReplayObservation, CrashReproduction};
+    let mut data = populated();
+    let reference = "ERROR: AddressSanitizer: heap-buffer-overflow\n#0 parse_header";
+    let (kind, signature, summary) = hf_crash::classify(reference);
+    let crash = &mut data.crashes[0];
+    crash.kind = kind;
+    crash.stack_signature = signature;
+    crash.summary = summary;
+    crash.casr = None;
+    crash.origin = hf_crash::crash_origin(reference);
+    crash.minimized = false;
+    let root = PathBuf::from(format!("/work/runs/{}", crash.run_id));
+    let original = root.join("out/crash-original");
+    let candidate = root
+        .join("triage/minimized")
+        .join(format!("{}.min", crash.id));
+    crash.input_path = original.clone();
+    let observation = |matches_reference| CrashReplayObservation {
+        exit_code: Some(i32::from(matches_reference)),
+        termination: Some(hf_core::runtime::CommandTermination::Completed),
+        log: if matches_reference {
+            reference.to_owned()
+        } else {
+            String::new()
+        },
+        matches_reference,
+        error: None,
+    };
+    crash.reproduction = Some(CrashReproduction {
+        version: 1,
+        run_id: crash.run_id,
+        crash_id: crash.id,
+        requested_runs: 3,
+        reference_log: Some(reference.to_owned()),
+        original_input: original,
+        original_sha256: "a".repeat(64),
+        candidate_input: candidate,
+        candidate_sha256: "b".repeat(64),
+        binary_sha256: "c".repeat(64),
+        image: format!("sha256:{}", "d".repeat(64)),
+        original: vec![observation(true), observation(true), observation(true)],
+        candidate: vec![observation(true), observation(false), observation(true)],
+        confirmed: false,
+    });
+    let report = render_markdown(&data, &Labels::english());
+    assert!(report.contains("Observed reproduction"));
+    assert!(report.contains("original 3/3; candidate 2/3"));
+    assert!(report.contains("Confirmation: no"));
+    let enriched = ensure_required_evidence("Model report", &data, &Labels::english());
+    assert!(enriched.contains("original 3/3; candidate 2/3"));
+    let proof = hf_service::finding_proof::finding_proof_card(&data.crashes[0]);
+    assert!(proof.deterministic_reproduction.detail.contains("2/3"));
+    data.crashes[0].reproduction.as_mut().unwrap().candidate[1].matches_reference = true;
+    data.crashes[0].reproduction.as_mut().unwrap().confirmed = true;
+    let proof = hf_service::finding_proof::finding_proof_card(&data.crashes[0]);
+    assert_eq!(
+        proof.deterministic_reproduction.status,
+        hf_service::finding_proof::FindingProofStatus::NotVerified,
+        "a saved matching flag cannot turn a clean observation into reproduction"
+    );
+    let report = render_markdown(&data, &Labels::english());
+    assert!(report.contains("Confirmation: no"));
+    data.crashes[0].reproduction.as_mut().unwrap().candidate[1] = observation(true);
+    let proof = hf_service::finding_proof::finding_proof_card(&data.crashes[0]);
+    assert_eq!(
+        proof.deterministic_reproduction.status,
+        hf_service::finding_proof::FindingProofStatus::Supported
+    );
+    let verified = data.crashes[0].clone();
+    for mutation in 0..12 {
+        let mut invalid = verified.clone();
+        let record = invalid.reproduction.as_mut().unwrap();
+        match mutation {
+            0 => {
+                record.candidate[0].termination =
+                    Some(hf_core::runtime::CommandTermination::TimedOut);
+            }
+            1 => record.candidate[0].error = Some("runtime unavailable".to_owned()),
+            2 => record.reference_log = None,
+            3 => record.candidate_input = PathBuf::from("/other/candidate"),
+            4 => record.run_id = Uuid::new_v4(),
+            5 => record.requested_runs = 4,
+            6 => {
+                record.original.clear();
+                record.candidate.clear();
+            }
+            7 => record.original[0].exit_code = None,
+            8 => record.binary_sha256 = "not-a-digest".to_owned(),
+            9 => record.image = "mutable:image".to_owned(),
+            10 => record.crash_id = Uuid::new_v4(),
+            _ => invalid.summary = "ERROR: AddressSanitizer: heap-use-after-free".to_owned(),
+        }
+        let proof = hf_service::finding_proof::finding_proof_card(&invalid);
+        assert_eq!(
+            proof.deterministic_reproduction.status,
+            hf_service::finding_proof::FindingProofStatus::NotVerified
+        );
+        data.crashes[0] = invalid;
+        assert!(render_markdown(&data, &Labels::english()).contains("Confirmation: no"));
+    }
+    let mut casr_only = verified;
+    casr_only.casr = sample_crash().casr;
+    casr_only.reproduction.as_mut().unwrap().reference_log = None;
+    let proof = hf_service::finding_proof::finding_proof_card(&casr_only);
+    assert_eq!(
+        proof.deterministic_reproduction.status,
+        hf_service::finding_proof::FindingProofStatus::NotVerified
+    );
+    assert!(proof
+        .deterministic_reproduction
+        .detail
+        .contains("No comparable retained classification log"));
 }
 
 #[test]

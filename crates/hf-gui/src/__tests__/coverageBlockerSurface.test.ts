@@ -1,3 +1,4 @@
+import { extraTranslationDictionariesJson } from "./translationDictionaryScan";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
@@ -56,7 +57,7 @@ describe("service-owned coverage blocker surface", () => {
   });
 
   it("keeps English and Chinese blocker labels paired", () => {
-    const translations = source("../i18n.extra.ts");
+    const translations = extraTranslationDictionariesJson;
     expect(translations).toContain('"coverageBlockers.title": "Coverage Blockers"');
     expect(translations).toContain('"coverageBlockers.title": "覆盖率阻塞点"');
     expect(translations).toContain('"coverageBlockers.noRoute": "No observed route"');

@@ -231,6 +231,7 @@ function configureHarnessTransport() {
       });
     }
     if (command === "harness_review_queue") return Promise.resolve([]);
+    if (command === "managed_mutator_status") return Promise.resolve({ harness_id: "retained-harness", source: null, mutator: null });
     if (command === "work_order_list") return Promise.resolve([]);
     if (command === "system_status_cmd") {
       return Promise.resolve({
@@ -927,6 +928,7 @@ describe("Harness repair interactions", () => {
         review("harness-exact", "exact promoted source", "Promoted"),
       ]);
       if (command === "work_order_list") return Promise.resolve(args.project === PROJECT ? [order] : []);
+      if (command === "managed_mutator_status") return Promise.resolve({ harness_id: args.project === PROJECT_B ? "harness-project-b" : "harness-exact", source: null, mutator: null });
       if (command === "work_order_submissions") return Promise.resolve([submission]);
       if (command === "work_order_attempts") return Promise.resolve([attempt]);
       if (command === "work_order_promote") return Promise.resolve({ id: "harness-exact", status: "Promoted" });

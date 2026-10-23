@@ -77,6 +77,15 @@ async fn main() -> anyhow::Result<()> {
 
 async fn dispatch(command: Commands) -> anyhow::Result<()> {
     match command {
+        #[cfg(feature = "managed-mutators")]
+        Commands::Mutator(args) => commands::mutator::run(args).await?,
+        #[cfg(feature = "model-budgets")]
+        Commands::ModelBudget => {
+            let status = hf_service::model_budget::model_budget_status()
+                .await
+                .map_err(anyhow::Error::msg)?;
+            println!("{}", serde_json::to_string_pretty(&status)?);
+        }
         Commands::Init => {
             let report = hf_service::init_workspace().await?;
             println!("Initialized oxfuzz workspace.");
@@ -176,6 +185,7 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
             sanitizer,
             cmplog,
             replay,
+            experiment,
         }) => {
             cmd_run(
                 project,
@@ -190,6 +200,7 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
                 cmplog,
                 seed,
                 replay.as_deref(),
+                experiment,
             )
             .await?;
         }
@@ -221,7 +232,7 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
             iterations,
             ai,
         }) => {
-            cmd_campaign(
+            Box::pin(cmd_campaign(
                 project,
                 target.as_deref(),
                 &engine,
@@ -234,7 +245,7 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
                 seed,
                 iterations,
                 ai,
-            )
+            ))
             .await?;
         }
         Commands::Fuzz(fuzz_args) => {

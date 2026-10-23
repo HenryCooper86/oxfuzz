@@ -254,6 +254,10 @@ pub struct Labels {
     pub bullet_crash_line: &'static str,
     pub bullet_cluster: &'static str,
     pub bullet_minimized: &'static str,
+    pub reproduction_observed: &'static str,
+    pub reproduction_original: &'static str,
+    pub reproduction_candidate: &'static str,
+    pub reproduction_confirmation: &'static str,
     pub bool_yes: &'static str,
     pub bool_no: &'static str,
     pub stack_trace: &'static str,
@@ -383,6 +387,10 @@ impl Labels {
             bullet_crash_line: "Crash line",
             bullet_cluster: "Cluster",
             bullet_minimized: "Minimized",
+            reproduction_observed: "Observed reproduction",
+            reproduction_original: "original",
+            reproduction_candidate: "candidate",
+            reproduction_confirmation: "Confirmation",
             bool_yes: "yes",
             bool_no: "no",
             stack_trace: "Stack trace:",
@@ -493,6 +501,10 @@ impl Labels {
             bullet_crash_line: "崩溃位置",
             bullet_cluster: "簇",
             bullet_minimized: "已最小化",
+            reproduction_observed: "实测复现",
+            reproduction_original: "原始输入",
+            reproduction_candidate: "候选输入",
+            reproduction_confirmation: "确认",
             stack_trace: "堆栈：",
             no_crashes_found: "未发现崩溃，无需分类定级。",
             bug_report_heading: "缺陷报告",
@@ -1197,6 +1209,31 @@ fn render_casr_verdicts(md: &mut String, data: &ReportData, labels: &Labels) {
     let _ = writeln!(md);
 }
 
+fn render_reproduction(md: &mut String, crash: &Crash, labels: &Labels) {
+    let Some(evidence) = &crash.reproduction else {
+        return;
+    };
+    let assessment = crate::container::crash_confirmation::assess_reproduction(crash, evidence);
+    // Formatting into a String cannot fail; no external I/O is performed.
+    let _ = writeln!(
+        md,
+        "- {}: {} {}/{}; {} {}/{}; {}: {}",
+        labels.reproduction_observed,
+        labels.reproduction_original,
+        assessment.original_matches,
+        evidence.original.len(),
+        labels.reproduction_candidate,
+        assessment.candidate_matches,
+        evidence.candidate.len(),
+        labels.reproduction_confirmation,
+        if assessment.confirmed {
+            labels.bool_yes
+        } else {
+            labels.bool_no
+        }
+    );
+}
+
 fn render_crash_detail(md: &mut String, n: usize, c: &Crash, labels: &Labels) {
     let title = c
         .bug_report
@@ -1242,6 +1279,8 @@ fn render_crash_detail(md: &mut String, n: usize, c: &Crash, labels: &Labels) {
             labels.bool_no
         }
     );
+
+    render_reproduction(md, c, labels);
 
     if let Some(casr) = &c.casr {
         let _ = writeln!(
@@ -1413,6 +1452,16 @@ pub fn report_user_prompt(facts: &str, data: &ReportData, language: ReportLangua
 #[must_use]
 pub fn ensure_required_evidence(ai_markdown: &str, data: &ReportData, labels: &Labels) -> String {
     let mut out = ai_markdown.trim_end().to_owned();
+    for crash in &data.crashes {
+        if crash.reproduction.is_some() {
+            let mut observed = format!("{} `{}`\n", labels.reproduction_observed, crash.id);
+            render_reproduction(&mut observed, crash, labels);
+            if !out.contains(observed.trim()) {
+                out.push_str("\n\n");
+                out.push_str(&observed);
+            }
+        }
+    }
     if !out.contains("```mermaid") {
         let mut visual = String::new();
         render_visual_summary(&mut visual, data, labels);

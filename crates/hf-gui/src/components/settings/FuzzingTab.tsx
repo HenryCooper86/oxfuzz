@@ -1,3 +1,4 @@
+import { ModelBudgetSettings } from "./ModelBudgetSettings";
 import { Badge, Input, Select, Switch } from "../ui";
 import { SettingsGroup, SettingsItem } from "../ui/SettingsGroup";
 import { useI18n } from "../../i18nContext";
@@ -66,6 +67,7 @@ export function FuzzingTab({ value, onChange }: FuzzingTabProps) {
 
   return (
     <div style={{ animation: "fadeIn 0.2s ease" }}>
+      <ModelBudgetSettings value={value} onChange={onChange} />
       <SettingsGroup
         title={t("settings.fuzzing.engines")}
         description={t("settings.fuzzing.enginesDesc")}

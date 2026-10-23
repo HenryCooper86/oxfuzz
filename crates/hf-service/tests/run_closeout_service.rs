@@ -78,6 +78,7 @@ async fn seeded_run_at(container: &ServiceContainer, project: PathBuf) -> Uuid {
         sanitizer: Sanitizer::Address,
         status: HarnessStatus::SmokePassed,
         smoke_run: None,
+        custom_mutator: None,
         cmplog: None,
     };
     store.upsert_harness(&harness).await.unwrap();

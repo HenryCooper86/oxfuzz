@@ -431,6 +431,7 @@ mod semgrep_ranking_consumer_tests {
             sanitizer: Sanitizer::Address,
             status: HarnessStatus::Promoted,
             smoke_run: None,
+            custom_mutator: None,
             cmplog: None,
         }
     }

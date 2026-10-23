@@ -141,6 +141,7 @@ async fn triage_fixture(name: &str, crash_files: &[String]) -> TriageFixture {
         sanitizer: Sanitizer::Address,
         status: HarnessStatus::Promoted,
         smoke_run: None,
+        custom_mutator: None,
         cmplog: None,
     };
     let mut run = hf_storage::RunRecord::new(

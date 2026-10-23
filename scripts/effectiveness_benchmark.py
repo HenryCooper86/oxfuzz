@@ -48,11 +48,20 @@ def integer(value, name, minimum):
 
 def unique_ids(items, kind):
     ids = set()
+    filesystem_ids = set()
+    reserved = {"con", "prn", "aux", "nul"} | {
+        "{}{}".format(prefix, index) for prefix in ("com", "lpt") for index in range(1, 10)
+    }
     for item in items:
         item_id = nonempty(item["id"], "{} id".format(kind))
-        if item_id in ids:
+        if re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.+\-]*", item_id) is None \
+                or item_id.endswith(".") or item_id.split(".", 1)[0].lower() in reserved:
+            raise ValueError("{} identifier must be a portable filename component".format(kind))
+        filesystem_id = item_id.casefold()
+        if filesystem_id in filesystem_ids:
             raise ValueError("duplicate {} id: {}".format(kind, item_id))
         ids.add(item_id)
+        filesystem_ids.add(filesystem_id)
     return ids
 
 
@@ -68,7 +77,7 @@ def validate_cohort(value):
         "schema_version", "cohort_id", "candidate_commit", "projects",
         "conditions", "trials",
     ))
-    if type(value["schema_version"]) is not int or value["schema_version"] != 1:
+    if type(value["schema_version"]) is not int or value["schema_version"] not in (1, 2):
         raise ValueError("unsupported cohort schema_version")
     nonempty(value["cohort_id"], "cohort_id")
     digest(value["candidate_commit"], "candidate_commit", HEX_40)
@@ -127,9 +136,24 @@ def validate_cohort(value):
 
     trials = nonempty_list(value["trials"], "trials")
     for trial in trials:
-        record(trial, "trial", (
+        fields = (
             "id", "project_id", "condition_id", "selected_function", "seed",
-        ))
+        )
+        if value["schema_version"] == 2:
+            fields += ("prepared_harness",)
+        record(trial, "trial", fields)
+        if value["schema_version"] == 2:
+            prepared = record(trial["prepared_harness"], "prepared_harness", (
+                "path", "sha256", "source_sha256", "origin",
+            ))
+            path = nonempty(prepared["path"], "prepared_harness.path")
+            if path.startswith("/") or "\\" in path or ":" in path or any(
+                    part in ("", ".", "..") for part in path.split("/")):
+                raise ValueError("prepared_harness.path must be a relative descendant path")
+            digest(prepared["sha256"], "prepared_harness.sha256", HEX_64)
+            digest(prepared["source_sha256"], "prepared_harness.source_sha256", HEX_64)
+            if prepared["origin"] not in ("generated", "upstream", "reference"):
+                raise ValueError("unsupported prepared_harness.origin")
         nonempty(trial["id"], "trial id")
         if nonempty(trial["project_id"], "project_id") not in project_ids:
             raise ValueError("unknown project_id")
@@ -147,6 +171,12 @@ def validate_cohort(value):
             raise ValueError("seed must have nonzero low 32 bits for libFuzzer; zero randomizes")
     unique_ids(trials, "trial")
     return value
+
+
+def trial_source_digest(trial, project):
+    """Expected staged source identity for this exact frozen harness."""
+    prepared = trial.get("prepared_harness")
+    return prepared["source_sha256"] if prepared is not None else project["source_sha256"]
 
 
 def no_duplicate_keys(pairs):

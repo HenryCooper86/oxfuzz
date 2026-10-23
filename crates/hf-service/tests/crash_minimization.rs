@@ -21,6 +21,15 @@ use sha2::{Digest, Sha256};
 enum MinimizeOutcome {
     Success,
     TimedOut,
+    CleanReplay,
+    DifferentReplay,
+    DifferentClass,
+    IntermittentReplay,
+    IncompleteReplay,
+    ChangedOriginal,
+    LeakPids,
+    UbsanAddresses,
+    DifferentUbsanClass,
 }
 
 struct MinimizeRuntime {
@@ -76,7 +85,7 @@ impl RuntimeAdapter for MinimizeRuntime {
             .find_map(|part| part.strip_prefix("-exact_artifact_path="))
         {
             self.minimize_options.lock().unwrap().push(options.clone());
-            if matches!(self.outcome, MinimizeOutcome::Success) {
+            if !matches!(self.outcome, MinimizeOutcome::TimedOut) {
                 let mount = options
                     .extra_mounts
                     .iter()
@@ -95,18 +104,75 @@ impl RuntimeAdapter for MinimizeRuntime {
                 stderr: String::new(),
                 workspace: cwd.to_path_buf(),
                 termination: match self.outcome {
-                    MinimizeOutcome::Success => CommandTermination::Completed,
                     MinimizeOutcome::TimedOut => CommandTermination::TimedOut,
+                    _ => CommandTermination::Completed,
                 },
             });
         }
 
+        let is_minimized = |part: &String| {
+            Path::new(part)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("min"))
+        };
+        let minimized_replay = cmd.iter().any(is_minimized);
+        let replay_number = self
+            .commands
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|command| command.iter().any(is_minimized))
+            .count();
+        let clean = minimized_replay
+            && (matches!(self.outcome, MinimizeOutcome::CleanReplay)
+                || (matches!(self.outcome, MinimizeOutcome::IntermittentReplay)
+                    && replay_number == 2));
+        let after_minimizer = !self.minimize_options.lock().unwrap().is_empty();
+        let different = (minimized_replay
+            && matches!(self.outcome, MinimizeOutcome::DifferentReplay))
+            || (after_minimizer && matches!(self.outcome, MinimizeOutcome::ChangedOriginal));
+        let count = self.commands.lock().unwrap().len();
+        let different_class =
+            minimized_replay && matches!(self.outcome, MinimizeOutcome::DifferentClass);
         Ok(CommandResult {
-            exit_code: 1,
+            exit_code: i32::from(!clean),
             stdout: String::new(),
-            stderr: "ERROR: AddressSanitizer: heap-buffer-overflow\n#0 parse_input".to_owned(),
+            stderr: if matches!(self.outcome, MinimizeOutcome::LeakPids) {
+                format!("=={count}==ERROR: LeakSanitizer: detected memory leaks\n#0 parse_input")
+            } else if matches!(
+                self.outcome,
+                MinimizeOutcome::UbsanAddresses | MinimizeOutcome::DifferentUbsanClass
+            ) {
+                if minimized_replay && matches!(self.outcome, MinimizeOutcome::DifferentUbsanClass)
+                {
+                    "parse.c:1:2: runtime error: signed integer overflow: 1 + 2 cannot be represented\n#0 parse_input".to_owned()
+                } else {
+                    format!("parse.c:1:2: runtime error: load of misaligned address 0x{count:08x} for type 'int'\n#0 parse_input")
+                }
+            } else if clean {
+                String::new()
+            } else if different_class {
+                "ERROR: AddressSanitizer: heap-use-after-free\n#0 parse_input".to_owned()
+            } else if different {
+                "ERROR: AddressSanitizer: heap-buffer-overflow\n#0 different_failure".to_owned()
+            } else {
+                format!(
+                    "ERROR: AddressSanitizer: heap-buffer-overflow\n#0 parse_input\n{}",
+                    if minimized_replay {
+                        "candidate replay"
+                    } else {
+                        "original replay"
+                    }
+                )
+            },
             workspace: cwd.to_path_buf(),
-            termination: CommandTermination::Completed,
+            termination: if minimized_replay
+                && matches!(self.outcome, MinimizeOutcome::IncompleteReplay)
+            {
+                CommandTermination::TimedOut
+            } else {
+                CommandTermination::Completed
+            },
         })
     }
 
@@ -174,6 +240,7 @@ async fn fixture(name: &str) -> Fixture {
         sanitizer: Sanitizer::Address,
         status: hf_core::harness::HarnessStatus::Promoted,
         smoke_run: None,
+        custom_mutator: None,
         cmplog: None,
     };
     let mut run = hf_storage::RunRecord::new(
@@ -213,6 +280,10 @@ async fn fixture(name: &str) -> Fixture {
     let binary = input_dir.join("harness");
     std::fs::write(&binary, b"immutable run binary").unwrap();
     run.binary_rev = Some(format!("{:x}", Sha256::digest(b"immutable run binary")));
+    run.sandbox_rev = Some(format!(
+        "docker-image-id-sha256:{}",
+        hf_test_utils::immutable_test_image().unwrap().sha256()
+    ));
     let original = output_dir.join("crash-original");
     std::fs::write(&original, b"crashing input that should become smaller").unwrap();
     let original = std::fs::canonicalize(original).unwrap();
@@ -275,6 +346,20 @@ async fn triage_persists_verified_run_owned_minimized_artifact() {
         .unwrap();
     assert_eq!(persisted.len(), 1);
     assert!(persisted[0].minimized);
+    let evidence = persisted[0].reproduction.as_ref().unwrap();
+    assert!(evidence.confirmed);
+    assert_eq!(evidence.original.len(), 3);
+    assert_eq!(evidence.candidate.len(), 3);
+    assert!(evidence
+        .original
+        .iter()
+        .all(|o| o.matches_reference && o.log.contains("original replay")));
+    assert!(evidence
+        .candidate
+        .iter()
+        .all(|o| o.matches_reference && o.log.contains("candidate replay")));
+    assert_eq!(evidence.original_input, fixture.original);
+    assert_ne!(evidence.original_sha256, evidence.candidate_sha256);
 
     let options = runtime.minimize_options.lock().unwrap();
     assert_eq!(options.len(), 1);
@@ -312,6 +397,72 @@ async fn triage_timeout_keeps_original_crash_unminimized() {
     assert!(!minimized_dir.exists() || std::fs::read_dir(minimized_dir).unwrap().next().is_none());
 }
 
+#[tokio::test]
+async fn minimization_requires_repeated_reproduction_of_the_original_failure() {
+    for outcome in [
+        MinimizeOutcome::CleanReplay,
+        MinimizeOutcome::DifferentReplay,
+        MinimizeOutcome::DifferentClass,
+        MinimizeOutcome::IncompleteReplay,
+        MinimizeOutcome::IntermittentReplay,
+    ] {
+        let fixture = fixture("minimize-replay-mismatch").await;
+        let service = ServiceContainer::new(Arc::new(MinimizeRuntime::new(outcome)), None)
+            .with_store(Arc::clone(&fixture.store));
+        let crashes = service
+            .triage_run(&fixture.project, &fixture.target.symbol, fixture.run.id)
+            .await
+            .unwrap();
+        assert!(
+            !crashes[0].minimized,
+            "unconfirmed minimized input must not replace original"
+        );
+        assert_eq!(crashes[0].input_path, fixture.original);
+        let persisted = fixture
+            .store
+            .list_crashes_by_run(fixture.run.id)
+            .await
+            .unwrap();
+        assert!(!persisted[0].minimized);
+        let evidence = persisted[0].reproduction.as_ref().unwrap();
+        assert!(!evidence.confirmed);
+        assert_eq!(evidence.original.len(), 3);
+        assert_eq!(evidence.candidate.len(), 3);
+        if matches!(outcome, MinimizeOutcome::IntermittentReplay) {
+            assert_eq!(
+                evidence
+                    .candidate
+                    .iter()
+                    .filter(|o| o.matches_reference)
+                    .count(),
+                2
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn minimization_without_retained_image_keeps_original() {
+    let mut fixture = fixture("minimize-no-image").await;
+    fixture.run.sandbox_rev = None;
+    fixture
+        .store
+        .delete_run(&fixture.run.id.to_string())
+        .await
+        .unwrap();
+    fixture.store.insert_run(&fixture.run).await.unwrap();
+    let runtime = Arc::new(MinimizeRuntime::new(MinimizeOutcome::Success));
+    let service =
+        ServiceContainer::new(runtime.clone(), None).with_store(Arc::clone(&fixture.store));
+    let crashes = service
+        .triage_run(&fixture.project, &fixture.target.symbol, fixture.run.id)
+        .await
+        .unwrap();
+    assert!(!crashes[0].minimized);
+    assert_eq!(crashes[0].input_path, fixture.original);
+    assert!(runtime.minimize_options.lock().unwrap().is_empty());
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn triage_rejects_symlinked_minimization_output_directory() {
@@ -340,4 +491,58 @@ async fn triage_rejects_symlinked_minimization_output_directory() {
     assert_eq!(crashes[0].input_path, fixture.original);
     assert!(std::fs::read_dir(outside).unwrap().next().is_none());
     assert!(runtime.minimize_options.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_changed_original_cannot_confirm_the_old_finding() {
+    let fixture = fixture("changed-original").await;
+    let service = ServiceContainer::new(
+        Arc::new(MinimizeRuntime::new(MinimizeOutcome::ChangedOriginal)),
+        None,
+    )
+    .with_store(Arc::clone(&fixture.store));
+    let crashes = service
+        .triage_run(&fixture.project, &fixture.target.symbol, fixture.run.id)
+        .await
+        .unwrap();
+    assert!(
+        !crashes[0].minimized,
+        "fresh original and candidate agree on a different failure"
+    );
+    assert_eq!(crashes[0].input_path, fixture.original);
+    assert!(!crashes[0].reproduction.as_ref().unwrap().confirmed);
+}
+
+#[tokio::test]
+async fn volatile_leak_pids_and_ubsan_addresses_do_not_change_failure_identity() {
+    for outcome in [MinimizeOutcome::LeakPids, MinimizeOutcome::UbsanAddresses] {
+        let fixture = fixture("volatile-failure-data").await;
+        let service = ServiceContainer::new(Arc::new(MinimizeRuntime::new(outcome)), None)
+            .with_store(Arc::clone(&fixture.store));
+        let crashes = service
+            .triage_run(&fixture.project, &fixture.target.symbol, fixture.run.id)
+            .await
+            .unwrap();
+        assert!(
+            crashes[0].minimized,
+            "semantic failure class and stack remain the same"
+        );
+        assert!(crashes[0].reproduction.as_ref().unwrap().confirmed);
+    }
+}
+
+#[tokio::test]
+async fn distinct_ubsan_categories_do_not_confirm_each_other() {
+    let fixture = fixture("changed-ubsan-class").await;
+    let service = ServiceContainer::new(
+        Arc::new(MinimizeRuntime::new(MinimizeOutcome::DifferentUbsanClass)),
+        None,
+    )
+    .with_store(Arc::clone(&fixture.store));
+    let crashes = service
+        .triage_run(&fixture.project, &fixture.target.symbol, fixture.run.id)
+        .await
+        .unwrap();
+    assert!(!crashes[0].minimized);
+    assert!(!crashes[0].reproduction.as_ref().unwrap().confirmed);
 }

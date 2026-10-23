@@ -460,6 +460,7 @@ SUMMARY: AddressSanitizer: 4 byte(s) leaked in 1 allocation(s).
         );
 
         let make = |sig: String| Crash {
+            reproduction: None,
             id: Uuid::new_v4(),
             run_id: Uuid::nil(),
             target_id: Uuid::nil(),

@@ -27,6 +27,7 @@ mod corpus;
 mod coverage_cache;
 mod coverage_feedback;
 use coverage_feedback::CoverageFeedback;
+pub(crate) mod crash_confirmation;
 mod crash_inputs;
 mod crash_owner;
 mod discovery;
@@ -39,6 +40,8 @@ mod fuzz;
 mod guards;
 mod harness;
 mod harness_inputs;
+mod managed_mutator;
+pub use managed_mutator::ManagedMutatorStatus;
 #[cfg(feature = "harness-work-order")]
 mod harness_work_order;
 #[cfg(feature = "campaign-health")]
@@ -57,8 +60,10 @@ mod run;
 pub(crate) use run::CampaignRunLimits;
 pub use run::{ReplayInputs, ReplayReview};
 mod function_coverage;
+mod harness_behavior;
 #[cfg(feature = "run-closeout")]
 pub use edge_sets::{CoverageDiffReport, RunEdgeSetCapture};
+pub use harness_behavior::{BehaviorCheck, BehaviorObservation, HarnessBehaviorReport};
 mod retained_inputs;
 pub use function_coverage::RunFunctionCoverage;
 #[cfg(feature = "run-closeout")]
@@ -73,7 +78,10 @@ mod workspace_file;
 
 #[cfg(feature = "native-analysis")]
 pub use discovery::AnalyzedInventory;
-pub use fuzz::{FuzzOutcome, FuzzRequest, FuzzStage, FUZZ_PIPELINE_REPAIRS};
+pub use fuzz::{
+    FuzzOutcome, FuzzRequest, FuzzStage, PreparedHarnessSource, FUZZ_PIPELINE_REPAIRS,
+    MAX_PREPARED_HARNESS_SOURCE_BYTES,
+};
 pub use guards::AgentTurnGuard;
 pub use harness_workspace::{
     copy_project_sources, generate_target_seeds, stage_generated_build_inputs,
@@ -150,7 +158,7 @@ const MAX_GUARDAIL_DETAIL_CHARS: usize = 256;
 const GUARDRAIL_DECISION_RETENTION: usize = 1000;
 pub(crate) const WORKSPACE_CLEANUP_BUSY_MESSAGE: &str =
     "workspace cannot be cleared while another workspace operation is active";
-pub(crate) const EXACT_DOCKER_IMAGE_REV_PREFIX: &str = "docker-image-id-sha256:";
+pub(crate) use hf_core::runtime::EXACT_DOCKER_IMAGE_REV_PREFIX;
 
 // Fields drop in declaration order: close the advisory lock before releasing
 // the process guard, which can immediately wake the next local waiter.
@@ -1563,6 +1571,27 @@ pub(crate) fn docker_runtime_enabled_from(value: Option<&str>) -> bool {
     !matches!(value, Some("0" | "false"))
 }
 
+/// Assemble every service provider path with the same spending policy.
+fn service_provider_pool(
+    config: &hf_provider::ProviderPoolConfig,
+) -> Result<hf_provider::ProviderPoolImpl, hf_provider::ProviderPoolError> {
+    config.validate()?;
+    let providers = hf_provider::build_providers(config)?;
+    if providers.is_empty() {
+        return Err(hf_provider::ProviderPoolError::Config {
+            message: "no usable providers remain".into(),
+        });
+    }
+    #[cfg(feature = "model-budgets")]
+    let providers = crate::model_budget::configured_budget_providers(providers);
+    #[cfg(not(feature = "model-budgets"))]
+    crate::config::effective_model_budget_settings()
+        .map_err(|message| hf_provider::ProviderPoolError::Config { message })?;
+    Ok(hf_provider::ProviderPoolImpl::from_providers(
+        providers, config,
+    ))
+}
+
 /// Build an LLM provider pool from `HF_PROVIDER_*` env vars, or `None` when no
 /// API key is configured.
 #[must_use]
@@ -1599,7 +1628,7 @@ pub fn provider_pool_from_env() -> Option<Arc<dyn ProviderPool>> {
         base_url_q = quote(&base_url),
     );
     let cfg: hf_provider::ProviderPoolConfig = toml::from_str(&toml_str).ok()?;
-    hf_provider::ProviderPoolImpl::from_config(&cfg)
+    service_provider_pool(&cfg)
         .ok()
         .map(|p| Arc::new(p) as Arc<dyn ProviderPool>)
 }
@@ -1623,7 +1652,7 @@ pub fn provider_pool_from_config() -> Option<Arc<dyn ProviderPool>> {
     if !cfg.providers.iter().any(|p| p.enabled) {
         return None;
     }
-    match hf_provider::ProviderPoolImpl::from_config(&cfg) {
+    match service_provider_pool(&cfg) {
         Ok(pool) => Some(Arc::new(pool) as Arc<dyn ProviderPool>),
         Err(e) => {
             tracing::warn!("failed to build provider pool from config: {e}");
@@ -1941,7 +1970,10 @@ fn auto_revert_decision(
 /// experimental setup. Comparability excludes these keys; the persisted run
 /// config keeps them verbatim (Engineering Protocol 2.13). One home serves
 /// both the boolean check and the grouping key (Engineering Protocol 2.18).
-const RUN_SCOPED_ENV_KEYS: &[&str] = &[function_coverage::PROFILE_ENV_KEY];
+const RUN_SCOPED_ENV_KEYS: &[&str] = &[
+    function_coverage::PROFILE_ENV_KEY,
+    hf_engine::managed_mutator::LIBRARY_ENV,
+];
 
 /// The run environment as the comparability contract sees it: the persisted
 /// entries minus the run-scoped destinations named by [`RUN_SCOPED_ENV_KEYS`].

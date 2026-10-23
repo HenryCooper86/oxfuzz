@@ -254,6 +254,7 @@ impl EngineRunner {
         };
         let cfg = effective_cfg.as_ref();
 
+        crate::managed_mutator::validate(engine, cfg, workspace, sandbox)?;
         let args = crate::registry::adapter_for(engine).build_run_args(cfg, binary, corpus, out)?;
         // The sandbox wall-clock timeout must exceed the fuzzer's own run time:
         // a libFuzzer `-max_total_time=N` campaign also spends time loading the

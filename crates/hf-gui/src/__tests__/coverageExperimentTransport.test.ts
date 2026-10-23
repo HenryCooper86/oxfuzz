@@ -37,3 +37,16 @@ describe("experiment transport", () => {
     await transport.invoke("run_history",{project:"/project"}); expect(invoke.mock.lastCall?.[1]).toEqual({project:"/project"});
   });
 });
+
+it("carries guided review scope through HTTP and bounded native IPC", async () => {
+  const fetch = vi.fn().mockResolvedValue(new Response("{}"));
+  vi.stubGlobal("fetch", fetch);
+  await createHttpTransport().invoke("coverage_experiment_replay_review", { id, scope });
+  const url = new URL(fetch.mock.calls[0][0]);
+  expect(url.pathname).toBe(`/coverage/experiments/${id}/replay`);
+  expect(url.searchParams.get("project")).toBe(scope.project);
+  expect(url.searchParams.get("target_id")).toBe(scope.target_id);
+  await createTauriTransport().invoke("coverage_experiment_replay_review", { id, scope });
+  expect(invoke.mock.lastCall?.[1]).toBeInstanceOf(Uint8Array);
+  expect(JSON.parse(new TextDecoder().decode(invoke.mock.lastCall?.[1]))).toEqual({ id, scope });
+});

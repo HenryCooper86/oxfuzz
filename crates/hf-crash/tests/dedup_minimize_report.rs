@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 fn crash(sig: &str, kind: CrashKind) -> Crash {
     Crash {
+        reproduction: None,
         id: Uuid::new_v4(),
         run_id: Uuid::new_v4(),
         target_id: Uuid::new_v4(),

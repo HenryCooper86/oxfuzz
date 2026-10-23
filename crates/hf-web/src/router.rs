@@ -431,6 +431,8 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .route("/semgrep/available", get(semgrep_available))
         .route("/harness/draft", post(harness_draft))
         .route("/harness/compile", post(harness_compile))
+        .route("/harness/mutator/status", post(managed_mutator_status))
+        .route("/harness/mutator/attach", post(attach_managed_mutator))
         .route("/harness/smoke", post(harness_smoke))
         .route("/harness/promote", post(harness_promote))
         .route("/harness/promote-with-findings", post(harness_promote_with_findings))
@@ -464,6 +466,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .route("/runs/revert-harness", post(revert_harness_from_run))
         .route("/runs/start", post(run_start))
         .route("/runs/{id}/function-coverage", get(run_function_coverage))
+        .route("/runs/{id}/harness-behavior", get(run_harness_behavior))
         .route("/runs/{id}/replay", get(replay_review).post(replay_start))
         .route("/runs/{id}/owner", get(run_owner))
         .route("/runs/{id}/status", get(run_status))
@@ -591,6 +594,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .route("/config/sections", get(list_configs))
         .route("/config/read", post(read_config))
         .route("/config/write", post(write_config))
+        .route("/model-budget", get(model_budget_view))
         .route("/config/toml_to_value", post(config_toml_to_value))
         .route("/config/value_to_toml", post(config_value_to_toml))
         .route("/config/providers", get(get_providers).post(set_providers))
@@ -2065,6 +2069,58 @@ async fn harness_compile(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManagedMutatorRequest {
+    project: PathBuf,
+    target: String,
+    engine: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AttachManagedMutatorRequest {
+    project: PathBuf,
+    target: String,
+    engine: String,
+    expected_harness_id: uuid::Uuid,
+    source: String,
+}
+
+async fn managed_mutator_status(
+    State(state): State<AppState>,
+    Json(req): Json<ManagedMutatorRequest>,
+) -> ApiResult<serde_json::Value> {
+    let project = approved_project(&state, &req.project)?;
+    let engine = parse_engine(&req.engine).map_err(map_err(StatusCode::BAD_REQUEST))?;
+    let status = state
+        .container
+        .managed_mutator_status(&project, &req.target, engine)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(serde_json::json!(status)))
+}
+
+async fn attach_managed_mutator(
+    State(state): State<AppState>,
+    Json(req): Json<AttachManagedMutatorRequest>,
+) -> ApiResult<serde_json::Value> {
+    let project = approved_project(&state, &req.project)?;
+    let engine = parse_engine(&req.engine).map_err(map_err(StatusCode::BAD_REQUEST))?;
+    let status = state
+        .container
+        .attach_managed_mutator(
+            &project,
+            &req.target,
+            engine,
+            req.expected_harness_id,
+            req.source,
+        )
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(serde_json::json!(status)))
+}
+
+#[derive(Debug, Deserialize)]
 struct HarnessQualificationRequest {
     project: PathBuf,
     target: String,
@@ -2097,6 +2153,7 @@ async fn harness_smoke(
         // Deterministic self-verification verdict (grok-build L2): lets the UI
         // warn on a hollow pass instead of treating every "passed" as qualified.
         "verdict": smoke.verdict,
+        "behavior": smoke.behavior,
     })))
 }
 
@@ -2288,6 +2345,24 @@ enum CampaignLaunch {
 #[serde(deny_unknown_fields)]
 struct ReplayReviewQuery {
     inputs: Option<hf_service::ReplayInputs>,
+}
+
+async fn run_harness_behavior(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> ApiResult<serde_json::Value> {
+    let owner = state
+        .container
+        .run_project(id)
+        .await
+        .map_err(classified_api_error)?;
+    let _approved_owner = approved_project(&state, &owner)?;
+    let evidence = state
+        .container
+        .harness_behavior(id)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(evidence)))
 }
 
 async fn run_function_coverage(
@@ -4147,7 +4222,7 @@ struct WriteConfigRequest {
 }
 
 async fn write_config(
-    State(_): State<AppState>,
+    State(state): State<AppState>,
     Json(req): Json<WriteConfigRequest>,
 ) -> ApiResult<()> {
     // Sections with a typed endpoint must go through it: the typed route also
@@ -4176,7 +4251,9 @@ async fn write_config(
             }),
         ));
     }
-    hf_service::config::write_config(&req.name, &req.content)
+    state
+        .container
+        .save_config(&req.name, &req.content)
         .map_err(map_err(StatusCode::BAD_REQUEST))?;
     Ok(Json(()))
 }
@@ -5006,4 +5083,11 @@ mod run_history_error_tests {
             serde_json::json!({"error":"validation error: active"})
         );
     }
+}
+
+async fn model_budget_view() -> ApiResult<hf_service::model_budget::ModelBudgetView> {
+    hf_service::model_budget::model_budget_view()
+        .await
+        .map(Json)
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))
 }

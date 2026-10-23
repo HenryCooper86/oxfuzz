@@ -41,6 +41,8 @@ pub enum StandardError {
     ResponseBodyLimitExceeded,
     /// Successful stream exceeded a finite receive allowance.
     ResponseStreamLimitExceeded,
+    /// Workflow accounting requires operator action; do not retry or freeze.
+    ModelBudgetDenied,
     /// Unclassified error.
     Unknown,
 }
@@ -72,7 +74,8 @@ impl StandardError {
             // Request-specific context, content filter or response budget — do not freeze.
             // Permanent errors (key invalid, quota, balance) — freeze duration
             // is effectively infinite, handled by freeze_permanent().
-            Self::ContextWindowExceeded
+            Self::ModelBudgetDenied
+            | Self::ContextWindowExceeded
             | Self::ResponseBodyLimitExceeded
             | Self::ResponseStreamLimitExceeded
             | Self::ContentFiltered
@@ -111,7 +114,8 @@ impl StandardError {
     pub fn should_freeze(&self) -> bool {
         !matches!(
             self,
-            Self::ContextWindowExceeded
+            Self::ModelBudgetDenied
+                | Self::ContextWindowExceeded
                 | Self::ContentFiltered
                 | Self::ResponseBodyLimitExceeded
                 | Self::ResponseStreamLimitExceeded
@@ -170,6 +174,7 @@ pub fn classify_provider_error(error: &hf_core::provider::ProviderError) -> Stan
                 }
             })
         }
+        ProviderError::ModelBudgetDenied { .. } => StandardError::ModelBudgetDenied,
         ProviderError::ResponseBodyLimitExceeded { .. } => StandardError::ResponseBodyLimitExceeded,
         ProviderError::ResponseStreamLimitExceeded { .. } => {
             StandardError::ResponseStreamLimitExceeded

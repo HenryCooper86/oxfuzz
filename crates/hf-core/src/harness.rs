@@ -72,6 +72,9 @@ pub struct Harness {
     /// `docs/standards/ENGINE_ADAPTER_STANDARD.md` (`CmpLog` section).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cmplog: Option<CmpLogCompanion>,
+    /// Reviewed native mutator artifact for this exact revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_mutator: Option<crate::mutator::ManagedMutatorArtifact>,
 }
 
 /// The recorded AFL++ `CmpLog` companion build of a harness revision.
@@ -148,6 +151,7 @@ mod tests {
             status: HarnessStatus::Compiled,
             smoke_run: None,
             cmplog,
+            custom_mutator: None,
         }
     }
 

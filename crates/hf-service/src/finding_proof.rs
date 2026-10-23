@@ -153,13 +153,26 @@ pub fn finding_proof_card(crash: &Crash) -> FindingProofCard {
             "No retained repeated sandbox replay record establishes deterministic reproduction.",
         )
     };
-    let deterministic_reproduction = proof_claim(
+    let mut deterministic_reproduction = proof_claim(
         ReproductionDetermination::NotVerified,
         FindingProofStatus::NotVerified,
         reproduction_detail.0,
         reproduction_detail.1,
         reproduction_evidence,
     );
+    if let Some(observed) = &crash.reproduction {
+        let assessment = crate::container::crash_confirmation::assess_reproduction(crash, observed);
+        let original_matches = assessment.original_matches;
+        let candidate_matches = assessment.candidate_matches;
+        "reproduction_observed_counts".clone_into(&mut deterministic_reproduction.detail_code);
+        deterministic_reproduction.detail = format!(
+            "Observed same-failure replays: original {original_matches}/{}; candidate {candidate_matches}/{}. These counts describe retained executions, not a guarantee of future determinism. {}",
+            observed.original.len(), observed.candidate.len(), assessment.reason);
+        if assessment.confirmed {
+            deterministic_reproduction.determination = ReproductionDetermination::Deterministic;
+            deterministic_reproduction.status = FindingProofStatus::Supported;
+        }
+    }
 
     let casr_exploitability = crash.casr.as_ref().map_or_else(
         || {

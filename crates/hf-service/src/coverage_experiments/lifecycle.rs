@@ -95,12 +95,7 @@ impl ServiceContainer {
     ) -> Result<CoverageExperimentView, CoverageExperimentError> {
         self.validate_coverage_experiment_scope(id, scope, None)
             .await?;
-        Ok(self
-            .experiment_store()?
-            .coverage_experiment(id)
-            .await?
-            .ok_or_else(|| CoverageExperimentError::new(C::NotFound))?
-            .into())
+        self.coverage_experiment_execution_view(id).await
     }
     /// List retained attempts without applying current execution policy.
     #[tracing::instrument(skip_all)]
@@ -140,9 +135,13 @@ impl ServiceContainer {
                     }),
             )
             .await?;
+        let mut items = Vec::with_capacity(page.items.len());
+        for item in page.items {
+            items.push(self.coverage_experiment_execution_view(item.id).await?);
+        }
         Ok(CoverageExperimentPage {
             schema_version: 1,
-            items: page.items.into_iter().map(Into::into).collect(),
+            items,
             next_cursor: page.next_cursor.map(|cursor| CoverageExperimentCursor {
                 created_at: cursor.created_at,
                 id: cursor.id,
@@ -196,12 +195,20 @@ impl ServiceContainer {
                     .as_ref()
                     .is_some_and(|result| result.run.run_id == request.result_run_id)
             {
-                return Ok(record.into());
+                return self
+                    .decorate_experiment_execution(record.into(), None)
+                    .await;
             }
             return Err(StorageError::CoverageExperimentConflict { id }.into());
         }
         self.validate_coverage_experiment_scope(id, request.scope, Some(request.result_run_id))
             .await?;
+        if let Some(execution) = store.coverage_experiment_execution(id).await? {
+            if execution.run_id != request.result_run_id {
+                return Err(StorageError::CoverageExperimentConflict { id }.into());
+            }
+            super::execution::validated_review(&execution.review_json, id, record.baseline_run_id)?;
+        }
         let run = eligible_snapshot(store, request.result_run_id, false).await?;
         let now = Utc::now();
         if now < record.created_at
@@ -231,10 +238,9 @@ impl ServiceContainer {
             input_change,
             run,
         };
-        Ok(store
-            .complete_coverage_experiment(id, &result, now)
-            .await?
-            .into())
+        let record = store.complete_coverage_experiment(id, &result, now).await?;
+        self.decorate_experiment_execution(record.into(), None)
+            .await
     }
     /// Cancel only this idle investigation; no campaign is stopped.
     #[tracing::instrument(skip_all)]
@@ -257,14 +263,17 @@ impl ServiceContainer {
             if record.status == CoverageExperimentStatus::Cancelled
                 && record.cancellation_reason.as_deref() == Some(request.reason.as_str())
             {
-                return Ok(record.into());
+                return self
+                    .decorate_experiment_execution(record.into(), None)
+                    .await;
             }
             return Err(StorageError::CoverageExperimentConflict { id }.into());
         }
-        Ok(store
+        let record = store
             .cancel_coverage_experiment(id, &request.reason, Utc::now())
-            .await?
-            .into())
+            .await?;
+        self.decorate_experiment_execution(record.into(), None)
+            .await
     }
 }
 fn compare_setup(

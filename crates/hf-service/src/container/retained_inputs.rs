@@ -265,6 +265,32 @@ pub(super) fn capture_workspace(root: &Path, destination: &Path) -> Result<(), C
     Ok(())
 }
 
+/// Bind a guided review to the complete current inputs with bounded file readers.
+#[cfg(feature = "coverage-experiments")]
+pub(super) fn review_digest(
+    workspace: &Path,
+    corpus: &Path,
+    sandbox_rev: &str,
+    config: &FuzzRunConfig,
+) -> Result<String, ClassifiedError> {
+    let workspace_files = entries(workspace, &["runs", "corpus", "out"])?;
+    let mut corpus_files = entries(corpus, &[])?;
+    // Corpus snapshots use fresh private files; only names and bytes reach the engine.
+    for entry in &mut corpus_files {
+        entry.mode = 0;
+    }
+    let mut normalized = config.clone();
+    super::managed_mutator::normalize_review_paths(&mut normalized);
+    let bytes = serde_json::to_vec(&(
+        sandbox_rev,
+        config_value(&normalized)?,
+        workspace_files,
+        corpus_files,
+    ))
+    .map_err(invalid)?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
 fn config_value(config: &FuzzRunConfig) -> Result<serde_json::Value, ClassifiedError> {
     let mut config = config.clone();
     config.input_manifest_sha256 = None;

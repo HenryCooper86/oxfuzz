@@ -105,6 +105,7 @@ async fn fixture() -> Fixture {
             binary_sha256: Some("b".repeat(64)),
             run_id: Some(Uuid::new_v4()),
         }),
+        custom_mutator: None,
         cmplog: None,
     };
     store.upsert_harness(&harness).await.unwrap();
@@ -215,6 +216,7 @@ async fn fixture() -> Fixture {
     }
 
     let crash = |run_id: Uuid, signature: &str| Crash {
+        reproduction: None,
         id: Uuid::new_v4(),
         run_id,
         target_id: target.id,
@@ -344,6 +346,7 @@ fn defectdojo_document_qualifies_head_only_observations_with_comparison_evidence
     };
     let crash_id = Uuid::new_v4();
     let crash = Crash {
+        reproduction: None,
         id: crash_id,
         run_id: head_run_id,
         target_id: Uuid::new_v4(),

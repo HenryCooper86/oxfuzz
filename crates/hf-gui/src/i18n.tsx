@@ -9,6 +9,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { enGui, zhGui } from "./i18n.gui";
 import { enResults, zhResults } from "./i18n.results";
+import { enMutators, zhMutators } from "./i18n.mutators";
+import { enBudgets, zhBudgets } from "./i18n.budgets";
 import { enExperiments, zhExperiments } from "./i18n.experiments";
 import { enExtra, zhExtra } from "./i18n.extra";
 import {
@@ -22,6 +24,23 @@ const STORAGE_KEY = "hf_locale";
 type Dict = Record<string, string>;
 
 const en: Dict = {
+  "harness.behavior.input_sensitivity": "Input sensitivity",
+  "harness.behavior.entry_rejection": "Entry and rejection",
+  "harness.behavior.repeated_input_stability": "Repeated-input stability",
+  "harness.behavior.persistent_state": "Persistent state",
+  "harness.behavior.target_coverage_growth": "Target coverage growth",
+  "harness.behavior.loading": "Loading retained qualification evidence…",
+  "harness.behavior.noRun": "No retained qualification run is linked to this revision.",
+  "harness.behavior.invalid": "Retained behavioral evidence does not match this qualification.",
+  "harness.behavior.ownerMismatch": "The qualification run belongs to another project or target.",
+  "harness.behavior.refresh": "Refresh qualification evidence",
+
+  "harness.behavior.title": "Behavioral qualification",
+  "harness.behavior.pass": "Observed",
+  "harness.behavior.suspect": "Needs review",
+  "harness.behavior.unavailable": "Unavailable",
+  ...enMutators,
+  ...enBudgets,
   ...enExperiments,
   ...enResults,
   // Sidebar navigation
@@ -184,6 +203,23 @@ const en: Dict = {
 };
 
 const zh: Dict = {
+  "harness.behavior.input_sensitivity": "输入敏感性",
+  "harness.behavior.entry_rejection": "入口与拒绝行为",
+  "harness.behavior.repeated_input_stability": "重复输入稳定性",
+  "harness.behavior.persistent_state": "持久化状态",
+  "harness.behavior.target_coverage_growth": "目标覆盖率增长",
+  "harness.behavior.loading": "正在读取已保存的验证证据…",
+  "harness.behavior.noRun": "此版本未关联已保存的验证运行。",
+  "harness.behavior.invalid": "已保存的行为证据与此次验证不匹配。",
+  "harness.behavior.ownerMismatch": "验证运行属于其他项目或目标。",
+  "harness.behavior.refresh": "刷新验证证据",
+
+  "harness.behavior.title": "行为验证",
+  "harness.behavior.pass": "已观测",
+  "harness.behavior.suspect": "需要复核",
+  "harness.behavior.unavailable": "不可用",
+  ...zhMutators,
+  ...zhBudgets,
   ...zhExperiments,
   ...zhResults,
   // Sidebar navigation

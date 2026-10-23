@@ -583,6 +583,7 @@ mod tests {
 
     fn base_crash() -> Crash {
         Crash {
+            reproduction: None,
             id: Uuid::nil(),
             run_id: Uuid::nil(),
             target_id: Uuid::nil(),

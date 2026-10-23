@@ -228,7 +228,7 @@ async fn stop_button_cancels_a_real_fuzz_run() {
         EngineKind::AflPlusPlus,
         EngineKind::Honggfuzz,
     ] {
-        qualify_engine(Arc::clone(&container), &root, engine).await;
+        Box::pin(qualify_engine(Arc::clone(&container), &root, engine)).await;
         let after = sandbox_names(ownership.workspace_digest()).await;
         assert!(
             after.is_empty(),

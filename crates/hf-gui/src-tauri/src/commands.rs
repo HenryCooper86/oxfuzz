@@ -383,6 +383,7 @@ pub async fn harness_smoke(
         // Deterministic self-verification verdict (grok-build L2): lets the UI
         // warn on a hollow pass instead of treating every "passed" as qualified.
         "verdict": smoke.verdict,
+        "behavior": smoke.behavior,
     }))
 }
 
@@ -4449,8 +4450,12 @@ pub fn read_config(name: String) -> Result<String, String> {
 
 /// Write a config section's raw TOML to its live file.
 #[tauri::command]
-pub fn write_config(name: String, content: String) -> Result<(), String> {
-    hf_service::config::write_config(&name, &content)
+pub fn write_config(
+    state: tauri::State<'_, crate::state::AppState>,
+    name: String,
+    content: String,
+) -> Result<(), String> {
+    state.container.save_config(&name, &content)
 }
 
 /// Parse raw TOML into a JSON value, for driving a structured settings form.
@@ -5158,6 +5163,65 @@ pub async fn run_function_coverage(
     state
         .container
         .run_function_coverage(uuid::Uuid::parse_str(&run_id).map_err(|error| error.to_string())?)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Read configured workflow model budget and retained usage.
+#[tauri::command]
+pub async fn model_budget_view() -> Result<hf_service::model_budget::ModelBudgetView, String> {
+    hf_service::model_budget::model_budget_view().await
+}
+
+/// Read the selected harness's retained native mutator identity and qualification.
+#[tauri::command]
+pub async fn managed_mutator_status(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: PathBuf,
+    target: String,
+    engine: String,
+) -> Result<serde_json::Value, String> {
+    let status = state
+        .container
+        .managed_mutator_status(&project, &target, parse_engine(&engine)?)
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(status).map_err(|error| error.to_string())
+}
+
+/// Compile imported source as a new unpromoted harness revision in its sandbox.
+#[tauri::command]
+pub async fn attach_managed_mutator(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: PathBuf,
+    target: String,
+    engine: String,
+    expected_harness_id: uuid::Uuid,
+    source: String,
+) -> Result<serde_json::Value, String> {
+    let status = state
+        .container
+        .attach_managed_mutator(
+            &project,
+            &target,
+            parse_engine(&engine)?,
+            expected_harness_id,
+            source,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(status).map_err(|error| error.to_string())
+}
+
+/// Read retained behavioral qualification without executing target code.
+#[tauri::command]
+pub async fn run_harness_behavior(
+    state: tauri::State<'_, crate::state::AppState>,
+    run_id: String,
+) -> Result<hf_service::container::HarnessBehaviorReport, String> {
+    state
+        .container
+        .harness_behavior(uuid::Uuid::parse_str(&run_id).map_err(|error| error.to_string())?)
         .await
         .map_err(|error| error.to_string())
 }

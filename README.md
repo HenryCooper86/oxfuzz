@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust 1.94](https://img.shields.io/badge/Rust-1.94-orange.svg)](rust-toolchain.toml)
 
-> An AI fuzzing agent that discovers targets, writes harnesses, drives open-source fuzzing engines, and triages the crashes -- under human-in-the-loop supervision and sandboxed execution.
+> A unified GUI for open-source fuzzing engines: manage targets, harnesses, campaigns, coverage, crashes, and history in one place. AFL++, honggfuzz, libFuzzer, and syzkaller run through shared service workflows, human approval, and sandboxed execution.
 
 **Target Discovery** &middot; **Harness Generation** &middot; **Engine Integration** &middot; **Crash Triage** &middot; **Corpus & Coverage Loop** &middot; **User-Extensible Skills**
 
@@ -46,16 +46,24 @@ of every term.
 | **AI Target Recommendations** | Discover shows scan results first, then automatically ranks promising targets by bug potential, reachable code, and harness feasibility; every AI score is explained and the original scan score remains visible. |
 | **Optional Semgrep Enrichment** | Explicit C/C++-only enrichment adds capped, advisory static-analysis signals from a pinned offline rules snapshot without changing normal discovery. |
 | **Harness Generation** | LLM-authored, compile-validated, smoke-fuzzed harnesses per target. |
+| **Harness Qualification Evidence** | Retained AFL++ input and persistent-sequence observations appear in Harness and History; unavailable or suspect measurements remain explicit. |
+| **Native Custom Mutators** | Import reviewed C/C++ source for upstream AFL++ or libFuzzer APIs, qualify a new harness revision, and retain artifact/image identity for replay. |
 | **Engine Integration** | AFL++, honggfuzz, libFuzzer, and syzkaller behind one `EngineAdapter` trait. |
 | **Crash Triage** | Dedup by stack signature, CASR severity/exploitability, minimize, and LLM-drafted bug reports under human review. |
 | **Corpus & Coverage** | Seed, grow, prune, and merge corpora; track coverage deltas; feed crashes back into the corpus. |
+| **Guided Coverage Experiments** | Review a baseline and changed inputs, launch through normal approval, and retain the associated campaign and comparison, including unsuccessful attempts. |
 | **AI Assistant** | A conversational control surface for the same service-owned workflow, with visible tool activity and policy-enforced human approval gates. |
 | **Multi-Provider LLM Pool** | Tag-based routing, automatic failover, provider freeze/thaw across OpenAI, Anthropic, Gemini, and OpenAI-compatible backends. |
+| **Workflow Spending Limits** | Set durable model-call, token, and USD limits in Settings; inspect usage and denials in Dashboard. Concurrent requests and retries reserve allowance before dispatch. |
 | **Sandboxed Execution** | Every harness build and fuzz run goes through the mandatory Docker-backed `hf-runtime`; there is no production host-execution fallback. |
 | **Scheduled Campaigns** | Headless, budget-bounded fuzzing on an interval/cron/once schedule, rotating through a project's promoted targets. |
 | **Issue & Vuln Tracking** | File crashes as GitHub/GitLab issues or push them to DefectDojo as findings; export SARIF for code scanning. |
 | **Retained Evidence** | Run history, policy decisions, reports, crash reproducers, corpora, coverage, and exportable project evidence remain available for review. |
 | **Desktop, CLI & Web** | A native macOS app (Tauri v2 + React) with a built-in Help guide, a full CLI/TUI, and a REST + SSE API -- all over the same service core. |
+
+Live engine and real-project effectiveness claims require separate qualification.
+See [manual qualification](docs/guides/MANUAL_QUALIFICATION.md) and
+[native custom mutators](docs/guides/MANAGED_MUTATORS.md) for the remaining operator checks.
 
 ---
 

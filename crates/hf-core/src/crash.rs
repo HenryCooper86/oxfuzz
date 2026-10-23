@@ -100,6 +100,60 @@ pub enum CrashOrigin {
     Unknown,
 }
 
+/// One observed sandbox replay, distinct from a model's advisory assessment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrashReplayObservation {
+    /// Exit status, absent when the runtime could not execute the request.
+    pub exit_code: Option<i32>,
+    /// Runtime completion status; forced termination cannot confirm a failure.
+    pub termination: Option<crate::runtime::CommandTermination>,
+    /// Bounded actual output from this attempt.
+    pub log: String,
+    /// Whether this attempt reproduced the reference failure.
+    pub matches_reference: bool,
+    /// Runtime error, when the request could not complete.
+    pub error: Option<String>,
+}
+
+/// Empirical evidence retained by independent crash-minimization confirmation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrashReproduction {
+    /// Evidence format; older incomplete records cannot support confirmation.
+    #[serde(default)]
+    pub version: u32,
+    /// Run that owns the classified reference and replay artifacts.
+    #[serde(default)]
+    pub run_id: Uuid,
+    /// Finding whose original classification supplied the reference log.
+    #[serde(default)]
+    pub crash_id: Uuid,
+    /// Requested observations per input, retained independently of completed counts.
+    #[serde(default)]
+    pub requested_runs: u32,
+    /// Actual bounded log used to classify the original finding, before minimization.
+    /// Absent for CASR-only evidence without a comparable sanitizer trace.
+    #[serde(default)]
+    pub reference_log: Option<String>,
+    /// Original run-owned artifact, retained even after confirmation.
+    pub original_input: PathBuf,
+    /// Digest of the original bytes.
+    pub original_sha256: String,
+    /// Candidate derived artifact.
+    pub candidate_input: PathBuf,
+    /// Digest of the candidate bytes.
+    pub candidate_sha256: String,
+    /// Digest of the immutable run binary used for every attempt.
+    pub binary_sha256: String,
+    /// Exact sandbox image used for every attempt.
+    pub image: String,
+    /// Actual observations for the original input.
+    pub original: Vec<CrashReplayObservation>,
+    /// Actual observations for the minimized candidate.
+    pub candidate: Vec<CrashReplayObservation>,
+    /// All requested attempts completed with the same failure identity.
+    pub confirmed: bool,
+}
+
 /// A crash artifact from a fuzz run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Crash {
@@ -111,6 +165,9 @@ pub struct Crash {
     pub kind: CrashKind,
     pub summary: String,
     pub minimized: bool,
+    /// Observed reproduction evidence; absent on older or unconfirmed runs.
+    #[serde(default)]
+    pub reproduction: Option<CrashReproduction>,
     pub bug_report: Option<BugReport>,
     /// CASR severity/analysis report, when triage ran CASR.
     #[serde(default)]

@@ -168,6 +168,7 @@ fn stored_harness(target_id: uuid::Uuid, symbol: &str) -> hf_core::harness::Harn
             binary_sha256: None,
             run_id: None,
         }),
+        custom_mutator: None,
         cmplog: None,
     }
 }
@@ -206,6 +207,7 @@ fn stored_run(
 
 fn stored_crash(run_id: uuid::Uuid, target_id: uuid::Uuid, marker: &str) -> hf_core::crash::Crash {
     hf_core::crash::Crash {
+        reproduction: None,
         id: uuid::Uuid::new_v4(),
         run_id,
         target_id,

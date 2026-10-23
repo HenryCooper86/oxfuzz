@@ -219,6 +219,7 @@ mod tests {
 
     fn crash() -> Crash {
         Crash {
+            reproduction: None,
             id: uuid::Uuid::new_v4(),
             run_id: uuid::Uuid::new_v4(),
             target_id: uuid::Uuid::new_v4(),

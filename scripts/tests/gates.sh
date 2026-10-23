@@ -27,6 +27,9 @@ COVERAGE_INFRASTRUCTURE_CRATES=(
 # hf-web and hf-service. Checking them one at a time catches undeclared feature
 # coupling that default and all-feature builds both hide.
 PRODUCT_FEATURES=(
+  managed-mutators
+  model-budgets
+  harness-behavior
   clang-analysis
   ai-target-ranking
   campaign-allocation
@@ -101,6 +104,12 @@ gate_test() {
 gate_feature_behavior() {
   # Compile-only feature checks cannot establish the behavior of a disabled
   # route or an enabled standalone service operation.
+  ./scripts/cargo-test-filtered.sh -p hf-harness --no-default-features --test managed_mutator_feature_off
+  ./scripts/cargo-test-filtered.sh -p hf-engine --no-default-features --test managed_mutators feature_disabled_dispatch_rejects_native_plugin_requests
+  ./scripts/cargo-test-filtered.sh -p hf-service --no-default-features --features managed-mutators --test managed_mutators
+  ./scripts/cargo-test-filtered.sh -p hf-service --no-default-features --features model-budgets --test model_budgets
+  ./scripts/cargo-test-filtered.sh -p hf-service --no-default-features --lib model_budget::tests
+  ./scripts/cargo-test-filtered.sh -p hf-service --no-default-features --features harness-behavior --test harness_qualification stable_sequence_is_measured_and_promotable
   ./scripts/cargo-test-filtered.sh -p hf-web --no-default-features --test build_doctor_disabled_api
   ./scripts/cargo-test-filtered.sh -p hf-web --no-default-features --test coverage_experiments_api
   ./scripts/cargo-test-filtered.sh -p hf-service --no-default-features --test coverage_experiments

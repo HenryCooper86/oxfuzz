@@ -1,3 +1,4 @@
+import { extraTranslationDictionariesJson } from "./translationDictionaryScan";
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 
@@ -26,7 +27,7 @@ describe("harness generator choice", () => {
     expect(view).toContain('t("harness.wroteByLlm")');
     expect(view).toContain('t("harness.wroteByHeuristic")');
 
-    const strings = source("../i18n.extra.ts");
+    const strings = extraTranslationDictionariesJson;
     for (const key of [
       "harness.generator",
       "harness.generatorAuto",

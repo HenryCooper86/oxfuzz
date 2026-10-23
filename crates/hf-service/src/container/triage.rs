@@ -141,13 +141,13 @@ impl ServiceContainer {
         if run.binary_rev.is_some() {
             self.minimize_triaged_crashes_locked(
                 &workspace,
-                run_id,
+                &run,
                 engine,
                 &run_binary,
                 &mut deduped,
                 &mut logs,
             )
-            .await;
+            .await?;
         }
 
         // Draft an LLM bug report for each unique crash when a provider is
@@ -225,13 +225,25 @@ impl ServiceContainer {
     async fn minimize_triaged_crashes_locked(
         &self,
         workspace: &Path,
-        run_id: Uuid,
+        run: &RunRecord,
         engine: EngineKind,
         binary: &Path,
         crashes: &mut [hf_core::crash::Crash],
         logs: &mut std::collections::HashMap<PathBuf, String>,
-    ) {
+    ) -> Result<(), ClassifiedError> {
         use crate::crash_minimization::{prepare, PreparedMinimization, MAX_CRASH_MINIMIZATIONS};
+
+        let policy =
+            crate::config::effective_triage_settings().map_err(ClassifiedError::Validation)?;
+        let Some(digest) = run
+            .sandbox_rev
+            .as_deref()
+            .and_then(|rev| rev.strip_prefix(super::EXACT_DOCKER_IMAGE_REV_PREFIX))
+        else {
+            return Ok(());
+        };
+        let image =
+            hf_core::runtime::ImmutableImageReference::from_sha256_id(format!("sha256:{digest}"))?;
 
         let limits = hf_core::runtime::ResourceLimits {
             max_mem_mb: 2048,
@@ -242,7 +254,7 @@ impl ServiceContainer {
         };
         for crash in crashes.iter_mut().take(MAX_CRASH_MINIMIZATIONS) {
             let original = crash.input_path.clone();
-            let prepared = match prepare(workspace, run_id, engine, binary, &original, crash.id) {
+            let prepared = match prepare(workspace, run.id, engine, binary, &original, crash.id) {
                 Ok(prepared) => prepared,
                 Err(error) => {
                     tracing::warn!(
@@ -255,7 +267,8 @@ impl ServiceContainer {
             let minimized = match prepared {
                 PreparedMinimization::Unsupported => break,
                 PreparedMinimization::Complete(path) => Some(path),
-                PreparedMinimization::Run(run) => {
+                PreparedMinimization::Run(mut run) => {
+                    run.sandbox.image = Some(image.reference().to_owned());
                     let result = self
                         .runtime
                         .run_command_opts(&run.command, workspace, &limits, &run.sandbox)
@@ -297,13 +310,35 @@ impl ServiceContainer {
                 }
             };
             if let Some(path) = minimized {
-                if let Some(log) = logs.get(&original).cloned() {
-                    logs.insert(path.clone(), log);
+                let evidence = self
+                    .confirm_minimized_crash(
+                        workspace,
+                        run,
+                        binary,
+                        (&original, &path),
+                        &image,
+                        &policy,
+                        crash,
+                        logs.get(&original).map(String::as_str),
+                    )
+                    .await?;
+                if evidence.confirmed {
+                    if let Some(observation) = evidence.candidate.first() {
+                        logs.insert(path.clone(), observation.log.clone());
+                    }
+                    crash.input_path = path;
+                    crash.minimized = true;
                 }
-                crash.input_path = path;
-                crash.minimized = true;
+                crash.reproduction = Some(evidence);
+                if let Some(store) = &self.store {
+                    store
+                        .upsert_crash(crash)
+                        .await
+                        .map_err(|e| ClassifiedError::Storage(e.to_string()))?;
+                }
             }
         }
+        Ok(())
     }
 
     /// Fetch the raw `llvm-cov export` JSON for a target, cached per target by
@@ -583,6 +618,7 @@ impl ServiceContainer {
                     format!("{} at {}", casr.severity_short, casr.crashline)
                 };
                 hf_core::crash::Crash {
+                    reproduction: None,
                     id: Uuid::new_v4(),
                     run_id,
                     target_id,

@@ -50,6 +50,8 @@ pub struct SmokeOutcome {
     #[serde(flatten)]
     pub summary: SmokeRunSummary,
     pub verdict: HarnessVerdict,
+    /// Retained bounded behavioral observations of the exact smoke binary.
+    pub behavior: crate::container::HarnessBehaviorReport,
 }
 
 /// Assess a harness smoke outcome from its concrete signals, cheapest checks
@@ -354,6 +356,7 @@ mod tests {
         // added alongside, never nesting the summary under a new key.
         let summary = smoke(true, 0.0, 0);
         let outcome = SmokeOutcome {
+            behavior: crate::container::HarnessBehaviorReport::unavailable("test fixture"),
             verdict: assess_harness_smoke(&summary, HarnessStatus::SmokePassed),
             summary,
         };

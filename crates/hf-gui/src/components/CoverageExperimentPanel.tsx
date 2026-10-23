@@ -97,6 +97,29 @@ function ExperimentWorkspace({ project, targetId, runs, advice, onNavigate, inve
     const timer = window.setTimeout(() => void choose(restoration.id!), 0);
     return () => window.clearTimeout(timer);
   }, [choose, restoration.id]);
+  const selectedId = selected?.id;
+  const selectedStatus = selected?.status;
+  const executionStatus = selected?.execution?.status;
+  useEffect(() => {
+    if (!selectedId || (selectedStatus !== "prepared" && executionStatus !== "running")) return;
+    const id = selectedId;
+    const token = generation.current;
+    let refreshing = false;
+    const timer = window.setInterval(() => {
+      if (refreshing || writing.current) return;
+      refreshing = true;
+      getTransport().invoke<CoverageExperiment>("coverage_experiment_get", { id, scope: { project, target_id: targetId } })
+        .then(value => { if (active.current && token === generation.current) setSelected(value); })
+        .catch(error => { if (active.current && token === generation.current) failure(error); })
+        .finally(() => { refreshing = false; });
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [selectedId, selectedStatus, executionStatus, project, targetId, failure]);
+  const cancelExecution = async (runId: string) => {
+    const token = generation.current;
+    try { await getTransport().invoke("cancel_run", { runId }); }
+    catch (error) { if (active.current && token === generation.current) failure(error); }
+  };
   const write = async (command: string, args: Record<string, unknown>) => {
     if (writing.current || unavailable) return;
     if (command === "coverage_experiment_create") listGeneration.current++;
@@ -136,13 +159,21 @@ function ExperimentWorkspace({ project, targetId, runs, advice, onNavigate, inve
       <RunEvidence run={selected.baseline} label={t("experiments.baselineStatus")} />
       {selected.status === "prepared" && <>
         <div className="flex gap-2"><Button disabled={!onNavigate} onClick={() => onNavigate?.(selected.kind === "grow_corpus" ? "corpus" : "harness")}>{t(selected.kind === "grow_corpus" ? "experiments.openCorpus" : "experiments.openHarness")}</Button></div>
-        {selected.baseline.seed === null ? <p className="text-xs">{t("experiments.replaySeedMissing")}</p> : <ReplayRun runId={selected.baseline_run_id} inputs="current" onNavigate={onNavigate} />}
-        <p className="text-xs">{t("experiments.error.invalid_chronology")}</p>
+        {selected.baseline.seed === null ? <p className="text-xs">{t("experiments.replaySeedMissing")}</p> : !selected.execution && <ReplayRun runId={selected.baseline_run_id} inputs="current" experiment={{ id: selected.id, scope }} onFinished={() => void choose(selected.id)} onNavigate={onNavigate} />}
+        <p className="text-xs">{t("experiments.guided")}</p>
+        {!selected.execution && <><p className="text-xs">{t("experiments.error.invalid_chronology")}</p>
         <label>{t("experiments.result")}<select aria-label={t("experiments.result")} value={result} disabled={disabled} onChange={event => setResult(event.target.value)}><option value="">{t("experiments.choose")}</option>{laterRuns.map(run => <option key={run.id} value={run.id}>{run.id} · {run.started_at} · {t(`experiments.status.${run.status.toLowerCase() === "cancelled" ? "cancelledRun" : run.status.toLowerCase()}`)}</option>)}</select></label>
-        <Button disabled={disabled || !result} onClick={() => void write("coverage_experiment_complete", { id: selected.id, request: { scope, result_run_id: result } })}>{t("experiments.attach")}</Button>
+        <Button disabled={disabled || !result} onClick={() => void write("coverage_experiment_complete", { id: selected.id, request: { scope, result_run_id: result } })}>{t("experiments.attach")}</Button></>}
         <label>{t("experiments.reason")}<textarea aria-label={t("experiments.reason")} value={reason} disabled={disabled} onChange={event => setReason(event.target.value)} /></label>
         <Button disabled={disabled || !reason.trim()} onClick={() => void write("coverage_experiment_cancel", { id: selected.id, request: { scope, reason } })}>{t("experiments.cancel")}</Button>
       </>}
+      {selected.execution && <section aria-label={t("experiments.execution")}>
+        <p>{t("experiments.execution")}: {selected.execution.run_id} · {selected.execution.status}</p>
+        <p className="text-xs break-all">{selected.execution.reviewed_input_sha256}</p>
+        {selected.execution.comparison_error && <p role="alert">{t(`experiments.error.${selected.execution.comparison_error}`)}</p>}
+        {selected.execution.status.toLowerCase() === "running" && <Button onClick={() => void cancelExecution(selected.execution!.run_id)}>{t("experiments.cancelExecution")}</Button>}
+        <p className="text-xs">{t("experiments.cancellationSeparate")}</p>
+      </section>}
       {selected.cancellation_reason && <p>{selected.cancellation_reason}</p>}
       {selected.result && <>
         <RunEvidence run={selected.result.run} label={t("experiments.resultStatus")} />

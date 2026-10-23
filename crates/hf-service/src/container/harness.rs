@@ -887,6 +887,7 @@ impl ServiceContainer {
                 sanitizer,
                 status: HarnessStatus::Draft,
                 smoke_run: None,
+                custom_mutator: None,
                 cmplog: cmplog_companion_spec(
                     engine,
                     lang,
@@ -1134,11 +1135,32 @@ impl ServiceContainer {
         sanitizer: Option<Sanitizer>,
         cmplog: bool,
     ) -> Result<CompileOutcome, ClassifiedError> {
+        self.harness_compile_with_expected(
+            source, project, engine, target, lang, sanitizer, cmplog, None,
+        )
+        .await
+    }
+
+    pub(super) async fn harness_compile_with_expected(
+        &self,
+        source: String,
+        project: &Path,
+        engine: EngineKind,
+        target: &str,
+        lang: TargetLanguage,
+        sanitizer: Option<Sanitizer>,
+        cmplog: bool,
+        expected_harness_id: Option<Uuid>,
+    ) -> Result<CompileOutcome, ClassifiedError> {
         self.compilation_store()?;
         require_fuzzing_harness_engine(engine, lang)?;
         self.admit_harness_build(project, lang).await?;
         let _workspace_operation = self.acquire_workspace_operation().await?;
         let _target_revision = self.acquire_target_revision(project, target).await?;
+        if let Some(expected) = expected_harness_id {
+            let active = self.active_harness_locked(project, target, engine).await?;
+            require_expected_harness_id(&active, Some(expected))?;
+        }
         self.authorize_recorded(Action::CompileHarness, "harness_compile", Some(project))
             .await?;
         let sanitizer = crate::config::resolve_build_sanitizer(sanitizer)
@@ -1192,6 +1214,7 @@ impl ServiceContainer {
             sanitizer,
             status: HarnessStatus::Draft,
             smoke_run: None,
+            custom_mutator: None,
             cmplog: cmplog_companion_spec(
                 engine,
                 lang,
@@ -1642,6 +1665,14 @@ impl ServiceContainer {
         // is never part of the qualification argv or its evidence.
         let artifacts =
             stage_run_artifacts(&workspace, smoke_record.id, &harness.source, &binary, None)?;
+        super::managed_mutator::stage(
+            &harness,
+            &artifacts,
+            &mut smoke_config,
+            sandbox_image.reference(),
+            false,
+            true,
+        )?;
         // A qualification run retains the same immutable inputs a campaign does,
         // because collection verifies that manifest to attribute the profile
         // export to an exact binary and image. Without it a smoke run cannot
@@ -1833,6 +1864,21 @@ impl ServiceContainer {
             &tokio_util::sync::CancellationToken::new(),
         )
         .await;
+        #[cfg(feature = "harness-behavior")]
+        let behavior = self
+            .collect_harness_behavior(
+                project,
+                &smoked,
+                &smoke_record,
+                &artifacts,
+                &smoke_config,
+                sandbox_image.reference(),
+            )
+            .await?;
+        #[cfg(not(feature = "harness-behavior"))]
+        let behavior = super::harness_behavior::HarnessBehaviorReport::unavailable(
+            "harness-behavior feature is disabled",
+        );
         let Some(summary) = smoked.smoke_run.as_mut() else {
             let _ = store
                 .set_run_status(smoke_record.id, RunStatus::Failed, Some(Utc::now()))
@@ -1875,8 +1921,13 @@ impl ServiceContainer {
         // with a verdict so every presentation layer surfaces a hollow pass -- a
         // harness that compiled and "passed" yet never drove the target -- instead
         // of re-deriving that judgment. Observation only; it changes no control flow.
-        let verdict = crate::verification::assess_harness_smoke(&summary, smoked.status);
-        Ok(crate::verification::SmokeOutcome { summary, verdict })
+        let mut verdict = crate::verification::assess_harness_smoke(&summary, smoked.status);
+        behavior.augment_verdict(&mut verdict);
+        Ok(crate::verification::SmokeOutcome {
+            summary,
+            verdict,
+            behavior,
+        })
     }
 
     /// Promote the active harness after a clean persisted smoke run. Calling
@@ -2007,6 +2058,7 @@ impl ServiceContainer {
             ))
             .into());
         }
+        self.require_behavior_promotion(smoke.run_id).await?;
         self.require_smoke_target_entry(target, smoke.run_id)
             .await?;
         let (_, source_sha256, binary_sha256) = qualification_evidence(&harness)?;
@@ -2053,6 +2105,7 @@ impl ServiceContainer {
         let smoke_run_id = smoke.run_id;
         self.verify_harness_qualification_locked(project, target, &harness)
             .await?;
+        self.require_behavior_promotion(smoke_run_id).await?;
         self.require_smoke_target_entry(target, smoke_run_id)
             .await?;
         let (_, source_sha256, binary_sha256) = qualification_evidence(&harness)?;
@@ -2629,6 +2682,7 @@ mod smoke_config_tests {
             sanitizer: Sanitizer::Address,
             status: HarnessStatus::Draft,
             smoke_run: None,
+            custom_mutator: None,
             cmplog: None,
         }
     }
@@ -2944,6 +2998,7 @@ mod exact_qualification_tests {
                 sanitizer: Sanitizer::Address,
                 status: HarnessStatus::Compiled,
                 smoke_run: None,
+                custom_mutator: None,
                 cmplog: None,
             })
             .await

@@ -201,6 +201,7 @@ async fn fuzz_auto_pick_excludes_go_even_with_the_go_native_engine_enabled() {
     let error = container
         .fuzz_onboard(
             FuzzRequest {
+                prepared_harness: None,
                 project: &project,
                 target: None,
                 engine: EngineKind::GoNative,
@@ -251,6 +252,7 @@ async fn fuzz_with_an_explicit_go_target_fails_naming_the_language() {
     let error = container
         .fuzz_onboard(
             FuzzRequest {
+                prepared_harness: None,
                 project: &project,
                 target: Some("ParsePacket"),
                 engine: EngineKind::LibFuzzer,

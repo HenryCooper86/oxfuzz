@@ -77,6 +77,22 @@ def function_coverage(count="0"):
 
 
 class ReportTests(unittest.TestCase):
+    def test_schema_two_report_binds_the_exact_prepared_trial_source(self):
+        plan = cohort()
+        plan["schema_version"] = 2
+        plan["trials"][0]["prepared_harness"] = {
+            "path": "harnesses/reference.c", "sha256": "c" * 64,
+            "source_sha256": "d" * 64, "origin": "reference",
+        }
+        value = campaign_manifest()
+        value["body"]["source_revision"] = "d" * 64
+        manifest = self.artifact("prepared.json", value)
+        assemble_report(plan, self.observations(manifest), self.root)
+        value["body"]["source_revision"] = DIGEST
+        stale = self.artifact("stale.json", value)
+        with self.assertRaisesRegex(ValueError, "source_revision"):
+            assemble_report(plan, self.observations(stale), self.root)
+
     def test_evidence_reads_do_not_load_unbounded_file_bytes(self):
         small = self.root / "small.json"
         small.write_text('{"ok": true}', encoding="utf-8")

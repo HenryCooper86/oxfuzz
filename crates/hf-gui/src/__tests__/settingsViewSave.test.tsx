@@ -225,4 +225,35 @@ describe("SettingsView save", () => {
     // The stale conversion must neither switch to raw nor overwrite the edit.
     expect(coverageSwitch().getAttribute("aria-pressed")).toBe("false");
   });
+  it("saves exact budget limits through the shared validated config operation", async () => {
+    const config = { fuzzing: { ...FUZZING }, model_budget: { scope_id: "trial", max_tokens: "9007199254740993", max_cost_microusd: "1000000" } };
+    mocks.invoke.mockImplementation((command: string) => {
+      if (command === "read_config") return Promise.resolve("[model_budget]\n");
+      if (command === "config_toml_to_value") return Promise.resolve(config);
+      if (command === "config_value_to_toml") return Promise.resolve("[model_budget]\nscope_id='trial'\nmax_tokens=9007199254740995\nmax_cost_microusd=2500000");
+      if (command === "write_config") return Promise.resolve();
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    await act(async () => root.render(<I18nContext.Provider value={i18n}><SettingsView /></I18nContext.Provider>));
+    const nav = [...container.querySelectorAll("button")].find((button) => button.textContent === "settings.tab.fuzzing")!;
+    await act(async () => nav.click());
+    await flush();
+    const input = container.querySelector<HTMLInputElement>('input[aria-label="budget.max_tokens"]')!;
+    expect(input.value).toBe("9007199254740993");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "9007199254740995");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const dollars = container.querySelector<HTMLInputElement>('input[aria-label="budget.max_cost_microusd"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(dollars, "2.50");
+      dollars.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const save = [...container.querySelectorAll("button")].find((button) => button.textContent === "settings.save")!;
+    await act(async () => save.click());
+    await flush();
+    expect(mocks.invoke).toHaveBeenCalledWith("config_value_to_toml", { value: { ...config, model_budget: { ...config.model_budget, max_tokens: "9007199254740995", max_cost_microusd: "2500000" } } });
+    expect(mocks.invoke).toHaveBeenCalledWith("write_config", { name: "oxfuzz", content: "[model_budget]\nscope_id='trial'\nmax_tokens=9007199254740995\nmax_cost_microusd=2500000" });
+  });
+
 });

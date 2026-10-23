@@ -9,6 +9,7 @@ use hf_core::{engine::EngineKind, target::Sanitizer};
 pub(crate) use lifecycle::run_reference;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+pub(crate) use validation::{parse_uuid, unique_json};
 
 macro_rules! experiment_enum {
     ($name:ident, $doc:literal, [$($variant:ident),+ $(,)?]) => {

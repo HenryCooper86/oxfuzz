@@ -493,6 +493,7 @@ async fn fuzz_cmplog_rebuilds_a_companionless_promoted_harness() {
     let (dir, store, container, _runtime, _workspace) = fixture().await;
     let project = dir.path().join("proj");
     let request = |cmplog| hf_service::FuzzRequest {
+        prepared_harness: None,
         project: &project,
         target: Some("parse_value"),
         engine: EngineKind::AflPlusPlus,
@@ -545,4 +546,73 @@ async fn fuzz_cmplog_rebuilds_a_companionless_promoted_harness() {
         .expect("a companion-carrying harness is reusable");
     assert!(reused.harness_reused);
     assert_eq!(reused.harness_id, cmplog_run.harness_id);
+}
+
+#[cfg(feature = "coverage-experiments")]
+#[tokio::test]
+async fn guided_experiment_stages_and_drives_the_reviewed_cmplog_companion() {
+    use hf_service::coverage_experiments::*;
+    let (dir, store, service, runtime, _workspace) = fixture().await;
+    let project = dir.path().join("proj");
+    qualify(&service, &project, true).await;
+    let baseline = service
+        .run_fuzzer(
+            &project,
+            "parse_value",
+            EngineKind::AflPlusPlus,
+            30,
+            None,
+            None,
+            None,
+            None,
+            Some(true),
+            None,
+            &|_| {},
+        )
+        .await
+        .unwrap();
+    let evidence = store
+        .coverage_experiment_run_evidence(baseline.run_id)
+        .await
+        .unwrap();
+    let experiment = service
+        .create_coverage_experiment(CreateCoverageExperimentRequest {
+            project: project.clone(),
+            target_id: evidence.target_id,
+            baseline_run_id: baseline.run_id,
+            kind: CoverageExperimentKind::GrowCorpus,
+            goal_function: "parse_value".into(),
+            hypothesis: "Additional seeds with the same comparison instrumentation".into(),
+            duration_secs: 30,
+        })
+        .await
+        .unwrap();
+    let scope = CoverageExperimentScope {
+        project: project.clone(),
+        target_id: evidence.target_id,
+    };
+    let review = service
+        .coverage_experiment_replay_review(experiment.id, scope.clone())
+        .await
+        .unwrap();
+    let result = service
+        .replay_run_reviewed(review, &|_| {}, &|_| {})
+        .await
+        .unwrap();
+    let workspace = hf_service::workspace_dir(&project, "parse_value");
+    assert!(workspace
+        .join("runs")
+        .join(result.run_id.to_string())
+        .join("input/harness.cmplog")
+        .is_file());
+    let runs = runtime.afl_runs();
+    assert!(runs.last().unwrap().iter().any(|arg| arg == "-c"));
+    assert_eq!(
+        service
+            .coverage_experiment(experiment.id, scope)
+            .await
+            .unwrap()
+            .status,
+        CoverageExperimentStatus::Completed
+    );
 }

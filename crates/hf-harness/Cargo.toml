@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Harness generation, compile validation, smoke fuzz"
 
+[features]
+managed-mutators = ["hf-engine/managed-mutators"]
+
 [dependencies]
 hf-core = { workspace = true }
 hf-prompt = { workspace = true }

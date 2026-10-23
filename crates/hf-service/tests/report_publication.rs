@@ -129,6 +129,7 @@ async fn project(label: &str, symbol: &str) -> ProjectFixture {
         sanitizer: Sanitizer::Address,
         status: HarnessStatus::Promoted,
         smoke_run: None,
+        custom_mutator: None,
         cmplog: None,
     };
     store.upsert_target(&target, Utc::now()).await.unwrap();
@@ -142,6 +143,7 @@ async fn project(label: &str, symbol: &str) -> ProjectFixture {
     // exactly one finding.
     store
         .upsert_crash(&Crash {
+            reproduction: None,
             id: Uuid::new_v4(),
             run_id: latest.id,
             target_id: target.id,

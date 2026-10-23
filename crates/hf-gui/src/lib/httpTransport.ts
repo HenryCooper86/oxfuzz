@@ -43,6 +43,8 @@ const COMMAND_MAP: Record<string, CommandEndpoint> = {
     path: "/semgrep/enrich/{operation_id}/cancel",
   },
   harness_draft: { method: "POST", path: "/harness/draft" },
+  managed_mutator_status: { method: "POST", path: "/harness/mutator/status" },
+  attach_managed_mutator: { method: "POST", path: "/harness/mutator/attach" },
   harness_compile: { method: "POST", path: "/harness/compile" },
   harness_smoke: { method: "POST", path: "/harness/smoke" },
   harness_promote: { method: "POST", path: "/harness/promote" },
@@ -87,7 +89,9 @@ const COMMAND_MAP: Record<string, CommandEndpoint> = {
   run_coverage_series: { method: "POST", path: "/runs/coverage" },
   run_harness_source: { method: "POST", path: "/runs/harness-source" },
   revert_harness_from_run: { method: "POST", path: "/runs/revert-harness" },
+  run_harness_behavior: { method: "GET", path: "/runs/{run_id}/harness-behavior" },
   run_function_coverage: { method: "GET", path: "/runs/{run_id}/function-coverage" },
+  coverage_experiment_replay_review: { method: "GET", path: "/coverage/experiments/{id}/replay" },
   replay_review: { method: "GET", path: "/runs/{run_id}/replay" },
   replay_run: { method: "POST", path: "/runs/{run_id}/replay" },
   run_fuzzer: { method: "POST", path: "/runs/start" },
@@ -240,6 +244,7 @@ const COMMAND_MAP: Record<string, CommandEndpoint> = {
   list_configs: { method: "GET", path: "/config/sections" },
   read_config: { method: "POST", path: "/config/read" },
   write_config: { method: "POST", path: "/config/write" },
+  model_budget_view: { method: "GET", path: "/model-budget" },
   config_toml_to_value: { method: "POST", path: "/config/toml_to_value" },
   config_value_to_toml: { method: "POST", path: "/config/value_to_toml" },
   get_fuzzing_settings: { method: "GET", path: "/config/fuzzing" },
@@ -599,7 +604,7 @@ export function createHttpTransport(options: HttpTransportOptions = {}): Transpo
         // present an accurate unsupported/offline state.
         throw new Error(`Unsupported command in web mode: ${command}`);
       }
-      if (command === "coverage_experiment_get") return request<T>(endpoint, { id: args?.id, ...args?.scope as Record<string, unknown> }, options);
+      if (command === "coverage_experiment_get" || command === "coverage_experiment_replay_review") return request<T>(endpoint, { id: args?.id, ...args?.scope as Record<string, unknown> }, options);
       if (command === "coverage_experiment_complete" || command === "coverage_experiment_cancel") return request<T>(endpoint, { id: args?.id, ...args?.request as Record<string, unknown> }, options);
       if (command === "coverage_experiment_list") {
         const { before, ...rest } = args ?? {};

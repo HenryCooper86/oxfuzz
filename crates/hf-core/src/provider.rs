@@ -376,6 +376,10 @@ pub enum ProviderError {
     #[error("no provider available matching tags {tags:?}")]
     NoProviderAvailable { tags: Vec<String> },
 
+    /// A durable workflow budget denied this upstream attempt.
+    #[error("model budget {scope_id}: {reason}")]
+    ModelBudgetDenied { scope_id: String, reason: String },
+
     #[error("request cancelled")]
     Cancelled,
 
@@ -405,7 +409,8 @@ impl ProviderError {
             Self::AuthenticationFailed { .. }
             | Self::KeyInvalid { .. }
             | Self::QuotaExhausted { .. } => ErrorSeverity::Permanent,
-            Self::NoProviderAvailable { .. }
+            Self::ModelBudgetDenied { .. }
+            | Self::NoProviderAvailable { .. }
             | Self::ResponseBodyLimitExceeded { .. }
             | Self::ResponseStreamLimitExceeded { .. } => ErrorSeverity::UserActionRequired,
             // All other errors are transient (rate limits, network, server, parse, etc.)

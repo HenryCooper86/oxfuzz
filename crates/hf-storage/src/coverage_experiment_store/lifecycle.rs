@@ -233,7 +233,7 @@ pub(crate) async fn run_reference(
     connection: &mut SqliteConnection,
     run_id: &str,
 ) -> Result<Option<CoverageExperimentRunReference>, StorageError> {
-    let row = sqlx::query("SELECT id, 'baseline' AS role FROM coverage_experiments WHERE baseline_run_id = ?1 UNION ALL SELECT id, 'result' AS role FROM coverage_experiments WHERE result_run_id = ?1 ORDER BY id, role LIMIT 1")
+    let row = sqlx::query("SELECT id, 'baseline' AS role FROM coverage_experiments WHERE baseline_run_id = ?1 UNION ALL SELECT id, 'result' AS role FROM coverage_experiments WHERE result_run_id = ?1 UNION ALL SELECT experiment_id AS id, 'result' AS role FROM coverage_experiment_executions WHERE run_id = ?1 ORDER BY id, role LIMIT 1")
         .bind(run_id).fetch_optional(connection).await?;
     row.map(|row| {
         Ok(CoverageExperimentRunReference {

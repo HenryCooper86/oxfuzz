@@ -1344,3 +1344,207 @@ async fn run_history_retains_exact_target_identity_and_requested_budget() {
     assert_eq!(item.target_id, None);
     assert_eq!(item.requested_duration_secs, None);
 }
+
+#[cfg(feature = "coverage-experiments")]
+#[tokio::test]
+async fn guided_execution_recovers_failed_results_and_preserves_cancelled_records() {
+    let (_dir, store, service, baseline, request) = setup().await;
+    for (cancelled_record, malformed_review) in [(false, false), (true, false), (false, true)] {
+        let experiment = service
+            .create_coverage_experiment(request.clone())
+            .await
+            .unwrap();
+        let mut run = baseline.clone();
+        run.id = Uuid::new_v4();
+        run.started_at = Utc::now();
+        run.status = RunStatus::Running;
+        run.ended_at = None;
+        run.config.as_mut().unwrap().replay_of = Some(baseline.id);
+        let review = hf_service::ReplayReview {
+            experiment_id: Some(experiment.id),
+            current_input_sha256: Some("a".repeat(64)),
+            run_id: baseline.id,
+            project: request.project.clone(),
+            target: "parse_value".into(),
+            engine: baseline.engine,
+            seed: baseline.config.as_ref().unwrap().seed.unwrap().to_string(),
+            duration_secs: 60,
+            max_mem_mb: baseline.config.as_ref().unwrap().max_mem_mb.to_string(),
+            max_cpus: 1,
+            input_manifest_sha256: None,
+            inputs: hf_service::ReplayInputs::Current,
+        };
+        let mut review_value = serde_json::to_value(&review).unwrap();
+        if malformed_review {
+            review_value["unknown_field"] = serde_json::json!(true);
+        }
+        let review_json = serde_json::to_string(&review_value).unwrap();
+        let mut forged_review = review.clone();
+        forged_review.experiment_id = Some(Uuid::new_v4());
+        assert!(store
+            .insert_coverage_experiment_run(
+                experiment.id,
+                &run,
+                &serde_json::to_string(&forged_review).unwrap()
+            )
+            .await
+            .is_err());
+        assert!(store.get_run(run.id).await.unwrap().is_none());
+        let mut competing = run.clone();
+        competing.id = Uuid::new_v4();
+        let (first, second) = tokio::join!(
+            store.insert_coverage_experiment_run(experiment.id, &run, &review_json),
+            store.insert_coverage_experiment_run(experiment.id, &competing, &review_json),
+        );
+        assert_ne!(first.is_ok(), second.is_ok(), "one atomic reservation wins");
+        if second.is_ok() {
+            std::mem::swap(&mut run, &mut competing);
+        }
+        assert!(store.get_run(competing.id).await.unwrap().is_none());
+        assert_eq!(
+            service
+                .complete_coverage_experiment(
+                    experiment.id,
+                    CompleteCoverageExperimentRequest {
+                        scope: scope(&request),
+                        result_run_id: baseline.id
+                    }
+                )
+                .await
+                .unwrap_err()
+                .code(),
+            "terminal_conflict"
+        );
+        assert!(store.delete_run(&run.id.to_string()).await.is_err());
+        if cancelled_record {
+            service
+                .cancel_coverage_experiment(
+                    experiment.id,
+                    CancelCoverageExperimentRequest {
+                        scope: scope(&request),
+                        reason: "Stop investigating; retain execution evidence".into(),
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                store.get_run(run.id).await.unwrap().unwrap().status,
+                RunStatus::Running
+            );
+        }
+        store
+            .set_run_status(run.id, RunStatus::Failed, Some(Utc::now()))
+            .await
+            .unwrap();
+        let restored = ServiceContainer::new(Arc::new(NoExecution), None).with_store(store.clone());
+        if malformed_review {
+            assert_eq!(
+                restored
+                    .coverage_experiment(experiment.id, scope(&request))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                "storage_error"
+            );
+            assert_eq!(
+                store
+                    .coverage_experiment(experiment.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                CoverageExperimentStatus::Prepared
+            );
+            continue;
+        }
+        let view = restored
+            .coverage_experiment(experiment.id, scope(&request))
+            .await
+            .unwrap();
+        let execution = view.execution.unwrap();
+        assert_eq!(execution.run_id, run.id);
+        assert_eq!(execution.status, RunStatus::Failed);
+        assert_eq!(execution.comparison_error, None);
+        if cancelled_record {
+            assert_eq!(view.status, CoverageExperimentStatus::Cancelled);
+            assert!(view.result.is_none());
+        } else {
+            assert_eq!(view.status, CoverageExperimentStatus::Completed);
+            assert!(view
+                .result
+                .unwrap()
+                .limitations
+                .contains(&CoverageExperimentLimitation::ResultFailed));
+        }
+    }
+}
+
+#[cfg(feature = "coverage-experiments")]
+#[tokio::test]
+async fn guided_reservation_without_journal_recovers_as_the_same_failed_attempt() {
+    let (dir, store, service, baseline, request) = setup().await;
+    let experiment = service
+        .create_coverage_experiment(request.clone())
+        .await
+        .unwrap();
+    let mut run = baseline.clone();
+    run.id = Uuid::new_v4();
+    run.started_at = Utc::now();
+    run.status = RunStatus::Running;
+    run.ended_at = None;
+    run.config.as_mut().unwrap().replay_of = Some(baseline.id);
+    let review = hf_service::ReplayReview {
+        experiment_id: Some(experiment.id),
+        current_input_sha256: Some("a".repeat(64)),
+        run_id: baseline.id,
+        project: request.project.clone(),
+        target: "parse_value".into(),
+        engine: baseline.engine,
+        seed: baseline.config.as_ref().unwrap().seed.unwrap().to_string(),
+        duration_secs: 60,
+        max_mem_mb: baseline.config.as_ref().unwrap().max_mem_mb.to_string(),
+        max_cpus: 1,
+        input_manifest_sha256: None,
+        inputs: hf_service::ReplayInputs::Current,
+    };
+    let review_json = serde_json::to_string(&review).unwrap();
+    store
+        .insert_coverage_experiment_run(experiment.id, &run, &review_json)
+        .await
+        .unwrap();
+    let reopened = Store::connect(dir.path().join("experiments.db"))
+        .await
+        .unwrap();
+    let journal = hf_service::recovery::RunJournal::open(dir.path().join("empty-journal.jsonl"));
+    assert!(journal.interrupted().is_empty());
+    assert_eq!(
+        hf_service::recovery::reconcile_interrupted_run_statuses(&reopened, &journal)
+            .await
+            .unwrap(),
+        1
+    );
+    let retained = reopened.get_run(run.id).await.unwrap().unwrap();
+    assert_eq!(retained.status, RunStatus::Failed);
+    assert!(retained.ended_at.is_some());
+    assert_eq!(retained.started_at, run.started_at);
+    let execution = reopened
+        .coverage_experiment_execution(experiment.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(execution.run_id, run.id);
+    assert_eq!(execution.review_json, review_json);
+    assert_eq!(
+        hf_service::recovery::reconcile_interrupted_run_statuses(&reopened, &journal)
+            .await
+            .unwrap(),
+        0
+    );
+    let view = service
+        .coverage_experiment(experiment.id, scope(&request))
+        .await
+        .unwrap();
+    assert_eq!(view.execution.unwrap().status, RunStatus::Failed);
+    assert_eq!(view.status, CoverageExperimentStatus::Completed);
+    assert_eq!(view.result.unwrap().run.run_id, run.id);
+}

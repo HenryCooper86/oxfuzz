@@ -1440,3 +1440,87 @@ when source or configuration becomes stale. See
 | `renderer_version` | `INTEGER NOT NULL` | version 1 (full JSON) or 2 (compact advanced) |
 | `rendered` | `TEXT NOT NULL` | exact provider section, at most 64 KiB |
 | `created_at` | `TEXT NOT NULL` | UTC capture time |
+
+
+## Model spending reservations (migration 0041)
+
+`model_budget_scopes` retains immutable workflow policy JSON and aggregate call,
+token, and integer microdollar usage including unresolved reservations. A blocked
+flag records observed usage beyond its reservation; `terminal_reason` names the
+most recent denial. `model_budget_attempts` binds each reservation UUID to the
+scope, provider, model, input/output allowances, cost, observed usage, state and
+creation time. Admission and settlement each commit atomically. Admission writes
+before reading the balance to serialize SQLite writers. No project evidence
+cleanup deletes these workflow accounting records. Restart retains unresolved
+charges; only reported completed usage can return unused allowance.
+
+### `model_budget_scopes`
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `scope_id` | `TEXT PRIMARY KEY NOT NULL` | Stable workflow identifier |
+| `policy_json` | `TEXT NOT NULL` | Immutable validated limits |
+| `calls` | `INTEGER NOT NULL DEFAULT 0` | Admitted attempts, including retries |
+| `tokens` | `INTEGER NOT NULL DEFAULT 0` | Settled usage plus unresolved reservations |
+| `cost_microusd` | `INTEGER NOT NULL DEFAULT 0` | Charged cost in millionths of USD |
+| `terminal_reason` | `TEXT` | Most recent denial or overrun reason |
+| `blocked` | `INTEGER NOT NULL DEFAULT 0` | Boolean overrun block |
+
+### `model_budget_attempts`
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY NOT NULL` | Reservation UUID |
+| `scope_id` | `TEXT NOT NULL` | Foreign key to the workflow scope |
+| `provider` | `TEXT NOT NULL` | Selected provider identifier |
+| `model` | `TEXT NOT NULL` | Selected model identifier |
+| `reserved_input` | `INTEGER NOT NULL` | Reserved input tokens |
+| `reserved_output` | `INTEGER NOT NULL` | Reserved output tokens |
+| `reserved_cost_microusd` | `INTEGER NOT NULL` | Reserved integer cost |
+| `observed_input` | `INTEGER` | Reported input tokens after completion |
+| `observed_output` | `INTEGER` | Reported output tokens after completion |
+| `observed_cost_microusd` | `INTEGER` | Cost derived from reported usage |
+| `state` | `TEXT NOT NULL` | `reserved`, `settled`, or `overrun` |
+| `created_at` | `TEXT NOT NULL` | UTC reservation timestamp |
+
+## Guided coverage experiment executions (0042)
+
+`coverage_experiment_executions` stores `experiment_id` (primary key and
+`coverage_experiments` foreign key with cascading deletion), `run_id` (unique,
+`runs` foreign key with restricted deletion), and `review_json` (2–16,384 UTF-8
+bytes). Run allocation and association are one reserved-writer transaction.
+Only a prepared proposal without an existing association can reserve a run.
+Updates are forbidden; result attachment must match the associated run. Record
+cancellation leaves this association intact. Existing run-reference checks treat
+the associated run as a result reference even before comparison. Scoped service
+reads reconcile terminal campaigns after restart and expose comparison refusals.
+
+### `coverage_experiment_executions`
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `experiment_id` | `TEXT PRIMARY KEY` | Proposal foreign key; cascading deletion |
+| `run_id` | `TEXT NOT NULL UNIQUE` | Associated run foreign key; restricted deletion |
+| `review_json` | `TEXT NOT NULL` | Exact reviewed inputs and settings, 2–16384 UTF-8 bytes |
+
+## Harness behavioral qualification (0043)
+
+### `harness_behavior`
+
+Migration 0043 retains one immutable versioned behavioral report per smoke run.
+`run_id` references `runs(id)` with cascading deletion. `source_sha256`,
+`binary_sha256`, and `sandbox_rev` must match that run on insert and read.
+`report_json` is valid JSON capped at 1 MiB; `report_sha256` authenticates its
+bytes. Identical retries are accepted and replacement is refused. The service
+report retains exact probe input bytes, per-input AFL tuples, commands, limits,
+check outcomes and unavailable reasons. Historical runs have no row and remain
+explicitly unmeasured. Both promotion executors read this retained evidence.
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `run_id` | `TEXT PRIMARY KEY` | Smoke run foreign key; cascading deletion |
+| `source_sha256` | `TEXT NOT NULL` | Exact retained harness source digest |
+| `binary_sha256` | `TEXT NOT NULL` | Exact retained executable digest |
+| `sandbox_rev` | `TEXT NOT NULL` | Content-addressed run image revision |
+| `report_sha256` | `TEXT NOT NULL` | Digest of the exact JSON bytes |
+| `report_json` | `TEXT NOT NULL` | Valid JSON at most 1 MiB |

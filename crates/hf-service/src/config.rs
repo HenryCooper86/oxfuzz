@@ -1110,7 +1110,6 @@ impl FuzzingSettings {
 /// Operator policy for harness qualification.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-#[derive(Default)]
 pub struct HarnessSettings {
     /// Permit smoke qualification without the independent LLM pre-execution
     /// review. Off by default and deliberately so: with the review skipped,
@@ -1120,6 +1119,29 @@ pub struct HarnessSettings {
     /// marked review record and a policy-decision row (Engineering Protocol
     /// 2.13), and promotion still requires human approval.
     pub allow_unreviewed_smoke: bool,
+    /// Per-command sandbox ceiling for the bounded behavioral probes (1–60 seconds).
+    pub behavior_probe_timeout_secs: u64,
+}
+
+impl Default for HarnessSettings {
+    fn default() -> Self {
+        Self {
+            allow_unreviewed_smoke: false,
+            behavior_probe_timeout_secs: 5,
+        }
+    }
+}
+
+impl HarnessSettings {
+    fn validate(&self) -> Result<(), String> {
+        if !(1..=60).contains(&self.behavior_probe_timeout_secs) {
+            return Err("harness.behavior_probe_timeout_secs must be in 1..=60".to_owned());
+        }
+        if !cfg!(feature = "harness-behavior") && self.behavior_probe_timeout_secs != 5 {
+            return Err("harness.behavior_probe_timeout_secs requires harness-behavior".to_owned());
+        }
+        Ok(())
+    }
 }
 
 /// Deployment allowance for explicit `CMake` definitions in saved build profiles.
@@ -1216,6 +1238,47 @@ impl GitDiffSettings {
     }
 }
 
+/// Bounds for independent crash reproduction after native minimization.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TriageSettings {
+    /// Number of observations required for each original and candidate input.
+    pub confirmation_runs: u32,
+    /// Wall-clock ceiling for each sandbox replay.
+    pub replay_timeout_secs: u64,
+}
+
+impl Default for TriageSettings {
+    fn default() -> Self {
+        Self {
+            confirmation_runs: 3,
+            replay_timeout_secs: 10,
+        }
+    }
+}
+
+impl TriageSettings {
+    fn validate(&self) -> Result<(), String> {
+        if !(2..=10).contains(&self.confirmation_runs)
+            || !(1..=30).contains(&self.replay_timeout_secs)
+        {
+            return Err(
+                "triage confirmation_runs must be 2..=10 and replay_timeout_secs 1..=30".to_owned(),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Read the validated crash reproduction policy.
+///
+/// # Errors
+/// Returns configuration read or validation errors.
+pub fn effective_triage_settings() -> Result<TriageSettings, String> {
+    let raw = read_config("oxfuzz")?;
+    Ok(parse_oxfuzz_runtime_config(&raw)?.triage)
+}
+
 /// Typed global settings whose values are consumed during service bootstrap.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -1226,9 +1289,11 @@ struct OxfuzzRuntimeConfig {
     auto_revert_enabled: bool,
     auto_revert_threshold_pct: f64,
     auto_revert_notify_only: bool,
+    model_budget: crate::model_budget::ModelBudgetSettings,
     grep: hf_core::grep_limits::GrepLimitsConfig,
     git_diff: GitDiffSettings,
     fuzzing: FuzzingSettings,
+    triage: TriageSettings,
     harness: HarnessSettings,
     build_profiles: BuildProfileSettings,
     campaign_health: CampaignHealthSettings,
@@ -1250,9 +1315,11 @@ impl Default for OxfuzzRuntimeConfig {
             auto_revert_enabled: false,
             auto_revert_threshold_pct: DEFAULT_AUTO_REVERT_THRESHOLD_PCT,
             auto_revert_notify_only: false,
+            model_budget: crate::model_budget::ModelBudgetSettings::default(),
             grep: hf_core::grep_limits::GrepLimitsConfig::default(),
             git_diff: GitDiffSettings::default(),
             fuzzing: FuzzingSettings::default(),
+            triage: TriageSettings::default(),
             harness: HarnessSettings::default(),
             build_profiles: BuildProfileSettings::default(),
             campaign_health: CampaignHealthSettings::default(),
@@ -1281,9 +1348,12 @@ impl OxfuzzRuntimeConfig {
                     .to_owned(),
             );
         }
+        self.model_budget.validate()?;
         self.grep.resolve()?;
         self.git_diff.resolve()?;
         self.fuzzing.validate()?;
+        self.harness.validate()?;
+        self.triage.validate()?;
         self.build_profiles.validate()?;
         self.campaign_health.validate()?;
         self.concolic.validate()?;
@@ -1374,6 +1444,19 @@ pub fn effective_scheduler_config() -> hf_scheduler::SchedulerConfig {
 pub fn effective_fuzzing_settings() -> Result<FuzzingSettings, String> {
     let raw = read_config("oxfuzz")?;
     Ok(parse_oxfuzz_runtime_config(&raw)?.fuzzing)
+}
+
+/// Parse and validate durable workflow spending policy.
+pub fn parse_model_budget_settings(
+    raw: &str,
+) -> Result<crate::model_budget::ModelBudgetSettings, String> {
+    Ok(parse_oxfuzz_runtime_config(raw)?.model_budget)
+}
+
+/// Resolve the provider pool's spending policy without a permissive fallback.
+pub fn effective_model_budget_settings() -> Result<crate::model_budget::ModelBudgetSettings, String>
+{
+    parse_model_budget_settings(&read_config("oxfuzz")?)
 }
 
 /// Parse and validate harness qualification settings from a config document.
@@ -2747,7 +2830,9 @@ pub fn toml_to_json(content: &str) -> Result<serde_json::Value, String> {
         return Ok(serde_json::Value::Object(serde_json::Map::new()));
     }
     let value: toml::Value = toml::from_str(content).map_err(|e| format!("invalid TOML: {e}"))?;
-    serde_json::to_value(value).map_err(|e| e.to_string())
+    let mut value = serde_json::to_value(value).map_err(|e| e.to_string())?;
+    crate::model_budget::presentation::stringify_config(&mut value);
+    Ok(value)
 }
 
 /// Serialize a JSON value (from a settings form) back into TOML text.
@@ -2760,6 +2845,7 @@ pub fn json_to_toml(value: &serde_json::Value) -> Result<String, String> {
     // TOML representation of an absent optional value -- before converting.
     let mut value = value.clone();
     strip_nulls(&mut value);
+    crate::model_budget::presentation::parse_config(&mut value)?;
     let toml_value: toml::Value =
         serde_json::from_value(value).map_err(|e| format!("not representable: {e}"))?;
     toml::to_string_pretty(&toml_value).map_err(|e| e.to_string())
@@ -3233,8 +3319,12 @@ pub async fn test_provider(mut cfg: ProviderConfig) -> Result<String, String> {
         providers: vec![cfg],
         ..Default::default()
     };
-    let provider = hf_provider::build_providers(&pool_cfg)
-        .map_err(|error| error.to_string())?
+    let providers = hf_provider::build_providers(&pool_cfg).map_err(|error| error.to_string())?;
+    #[cfg(feature = "model-budgets")]
+    let providers = crate::model_budget::configured_budget_providers(providers);
+    #[cfg(not(feature = "model-budgets"))]
+    effective_model_budget_settings()?;
+    let provider = providers
         .into_iter()
         .next()
         .ok_or_else(|| "could not construct provider from config".to_owned())?;
@@ -5179,8 +5269,10 @@ default_duration_secs = 22
             "grep",
             "harness",
             "knowledge",
+            "model_budget",
             "scheduler",
             "session",
+            "triage",
         ];
 
         for (label, raw) in [
@@ -5675,5 +5767,27 @@ mod git_diff_configuration_tests {
         std::fs::remove_file(&file).unwrap();
         std::fs::create_dir(&file).unwrap();
         assert!(resolve_git_diff_timeout_at(directory.path()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod harness_behavior_settings_tests {
+    #[test]
+    fn behavioral_probe_timeout_is_bounded_at_config_load() {
+        assert_eq!(
+            super::parse_harness_settings("")
+                .unwrap()
+                .behavior_probe_timeout_secs,
+            5
+        );
+        for value in [0, 61] {
+            assert!(super::parse_harness_settings(&format!(
+                "[harness]\nbehavior_probe_timeout_secs = {value}\n"
+            ))
+            .is_err());
+        }
+        let changed =
+            super::parse_harness_settings("[harness]\nbehavior_probe_timeout_secs = 10\n");
+        assert_eq!(changed.is_ok(), cfg!(feature = "harness-behavior"));
     }
 }

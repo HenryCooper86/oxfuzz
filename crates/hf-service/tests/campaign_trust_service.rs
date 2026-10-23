@@ -120,6 +120,7 @@ fn harness(target_id: Uuid, status: HarnessStatus, smoke_passed: bool) -> Harnes
             binary_sha256: Some("b".repeat(64)),
             run_id: None,
         }),
+        custom_mutator: None,
         cmplog: None,
     }
 }
@@ -223,6 +224,7 @@ async fn crash_attribution_reaches_the_triage_gate() {
     // One attributed, one not: the claim that every crash is triaged fails.
     for origin in [CrashOrigin::Target, CrashOrigin::Unknown] {
         let crash = Crash {
+            reproduction: None,
             id: Uuid::new_v4(),
             run_id: record.id,
             target_id: target.id,

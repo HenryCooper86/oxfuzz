@@ -1,3 +1,4 @@
+import { extraTranslationDictionariesJson } from "./translationDictionaryScan";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
@@ -82,7 +83,7 @@ describe("action-first dashboard overview", () => {
   });
 
   it("provides the new visible copy in English and Chinese", () => {
-    const dictionaries = source("../i18n.extra.ts");
+    const dictionaries = extraTranslationDictionariesJson;
 
     expect(dictionaries.match(/"dashboard\.attention": "Needs attention"/g)).toHaveLength(1);
     expect(dictionaries.match(/"dashboard\.attention": "待处理事项"/g)).toHaveLength(1);

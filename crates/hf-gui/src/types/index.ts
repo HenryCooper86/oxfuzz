@@ -397,6 +397,7 @@ export interface HarnessReviewItem {
   language: string;
   status: string;
   build_output: string;
+  smoke_run_id?: string | null;
   smoke_passed: boolean;
   smoke_execs_per_sec: number;
   needs_review: boolean;

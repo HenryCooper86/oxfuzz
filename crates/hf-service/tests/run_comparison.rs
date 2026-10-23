@@ -51,6 +51,7 @@ async fn fixture(project: &std::path::Path) -> (ServiceContainer, Arc<Store>, Ru
             output: "unused".into(),
             extra_flags: Vec::new(),
         },
+        custom_mutator: None,
         cmplog: None,
     };
     store.upsert_harness(&harness).await.unwrap();

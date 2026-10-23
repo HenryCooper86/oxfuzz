@@ -364,3 +364,48 @@ async fn actual_create_and_cancel_round_trip_preserves_intent() {
     assert_eq!(response.1["status"], "cancelled");
     assert_eq!(response.1["cancellation_reason"], "abandoned deliberately");
 }
+
+#[tokio::test]
+async fn guided_review_preserves_owner_checks_and_disabled_feature_precedence() {
+    let (_dir, service, record, _) =
+        hf_service::test_support::coverage_experiments::presentation_fixture().await;
+    let security = hf_web::WebSecurityConfig::new(
+        None,
+        true,
+        vec![],
+        vec![record.project_root.clone().into()],
+    )
+    .unwrap();
+    let app = hf_web::build_with_state_and_security(hf_web::AppState::new(service), security);
+    let base = format!("/coverage/experiments/{}/replay", record.id);
+    let wrong = request(
+        &app,
+        "GET",
+        &format!(
+            "{base}?project={}&target_id={}",
+            record.project_root,
+            uuid::Uuid::new_v4()
+        ),
+        vec![],
+    )
+    .await;
+    assert_eq!(wrong.1["code"], "different_target");
+    let authorized = request(
+        &app,
+        "GET",
+        &format!(
+            "{base}?project={}&target_id={}",
+            record.project_root, record.target_id
+        ),
+        vec![],
+    )
+    .await;
+    #[cfg(feature = "coverage-experiments")]
+    assert_eq!(
+        authorized.0,
+        StatusCode::BAD_REQUEST,
+        "fixture has no promoted current harness"
+    );
+    #[cfg(not(feature = "coverage-experiments"))]
+    assert_eq!(authorized.1["code"], "feature_unavailable");
+}

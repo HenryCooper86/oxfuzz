@@ -979,6 +979,7 @@ mod project_artifact_tests {
             store.insert_run(&run).await.unwrap();
             run_ids.push(run.id);
             let crash = Crash {
+                reproduction: None,
                 id: Uuid::new_v4(),
                 run_id: run.id,
                 target_id: target.id,
@@ -1142,6 +1143,7 @@ mod workspace_lease_tests {
             sanitizer: Sanitizer::Address,
             status: HarnessStatus::Compiled,
             smoke_run: None,
+            custom_mutator: None,
             cmplog: None,
         };
         store.upsert_harness(&harness).await.unwrap();

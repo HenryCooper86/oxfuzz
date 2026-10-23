@@ -258,18 +258,42 @@ impl ServiceContainer {
         // only via `HF_PROVIDER_API_KEY` must survive a Settings reload. Using
         // config alone here would swap in `None` and silently disable the LLM
         // (e.g. after saving an unrelated setting) until a restart.
-        let pool = provider_pool_from_config().or_else(provider_pool_from_env);
-        let loaded = pool.is_some();
-        // Recover a poisoned lock rather than skipping the swap: dropping the
-        // write on poison would keep the stale pool while still returning
-        // `loaded = true`, so the caller (UI) believes a reload that never
-        // happened succeeded.
         let mut guard = self
             .provider_pool
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pool = provider_pool_from_config().or_else(provider_pool_from_env);
+        let loaded = pool.is_some();
         *guard = pool;
         loaded
+    }
+
+    /// Save configuration and apply runtime provider policy to the next operation.
+    /// Existing in-flight pool handles retain their previously acquired policy.
+    ///
+    /// # Errors
+    /// Reports validation/persistence failures and provider activation failure.
+    /// If activation fails after saving, providers are disabled rather than retaining
+    /// a stale, potentially unlimited spending policy.
+    pub fn save_config(&self, name: &str, content: &str) -> Result<(), String> {
+        if name != "oxfuzz" {
+            return crate::config::write_config(name, content);
+        }
+        // Serialize persistence and pool construction with reloads across clones.
+        // A late reload must never replace a newly saved policy with an older one.
+        let mut guard = self
+            .provider_pool
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::config::write_config(name, content)?;
+        let had_pool = guard.is_some();
+        let pool = provider_pool_from_config().or_else(provider_pool_from_env);
+        let loaded = pool.is_some();
+        *guard = pool;
+        if had_pool && !loaded {
+            return Err("Configuration saved, but providers could not be reloaded. Providers are disabled; review provider settings before retrying.".into());
+        }
+        Ok(())
     }
 
     /// Persist the first setup connection and make it available without a restart.

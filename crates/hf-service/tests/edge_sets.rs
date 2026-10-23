@@ -144,6 +144,7 @@ async fn seed_run(
         sanitizer: Sanitizer::Address,
         status: HarnessStatus::Promoted,
         smoke_run: None,
+        custom_mutator: None,
         cmplog: None,
     };
     store.upsert_harness(&harness).await.unwrap();

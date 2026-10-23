@@ -25,6 +25,7 @@ fn print_line(json: bool, line: &str) {
 /// target/engine/revision facts it acts on.
 fn render_stage(project: &Path, stage: &FuzzStage) -> String {
     match stage {
+        FuzzStage::PreparedHarness { target, engine, source_sha256 } => format!("--- [2/5] harness: compiling supplied source for '{target}' ({}, SHA-256 {source_sha256}); no drafting or repair ---", engine.as_str()),
         FuzzStage::Discover { lang } => {
             let language = lang.map_or("auto-detect".to_owned(), |lang| lang.as_str().to_owned());
             format!(
@@ -69,6 +70,9 @@ fn render_stage(project: &Path, stage: &FuzzStage) -> String {
 }
 
 fn render_outcome(outcome: &FuzzOutcome) {
+    if let Some(digest) = &outcome.prepared_harness_sha256 {
+        println!("[fuzz] supplied source SHA-256: {digest}");
+    }
     println!(
         "[fuzz] done: target={} lang={} engine={} harness={} reused={} repairs={}",
         outcome.target,
@@ -99,6 +103,8 @@ pub(crate) async fn cmd_fuzz(args: crate::args::FuzzArgs) -> anyhow::Result<()> 
     let crate::args::FuzzArgs {
         project,
         target,
+        harness_source,
+        harness_sha256,
         engine,
         lang,
         duration_secs,
@@ -116,6 +122,21 @@ pub(crate) async fn cmd_fuzz(args: crate::args::FuzzArgs) -> anyhow::Result<()> 
         fresh,
         resume,
     } = switches;
+    let prepared_harness = match (harness_source, harness_sha256) {
+        (Some(path), Some(sha256)) => {
+            use std::io::Read as _;
+            let file = std::fs::File::open(&path)?;
+            if !file.metadata()?.is_file() {
+                anyhow::bail!("--harness-source must name a regular file");
+            }
+            let mut source = String::new();
+            file.take(hf_service::MAX_PREPARED_HARNESS_SOURCE_BYTES as u64 + 1)
+                .read_to_string(&mut source)?;
+            Some(hf_service::PreparedHarnessSource { source, sha256 })
+        }
+        (None, None) => None,
+        _ => anyhow::bail!("--harness-source and --harness-sha256 must be supplied together"),
+    };
     let target = target.as_deref();
     let engine = parse_engine(&engine)?;
     let lang = lang.as_deref().map(parse_lang).transpose()?;
@@ -137,6 +158,7 @@ pub(crate) async fn cmd_fuzz(args: crate::args::FuzzArgs) -> anyhow::Result<()> 
     let outcome = container
         .fuzz_onboard(
             FuzzRequest {
+                prepared_harness,
                 project: &project,
                 target,
                 engine,

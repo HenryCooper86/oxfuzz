@@ -4,7 +4,10 @@
 //! `close` or `dismiss` event identifies a run interrupted by an app crash or
 //! quit. [`RunJournal`] appends synced lifecycle events to a bounded JSONL WAL,
 //! replays it on startup, and surfaces those interrupted runs. The WAL is the
-//! sole source of recovery state; no parallel in-memory scope model exists.
+//! source of recovery state for ordinary runs. Guided reservations also recover
+//! from their durable association under an exclusive owner lease.
+
+pub(crate) mod guided;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
@@ -252,7 +255,7 @@ pub async fn reconcile_interrupted_run_statuses(
     store: &Store,
     journal: &RunJournal,
 ) -> Result<usize, ClassifiedError> {
-    let mut repaired = 0;
+    let mut repaired = guided::recover_unowned(store).await?;
     for run in journal.interrupted() {
         let id = run.run_id.parse::<Uuid>().map_err(|error| {
             ClassifiedError::Storage(format!(
@@ -260,6 +263,12 @@ pub async fn reconcile_interrupted_run_statuses(
                 run.run_id
             ))
         })?;
+        if store.is_guided_experiment_run(id).await? {
+            if let Some(_owner) = guided::try_acquire(store, id)? {
+                repaired += usize::from(store.recover_guided_experiment_run(id).await?);
+            }
+            continue;
+        }
         let retained = store
             .get_run(id)
             .await

@@ -175,7 +175,12 @@ impl RuntimeAdapter for PipelineRuntime {
             std::fs::write(mount.host_path.join(relative), MINIMIZED_INPUT).unwrap();
             return Ok(completed(0, "", "", cwd));
         }
-        if cmd.len() == 2 && cmd[1].contains("crash-") {
+        if cmd.len() == 2
+            && (cmd[1].contains("crash-")
+                || Path::new(&cmd[1])
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("min")))
+        {
             // Crash reproduction: the stubbed harness reports the ASan error.
             return Ok(completed(1, "", ASAN_TRACE, cwd));
         }
@@ -599,6 +604,18 @@ async fn full_pipeline_minimizes_the_crash_it_found() {
     assert_eq!(crash.run_id, summary.run_id);
 
     assert!(crash.minimized, "the converged minimizer must be recorded");
+    let reproduction = crash
+        .reproduction
+        .as_ref()
+        .expect("independent replay evidence");
+    assert!(reproduction.confirmed);
+    assert_eq!(reproduction.original.len(), 3);
+    assert_eq!(reproduction.candidate.len(), 3);
+    assert!(reproduction
+        .original
+        .iter()
+        .chain(&reproduction.candidate)
+        .all(|attempt| attempt.matches_reference));
     assert_eq!(
         std::fs::read(&crash.input_path).unwrap(),
         MINIMIZED_INPUT,

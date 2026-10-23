@@ -13,6 +13,10 @@
 //! skipped for a fresh harness, and a denied promotion stops the pipeline
 //! before any campaign rather than falling back to an un-promoted run.
 
+mod prepared;
+pub(super) use prepared::verify_prepared_harness;
+pub use prepared::{PreparedHarnessSource, MAX_PREPARED_HARNESS_SOURCE_BYTES};
+
 use std::path::Path;
 
 use hf_core::engine::{EngineKind, FuzzProgress};
@@ -38,6 +42,8 @@ pub const FUZZ_PIPELINE_REPAIRS: usize = 2;
 /// path (`TargetLanguage::harnessable`) that the engine can drive, and
 /// `lang: None` scans every discoverable language instead of defaulting one.
 pub struct FuzzRequest<'a> {
+    /// Exact operator-supplied source; never reused, drafted or repaired.
+    pub prepared_harness: Option<PreparedHarnessSource>,
     /// Project root path.
     pub project: &'a Path,
     /// Target symbol (or `file::symbol`); `None` auto-picks by fit score.
@@ -86,6 +92,12 @@ pub struct FuzzRequest<'a> {
 /// presentation layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FuzzStage {
+    /// Compile the operator-supplied bytes without drafting or repair.
+    PreparedHarness {
+        target: String,
+        engine: EngineKind,
+        source_sha256: String,
+    },
     /// Scanning the project and picking a target. `lang: None` means the scan
     /// covers every discoverable language.
     Discover {
@@ -134,6 +146,8 @@ pub enum FuzzStage {
 /// campaign outcome over it.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct FuzzOutcome {
+    /// Supplied-source provenance; absent when the pipeline selected its source.
+    pub prepared_harness_sha256: Option<String>,
     /// The fuzzed target symbol.
     pub target: String,
     /// The target's language (auto-detected unless the request pinned it).
@@ -204,6 +218,9 @@ impl ServiceContainer {
         on_stage: &(dyn Fn(FuzzStage) + Send + Sync),
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
     ) -> Result<FuzzOutcome, ClassifiedError> {
+        if let Some(source) = &request.prepared_harness {
+            source.validate(request.target)?;
+        }
         let project = request.project;
         let engine = request.engine;
         super::resolve_fuzzing_run(
@@ -219,7 +236,7 @@ impl ServiceContainer {
 
         // Stage 1: discover targets and pick one (explicit or top-ranked).
         on_stage(FuzzStage::Discover { lang: request.lang });
-        let (target, lang) = self
+        let (mut target, lang) = self
             .fuzz_pick_target(project, request.target, request.lang, engine)
             .await
             .map_err(|error| {
@@ -231,13 +248,17 @@ impl ServiceContainer {
                 )
             })?;
 
+        if let (Some(_), Some(selector)) = (&request.prepared_harness, request.target) {
+            target = selector.to_owned();
+        }
+
         // Stage 2: reuse the promoted revision for (target, engine) when one is
         // active, unless the operator asked for a fresh draft. A requested
         // sanitizer the active revision was not built with forces a fresh
         // draft: reusing it would silently fuzz a different build than asked.
         // The same rule covers CmpLog: a CmpLog campaign needs the recorded
         // companion, so a companion-less revision is rebuilt with one.
-        let reused = if request.fresh {
+        let reused = if request.fresh || request.prepared_harness.is_some() {
             None
         } else {
             self.reusable_promoted_harness(project, &target, engine, lang)
@@ -265,58 +286,86 @@ impl ServiceContainer {
             });
             (harness, 0, true)
         } else {
-            on_stage(FuzzStage::Harness {
-                target: target.clone(),
-                engine,
-                reused: false,
-            });
-            let generated = self
-                .harness_generate(
-                    project,
-                    &target,
+            let (repairs_used, exact_harness_id) = if let Some(source) = &request.prepared_harness {
+                on_stage(FuzzStage::PreparedHarness {
+                    target: target.clone(),
                     engine,
-                    lang,
-                    FUZZ_PIPELINE_REPAIRS,
-                    request.sanitizer,
-                    request.cmplog,
-                    // The onboarding pipeline always drafts the stock driver
-                    // shape; the persistent-mode flavor is a deliberate
-                    // per-target choice on `oxfuzz harness --persistent`.
-                    false,
-                )
-                .await
-                .map_err(|error| {
-                    stage_failure(
-                        "harness",
-                        &error,
-                        "for a compile failure, --ai require makes a missing model an explicit \
+                    source_sha256: source.sha256.clone(),
+                });
+                let compiled = self.harness_compile(source.source.clone(), project, engine, &target, lang, request.sanitizer, request.cmplog).await
+                    .map_err(|error| stage_failure("harness", &error, "supplied source is never repaired; fix and review a new source/hash before retrying"))?;
+                if compiled.status != HarnessStatus::Compiled {
+                    return Err(ClassifiedError::Harness(
+                        "supplied harness failed to compile; no repair was attempted".into(),
+                    ));
+                }
+                (0, Some(compiled.harness_id))
+            } else {
+                on_stage(FuzzStage::Harness {
+                    target: target.clone(),
+                    engine,
+                    reused: false,
+                });
+                let generated = self
+                    .harness_generate(
+                        project,
+                        &target,
+                        engine,
+                        lang,
+                        FUZZ_PIPELINE_REPAIRS,
+                        request.sanitizer,
+                        request.cmplog,
+                        false,
+                    )
+                    .await
+                    .map_err(|error| {
+                        stage_failure(
+                            "harness",
+                            &error,
+                            "for a compile failure, --ai require makes a missing model an explicit \
                          error and the work-order flow authors the harness manually; for a \
                          sandbox error, `oxfuzz doctor` checks the sandbox image",
-                    )
-                })?;
+                        )
+                    })?;
+                (generated.repairs_used, None)
+            };
 
             // Stage 3: smoke qualification behind the pre-execution review.
             on_stage(FuzzStage::Smoke {
                 target: target.clone(),
                 engine,
             });
-            let smoke = self
-                .harness_smoke_with_review_bypass(
-                    project,
-                    &target,
-                    engine,
-                    lang,
-                    request.review_bypass,
-                )
-                .await
-                .map_err(|error| {
-                    stage_failure(
-                        "smoke",
-                        &error,
-                        "fix the harness and re-run; without a provider the review gate needs \
-                         the explicit --no-llm-review opt-in",
+            let smoke = match exact_harness_id {
+                Some(id) => {
+                    self.harness_smoke_exact(
+                        project,
+                        &target,
+                        engine,
+                        lang,
+                        id,
+                        request.review_bypass,
                     )
-                })?;
+                    .await
+                }
+                None => {
+                    self.harness_smoke_with_review_bypass(
+                        project,
+                        &target,
+                        engine,
+                        lang,
+                        request.review_bypass,
+                    )
+                    .await
+                }
+            }
+            .map_err(|error| {
+                stage_failure(
+                    "smoke",
+                    &error,
+                    "fix the harness and re-run; without a provider the review gate needs \
+                         the explicit --no-llm-review opt-in",
+                )
+            })?;
             if smoke.summary.crashes > 0 {
                 return Err(ClassifiedError::Validation(format!(
                     "fuzz smoke stopped: the qualification run of '{target}' found {} \
@@ -345,11 +394,21 @@ impl ServiceContainer {
                 target: target.clone(),
                 engine,
             });
-            let promoted = self
-                .harness_promote(project, &target, engine)
-                .await
-                .map_err(|error| promote_failure(&target, &error))?;
-            (promoted, generated.repairs_used, false)
+            let promoted = match (exact_harness_id, request.prepared_harness.as_ref()) {
+                (Some(id), Some(source)) => {
+                    let binary = smoke.summary.binary_sha256.as_deref().ok_or_else(|| {
+                        ClassifiedError::Validation(
+                            "supplied harness smoke has no binary digest".into(),
+                        )
+                    })?;
+                    self.harness_promote_exact(project, &target, engine, id, &source.sha256, binary)
+                        .await
+                        .map_err(ClassifiedError::from)
+                }
+                _ => self.harness_promote(project, &target, engine).await,
+            }
+            .map_err(|error| promote_failure(&target, &error))?;
+            (promoted, repairs_used, false)
         };
 
         // Stage 5: the bounded campaign over the promoted revision. The campaign
@@ -361,31 +420,39 @@ impl ServiceContainer {
             duration_secs: request.duration_secs,
             iterations: request.iterations,
         });
-        let campaign = self
-            .run_campaign_observed(
-                project,
-                Some(&target),
-                engine,
-                lang,
-                request.duration_secs,
-                request.timeout_ms,
-                request.resume,
-                request.sanitizer,
-                request.cmplog.then_some(true),
-                request.seed,
-                request.iterations,
-                on_progress,
+        let campaign_future = self.run_campaign_observed(
+            project,
+            Some(&target),
+            engine,
+            lang,
+            request.duration_secs,
+            request.timeout_ms,
+            request.resume,
+            request.sanitizer,
+            request.cmplog.then_some(true),
+            request.seed,
+            request.iterations,
+            on_progress,
+        );
+        let campaign = Box::pin(prepared::with_harness(
+            &harness,
+            request.prepared_harness.as_ref(),
+            campaign_future,
+        ))
+        .await
+        .map_err(|error| {
+            stage_failure(
+                "campaign",
+                &error,
+                "the harness is promoted; `oxfuzz campaign` reruns just this stage",
             )
-            .await
-            .map_err(|error| {
-                stage_failure(
-                    "campaign",
-                    &error,
-                    "the harness is promoted; `oxfuzz campaign` reruns just this stage",
-                )
-            })?;
+        })?;
 
         Ok(FuzzOutcome {
+            prepared_harness_sha256: request
+                .prepared_harness
+                .as_ref()
+                .map(|source| source.sha256.clone()),
             target,
             lang,
             engine,

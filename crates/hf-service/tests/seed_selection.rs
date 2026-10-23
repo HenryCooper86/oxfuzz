@@ -472,6 +472,7 @@ async fn onboarding_rejects_a_randomizing_seed_before_discovery() {
     let error = container
         .fuzz_onboard(
             hf_service::FuzzRequest {
+                prepared_harness: None,
                 project: &project.path().join("missing"),
                 target: Some(FIXTURE_TARGET),
                 engine: EngineKind::LibFuzzer,

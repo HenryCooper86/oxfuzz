@@ -1,5 +1,8 @@
 //! Runtime sandbox adapter.
 
+/// Prefix for a retained Docker image revision, followed by its SHA-256 hex digest.
+pub const EXACT_DOCKER_IMAGE_REV_PREFIX: &str = "docker-image-id-sha256:";
+
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::PathBuf;

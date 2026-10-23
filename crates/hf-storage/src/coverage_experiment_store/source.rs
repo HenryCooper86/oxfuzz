@@ -51,7 +51,7 @@ pub(super) async fn load_source(
     let run_record = crate::store::run_from_row(&row)?;
     // Existing runs use variable-precision RFC3339 with offsets; the new snapshot
     // encodes their parsed UTC values canonically without rewriting run history.
-    let config = required(run_record.config, "config")?;
+    let mut config = required(run_record.config, "config")?;
     uuid(config.harness_id)?;
     let duration = required(config.duration, "duration")?;
     if duration.subsec_nanos() != 0 {
@@ -110,6 +110,12 @@ pub(super) async fn load_source(
         .transpose()
         .map_err(|_| invalid("negative edges"))?;
     let build_inputs = crate::build_profile_store::load_inputs(connection, harness_id).await?;
+    normalize_managed_mutator_env(
+        &mut config.env,
+        &harness,
+        id,
+        run_record.sandbox_rev.as_deref(),
+    )?;
     let evidence = CoverageExperimentRunEvidenceV1 {
         schema_version: 1,
         run_id: id,
@@ -158,4 +164,51 @@ fn json_uuid(value: &serde_json::Value, field: &str) -> Result<Uuid, StorageErro
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| invalid("source UUID field"))?,
     )
+}
+
+// Only a retained native library whose run path, digest and image agree with its
+// harness identity is relocatable. All other environment values compare exactly.
+fn normalize_managed_mutator_env(
+    env: &mut [(String, String)],
+    harness: &Harness,
+    run_id: Uuid,
+    image: Option<&str>,
+) -> Result<(), StorageError> {
+    let Some(record) = &harness.custom_mutator else {
+        return Ok(());
+    };
+    if record.api != hf_core::mutator::MutatorApi::AflPlusPlus {
+        return Ok(());
+    }
+    let expected_image =
+        hf_core::runtime::ImmutableImageReference::from_sha256_id(record.sandbox_image_id.clone())
+            .map_err(|_| invalid("managed mutator immutable image"))?;
+    let expected_revision = format!(
+        "{}{}",
+        hf_core::runtime::EXACT_DOCKER_IMAGE_REV_PREFIX,
+        expected_image.sha256()
+    );
+    if record.version != 1 || image != Some(expected_revision.as_str()) {
+        return Err(invalid("managed mutator image identity"));
+    }
+    let library_key = "AFL_CUSTOM_MUTATOR_LIBRARY";
+    for (key, expected) in [
+        (
+            library_key,
+            format!("/work/runs/{run_id}/input/harness.mutator.so"),
+        ),
+        ("OXFUZZ_MUTATOR_SHA256", record.artifact_sha256.clone()),
+        ("OXFUZZ_MUTATOR_IMAGE_ID", record.sandbox_image_id.clone()),
+    ] {
+        let mut entries = env.iter().filter(|(candidate, _)| candidate == key);
+        if entries.next().map(|(_, value)| value) != Some(&expected) || entries.next().is_some() {
+            return Err(invalid("managed mutator retained run environment"));
+        }
+    }
+    for (key, value) in env {
+        if key == library_key {
+            *value = "/work/runs/<run>/input/harness.mutator.so".into();
+        }
+    }
+    Ok(())
 }

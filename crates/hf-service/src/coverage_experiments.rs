@@ -1,4 +1,6 @@
-//! Durable operator-reviewed experiments; reads and mutations never execute a campaign.
+//! Durable operator-reviewed experiments and guided, explicitly approved replay.
+#[cfg(feature = "coverage-experiments")]
+mod execution;
 #[cfg(feature = "coverage-experiments")]
 mod lifecycle;
 mod views;

@@ -462,6 +462,7 @@ async fn fuzz_redrafts_when_the_promoted_harness_has_a_different_sanitizer() {
     let (dir, store, container, _runtime) = fixture("").await;
     let project = dir.path().join("proj");
     let request = |sanitizer| hf_service::FuzzRequest {
+        prepared_harness: None,
         project: &project,
         target: Some("parse_value"),
         engine: EngineKind::LibFuzzer,

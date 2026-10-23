@@ -50,6 +50,41 @@ def cohort():
 
 
 class CohortValidationTests(unittest.TestCase):
+    def test_identifiers_cannot_escape_or_alias_trial_output_directories(self):
+        for unsafe in ("../outside", "/tmp/outside", "C:\\outside", "..", "trials/other", "nul", "alias."):
+            for kind in ("projects", "conditions", "trials"):
+                value = cohort()
+                value[kind][0]["id"] = unsafe
+                if kind == "projects":
+                    value["trials"][0]["project_id"] = unsafe
+                elif kind == "conditions":
+                    value["trials"][0]["condition_id"] = unsafe
+                with self.subTest(kind=kind, identifier=unsafe), self.assertRaisesRegex(ValueError, "identifier"):
+                    validate_cohort(value)
+        value = cohort()
+        other = copy.deepcopy(value["projects"][0])
+        other["id"] = value["projects"][0]["id"].upper()
+        value["projects"].append(other)
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            validate_cohort(value)
+
+    def test_prepared_trials_bind_each_exact_harness_and_staged_source(self):
+        value = cohort()
+        value["schema_version"] = 2
+        value["trials"][0]["prepared_harness"] = {
+            "path": "harnesses/parser.c", "sha256": "c" * 64,
+            "source_sha256": "d" * 64, "origin": "upstream",
+        }
+        self.assertEqual(validate_cohort(value)["trials"][0]["prepared_harness"]["origin"], "upstream")
+        for path in ("../outside.c", "/tmp/outside.c", "harnesses/../outside.c", "C:\\outside.c"):
+            invalid = copy.deepcopy(value)
+            invalid["trials"][0]["prepared_harness"]["path"] = path
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, "path"):
+                validate_cohort(invalid)
+        del value["trials"][0]["prepared_harness"]
+        with self.assertRaisesRegex(ValueError, "prepared_harness"):
+            validate_cohort(value)
+
     def test_accepts_complete_immutable_trial_matrix(self):
         self.assertEqual(validate_cohort(cohort())["trials"][0]["id"], "parser-ranked-1")
 

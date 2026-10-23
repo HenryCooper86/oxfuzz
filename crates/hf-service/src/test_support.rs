@@ -2,7 +2,7 @@
 
 pub mod coverage_experiments;
 pub mod desktop_approval;
-mod retained_campaign;
+use crate::retained_campaign_fixture as retained_campaign;
 mod scheduler_history;
 pub use scheduler_history::{scheduler_history_fixture, SchedulerHistoryTestFixture};
 
@@ -311,6 +311,7 @@ pub async fn patch_to_proof_fixture(
     let finding_id = uuid::Uuid::new_v4();
     store
         .upsert_crash(&Crash {
+            reproduction: None,
             id: finding_id,
             run_id: run.id,
             target_id: target.id,
@@ -504,6 +505,7 @@ pub async fn change_aware_fixture() -> Result<ChangeAwareTestFixture, Box<dyn Er
             binary_sha256: Some("b".repeat(64)),
             run_id: Some(uuid::Uuid::new_v4()),
         }),
+        custom_mutator: None,
         cmplog: None,
     };
     store.upsert_harness(&harness).await?;
@@ -560,6 +562,7 @@ pub async fn change_aware_fixture() -> Result<ChangeAwareTestFixture, Box<dyn Er
     store.insert_run(&head).await?;
 
     let crash = |run_id: uuid::Uuid, signature: &str| Crash {
+        reproduction: None,
         id: uuid::Uuid::new_v4(),
         run_id,
         target_id: target.id,
@@ -671,6 +674,7 @@ pub async fn run_closeout_fixture() -> Result<RunCloseoutTestFixture, Box<dyn Er
         sanitizer: Sanitizer::Address,
         status: HarnessStatus::Draft,
         smoke_run: None,
+        custom_mutator: None,
         cmplog: None,
     };
     store.upsert_harness(&harness).await?;

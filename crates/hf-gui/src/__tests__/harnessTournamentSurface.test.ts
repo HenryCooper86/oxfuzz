@@ -1,3 +1,4 @@
+import { extraTranslationDictionariesJson } from "./translationDictionaryScan";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
@@ -52,7 +53,7 @@ describe("service-owned harness tournament surface", () => {
   });
 
   it("keeps English and Chinese tournament labels paired", () => {
-    const translations = source("../i18n.extra.ts");
+    const translations = extraTranslationDictionariesJson;
     expect(translations).toContain('"harnessTournament.title": "Harness Tournament"');
     expect(translations).toContain('"harnessTournament.title": "测试桩选拔"');
     expect(translations).toContain('"harnessTournament.winner": "Selected"');

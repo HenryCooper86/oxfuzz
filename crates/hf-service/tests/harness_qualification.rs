@@ -81,7 +81,25 @@ impl hf_core::provider::ProviderPool for FixedReviewPool {
 }
 
 fn isolate_workspace() {
-    common::install_managed_workspace("oxfuzz_qualification_it");
+    static ENVIRONMENT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    ENVIRONMENT.get_or_init(|| {
+        let workspace = common::install_managed_workspace("oxfuzz_qualification_it");
+        // Every fixture uses identical settings. Keep the shared config outside
+        // per-test TempDirs so parallel fixture teardown cannot delete a live read.
+        let config = workspace.parent().unwrap().join("qualification-config");
+        std::env::set_var("HF_CONFIG_DIR", &config);
+        hf_service::config::write_config(
+            "oxfuzz",
+            &format!(
+                "[fuzzing]\ncollect_function_coverage = {}\n\
+             enabled_engines = [\"libfuzzer\", \"afl++\", \"honggfuzz\", \"syzkaller\"]\n\
+             default_engine = \"libfuzzer\"\ndefault_duration_secs = 60\n\
+             [fuzzing.sandbox]\nmax_mem_mb = 2048\nmax_cpus = 1\nmax_duration_secs = 600\n",
+                cfg!(feature = "proof-carrying")
+            ),
+        )
+        .unwrap();
+    });
 }
 
 struct QualifyingRuntime {
@@ -184,20 +202,6 @@ async fn qualified_fixture_with_entry_count(
 ) -> (tempfile::TempDir, Arc<hf_storage::Store>, ServiceContainer) {
     isolate_workspace();
     let project = tempfile::tempdir().unwrap();
-    // Own the config directory: which settings are in force decides whether a
-    // harness is instrumented at all, so a fixture reading the ambient config
-    // changes behaviour with the developer's checkout. Collection is on here
-    // because the qualification profile is what promotion reads.
-    let config = project.path().join("config");
-    std::env::set_var("HF_CONFIG_DIR", &config);
-    hf_service::config::write_config(
-        "oxfuzz",
-        "[fuzzing]\ncollect_function_coverage = true\n\
-         enabled_engines = [\"libfuzzer\", \"afl++\", \"honggfuzz\", \"syzkaller\"]\n\
-         default_engine = \"libfuzzer\"\ndefault_duration_secs = 60\n\
-         [fuzzing.sandbox]\nmax_mem_mb = 2048\nmax_cpus = 1\nmax_duration_secs = 600\n",
-    )
-    .unwrap();
     std::fs::write(
         project.path().join("parse.c"),
         "#include <stddef.h>\nint parse_entry(const unsigned char *data, size_t size) { return size && data[0]; }\n",
@@ -453,7 +457,7 @@ async fn smoke_updates_the_compiled_revision_and_promotion_is_explicit() {
 }
 
 #[tokio::test]
-async fn promotion_is_refused_when_the_smoke_profile_never_entered_the_target() {
+async fn promotion_distinguishes_measured_non_entry_from_unmeasured_smoke() {
     // A measured run that never entered the target: it burned cycles without
     // fuzzing anything, which is the failure the gate exists to catch.
     let (project, _store, container) = qualified_fixture_with_entry_count(0).await;
@@ -471,7 +475,7 @@ async fn promotion_is_refused_when_the_smoke_profile_never_entered_the_target() 
         )
         .await
         .unwrap();
-    container
+    let smoke = container
         .harness_smoke(
             project.path(),
             "parse_entry",
@@ -484,8 +488,21 @@ async fn promotion_is_refused_when_the_smoke_profile_never_entered_the_target() 
     let refused = container
         .harness_promote(project.path(), "parse_entry", EngineKind::LibFuzzer)
         .await;
-    let error = refused.expect_err("a harness that never entered the target must not promote");
-    assert!(error.to_string().contains("parse_entry"), "{error}");
+    if cfg!(feature = "proof-carrying") {
+        let error = refused.expect_err("a harness that never entered the target must not promote");
+        assert!(error.to_string().contains("parse_entry"), "{error}");
+    } else {
+        let coverage = container
+            .run_function_coverage(smoke.summary.run_id.unwrap())
+            .await
+            .unwrap();
+        assert!(matches!(
+            coverage,
+            hf_service::RunFunctionCoverage::Unavailable { .. }
+        ));
+        let promoted = refused.expect("unmeasured clean smoke remains promotable");
+        assert_eq!(promoted.status, HarnessStatus::Promoted);
+    }
 }
 
 #[tokio::test]
@@ -793,7 +810,7 @@ async fn unsupported_harness_languages_fail_before_the_compiler() {
 }
 
 #[tokio::test]
-async fn a_smoke_run_requests_a_profile_it_can_actually_retain() {
+async fn smoke_profile_requests_and_directories_follow_feature_availability() {
     let (project, store, container) = qualified_fixture().await;
     let source = "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }";
 
@@ -827,27 +844,31 @@ async fn a_smoke_run_requests_a_profile_it_can_actually_retain() {
         .unwrap()
         .expect("the smoke run names its harness");
 
-    // Whether collection is on is deployment configuration, and this fixture
-    // resolves the ambient config, so the path logic is pinned by unit tests in
-    // `function_coverage::relocation_tests` instead. What is asserted here is
-    // the part that must hold either way: the qualification run leaves a
-    // writable directory for a profile inside its own run-scoped output.
-    //
-    // Producing the record itself needs the profiling toolchain, so a stub
-    // runtime cannot close that link; the acceptance records cover it.
-    let _ = harness;
     let workspace = hf_service::workspace_dir(project.path(), "parse_entry");
     let raw = workspace
         .join(run.evidence_dir.as_deref().expect("runs are run-scoped"))
         .join("function-coverage/raw");
-    assert!(
-        raw.is_dir(),
-        "the profile directory must exist before the run: llvm creates the file, not its parents"
-    );
+    if cfg!(feature = "proof-carrying") {
+        assert!(
+            raw.is_dir(),
+            "the profile directory must exist before the run: llvm creates the file, not its parents"
+        );
+    } else {
+        assert!(
+            !raw.exists(),
+            "disabled profiling must not stage a raw profile directory"
+        );
+        assert!(!config.env.iter().any(|(key, _)| key == "LLVM_PROFILE_FILE"));
+        assert!(!harness
+            .build_cmd
+            .extra_flags
+            .iter()
+            .any(|flag| flag == "-fprofile-instr-generate"));
+    }
 }
 
 #[tokio::test]
-async fn a_smoke_run_retains_the_profile_promotion_reads() {
+async fn smoke_retains_measured_profiles_or_explicitly_unavailable_evidence() {
     let (project, store, container) = qualified_fixture().await;
     let source = "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }";
 
@@ -886,6 +907,29 @@ async fn a_smoke_run_retains_the_profile_promotion_reads() {
         .await
         .unwrap()
         .expect("the smoke run names its harness");
+    let workspace = hf_service::workspace_dir(project.path(), "parse_entry");
+    let raw = workspace
+        .join(run.evidence_dir.as_deref().expect("runs are run-scoped"))
+        .join("function-coverage/raw");
+    if !cfg!(feature = "proof-carrying") {
+        assert!(!harness
+            .build_cmd
+            .extra_flags
+            .iter()
+            .any(|flag| flag == "-fprofile-instr-generate"));
+        assert!(!config.env.iter().any(|(key, _)| key == "LLVM_PROFILE_FILE"));
+        assert!(
+            !raw.exists(),
+            "disabled profiling must not retain a raw profile directory"
+        );
+        let coverage = container.run_function_coverage(run.id).await.unwrap();
+        assert!(matches!(
+            coverage,
+            hf_service::RunFunctionCoverage::Unavailable { .. }
+        ));
+        assert!(store.run_function_coverage(run.id).await.unwrap().is_none());
+        return;
+    }
     assert!(
         harness
             .build_cmd
@@ -901,10 +945,6 @@ async fn a_smoke_run_retains_the_profile_promotion_reads() {
         config.env
     );
 
-    let workspace = hf_service::workspace_dir(project.path(), "parse_entry");
-    let raw = workspace
-        .join(run.evidence_dir.as_deref().expect("runs are run-scoped"))
-        .join("function-coverage/raw");
     assert!(
         std::fs::read_dir(&raw)
             .map(|entries| entries.count() > 0)
@@ -969,4 +1009,379 @@ async fn promotion_is_refused_when_the_gate_denies_it() {
         refused.is_err(),
         "promotion must be refused when the gate denies it"
     );
+}
+
+#[tokio::test]
+async fn smoke_reports_unavailable_behavior_for_unsupported_engine() {
+    let (project, _store, container) = qualified_fixture().await;
+    container.harness_compile(
+        "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }".to_owned(),
+        project.path(), EngineKind::LibFuzzer, "parse_entry", TargetLanguage::C, None, false,
+    ).await.unwrap();
+    let outcome = container
+        .harness_smoke(
+            project.path(),
+            "parse_entry",
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+        )
+        .await
+        .unwrap();
+    let json = serde_json::to_value(outcome).unwrap();
+    assert_eq!(
+        json["behavior"]["input_sensitivity"]["status"],
+        "unavailable"
+    );
+}
+
+#[cfg(feature = "harness-behavior")]
+#[derive(Clone, Copy)]
+enum BehaviorScenario {
+    Stable,
+    Contaminated,
+    MissingMap,
+    Unstable,
+    InnerCrash,
+    RuntimeError,
+}
+
+#[cfg(feature = "harness-behavior")]
+struct BehavioralRuntime {
+    scenario: BehaviorScenario,
+}
+
+#[cfg(feature = "harness-behavior")]
+#[async_trait::async_trait]
+impl RuntimeAdapter for BehavioralRuntime {
+    async fn resolve_image_reference(
+        &self,
+        image: &str,
+    ) -> Result<Option<hf_core::runtime::ImmutableImageReference>, ClassifiedError> {
+        QualifyingRuntime { entry_count: 64 }
+            .resolve_image_reference(image)
+            .await
+    }
+    async fn run_command(
+        &self,
+        cmd: &[String],
+        cwd: &Path,
+        limits: &ResourceLimits,
+    ) -> Result<CommandResult, ClassifiedError> {
+        let result = QualifyingRuntime { entry_count: 64 }
+            .run_command(cmd, cwd, limits)
+            .await?;
+        std::fs::write(
+            cwd.join("fuzz_parse_entry"),
+            b"mock ##SIG_AFL_PERSISTENT## compiled harness",
+        )
+        .unwrap();
+        Ok(result)
+    }
+    async fn run_command_opts(
+        &self,
+        cmd: &[String],
+        cwd: &Path,
+        limits: &ResourceLimits,
+        opts: &hf_core::runtime::SandboxOptions,
+    ) -> Result<CommandResult, ClassifiedError> {
+        if cmd[0] != "afl-showmap" {
+            return self.run_command(cmd, cwd, limits).await;
+        }
+        if matches!(self.scenario, BehaviorScenario::RuntimeError) {
+            return Err(ClassifiedError::Sandbox(format!(
+                "showmap unavailable: {}",
+                "failure ".repeat(2048)
+            )));
+        }
+        assert!(opts.workspace_read_only);
+        assert!(opts.image.as_ref().unwrap().starts_with("sha256:"));
+        assert!(limits.max_duration_secs <= 5);
+        assert_eq!(limits.env.get("AFL_FUZZER_LOOPCOUNT").unwrap(), "100");
+        let input_mount = opts
+            .extra_mounts
+            .iter()
+            .find(|m| m.container_path == "/behavior-inputs")
+            .unwrap();
+        assert!(input_mount.read_only);
+        let output_mount = opts
+            .extra_mounts
+            .iter()
+            .find(|m| m.container_path == "/behavior-maps")
+            .unwrap();
+        let output = cmd[cmd.iter().position(|v| v == "-o").unwrap() + 1]
+            .strip_prefix("/behavior-maps/")
+            .unwrap();
+        let output = output_mount.host_path.join(output);
+        if let Some(list_at) = cmd.iter().position(|v| v == "-I") {
+            let list_name = cmd[list_at + 1].strip_prefix("/behavior-inputs/").unwrap();
+            let list = std::fs::read_to_string(input_mount.host_path.join(list_name)).unwrap();
+            if list_name == "sequence.list" {
+                assert_eq!(
+                    list,
+                    "/behavior-inputs/a1\n/behavior-inputs/b\n/behavior-inputs/a2\n"
+                );
+            }
+            for path in list.lines() {
+                let name = path.strip_prefix("/behavior-inputs/").unwrap();
+                if name == "a2" && matches!(self.scenario, BehaviorScenario::MissingMap) {
+                    continue;
+                }
+                let map = if list_name == "sequence.list"
+                    && name == "b"
+                    && matches!(self.scenario, BehaviorScenario::InnerCrash)
+                {
+                    ""
+                } else if list_name == "repeat_a.list"
+                    && matches!(self.scenario, BehaviorScenario::Unstable)
+                {
+                    "1001\n1005\n"
+                } else if name == "b" {
+                    "1001\n1003\n"
+                } else if name == "a2" && matches!(self.scenario, BehaviorScenario::Contaminated) {
+                    "1001\n1004\n"
+                } else {
+                    "1001\n1002\n"
+                };
+                std::fs::write(output.join(name), map).unwrap();
+            }
+        } else {
+            std::fs::write(output, "1001\n").unwrap();
+        }
+        Ok(CommandResult {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            workspace: cwd.to_path_buf(),
+            termination: hf_core::runtime::CommandTermination::Completed,
+        })
+    }
+    async fn run_command_streaming_opts(
+        &self,
+        cmd: &[String],
+        cwd: &Path,
+        limits: &ResourceLimits,
+        opts: &hf_core::runtime::SandboxOptions,
+        cancel: &tokio_util::sync::CancellationToken,
+        on_line: &hf_core::runtime::LineSink<'_>,
+    ) -> Result<CommandResult, ClassifiedError> {
+        QualifyingRuntime { entry_count: 64 }
+            .run_command_streaming_opts(cmd, cwd, limits, opts, cancel, on_line)
+            .await
+    }
+    async fn write_file(&self, path: &Path, content: &str) -> Result<(), ClassifiedError> {
+        QualifyingRuntime { entry_count: 64 }
+            .write_file(path, content)
+            .await
+    }
+    async fn read_file(&self, path: &Path) -> Result<String, ClassifiedError> {
+        QualifyingRuntime { entry_count: 64 }.read_file(path).await
+    }
+}
+
+#[cfg(feature = "harness-behavior")]
+async fn behavior_fixture(
+    scenario: BehaviorScenario,
+) -> (
+    tempfile::TempDir,
+    Arc<hf_storage::Store>,
+    ServiceContainer,
+    hf_service::verification::SmokeOutcome,
+) {
+    let (project, store, _) = qualified_fixture().await;
+    let container = ServiceContainer::new(
+        Arc::new(BehavioralRuntime { scenario }),
+        Some(Arc::new(FixedReviewPool::new(APPROVING_REVIEW))),
+    )
+    .with_store(Arc::clone(&store));
+    container.harness_compile(
+        "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }".to_owned(), project.path(), EngineKind::AflPlusPlus, "parse_entry", TargetLanguage::C, None, false,
+    ).await.unwrap();
+    let outcome = container
+        .harness_smoke(
+            project.path(),
+            "parse_entry",
+            EngineKind::AflPlusPlus,
+            TargetLanguage::C,
+        )
+        .await
+        .unwrap();
+    (project, store, container, outcome)
+}
+
+#[cfg(feature = "harness-behavior")]
+#[tokio::test]
+async fn persistent_contamination_is_retained_and_denied_by_promotion_executor() {
+    use hf_service::container::BehaviorCheck;
+    let (project, store, container, outcome) =
+        behavior_fixture(BehaviorScenario::Contaminated).await;
+    assert!(matches!(
+        outcome.behavior.input_sensitivity,
+        BehaviorCheck::Pass { .. }
+    ));
+    assert!(matches!(
+        outcome.behavior.repeated_input_stability,
+        BehaviorCheck::Pass { .. }
+    ));
+    assert!(matches!(
+        outcome.behavior.persistent_state,
+        BehaviorCheck::Suspect { .. }
+    ));
+    assert_eq!(outcome.behavior.observations.len(), 7);
+    let run_id = outcome.summary.run_id.unwrap();
+    assert_eq!(
+        container.harness_behavior(run_id).await.unwrap(),
+        outcome.behavior
+    );
+    assert!(store.harness_behavior(run_id).await.unwrap().is_some());
+    let error = container
+        .harness_promote(project.path(), "parse_entry", EngineKind::AflPlusPlus)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("persistent state contamination"),
+        "{error}"
+    );
+    let run = store.get_run(run_id).await.unwrap().unwrap();
+    let mut harness = store
+        .get_harness(run.config.unwrap().harness_id)
+        .await
+        .unwrap()
+        .unwrap();
+    harness.smoke_run.as_mut().unwrap().crashes = 1;
+    store.upsert_harness(&harness).await.unwrap();
+    let error = container
+        .harness_promote_with_findings(project.path(), "parse_entry", EngineKind::AflPlusPlus)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("persistent state contamination"),
+        "{error}"
+    );
+}
+
+#[cfg(feature = "harness-behavior")]
+#[tokio::test]
+async fn missing_sequence_output_remains_unavailable_instead_of_passing() {
+    use hf_service::container::BehaviorCheck;
+    let (_, _, _, outcome) = behavior_fixture(BehaviorScenario::MissingMap).await;
+    assert!(matches!(
+        outcome.behavior.persistent_state,
+        BehaviorCheck::Unavailable { .. }
+    ));
+    assert_eq!(outcome.behavior.observations.len(), 4);
+}
+
+#[cfg(feature = "harness-behavior")]
+#[tokio::test]
+async fn stable_sequence_is_measured_and_promotable() {
+    use hf_service::container::BehaviorCheck;
+    let (project, _, container, outcome) = behavior_fixture(BehaviorScenario::Stable).await;
+    assert!(matches!(
+        outcome.behavior.persistent_state,
+        BehaviorCheck::Pass { .. }
+    ));
+    container
+        .harness_promote(project.path(), "parse_entry", EngineKind::AflPlusPlus)
+        .await
+        .unwrap();
+}
+
+#[cfg(feature = "harness-behavior")]
+#[tokio::test]
+async fn fresh_input_instability_is_denied_by_promotion_executor() {
+    use hf_service::container::BehaviorCheck;
+    let (project, _, container, outcome) = behavior_fixture(BehaviorScenario::Unstable).await;
+    assert!(matches!(
+        outcome.behavior.repeated_input_stability,
+        BehaviorCheck::Suspect { .. }
+    ));
+    let error = container
+        .harness_promote(project.path(), "parse_entry", EngineKind::AflPlusPlus)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("different coverage on repetition"),
+        "{error}"
+    );
+}
+
+#[cfg(feature = "harness-behavior")]
+#[tokio::test]
+async fn earlier_sequence_crash_cannot_hide_behind_final_success() {
+    use hf_service::container::BehaviorCheck;
+    let (_, _, _, outcome) = behavior_fixture(BehaviorScenario::InnerCrash).await;
+    assert!(matches!(
+        outcome.behavior.persistent_state,
+        BehaviorCheck::Unavailable { .. }
+    ));
+    assert_eq!(outcome.behavior.observations.len(), 4);
+    assert!(outcome
+        .behavior
+        .issues
+        .iter()
+        .any(|reason| reason.contains("no coverage map")));
+}
+
+#[cfg(feature = "harness-behavior")]
+#[tokio::test]
+async fn optional_probe_runtime_failure_is_retained_as_unavailable_and_remains_promotable() {
+    use hf_service::container::BehaviorCheck;
+    let (project, store, container, outcome) =
+        behavior_fixture(BehaviorScenario::RuntimeError).await;
+    for check in [
+        &outcome.behavior.input_sensitivity,
+        &outcome.behavior.entry_rejection,
+        &outcome.behavior.repeated_input_stability,
+        &outcome.behavior.persistent_state,
+        &outcome.behavior.target_coverage_growth,
+    ] {
+        assert!(matches!(check, BehaviorCheck::Unavailable { .. }));
+    }
+    assert!(outcome.behavior.observations.is_empty());
+    assert_eq!(outcome.behavior.commands.len(), 5);
+    assert_eq!(outcome.behavior.issues.len(), 5);
+    assert!(outcome
+        .behavior
+        .issues
+        .iter()
+        .all(|issue| issue.contains("showmap unavailable") && issue.len() < 4096));
+    let run_id = outcome.summary.run_id.unwrap();
+    assert!(store.harness_behavior(run_id).await.unwrap().is_some());
+    assert_eq!(
+        container.harness_behavior(run_id).await.unwrap(),
+        outcome.behavior
+    );
+    container
+        .harness_promote(project.path(), "parse_entry", EngineKind::AflPlusPlus)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn dropping_another_fixture_preserves_qualification_configuration() {
+    let (project, _store, container) = qualified_fixture().await;
+    let (other_project, other_store, other_container) = qualified_fixture().await;
+    drop(other_container);
+    drop(other_store);
+    drop(other_project);
+    let active_config =
+        PathBuf::from(std::env::var_os("HF_CONFIG_DIR").unwrap()).join("oxfuzz.toml");
+    std::fs::read_to_string(active_config)
+        .expect("fixture configuration must outlive individual project directories");
+    container.harness_compile(
+        "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }".to_owned(),
+        project.path(), EngineKind::LibFuzzer, "parse_entry", TargetLanguage::C, None, false,
+    ).await.expect("another fixture must not own this qualification's configuration");
+    let outcome = container
+        .harness_smoke(
+            project.path(),
+            "parse_entry",
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+        )
+        .await
+        .expect("qualification must retain configuration after another project is dropped");
+    assert!(outcome.summary.passed);
 }

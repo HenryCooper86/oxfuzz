@@ -19,7 +19,7 @@ pub(super) fn uuid(id: Uuid) -> Result<(), StorageError> {
     }
     Ok(())
 }
-pub(super) fn parse_uuid(value: &str) -> Result<Uuid, StorageError> {
+pub(crate) fn parse_uuid(value: &str) -> Result<Uuid, StorageError> {
     let id = Uuid::parse_str(value).map_err(|_| invalid("UUID"))?;
     uuid(id)?;
     if id.to_string() != value {
@@ -362,7 +362,7 @@ pub(super) fn strict_json<T: DeserializeOwned + Serialize>(text: &str) -> Result
     Ok(result)
 }
 /// Parse arbitrary retained source JSON without silently accepting duplicate keys.
-pub(super) fn unique_json(text: &str) -> Result<Value, StorageError> {
+pub(crate) fn unique_json(text: &str) -> Result<Value, StorageError> {
     Ok(serde_json::from_str::<UniqueValue>(text)?.0)
 }
 struct UniqueValue(Value);

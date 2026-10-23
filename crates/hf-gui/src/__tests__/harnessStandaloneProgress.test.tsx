@@ -87,7 +87,10 @@ it("keeps hydration progress for a newly typed standalone project", async () => 
   invoke.mockImplementation(async (command: string) => {
     if (command === "get_fuzzing_settings") return SETTINGS;
     if (command === "discover") return { candidates: [], call_graph: {} };
-    if (command === "harness_review_queue") return [SMOKE_PASSED];
+    if (command === "harness_review_queue") return [{ ...SMOKE_PASSED, smoke_run_id: "smoke-hydrated" }];
+    if (command === "run_owner") return { run_id: "smoke-hydrated", project_root: "/new", target: "parse", kind: "smoke" };
+    if (command === "run_harness_behavior") return { version: 1, run_id: "smoke-hydrated", source_sha256: SMOKE_PASSED.source_sha256, binary_sha256: SMOKE_PASSED.binary_sha256,
+      ...Object.fromEntries(["input_sensitivity", "entry_rejection", "repeated_input_stability", "persistent_state", "target_coverage_growth"].map(key => [key, { status: "unavailable", detail: "Retained qualification after reopening" }])) };
     if (command === "system_status_cmd") return { docker: true, sandbox_image: true };
     if (command === "build_profile") return null;
     if (command === "build_diagnose")
@@ -146,6 +149,8 @@ it("keeps hydration progress for a newly typed standalone project", async () => 
 
   const progress = readProgress();
   expect(progress["/new"]?.completed ?? []).toEqual(expect.arrayContaining(["harness", "compile", "smoke"]));
+  expect(invoke).toHaveBeenCalledWith("run_harness_behavior", { runId: "smoke-hydrated" });
+  expect(host.textContent).toContain("Retained qualification after reopening");
 });
 
 it("does not re-register a project removed while hydration is pending", async () => {

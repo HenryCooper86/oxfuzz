@@ -135,6 +135,15 @@ allowed_cmake_options = ["BUILD_SHARED_LIBS", "BUILD_TESTING"]
 [git_diff]
 timeout_secs = 30
 
+# Independent confirmation of native minimizer output.
+[triage]
+confirmation_runs = 3
+replay_timeout_secs = 10
+
+# Limits remain disabled until a workflow scope and at least one limit are set.
+[model_budget]
+max_output_tokens = 4096
+
 # Finite source-search allowances; see grep-resources.md for their meaning.
 [grep]
 output_bytes = 10000

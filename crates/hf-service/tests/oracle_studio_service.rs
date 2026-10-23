@@ -77,6 +77,7 @@ async fn crash_with_log(log: &str) -> (ServiceContainer, Uuid, tempfile::TempDir
     let crash_id = Uuid::new_v4();
     store
         .upsert_crash(&Crash {
+            reproduction: None,
             id: crash_id,
             run_id: run.id,
             target_id: Uuid::new_v4(),

@@ -12,6 +12,7 @@ export interface ExperimentRun {
   build_inputs: { build_input_sha256: string } | null;
 }
 export interface CoverageExperiment {
+  execution?: { run_id: string; status: string; comparison_error: string | null; reviewed_input_sha256: string } | null;
   id: string;
   project_root: string;
   target_id: string;

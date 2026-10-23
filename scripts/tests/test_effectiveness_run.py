@@ -24,13 +24,81 @@ from scripts.effectiveness_benchmark import validate_cohort
 from scripts.effectiveness_run import (
     RunnerError, binding_mismatches, collect_coverage, collect_db_metrics,
     collect_run_metrics, derive_trial_seed, dry_run, freeze_cohort,
-    time_to_first_crash, validate_manifest,
+    time_to_first_crash, validate_manifest, write_trial_config,
 )
 
 
 COMMIT = "a" * 40
 SOURCE_DIGEST = "b" * 64
 IMAGE_DIGEST = "c" * 64
+
+
+class RuntimeBudgetConfigTests(unittest.TestCase):
+    def test_prepared_harness_rejects_nonregular_and_oversized_inputs(self):
+        from scripts.effectiveness_run import read_prepared_harness
+        import hashlib
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "harness.c"
+            spec = {"path": "harness.c", "sha256": hashlib.sha256(b"ok").hexdigest()}
+            for content in (b"\0", b"\xff", b"x" * 1048577):
+                source.write_bytes(content)
+                with self.subTest(size=len(content)), self.assertRaises(RunnerError):
+                    read_prepared_harness(root, spec)
+            source.unlink()
+            if hasattr(os, "mkfifo"):
+                os.mkfifo(source)
+                with self.assertRaisesRegex(RunnerError, "regular"):
+                    read_prepared_harness(root, spec)
+
+    def test_prepared_binding_uses_the_trial_source_identity(self):
+        from scripts.effectiveness_benchmark import trial_source_digest
+        project = cohort()["projects"][0]
+        trial = dict(cohort()["trials"][0], prepared_harness={"source_sha256": "d" * 64})
+        self.assertEqual(trial_source_digest(trial, project), "d" * 64)
+        self.assertNotEqual(trial_source_digest(trial, project), project["source_sha256"])
+
+    def test_prepared_execution_requires_explicit_reviewed_approval(self):
+        from scripts.effectiveness_run import require_prepared_approval
+        from types import SimpleNamespace
+        frozen = dict(cohort(), schema_version=2)
+        with self.assertRaisesRegex(RunnerError, "approve-prepared-harnesses"):
+            require_prepared_approval(frozen, SimpleNamespace(dry_run=False, approve_prepared_harnesses=False))
+        require_prepared_approval(frozen, SimpleNamespace(dry_run=True, approve_prepared_harnesses=False))
+        require_prepared_approval(frozen, SimpleNamespace(dry_run=False, approve_prepared_harnesses=True))
+
+    def test_prepared_harness_is_copied_and_checked_before_dispatch(self):
+        from scripts.effectiveness_run import stage_prepared_harness
+        import hashlib
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "harness.c"
+            source.write_bytes(b"reviewed source")
+            dest = root / "trial"
+            dest.mkdir()
+            spec = {"path": "harness.c", "sha256": hashlib.sha256(source.read_bytes()).hexdigest()}
+            staged = stage_prepared_harness(root, dest, spec)
+            self.assertEqual(staged.read_bytes(), b"reviewed source")
+            source.write_bytes(b"changed source")
+            with self.assertRaisesRegex(RunnerError, "digest"):
+                stage_prepared_harness(root, dest, spec)
+
+    def test_trial_installs_durable_call_and_cost_limits_before_execution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_trial_config(root, None, condition(), "frozen-trial-1")
+            config = (root / "oxfuzz.toml").read_text()
+            self.assertIn('[model_budget]\nscope_id = "frozen-trial-1"', config)
+            self.assertIn("max_calls = 4", config)
+            self.assertIn("max_cost_microusd = 1000000", config)
+
+    def test_offline_trial_does_not_enable_a_paid_model_budget(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            offline = dict(condition(), provider_family="none", model_id="none", model_call_budget=0, model_cost_budget_usd=0)
+            write_trial_config(root, None, offline, "offline-trial")
+            config = (root / "oxfuzz.toml").read_text()
+            self.assertNotIn("model_budget", config)
 RUN_ID = "11111111-1111-4111-8111-111111111111"
 BINARY_DIGEST = "d" * 64
 

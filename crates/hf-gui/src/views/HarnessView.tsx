@@ -9,6 +9,9 @@ import type { TargetInventory, HarnessReviewItem } from "../types";
 import { Button, Input, Select, ViewHeader, EmptyState } from "../components/ui";
 import { SandboxBanner } from "../components/SandboxBanner";
 const BuildDoctorPanel = lazy(() => import("../components/BuildDoctorPanel").then((module) => ({ default: module.BuildDoctorPanel })));
+import { HarnessBehaviorEvidence, type HarnessBehaviorReport } from "../components/HarnessBehaviorEvidence";
+import { RetainedHarnessBehavior } from "../components/RetainedHarnessBehavior";
+import { ManagedMutatorPanel } from "../components/ManagedMutatorPanel";
 import { HarnessApprovalEvidence } from "../components/HarnessApprovalEvidence";
 import { HarnessTournamentPanel } from "../components/HarnessTournamentPanel";
 import { OracleStudioPanel } from "../components/OracleStudioPanel";
@@ -60,6 +63,7 @@ interface SmokeResult {
   passed: boolean;
   /** Present when the service ran its verification pass; absent on local errors. */
   verdict?: HarnessVerdict;
+  behavior?: HarnessBehaviorReport;
   error?: string;
 }
 
@@ -586,6 +590,9 @@ export function HarnessView({
           <p className="text-xs text-text-muted mt-2">
             {t("harness.generatedPreviously")}
           </p>
+          <ManagedMutatorPanel key={`${project}:${selectedTarget}:${engine}:${existing.harness_id}:${reviewRefresh}:${smokeStatus}:${promotionStatus}`} project={project} target={selectedTarget} engine={engine} lang={lang}
+            harnessId={existing.harness_id} disabled={selectionBlocked || buildBlocked || qualificationBusy}
+            onImported={() => { setHarness(null); setHarnessStatus("idle"); setSmokeResult(null); setSmokeStatus("idle"); setPromotionResult(null); setPromotionStatus("idle"); setCompileResult(null); setCompileStatus("done"); setCompiled(false); setReviewRefresh((value) => value + 1); }} />
         </div>
       )}
 
@@ -789,6 +796,10 @@ export function HarnessView({
             actionClick={smokeHarness}
             disabled={selectionBlocked || !fuzzingSettings || qualificationBusy || (compileStatus !== "done" && (!canUseExisting || (existing?.status !== "Compiled" && existing?.status !== "SmokePassed")))}
           >
+            {!smokeResult && canUseExisting && existing && <RetainedHarnessBehavior
+              runId={existing.smoke_run_id ?? null} project={existing.project_root} target={selectedTarget}
+              sourceSha={existing.source_sha256} binarySha={existing.binary_sha256}
+            />}
             {smokeResult && (
               <div className="mt-2 text-xs">
                 <div className="flex items-center gap-2">
@@ -809,6 +820,7 @@ export function HarnessView({
                     passed=true yet a signal (near-zero execs) says the harness
                     never drove the target. Surface it so a hollow pass is not
                     approved for a full campaign on the strength of the green check. */}
+                {smokeResult.behavior && <HarnessBehaviorEvidence report={smokeResult.behavior} />}
                 {smokeResult.verdict?.level === "suspect" && (
                   <div className="mt-1 flex items-start gap-2" style={{ color: "var(--warning)" }}>
                     <AlertTriangle size={14} style={{ marginTop: 1, flexShrink: 0 }} />

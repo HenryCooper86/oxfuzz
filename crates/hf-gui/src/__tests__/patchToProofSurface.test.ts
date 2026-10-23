@@ -1,3 +1,4 @@
+import { extraTranslationDictionariesJson } from "./translationDictionaryScan";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
@@ -75,7 +76,7 @@ describe("service-owned Patch-to-Proof surface", () => {
   });
 
   it("keeps English and Chinese Patch-to-Proof labels paired", () => {
-    const translations = source("../i18n.extra.ts");
+    const translations = extraTranslationDictionariesJson;
     expect(translations).toContain('"patchToProof.title": "Patch to Proof"');
     expect(translations).toContain('"patchToProof.title": "补丁验证"');
     expect(translations).toContain('"patchToProof.stage.original_replay": "Original replay"');

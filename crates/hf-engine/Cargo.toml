@@ -5,7 +5,11 @@ edition.workspace = true
 license.workspace = true
 description = "EngineAdapter implementations for AFL++, honggfuzz, libFuzzer, and syzkaller"
 
+[features]
+managed-mutators = []
+
 [dependencies]
+sha2 = { workspace = true }
 hf-core = { workspace = true }
 async-trait = { workspace = true }
 tokio-util = { workspace = true }

@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 
 from scripts.effectiveness_benchmark import (
-    HEX_64, digest, no_duplicate_keys, nonempty, record, validate_cohort,
+    HEX_64, digest, no_duplicate_keys, nonempty, record, validate_cohort, trial_source_digest,
 )
 
 
@@ -137,7 +137,7 @@ def validate_manifest(manifest, trial, project, condition, outcome):
     expected = {
         "target": trial["selected_function"],
         "engine": condition["engine"],
-        "source_revision": project["source_sha256"],
+        "source_revision": trial_source_digest(trial, project),
         "sandbox_image_sha256": condition["sandbox_image_sha256"],
         "status": "done" if outcome == "completed" else outcome,
     }

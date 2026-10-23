@@ -177,6 +177,7 @@ async fn fuzz_runs_the_whole_pipeline_and_auto_picks_the_top_target() {
         std::time::Duration::from_secs(10),
         container.fuzz_onboard(
             FuzzRequest {
+                prepared_harness: None,
                 project: &project,
                 target: None,
                 engine: EngineKind::LibFuzzer,
@@ -256,6 +257,7 @@ async fn fuzz_reuses_a_promoted_harness_and_fresh_forces_a_redraft() {
     let container = pipeline_container(&store);
 
     let request = |fresh: bool| FuzzRequest {
+        prepared_harness: None,
         project: &project,
         target: Some("parse_entry"),
         engine: EngineKind::LibFuzzer,
@@ -358,6 +360,7 @@ async fn fuzz_stops_at_promotion_when_the_operator_denies_it() {
     let error = container
         .fuzz_onboard(
             FuzzRequest {
+                prepared_harness: None,
                 project: &project,
                 target: None,
                 engine: EngineKind::LibFuzzer,
@@ -471,6 +474,7 @@ async fn fuzz_auto_pick_excludes_a_higher_scoring_not_yet_harnessable_target() {
     let outcome = container
         .fuzz_onboard(
             FuzzRequest {
+                prepared_harness: None,
                 project: &project,
                 target: None,
                 engine: EngineKind::LibFuzzer,
@@ -515,6 +519,7 @@ async fn fuzz_on_a_go_only_project_fails_at_discovery_naming_the_harnessable_set
     let error = container
         .fuzz_onboard(
             FuzzRequest {
+                prepared_harness: None,
                 project: &project,
                 target: None,
                 engine: EngineKind::LibFuzzer,
@@ -577,6 +582,7 @@ async fn fuzz_fails_loud_when_discovery_finds_no_candidates() {
     let error = container
         .fuzz_onboard(
             FuzzRequest {
+                prepared_harness: None,
                 project: &project,
                 target: None,
                 engine: EngineKind::LibFuzzer,
@@ -632,6 +638,7 @@ async fn fuzz_fails_loud_for_an_unknown_explicit_target() {
     let error = container
         .fuzz_onboard(
             FuzzRequest {
+                prepared_harness: None,
                 project: &project,
                 target: Some("no_such_function"),
                 engine: EngineKind::LibFuzzer,
@@ -681,6 +688,7 @@ async fn fuzz_smoke_without_a_provider_fails_closed_and_names_the_bypass() {
     let error = container
         .fuzz_onboard(
             FuzzRequest {
+                prepared_harness: None,
                 project: &project,
                 target: None,
                 engine: EngineKind::LibFuzzer,
@@ -717,5 +725,275 @@ async fn fuzz_smoke_without_a_provider_fails_closed_and_names_the_bypass() {
             FuzzStage::Promote { .. } | FuzzStage::Campaign { .. }
         )),
         "nothing past smoke ran: {stages:?}"
+    );
+}
+
+fn supplied(source: &str) -> hf_service::PreparedHarnessSource {
+    use sha2::{Digest, Sha256};
+    hf_service::PreparedHarnessSource {
+        source: source.into(),
+        sha256: format!("{:x}", Sha256::digest(source.as_bytes())),
+    }
+}
+fn prepared_request<'a>(project: &'a std::path::Path, source: &str) -> FuzzRequest<'a> {
+    FuzzRequest {
+        project,
+        target: Some("parse_entry"),
+        engine: EngineKind::LibFuzzer,
+        lang: Some(TargetLanguage::C),
+        duration_secs: 1,
+        iterations: 1,
+        timeout_ms: None,
+        resume: None,
+        review_bypass: hf_service::HarnessReviewBypass::NotRequested,
+        fresh: false,
+        sanitizer: None,
+        cmplog: false,
+        seed: None,
+        prepared_harness: Some(supplied(source)),
+    }
+}
+const FROZEN_SOURCE: &str = "#include <stdint.h>\n#include <stddef.h>\nint LLVMFuzzerTestOneInput(const uint8_t *d, size_t n) { (void)d; (void)n; return 0; }\n";
+
+#[tokio::test]
+async fn prepared_source_is_exact_and_never_reuses_a_promoted_revision() {
+    let dir = tempfile::tempdir().unwrap();
+    let _workspace = common::install_managed_workspace("oxfuzz_prepared_exact");
+    let project = c_project(&dir);
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("runs.db"))
+            .await
+            .unwrap(),
+    );
+    let service = pipeline_container(&store);
+    let first = service
+        .fuzz_onboard(
+            prepared_request(&project, FROZEN_SOURCE),
+            &noop_stage(),
+            &noop_progress(),
+        )
+        .await
+        .unwrap();
+    let second_source = format!("{FROZEN_SOURCE}\n/* Frozen second revision */\n");
+    let second = service
+        .fuzz_onboard(
+            prepared_request(&project, &second_source),
+            &noop_stage(),
+            &noop_progress(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(first.harness_id, second.harness_id);
+    assert!(!second.harness_reused);
+    assert_eq!(second.repairs_used, 0);
+    assert_eq!(
+        second.prepared_harness_sha256,
+        Some(supplied(&second_source).sha256)
+    );
+    assert_eq!(
+        store
+            .get_harness(second.harness_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .source,
+        second_source
+    );
+}
+
+#[tokio::test]
+async fn prepared_source_validation_precedes_discovery_and_execution() {
+    let service = ServiceContainer::stubbed();
+    let root = std::path::Path::new("/not-a-project");
+    for invalid in ["digest", "target", "size", "nul"] {
+        let mut request = prepared_request(root, FROZEN_SOURCE);
+        match invalid {
+            "digest" => request.prepared_harness.as_mut().unwrap().sha256 = "0".repeat(64),
+            "target" => request.target = None,
+            "size" => {
+                request.prepared_harness = Some(supplied(
+                    &"x".repeat(hf_service::MAX_PREPARED_HARNESS_SOURCE_BYTES + 1),
+                ));
+            }
+            "nul" => request.prepared_harness = Some(supplied("source\0")),
+            _ => unreachable!(),
+        }
+        let log = StageLog::default();
+        assert!(service
+            .fuzz_onboard(request, &log.sink(), &noop_progress())
+            .await
+            .is_err());
+        assert!(
+            log.stages().is_empty(),
+            "{invalid} must fail before discovery"
+        );
+    }
+}
+
+#[tokio::test]
+async fn prepared_source_still_requires_human_promotion() {
+    let dir = tempfile::tempdir().unwrap();
+    let _workspace = common::install_managed_workspace("oxfuzz_prepared_denied");
+    let project = c_project(&dir);
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("runs.db"))
+            .await
+            .unwrap(),
+    );
+    let service = pipeline_container(&store).with_guardrails(hf_guardrails::Guardrails::new(
+        hf_guardrails::GuardrailPolicy::default(),
+        Arc::new(ApproveExceptPromote),
+    ));
+    let log = StageLog::default();
+    let error = service
+        .fuzz_onboard(
+            prepared_request(&project, FROZEN_SOURCE),
+            &log.sink(),
+            &noop_progress(),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("denied"));
+    assert!(!log
+        .stages()
+        .iter()
+        .any(|stage| matches!(stage, FuzzStage::Campaign { .. })));
+    assert!(store
+        .list_runs(None)
+        .await
+        .unwrap()
+        .iter()
+        .all(|run| run.kind != hf_storage::RunKind::Campaign));
+}
+
+struct FailedPreparedCompile(std::sync::atomic::AtomicUsize);
+#[async_trait::async_trait]
+impl hf_core::runtime::RuntimeAdapter for FailedPreparedCompile {
+    async fn resolve_image_reference(
+        &self,
+        image: &str,
+    ) -> Result<Option<hf_core::runtime::ImmutableImageReference>, hf_core::error::ClassifiedError>
+    {
+        hf_core::runtime::RuntimeAdapter::resolve_image_reference(&PipelineRuntime, image).await
+    }
+    async fn run_command(
+        &self,
+        _cmd: &[String],
+        cwd: &std::path::Path,
+        _limits: &hf_core::runtime::ResourceLimits,
+    ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(hf_core::runtime::CommandResult {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "controlled compile failure".into(),
+            workspace: cwd.into(),
+            termination: hf_core::runtime::CommandTermination::Completed,
+        })
+    }
+    async fn write_file(
+        &self,
+        path: &std::path::Path,
+        content: &str,
+    ) -> Result<(), hf_core::error::ClassifiedError> {
+        hf_core::runtime::RuntimeAdapter::write_file(&PipelineRuntime, path, content).await
+    }
+    async fn read_file(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<String, hf_core::error::ClassifiedError> {
+        hf_core::runtime::RuntimeAdapter::read_file(&PipelineRuntime, path).await
+    }
+}
+#[tokio::test]
+async fn prepared_source_compile_failure_never_enters_ai_repair_or_execution() {
+    let dir = tempfile::tempdir().unwrap();
+    let _workspace = common::install_managed_workspace("oxfuzz_prepared_compile_failure");
+    let project = c_project(&dir);
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("runs.db"))
+            .await
+            .unwrap(),
+    );
+    let runtime = Arc::new(FailedPreparedCompile(std::sync::atomic::AtomicUsize::new(
+        0,
+    )));
+    let service = ServiceContainer::new(runtime.clone(), Some(Arc::new(CodeBlockPool)))
+        .with_store(store.clone());
+    let log = StageLog::default();
+    assert!(service
+        .fuzz_onboard(
+            prepared_request(&project, FROZEN_SOURCE),
+            &log.sink(),
+            &noop_progress()
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        runtime.0.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "one sandbox compile and no retry/repair"
+    );
+    assert!(!log
+        .stages()
+        .iter()
+        .any(|stage| matches!(stage, FuzzStage::Smoke { .. } | FuzzStage::Campaign { .. })));
+    assert!(store.list_runs(None).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn prepared_source_rejects_another_promoted_revision_at_campaign_dispatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let _workspace = common::install_managed_workspace("oxfuzz_prepared_replaced");
+    let project = c_project(&dir);
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("runs.db"))
+            .await
+            .unwrap(),
+    );
+    let service = pipeline_container(&store);
+    let first = service
+        .fuzz_onboard(
+            prepared_request(&project, FROZEN_SOURCE),
+            &noop_stage(),
+            &noop_progress(),
+        )
+        .await
+        .unwrap();
+    let workspace = hf_service::workspace_dir(&project, "parse_entry");
+    let changed = format!("{FROZEN_SOURCE}\n/* Approved second revision */\n");
+    let swap = |stage| {
+        if matches!(stage, FuzzStage::Campaign { .. }) {
+            std::fs::write(
+                workspace.join("harness.active"),
+                first.harness_id.to_string(),
+            )
+            .unwrap();
+            std::fs::write(workspace.join("harness.source"), FROZEN_SOURCE).unwrap();
+        }
+    };
+    let error = service
+        .fuzz_onboard(
+            prepared_request(&project, &changed),
+            &swap,
+            &noop_progress(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("prepared harness revision changed"),
+        "{error}"
+    );
+    assert_eq!(
+        store
+            .list_runs(None)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|run| run.kind == hf_storage::RunKind::Campaign)
+            .count(),
+        1
     );
 }

@@ -74,6 +74,7 @@ fn sample_harness(target_id: Uuid) -> Harness {
         sanitizer: Sanitizer::Address,
         status: HarnessStatus::Compiled,
         smoke_run: None,
+        custom_mutator: None,
         cmplog: None,
     }
 }
@@ -153,6 +154,7 @@ async fn dashboard_summarizes_targets_harnesses_runs_and_crashes() {
     let harness = sample_harness(target.id);
     let run = sample_run("/proj", harness.id);
     let crash = Crash {
+        reproduction: None,
         id: Uuid::new_v4(),
         run_id: run.id,
         target_id: target.id,
@@ -223,6 +225,7 @@ async fn finding_proof_preserves_harness_origin_and_undefined_casr() {
     let harness = sample_harness(target.id);
     let run = sample_run("/proj", harness.id);
     let crash = Crash {
+        reproduction: None,
         id: Uuid::new_v4(),
         run_id: run.id,
         target_id: target.id,
@@ -289,6 +292,7 @@ async fn finding_proof_preserves_harness_origin_and_undefined_casr() {
 #[test]
 fn finding_proof_maps_every_persisted_origin_and_casr_classification() {
     let mut crash = Crash {
+        reproduction: None,
         id: Uuid::new_v4(),
         run_id: Uuid::new_v4(),
         target_id: Uuid::new_v4(),
@@ -425,6 +429,7 @@ async fn dashboard_project_filter_does_not_leak_other_project_reviews() {
     let target = sample_target("/other");
     let run = RunRecord::new("/other", EngineKind::LibFuzzer, None, Utc::now());
     let crash = Crash {
+        reproduction: None,
         id: Uuid::new_v4(),
         run_id: run.id,
         target_id: target.id,
@@ -515,6 +520,7 @@ async fn issue_export_returns_reviewable_payload() {
     let target = sample_target("/proj");
     let run = RunRecord::new("/proj", EngineKind::LibFuzzer, None, Utc::now());
     let crash = Crash {
+        reproduction: None,
         id: Uuid::new_v4(),
         run_id: run.id,
         target_id: target.id,
@@ -648,6 +654,7 @@ async fn the_crash_queue_is_ordered_by_disposition_and_carries_one_next_action()
         (CrashOrigin::Target, true, Disposition::ReachabilityUnproven),
     ] {
         let crash = Crash {
+            reproduction: None,
             id: Uuid::new_v4(),
             run_id: run.id,
             target_id: target.id,
@@ -715,6 +722,7 @@ async fn actual_workbench_enrichment_places_three_actionable_findings_before_one
 
     for index in 0..103_u128 {
         let crash = Crash {
+            reproduction: None,
             id: Uuid::from_u128(index + 1),
             run_id: run.id,
             target_id: target.id,
@@ -859,6 +867,7 @@ async fn harness_review_items_carry_the_qualification_evidence() {
     // A lint-detectable defect in the exact source: the approval surface must
     // recompute and show the lexical findings for this revision.
     harness.source = "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return strlen(data); }".to_owned();
+    let qualification_id = Uuid::new_v4();
     harness.smoke_run = Some(SmokeRunSummary {
         duration_secs: 60,
         execs_per_sec: 128.0,
@@ -866,7 +875,7 @@ async fn harness_review_items_carry_the_qualification_evidence() {
         passed: true,
         source_sha256: Some("a".repeat(64)),
         binary_sha256: Some("b".repeat(64)),
-        run_id: None,
+        run_id: Some(qualification_id),
     });
     store.upsert_harness(&harness).await.unwrap();
     // The durable review evidence is the schema-versioned envelope the
@@ -904,6 +913,10 @@ async fn harness_review_items_carry_the_qualification_evidence() {
 
     assert_eq!(items.len(), 1);
     let item = &items[0];
+    assert_eq!(
+        serde_json::to_value(item).unwrap()["smoke_run_id"],
+        qualification_id.to_string()
+    );
     let review = item.ai_review.as_ref().expect("review evidence attached");
     assert!(review.exercises_target);
     assert!(review.safe_to_execute);

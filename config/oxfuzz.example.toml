@@ -110,6 +110,8 @@ max_duration_secs = 7200
 # promotion still requires human approval. See docs/guides/SAFETY_MODEL.md.
 [harness]
 allow_unreviewed_smoke = false
+# Bounded AFL++ behavioral probe command ceiling (1..60 seconds).
+behavior_probe_timeout_secs = 5
 
 # Retained monitoring for active and recent campaign runs. Throughput mean is
 # the arithmetic mean of all valid reported samples for the run; the live
@@ -126,6 +128,12 @@ morning_summary_lookback_hours = 24
 # Optional Scapy automotive protocol adapter. Compile-time support and this
 # runtime switch must both be enabled. The sidecar executes only in hf-runtime;
 # offline PCAP and isolated vcan are the normal modes.
+[triage]
+# Independent confirmation after native crash minimization (2..=10 attempts each).
+confirmation_runs = 3
+# Per-attempt sandbox limit; the whole triage operation remains bounded.
+replay_timeout_secs = 10
+
 [automotive]
 enabled = true
 sidecar_image = "oxfuzz/scapy-automotive:2.7.0"
@@ -223,3 +231,16 @@ timeout_secs = 30
 # max_records = 256
 # max_cfg_blocks = 2048
 # max_inline_depth = 4
+
+# Optional hard provider spending limits, shared by all commands using this
+# configuration and HF_DB_PATH. Uncomment a stable scope and at least one limit.
+# Restart/reload providers after edits. A scope's limits cannot change after its
+# first reservation; choose a new scope only for a genuinely new workflow.
+# Every retry and paid health probe consumes a call. Unresolved requests retain
+# their full reservation after failure, cancellation, or restart.
+[model_budget]
+# scope_id = "project-a-trial-1"
+# max_calls = 30
+# max_tokens = 2000000
+# max_cost_microusd = 5000000 # $5.00; requires positive configured token prices
+max_output_tokens = 4096

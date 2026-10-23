@@ -116,6 +116,7 @@ pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/coverage/experiments", post(create).get(list))
         .route("/coverage/experiments/{id}", get(get_one))
+        .route("/coverage/experiments/{id}/replay", get(review_replay))
         .route("/coverage/experiments/{id}/complete", post(complete))
         .route("/coverage/experiments/{id}/cancel", post(cancel))
 }
@@ -187,6 +188,31 @@ async fn get_one(
                 .coverage_experiment(id, scope)
                 .await
                 .map_err(map_error)?,
+        )
+    }
+    #[cfg(not(feature = "coverage-experiments"))]
+    {
+        Err(error(Code::FeatureUnavailable))
+    }
+}
+async fn review_replay(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    request: Request,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let raw: ScopeQuery = query(&request)?;
+    let scope: CoverageExperimentScope =
+        decode(serde_json::json!({"project":raw.project,"target_id":raw.target_id}))?;
+    let id = parse_coverage_experiment_id(&id).map_err(map_error)?;
+    access(&state, id, scope.clone(), None).await?;
+    #[cfg(feature = "coverage-experiments")]
+    {
+        public(
+            state
+                .container
+                .coverage_experiment_replay_review(id, scope)
+                .await
+                .map_err(|_| error(Code::InvalidRequest))?,
         )
     }
     #[cfg(not(feature = "coverage-experiments"))]

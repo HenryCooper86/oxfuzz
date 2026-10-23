@@ -4,8 +4,8 @@ Status: **implemented**. Owners: `hf-service` for experiment
 policy and workflow, `hf-storage` for durable records and reference protection,
 `hf-web` and `hf-gui` for presentation. This document is the authoritative
 experiment design; [Coverage Blockers](coverage-blocker-design.md) supplies
-optional suggestions. The feature retains proposals and results but does not
-execute experiment work.
+optional suggestions. The feature retains proposals and results and connects an explicitly reviewed
+current-input replay to its experiment through the existing execution workflow.
 
 ## 1. Operator workflow and scope
 
@@ -13,8 +13,10 @@ An engineer selects a retained terminal campaign for the current project and
 target, reviews `grow_corpus` or `refine_harness`, a goal function, their own
 hypothesis, and a positive duration budget. Preparation persists that exact
 intent and baseline evidence before any navigation. The engineer explicitly
-uses existing Corpus and Harness workflows, then explicitly starts the existing
-CLI replay operation with the baseline seed and attaches one later terminal campaign, or cancels the investigation with a reason. Reopening shows
+uses existing Corpus and Harness workflows, then reviews and approves a guided
+current-input replay with the baseline seed. The service associates its campaign
+and compares the terminal result automatically. The engineer can separately
+cancel the investigation record or the associated campaign execution. Reopening shows
 the immutable proposal and its history, including unsuccessful attempts.
 
 Preparation is an evidence write, not execution authorization. Create, get,
@@ -334,8 +336,9 @@ rewrite history. A direct Store retry supplies the same evidence/reason; a new
 candidate end time is ignored on an exact retry, preserving the original end.
 Different supplied result evidence is conflict even for the same result UUID.
 On first transition, Store verifies the supplied snapshot against the current
-retained source rows within the transaction. No automatic transition occurs on
-restart: prepared is a durable idle state, and cancellation has no compensation.
+retained source rows within the transaction. Unassociated prepared proposals remain idle on restart. Associated terminal runs
+are reconciled by the terminal hook and scoped reads; record cancellation has
+no execution compensation.
 
 Stable error codes: `feature_unavailable`, `storage_unavailable`, `storage_error`,
 `not_found`, `invalid_request`, `invalid_project_path`, `project_not_authorized`,
@@ -388,8 +391,9 @@ feature list. `hf-web` and Tauri forward to `hf-service/coverage-experiments`;
 forwarding. All four product default feature lists enable it.
 Service standalone `--no-default-features --features coverage-experiments`
 requires neither `change-aware` nor `coverage-blockers`; do not reuse their
-comparison or proposal types. No new CLI command is required. Storage stays
-unconditional. Feature-off REST retains all five operations as authorized stubs,
+comparison or proposal types. The existing `run` command accepts `--experiment <UUID>` and resolves the
+baseline and target from that proposal; conflicting per-run overrides are refused. Storage stays
+unconditional. Feature-off REST retains all six operations as authorized stubs,
 returning HTTP 501 with exactly
 `{"code":"feature_unavailable","error":"coverage experiments are not included in this application build"}`.
 Registered Tauri stubs return the same stable code/message after native scope
@@ -522,8 +526,8 @@ the operator to start a new campaign and prepare against its recorded seed.
 REST and native replay use the same service replay and durable run lifecycle,
 including cancellation and progress. REST authorizes the retained owner before
 reading review details or executing; native launch is an explicit human action.
-There is no automatic execution or relaxed seed comparison. Result attachment
-remains a separate reviewed action after refreshing retained run history.
+There is no automatic execution or relaxed seed comparison. Guided result association is automatic after terminal execution; legacy manual
+attachment remains available only for unassociated proposals.
 No navigation handler invokes an action. Preserve experiment ID when returning. The GUI stores only the selected ID in a
 local preference keyed by canonical project and target UUID, then reloads its
 record through the scoped service read. Preference failures are visible; this
@@ -573,7 +577,7 @@ out-of-root path and ID requests before evidence/mutation; GUI tests cover
 prepare-before-navigation, reopen, failed/cancelled attachment, cancellation,
 claim limits, and delayed responses across project switches. Check standalone
 service feature and feature-off storage retention. In a no-default REST build
-with both experiments and harness-work-order disabled, test all five registered
+with both experiments and harness-work-order disabled, test all six registered
 stubs: authorized valid scopes receive the exact 501 JSON; out-of-root experiment
 and result IDs, wrong selected project/target, missing IDs, malformed/oversized
 requests, and storage failures preserve their errors. Assert no lifecycle writes
@@ -606,3 +610,72 @@ loads by exact selected IDs, ignores superseded replies and keeps history usable
 when comparison is unavailable. Existing experiment lifecycle and approval
 requirements remain owned by their operations. Allocation evidence uses the
 same service measurement assessment for selecting comparable retained runs.
+
+## Guided execution (October 2026)
+
+This extension supersedes the manual-only workflow above. After preparing a
+proposal, the operator uses the existing corpus or harness editor and qualification/
+promotion controls, then requests `coverage_experiment_replay_review(id, scope)`.
+The service binds the proposal, baseline seed, duration and resource settings to
+the exact current workspace and corpus digest. Starting this review through the
+existing replay executor remains an explicit human action and passes its normal
+RunFuzzer approval, promotion, policy and sandbox checks. The executor rechecks
+the retained experiment and the captured inputs before reserving any experiment
+execution; modified inputs require a fresh review. Experiment review and launch
+are unavailable when the coverage-experiments feature is disabled.
+
+Migration 0042 adds one immutable execution association per experiment, storing
+the exact reviewed JSON with a retained run reference. Run allocation and this
+association commit together before engine dispatch; competing launches cannot
+execute two campaigns for one proposal. The existing replay endpoints carry the
+association and new nullable review fields, and experiment review uses selected
+project/target scope. The UI uses the existing replay progress and execution
+cancellation controls. Cancelling the experiment record remains distinct and
+does not stop the associated execution. Its run and approval evidence remain
+retained even when the experiment is cancelled.
+
+On terminal execution the service automatically applies existing comparison
+rules and retains Done, Failed, Cancelled and no-improvement outcomes. Scoped
+reads reconcile a terminal associated run after interrupted completion or
+restart. Comparison refusal remains visible as a stable error code with the
+associated run; it does not discard the attempt or fabricate a comparison.
+Manual attachment remains available for historical unassociated proposals; it
+cannot replace a guided execution with an unrelated run. A new attempt requires
+a new experiment. Read/list views expose the associated run and reconciliation
+error so engineers never reconstruct campaign relationships manually.
+
+Guided review is exposed as GET `/coverage/experiments/{id}/replay` with the
+existing project/target scope query, and native command
+`coverage_experiment_replay_review` with the same bounded raw `{id, scope}`
+envelope. Its `ReplayReview` adds nullable `experiment_id` and
+`current_input_sha256`; POST to the existing baseline replay endpoint launches
+that review. Both transports retain owner authorization and feature-off refusals.
+CLI `oxfuzz run PROJECT --experiment UUID` prints the reviewed inputs/settings,
+passes existing execution approval, and prints the associated comparison.
+
+The input digest includes the complete run configuration, baseline immutable
+sandbox image, complete captured
+workspace entries (including executable permissions), and starting corpus names
+and bytes. Corpus permission bits are excluded because the existing snapshot
+operation creates private fresh files. Guided execution reuses retained argv,
+environment, timeout and CmpLog settings and does not regenerate its dictionary
+after human review. Every executed campaign still seals its full retained input
+manifest for future historical replay.
+
+### Recovery between durable admission and journal creation
+
+Guided execution holds an exclusive OS file lease before committing its run and
+experiment association, and retains it until terminal persistence or owner loss.
+The lease rendezvous is beside the canonical SQLite database, keyed by database
+identity and run UUID; separate configuration directories and service instances
+therefore share ownership checks. Recovery never infers owner death from a
+missing process-local cancellation token.
+
+Startup enumerates unfinished guided associations even when no journal-open
+entry survived. Only an acquired exclusive lease permits the associated running
+row to become failed, with an end timestamp. The same ownership check protects
+guided rows in journal recovery. Busy leases leave live executions unchanged;
+lock errors leave evidence unchanged and report degraded recovery. The failed
+run and immutable association remain inspectable and normal scoped completion
+can retain their comparison. Recovery never dispatches or automatically retries
+a target. No schema migration is required.

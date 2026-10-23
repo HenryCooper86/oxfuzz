@@ -9,9 +9,47 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ## Unreleased
 
+### Added
+
+- Harness and History show retained AFL++ behavioral qualification evidence,
+  including input sensitivity, repeatability, and persistent sequence checks.
+  Unsupported or unavailable measurements remain explicit.
+- Harness imports native C/C++ custom mutators through upstream AFL++ and
+  libFuzzer APIs. New revisions retain reviewed source, sandbox image, native
+  artifact identity and bounded callback observations; campaigns and retained
+  replay verify the staged artifacts before loading them.
+- Settings configures durable workflow call, token and USD limits. Dashboard
+  shows exact usage and denials. Provider retries and streams reserve allowance
+  before dispatch; restart retains unresolved charges, and Settings changes
+  apply to new provider operations without restarting the application.
+- Coverage experiments guide a reviewed change into an approved campaign,
+  associate its run atomically, and attach the terminal comparison. Restart
+  recovers abandoned admissions while preserving live process ownership and
+  unsuccessful attempts.
+- Prepared-source onboarding and schema-2 benchmark cohorts bind each trial to
+  exact reviewed harness bytes and staged-source identity. The runner installs
+  runtime spending limits and validates output identifiers and source files.
+
 ### Fixed
 
 - Updated Tokio to 1.53.3 for the RUSTSEC-2026-0386 I/O-safety advisory.
+- Crash minimization independently confirms the original and smaller input
+  against the retained executable and image. Reports and proof views recompute
+  observed same-failure counts; clean, changed, incomplete or intermittent
+  outcomes preserve the original input and evidence.
+- Optional behavioral probe runtime failures retain bounded unavailable
+  evidence without hiding artifact, image, or storage failures.
+- Shared translation keys reduce application JavaScript by 48 KB while
+  preserving all English and Chinese text and existing locale fallbacks.
+- Translation confirmations select exact repository-relative file paths,
+  preserving unrelated records for documents with the same filename.
+
+### Qualification
+
+- Real-project effectiveness results and native-mutator benefit measurements
+  remain pending manual qualification. Passing controlled tests does not supply
+  those measurements. See `docs/guides/MANUAL_QUALIFICATION.md` and
+  `docs/guides/MANAGED_MUTATORS.md`.
 
 ## 0.6.10 - 2026-10-23
 
