@@ -33,7 +33,9 @@ Two accepted inputs produce the same parsed value:
    in the project through the existing read-only `hf_runtime::scrubbed_command("git")`
    idiom already used to resolve the origin remote. Revision arguments are
    validated against a conservative grammar before they reach the command, and
-   the command is never composed through a shell.
+   the command is never composed through a shell. External diff and textconv
+   helpers are explicitly disabled; repository configuration must not turn
+   source inspection into host execution.
 2. **Supplied diff** -- an operator or CI pipeline supplies unified-diff text
    directly, for contexts that have the patch but no checkout.
 

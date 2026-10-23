@@ -424,6 +424,66 @@ async fn revision_arguments_that_could_reach_the_git_command_line_are_refused() 
     }
 }
 
+fn fixture_git(project: &std::path::Path, args: &[&str]) {
+    let output = hf_runtime::scrubbed_command("git")
+        .arg("-C")
+        .arg(project)
+        .args(["-c", "core.hooksPath=", "-c", "commit.gpgSign=false"])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[tokio::test]
+async fn revision_diff_does_not_execute_configured_helpers() {
+    let fixture = fixture().await;
+    let project = fixture.project.path();
+    fixture_git(project, &["init", "--quiet"]);
+    fixture_git(project, &["config", "user.name", "Regression Test"]);
+    fixture_git(project, &["config", "user.email", "test@example.invalid"]);
+    fixture_git(project, &["add", "parser.c"]);
+    fixture_git(project, &["commit", "--quiet", "-m", "base"]);
+    fixture_git(project, &["tag", "base"]);
+    std::fs::write(
+        project.join("parser.c"),
+        "int parse_packet(void) { return 1; }\n",
+    )
+    .unwrap();
+    fixture_git(project, &["add", "parser.c"]);
+    fixture_git(project, &["commit", "--quiet", "-m", "head"]);
+    std::fs::write(project.join(".gitattributes"), "parser.c diff=fixture\n").unwrap();
+
+    // A nonexistent helper makes accidental invocation fail without executing
+    // any target-supplied program on the host.
+    for setting in [
+        "diff.external",
+        "diff.fixture.command",
+        "diff.fixture.textconv",
+    ] {
+        fixture_git(project, &["config", setting, "oxfuzz-missing-diff-helper"]);
+        let result = fixture
+            .container
+            .change_impact(ChangeImpactRequest {
+                project: project.display().to_string(),
+                revisions: Some(hf_service::RevisionRange {
+                    base: "base".into(),
+                    head: "HEAD".into(),
+                }),
+                diff: None,
+            })
+            .await;
+        fixture_git(project, &["config", "--unset", setting]);
+        let view = result.unwrap_or_else(|error| panic!("{setting} affected inspection: {error}"));
+        assert_eq!(view.files.len(), 1);
+        assert_eq!(view.files[0].new_path.as_deref(), Some("parser.c"));
+    }
+}
+
 #[tokio::test]
 async fn publishing_is_refused_before_authorization_when_the_pair_is_incomparable() {
     use hf_guardrails::{DenyAll, GuardrailPolicy, Guardrails, RiskTier};

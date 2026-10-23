@@ -512,6 +512,8 @@ fn git_diff(project: &str, range: &RevisionRange) -> Result<String, ClassifiedEr
             "diff",
             "--unified=0",
             "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
             &format!("{}...{}", range.base, range.head),
             "--",
         ])
