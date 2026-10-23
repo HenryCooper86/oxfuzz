@@ -17,6 +17,8 @@ ALL_GATES=(fmt clippy check check-no-default-features check-feature-matrix test 
 # Keep the two package groups separate so each instrumented test run has an
 # explicit package set and its own report.
 COVERAGE_DOMAIN_CRATES=(hf-discovery hf-harness hf-engine hf-crash)
+# Domain packages do not inherit the shipping service's default features.
+COVERAGE_DOMAIN_FEATURES="hf-harness/managed-mutators"
 COVERAGE_INFRASTRUCTURE_CRATES=(
   hf-provider hf-session hf-context hf-storage hf-knowledge hf-diagnostics
   hf-spill hf-guardrails hf-prompt hf-tools hf-skills hf-runtime hf-scheduler
@@ -167,13 +169,18 @@ gate_coverage() {
   "${binary}" llvm-cov clean --workspace
   coverage_group() {
     local report="$1"
-    shift
+    local features="$2"
+    shift 2
     local crate_args=()
     local crate
     for crate in "$@"; do
       crate_args+=(-p "${crate}")
     done
-    "${binary}" llvm-cov --no-report "${crate_args[@]}"
+    local test_args=("${crate_args[@]}")
+    if [ -n "${features}" ]; then
+      test_args=(--features "${features}" "${crate_args[@]}")
+    fi
+    "${binary}" llvm-cov --no-report "${test_args[@]}"
     # The restrictive-umask child tests intentionally create mode-000 profile
     # files. Restore owner read access only on this run's generated profiles so
     # llvm-profdata can merge them; test artifacts remain in the coverage dir.
@@ -181,11 +188,13 @@ gate_coverage() {
       find "${coverage_target}" -maxdepth 1 -type f -name 'oxfuzz-*.profraw' \
         -exec chmod u+r {} +
     fi
+    # report consumes these freshly collected feature-enabled objects; it does
+    # not support --features. Keep its package selection identical to collection.
     "${binary}" llvm-cov report --json --summary-only "${crate_args[@]}" \
       --output-path "${report}"
   }
-  coverage_group "${coverage_reports}/domain.json" "${COVERAGE_DOMAIN_CRATES[@]}"
-  coverage_group "${coverage_reports}/infrastructure.json" "${COVERAGE_INFRASTRUCTURE_CRATES[@]}"
+  coverage_group "${coverage_reports}/domain.json" "${COVERAGE_DOMAIN_FEATURES}" "${COVERAGE_DOMAIN_CRATES[@]}"
+  coverage_group "${coverage_reports}/infrastructure.json" "" "${COVERAGE_INFRASTRUCTURE_CRATES[@]}"
   local baseline_args=(--measure)
   if [ "$(uname -s)" = Linux ]; then
     baseline_args=(--baseline config/quality/coverage-baseline.json)

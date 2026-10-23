@@ -150,6 +150,36 @@ class GateDispatcherTests(unittest.TestCase):
             result = self.run_gates(["deny"], stub_dir)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_domain_coverage_collects_and_reports_shipping_mutator_feature(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            stub_dir = pathlib.Path(directory)
+            target = stub_dir / "target"
+            log = stub_dir / "coverage-invocations.log"
+            self.make_stub(
+                stub_dir,
+                "cargo-llvm-cov",
+                f'echo "$*" >> "{log}"\n'
+                'if [[ "$*" == "llvm-cov report "* && "$*" == *"--features"* ]]; then exit 64; fi\n'
+                'exit 0',
+            )
+            self.make_stub(stub_dir, "python3", "exit 0")
+            result = self.run_gates(["coverage"], stub_dir, extra_env={"CARGO_TARGET_DIR": str(target)})
+            recorded = log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(recorded[0], "llvm-cov clean --workspace")
+        domain = [line for line in recorded if "-p hf-harness" in line]
+        self.assertEqual(len(domain), 2, recorded)
+        packages = "-p hf-discovery -p hf-harness -p hf-engine -p hf-crash"
+        self.assertEqual(domain[0], f"llvm-cov --no-report --features hf-harness/managed-mutators {packages}")
+        self.assertEqual(domain[1], f"llvm-cov report --json --summary-only {packages} --output-path {target}/coverage/domain.json")
+        self.assertEqual(recorded[1:3], domain, "report the fresh domain objects before collecting another feature set")
+        self.assertEqual(len(recorded), 5)
+        infrastructure = [line for line in recorded if "-p hf-service" in line]
+        self.assertEqual(len(infrastructure), 2)
+        for command in infrastructure:
+            self.assertNotIn("--features", command)
+            self.assertNotIn("--no-default-features", command)
+
     def test_coverage_gate_reopens_owned_profiles(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             stub_dir = pathlib.Path(directory)
