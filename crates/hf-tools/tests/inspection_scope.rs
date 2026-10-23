@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use hf_core::tool::{Tool, ToolInput, ToolOutput};
 use hf_core::types::{SessionId, ToolName};
-use hf_tools::builtin::{glob::GlobTool, grep::GrepTool};
+use hf_tools::builtin::{file_read::FileReadTool, glob::GlobTool, grep::GrepTool};
 use hf_tools::error::ToolRegistryError;
 use hf_tools::{ToolExecutor, ToolRegistryConfig, ToolRegistryImpl};
 use serde_json::{json, Value};
@@ -111,4 +111,15 @@ async fn explicit_grep_link_keeps_canonical_project_authorization() {
     )
     .await;
     assert!(denied.is_err());
+}
+
+#[tokio::test]
+async fn file_read_rejects_special_files_inside_its_allowed_root() {
+    let result = inspect(
+        Arc::new(FileReadTool::new()),
+        Path::new("/dev"),
+        json!({"path": "null"}),
+    )
+    .await;
+    assert!(result.is_err(), "device files must not be read as source");
 }

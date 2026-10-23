@@ -151,6 +151,11 @@ impl Tool for FileReadTool {
                 message: format!("cannot read directory '{}'", canonical.display()),
             });
         }
+        if !metadata.is_file() {
+            return Err(ToolError::Other {
+                message: format!("cannot read non-regular file '{}'", canonical.display()),
+            });
+        }
 
         let range = ReadRange::from_arguments(&input.arguments)?;
         let include_line_numbers =
@@ -294,9 +299,19 @@ async fn read_file_range_fast(
     metadata: &std::fs::Metadata,
     range: ReadRange,
 ) -> Result<FileRangeRead, ToolError> {
-    let bytes = tokio::fs::read(path)
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| file_io_error(path, "open", &e))?;
+    let mut bytes = Vec::new();
+    file.take(metadata.len().saturating_add(1))
+        .read_to_end(&mut bytes)
         .await
         .map_err(|e| file_io_error(path, "read", &e))?;
+    if bytes.len() as u64 > metadata.len() {
+        return Err(ToolError::Other {
+            message: "file grew after size validation; retry the read".into(),
+        });
+    }
     let (content, encoding) = decode_bytes_to_utf8(&bytes, path);
 
     let lines: Vec<&str> = content.lines().collect();
@@ -604,6 +619,18 @@ mod tests {
     use hf_core::types::SessionId;
     use std::io::Write;
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn fast_read_rejects_growth_after_size_admission() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "before\n").unwrap();
+        let metadata = std::fs::metadata(file.path()).unwrap();
+        std::fs::write(file.path(), "before\nafter\n").unwrap();
+        let range = ReadRange::from_arguments(&serde_json::json!({"limit": 1})).unwrap();
+
+        let result = read_file_range_as_utf8_impl(file.path(), &metadata, range).await;
+        assert!(result.is_err(), "a growing file must not bypass admission");
+    }
 
     fn make_input(args: serde_json::Value) -> ToolInput {
         ToolInput {

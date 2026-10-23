@@ -36,6 +36,9 @@ pub trait Tool: Send + Sync {
 | `KnowledgeSearch` | BM25 search over the active project's source index. |
 
 `FileRead`, `Glob`, and `Grep` are implemented in `hf-tools`.
+`FileRead` rejects non-regular files before reading. Its small-file reader
+limits actual reads to the admitted metadata size plus one detection byte and
+rejects growth, so file growth cannot turn that read into an unbounded allocation.
 `KnowledgeSearch` is registered by `hf-agent` with its `AgentBackend`, so all
 four advertised tools have executable registry entries. The registry assembly
 test in `hf-agent::agent_tools` enforces exact parity between this catalog and
