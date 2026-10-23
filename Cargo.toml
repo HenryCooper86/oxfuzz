@@ -39,7 +39,7 @@ repository = "https://github.com/HenryCooper86/oxfuzz"
 
 [workspace.dependencies]
 # Async runtime
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1.53.3", features = ["full"] }
 tokio-util = "0.7"
 async-trait = "0.1"
 futures = "0.3"

@@ -9,6 +9,10 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ## Unreleased
 
+### Fixed
+
+- Updated Tokio to 1.53.3 for the RUSTSEC-2026-0386 I/O-safety advisory.
+
 ## 0.6.10 - 2026-10-23
 
 ### Fixed
