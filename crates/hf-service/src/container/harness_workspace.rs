@@ -11,7 +11,7 @@ use hf_core::error::ClassifiedError;
 use uuid::Uuid;
 
 use super::crash_inputs::is_regular_file;
-use super::workspace_file::replace_workspace_file;
+use super::workspace_file::{open_workspace_file, replace_workspace_file};
 
 /// Reduce an untrusted `target` to the single directory component that names
 /// its workspace.
@@ -155,19 +155,13 @@ pub fn generate_target_seeds(target: &str) -> Vec<(Vec<u8>, String)> {
 pub(super) fn build_workspace_dictionary(workspace: &Path, dict_name: &str) -> Option<PathBuf> {
     let mut tokens: Vec<Vec<u8>> = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    let entries = std::fs::read_dir(workspace).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if !matches!(ext, "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh") {
-            continue;
+    let mut remaining = MAX_DICTIONARY_SOURCE_BYTES;
+    for path in dictionary_source_paths(workspace) {
+        if remaining == 0 {
+            break;
         }
-        // Skip the generated harness itself -- its literals are oxfuzz's, not
-        // the target's, and add noise.
-        if path.file_stem().and_then(|s| s.to_str()) == Some("harness") {
-            continue;
-        }
-        if let Ok(src) = std::fs::read_to_string(&path) {
+        if let Ok((src, bytes_read)) = read_dictionary_source(workspace, &path, remaining) {
+            remaining -= bytes_read;
             for token in hf_engine::dict::extract_tokens(&src) {
                 if seen.insert(token.clone()) {
                     tokens.push(token);
@@ -192,29 +186,85 @@ pub(super) fn build_workspace_dictionary(workspace: &Path, dict_name: &str) -> O
 /// dictionary author. Capped so a large target cannot blow the prompt budget.
 pub(super) fn read_dictionary_source_excerpt(workspace: &Path, max_bytes: usize) -> String {
     let mut excerpt = String::new();
-    let Ok(entries) = std::fs::read_dir(workspace) else {
-        return excerpt;
-    };
-    let mut paths: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
-    paths.sort();
-    for path in paths {
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if !matches!(ext, "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh") {
-            continue;
+    let mut remaining = max_bytes.min(MAX_DICTIONARY_SOURCE_BYTES);
+    for path in dictionary_source_paths(workspace) {
+        if remaining == 0 {
+            break;
         }
-        if path.file_stem().and_then(|s| s.to_str()) == Some("harness") {
-            continue;
-        }
-        if let Ok(src) = std::fs::read_to_string(&path) {
+        if let Ok((src, bytes_read)) = read_dictionary_source(workspace, &path, remaining) {
+            remaining -= bytes_read;
             excerpt.push_str(&src);
-            excerpt.push('\n');
-            if excerpt.len() >= max_bytes {
-                excerpt.truncate(max_bytes);
-                break;
+            if remaining > 0 {
+                excerpt.push('\n');
+                remaining -= 1;
             }
         }
     }
     excerpt
+}
+
+/// Aggregate safety ceiling for optional dictionary source inspection.
+const MAX_DICTIONARY_SOURCE_BYTES: usize = 8 * 1024 * 1024;
+
+fn dictionary_source_paths(workspace: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(workspace) else {
+        // Dictionary enrichment is optional when the workspace cannot be listed.
+        return Vec::new();
+    };
+    let mut paths = Vec::new();
+    for entry in entries.take(MAX_STAGED_FILES) {
+        let Ok(entry) = entry else {
+            // Unreadable entries cannot supply optional source tokens.
+            continue;
+        };
+        let path = PathBuf::from(entry.file_name());
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if matches!(ext, "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh")
+            && path.file_stem().and_then(|s| s.to_str()) != Some("harness")
+        {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    paths
+}
+
+fn read_dictionary_source(
+    workspace: &Path,
+    relative: &Path,
+    max_bytes: usize,
+) -> std::io::Result<(String, usize)> {
+    let file = open_workspace_file(workspace, relative)?;
+    read_dictionary_source_bytes(file, max_bytes)
+}
+
+fn read_dictionary_source_bytes(
+    reader: impl std::io::Read,
+    max_bytes: usize,
+) -> std::io::Result<(String, usize)> {
+    use std::io::Read as _;
+
+    let mut bytes = Vec::new();
+    if reader
+        .take(max_bytes as u64)
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        // A partial read cannot supply optional tokens, but its bytes still
+        // count against the aggregate source limit.
+        return Ok((String::new(), bytes.len()));
+    }
+    let bytes_read = bytes.len();
+    let valid_len = match std::str::from_utf8(&bytes) {
+        Ok(_) => bytes.len(),
+        Err(error) if error.error_len().is_none() => error.valid_up_to(),
+        // Invalid source contributes no tokens, but still consumes the read budget.
+        Err(_) => return Ok((String::new(), bytes_read)),
+    };
+    bytes.truncate(valid_len);
+    String::from_utf8(bytes)
+        .map(|source| (source, bytes_read))
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 
 /// Cache of LLM-proposed dictionary tokens, keyed by `project::target` and
@@ -826,7 +876,46 @@ mod harness_source_tests {
 
 #[cfg(test)]
 mod dictionary_tests {
-    use super::build_workspace_dictionary;
+    use super::{build_workspace_dictionary, read_dictionary_source_excerpt};
+
+    #[cfg(unix)]
+    #[test]
+    fn dictionary_inputs_do_not_follow_sandbox_created_symlinks() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("private.h");
+        std::fs::write(&secret, "const char *secret = \"PRIVATE_TOKEN\";").unwrap();
+        std::os::unix::fs::symlink(&secret, workspace.path().join("leak.h")).unwrap();
+
+        assert!(build_workspace_dictionary(workspace.path(), "test.dict").is_none());
+        assert!(read_dictionary_source_excerpt(workspace.path(), 8192).is_empty());
+    }
+
+    #[test]
+    fn dictionary_excerpt_truncates_at_a_utf8_character() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("parse.c"), "// é中\n").unwrap();
+
+        assert_eq!(read_dictionary_source_excerpt(workspace.path(), 4), "// ");
+        assert_eq!(read_dictionary_source_excerpt(workspace.path(), 5), "// é");
+        assert_eq!(read_dictionary_source_excerpt(workspace.path(), 7), "// é");
+        assert_eq!(read_dictionary_source_excerpt(workspace.path(), 0), "");
+    }
+
+    #[test]
+    fn dictionary_read_errors_still_consume_the_source_budget() {
+        struct FailingReader;
+        impl std::io::Read for FailingReader {
+            fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("source read failed"))
+            }
+        }
+        use std::io::Read as _;
+        let reader = std::io::Cursor::new(b"partial").chain(FailingReader);
+        let (source, consumed) = super::read_dictionary_source_bytes(reader, 32).unwrap();
+        assert!(source.is_empty());
+        assert_eq!(consumed, 7);
+    }
 
     #[test]
     fn builds_dictionary_from_source_literals_excluding_harness() {

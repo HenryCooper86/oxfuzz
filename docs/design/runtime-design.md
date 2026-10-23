@@ -50,6 +50,14 @@ The service constructs the production runtime with
 `hf_service::workspace_root()`. A caller-controlled project path or target name
 must never cause Docker to bind-mount another host directory.
 
+Dictionary inspection treats files left by sandbox builds as untrusted. Both
+static token extraction and provider excerpts use descriptor-relative regular
+file opens that reject links and special files. The optional scan visits at
+most 20,000 directory entries and reads at most 8 MiB of source in aggregate;
+provider excerpts retain their smaller requested byte limit. UTF-8 prefixes
+end at complete characters. Sources beyond those safety ceilings contribute no
+optional dictionary tokens.
+
 `SandboxOptions.user` can select an explicit numeric container UID/GID. Omitting
 it preserves the image's configured identity. This does not add capabilities or
 change mount permissions, networking, process limits, or approval requirements.

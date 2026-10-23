@@ -1,4 +1,4 @@
-//! Host writes to a workspace that a sandbox may have modified.
+//! Confined host file access to a workspace that a sandbox may have modified.
 
 use std::ffi::OsString;
 use std::io::{self, Read};
@@ -19,6 +19,79 @@ fn components(relative: &Path) -> io::Result<(Vec<OsString>, OsString)> {
         io::Error::new(io::ErrorKind::InvalidInput, "workspace file path is empty")
     })?;
     Ok((parts, leaf))
+}
+
+/// Open a regular workspace file without following sandbox-created links.
+pub(super) fn open_workspace_file(workspace: &Path, relative: &Path) -> io::Result<std::fs::File> {
+    let (parents, leaf) = components(relative)?;
+    let file = open_workspace_file_impl(workspace, &parents, &leaf)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "workspace input is not a regular file",
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn open_workspace_file_impl(
+    workspace: &Path,
+    parents: &[OsString],
+    leaf: &std::ffi::OsStr,
+) -> io::Result<std::fs::File> {
+    use rustix::fs::{open, openat, Mode, OFlags};
+    use std::fs::File;
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut directory = File::from(open(workspace, flags, Mode::empty())?);
+    for parent in parents {
+        directory = File::from(openat(&directory, parent, flags, Mode::empty())?);
+    }
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    Ok(File::from(openat(&directory, leaf, flags, Mode::empty())?))
+}
+
+#[cfg(windows)]
+fn open_workspace_file_impl(
+    workspace: &Path,
+    parents: &[OsString],
+    leaf: &std::ffi::OsStr,
+) -> io::Result<std::fs::File> {
+    use cap_primitives::fs::{open, open_ambient, open_dir_nofollow, OpenOptions, OpenOptionsExt};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    };
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+    let mut directory = open_ambient(workspace, &options, cap_primitives::ambient_authority())?;
+    if !directory.metadata()?.is_dir() || directory.metadata()?.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "workspace root is not a regular directory",
+        ));
+    }
+    for parent in parents {
+        directory = open_dir_nofollow(&directory, Path::new(parent))?;
+    }
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    open(&directory, Path::new(leaf), &options)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_workspace_file_impl(
+    _workspace: &Path,
+    _parents: &[OsString],
+    _leaf: &std::ffi::OsStr,
+) -> io::Result<std::fs::File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "confined workspace reads are unavailable on this platform",
+    ))
 }
 
 /// Replace a file without following a link left by a sandbox at its destination
