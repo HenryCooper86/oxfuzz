@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -862,6 +863,60 @@ def _int_list(value: Any, field: str) -> list[int]:
     return result
 
 
+class _ScanBudget:
+    def __init__(self, limits: dict[str, int], probe_count: int, payload_bytes: int) -> None:
+        self.limits = limits
+        self._check(probe_count > limits["max_events"], "max_events")
+        self._check(payload_bytes > limits["max_payload_bytes"], "max_payload_bytes")
+        self._check(
+            (probe_count - 1) * 1_000 >= limits["max_duration_ms"] * limits["max_rate_per_second"],
+            "max_duration_ms",
+        )
+        self.started = time.monotonic()
+        self.next_probe = self.started
+        self.payload_bytes = 0
+        self.events: list[dict[str, Any]] = []
+
+    @staticmethod
+    def _check(exceeded: bool, field: str) -> None:
+        if exceeded:
+            raise SidecarError(
+                "limit_exceeded", f"UDS scan exceeds {field}", field=f"limits.{field}"
+            )
+
+    def elapsed(self) -> float:
+        elapsed = time.monotonic() - self.started
+        self._check(elapsed * 1_000 >= self.limits["max_duration_ms"], "max_duration_ms")
+        return elapsed
+
+    def before_probe(self, request_id: int, payload: bytes) -> None:
+        self.elapsed()
+        delay = self.next_probe - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+        self.record("transmit", request_id, payload)
+        self.next_probe = time.monotonic() + 1 / self.limits["max_rate_per_second"]
+
+    def record(self, direction: str, arbitration_id: int, payload: bytes) -> None:
+        elapsed = self.elapsed()
+        self._check(len(self.events) >= self.limits["max_events"], "max_events")
+        self._check(
+            self.payload_bytes + len(payload) > self.limits["max_payload_bytes"],
+            "max_payload_bytes",
+        )
+        self.events.append(
+            {
+                "sequence": len(self.events),
+                "protocol": "uds",
+                "direction": direction,
+                "offset_micros": int(elapsed * 1_000_000),
+                "payload_hex": payload.hex(),
+                "metadata": {"arbitration_id": str(arbitration_id)},
+            }
+        )
+        self.payload_bytes += len(payload)
+
+
 def _scan_uds(
     payload: Mapping[str, Any],
     artifact_store: ArtifactStore,
@@ -922,40 +977,30 @@ def _scan_uds(
                 field="payload.services",
             )
 
-    events: list[dict[str, Any]] = []
+    budget = _ScanBudget(
+        limits,
+        len(request_ids) * len(services),
+        len(request_ids) * sum(len(_UDS_PROBES[service]) for service in services),
+    )
     ecus: list[dict[str, Any]] = []
-    sequence = 0
     for request_id in request_ids:
         response_id = request_id + 8  # 11-bit UDS response convention
         discovered: list[dict[str, Any]] = []
         for service in services:
             probe = _UDS_PROBES[service]
-            events.append(
-                {
-                    "sequence": sequence,
-                    "protocol": "uds",
-                    "direction": "transmit",
-                    "offset_micros": 0,
-                    "payload_hex": probe.hex(),
-                    "metadata": {"arbitration_id": str(request_id)},
-                }
-            )
-            sequence += 1
+            budget.before_probe(request_id, probe)
             response = transport.probe(request_id, response_id, probe)
+            budget.elapsed()
             if response is None:
                 continue
+            if not isinstance(response, bytes | bytearray) or not 1 <= len(response) <= 8:
+                raise SidecarError(
+                    "transport_error",
+                    "UDS probe response must be a non-empty classic CAN frame",
+                    field="response",
+                )
             response = bytes(response)
-            events.append(
-                {
-                    "sequence": sequence,
-                    "protocol": "uds",
-                    "direction": "receive",
-                    "offset_micros": 0,
-                    "payload_hex": response.hex(),
-                    "metadata": {"arbitration_id": str(response_id)},
-                }
-            )
-            sequence += 1
+            budget.record("receive", response_id, response)
             classification = _classify_uds_response(service, response)
             if classification is None:
                 continue
@@ -966,8 +1011,8 @@ def _scan_uds(
                 {"request_id": request_id, "response_id": response_id, "services": discovered}
             )
 
-    transcript_bytes = rust_transcript_bytes(events)
-    transcript_hash = rust_transcript_sha256(events)
+    transcript_bytes = rust_transcript_bytes(budget.events)
+    transcript_hash = rust_transcript_sha256(budget.events)
     transcript = artifact_store.write_bytes(
         "scan-transcript",
         "application/vnd.oxfuzz.automotive-transcript+json",

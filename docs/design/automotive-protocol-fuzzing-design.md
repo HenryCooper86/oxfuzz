@@ -163,6 +163,26 @@ Failures before step 4 create no workspace or run record. Presentation layers
 transport service-owned DTOs and never construct sidecar commands or
 reimplement physical-bench readiness.
 
+### UDS discovery scan budgets
+
+A UDS scan applies the injected operation limits inside the sidecar executor.
+Before its first probe, it rejects an outbound request count, aggregate request
+payload, or minimum paced schedule that cannot fit the configured budgets. Each
+transmission is separated from the previous transmission by at least the inverse
+of `max_rate_per_second`; the executor checks the elapsed duration before and
+after every probe and after pacing waits. The runtime retains responsibility for
+terminating an in-flight blocking transport at the sandbox deadline.
+
+`max_events` counts both transmitted requests and received responses.
+`max_payload_bytes` counts the bytes retained in those transcript events: the
+UDS request bytes and the returned CAN frame bytes. Responses must be non-empty
+classic CAN frames of at most eight bytes. Each event consumes the remaining
+aggregate budget before it is appended, and exhaustion prevents subsequent
+transmission. A scan that exhausts a budget fails with a structured error instead
+of publishing a successful partial transcript. Event offsets retain measured
+monotonic time rather than assigning every event time zero. Physical-bench scans
+remain refused by the service; these limits do not grant execution approval.
+
 ## 6. Agent and Human Authority
 
 Agents may propose capture analysis, mutation, or replay plans. They cannot

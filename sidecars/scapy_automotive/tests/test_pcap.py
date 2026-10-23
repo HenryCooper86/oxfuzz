@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 from oxfuzz_scapy_automotive.errors import SidecarError
 from oxfuzz_scapy_automotive.pcap import ScapyPcapDecoder, decode_pcap
@@ -64,15 +65,25 @@ class PcapTests(unittest.TestCase):
 
     def test_real_scapy_decoder_only_reads_an_offline_pcap(self) -> None:
         try:
-            from scapy.all import IP, UDP, Ether, Raw, wrpcap
+            from scapy.all import IP, UDP, Ether, Raw, conf, wrpcap
         except ImportError:
             self.skipTest("Scapy is not installed")
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "offline.pcap"
-            packet = Ether() / IP(dst="192.0.2.1") / UDP(dport=13400) / Raw(b"doip")
+            packet = (
+                Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02")
+                / IP(src="192.0.2.2", dst="192.0.2.1")
+                / UDP(dport=13400)
+                / Raw(b"doip")
+            )
             packet.time = 1.25
-            wrpcap(str(path), [packet])
+            with patch.object(
+                conf.route,
+                "route",
+                side_effect=AssertionError("offline fixture queried host route"),
+            ):
+                wrpcap(str(path), [packet])
 
             result = decode_pcap(
                 path,
