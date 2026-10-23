@@ -9,6 +9,8 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ## Unreleased
 
+## 0.7.0 - 2026-10-23
+
 ### Added
 
 - Harness and History show retained AFL++ behavioral qualification evidence,
