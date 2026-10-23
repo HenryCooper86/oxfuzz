@@ -142,7 +142,9 @@ fn report_distinguishes_observed_reproduction_counts_from_advisory_determinism()
     crash.casr = None;
     crash.origin = hf_crash::crash_origin(reference);
     crash.minimized = false;
-    let root = PathBuf::from(format!("/work/runs/{}", crash.run_id));
+    let workspace = tempfile::tempdir().unwrap();
+    let root = workspace.path().join("runs").join(crash.run_id.to_string());
+    assert!(root.is_absolute());
     let original = root.join("out/crash-original");
     let candidate = root
         .join("triage/minimized")
@@ -200,7 +202,7 @@ fn report_distinguishes_observed_reproduction_counts_from_advisory_determinism()
         hf_service::finding_proof::FindingProofStatus::Supported
     );
     let verified = data.crashes[0].clone();
-    for mutation in 0..12 {
+    for mutation in 0..13 {
         let mut invalid = verified.clone();
         let record = invalid.reproduction.as_mut().unwrap();
         match mutation {
@@ -221,7 +223,17 @@ fn report_distinguishes_observed_reproduction_counts_from_advisory_determinism()
             8 => record.binary_sha256 = "not-a-digest".to_owned(),
             9 => record.image = "mutable:image".to_owned(),
             10 => record.crash_id = Uuid::new_v4(),
-            _ => invalid.summary = "ERROR: AddressSanitizer: heap-use-after-free".to_owned(),
+            11 => invalid.summary = "ERROR: AddressSanitizer: heap-use-after-free".to_owned(),
+            _ => {
+                let relative_run = PathBuf::from("workspace")
+                    .join("runs")
+                    .join(invalid.run_id.to_string());
+                record.original_input = relative_run.join("out/crash-original");
+                record.candidate_input = relative_run
+                    .join("triage/minimized")
+                    .join(format!("{}.min", invalid.id));
+                invalid.input_path.clone_from(&record.original_input);
+            }
         }
         let proof = hf_service::finding_proof::finding_proof_card(&invalid);
         assert_eq!(

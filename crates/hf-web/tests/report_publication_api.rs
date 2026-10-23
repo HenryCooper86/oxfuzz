@@ -15,7 +15,6 @@
 
 #![cfg(feature = "change-aware")]
 
-use std::path::PathBuf;
 use std::sync::LazyLock;
 
 use axum::body::Body;
@@ -272,7 +271,7 @@ async fn aliased_saved_owner_publishes_the_canonical_approved_path() {
     let fixture = hf_service::test_support::change_aware_fixture()
         .await
         .expect("store-backed fixture");
-    let real_root: PathBuf = fixture.project_root().to_path_buf();
+    let real_root = fixture.project_root().to_path_buf();
     let product = product_name(&fixture);
     let alias_parent = tempfile::tempdir().unwrap();
     let alias = alias_parent.path().join("alias-to-project");
