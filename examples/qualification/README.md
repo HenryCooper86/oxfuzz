@@ -33,8 +33,10 @@ filter. A configured review provider, Docker, and the local
 Each of libFuzzer, AFL++, and honggfuzz compiles in `hf-runtime`, completes a
 10-second smoke, promotes that harness revision, starts a 10-second campaign,
 and stops it after measured progress. Stop must finish within 15 seconds. A
-10-second retained-input replay follows. The test checks that no new sandbox
-containers remain after each engine. It never removes unrelated containers.
+10-second retained-input replay follows. After each engine, the test checks that
+no running or stopped containers or pending ownership records remain for its
+workspace. Other workspaces do not enter this cleanup check, and the test never
+removes unrelated containers.
 
 The selected directory receives a unique `qualification-<uuid>` child with the
 database, isolated config, workspace, immutable inputs, journals, and per-engine

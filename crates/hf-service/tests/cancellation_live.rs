@@ -30,10 +30,17 @@ fn live_approval_is_bound_to_both_source_files() {
     assert!(!approved_sources(""));
 }
 
-async fn sandbox_names() -> BTreeSet<String> {
+async fn sandbox_names(workspace_digest: &str) -> BTreeSet<String> {
     let mut command = tokio::process::Command::new(hf_runtime::docker_bin());
     command
-        .args(["ps", "--format", "{{.Names}}", "--filter", "name=hf-run-"])
+        .args([
+            "ps",
+            "-a",
+            "--format",
+            "{{.Names}}",
+            "--filter",
+            &format!("label=org.oxfuzz.workspace-sha256={workspace_digest}"),
+        ])
         .kill_on_drop(true);
     let result = tokio::time::timeout(Duration::from_secs(10), command.output())
         .await
@@ -211,7 +218,10 @@ async fn stop_button_cancels_a_real_fuzz_run() {
             .unwrap(),
     );
     let container = Arc::new(ServiceContainer::new(runtime, Some(pool)).with_store(store));
-    let before = sandbox_names().await;
+    let ownership =
+        hf_runtime::owned_containers::OwnedContainerRegistry::new(&root.join("workspace"))
+            .expect("qualification workspace ownership");
+    assert!(sandbox_names(ownership.workspace_digest()).await.is_empty());
     eprintln!("Live qualification evidence: {}", root.display());
     for engine in [
         EngineKind::LibFuzzer,
@@ -219,10 +229,11 @@ async fn stop_button_cancels_a_real_fuzz_run() {
         EngineKind::Honggfuzz,
     ] {
         qualify_engine(Arc::clone(&container), &root, engine).await;
-        let after = sandbox_names().await;
+        let after = sandbox_names(ownership.workspace_digest()).await;
         assert!(
-            after.difference(&before).next().is_none(),
-            "new sandbox containers remain after closeout: {after:?}"
+            after.is_empty(),
+            "qualification sandbox containers remain after closeout: {after:?}"
         );
+        assert!(ownership.pending_names().unwrap().is_empty());
     }
 }
