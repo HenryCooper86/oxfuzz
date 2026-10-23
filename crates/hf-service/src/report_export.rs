@@ -83,8 +83,8 @@ pub fn available_formats() -> Vec<String> {
 /// the right fonts and line-breaking rules.
 ///
 /// # Errors
-/// Returns an error on IO failure, or when a required external tool (pandoc, or
-/// a PDF engine) is unavailable for the requested format.
+/// Returns an error on IO failure, when a required external tool is unavailable,
+/// or when PDF/DOCX content contains images or raw HTML that could load resources.
 pub fn write_report(
     markdown: &str,
     title: &str,
@@ -106,22 +106,19 @@ pub fn write_report(
             markdown_to_html(&strip_mermaid_blocks(markdown), title, language),
         )
         .map_err(|e| ClassifiedError::Internal(format!("write report: {e}"))),
-        ReportFormat::Docx => pandoc_convert(&strip_mermaid_blocks(markdown), out_path, None),
+        ReportFormat::Docx => pandoc_convert(
+            &strip_mermaid_blocks(markdown),
+            out_path,
+            ReportFormat::Docx,
+        ),
         ReportFormat::Pdf => {
-            let engine = pdf_engine().ok_or_else(|| {
-                ClassifiedError::Validation(
-                    "PDF export needs a PDF engine (wkhtmltopdf, weasyprint, or a LaTeX install). \
-                     Export HTML and print to PDF instead."
-                        .to_owned(),
-                )
-            })?;
             // LaTeX-based PDF engines (xelatex/pdflatex) use fonts that lack the
             // box-drawing / block / arrow glyphs a report can contain (sparklines,
             // mermaid arrows), which get silently dropped. Substitute ASCII so the
             // PDF renders cleanly. Then insert zero-width break hints so long
             // paths wrap. MD/HTML/DOCX keep the original text.
             let prepared = sanitize_for_latex(&insert_break_hints(&strip_mermaid_blocks(markdown)));
-            pandoc_convert(&prepared, out_path, Some(engine))
+            pandoc_convert(&prepared, out_path, ReportFormat::Pdf)
         }
     }
 }
@@ -234,12 +231,7 @@ fn strip_mermaid_blocks(md: &str) -> String {
 /// `language` is declared as the document's `lang` attribute.
 #[must_use]
 pub fn markdown_to_html(markdown: &str, title: &str, language: ReportLanguage) -> String {
-    let mut opts = comrak::Options::default();
-    opts.extension.table = true;
-    opts.extension.strikethrough = true;
-    opts.extension.autolink = true;
-    opts.extension.tasklist = true;
-    let body = comrak::markdown_to_html(markdown, &opts);
+    let body = comrak::markdown_to_html(markdown, &markdown_options());
     format!(
         "<!doctype html>\n<html lang=\"{lang}\">\n<head>\n<meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
@@ -248,6 +240,37 @@ pub fn markdown_to_html(markdown: &str, title: &str, language: ReportLanguage) -
         lang = html_lang_tag(language),
         title = html_escape(title),
     )
+}
+
+fn markdown_options() -> comrak::Options<'static> {
+    let mut opts = comrak::Options::default();
+    opts.extension.table = true;
+    opts.extension.strikethrough = true;
+    opts.extension.autolink = true;
+    opts.extension.tasklist = true;
+    opts
+}
+
+fn prepare_pandoc_input(markdown: &str) -> Result<String, ClassifiedError> {
+    let arena = comrak::Arena::new();
+    let document = comrak::parse_document(&arena, markdown, &markdown_options());
+    for node in document.descendants() {
+        if matches!(
+            node.data.borrow().value,
+            comrak::nodes::NodeValue::Image(_)
+                | comrak::nodes::NodeValue::HtmlBlock(_)
+                | comrak::nodes::NodeValue::HtmlInline(_)
+        ) {
+            return Err(ClassifiedError::Validation(
+                "PDF and DOCX reports cannot contain images or raw HTML; remove them or export Markdown instead."
+                    .to_owned(),
+            ));
+        }
+    }
+    // Keep one Markdown interpretation. Pandoc's GFM reader enables additional
+    // extensions, including YAML metadata and raw TeX math, which could turn
+    // otherwise literal report text into PDF engine instructions.
+    Ok(comrak::markdown_to_html(markdown, &markdown_options()))
 }
 
 /// Print-friendly stylesheet embedded in exported HTML so the file is
@@ -345,8 +368,22 @@ fn tool_on_path(tool: &str) -> bool {
 fn pandoc_convert(
     markdown: &str,
     out_path: &Path,
-    pdf_engine: Option<&str>,
+    format: ReportFormat,
 ) -> Result<(), ClassifiedError> {
+    // Check the prepared document: export transforms must not expose resources
+    // that were previously inside literal code or removed Mermaid blocks.
+    let html = prepare_pandoc_input(markdown)?;
+    let pdf_engine = if format == ReportFormat::Pdf {
+        Some(pdf_engine().ok_or_else(|| {
+            ClassifiedError::Validation(
+                "PDF export needs a PDF engine (wkhtmltopdf, weasyprint, or a LaTeX install). \
+                 Export HTML and print to PDF instead."
+                    .to_owned(),
+            )
+        })?)
+    } else {
+        None
+    };
     if !pandoc_available() {
         return Err(ClassifiedError::Validation(
             "This format needs pandoc, which is not installed. Markdown and HTML are always available."
@@ -355,7 +392,10 @@ fn pandoc_convert(
     }
     let mut cmd = hf_runtime::scrubbed_command(hf_runtime::resolve_bin("pandoc"));
     cmd.arg("-f")
-        .arg("gfm")
+        .arg("html")
+        // Pandoc's sandbox does not isolate PDF engines. The parsed-content
+        // check above also denies resource-bearing content to those engines.
+        .arg("--sandbox")
         .arg("--standalone")
         .arg("-o")
         .arg(out_path);
@@ -392,7 +432,7 @@ fn pandoc_convert(
             .stdin
             .take()
             .ok_or_else(|| ClassifiedError::Internal("pandoc stdin unavailable".to_owned()))?;
-        if let Err(e) = stdin.write_all(markdown.as_bytes()) {
+        if let Err(e) = stdin.write_all(html.as_bytes()) {
             // pandoc exited early (broken pipe): reap it before returning so a
             // failed export does not leave an unwaited/zombie process behind.
             let _ = child.kill();
@@ -416,6 +456,102 @@ fn pandoc_convert(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_resource_rejected(format: ReportFormat, samples: &[&str]) {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join(format!("report.{}", format.ext()));
+        for markdown in samples {
+            let error = write_report(markdown, "Report", format, &output, ReportLanguage::En)
+                .expect_err("resource-bearing Markdown must fail before tool discovery");
+            assert!(
+                matches!(error, ClassifiedError::Validation(ref message)
+                    if message.contains("images or raw HTML")),
+                "expected resource-policy rejection for {markdown:?}, got {error}"
+            );
+            assert!(!output.exists());
+        }
+    }
+
+    #[test]
+    fn docx_rejects_markdown_image_resources() {
+        assert_resource_rejected(
+            ReportFormat::Docx,
+            &[
+                "![evidence](report-fixture.png)",
+                "![evidence][attachment]\n\n[attachment]: report-fixture.png",
+                "![evidence](http://127.0.0.1:9/report-fixture.png)",
+                "![evidence](data:image/png;base64,AA==)",
+            ],
+        );
+    }
+
+    #[test]
+    fn pdf_rejects_markdown_image_resources_before_engine_discovery() {
+        assert_resource_rejected(ReportFormat::Pdf, &["![evidence](report-fixture.png)"]);
+    }
+
+    #[test]
+    fn docx_rejects_raw_html_resources() {
+        assert_resource_rejected(
+            ReportFormat::Docx,
+            &[
+                "<img src=\"report-fixture.png\">",
+                "<div style=\"background:url(report-fixture.png)\">evidence</div>",
+                "evidence <img src=\"report-fixture.png\">",
+            ],
+        );
+    }
+
+    #[test]
+    fn pdf_rejects_raw_html_before_engine_discovery() {
+        assert_resource_rejected(
+            ReportFormat::Pdf,
+            &[
+                "<iframe src=\"report-fixture.html\"></iframe>",
+                "<script>alert(1)</script>",
+            ],
+        );
+    }
+
+    #[test]
+    fn resource_syntax_inside_code_remains_literal() {
+        let markdown = "# Report\n\n| finding | count |\n|---|---|\n| crash | 1 |\n\n\
+            `[inline](report-fixture.png)` and `![image](report-fixture.png)`\n\n\
+            ````text\n![image](report-fixture.png)\n```\n<img src=\"report-fixture.png\">\n````\n\n\
+            ~~~html\n<iframe src=\"report-fixture.html\"></iframe>\n~~~\n\n\
+            [reference](https://example.invalid/evidence)\n";
+        prepare_pandoc_input(markdown).unwrap();
+        let prepared = sanitize_for_latex(&insert_break_hints(&strip_mermaid_blocks(markdown)));
+        prepare_pandoc_input(&prepared).unwrap();
+    }
+
+    #[test]
+    fn pandoc_input_preserves_tex_and_metadata_as_document_text() {
+        let prepared = prepare_pandoc_input(
+            "---\nheader-includes: innocent metadata example\n---\n\n\
+             $\\input{never-read}$\n\n`<img src=\"never-read.png\">`\n",
+        )
+        .unwrap();
+        assert!(prepared.contains("<h2>header-includes: innocent metadata example</h2>"));
+        assert!(prepared.contains("<p>$\\input{never-read}$</p>"));
+        assert!(prepared.contains("<code>&lt;img src=&quot;never-read.png&quot;&gt;</code>"));
+    }
+
+    #[test]
+    fn raw_markdown_export_retains_image_and_html_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("report.md");
+        let markdown = "![evidence](report-fixture.png)\n<img src=\"report-fixture.png\">\n";
+        write_report(
+            markdown,
+            "Report",
+            ReportFormat::Md,
+            &output,
+            ReportLanguage::En,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(output).unwrap(), markdown);
+    }
 
     #[test]
     fn markdown_to_html_wraps_body_and_renders_tables() {

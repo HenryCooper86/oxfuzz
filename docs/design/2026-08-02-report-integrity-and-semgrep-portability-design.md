@@ -107,6 +107,33 @@ rename the test to describe rejection of non-regular entries. Keep the symlink
 and identity-replacement cases in the same test, so the original security
 coverage remains present.
 
+### 3.4 Resource-free external report conversion
+
+Provider-composed reports and editable drafts remain untrusted Markdown. Before
+discovering or launching Pandoc/PDF tools, the shared export operation parses the
+prepared document with the existing Comrak GFM parser and rejects image nodes
+(including reference images and data URLs) and raw HTML nodes. Validation runs
+after export transforms so it checks the final Markdown before HTML conversion.
+Literal examples in code spans and code blocks remain allowed. Rejection names
+the unsupported content and does not write an output document.
+
+The accepted Markdown is rendered to safe HTML using the same Comrak options,
+then passed to Pandoc's HTML reader with `--sandbox`. Passing Markdown directly
+to Pandoc is rejected because its GFM defaults also enable YAML metadata and TeX
+math, which can become PDF engine instructions. The HTML conversion keeps such
+syntax literal. The sandbox protects Pandoc readers/writers; it does not isolate
+PDF engines. Denying images and raw HTML prevents those engines from receiving
+document-controlled resource loads, scripts, or styles. Ordinary prose, headings,
+tables, links, and code remain supported. Markdown and the in-process HTML export
+keep their existing behavior.
+
+Allow-listing URL schemes or filesystem roots is rejected: these reports use
+text charts and do not need external assets, and relative paths, redirects, and
+embedded HTML introduce additional resource-resolution cases. A regex check is
+also rejected because it would miss reference images and reject literal code
+examples. This repair controls document-directed resource access; it does not
+add process timeouts or OS isolation for the trusted converter binaries.
+
 ## 4. Data Flow
 
 For report generation, `ServiceContainer` continues to gather `ReportData`.
