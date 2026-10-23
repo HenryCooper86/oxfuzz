@@ -9,7 +9,8 @@ use hf_core::tool::{
 };
 use hf_core::types::ToolName;
 
-use super::path_utils::resolve_read_path;
+use super::file_read_open::open_regular_file;
+use super::path_utils::resolve_existing_read_path;
 
 /// Default and maximum number of lines returned by one `FileRead` call.
 const MAX_LINES_TO_READ: usize = 2_000;
@@ -131,31 +132,25 @@ impl Tool for FileReadTool {
                     message: "missing 'path' parameter".into(),
                 })?;
 
-        let path = resolve_read_path(
+        let canonical = resolve_existing_read_path(
             "FileRead",
             Some(path_str),
             input.working_dir.as_deref(),
             &input.additional_read_dirs,
         )?;
 
-        // Resolve to canonical path for security.
-        let canonical = path.canonicalize().map_err(|e| ToolError::Other {
-            message: format!("cannot resolve path '{}': {e}", path.display()),
-        })?;
-
-        let metadata = tokio::fs::metadata(&canonical)
+        let open_path = canonical.clone();
+        let file = tokio::task::spawn_blocking(move || open_regular_file(&open_path))
             .await
-            .map_err(|e| file_io_error(&canonical, "read metadata", &e))?;
-        if metadata.is_dir() {
-            return Err(ToolError::Other {
-                message: format!("cannot read directory '{}'", canonical.display()),
-            });
-        }
-        if !metadata.is_file() {
-            return Err(ToolError::Other {
-                message: format!("cannot read non-regular file '{}'", canonical.display()),
-            });
-        }
+            .map_err(|error| ToolError::Other {
+                message: format!("file open task failed: {error}"),
+            })?
+            .map_err(|error| file_io_error(&canonical, "open", &error))?;
+        let file = tokio::fs::File::from_std(file);
+        let metadata = file
+            .metadata()
+            .await
+            .map_err(|error| file_io_error(&canonical, "read metadata", &error))?;
 
         let range = ReadRange::from_arguments(&input.arguments)?;
         let include_line_numbers =
@@ -170,7 +165,7 @@ impl Tool for FileReadTool {
             });
         }
 
-        let read = read_file_range_as_utf8_impl(&canonical, &metadata, range).await?;
+        let read = read_file_range_as_utf8_impl(&canonical, file, &metadata, range).await?;
         let formatted_content = if include_line_numbers {
             format_numbered_lines(&read.lines, range.offset)
         } else {
@@ -284,24 +279,23 @@ struct FileRangeRead {
 /// Internal helper to read only the requested line range while bounding returned content.
 async fn read_file_range_as_utf8_impl(
     path: &std::path::Path,
+    file: tokio::fs::File,
     metadata: &std::fs::Metadata,
     range: ReadRange,
 ) -> Result<FileRangeRead, ToolError> {
     if metadata.len() < FAST_PATH_MAX_SIZE_BYTES {
-        read_file_range_fast(path, metadata, range).await
+        read_file_range_fast(path, file, metadata, range).await
     } else {
-        read_file_range_streaming(path, metadata, range).await
+        read_file_range_streaming(path, file, metadata, range).await
     }
 }
 
 async fn read_file_range_fast(
     path: &std::path::Path,
+    file: tokio::fs::File,
     metadata: &std::fs::Metadata,
     range: ReadRange,
 ) -> Result<FileRangeRead, ToolError> {
-    let file = tokio::fs::File::open(path)
-        .await
-        .map_err(|e| file_io_error(path, "open", &e))?;
     let mut bytes = Vec::new();
     file.take(metadata.len().saturating_add(1))
         .read_to_end(&mut bytes)
@@ -371,12 +365,11 @@ fn decode_bytes_to_utf8(bytes: &[u8], path: &std::path::Path) -> (String, &'stat
 
 async fn read_file_range_streaming(
     path: &std::path::Path,
+    file: tokio::fs::File,
     metadata: &std::fs::Metadata,
     range: ReadRange,
 ) -> Result<FileRangeRead, ToolError> {
-    let mut file = tokio::fs::File::open(path)
-        .await
-        .map_err(|e| file_io_error(path, "open", &e))?;
+    let mut file = file.take(metadata.len().saturating_add(1));
     let mut buffer = vec![0_u8; STREAM_CHUNK_SIZE];
     let mut selected_lines = Vec::new();
     let mut partial = Vec::new();
@@ -399,6 +392,11 @@ async fn read_file_range_streaming(
         let mut start = 0;
         let chunk = &buffer[..bytes_read];
         total_bytes = total_bytes.saturating_add(bytes_read as u64);
+        if total_bytes > metadata.len() {
+            return Err(ToolError::Other {
+                message: "file grew after size validation; retry the read".into(),
+            });
+        }
         last_byte_was_newline = chunk.last().is_some_and(|b| *b == b'\n');
 
         if first_chunk {
@@ -624,12 +622,78 @@ mod tests {
     async fn fast_read_rejects_growth_after_size_admission() {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), "before\n").unwrap();
-        let metadata = std::fs::metadata(file.path()).unwrap();
+        let admitted = tokio::fs::File::open(file.path()).await.unwrap();
+        let metadata = admitted.metadata().await.unwrap();
         std::fs::write(file.path(), "before\nafter\n").unwrap();
         let range = ReadRange::from_arguments(&serde_json::json!({"limit": 1})).unwrap();
 
-        let result = read_file_range_as_utf8_impl(file.path(), &metadata, range).await;
+        let result = read_file_range_as_utf8_impl(file.path(), admitted, &metadata, range).await;
         assert!(result.is_err(), "a growing file must not bypass admission");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_read_rejects_replaced_leaf_and_parent() {
+        for replace_parent in [false, true] {
+            let project = tempfile::tempdir().unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            let parent = project.path().join("nested");
+            std::fs::create_dir(&parent).unwrap();
+            let path = parent.join("source.txt");
+            std::fs::write(&path, "public").unwrap();
+            std::fs::write(outside.path().join("source.txt"), "secret").unwrap();
+            let path = path.canonicalize().unwrap();
+            if replace_parent {
+                std::fs::rename(&parent, project.path().join("original")).unwrap();
+                std::os::unix::fs::symlink(outside.path(), &parent).unwrap();
+            } else {
+                std::fs::remove_file(&path).unwrap();
+                std::os::unix::fs::symlink(outside.path().join("source.txt"), &path).unwrap();
+            }
+            let result = open_regular_file(&path);
+            assert!(
+                result.is_err(),
+                "replaced input must not be followed: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_read_rejects_growth_after_admission() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "first\n").unwrap();
+        file.as_file().set_len(FAST_PATH_MAX_SIZE_BYTES).unwrap();
+        let admitted = tokio::fs::File::open(file.path()).await.unwrap();
+        let metadata = admitted.metadata().await.unwrap();
+        file.as_file()
+            .set_len(FAST_PATH_MAX_SIZE_BYTES + 1)
+            .unwrap();
+        let range = ReadRange::from_arguments(&serde_json::json!({"limit":1})).unwrap();
+        let result = read_file_range_as_utf8_impl(file.path(), admitted, &metadata, range).await;
+        assert!(
+            result.is_err(),
+            "streaming must not read past the admitted size"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_read_keeps_the_admitted_descriptor_after_replacement() {
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let path = project.path().join("source.txt");
+        std::fs::write(&path, "public").unwrap();
+        std::fs::write(outside.path().join("source.txt"), "secret").unwrap();
+        let canonical = path.canonicalize().unwrap();
+        let admitted = tokio::fs::File::from_std(open_regular_file(&canonical).unwrap());
+        let metadata = admitted.metadata().await.unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("source.txt"), &path).unwrap();
+        let range = ReadRange::from_arguments(&serde_json::json!({"limit":1})).unwrap();
+        let read = read_file_range_as_utf8_impl(&canonical, admitted, &metadata, range)
+            .await
+            .unwrap();
+        assert_eq!(read.lines, ["public"]);
     }
 
     fn make_input(args: serde_json::Value) -> ToolInput {

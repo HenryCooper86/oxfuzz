@@ -123,3 +123,73 @@ async fn file_read_rejects_special_files_inside_its_allowed_root() {
     .await;
     assert!(result.is_err(), "device files must not be read as source");
 }
+
+#[tokio::test]
+async fn file_read_resolves_parent_components_after_symlinks() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(project.path().join("nested/deep")).unwrap();
+    std::fs::write(project.path().join("source.txt"), "wrong lexical source").unwrap();
+    std::fs::write(project.path().join("nested/source.txt"), "resolved source").unwrap();
+    std::os::unix::fs::symlink(
+        project.path().join("nested/deep"),
+        project.path().join("alias"),
+    )
+    .unwrap();
+    let result = inspect(
+        Arc::new(FileReadTool::new()),
+        project.path(),
+        json!({"path":"alias/../source.txt"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.content["content"], "resolved source");
+}
+
+#[tokio::test]
+async fn file_read_rejects_fifo_without_waiting_for_a_writer() {
+    let project = tempfile::tempdir().unwrap();
+    let path = project.path().join("pipe");
+    assert!(std::process::Command::new("mkfifo")
+        .env_clear()
+        .arg(&path)
+        .status()
+        .unwrap()
+        .success());
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        inspect(
+            Arc::new(FileReadTool::new()),
+            project.path(),
+            json!({"path":"pipe"}),
+        ),
+    )
+    .await;
+    if result.is_err() {
+        // Release a regressed blocking open so runtime shutdown can finish the failed test.
+        let _writer = rustix::fs::open(
+            &path,
+            rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .unwrap();
+        panic!("FIFO admission must not block");
+    }
+    let result = result.unwrap();
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn file_read_retains_in_project_symlink_support() {
+    let (project, _outside) = linked_project();
+    let result = inspect(
+        Arc::new(FileReadTool::new()),
+        project.path(),
+        json!({"path":"alias.txt"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result.content["content"],
+        "scope_needle ordinary project source"
+    );
+}

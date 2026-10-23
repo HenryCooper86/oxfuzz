@@ -21,6 +21,13 @@ grep-regex = { workspace = true }
 grep-matcher = { workspace = true }
 chardetng = "1.0"
 
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+cap-primitives = { workspace = true }
+windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = { workspace = true }

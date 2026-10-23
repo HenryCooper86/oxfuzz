@@ -22,7 +22,17 @@ pub(super) fn resolve_read_path(
     working_dir: Option<&str>,
     additional_read_dirs: &[String],
 ) -> Result<PathBuf, ToolError> {
-    resolve_path_with_read_dirs(tool_name, path, working_dir, additional_read_dirs)
+    resolve_path_with_read_dirs(tool_name, path, working_dir, additional_read_dirs, false)
+}
+
+/// Return the existing canonical path that was checked against the read roots.
+pub(super) fn resolve_existing_read_path(
+    tool_name: &str,
+    path: Option<&str>,
+    working_dir: Option<&str>,
+    additional_read_dirs: &[String],
+) -> Result<PathBuf, ToolError> {
+    resolve_path_with_read_dirs(tool_name, path, working_dir, additional_read_dirs, true)
 }
 
 fn resolve_path_with_read_dirs(
@@ -30,6 +40,7 @@ fn resolve_path_with_read_dirs(
     path: Option<&str>,
     working_dir: Option<&str>,
     additional_read_dirs: &[String],
+    require_existing: bool,
 ) -> Result<PathBuf, ToolError> {
     let workspace = working_dir.filter(|value| !value.is_empty()).map(Path::new);
     let resolved = match (path.filter(|value| !value.is_empty()), workspace) {
@@ -46,7 +57,19 @@ fn resolve_path_with_read_dirs(
         (None, None) => PathBuf::from("."),
     };
 
-    let resolved = normalize_lexically(&resolved);
+    // Existing reads must preserve `..` until the kernel resolves preceding links.
+    let resolved = if require_existing {
+        resolved
+    } else {
+        normalize_lexically(&resolved)
+    };
+    let real_target = if require_existing {
+        resolved.canonicalize().map_err(|error| ToolError::Other {
+            message: format!("cannot resolve path '{}': {error}", resolved.display()),
+        })?
+    } else {
+        canonicalize_existing_ancestor(&resolved)
+    };
     let workspace_root = workspace.map(normalize_lexically);
     let additional_roots = additional_read_dirs
         .iter()
@@ -101,7 +124,6 @@ fn resolve_path_with_read_dirs(
         // canonicalized too so equivalent paths compare correctly. When
         // nothing on the path exists yet, both sides fall back to lexical
         // form, preserving prior behavior.
-        let real_target = canonicalize_existing_ancestor(&resolved);
         let within_real_root = allowed_roots.iter().any(|root| {
             let real_root = root.canonicalize().unwrap_or_else(|_| root.clone());
             path_is_within_root(&real_target, &real_root)
@@ -117,7 +139,11 @@ fn resolve_path_with_read_dirs(
         }
     }
 
-    Ok(resolved)
+    Ok(if require_existing {
+        real_target
+    } else {
+        resolved
+    })
 }
 
 /// Canonicalize `path`, tolerating a leaf (or tail) that does not exist yet.

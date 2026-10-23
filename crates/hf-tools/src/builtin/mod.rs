@@ -5,6 +5,7 @@
 //! commands, delegating agents, and changing workflows are service-owned
 //! operations; they are deliberately not exposed as generic built-in tools.
 
+mod file_read_open;
 mod path_utils;
 
 pub mod file_read;

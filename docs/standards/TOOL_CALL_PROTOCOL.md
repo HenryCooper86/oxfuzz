@@ -36,9 +36,15 @@ pub trait Tool: Send + Sync {
 | `KnowledgeSearch` | BM25 search over the active project's source index. |
 
 `FileRead`, `Glob`, and `Grep` are implemented in `hf-tools`.
-`FileRead` rejects non-regular files before reading. Its small-file reader
-limits actual reads to the admitted metadata size plus one detection byte and
-rejects growth, so file growth cannot turn that read into an unbounded allocation.
+`FileRead` authorizes the kernel-resolved canonical path, then opens each path
+component relative to an already-open directory without following replacement
+links. In-project symlinks remain usable through their authorized canonical
+paths; parent components are resolved after preceding symlinks. Regular-file
+checks, size admission, and reading use the same file descriptor. FIFOs are
+opened nonblocking and rejected. Both small-file and streaming readers stop at
+the admitted size plus one detection byte and reject growth. These controls
+prevent symlink replacement from redirecting a read; they do not promise an
+immutable snapshot against in-place writes or operating-system mount changes.
 `KnowledgeSearch` is registered by `hf-agent` with its `AgentBackend`, so all
 four advertised tools have executable registry entries. The registry assembly
 test in `hf-agent::agent_tools` enforces exact parity between this catalog and
