@@ -7,39 +7,51 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Client, ClientBuilder, RequestBuilder};
 
 use crate::config::HttpProtocol;
+use crate::error::ProviderPoolError;
+
+/// Parse an explicit proxy URL without exposing credentials in errors.
+pub(crate) fn configured_proxy(url: &str) -> Result<reqwest::Proxy, ProviderPoolError> {
+    let invalid = || ProviderPoolError::Config {
+        message: "invalid proxy URL; expected an HTTP, HTTPS, or SOCKS proxy URL".into(),
+    };
+    let parsed = reqwest::Url::parse(url).map_err(|_| invalid())?;
+    if !matches!(
+        parsed.scheme(),
+        "http" | "https" | "socks4" | "socks4a" | "socks5" | "socks5h"
+    ) || parsed.host_str().is_none()
+    {
+        return Err(invalid());
+    }
+    reqwest::Proxy::all(parsed).map_err(|_| invalid())
+}
 
 /// Build a provider HTTP client with protocol-specific header behavior.
 pub fn provider_http_client_builder(
     protocol: HttpProtocol,
     proxy_url: Option<String>,
-) -> ClientBuilder {
+) -> Result<ClientBuilder, ProviderPoolError> {
     let mut builder = match protocol {
         HttpProtocol::Http1 => Client::builder().http1_only().http1_title_case_headers(),
         HttpProtocol::Http2 => Client::builder().http2_prior_knowledge(),
     };
 
     if let Some(proxy_url) = proxy_url {
-        match reqwest::Proxy::all(&proxy_url) {
-            Ok(proxy) => builder = builder.proxy(proxy),
-            Err(e) => {
-                tracing::warn!(
-                    proxy_url = %proxy_url,
-                    error = %e,
-                    "failed to create proxy, proceeding without proxy"
-                );
-            }
-        }
+        builder = builder.proxy(configured_proxy(&proxy_url)?);
     }
 
-    builder
+    Ok(builder)
 }
 
 /// Build a provider HTTP client with protocol-specific header behavior.
 pub fn provider_http_client(
     protocol: HttpProtocol,
     proxy_url: Option<String>,
-) -> Result<Client, reqwest::Error> {
-    provider_http_client_builder(protocol, proxy_url).build()
+) -> Result<Client, ProviderPoolError> {
+    provider_http_client_builder(protocol, proxy_url)?
+        .build()
+        .map_err(|_| ProviderPoolError::Config {
+            message: "could not build provider HTTP client".into(),
+        })
 }
 
 /// Build a validated header map from user-provided provider configuration.

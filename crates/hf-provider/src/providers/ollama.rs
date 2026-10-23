@@ -91,7 +91,7 @@ impl OllamaProvider {
         max_concurrency: usize,
         context_window: usize,
         tool_calling_mode: ToolCallingMode,
-    ) -> Self {
+    ) -> Result<Self, crate::error::ProviderPoolError> {
         let headers = std::collections::HashMap::new();
         Self::with_headers(
             id,
@@ -123,7 +123,7 @@ impl OllamaProvider {
         tool_calling_mode: ToolCallingMode,
         headers: &std::collections::HashMap<String, String, S>,
         http_protocol: HttpProtocol,
-    ) -> Self {
+    ) -> Result<Self, crate::error::ProviderPoolError> {
         let base_url = normalize_base_url(base_url);
 
         // Ollama Cloud (and any authenticated endpoint) uses a bearer token; the
@@ -153,10 +153,9 @@ impl OllamaProvider {
 
         // Ollama is typically local, but proxy is still applied if configured.
         // Operators should set `enabled = false` in proxy config to bypass.
-        let client = crate::http_headers::provider_http_client(http_protocol, proxy_url)
-            .unwrap_or_else(|_| Client::new());
+        let client = crate::http_headers::provider_http_client(http_protocol, proxy_url)?;
 
-        Self {
+        Ok(Self {
             response_body_limits: crate::response_body::resolve_default_limits(),
             response_stream_limits: crate::sse::resolve_default_limits(),
             client,
@@ -174,7 +173,7 @@ impl OllamaProvider {
                 cost_per_1k_output: 0.0,
                 tool_calling_mode,
             },
-        }
+        })
     }
 
     /// Build the full API URL for a given endpoint.
@@ -653,7 +652,8 @@ mod tests {
             3,
             32_768,
             ToolCallingMode::default(),
-        );
+        )
+        .unwrap();
 
         let meta = provider.metadata();
         assert_eq!(meta.id, ProviderId::from_string("ollama-local"));
@@ -678,7 +678,8 @@ mod tests {
             3,
             32_768,
             ToolCallingMode::default(),
-        );
+        )
+        .unwrap();
         assert_eq!(
             provider.api_url("api/chat"),
             "http://localhost:11434/api/chat"
@@ -698,7 +699,8 @@ mod tests {
             3,
             32_768,
             ToolCallingMode::default(),
-        );
+        )
+        .unwrap();
         assert_eq!(
             provider.api_url("api/chat"),
             "http://192.168.1.100:11434/api/chat"
@@ -727,7 +729,8 @@ mod tests {
                 3,
                 32_768,
                 ToolCallingMode::default(),
-            );
+            )
+            .unwrap();
             assert_eq!(
                 provider.api_url("api/chat"),
                 "http://localhost:11434/api/chat",
@@ -752,7 +755,8 @@ mod tests {
             3,
             32_768,
             ToolCallingMode::default(),
-        );
+        )
+        .unwrap();
         let auth = provider
             .custom_headers
             .get(reqwest::header::AUTHORIZATION)
@@ -775,7 +779,8 @@ mod tests {
             3,
             32_768,
             ToolCallingMode::default(),
-        );
+        )
+        .unwrap();
         assert!(provider
             .custom_headers
             .get(reqwest::header::AUTHORIZATION)

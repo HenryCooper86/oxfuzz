@@ -481,6 +481,18 @@ impl ProviderPoolConfig {
         self.response_stream_limits
             .resolve()
             .map_err(|message| ProviderPoolError::Config { message })?;
+        for entry in self
+            .proxy
+            .global
+            .iter()
+            .chain(self.proxy.tags.values())
+            .chain(self.proxy.providers.values())
+            .filter(|entry| entry.enabled)
+        {
+            if let Some(url) = &entry.url {
+                crate::http_headers::configured_proxy(&self.normalize_proxy_url(url))?;
+            }
+        }
         if self.providers.is_empty() {
             return Err(ProviderPoolError::Config {
                 message: "at least one provider must be configured".into(),

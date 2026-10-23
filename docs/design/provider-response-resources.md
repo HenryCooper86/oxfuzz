@@ -5,6 +5,14 @@ by hf-service and hf-knowledge.
 
 ## HTTP bodies
 
+Configured proxies are required transport settings. Invalid enabled proxy URLs
+fail pool validation, and the shared HTTP client constructor repeats validation
+for directly constructed adapters. Concrete adapter constructors return errors
+for invalid transport configuration or client construction; they never replace
+a failed configured client with a default direct client. Proxy construction
+errors contain no URL or embedded credentials. Disabled proxy entries retain
+their existing cascade semantics.
+
 All concrete provider adapters collect successful chat/image JSON and failed HTTP
 responses through a shared bounded byte receiver. Embeddings use the same receiver.
 Streaming handshake failures are HTTP bodies and use the error budget. A response

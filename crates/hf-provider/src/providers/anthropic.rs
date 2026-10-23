@@ -86,7 +86,7 @@ impl AnthropicProvider {
         max_concurrency: usize,
         context_window: usize,
         tool_calling_mode: ToolCallingMode,
-    ) -> Self {
+    ) -> Result<Self, crate::error::ProviderPoolError> {
         let headers = std::collections::HashMap::new();
         Self::with_headers(
             id,
@@ -118,7 +118,7 @@ impl AnthropicProvider {
         tool_calling_mode: ToolCallingMode,
         headers: &std::collections::HashMap<String, String, S>,
         http_protocol: HttpProtocol,
-    ) -> Self {
+    ) -> Result<Self, crate::error::ProviderPoolError> {
         let base_url = base_url.unwrap_or_else(|| ANTHROPIC_API_URL.to_string());
         let custom_headers = crate::http_headers::custom_header_map(headers).unwrap_or_else(
             |message| {
@@ -127,11 +127,10 @@ impl AnthropicProvider {
             },
         );
 
-        Self {
+        Ok(Self {
             response_body_limits: crate::response_body::resolve_default_limits(),
             response_stream_limits: crate::sse::resolve_default_limits(),
-            client: crate::http_headers::provider_http_client(http_protocol, proxy_url)
-                .unwrap_or_else(|_| Client::new()),
+            client: crate::http_headers::provider_http_client(http_protocol, proxy_url)?,
             api_key,
             base_url,
             custom_headers,
@@ -147,7 +146,7 @@ impl AnthropicProvider {
                 cost_per_1k_output: 0.0,
                 tool_calling_mode,
             },
-        }
+        })
     }
 
     /// Build the full API URL for a given endpoint.
@@ -1242,7 +1241,8 @@ mod tests {
             3,
             200_000,
             ToolCallingMode::default(),
-        );
+        )
+        .unwrap();
 
         let dbg = format!("{provider:?}");
         assert!(
@@ -1268,7 +1268,8 @@ mod tests {
             3,
             200_000,
             ToolCallingMode::default(),
-        );
+        )
+        .unwrap();
 
         let meta = provider.metadata();
         assert_eq!(meta.id, ProviderId::from_string("anthropic-main"));
@@ -1293,7 +1294,8 @@ mod tests {
             3,
             200_000,
             ToolCallingMode::default(),
-        );
+        )
+        .unwrap();
         let (name, value) = provider.auth_header().expect("a key is configured");
         assert_eq!(name, "x-api-key");
         assert_eq!(value, "sk-ant-test");
@@ -1312,7 +1314,8 @@ mod tests {
             3,
             200_000,
             ToolCallingMode::default(),
-        );
+        )
+        .unwrap();
         assert!(provider.auth_header().is_none());
     }
 
@@ -1329,7 +1332,8 @@ mod tests {
             3,
             200_000,
             ToolCallingMode::default(),
-        );
+        )
+        .unwrap();
         assert_eq!(
             provider.api_url("messages"),
             "https://api.anthropic.com/v1/messages"
@@ -1349,7 +1353,8 @@ mod tests {
             3,
             200_000,
             ToolCallingMode::default(),
-        );
+        )
+        .unwrap();
         assert_eq!(
             provider.api_url("messages"),
             "http://localhost:8080/v1/messages"
@@ -2003,7 +2008,8 @@ mod tests {
             3,
             200_000,
             ToolCallingMode::default(),
-        );
+        )
+        .unwrap();
         let body = provider.build_request_body(&request, false);
         let json = serde_json::to_value(&body).unwrap();
 

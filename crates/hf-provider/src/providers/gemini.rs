@@ -85,7 +85,7 @@ impl GeminiProvider {
         max_concurrency: usize,
         context_window: usize,
         tool_calling_mode: ToolCallingMode,
-    ) -> Self {
+    ) -> Result<Self, crate::error::ProviderPoolError> {
         let headers = std::collections::HashMap::new();
         Self::with_headers(
             id,
@@ -117,7 +117,7 @@ impl GeminiProvider {
         tool_calling_mode: ToolCallingMode,
         headers: &std::collections::HashMap<String, String, S>,
         http_protocol: HttpProtocol,
-    ) -> Self {
+    ) -> Result<Self, crate::error::ProviderPoolError> {
         let base_url = base_url.unwrap_or_else(|| GEMINI_API_URL.to_string());
         let custom_headers = crate::http_headers::custom_header_map(headers).unwrap_or_else(
             |message| {
@@ -126,11 +126,10 @@ impl GeminiProvider {
             },
         );
 
-        Self {
+        Ok(Self {
             response_body_limits: crate::response_body::resolve_default_limits(),
             response_stream_limits: crate::sse::resolve_default_limits(),
-            client: crate::http_headers::provider_http_client(http_protocol, proxy_url)
-                .unwrap_or_else(|_| Client::new()),
+            client: crate::http_headers::provider_http_client(http_protocol, proxy_url)?,
             api_key,
             base_url,
             custom_headers,
@@ -146,7 +145,7 @@ impl GeminiProvider {
                 cost_per_1k_output: 0.0,
                 tool_calling_mode,
             },
-        }
+        })
     }
 
     /// Build the generateContent URL (non-streaming).
@@ -858,7 +857,8 @@ mod tests {
             5,
             1_000_000,
             ToolCallingMode::default(),
-        );
+        )
+        .unwrap();
 
         let dbg = format!("{provider:?}");
         assert!(
@@ -884,7 +884,8 @@ mod tests {
             5,
             1_000_000,
             ToolCallingMode::default(),
-        );
+        )
+        .unwrap();
 
         let meta = provider.metadata();
         assert_eq!(meta.id, ProviderId::from_string("gemini-main"));
@@ -906,7 +907,8 @@ mod tests {
             5,
             1_000_000,
             ToolCallingMode::default(),
-        );
+        )
+        .unwrap();
         assert_eq!(
             provider.generate_url(),
             "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
@@ -926,7 +928,8 @@ mod tests {
             5,
             1_000_000,
             ToolCallingMode::default(),
-        );
+        )
+        .unwrap();
         assert_eq!(
             provider.stream_url(),
             "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse"
@@ -946,7 +949,8 @@ mod tests {
             5,
             1_000_000,
             ToolCallingMode::default(),
-        );
+        )
+        .unwrap();
         assert_eq!(
             provider.generate_url(),
             "http://localhost:8080/v1beta/models/gemini-2.0-flash:generateContent"
@@ -1090,7 +1094,8 @@ mod tests {
             5,
             1_000_000,
             ToolCallingMode::default(),
-        );
+        )
+        .unwrap();
         let response = GeminiResponse {
             candidates: vec![GeminiCandidate {
                 content: GeminiContent {

@@ -298,7 +298,7 @@ pub fn build_providers(
                         tool_calling_mode,
                         &cfg.headers,
                         cfg.http_protocol,
-                    )
+                    )?
                     .with_response_body_limits(response_body_limits)
                     .with_response_stream_limits(response_stream_limits),
                 ) as Arc<dyn LlmProvider>
@@ -323,31 +323,32 @@ pub fn build_providers(
         let use_reasoning_effort = crate::providers::openai::provider_type_uses_reasoning_effort(
             cfg.provider_type.as_str(),
         );
-        let make_openai = |base: Option<String>| -> Arc<dyn LlmProvider> {
-            Arc::new(
-                crate::providers::openai::OpenAiProvider::with_headers(
-                    &cfg.id,
-                    &cfg.model,
-                    api_key.clone(),
-                    base,
-                    proxy_url.clone(),
-                    cfg.tags.clone(),
-                    capabilities.clone(),
-                    cfg.max_concurrency,
-                    cfg.context_window,
-                    tool_calling_mode,
-                    &cfg.headers,
-                    cfg.http_protocol,
-                )
-                .with_response_body_limits(response_body_limits)
-                .with_response_stream_limits(response_stream_limits)
-                .with_include_usage(include_usage)
-                .with_use_max_completion_tokens(use_max_completion_tokens)
-                .with_use_reasoning_effort(use_reasoning_effort),
-            ) as Arc<dyn LlmProvider>
-        };
-        let make_azure = || -> Arc<dyn LlmProvider> {
-            Arc::new(
+        let make_openai =
+            |base: Option<String>| -> Result<Arc<dyn LlmProvider>, ProviderPoolError> {
+                Ok(Arc::new(
+                    crate::providers::openai::OpenAiProvider::with_headers(
+                        &cfg.id,
+                        &cfg.model,
+                        api_key.clone(),
+                        base,
+                        proxy_url.clone(),
+                        cfg.tags.clone(),
+                        capabilities.clone(),
+                        cfg.max_concurrency,
+                        cfg.context_window,
+                        tool_calling_mode,
+                        &cfg.headers,
+                        cfg.http_protocol,
+                    )?
+                    .with_response_body_limits(response_body_limits)
+                    .with_response_stream_limits(response_stream_limits)
+                    .with_include_usage(include_usage)
+                    .with_use_max_completion_tokens(use_max_completion_tokens)
+                    .with_use_reasoning_effort(use_reasoning_effort),
+                ) as Arc<dyn LlmProvider>)
+            };
+        let make_azure = || -> Result<Arc<dyn LlmProvider>, ProviderPoolError> {
+            Ok(Arc::new(
                 crate::providers::azure::AzureOpenAiProvider::with_headers(
                     &cfg.id,
                     &cfg.model,
@@ -361,7 +362,7 @@ pub fn build_providers(
                     tool_calling_mode,
                     &cfg.headers,
                     cfg.http_protocol,
-                )
+                )?
                 .with_response_body_limits(response_body_limits)
                 .with_response_stream_limits(response_stream_limits)
                 .with_include_usage(include_usage)
@@ -373,13 +374,13 @@ pub fn build_providers(
                     cfg.azure_auth_mode
                         .unwrap_or(crate::config::AzureAuthMode::ApiKey),
                 ),
-            ) as Arc<dyn LlmProvider>
+            ) as Arc<dyn LlmProvider>)
         };
 
         let provider: Option<Arc<dyn LlmProvider>> = match cfg.provider_type.as_str() {
             // OpenAI Response API and compatible aliases share this transport.
             "openai" | "openai-compat" | "openai_compatible" | "custom" => {
-                Some(make_openai(cfg.base_url.clone()))
+                Some(make_openai(cfg.base_url.clone())?)
             }
             "anthropic" => Some(make_provider!(
                 crate::providers::anthropic::AnthropicProvider,
@@ -397,8 +398,8 @@ pub fn build_providers(
                 crate::providers::ollama::OllamaProvider,
                 base_url_for_ollama_cloud()
             )),
-            "azure" => Some(make_azure()),
-            "deepseek" => Some(make_openai(base_url_for_deepseek())),
+            "azure" => Some(make_azure()?),
+            "deepseek" => Some(make_openai(base_url_for_deepseek())?),
             other => {
                 tracing::warn!(
                     provider_id = %cfg.id,

@@ -115,7 +115,7 @@ impl AzureOpenAiProvider {
         max_concurrency: usize,
         context_window: usize,
         tool_calling_mode: ToolCallingMode,
-    ) -> Self {
+    ) -> Result<Self, crate::error::ProviderPoolError> {
         let headers = std::collections::HashMap::new();
         Self::with_headers(
             id,
@@ -147,7 +147,7 @@ impl AzureOpenAiProvider {
         tool_calling_mode: ToolCallingMode,
         headers: &std::collections::HashMap<String, String, S>,
         http_protocol: HttpProtocol,
-    ) -> Self {
+    ) -> Result<Self, crate::error::ProviderPoolError> {
         let endpoint_prefix = base_url.unwrap_or_default();
         let custom_headers = crate::http_headers::custom_header_map(headers).unwrap_or_else(
             |message| {
@@ -156,11 +156,10 @@ impl AzureOpenAiProvider {
             },
         );
 
-        Self {
+        Ok(Self {
             response_body_limits: crate::response_body::resolve_default_limits(),
             response_stream_limits: crate::sse::resolve_default_limits(),
-            client: crate::http_headers::provider_http_client(http_protocol, proxy_url)
-                .unwrap_or_else(|_| Client::new()),
+            client: crate::http_headers::provider_http_client(http_protocol, proxy_url)?,
             api_key,
             endpoint_mode: AzureEndpointMode::FullEndpoint,
             endpoint_prefix,
@@ -181,7 +180,7 @@ impl AzureOpenAiProvider {
             },
             include_usage: false,
             use_max_completion_tokens: false,
-        }
+        })
     }
 
     /// Builder-style setter: opt in to `stream_options.include_usage = true`
@@ -1179,7 +1178,8 @@ mod tests {
             5,
             128_000,
             ToolCallingMode::default(),
-        );
+        )
+        .unwrap();
 
         let dbg = format!("{provider:?}");
         assert!(
@@ -1205,7 +1205,8 @@ mod tests {
             5,
             128_000,
             ToolCallingMode::default(),
-        );
+        )
+        .unwrap();
 
         let meta = provider.metadata();
         assert_eq!(meta.id, ProviderId::from_string("azure-gpt4o"));
@@ -1227,7 +1228,8 @@ mod tests {
             5,
             128_000,
             ToolCallingMode::default(),
-        );
+        )
+        .unwrap();
         assert_eq!(
             provider.chat_url(),
             "https://myresource.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-10-21"
@@ -1379,7 +1381,8 @@ mod tests {
             5,
             128_000,
             ToolCallingMode::default(),
-        );
+        )
+        .unwrap();
 
         let json = serde_json::to_value(
             provider.build_request_body(&azure_chat_request(Some(256)), false),
@@ -1405,6 +1408,7 @@ mod tests {
             128_000,
             ToolCallingMode::default(),
         )
+        .unwrap()
         .with_use_max_completion_tokens(true);
 
         let json = serde_json::to_value(
@@ -1502,6 +1506,7 @@ mod tests {
             128_000,
             ToolCallingMode::default(),
         )
+        .unwrap()
         .with_azure_config(None, false, None, AzureAuthMode::ApiKey);
 
         assert_eq!(provider.endpoint_mode, AzureEndpointMode::FullEndpoint);
@@ -1526,6 +1531,7 @@ mod tests {
             128_000,
             ToolCallingMode::default(),
         )
+        .unwrap()
         .with_azure_config(Some("myresource"), false, None, AzureAuthMode::ApiKey);
 
         assert_eq!(provider.endpoint_mode, AzureEndpointMode::V1);
@@ -1550,6 +1556,7 @@ mod tests {
             128_000,
             ToolCallingMode::default(),
         )
+        .unwrap()
         .with_azure_config(Some("myresource"), true, None, AzureAuthMode::ApiKey);
 
         assert_eq!(provider.endpoint_mode, AzureEndpointMode::DeploymentBased);
@@ -1574,6 +1581,7 @@ mod tests {
             128_000,
             ToolCallingMode::default(),
         )
+        .unwrap()
         .with_azure_config(None, false, None, AzureAuthMode::ApiKey);
 
         assert_eq!(provider.endpoint_mode, AzureEndpointMode::V1);
@@ -1598,6 +1606,7 @@ mod tests {
             128_000,
             ToolCallingMode::default(),
         )
+        .unwrap()
         .with_azure_config(None, false, Some("2025-01-01"), AzureAuthMode::ApiKey);
 
         assert_eq!(
@@ -1621,6 +1630,7 @@ mod tests {
             128_000,
             ToolCallingMode::default(),
         )
+        .unwrap()
         .with_azure_config(Some("myresource"), false, None, AzureAuthMode::ApiKey);
 
         let json = serde_json::to_value(
@@ -1644,6 +1654,7 @@ mod tests {
             128_000,
             ToolCallingMode::default(),
         )
+        .unwrap()
         .with_azure_config(None, false, None, AzureAuthMode::ApiKey);
 
         let json = serde_json::to_value(
@@ -1667,6 +1678,7 @@ mod tests {
             128_000,
             ToolCallingMode::default(),
         )
+        .unwrap()
         .with_azure_config(Some("res"), true, None, AzureAuthMode::ApiKey);
 
         let json = serde_json::to_value(
@@ -1690,6 +1702,7 @@ mod tests {
             128_000,
             ToolCallingMode::default(),
         )
+        .unwrap()
         .with_azure_config(Some("myresource"), false, None, AzureAuthMode::ApiKey);
 
         assert_eq!(
@@ -1717,6 +1730,7 @@ mod tests {
             128_000,
             ToolCallingMode::default(),
         )
+        .unwrap()
         .with_azure_config(None, false, None, AzureAuthMode::Bearer);
 
         let req = provider.client.post("http://test.example.com");
@@ -1747,6 +1761,7 @@ mod tests {
             128_000,
             ToolCallingMode::default(),
         )
+        .unwrap()
         .with_azure_config(None, false, None, AzureAuthMode::ApiKey);
 
         let req = provider.client.post("http://test.example.com");

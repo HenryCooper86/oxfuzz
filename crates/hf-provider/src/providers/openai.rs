@@ -100,7 +100,7 @@ impl OpenAiProvider {
         max_concurrency: usize,
         context_window: usize,
         tool_calling_mode: ToolCallingMode,
-    ) -> Self {
+    ) -> Result<Self, crate::error::ProviderPoolError> {
         let headers = std::collections::HashMap::new();
         Self::with_headers(
             id,
@@ -132,7 +132,7 @@ impl OpenAiProvider {
         tool_calling_mode: ToolCallingMode,
         headers: &std::collections::HashMap<String, String, S>,
         http_protocol: HttpProtocol,
-    ) -> Self {
+    ) -> Result<Self, crate::error::ProviderPoolError> {
         let base_url = base_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string());
         let custom_headers = crate::http_headers::custom_header_map(headers).unwrap_or_else(
             |message| {
@@ -141,11 +141,10 @@ impl OpenAiProvider {
             },
         );
 
-        Self {
+        Ok(Self {
             response_body_limits: crate::response_body::resolve_default_limits(),
             response_stream_limits: crate::sse::resolve_default_limits(),
-            client: crate::http_headers::provider_http_client(http_protocol, proxy_url)
-                .unwrap_or_else(|_| Client::new()),
+            client: crate::http_headers::provider_http_client(http_protocol, proxy_url)?,
             api_key,
             base_url,
             custom_headers,
@@ -164,7 +163,7 @@ impl OpenAiProvider {
             include_usage: false,
             use_max_completion_tokens: false,
             use_reasoning_effort: false,
-        }
+        })
     }
 
     /// Builder-style setter: opt in to `stream_options.include_usage = true`
@@ -1350,7 +1349,8 @@ mod tests {
             5,
             128_000,
             ToolCallingMode::default(),
-        );
+        )
+        .unwrap();
 
         let dbg = format!("{provider:?}");
         assert!(
@@ -1376,7 +1376,8 @@ mod tests {
             5,
             128_000,
             ToolCallingMode::default(),
-        );
+        )
+        .unwrap();
 
         let meta = provider.metadata();
         assert_eq!(meta.id, ProviderId::from_string("test-openai"));
@@ -1398,7 +1399,8 @@ mod tests {
             5,
             128_000,
             ToolCallingMode::default(),
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             provider.api_url("chat/completions"),
@@ -1419,7 +1421,8 @@ mod tests {
             5,
             128_000,
             ToolCallingMode::default(),
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             provider.api_url("chat/completions"),
@@ -1502,7 +1505,8 @@ mod tests {
             5,
             128_000,
             ToolCallingMode::default(),
-        );
+        )
+        .unwrap();
 
         let request = ChatRequest {
             messages: vec![hf_core::types::Message {
@@ -1551,6 +1555,7 @@ mod tests {
             128_000,
             ToolCallingMode::default(),
         )
+        .unwrap()
         .with_include_usage(true);
 
         let request = ChatRequest {
@@ -1597,7 +1602,8 @@ mod tests {
             5,
             128_000,
             ToolCallingMode::default(),
-        );
+        )
+        .unwrap();
 
         let request = ChatRequest {
             messages: vec![hf_core::types::Message {
@@ -1649,6 +1655,7 @@ mod tests {
             128_000,
             ToolCallingMode::default(),
         )
+        .unwrap()
         .with_use_max_completion_tokens(true);
 
         let request = ChatRequest {
@@ -1699,7 +1706,8 @@ mod tests {
             5,
             128_000,
             ToolCallingMode::default(),
-        );
+        )
+        .unwrap();
         let provider_modern = OpenAiProvider::new(
             "modern",
             "o3",
@@ -1712,6 +1720,7 @@ mod tests {
             128_000,
             ToolCallingMode::default(),
         )
+        .unwrap()
         .with_use_max_completion_tokens(true);
 
         let request = ChatRequest {
@@ -1758,6 +1767,7 @@ mod tests {
             128_000,
             ToolCallingMode::default(),
         )
+        .unwrap()
         .with_use_reasoning_effort(use_reasoning_effort)
     }
 
@@ -1894,7 +1904,8 @@ mod tests {
             5,
             128_000,
             ToolCallingMode::default(),
-        );
+        )
+        .unwrap();
         assert_eq!(provider.metadata().id, ProviderId::from_string("proxied"));
 
         // Verify http proxy also works.
@@ -1909,7 +1920,8 @@ mod tests {
             3,
             128_000,
             ToolCallingMode::default(),
-        );
+        )
+        .unwrap();
         assert_eq!(
             provider2.metadata().id,
             ProviderId::from_string("proxied-http")
