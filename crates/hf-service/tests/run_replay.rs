@@ -303,12 +303,51 @@ fn assert_retained_initial_inputs(workspace: &Path, records: &[hf_storage::RunRe
     }
 }
 
-#[tokio::test]
-async fn run_records_a_seed_and_replay_reexecutes_with_it() {
-    common::install_managed_workspace("oxfuzz_run_replay_it");
+fn install_replay_fixture(workspace_prefix: &str, enabled_engines: &[&str]) -> tempfile::TempDir {
+    common::install_managed_workspace(workspace_prefix);
     let dir = tempfile::tempdir().unwrap();
     std::env::set_var("HF_CONFIG_DIR", dir.path().join("config"));
-    write_fuzzing_policy(&["libfuzzer", "honggfuzz"], 120);
+    write_fuzzing_policy(enabled_engines, 120);
+    dir
+}
+
+// These workflows change both the selected config directory and its policy.
+// A child process owns those mutations until its temporary fixtures are dropped.
+fn run_in_isolated_process(test_name: &str) -> bool {
+    if std::env::var("HF_REPLAY_TEST_CHILD").as_deref() == Ok(test_name) {
+        return false;
+    }
+    let caller_config = tempfile::tempdir().unwrap();
+    std::fs::write(
+        caller_config.path().join("oxfuzz.toml"),
+        "[fuzzing]\ncollect_function_coverage = false\ndefault_duration_secs = 17\n",
+    )
+    .unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test_name, "--nocapture"])
+        .env("HF_REPLAY_TEST_CHILD", test_name)
+        .env("HF_CONFIG_DIR", caller_config.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "isolated replay test {test_name} failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+        "isolated replay test {test_name} must execute its workflow"
+    );
+    true
+}
+
+#[tokio::test]
+async fn run_records_a_seed_and_replay_reexecutes_with_it() {
+    if run_in_isolated_process("run_records_a_seed_and_replay_reexecutes_with_it") {
+        return;
+    }
+    let dir = install_replay_fixture("oxfuzz_run_replay_it", &["libfuzzer", "honggfuzz"]);
     let project = dir.path().join("replay_project");
     std::fs::create_dir_all(&project).unwrap();
     std::fs::write(project.join("parser.c"), FIXTURE).unwrap();
@@ -680,10 +719,10 @@ fn legacy_config_json_without_a_seed_still_deserializes() {
 #[tokio::test]
 async fn guided_experiment_rejects_stale_inputs_and_attaches_its_run() {
     use hf_service::coverage_experiments::*;
-    common::install_managed_workspace("oxfuzz_guided_replay_it");
-    let dir = tempfile::tempdir().unwrap();
-    std::env::set_var("HF_CONFIG_DIR", dir.path().join("config"));
-    write_fuzzing_policy(&["libfuzzer"], 120);
+    if run_in_isolated_process("guided_experiment_rejects_stale_inputs_and_attaches_its_run") {
+        return;
+    }
+    let dir = install_replay_fixture("oxfuzz_guided_replay_it", &["libfuzzer"]);
     let project = dir.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
     std::fs::write(project.join("parser.c"), FIXTURE).unwrap();
@@ -816,4 +855,33 @@ async fn guided_experiment_rejects_stale_inputs_and_attaches_its_run() {
         .await
         .is_err());
     assert_eq!(before + 1, runtime.campaign_count());
+}
+
+#[test]
+fn replay_workflows_preserve_caller_configuration() {
+    if run_in_isolated_process("replay_workflows_preserve_caller_configuration") {
+        return;
+    }
+    let config_directory = std::env::var_os("HF_CONFIG_DIR");
+    let config = hf_service::config::read_config("oxfuzz").unwrap();
+    let policy = hf_service::config::effective_fuzzing_settings().unwrap();
+    let workflows: &[fn()] = &[
+        run_records_a_seed_and_replay_reexecutes_with_it,
+        #[cfg(feature = "coverage-experiments")]
+        guided_experiment_rejects_stale_inputs_and_attaches_its_run,
+    ];
+    for workflow in workflows {
+        workflow();
+        assert_eq!(
+            std::env::var_os("HF_CONFIG_DIR"),
+            config_directory,
+            "a finished replay fixture must not replace the caller's configuration with a deleted directory"
+        );
+        assert_eq!(hf_service::config::read_config("oxfuzz").unwrap(), config);
+        assert_eq!(
+            hf_service::config::effective_fuzzing_settings().unwrap(),
+            policy,
+            "workflow-specific policy changes must not leak into the caller"
+        );
+    }
 }

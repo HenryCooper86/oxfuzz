@@ -187,38 +187,36 @@ impl hf_core::provider::ProviderPool for HarnessDraftPool {
     }
 }
 
-/// Isolate the config directory and pin a fuzzing policy; `extra_fuzzing`
-/// appends lines to the `[fuzzing]` table.
-fn write_fuzzing_policy(config_dir: &Path, extra_fuzzing: &str) {
+/// Pin this test binary's immutable fuzzing policy.
+fn write_fuzzing_policy(config_dir: &Path) {
     std::env::set_var("HF_CONFIG_DIR", config_dir);
     hf_service::config::write_config(
         "oxfuzz",
-        &format!(
-            "[fuzzing]\n\
+        "[fuzzing]\n\
              enabled_engines = [\"libfuzzer\", \"afl++\", \"honggfuzz\"]\n\
              default_engine = \"libfuzzer\"\n\
              default_duration_secs = 30\n\
-             {extra_fuzzing}\n\
              [fuzzing.sandbox]\n\
              max_mem_mb = 1024\n\
              max_cpus = 1\n\
-             max_duration_secs = 600\n"
-        ),
+             max_duration_secs = 600\n",
     )
     .expect("write fuzzing policy");
 }
 
-async fn fixture(
-    extra_fuzzing: &str,
-) -> (
+async fn fixture() -> (
     tempfile::TempDir,
     Arc<hf_storage::Store>,
     ServiceContainer,
     Arc<RecordingRuntime>,
 ) {
-    let _workspace_root = common::install_managed_workspace("oxfuzz_sanitizer_it");
+    // The process-global policy must outlive every concurrent project fixture.
+    static ENVIRONMENT: std::sync::Once = std::sync::Once::new();
+    ENVIRONMENT.call_once(|| {
+        let root = common::install_managed_workspace("oxfuzz_sanitizer_it");
+        write_fuzzing_policy(&root.parent().unwrap().join("config"));
+    });
     let dir = tempfile::tempdir().unwrap();
-    write_fuzzing_policy(&dir.path().join("config"), extra_fuzzing);
     let project = dir.path().join("proj");
     std::fs::create_dir_all(&project).unwrap();
     std::fs::write(project.join("parser.c"), FIXTURE).unwrap();
@@ -284,7 +282,7 @@ async fn promoted_sanitizer(store: &Arc<hf_storage::Store>, project: &Path) -> S
 
 #[tokio::test]
 async fn requested_ubsan_reaches_the_build_script_and_the_run_identity() {
-    let (dir, store, container, runtime) = fixture("").await;
+    let (dir, store, container, runtime) = fixture().await;
     let project = dir.path().join("proj");
 
     qualify(&container, &project, Some(Sanitizer::Undefined)).await;
@@ -339,7 +337,7 @@ async fn requested_ubsan_reaches_the_build_script_and_the_run_identity() {
 
 #[tokio::test]
 async fn run_with_a_mismatched_sanitizer_request_fails_loud() {
-    let (dir, store, container, _runtime) = fixture("").await;
+    let (dir, store, container, _runtime) = fixture().await;
     let project = dir.path().join("proj");
     qualify(&container, &project, Some(Sanitizer::Undefined)).await;
 
@@ -376,7 +374,7 @@ async fn run_with_a_mismatched_sanitizer_request_fails_loud() {
 
 #[tokio::test]
 async fn unselectable_sanitizers_fail_loud_at_build_resolution() {
-    let (dir, _store, container, _runtime) = fixture("").await;
+    let (dir, _store, container, _runtime) = fixture().await;
     let project = dir.path().join("proj");
     let source =
         "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return 0; }";
@@ -427,7 +425,7 @@ async fn unselectable_sanitizers_fail_loud_at_build_resolution() {
 
 #[tokio::test]
 async fn rust_targets_reject_a_non_address_sanitizer_loudly() {
-    let (dir, store, container, runtime) = fixture("").await;
+    let (dir, store, container, runtime) = fixture().await;
     let project = dir.path().join("proj");
     let commands_before = runtime.commands.lock().unwrap().len();
 
@@ -459,7 +457,7 @@ async fn rust_targets_reject_a_non_address_sanitizer_loudly() {
 
 #[tokio::test]
 async fn fuzz_redrafts_when_the_promoted_harness_has_a_different_sanitizer() {
-    let (dir, store, container, _runtime) = fixture("").await;
+    let (dir, store, container, _runtime) = fixture().await;
     let project = dir.path().join("proj");
     let request = |sanitizer| hf_service::FuzzRequest {
         prepared_harness: None,
@@ -509,4 +507,28 @@ async fn fuzz_redrafts_when_the_promoted_harness_has_a_different_sanitizer() {
         .unwrap()
         .expect("the new harness revision persists");
     assert_eq!(harness.sanitizer, Sanitizer::Undefined);
+}
+
+#[tokio::test]
+async fn dropping_another_fixture_preserves_the_active_policy() {
+    let (dir, store, container, runtime) = fixture().await;
+    let second = fixture().await;
+    let config_path =
+        std::path::PathBuf::from(std::env::var_os("HF_CONFIG_DIR").unwrap()).join("oxfuzz.toml");
+    let policy = std::fs::read_to_string(&config_path).unwrap();
+    drop(second);
+    assert_eq!(
+        std::fs::read_to_string(&config_path).expect("policy outlives every project fixture"),
+        policy
+    );
+    let project = dir.path().join("proj");
+    qualify(&container, &project, Some(Sanitizer::Undefined)).await;
+    assert_eq!(
+        promoted_sanitizer(&store, &project).await,
+        Sanitizer::Undefined
+    );
+    assert!(runtime
+        .scripts()
+        .iter()
+        .any(|script| script.contains("-fsanitize=undefined")));
 }

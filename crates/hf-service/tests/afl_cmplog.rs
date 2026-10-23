@@ -252,9 +252,14 @@ async fn fixture() -> (
     Arc<RecordingRuntime>,
     std::path::PathBuf,
 ) {
-    let workspace_root = common::install_managed_workspace("oxfuzz_cmplog_it");
+    // The process-global policy must outlive every concurrent project fixture.
+    static WORKSPACE: std::sync::LazyLock<std::path::PathBuf> = std::sync::LazyLock::new(|| {
+        let root = common::install_managed_workspace("oxfuzz_cmplog_it");
+        write_fuzzing_policy(&root.parent().unwrap().join("config"));
+        root
+    });
+    let workspace_root = WORKSPACE.clone();
     let dir = tempfile::tempdir().unwrap();
-    write_fuzzing_policy(&dir.path().join("config"));
     let project = dir.path().join("proj");
     std::fs::create_dir_all(&project).unwrap();
     std::fs::write(project.join("parser.c"), FIXTURE).unwrap();
@@ -615,4 +620,22 @@ async fn guided_experiment_stages_and_drives_the_reviewed_cmplog_companion() {
             .status,
         CoverageExperimentStatus::Completed
     );
+}
+
+#[tokio::test]
+async fn dropping_another_fixture_preserves_the_active_policy() {
+    let (dir, store, container, runtime, _workspace) = fixture().await;
+    let second = fixture().await;
+    let config_path =
+        std::path::PathBuf::from(std::env::var_os("HF_CONFIG_DIR").unwrap()).join("oxfuzz.toml");
+    let policy = std::fs::read_to_string(&config_path).unwrap();
+    drop(second);
+    assert_eq!(
+        std::fs::read_to_string(&config_path).expect("policy outlives every project fixture"),
+        policy
+    );
+    let project = dir.path().join("proj");
+    qualify(&container, &project, true).await;
+    assert!(promoted_harness(&store, &project).await.cmplog.is_some());
+    assert_eq!(runtime.compile_scripts().len(), 2);
 }
