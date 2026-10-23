@@ -9,6 +9,32 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ## Unreleased
 
+## 0.6.10 - 2026-10-23
+
+### Fixed
+
+- Change-review REST operations enforce approved project roots for supplied
+  patches, revision inspection, and both retained runs in comparisons and
+  publication requests.
+- Git revision inspection disables executable diff/textconv helpers, captures
+  output asynchronously with a 4 MiB ceiling, and terminates stalled children.
+  The new `[git_diff].timeout_secs` setting defaults to 30 and accepts 1–300.
+- Source inspection rejects special files and replacement symlinks, validates
+  and reads the same open file, resolves parent components after symlinks, and
+  bounds both small-file and streaming reads against admitted file size.
+- Dictionary extraction uses confined, bounded source reads, preserves complete
+  UTF-8 prefixes, and accounts for bytes consumed before read failures.
+- Invalid provider proxy settings fail client construction instead of silently
+  connecting directly. Proxy errors no longer include embedded credentials.
+- PDF and DOCX export rejects images and raw HTML before tool discovery, renders
+  the validated Markdown tree to HTML, and enables Pandoc's sandbox. This prevents
+  local-file embedding and avoids interpreting report text as converter-specific
+  YAML or TeX instructions. Markdown export retains the original source.
+- UDS scans enforce event, payload, rate, and elapsed-time limits through the
+  sidecar executor, validate reply sizes, and retain measured event timestamps.
+  Offline packet-test fixtures use explicit synthetic addresses without routing
+  lookups. Physical CAN qualification remains separate acceptance work.
+
 ## 0.6.9 - 2026-10-22
 
 ### Fixed
