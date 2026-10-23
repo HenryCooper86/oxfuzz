@@ -1195,6 +1195,27 @@ pub fn effective_build_profile_settings() -> Result<BuildProfileSettings, String
     parse_build_profile_settings(&raw)
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct GitDiffSettings {
+    timeout_secs: u64,
+}
+
+impl Default for GitDiffSettings {
+    fn default() -> Self {
+        Self { timeout_secs: 30 }
+    }
+}
+
+impl GitDiffSettings {
+    fn resolve(&self) -> Result<std::time::Duration, String> {
+        if !(1..=300).contains(&self.timeout_secs) {
+            return Err("git_diff.timeout_secs must be within 1..=300".to_owned());
+        }
+        Ok(std::time::Duration::from_secs(self.timeout_secs))
+    }
+}
+
 /// Typed global settings whose values are consumed during service bootstrap.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -1206,6 +1227,7 @@ struct OxfuzzRuntimeConfig {
     auto_revert_threshold_pct: f64,
     auto_revert_notify_only: bool,
     grep: hf_core::grep_limits::GrepLimitsConfig,
+    git_diff: GitDiffSettings,
     fuzzing: FuzzingSettings,
     harness: HarnessSettings,
     build_profiles: BuildProfileSettings,
@@ -1229,6 +1251,7 @@ impl Default for OxfuzzRuntimeConfig {
             auto_revert_threshold_pct: DEFAULT_AUTO_REVERT_THRESHOLD_PCT,
             auto_revert_notify_only: false,
             grep: hf_core::grep_limits::GrepLimitsConfig::default(),
+            git_diff: GitDiffSettings::default(),
             fuzzing: FuzzingSettings::default(),
             harness: HarnessSettings::default(),
             build_profiles: BuildProfileSettings::default(),
@@ -1259,6 +1282,7 @@ impl OxfuzzRuntimeConfig {
             );
         }
         self.grep.resolve()?;
+        self.git_diff.resolve()?;
         self.fuzzing.validate()?;
         self.build_profiles.validate()?;
         self.campaign_health.validate()?;
@@ -1295,6 +1319,18 @@ pub fn resolve_grep_limits() -> Result<hf_core::grep_limits::GrepLimits, String>
 fn resolve_grep_limits_at(directory: &Path) -> Result<hf_core::grep_limits::GrepLimits, String> {
     let raw = read_config_from(directory, "oxfuzz")?;
     parse_oxfuzz_runtime_config(&raw)?.grep.resolve()
+}
+
+/// Resolve the deployment timeout before starting a revision diff.
+#[cfg(feature = "change-aware")]
+pub(crate) fn resolve_git_diff_timeout() -> Result<std::time::Duration, String> {
+    resolve_git_diff_timeout_at(&config_dir())
+}
+
+#[cfg(any(feature = "change-aware", test))]
+fn resolve_git_diff_timeout_at(directory: &Path) -> Result<std::time::Duration, String> {
+    let raw = read_config_from(directory, "oxfuzz")?;
+    parse_oxfuzz_runtime_config(&raw)?.git_diff.resolve()
 }
 
 fn effective_runtime_config() -> OxfuzzRuntimeConfig {
@@ -5139,6 +5175,7 @@ default_duration_secs = 22
             "coverage_stagnation_secs",
             "coverage_stagnation_stop_windows",
             "fuzzing",
+            "git_diff",
             "grep",
             "harness",
             "knowledge",
@@ -5600,4 +5637,43 @@ pub fn parse_clang_analysis_settings(
 pub fn effective_clang_analysis_settings(
 ) -> Result<crate::clang_analysis::ClangAnalysisSettings, String> {
     parse_clang_analysis_settings(&read_config("oxfuzz")?)
+}
+
+#[cfg(test)]
+mod git_diff_configuration_tests {
+    use super::*;
+
+    #[test]
+    fn git_diff_configuration_resolves_and_rejects_invalid_durations() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("oxfuzz.toml");
+        assert_eq!(
+            resolve_git_diff_timeout_at(directory.path())
+                .unwrap()
+                .as_secs(),
+            30
+        );
+        std::fs::write(&file, "[git_diff]\ntimeout_secs=2").unwrap();
+        assert_eq!(
+            resolve_git_diff_timeout_at(directory.path())
+                .unwrap()
+                .as_secs(),
+            2
+        );
+        for raw in [
+            "[git_diff]\ntimeout_secs=0",
+            "[git_diff]\ntimeout_secs=301",
+            "[git_diff]\nunknown=1",
+        ] {
+            std::fs::write(&file, raw).unwrap();
+            assert!(parse_oxfuzz_runtime_config(raw).is_err(), "{raw}");
+            assert!(
+                resolve_git_diff_timeout_at(directory.path()).is_err(),
+                "{raw}"
+            );
+        }
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        assert!(resolve_git_diff_timeout_at(directory.path()).is_err());
+    }
 }

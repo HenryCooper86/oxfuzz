@@ -10,6 +10,7 @@
 use hf_core::error::ClassifiedError;
 use hf_storage::{RunKind, RunRecord, RunStatus, Store};
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncReadExt;
 use uuid::Uuid;
 
 use crate::change_impact::{
@@ -142,7 +143,7 @@ impl ServiceContainer {
         })?;
         let diff_text = match (req.diff, req.revisions) {
             (Some(diff), _) => diff,
-            (None, Some(range)) => git_diff(&req.project, &range)?,
+            (None, Some(range)) => git_diff(&req.project, &range).await?,
             (None, None) => {
                 return Err(ClassifiedError::Validation(
                     "a change requires either a unified diff or a revision range".to_owned(),
@@ -502,34 +503,71 @@ impl ServiceContainer {
 /// Produce a diff for a validated revision range through the read-only git
 /// path. Revisions are validated before they reach the command line, and the
 /// command is never composed through a shell.
-fn git_diff(project: &str, range: &RevisionRange) -> Result<String, ClassifiedError> {
+async fn git_diff(project: &str, range: &RevisionRange) -> Result<String, ClassifiedError> {
     validate_revision(&range.base)?;
     validate_revision(&range.head)?;
-    let output = hf_runtime::scrubbed_command("git")
-        .args([
-            "-C",
-            project,
-            "diff",
-            "--unified=0",
-            "--no-color",
-            "--no-ext-diff",
-            "--no-textconv",
-            &format!("{}...{}", range.base, range.head),
-            "--",
-        ])
-        .output()
-        .map_err(|error| ClassifiedError::Validation(format!("could not run git diff: {error}")))?;
-    if !output.status.success() {
-        return Err(ClassifiedError::Validation(
-            "git could not diff the requested revision range".to_owned(),
-        ));
+    let timeout = crate::config::resolve_git_diff_timeout().map_err(ClassifiedError::Validation)?;
+    let mut command = hf_runtime::scrubbed_tokio_command("git");
+    command.args([
+        "-C",
+        project,
+        "diff",
+        "--unified=0",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        &format!("{}...{}", range.base, range.head),
+        "--",
+    ]);
+    capture_git_diff(&mut command, timeout).await
+}
+
+async fn capture_git_diff(
+    command: &mut tokio::process::Command,
+    timeout: std::time::Duration,
+) -> Result<String, ClassifiedError> {
+    use std::process::Stdio;
+
+    let process_error =
+        |error| ClassifiedError::Validation(format!("could not run git diff: {error}"));
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(process_error)?;
+    let result = tokio::time::timeout(timeout, async {
+        let stdout = child.stdout.take().ok_or_else(|| {
+            ClassifiedError::Internal("git diff stdout pipe is unavailable".to_owned())
+        })?;
+        let mut bytes = Vec::new();
+        stdout
+            .take(MAX_DIFF_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(process_error)?;
+        if bytes.len() > MAX_DIFF_BYTES {
+            return Err(ClassifiedError::Validation(
+                "the revision range produced a diff above the reviewable size limit".to_owned(),
+            ));
+        }
+        let status = child.wait().await.map_err(process_error)?;
+        if !status.success() {
+            return Err(ClassifiedError::Validation(
+                "git could not diff the requested revision range".to_owned(),
+            ));
+        }
+        Ok(bytes)
+    })
+    .await
+    .unwrap_or_else(|_| Err(ClassifiedError::Validation("git diff timed out".to_owned())));
+    if result.is_err() {
+        child.kill().await.map_err(|error| {
+            ClassifiedError::Internal(format!("failed to terminate git diff: {error}"))
+        })?;
     }
-    if output.stdout.len() > MAX_DIFF_BYTES {
-        return Err(ClassifiedError::Validation(
-            "the revision range produced a diff above the reviewable size limit".to_owned(),
-        ));
-    }
-    String::from_utf8(output.stdout).map_err(|_| {
+    String::from_utf8(result?).map_err(|_| {
         ClassifiedError::Validation("git produced a diff that is not valid UTF-8".to_owned())
     })
 }
@@ -642,5 +680,117 @@ fn coverage_publication_text(coverage: CoverageComparison) -> String {
             format!("measured coverage change of {delta_pct:+.2}%")
         }
         CoverageComparison::Unavailable => "measured coverage unavailable".to_owned(),
+    }
+}
+
+#[cfg(all(test, unix))]
+mod git_capture_tests {
+    use super::*;
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    fn fixture_command(script: &str) -> tokio::process::Command {
+        let mut command = hf_runtime::scrubbed_tokio_command("sh");
+        command.args(["-c", script, "git-capture-fixture"]);
+        command
+    }
+
+    async fn wait_for_pid(path: &std::path::Path) -> String {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(pid) = tokio::fs::read_to_string(path).await {
+                    if !pid.trim().is_empty() {
+                        return pid.trim().to_owned();
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("fixture process must start")
+    }
+
+    async fn assert_process_exited(pid: &str) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let status = hf_runtime::scrubbed_tokio_command("kill")
+                    .args(["-0", pid])
+                    .stderr(Stdio::null())
+                    .status()
+                    .await
+                    .unwrap();
+                if !status.success() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("fixture process must be terminated and reaped");
+    }
+
+    #[tokio::test]
+    async fn git_capture_preserves_stdout_and_rejects_failed_or_non_utf8_output() {
+        assert_eq!(
+            capture_git_diff(
+                &mut fixture_command("printf diff; printf diagnostic >&2"),
+                Duration::from_secs(5)
+            )
+            .await
+            .unwrap(),
+            "diff"
+        );
+        for script in ["printf diff; exit 7", "printf '\\377'"] {
+            assert!(
+                capture_git_diff(&mut fixture_command(script), Duration::from_secs(5))
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn git_capture_rejects_oversized_output_without_waiting_for_eof() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("output");
+        std::fs::write(&output, vec![b'x'; MAX_DIFF_BYTES + 1]).unwrap();
+        let pid_file = directory.path().join("pid");
+        let mut command = fixture_command("printf '%s' $$ > \"$2\"; cat \"$1\"; exec sleep 30");
+        command.arg(output).arg(&pid_file);
+        let error = capture_git_diff(&mut command, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("size limit"), "{error}");
+        assert_process_exited(&wait_for_pid(&pid_file).await).await;
+    }
+
+    #[tokio::test]
+    async fn git_capture_deadline_covers_wait_after_stdout_closes() {
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("pid");
+        let mut command = fixture_command("printf '%s' $$ > \"$1\"; exec 1>&-; exec sleep 30");
+        command.arg(&pid_file);
+        let error = capture_git_diff(&mut command, Duration::from_millis(250))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("timed out"), "{error}");
+        assert_process_exited(&wait_for_pid(&pid_file).await).await;
+    }
+
+    #[tokio::test]
+    async fn git_capture_yields_and_cancellation_terminates_child() {
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("pid");
+        let mut command = fixture_command("printf '%s' $$ > \"$1\"; exec sleep 30");
+        command.arg(&pid_file);
+        let task =
+            tokio::spawn(
+                async move { capture_git_diff(&mut command, Duration::from_secs(30)).await },
+            );
+        // This current-thread runtime cannot observe the PID if capture blocks it.
+        let pid = wait_for_pid(&pid_file).await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_process_exited(&pid).await;
     }
 }

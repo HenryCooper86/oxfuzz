@@ -30,12 +30,19 @@ approval; it never reclassifies a finding or recomputes a regression.
 Two accepted inputs produce the same parsed value:
 
 1. **Revision range** -- the service resolves `git diff --unified=0 <base>...<head>`
-   in the project through the existing read-only `hf_runtime::scrubbed_command("git")`
-   idiom already used to resolve the origin remote. Revision arguments are
+   in the project using `hf_runtime::scrubbed_tokio_command("git")`.
+   Revision arguments are
    validated against a conservative grammar before they reach the command, and
    the command is never composed through a shell. External diff and textconv
    helpers are explicitly disabled; repository configuration must not turn
-   source inspection into host execution.
+   source inspection into host execution. Capture runs asynchronously and retains
+   at most the fixed 4 MiB parser ceiling plus one overflow-detection byte.
+   Stdin and stderr are disconnected. The `[git_diff].timeout_secs` setting in
+   `oxfuzz.toml` defaults to 30 and accepts 1 through 300 seconds; it is resolved
+   before each revision inspection and covers both output reads and process exit.
+   Timeout and capture failure terminate and reap the child before returning;
+   dropping a pending request kills the child through Tokio's kill-on-drop and
+   runtime reaper. Cancellation does not synchronously await reaping.
 2. **Supplied diff** -- an operator or CI pipeline supplies unified-diff text
    directly, for contexts that have the patch but no checkout.
 
@@ -43,7 +50,7 @@ The parser accepts unified diffs only. It records, per changed file, the old and
 new paths and the changed line ranges on the new side. Renames are recorded with
 both paths. Binary files, mode-only changes, and deleted files are retained as
 changed files with no line ranges, because a target cannot overlap a range that
-does not exist. Bounded: a diff above the configured byte ceiling, an
+does not exist. Bounded: a diff above the fixed 4 MiB byte ceiling, an
 unparseable hunk header, or a hunk whose line counts do not agree with its body
 is rejected with a named reason rather than partially parsed. A partially
 understood diff would under-report affected targets, which is the one failure

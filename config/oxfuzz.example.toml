@@ -186,6 +186,10 @@ history_retention_limit = 100
 [build_profiles]
 allowed_cmake_options = ["BUILD_SHARED_LIBS", "BUILD_TESTING"]
 
+# Revision inspection deadline, 1..=300 seconds; output is capped at 4 MiB.
+[git_diff]
+timeout_secs = 30
+
 # Finite allowances for source inspection. Positive values are required.
 [grep]
 # Retained text/filenames, 1..=1048576 bytes; JSON metadata is additional.
