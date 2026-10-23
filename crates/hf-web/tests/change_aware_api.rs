@@ -1,23 +1,12 @@
 //! Isolated Change-Aware REST contract.
 //!
-//! This integration target intentionally contains exactly one test. Cargo runs
-//! each integration target in its own process, so its process-global auth
-//! override cannot race with unrelated `hf-web` tests.
+//! Exercises explicit per-router project access without global auth overrides.
 
 #![cfg(feature = "change-aware")]
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
-
-fn allow_open_dev_mode() {
-    // SAFETY: this binary contains exactly one test, only ever sets this to
-    // "1", and never sets HF_WEB_TOKEN, so there is no conflicting concurrent
-    // mutation.
-    unsafe {
-        std::env::set_var("HF_WEB_TOKEN_OPTIONAL", "1");
-    }
-}
 
 async fn post(
     app: &axum::Router,
@@ -46,11 +35,18 @@ async fn post(
 
 #[tokio::test]
 async fn rest_serves_the_service_comparison_and_never_publishes_on_its_own() {
-    allow_open_dev_mode();
     let fixture = hf_service::test_support::change_aware_fixture()
         .await
         .expect("change-aware fixture");
-    let app = hf_web::router::build_with_state(hf_web::router::AppState::new(fixture.container()));
+    let security = hf_web::WebSecurityConfig::new(
+        None,
+        true,
+        Vec::new(),
+        vec![fixture.project_root().to_path_buf()],
+    )
+    .unwrap();
+    let app =
+        hf_web::build_with_state_and_security(hf_web::AppState::new(fixture.container()), security);
 
     // A supplied diff needs no checkout and maps onto the retained targets.
     let (status, impact) = post(
@@ -105,4 +101,29 @@ async fn rest_serves_the_service_comparison_and_never_publishes_on_its_own() {
         status.is_client_error() || status.is_server_error(),
         "publication must not succeed unprompted, got {status}: {published}"
     );
+}
+
+#[tokio::test]
+async fn change_impact_rejects_projects_outside_approved_roots() {
+    let fixture = hf_service::test_support::change_aware_fixture()
+        .await
+        .unwrap();
+    let allowed = tempfile::tempdir().unwrap();
+    let security =
+        hf_web::WebSecurityConfig::new(None, true, Vec::new(), vec![allowed.path().to_path_buf()])
+            .unwrap();
+    let app =
+        hf_web::build_with_state_and_security(hf_web::AppState::new(fixture.container()), security);
+    for input in [
+        serde_json::json!({"diff": "--- a/parser.c\n+++ b/parser.c\n@@ -4,0 +5,1 @@\n+extra\n"}),
+        serde_json::json!({"revisions": {"base": "main", "head": "topic"}}),
+    ] {
+        let mut request = input;
+        request["project"] = serde_json::json!(fixture.project_root());
+        let (status, body) = post(&app, "/change/impact", request).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(!body
+            .to_string()
+            .contains(fixture.project_root().to_str().unwrap()));
+    }
 }

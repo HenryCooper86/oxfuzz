@@ -47,6 +47,11 @@ also be a regular file below its approved project root. The policy is resolved
 once when the router is built so a request cannot alter it through process
 environment races.
 
+Change-impact requests authorize the project before processing supplied diffs
+or invoking Git. Change comparison and publication authorize both retained
+run owners before service dispatch; publication still requires its separate
+human approval.
+
 REST project export requires an explicit approved project. An omitted project
 must not select the service's all-project export mode, which is reserved for
 trusted local presentation.

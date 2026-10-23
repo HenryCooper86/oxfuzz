@@ -447,7 +447,9 @@ pub async fn change_aware_fixture() -> Result<ChangeAwareTestFixture, Box<dyn Er
     };
     use hf_storage::{HarnessApprovalKind, RunRecord, RunStatus};
 
-    let directory = tempfile::tempdir()?;
+    // Production discovery persists canonical project roots; retain the same
+    // identity when the platform's temporary directory is itself a symlink.
+    let directory = tempfile::tempdir_in(std::fs::canonicalize(std::env::temp_dir())?)?;
     std::fs::write(
         directory.path().join("parser.c"),
         b"int parse_packet(void);\n",

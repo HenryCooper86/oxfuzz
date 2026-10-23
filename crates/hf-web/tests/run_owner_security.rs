@@ -28,6 +28,18 @@ async fn run_id_routes_reject_a_run_outside_approved_project_roots() {
     run.status = RunStatus::Done;
     store.insert_run(&run).await.unwrap();
 
+    #[cfg(feature = "change-aware")]
+    let allowed_run = {
+        let mut allowed_run = RunRecord::new(
+            approved.path().to_string_lossy(),
+            hf_service::EngineKind::LibFuzzer,
+            None,
+            chrono::Utc::now(),
+        );
+        allowed_run.status = RunStatus::Done;
+        store.insert_run(&allowed_run).await.unwrap();
+        allowed_run
+    };
     let container = hf_service::ServiceContainer::stubbed().with_store(store);
     let security =
         hf_web::WebSecurityConfig::new(None, true, Vec::new(), vec![approved.path().to_path_buf()])
@@ -59,5 +71,36 @@ async fn run_id_routes_reject_a_run_outside_approved_project_roots() {
             .await
             .unwrap();
         assert!(!String::from_utf8_lossy(&body).contains(outside.path().to_str().unwrap()));
+    }
+
+    #[cfg(feature = "change-aware")]
+    for uri in ["/change/compare", "/change/publish"] {
+        for (base, head) in [(run.id, allowed_run.id), (allowed_run.id, run.id)] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            json!({
+                                "base_run_id": base,
+                                "head_run_id": head,
+                                "regression_threshold_pct": 5.0,
+                                "destination": "issue_tracker"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "{uri}: {base} -> {head}"
+            );
+        }
     }
 }

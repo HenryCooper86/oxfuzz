@@ -1440,8 +1440,11 @@ async fn build_history(
 #[cfg(feature = "change-aware")]
 async fn change_impact(
     State(state): State<AppState>,
-    Json(request): Json<hf_service::ChangeImpactRequest>,
+    Json(mut request): Json<hf_service::ChangeImpactRequest>,
 ) -> ApiResult<serde_json::Value> {
+    request.project = approved_project(&state, std::path::Path::new(&request.project))?
+        .to_string_lossy()
+        .into_owned();
     let view = state
         .container
         .change_impact(request)
@@ -1455,6 +1458,8 @@ async fn change_compare(
     State(state): State<AppState>,
     Json(request): Json<hf_service::RevisionComparisonRequest>,
 ) -> ApiResult<serde_json::Value> {
+    approve_run_owner(&state, &request.base_run_id.to_string()).await?;
+    approve_run_owner(&state, &request.head_run_id.to_string()).await?;
     let view = state
         .container
         .compare_revisions(request)
@@ -1468,6 +1473,8 @@ async fn change_publish(
     State(state): State<AppState>,
     Json(request): Json<hf_service::PublishComparisonRequest>,
 ) -> ApiResult<serde_json::Value> {
+    approve_run_owner(&state, &request.base_run_id.to_string()).await?;
+    approve_run_owner(&state, &request.head_run_id.to_string()).await?;
     let published = state
         .container
         .publish_change_comparison(request)
