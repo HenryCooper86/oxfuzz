@@ -12,7 +12,7 @@ use hf_core::target::{
 };
 use hf_storage::{
     AutoRevertEvent, AutomotiveOperationRecord, AutomotiveOperationStatus,
-    AutomotiveStateCorpusRecord, CampaignHealthEventRecord, FiledIssueClaim,
+    AutomotiveStateCorpusRecord, CampaignHealthEventRecord, FiledIssueClaim, FiledIssueComplete,
     GuardrailDecisionRecord, HarnessAiReviewRecord, HarnessApprovalKind,
     HarnessWorkOrderAttemptCompletion, HarnessWorkOrderAttemptRecord, HarnessWorkOrderAttemptStage,
     HarnessWorkOrderAttemptStatus, HarnessWorkOrderRecord, HarnessWorkOrderSubmissionInsertError,
@@ -7654,25 +7654,92 @@ async fn filed_issue_claims_are_single_winner_and_retries_return_the_recorded_is
     let key = "crash-uuid-1";
 
     // VULN-001: the atomic claim is the dedup constraint. The first caller
-    // wins, a concurrent caller observes the in-flight claim, and every
-    // later caller receives the recorded issue instead of creating again.
+    // wins, a concurrent caller observes the in-flight claim (with the
+    // holder's attempt id), and every later caller receives the recorded
+    // issue instead of creating again.
     assert_eq!(
-        store.claim_filed_issue(key, Utc::now()).await.unwrap(),
+        store
+            .claim_filed_issue(key, "attempt-1", Utc::now())
+            .await
+            .unwrap(),
         FiledIssueClaim::Claimed
     );
     assert_eq!(
-        store.claim_filed_issue(key, Utc::now()).await.unwrap(),
-        FiledIssueClaim::Pending
+        store
+            .claim_filed_issue(key, "attempt-2", Utc::now())
+            .await
+            .unwrap(),
+        FiledIssueClaim::Pending {
+            attempt_id: "attempt-1".to_owned(),
+            stale: false
+        }
     );
 
     let issue = r#"{"url":"https://gitlab.com/g/p/-/issues/7","number":7}"#;
-    store.complete_filed_issue(key, issue).await.unwrap();
     assert_eq!(
-        store.claim_filed_issue(key, Utc::now()).await.unwrap(),
+        store
+            .complete_filed_issue(key, "attempt-1", issue)
+            .await
+            .unwrap(),
+        FiledIssueComplete::Recorded
+    );
+    assert_eq!(
+        store
+            .claim_filed_issue(key, "attempt-3", Utc::now())
+            .await
+            .unwrap(),
         FiledIssueClaim::Completed(issue.to_owned())
     );
     // Completing an already-completed claim fails closed.
-    assert!(store.complete_filed_issue(key, issue).await.is_err());
+    assert!(store
+        .complete_filed_issue(key, "attempt-1", issue)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn completion_and_release_are_fenced_to_the_holding_attempt() {
+    let (store, _dir) = temp_store().await;
+    let key = "crash-fenced";
+    // A claimant died holding a stale claim.
+    store
+        .claim_filed_issue(key, "dead", Utc::now() - Duration::minutes(11))
+        .await
+        .unwrap();
+    // A newer claimant reclaims the stale claim.
+    assert_eq!(
+        store
+            .reclaim_filed_issue(key, "fresh", Utc::now())
+            .await
+            .unwrap(),
+        FiledIssueClaim::Claimed
+    );
+    let issue = r#"{"url":"https://github.com/o/r/issues/1","number":1}"#;
+    // The stale holder's completion and release are both fenced out: neither
+    // can clobber or free a row now owned by the fresh attempt.
+    assert!(store
+        .complete_filed_issue(key, "dead", issue)
+        .await
+        .is_err());
+    store.release_filed_issue(key, "dead").await.unwrap();
+    assert_eq!(
+        store
+            .claim_filed_issue(key, "third", Utc::now())
+            .await
+            .unwrap(),
+        FiledIssueClaim::Pending {
+            attempt_id: "fresh".to_owned(),
+            stale: false
+        }
+    );
+    // The fresh attempt completes normally.
+    assert_eq!(
+        store
+            .complete_filed_issue(key, "fresh", issue)
+            .await
+            .unwrap(),
+        FiledIssueComplete::Recorded
+    );
 }
 
 #[tokio::test]
@@ -7680,74 +7747,110 @@ async fn released_claims_allow_a_retried_filing() {
     let (store, _dir) = temp_store().await;
     let key = "crash-uuid-2";
     assert_eq!(
-        store.claim_filed_issue(key, Utc::now()).await.unwrap(),
+        store
+            .claim_filed_issue(key, "attempt-1", Utc::now())
+            .await
+            .unwrap(),
         FiledIssueClaim::Claimed
     );
     // A failed remote create releases its claim so the filing can be retried.
-    store.release_filed_issue(key).await.unwrap();
+    store.release_filed_issue(key, "attempt-1").await.unwrap();
     assert_eq!(
-        store.claim_filed_issue(key, Utc::now()).await.unwrap(),
+        store
+            .claim_filed_issue(key, "attempt-2", Utc::now())
+            .await
+            .unwrap(),
         FiledIssueClaim::Claimed
     );
     // A completed record is never released by a late failure path.
     let issue = r#"{"url":"https://github.com/o/r/issues/1","number":1}"#;
-    store.complete_filed_issue(key, issue).await.unwrap();
-    store.release_filed_issue(key).await.unwrap();
+    store
+        .complete_filed_issue(key, "attempt-2", issue)
+        .await
+        .unwrap();
+    store.release_filed_issue(key, "attempt-2").await.unwrap();
     assert_eq!(
-        store.claim_filed_issue(key, Utc::now()).await.unwrap(),
+        store
+            .claim_filed_issue(key, "attempt-3", Utc::now())
+            .await
+            .unwrap(),
         FiledIssueClaim::Completed(issue.to_owned())
     );
 }
 
 #[tokio::test]
-async fn a_stale_pending_claim_is_reclaimed_by_a_new_claimant() {
+async fn claim_never_reclaims_implicitly_recovery_is_explicit_and_gated() {
     let (store, _dir) = temp_store().await;
     let key = "crash-uuid-stale";
     // A claimant died mid-create: the durable row is pending (no recorded
     // issue) and its created_at is well past the reclaim TTL.
+    store
+        .claim_filed_issue(key, "dead", Utc::now() - Duration::minutes(11))
+        .await
+        .unwrap();
+    // A later caller must observe Pending, never an implicit reclaim: blind
+    // reclaim would let it re-create an issue the dead holder may have opened.
     assert_eq!(
         store
-            .claim_filed_issue(key, Utc::now() - Duration::minutes(11))
+            .claim_filed_issue(key, "later", Utc::now())
+            .await
+            .unwrap(),
+        FiledIssueClaim::Pending {
+            attempt_id: "dead".to_owned(),
+            stale: true
+        }
+    );
+    // The explicit, reconciliation-gated reclaim still works.
+    assert_eq!(
+        store
+            .reclaim_filed_issue(key, "later", Utc::now())
             .await
             .unwrap(),
         FiledIssueClaim::Claimed
     );
-    // Without age-based reclaim this reports Pending forever, wedging the
-    // dedup key; a fresh claimant must reclaim the stale row.
-    assert_eq!(
-        store.claim_filed_issue(key, Utc::now()).await.unwrap(),
-        FiledIssueClaim::Claimed
-    );
-    // A fresh (non-stale) pending claim is still single-winner: it must not
-    // be reclaimed by a second caller arriving immediately.
+    // A fresh (non-stale) pending claim is still single-winner: reclaim does
+    // not take it over.
     let fresh = "crash-uuid-fresh";
+    store
+        .claim_filed_issue(fresh, "a", Utc::now())
+        .await
+        .unwrap();
     assert_eq!(
-        store.claim_filed_issue(fresh, Utc::now()).await.unwrap(),
-        FiledIssueClaim::Claimed
-    );
-    assert_eq!(
-        store.claim_filed_issue(fresh, Utc::now()).await.unwrap(),
-        FiledIssueClaim::Pending
+        store
+            .reclaim_filed_issue(fresh, "b", Utc::now())
+            .await
+            .unwrap(),
+        FiledIssueClaim::Pending {
+            attempt_id: "a".to_owned(),
+            stale: false
+        }
     );
 }
 
 #[tokio::test]
 async fn filed_issue_claims_reject_empty_keys_and_bad_records() {
     let (store, _dir) = temp_store().await;
-    assert!(store.claim_filed_issue("  ", Utc::now()).await.is_err());
+    assert!(store
+        .claim_filed_issue("  ", "attempt", Utc::now())
+        .await
+        .is_err());
+    assert!(store
+        .claim_filed_issue("crash-uuid-3", "  ", Utc::now())
+        .await
+        .is_err());
     assert_eq!(
         store
-            .claim_filed_issue("crash-uuid-3", Utc::now())
+            .claim_filed_issue("crash-uuid-3", "attempt-1", Utc::now())
             .await
             .unwrap(),
         FiledIssueClaim::Claimed
     );
     assert!(store
-        .complete_filed_issue("crash-uuid-3", "")
+        .complete_filed_issue("crash-uuid-3", "attempt-1", "")
         .await
         .is_err());
     assert!(store
-        .complete_filed_issue("unknown-key", "{}")
+        .complete_filed_issue("unknown-key", "attempt-1", "{}")
         .await
         .is_err());
 }

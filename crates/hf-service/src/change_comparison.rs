@@ -365,12 +365,12 @@ impl ServiceContainer {
             signatures.len()
         );
         let body = comparison_issue_body(comparison, signatures);
-        let created = crate::workbench::file_issue_exactly_once(store, &dedup_key, async {
-            if let Some(existing) = client.find_existing_issue(first).await {
-                return Ok(existing);
-            }
-            client.create_issue(&title, &body, &cfg.labels).await
-        })
+        let created = crate::workbench::file_issue_exactly_once(
+            store,
+            &dedup_key,
+            || async { Ok(client.find_existing_issue(first).await) },
+            || async { client.create_issue(&title, &body, &cfg.labels).await },
+        )
         .await?;
         Ok(Some(created.url))
     }

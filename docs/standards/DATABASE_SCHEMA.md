@@ -1070,13 +1070,19 @@ Indexes: `idx_auto_revert_events_ts(ts DESC)`,
 Durable dedup ledger for issue-tracker filings. The filing path claims its
 dedup key (crash UUID, or the comparison signature) with an atomic insert
 before creating the remote issue, records the created issue, and every retry
-returns the recorded issue instead of creating again. `issue_json` is NULL
-only while a claim is held and the remote create is in flight; a failed
-create releases the claim so the filing can be retried.
+returns the recorded issue instead of creating again. `attempt_id` is the
+ownership token: a claim can be completed or released only by the attempt that
+holds it, so a delayed claimant cannot clobber or free a row a newer claimant
+now owns. `issue_json` is NULL only while a claim is held and its remote
+create is in flight; a failed create releases the claim so the filing can be
+retried. Recovery of a stale claim (the holder died before completion) is
+reconciliation-gated: a later claimant searches the remote tracker and only
+reclaims-and-creates after an empty search, adopting a found issue instead.
 
 | column | SQLite declaration | notes |
 | --- | --- | --- |
 | `dedup_key` | `TEXT PRIMARY KEY` | filing identity: crash UUID or `comparison:{signature}` |
+| `attempt_id` | `TEXT NOT NULL` | ownership token fencing completion and release to the holding attempt |
 | `issue_json` | `TEXT` | recorded created issue (valid JSON, bounded); NULL while in flight |
 | `created_at` | `TEXT NOT NULL` | RFC 3339 |
 

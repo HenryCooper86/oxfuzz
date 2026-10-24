@@ -637,16 +637,34 @@ pub struct Store {
 /// `filed_issues.dedup_key` makes exactly one caller the filer without any
 /// read-then-write check, so concurrent filings of one crash (or one
 /// comparison) cannot both reach `create_issue`.
+///
+/// Every claim attempt is identified by an `attempt_id`; only the attempt
+/// that holds the claim may complete or release it (see
+/// [`Store::complete_filed_issue`] and [`Store::release_filed_issue`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FiledIssueClaim {
     /// This call won the claim and owes a follow-up
-    /// [`Store::complete_filed_issue`] or [`Store::release_filed_issue`].
+    /// [`Store::complete_filed_issue`] or [`Store::release_filed_issue`] with
+    /// its `attempt_id`.
     Claimed,
     /// The key was already filed; carries the recorded issue JSON to return
     /// verbatim to the retrying caller.
     Completed(String),
     /// Another caller holds the claim while its remote create is in flight.
-    Pending,
+    /// `stale` is true when that claim predates `FILED_ISSUE_CLAIM_TTL` (its
+    /// holder likely died mid-create), which is exactly when a reconciling
+    /// caller may reclaim it; a fresh `stale == false` claim is a live
+    /// in-flight filing and must be left alone.
+    Pending { attempt_id: String, stale: bool },
+}
+
+/// Outcome of [`Store::complete_filed_issue`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FiledIssueComplete {
+    /// This attempt recorded the issue.
+    Recorded,
+    /// A different attempt had already recorded; carries its recorded JSON.
+    AlreadyCompleted(String),
 }
 
 /// How long a pending [`FiledIssueClaim`] may stay uncompleted before a new
@@ -1471,16 +1489,19 @@ impl Store {
     /// Atomically claim the right to file one dedup key (crash UUID or
     /// comparison signature), or observe the already-filed issue.
     ///
-    /// A pending claim whose remote create never completed (for example the
-    /// process died mid-flight) is reclaimable once its `created_at` is older
-    /// than `FILED_ISSUE_CLAIM_TTL`, so a wedged dedup key self-heals
-    /// instead of blocking every later filing with "already in progress".
+    /// A conflicting pending row is reported as [`FiledIssueClaim::Pending`]
+    /// with its holder's `attempt_id`; it is never reclaimed here. Recovery
+    /// of a stale claim is a separate, reconciliation-gated step in
+    /// [`Store::reclaim_filed_issue`], because blindly reclaiming would let a
+    /// later claimant re-create an issue the dead holder already opened.
     ///
     /// # Errors
-    /// Returns an error on a SQL failure or when `dedup_key` is empty.
+    /// Returns an error on a SQL failure or when `dedup_key` or `attempt_id`
+    /// is empty.
     pub async fn claim_filed_issue(
         &self,
         dedup_key: &str,
+        attempt_id: &str,
         claimed_at: DateTime<Utc>,
     ) -> Result<FiledIssueClaim, StorageError> {
         if dedup_key.trim().is_empty() {
@@ -1488,27 +1509,86 @@ impl Store {
                 "filed issue dedup key must not be empty".to_owned(),
             ));
         }
+        if attempt_id.trim().is_empty() {
+            return Err(StorageError::InvalidData(
+                "filed issue attempt id must not be empty".to_owned(),
+            ));
+        }
         let result = sqlx::query(
-            "INSERT INTO filed_issues (dedup_key, issue_json, created_at)
-             VALUES (?1, NULL, ?2)
+            "INSERT INTO filed_issues (dedup_key, attempt_id, issue_json, created_at)
+             VALUES (?1, ?2, NULL, ?3)
              ON CONFLICT(dedup_key) DO NOTHING",
         )
         .bind(dedup_key)
+        .bind(attempt_id)
         .bind(claimed_at.to_rfc3339())
         .execute(&self.pool)
         .await?;
         if result.rows_affected() == 1 {
             return Ok(FiledIssueClaim::Claimed);
         }
-        // The row already exists. A pending (uncompleted) row older than the
-        // TTL is reclaimed atomically: the `created_at` rewrite is the
-        // single-winner gate, so at most one new claimant takes it over.
-        let cutoff = (claimed_at - FILED_ISSUE_CLAIM_TTL).to_rfc3339();
-        let reclaimed = sqlx::query(
-            "UPDATE filed_issues SET created_at = ?2
-             WHERE dedup_key = ?1 AND issue_json IS NULL AND created_at < ?3",
+        let row = sqlx::query(
+            "SELECT attempt_id, issue_json, created_at < ?2 AS stale
+             FROM filed_issues WHERE dedup_key = ?1",
         )
         .bind(dedup_key)
+        .bind((Utc::now() - FILED_ISSUE_CLAIM_TTL).to_rfc3339())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(match row {
+            Some(row) => {
+                let json: Option<String> = row.try_get("issue_json")?;
+                match json {
+                    Some(json) => FiledIssueClaim::Completed(json),
+                    None => FiledIssueClaim::Pending {
+                        attempt_id: row.try_get("attempt_id")?,
+                        stale: row.try_get::<i64, _>("stale")? != 0,
+                    },
+                }
+            }
+            // Released between the insert conflict and the read; a retry
+            // re-claims it.
+            None => FiledIssueClaim::Pending {
+                attempt_id: String::new(),
+                stale: false,
+            },
+        })
+    }
+
+    /// Reclaim a stale, uncompleted claim with a fresh attempt.
+    ///
+    /// The single-winner gate is the atomic rewrite of `attempt_id` and
+    /// `created_at` on a row whose `issue_json` is NULL and whose
+    /// `created_at` predates `FILED_ISSUE_CLAIM_TTL`. The caller must have
+    /// already reconciled against the remote tracker (searched and found no
+    /// issue) before calling this; reclaiming unconditionally reopens the
+    /// crash-after-create duplicate window.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure or an empty `dedup_key`/`attempt_id`.
+    pub async fn reclaim_filed_issue(
+        &self,
+        dedup_key: &str,
+        attempt_id: &str,
+        claimed_at: DateTime<Utc>,
+    ) -> Result<FiledIssueClaim, StorageError> {
+        if dedup_key.trim().is_empty() {
+            return Err(StorageError::InvalidData(
+                "filed issue dedup key must not be empty".to_owned(),
+            ));
+        }
+        if attempt_id.trim().is_empty() {
+            return Err(StorageError::InvalidData(
+                "filed issue attempt id must not be empty".to_owned(),
+            ));
+        }
+        let cutoff = (claimed_at - FILED_ISSUE_CLAIM_TTL).to_rfc3339();
+        let reclaimed = sqlx::query(
+            "UPDATE filed_issues SET attempt_id = ?2, created_at = ?3
+             WHERE dedup_key = ?1 AND issue_json IS NULL AND created_at < ?4",
+        )
+        .bind(dedup_key)
+        .bind(attempt_id)
         .bind(claimed_at.to_rfc3339())
         .bind(cutoff)
         .execute(&self.pool)
@@ -1516,62 +1596,114 @@ impl Store {
         if reclaimed.rows_affected() == 1 {
             return Ok(FiledIssueClaim::Claimed);
         }
-        let recorded: Option<Option<String>> =
-            sqlx::query("SELECT issue_json FROM filed_issues WHERE dedup_key = ?1")
-                .bind(dedup_key)
-                .fetch_optional(&self.pool)
-                .await?
-                .map(|row| row.try_get("issue_json"))
-                .transpose()?;
-        Ok(match recorded {
-            Some(Some(json)) => FiledIssueClaim::Completed(json),
-            // A conflicting row exists with no recorded issue -- another
-            // filing owns the in-flight create -- or the conflicting row was
-            // released between insert and read and a retry will re-claim it.
-            _ => FiledIssueClaim::Pending,
+        let row = sqlx::query(
+            "SELECT attempt_id, issue_json, created_at < ?2 AS stale
+             FROM filed_issues WHERE dedup_key = ?1",
+        )
+        .bind(dedup_key)
+        .bind((Utc::now() - FILED_ISSUE_CLAIM_TTL).to_rfc3339())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(match row {
+            Some(row) => {
+                let json: Option<String> = row.try_get("issue_json")?;
+                match json {
+                    Some(json) => FiledIssueClaim::Completed(json),
+                    None => FiledIssueClaim::Pending {
+                        attempt_id: row.try_get("attempt_id")?,
+                        stale: row.try_get::<i64, _>("stale")? != 0,
+                    },
+                }
+            }
+            None => FiledIssueClaim::Pending {
+                attempt_id: String::new(),
+                stale: false,
+            },
         })
     }
 
-    /// Record the created (or remotely found) issue for a held claim.
+    /// Record the created (or remotely found) issue for a held claim attempt.
+    ///
+    /// Fenced by `attempt_id`: only the attempt that holds the claim may
+    /// complete it, so a delayed claimant cannot overwrite a row a newer
+    /// claimant now owns. If a different attempt already recorded, its JSON
+    /// is returned via [`FiledIssueComplete::AlreadyCompleted`].
     ///
     /// # Errors
     /// Returns an error on a SQL failure, a malformed issue JSON, or when the
-    /// claim is not held (already completed or released).
+    /// (key, attempt) pair no longer holds the claim (superseded, completed,
+    /// or released).
     pub async fn complete_filed_issue(
         &self,
         dedup_key: &str,
+        attempt_id: &str,
         issue_json: &str,
-    ) -> Result<(), StorageError> {
+    ) -> Result<FiledIssueComplete, StorageError> {
         if issue_json.trim().is_empty() || issue_json.len() > 4096 {
             return Err(StorageError::InvalidData(
                 "filed issue record must be non-empty JSON up to 4096 bytes".to_owned(),
             ));
         }
         let result = sqlx::query(
-            "UPDATE filed_issues SET issue_json = ?2 WHERE dedup_key = ?1 AND issue_json IS NULL",
+            "UPDATE filed_issues SET issue_json = ?3
+             WHERE dedup_key = ?1 AND attempt_id = ?2 AND issue_json IS NULL",
         )
         .bind(dedup_key)
+        .bind(attempt_id)
         .bind(issue_json)
         .execute(&self.pool)
         .await?;
         if result.rows_affected() == 1 {
-            Ok(())
-        } else {
-            Err(StorageError::InvalidData(format!(
-                "filed issue claim for {dedup_key} is not held"
-            )))
+            return Ok(FiledIssueComplete::Recorded);
+        }
+        // The (key, attempt) pair no longer holds an uncompleted claim.
+        // Distinguish: a different attempt that completed is adopted (its
+        // record is the canonical one); a double-complete by this same attempt
+        // or a superseded in-flight claim both fail closed.
+        let row =
+            sqlx::query("SELECT attempt_id, issue_json FROM filed_issues WHERE dedup_key = ?1")
+                .bind(dedup_key)
+                .fetch_optional(&self.pool)
+                .await?;
+        match row {
+            Some(row) => {
+                let holder: String = row.try_get("attempt_id")?;
+                let json: Option<String> = row.try_get("issue_json")?;
+                match json {
+                    Some(json) if holder != attempt_id => {
+                        Ok(FiledIssueComplete::AlreadyCompleted(json))
+                    }
+                    _ => Err(StorageError::InvalidData(format!(
+                        "filed issue claim for {dedup_key} is not held by attempt {attempt_id}"
+                    ))),
+                }
+            }
+            None => Err(StorageError::InvalidData(format!(
+                "filed issue claim for {dedup_key} is not held by attempt {attempt_id}"
+            ))),
         }
     }
 
-    /// Release an uncompleted claim so a failed filing can be retried.
+    /// Release an uncompleted claim attempt so a failed filing can be retried.
+    ///
+    /// Fenced by `attempt_id`: a delayed claimant cannot free a row a newer
+    /// claimant now holds.
     ///
     /// # Errors
     /// Returns an error on a SQL failure.
-    pub async fn release_filed_issue(&self, dedup_key: &str) -> Result<(), StorageError> {
-        sqlx::query("DELETE FROM filed_issues WHERE dedup_key = ?1 AND issue_json IS NULL")
-            .bind(dedup_key)
-            .execute(&self.pool)
-            .await?;
+    pub async fn release_filed_issue(
+        &self,
+        dedup_key: &str,
+        attempt_id: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "DELETE FROM filed_issues
+             WHERE dedup_key = ?1 AND attempt_id = ?2 AND issue_json IS NULL",
+        )
+        .bind(dedup_key)
+        .bind(attempt_id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
