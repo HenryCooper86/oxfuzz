@@ -1234,6 +1234,13 @@ impl GitDiffSettings {
         if !(1..=300).contains(&self.timeout_secs) {
             return Err("git_diff.timeout_secs must be within 1..=300".to_owned());
         }
+        // The only consumer (`resolve_git_diff_timeout`) exists under the
+        // change-aware feature; without it this setting would be validated
+        // but never read, so a non-default value is rejected like
+        // `model_budget` is (§2.16).
+        if !cfg!(feature = "change-aware") && self.timeout_secs != Self::default().timeout_secs {
+            return Err("git_diff requires the change-aware feature".to_owned());
+        }
         Ok(std::time::Duration::from_secs(self.timeout_secs))
     }
 }
@@ -1403,33 +1410,40 @@ fn resolve_git_diff_timeout_at(directory: &Path) -> Result<std::time::Duration, 
     parse_oxfuzz_runtime_config(&raw)?.git_diff.resolve()
 }
 
-fn effective_runtime_config() -> OxfuzzRuntimeConfig {
-    let raw = read_config("oxfuzz").unwrap_or_default();
-    match parse_oxfuzz_runtime_config(&raw) {
-        Ok(config) => config,
-        Err(error) => {
-            tracing::warn!(%error, "invalid oxfuzz runtime config; using safe defaults");
-            OxfuzzRuntimeConfig::default()
-        }
-    }
+/// Read and validate `oxfuzz.toml` for the runtime sections.
+///
+/// # Errors
+/// Returns the read or validation failure; sibling readers fail loud on the
+/// same file, so an unreadable or malformed config never degrades to
+/// hard-coded defaults here.
+fn read_validated_runtime_config() -> Result<OxfuzzRuntimeConfig, String> {
+    let raw = read_config("oxfuzz")?;
+    parse_oxfuzz_runtime_config(&raw)
 }
 
 /// Resolve the knowledge configuration applied to project indexing/retrieval.
-#[must_use]
-pub fn effective_knowledge_config() -> hf_knowledge::config::KnowledgeConfig {
-    effective_runtime_config().knowledge.effective()
+///
+/// # Errors
+/// Returns the `oxfuzz.toml` read or validation failure.
+pub fn effective_knowledge_config() -> Result<hf_knowledge::config::KnowledgeConfig, String> {
+    Ok(read_validated_runtime_config()?.knowledge.effective())
 }
 
 /// Resolve the session configuration applied when building `SessionManager`.
-#[must_use]
-pub fn effective_session_config() -> hf_session::SessionConfig {
-    effective_runtime_config().session
+///
+/// # Errors
+/// Returns the `oxfuzz.toml` read or validation failure.
+pub fn effective_session_config() -> Result<hf_session::SessionConfig, String> {
+    Ok(read_validated_runtime_config()?.session)
 }
 
 /// Resolve the scheduler configuration applied at campaign scheduler startup.
-#[must_use]
-pub fn effective_scheduler_config() -> hf_scheduler::SchedulerConfig {
-    effective_runtime_config().scheduler
+///
+/// # Errors
+/// Returns the `oxfuzz.toml` read or validation failure; the scheduler refuses
+/// to start on a config other subsystems would also reject.
+pub fn effective_scheduler_config() -> Result<hf_scheduler::SchedulerConfig, String> {
+    Ok(read_validated_runtime_config()?.scheduler)
 }
 
 /// Read and validate the operator fuzzing policy for the next operation.
@@ -2563,16 +2577,20 @@ pub struct AutoRevertPolicy {
 /// `HF_AUTO_REVERT_NOTIFY_ONLY` env overrides, then `auto_revert_enabled` /
 /// `auto_revert_threshold_pct` / `auto_revert_notify_only` in `oxfuzz.toml`,
 /// then off with a [`DEFAULT_AUTO_REVERT_THRESHOLD_PCT`] threshold.
-#[must_use]
-pub fn auto_revert_policy() -> AutoRevertPolicy {
-    resolve_auto_revert_policy(
+///
+/// # Errors
+/// Returns the `oxfuzz.toml` read or validation failure instead of silently
+/// disabling the operator's settings on a malformed file.
+pub fn auto_revert_policy() -> Result<AutoRevertPolicy, String> {
+    let config = read_validated_runtime_config()?;
+    Ok(resolve_auto_revert_policy(
         std::env::var("HF_AUTO_REVERT").ok().as_deref(),
         std::env::var("HF_AUTO_REVERT_THRESHOLD_PCT")
             .ok()
             .as_deref(),
         std::env::var("HF_AUTO_REVERT_NOTIFY_ONLY").ok().as_deref(),
-        read_config("oxfuzz").ok().as_deref(),
-    )
+        &config,
+    ))
 }
 
 /// Parse a permissive boolean env value (`1/true/yes/on` vs `0/false/no/off`);
@@ -2587,41 +2605,28 @@ fn parse_flag(s: Option<&str>) -> Option<bool> {
 
 /// Pure resolver for [`auto_revert_policy`], split out so the precedence (env
 /// over TOML over default) is unit-testable without touching the environment or
-/// filesystem.
+/// filesystem. The TOML tier is the already-validated
+/// [`OxfuzzRuntimeConfig`]: a malformed file fails at the reader, never by
+/// silently discarding the operator's settings here.
 fn resolve_auto_revert_policy(
     env_enabled: Option<&str>,
     env_threshold: Option<&str>,
     env_notify_only: Option<&str>,
-    oxfuzz_toml: Option<&str>,
+    config: &OxfuzzRuntimeConfig,
 ) -> AutoRevertPolicy {
-    #[derive(Deserialize)]
-    struct OxfuzzConfig {
-        auto_revert_enabled: Option<bool>,
-        auto_revert_threshold_pct: Option<f64>,
-        auto_revert_notify_only: Option<bool>,
-    }
-    let parsed = oxfuzz_toml.and_then(|raw| toml::from_str::<OxfuzzConfig>(raw).ok());
-    let enabled = parse_flag(env_enabled)
-        .or_else(|| parsed.as_ref().and_then(|c| c.auto_revert_enabled))
-        .unwrap_or(false);
-    // Validate each source independently so an out-of-range env value falls
-    // through to a valid TOML threshold instead of skipping it and landing on the
-    // hard-coded default (the env value would otherwise win the `or_else`, then be
-    // filtered out after TOML was already bypassed).
+    let enabled = parse_flag(env_enabled).unwrap_or(config.auto_revert_enabled);
+    // Validate the env source independently so an out-of-range env value falls
+    // through to the validated TOML threshold instead of skipping it and
+    // landing on the hard-coded default (the env value would otherwise win the
+    // `or_else`, then be filtered out after TOML was already bypassed). The
+    // TOML tier needs no filter: `OxfuzzRuntimeConfig::validate` already
+    // enforced the range.
     let threshold_pct = env_threshold
         .map(str::trim)
         .and_then(|s| s.parse::<f64>().ok())
         .filter(|v| valid_auto_revert_threshold(*v))
-        .or_else(|| {
-            parsed
-                .as_ref()
-                .and_then(|c| c.auto_revert_threshold_pct)
-                .filter(|v| valid_auto_revert_threshold(*v))
-        })
-        .unwrap_or(DEFAULT_AUTO_REVERT_THRESHOLD_PCT);
-    let notify_only = parse_flag(env_notify_only)
-        .or_else(|| parsed.as_ref().and_then(|c| c.auto_revert_notify_only))
-        .unwrap_or(false);
+        .unwrap_or(config.auto_revert_threshold_pct);
+    let notify_only = parse_flag(env_notify_only).unwrap_or(config.auto_revert_notify_only);
     AutoRevertPolicy {
         enabled,
         threshold_pct,
@@ -2636,29 +2641,27 @@ fn resolve_auto_revert_policy(
 /// `coverage_stagnation_secs` in `oxfuzz.toml`, then
 /// [`DEFAULT_STAGNATION_THRESHOLD_SECS`]. Lower proposes sooner; set it very
 /// high to effectively silence the proposal.
-#[must_use]
-pub fn coverage_stagnation_secs() -> u64 {
-    resolve_stagnation_secs(
+///
+/// # Errors
+/// Returns the `oxfuzz.toml` read or validation failure.
+pub fn coverage_stagnation_secs() -> Result<u64, String> {
+    let config = read_validated_runtime_config()?;
+    Ok(resolve_stagnation_secs(
         std::env::var("HF_COVERAGE_STAGNATION_SECS").ok().as_deref(),
-        read_config("oxfuzz").ok().as_deref(),
-    )
+        &config,
+    ))
 }
 
 /// Pure resolver for [`coverage_stagnation_secs`], split out so the precedence
 /// (env over TOML over default) is unit-testable without touching the
-/// environment or filesystem.
-fn resolve_stagnation_secs(env: Option<&str>, oxfuzz_toml: Option<&str>) -> u64 {
-    #[derive(Deserialize)]
-    struct OxfuzzConfig {
-        coverage_stagnation_secs: Option<u64>,
-    }
+/// environment or filesystem. The TOML tier is the already-validated
+/// [`OxfuzzRuntimeConfig`], so a malformed file fails at the reader instead of
+/// silently reverting to the default threshold here.
+fn resolve_stagnation_secs(env: Option<&str>, config: &OxfuzzRuntimeConfig) -> u64 {
     if let Some(v) = env.map(str::trim).and_then(|s| s.parse::<u64>().ok()) {
         return v;
     }
-    oxfuzz_toml
-        .and_then(|raw| toml::from_str::<OxfuzzConfig>(raw).ok())
-        .and_then(|c| c.coverage_stagnation_secs)
-        .unwrap_or(DEFAULT_STAGNATION_THRESHOLD_SECS)
+    config.coverage_stagnation_secs
 }
 
 /// The resolved stagnation-escalation policy for `run_fuzzer`.
@@ -2670,9 +2673,13 @@ fn resolve_stagnation_secs(env: Option<&str>, oxfuzz_toml: Option<&str>) -> u64 
 /// `coverage_stagnation_stop_windows` in `oxfuzz.toml`, then the defaults.
 /// Window counts that violate `1 <= new_harness_windows < stop_windows` (they
 /// would make the harness tier unreachable) fall back to the default windows.
-#[must_use]
-pub fn coverage_stagnation_policy() -> hf_coverage::StagnationPolicy {
-    resolve_stagnation_policy(
+///
+/// # Errors
+/// Returns the `oxfuzz.toml` read or validation failure instead of silently
+/// replacing the operator's windows with defaults.
+pub fn coverage_stagnation_policy() -> Result<hf_coverage::StagnationPolicy, String> {
+    let config = read_validated_runtime_config()?;
+    Ok(resolve_stagnation_policy(
         std::env::var("HF_COVERAGE_STAGNATION_SECS").ok().as_deref(),
         std::env::var("HF_COVERAGE_STAGNATION_NEW_HARNESS_WINDOWS")
             .ok()
@@ -2680,45 +2687,31 @@ pub fn coverage_stagnation_policy() -> hf_coverage::StagnationPolicy {
         std::env::var("HF_COVERAGE_STAGNATION_STOP_WINDOWS")
             .ok()
             .as_deref(),
-        read_config("oxfuzz").ok().as_deref(),
-    )
+        &config,
+    ))
 }
 
 /// Pure resolver for [`coverage_stagnation_policy`], split out so the
 /// precedence (env over TOML over default) and the window validation are
-/// unit-testable without touching the environment or filesystem.
+/// unit-testable without touching the environment or filesystem. The TOML tier
+/// is the already-validated [`OxfuzzRuntimeConfig`]: its own windows passed
+/// `valid_stagnation_windows`, so only the env overrides need re-checking.
 fn resolve_stagnation_policy(
     env_secs: Option<&str>,
     env_new_harness: Option<&str>,
     env_stop: Option<&str>,
-    oxfuzz_toml: Option<&str>,
+    config: &OxfuzzRuntimeConfig,
 ) -> hf_coverage::StagnationPolicy {
-    #[derive(Deserialize)]
-    struct OxfuzzConfig {
-        coverage_stagnation_new_harness_windows: Option<u64>,
-        coverage_stagnation_stop_windows: Option<u64>,
-    }
-    let parsed = oxfuzz_toml.and_then(|raw| toml::from_str::<OxfuzzConfig>(raw).ok());
-    let parse_windows = |env: Option<&str>, toml: Option<u64>, default: u64| {
+    let parse_windows = |env: Option<&str>, toml: u64| {
         env.map(str::trim)
             .and_then(|s| s.parse::<u64>().ok())
-            .or(toml)
-            .unwrap_or(default)
+            .unwrap_or(toml)
     };
     let new_harness_windows = parse_windows(
         env_new_harness,
-        parsed
-            .as_ref()
-            .and_then(|c| c.coverage_stagnation_new_harness_windows),
-        DEFAULT_STAGNATION_NEW_HARNESS_WINDOWS,
+        config.coverage_stagnation_new_harness_windows,
     );
-    let stop_windows = parse_windows(
-        env_stop,
-        parsed
-            .as_ref()
-            .and_then(|c| c.coverage_stagnation_stop_windows),
-        DEFAULT_STAGNATION_STOP_WINDOWS,
-    );
+    let stop_windows = parse_windows(env_stop, config.coverage_stagnation_stop_windows);
     let (new_harness_windows, stop_windows) =
         if valid_stagnation_windows(new_harness_windows, stop_windows) {
             (new_harness_windows, stop_windows)
@@ -2729,7 +2722,7 @@ fn resolve_stagnation_policy(
             )
         };
     hf_coverage::StagnationPolicy {
-        threshold_secs: resolve_stagnation_secs(env_secs, oxfuzz_toml),
+        threshold_secs: resolve_stagnation_secs(env_secs, config),
         new_harness_windows,
         stop_windows,
     }
@@ -3349,71 +3342,70 @@ pub async fn test_provider(mut cfg: ProviderConfig) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn runtime_config_with(patch: impl FnOnce(&mut OxfuzzRuntimeConfig)) -> OxfuzzRuntimeConfig {
+        let mut config = OxfuzzRuntimeConfig::default();
+        patch(&mut config);
+        config
+    }
 
     #[test]
     fn stagnation_secs_precedence_env_then_toml_then_default() {
+        let configured = runtime_config_with(|config| {
+            config.coverage_stagnation_secs = 200;
+        });
         // Env wins over everything.
+        assert_eq!(resolve_stagnation_secs(Some("45"), &configured), 45);
+        // No env -> the configured value.
+        assert_eq!(resolve_stagnation_secs(None, &configured), 200);
+        // A default config -> the default threshold.
         assert_eq!(
-            resolve_stagnation_secs(Some("45"), Some("coverage_stagnation_secs = 200")),
-            45
-        );
-        // No env -> the TOML value.
-        assert_eq!(
-            resolve_stagnation_secs(None, Some("coverage_stagnation_secs = 200")),
-            200
-        );
-        // TOML without the key -> the default.
-        assert_eq!(
-            resolve_stagnation_secs(None, Some("log_level = \"info\"")),
-            DEFAULT_STAGNATION_THRESHOLD_SECS
-        );
-        // Nothing configured -> the default.
-        assert_eq!(
-            resolve_stagnation_secs(None, None),
+            resolve_stagnation_secs(None, &OxfuzzRuntimeConfig::default()),
             DEFAULT_STAGNATION_THRESHOLD_SECS
         );
         // A non-numeric env value falls through rather than panicking.
         assert_eq!(
-            resolve_stagnation_secs(Some("not-a-number"), None),
-            DEFAULT_STAGNATION_THRESHOLD_SECS
+            resolve_stagnation_secs(Some("not-a-number"), &configured),
+            200
         );
     }
 
     #[test]
+    fn a_malformed_stagnation_config_fails_loud_instead_of_defaulting() {
+        // SVC-020: an invalid file must surface as a reader error, never as a
+        // silent fallback to the default thresholds.
+        assert!(parse_oxfuzz_runtime_config("coverage_stagnation_secs = \"soon\"").is_err());
+        assert!(parse_oxfuzz_runtime_config(
+            "coverage_stagnation_new_harness_windows = 6\n\
+             coverage_stagnation_stop_windows = 6\n"
+        )
+        .is_err());
+        // An unknown key is rejected by the owning config's
+        // deny_unknown_fields, where the ad-hoc resolvers used to ignore it.
+        assert!(parse_oxfuzz_runtime_config("log_level = \"info\"").is_err());
+    }
+
+    #[test]
     fn stagnation_policy_precedence_env_then_toml_then_default() {
+        let configured = runtime_config_with(|config| {
+            config.coverage_stagnation_secs = 200;
+            config.coverage_stagnation_new_harness_windows = 5;
+            config.coverage_stagnation_stop_windows = 12;
+        });
         // Env wins over everything, per knob.
-        let policy = resolve_stagnation_policy(
-            Some("45"),
-            Some("3"),
-            Some("9"),
-            Some(
-                "coverage_stagnation_secs = 200\n\
-                 coverage_stagnation_new_harness_windows = 5\n\
-                 coverage_stagnation_stop_windows = 12\n",
-            ),
-        );
+        let policy = resolve_stagnation_policy(Some("45"), Some("3"), Some("9"), &configured);
         assert_eq!(policy.threshold_secs, 45);
         assert_eq!(policy.new_harness_windows, 3);
         assert_eq!(policy.stop_windows, 9);
 
-        // No env -> the TOML values.
-        let policy = resolve_stagnation_policy(
-            None,
-            None,
-            None,
-            Some(
-                "coverage_stagnation_secs = 200\n\
-                 coverage_stagnation_new_harness_windows = 5\n\
-                 coverage_stagnation_stop_windows = 12\n",
-            ),
-        );
+        // No env -> the configured values.
+        let policy = resolve_stagnation_policy(None, None, None, &configured);
         assert_eq!(policy.threshold_secs, 200);
         assert_eq!(policy.new_harness_windows, 5);
         assert_eq!(policy.stop_windows, 12);
 
-        // Nothing configured -> the defaults (which keep the historical 120s
+        // A default config -> the defaults (which keep the historical 120s
         // threshold and surface the gentlest tier first).
-        let policy = resolve_stagnation_policy(None, None, None, None);
+        let policy = resolve_stagnation_policy(None, None, None, &OxfuzzRuntimeConfig::default());
         assert_eq!(policy.threshold_secs, DEFAULT_STAGNATION_THRESHOLD_SECS);
         assert_eq!(
             policy.new_harness_windows,
@@ -3423,101 +3415,73 @@ mod tests {
     }
 
     #[test]
-    fn stagnation_policy_rejects_inverted_or_zero_windows() {
+    fn stagnation_policy_rejects_inverted_or_zero_env_windows() {
         // stop <= new_harness makes the harness tier unreachable: both window
-        // knobs fall back to the defaults.
-        let policy = resolve_stagnation_policy(None, Some("4"), Some("4"), None);
-        assert_eq!(
-            policy.new_harness_windows,
-            DEFAULT_STAGNATION_NEW_HARNESS_WINDOWS
-        );
-        assert_eq!(policy.stop_windows, DEFAULT_STAGNATION_STOP_WINDOWS);
+        // knobs fall back to the defaults. (A config file with such windows is
+        // rejected at validation -- see the malformed-config test above.)
+        let default = OxfuzzRuntimeConfig::default();
+        for (new_harness, stop) in [("4", "4"), ("5", "4"), ("0", "9")] {
+            let policy = resolve_stagnation_policy(None, Some(new_harness), Some(stop), &default);
+            assert_eq!(
+                policy.new_harness_windows, DEFAULT_STAGNATION_NEW_HARNESS_WINDOWS,
+                "windows {new_harness}/{stop} were accepted"
+            );
+            assert_eq!(policy.stop_windows, DEFAULT_STAGNATION_STOP_WINDOWS);
+        }
 
-        let policy = resolve_stagnation_policy(None, Some("5"), Some("4"), None);
-        assert_eq!(
-            policy.new_harness_windows,
-            DEFAULT_STAGNATION_NEW_HARNESS_WINDOWS
-        );
-        assert_eq!(policy.stop_windows, DEFAULT_STAGNATION_STOP_WINDOWS);
-
-        // A zero window count is rejected the same way.
-        let policy = resolve_stagnation_policy(None, Some("0"), Some("9"), None);
-        assert_eq!(
-            policy.new_harness_windows,
-            DEFAULT_STAGNATION_NEW_HARNESS_WINDOWS
-        );
-        assert_eq!(policy.stop_windows, DEFAULT_STAGNATION_STOP_WINDOWS);
-
-        // An invalid TOML pair falls back the same way, while the threshold
-        // knob still resolves independently.
-        let policy = resolve_stagnation_policy(
-            None,
-            None,
-            None,
-            Some(
-                "coverage_stagnation_secs = 90\n\
-                 coverage_stagnation_new_harness_windows = 6\n\
-                 coverage_stagnation_stop_windows = 6\n",
-            ),
-        );
-        assert_eq!(policy.threshold_secs, 90);
-        assert_eq!(
-            policy.new_harness_windows,
-            DEFAULT_STAGNATION_NEW_HARNESS_WINDOWS
-        );
-        assert_eq!(policy.stop_windows, DEFAULT_STAGNATION_STOP_WINDOWS);
-
-        // A non-numeric env value falls through to the TOML value.
-        let policy = resolve_stagnation_policy(
-            None,
-            Some("not-a-number"),
-            None,
-            Some("coverage_stagnation_new_harness_windows = 3\n"),
-        );
+        // A non-numeric env value falls through to the configured value.
+        let configured = runtime_config_with(|config| {
+            config.coverage_stagnation_new_harness_windows = 3;
+        });
+        let policy = resolve_stagnation_policy(None, Some("not-a-number"), None, &configured);
         assert_eq!(policy.new_harness_windows, 3);
     }
 
     #[test]
     fn auto_revert_policy_precedence_env_then_toml_then_default() {
-        // Default: off, with the default threshold, applying (not notify-only).
-        let p = resolve_auto_revert_policy(None, None, None, None);
+        let default = OxfuzzRuntimeConfig::default();
+        // Default config: off, with the default threshold, applying (not
+        // notify-only).
+        let p = resolve_auto_revert_policy(None, None, None, &default);
         assert!(!p.enabled);
         assert!(!p.notify_only);
         assert!((p.threshold_pct - DEFAULT_AUTO_REVERT_THRESHOLD_PCT).abs() < f64::EPSILON);
 
-        // TOML supplies all values when no env is set.
-        let toml =
-            "auto_revert_enabled = true\nauto_revert_threshold_pct = 35.0\nauto_revert_notify_only = true\n";
-        let p = resolve_auto_revert_policy(None, None, None, Some(toml));
+        // The config supplies all values when no env is set.
+        let configured = runtime_config_with(|config| {
+            config.auto_revert_enabled = true;
+            config.auto_revert_threshold_pct = 35.0;
+            config.auto_revert_notify_only = true;
+        });
+        let p = resolve_auto_revert_policy(None, None, None, &configured);
         assert!(p.enabled);
         assert!(p.notify_only);
         assert!((p.threshold_pct - 35.0).abs() < f64::EPSILON);
 
-        // Env overrides the TOML for every field.
-        let toml =
-            "auto_revert_enabled = false\nauto_revert_threshold_pct = 35.0\nauto_revert_notify_only = true\n";
-        let p = resolve_auto_revert_policy(Some("1"), Some("50"), Some("false"), Some(toml));
+        // Env overrides the config for every field.
+        let p = resolve_auto_revert_policy(Some("1"), Some("50"), Some("false"), &configured);
         assert!(p.enabled);
         assert!(!p.notify_only);
         assert!((p.threshold_pct - 50.0).abs() < f64::EPSILON);
 
-        // A non-positive or non-numeric threshold falls through to the default.
-        let p = resolve_auto_revert_policy(Some("yes"), Some("-5"), None, None);
+        // A non-positive threshold falls through to the configured value.
+        let p = resolve_auto_revert_policy(Some("yes"), Some("-5"), None, &configured);
         assert!(p.enabled);
-        assert!((p.threshold_pct - DEFAULT_AUTO_REVERT_THRESHOLD_PCT).abs() < f64::EPSILON);
+        assert!((p.threshold_pct - 35.0).abs() < f64::EPSILON);
 
         // Percent thresholds outside (0, 100] or non-finite values are not
         // meaningful coverage gates and must not silently disable rollback.
         for invalid in ["0", "100.1", "inf", "NaN"] {
-            let p = resolve_auto_revert_policy(Some("yes"), Some(invalid), None, None);
+            let p = resolve_auto_revert_policy(Some("yes"), Some(invalid), None, &configured);
             assert!(
-                (p.threshold_pct - DEFAULT_AUTO_REVERT_THRESHOLD_PCT).abs() < f64::EPSILON,
+                (p.threshold_pct - 35.0).abs() < f64::EPSILON,
                 "invalid threshold {invalid} was accepted"
             );
         }
 
-        // An unrecognized flag value leaves the policy off.
-        assert!(!resolve_auto_revert_policy(Some("maybe"), None, None, None).enabled);
+        // An unrecognized flag value leaves the configured policy in force.
+        assert!(!resolve_auto_revert_policy(Some("maybe"), None, None, &default).enabled);
+        assert!(resolve_auto_revert_policy(Some("maybe"), None, None, &configured).enabled);
     }
 
     #[test]
@@ -5767,6 +5731,22 @@ mod git_diff_configuration_tests {
         std::fs::remove_file(&file).unwrap();
         std::fs::create_dir(&file).unwrap();
         assert!(resolve_git_diff_timeout_at(directory.path()).is_err());
+    }
+
+    #[test]
+    #[cfg(not(feature = "change-aware"))]
+    fn non_default_git_diff_is_rejected_without_the_change_aware_feature() {
+        // §2.16: without change-aware nothing consumes git_diff, so a
+        // non-default value must fail validation instead of being accepted
+        // and silently unread.
+        assert!(parse_oxfuzz_runtime_config("[git_diff]\ntimeout_secs=2").is_err());
+        assert!(parse_oxfuzz_runtime_config("").is_ok());
+    }
+
+    #[test]
+    #[cfg(feature = "change-aware")]
+    fn non_default_git_diff_is_accepted_with_the_change_aware_feature() {
+        assert!(parse_oxfuzz_runtime_config("[git_diff]\ntimeout_secs=2").is_ok());
     }
 }
 

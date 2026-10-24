@@ -305,6 +305,8 @@ export interface SystemStatus {
   aflplusplus: boolean;
   honggfuzz: boolean;
   syzkaller: boolean;
+  /** The engine probe failed, so the flags above are unknown, not absent. */
+  engine_probe_failed?: boolean;
   /** The configured DefectDojo is answering (false also when unconfigured). */
   defectdojo: boolean;
   /** How to obtain the sandbox image; present only when it is missing. */

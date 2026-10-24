@@ -14,7 +14,7 @@ async fn first_provider_is_saved_and_available_without_restarting_the_service() 
     let observer = container.clone();
     assert!(observer.provider_pool().is_none());
     let security = hf_web::WebSecurityConfig::new(
-        Some("fixture-token".into()),
+        Some("fixture-token-0123456789".into()),
         false,
         Vec::new(),
         vec![root.path().into()],
@@ -26,7 +26,7 @@ async fn first_provider_is_saved_and_available_without_restarting_the_service() 
         .oneshot(
             Request::builder()
                 .uri("/system/setup/providers")
-                .header("authorization", "Bearer fixture-token")
+                .header("authorization", "Bearer fixture-token-0123456789")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -45,7 +45,7 @@ async fn first_provider_is_saved_and_available_without_restarting_the_service() 
                 Request::builder()
                     .method("POST")
                     .uri("/system/setup/providers")
-                    .header("authorization", "Bearer fixture-token")
+                    .header("authorization", "Bearer fixture-token-0123456789")
                     .header("content-type", "application/json")
                     .body(Body::from(provider.to_string()))
                     .unwrap(),
@@ -62,7 +62,7 @@ async fn first_provider_is_saved_and_available_without_restarting_the_service() 
         .oneshot(
             Request::builder()
                 .uri("/system/setup/providers")
-                .header("authorization", "Bearer fixture-token")
+                .header("authorization", "Bearer fixture-token-0123456789")
                 .body(Body::empty())
                 .unwrap(),
         )

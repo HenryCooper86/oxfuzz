@@ -203,3 +203,68 @@ it("keeps progress on the launched project when the active project changes mid-r
   expect(progress["/project"]?.skipped ?? []).toEqual(["triage"]);
   expect(progress["/other"]?.completed ?? []).not.toContain("run");
 });
+
+it.each([
+  ["AFL++", true],
+  ["afl", false],
+])(
+  "matches a promoted harness against the selected engine with the shared canonicalizer (retained %s)",
+  async (retainedEngine, approved) => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    localStorage.clear();
+    localStorage.setItem("hf_locale", "en");
+    localStorage.setItem("hf_active_project", "/project");
+    localStorage.setItem("hf_recent_projects", JSON.stringify(["/project"]));
+    localStorage.setItem(
+      "hf_target_selection_v1",
+      JSON.stringify({ "/project": { target: "parse", engine: "afl++", lang: "c", compiled: false } }),
+    );
+    invoke.mockReset();
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "get_fuzzing_settings") {
+        return {
+          ...SETTINGS,
+          enabled_engines: ["libfuzzer", "afl++", "honggfuzz", "syzkaller"],
+          default_engine: "afl++",
+        };
+      }
+      if (command === "artifact_summary") return { harness_built: true };
+      if (command === "harness_review_queue") return [{ ...PROMOTED, engine: retainedEngine }];
+      if (command === "campaign_health_events") return { events: [], next_cursor: null };
+      return [];
+    });
+
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    cleanup = async () => { await act(async () => root.unmount()); host.remove(); };
+
+    await act(async () => {
+      root.render(
+        <I18nProvider>
+          <ProjectProvider>
+            <TargetProvider>
+              <PipelineProvider>
+                <RunStatusProvider>
+                  <ToastProvider>
+                    <RunOutputProvider>
+                      <RunView embedded />
+                    </RunOutputProvider>
+                  </ToastProvider>
+                </RunStatusProvider>
+              </PipelineProvider>
+            </TargetProvider>
+          </ProjectProvider>
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    // The run gate is the observable: it opens only for an approval that the
+    // shared canonicalizer accepts. Bare `afl` is a different (invalid)
+    // scope than `afl++`, unlike the old local normalizer.
+    const start = [...host.querySelectorAll("button")].find((item) => item.textContent?.includes("Run Fuzzer"));
+    expect(start, host.textContent ?? "").toBeTruthy();
+    expect(start!.disabled).toBe(!approved);
+  },
+);

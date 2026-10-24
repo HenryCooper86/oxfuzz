@@ -1,11 +1,17 @@
 //! Tests for progress and coverage parsing.
 
 use hf_core::engine::FuzzProgress;
-use hf_engine::progress::{parse_progress, parse_progress_events};
+use hf_engine::progress::parse_progress_events;
+
+/// Parse a multi-line buffer the way the streaming runner does: one
+/// `parse_progress_events` call per line, events concatenated.
+fn parse_lines(stdout: &str) -> Vec<FuzzProgress> {
+    stdout.lines().flat_map(parse_progress_events).collect()
+}
 
 #[test]
 fn parse_libfuzzer_execs_line() {
-    let events = parse_progress("INFO: 1024 edges covered.\n#512: 5000 execs/sec\n");
+    let events = parse_lines("INFO: 1024 edges covered.\n#512: 5000 execs/sec\n");
     assert!(
         events.iter().any(|e| matches!(
             e,
@@ -17,7 +23,7 @@ fn parse_libfuzzer_execs_line() {
 
 #[test]
 fn parse_libfuzzer_edges_line() {
-    let events = parse_progress("INFO: 1024 edges covered.\n");
+    let events = parse_lines("INFO: 1024 edges covered.\n");
     assert!(
         events.iter().any(|e| matches!(
             e,
@@ -29,7 +35,7 @@ fn parse_libfuzzer_edges_line() {
 
 #[test]
 fn parse_libfuzzer_cov_line() {
-    let events = parse_progress("#2\tINITED cov: 10 ft: 11 corp: 1/3b exec/s: 0 rss: 32Mb\n");
+    let events = parse_lines("#2\tINITED cov: 10 ft: 11 corp: 1/3b exec/s: 0 rss: 32Mb\n");
     assert!(
         events.iter().any(|e| matches!(
             e,
@@ -42,7 +48,7 @@ fn parse_libfuzzer_cov_line() {
 #[test]
 fn parse_afl_cov_line() {
     // AFL++ output: "cov: 1234"
-    let events = parse_progress("cov: 1234");
+    let events = parse_lines("cov: 1234");
     assert!(
         events.iter().any(|e| matches!(
             e,
@@ -54,7 +60,7 @@ fn parse_afl_cov_line() {
 
 #[test]
 fn parse_crash_line() {
-    let events = parse_progress("==12345==ERROR: AddressSanitizer: heap-buffer-overflow\n");
+    let events = parse_lines("==12345==ERROR: AddressSanitizer: heap-buffer-overflow\n");
     assert!(
         events
             .iter()
@@ -81,7 +87,7 @@ fn benign_sanitizer_warnings_are_not_findings() {
          functions and may produce false positives in some cases!",
         "INFO: Running with libasan.so.6 preloaded",
     ] {
-        let events = parse_progress(line);
+        let events = parse_lines(line);
         assert!(
             !events
                 .iter()
@@ -102,7 +108,7 @@ fn real_sanitizer_reports_are_findings() {
         "==1234==ERROR: AddressSanitizer: SEGV on unknown address",
         "Test unit written to /work/out/crash-deadbeef",
     ] {
-        let events = parse_progress(line);
+        let events = parse_lines(line);
         assert!(
             events
                 .iter()
@@ -110,15 +116,6 @@ fn real_sanitizer_reports_are_findings() {
             "a real sanitizer report must register as a finding: {line:?} -> {events:?}"
         );
     }
-}
-
-#[test]
-fn parse_done_line() {
-    let events = parse_progress("DONE\n");
-    assert!(
-        events.iter().any(|e| matches!(e, FuzzProgress::Done)),
-        "should detect done: {events:?}"
-    );
 }
 
 #[test]
@@ -196,6 +193,49 @@ fn sub_second_fork_lines_produce_no_unstable_aggregate() {
             FuzzProgress::ExecsPerSec(rate) if *rate > 9000.0
         )),
         "{events:?}"
+    );
+}
+
+#[test]
+fn fork_line_with_only_dft_time_does_not_report_an_aggregate() {
+    // `dft_time:` contains the substring `time:`. A fork-mode line that
+    // carries no standalone `time:` field must not divide the cumulative
+    // counter by the data-flow seconds: the only rate is the printed one.
+    let events = parse_progress_events(
+        "#37851418: cov: 60 ft: 60 corp: 38 exec/s: 695057 oom/timeout/crash: 0/0/0 job: 9 dft_time: 7",
+    );
+    let rates: Vec<f64> = events
+        .iter()
+        .filter_map(|event| match event {
+            FuzzProgress::ExecsPerSec(rate) => Some(*rate),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        rates,
+        vec![695_057.0],
+        "dft_time must not be read as elapsed time: {rates:?}"
+    );
+}
+
+#[test]
+fn fork_line_with_dft_time_before_time_reads_the_standalone_field() {
+    // Field order is not contractual: when `dft_time:` precedes `time:`, the
+    // aggregate must still come from the standalone `time:` field (10 s),
+    // not the first `time:`-shaped substring (dft 2 s).
+    let events = parse_progress_events(
+        "#10000: cov: 1 ft: 1 corp: 2 exec/s: 10 dft_time: 2 time: 10s job: 1",
+    );
+    let rates: Vec<f64> = events
+        .iter()
+        .filter_map(|event| match event {
+            FuzzProgress::ExecsPerSec(rate) => Some(*rate),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        rates.contains(&1000.0),
+        "expected the 10000/10s aggregate among {rates:?}"
     );
 }
 

@@ -3,6 +3,7 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::http::{header, HeaderValue, Method, Uri};
 use sha2::{Digest, Sha256};
@@ -11,6 +12,21 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 const DEFAULT_CORS_ORIGINS: [&str; 2] = ["http://127.0.0.1:5173", "http://localhost:5173"];
 const REDACTED_PATH: &str = "<redacted-path>";
+/// Minimum bearer-token length. The visible-ASCII rule admits 95 graphic
+/// characters, so a uniformly random token carries log2(95) ~= 6.57 bits per
+/// character; 20 characters is the shortest length still at or above a
+/// 128-bit floor (20 * 6.57 ~= 131 bits of charset entropy).
+const MIN_TOKEN_CHARS: usize = 20;
+/// Failed authentications recorded before the lockout engages.
+const AUTH_FAILURE_THRESHOLD: usize = 10;
+/// Window within which [`AUTH_FAILURE_THRESHOLD`] failures lock the source out.
+const AUTH_FAILURE_WINDOW: Duration = Duration::from_secs(60);
+/// How long every further authentication attempt is refused once the
+/// threshold is reached.
+const AUTH_LOCKOUT: Duration = Duration::from_secs(30);
+/// Upper bound on retained failure timestamps. The window already bounds the
+/// list; this caps memory when failures arrive faster than they expire.
+const MAX_TRACKED_AUTH_FAILURES: usize = 64;
 
 /// A validated, immutable security policy for one router instance.
 ///
@@ -19,6 +35,7 @@ const REDACTED_PATH: &str = "<redacted-path>";
 #[derive(Clone)]
 pub struct WebSecurityConfig {
     pub(crate) auth: AuthPolicy,
+    auth_attempts: Arc<AuthAttemptGate>,
     cors_origins: Arc<Vec<HeaderValue>>,
     project_roots: Arc<Vec<PathBuf>>,
 }
@@ -38,7 +55,10 @@ impl WebSecurityConfig {
         project_roots: Vec<PathBuf>,
     ) -> Result<Self, SecurityConfigError> {
         let token = match token.filter(|value| !value.is_empty()) {
-            Some(value) if value.bytes().all(|byte| byte.is_ascii_graphic()) => {
+            Some(value)
+                if value.bytes().all(|byte| byte.is_ascii_graphic())
+                    && value.len() >= MIN_TOKEN_CHARS =>
+            {
                 Some(BearerToken::new(&value))
             }
             Some(_) => return Err(SecurityConfigError::InvalidToken),
@@ -86,14 +106,40 @@ impl WebSecurityConfig {
 
         Ok(Self {
             auth: AuthPolicy { token, allow_open },
+            auth_attempts: Arc::new(AuthAttemptGate::default()),
             cors_origins: Arc::new(parsed_origins),
             project_roots: Arc::new(canonical_roots),
         })
     }
 
-    /// Resolve the web policy from process environment once at router startup.
+    /// Resolve the web policy from process environment once at router startup,
+    /// failing closed to `WebSecurityConfig::deny_all` on invalid input.
+    ///
+    /// Presentation layers that must fail loudly on an explicitly configured
+    /// but invalid `HF_WEB_TOKEN` (a token below the entropy floor would
+    /// otherwise brick the server into all-401 mode) use [`Self::try_from_env`]
+    /// instead.
     #[must_use]
     pub fn from_env() -> Self {
+        match Self::try_from_env() {
+            Ok(config) => config,
+            Err(error) => {
+                tracing::error!(%error, "invalid hf-web security configuration; denying protected access");
+                Self::deny_all()
+            }
+        }
+    }
+
+    /// Resolve the web policy from process environment, surfacing invalid
+    /// configuration to the caller instead of hiding it behind a deny-all
+    /// policy.
+    ///
+    /// # Errors
+    /// Returns [`SecurityConfigError`] when `HF_WEB_TOKEN` is explicitly set
+    /// but weak (below the entropy floor or not visible ASCII), a CORS origin
+    /// is malformed, or a configured project root does not resolve to an
+    /// existing directory.
+    pub fn try_from_env() -> Result<Self, SecurityConfigError> {
         let token = std::env::var("HF_WEB_TOKEN")
             .ok()
             .filter(|value| !value.is_empty());
@@ -118,14 +164,7 @@ impl WebSecurityConfig {
             || hf_service::repo_root().into_iter().collect(),
             |raw| std::env::split_paths(&raw).collect(),
         );
-
-        match Self::new(token, allow_open, origins, roots) {
-            Ok(config) => config,
-            Err(error) => {
-                tracing::error!(%error, "invalid hf-web security configuration; denying protected access");
-                Self::deny_all()
-            }
-        }
+        Self::new(token, allow_open, origins, roots)
     }
 
     pub(crate) fn deny_all() -> Self {
@@ -134,6 +173,7 @@ impl WebSecurityConfig {
                 token: None,
                 allow_open: false,
             },
+            auth_attempts: Arc::new(AuthAttemptGate::default()),
             cors_origins: Arc::new(Vec::new()),
             project_roots: Arc::new(Vec::new()),
         }
@@ -223,6 +263,27 @@ impl WebSecurityConfig {
         &self.project_roots
     }
 
+    /// Remaining lockout when failed authentications reached
+    /// [`AUTH_FAILURE_THRESHOLD`] within [`AUTH_FAILURE_WINDOW`]; `None` when a
+    /// new attempt may be evaluated. The gate is shared by every clone of this
+    /// config, so one router instance throttles as a whole: the middleware has
+    /// no per-connection source address to key on, and every legitimate client
+    /// of a localhost-first API shares one address anyway.
+    pub(crate) fn auth_attempt_lockout_remaining(&self, now: Instant) -> Option<Duration> {
+        self.auth_attempts.lockout_remaining(now)
+    }
+
+    /// Record one rejected authentication attempt.
+    pub(crate) fn record_auth_failure(&self, now: Instant) {
+        self.auth_attempts.record_failure(now);
+    }
+
+    /// Record one accepted authentication; a success clears the failure window
+    /// without shortening an active lockout.
+    pub(crate) fn record_auth_success(&self) {
+        self.auth_attempts.record_success();
+    }
+
     pub(crate) fn approve_document(
         &self,
         project: &Path,
@@ -285,8 +346,9 @@ pub struct BindAddressError;
 /// Invalid startup security configuration.
 #[derive(Debug, Clone, Copy, thiserror::Error)]
 pub enum SecurityConfigError {
-    /// The bearer token contained whitespace or non-visible bytes.
-    #[error("HF_WEB_TOKEN must contain only visible ASCII characters")]
+    /// The bearer token was below the entropy floor or contained whitespace
+    /// or non-visible bytes.
+    #[error("HF_WEB_TOKEN must be at least 20 visible ASCII characters")]
     InvalidToken,
     /// A CORS origin was malformed or contained a wildcard.
     #[error("HF_WEB_CORS_ORIGINS must contain exact http or https origins")]
@@ -303,10 +365,12 @@ pub(crate) struct AuthPolicy {
 }
 
 impl AuthPolicy {
-    pub(crate) fn authorize(&self, path: &str, presented: Option<&str>) -> bool {
-        if path == "/health" {
-            return true;
-        }
+    /// Whether the presented credential authorizes a protected route.
+    ///
+    /// The unauthenticated `/health` carve-out is decided by the middleware
+    /// before this runs, so a credential failure here is always a real
+    /// authentication failure.
+    pub(crate) fn authorize(&self, presented: Option<&str>) -> bool {
         match (&self.token, presented) {
             (Some(expected), Some(presented)) => expected.matches(presented),
             (Some(_), None) => false,
@@ -315,6 +379,68 @@ impl AuthPolicy {
     }
 }
 
+/// In-process throttle bounding online guessing of the shared bearer token.
+///
+/// A fixed threshold of failures inside a short window locks out every
+/// authentication attempt for [`AUTH_LOCKOUT`], so brute force is rate-bound
+/// no matter how strong the enrolled token is. The comparison itself stays
+/// constant-time in [`BearerToken::matches`]; this gate only decides whether
+/// the comparison runs at all.
+#[derive(Default)]
+struct AuthAttemptGate {
+    state: std::sync::Mutex<AuthAttemptState>,
+}
+
+#[derive(Default)]
+struct AuthAttemptState {
+    failures: Vec<Instant>,
+    locked_until: Option<Instant>,
+}
+
+impl AuthAttemptGate {
+    fn lockout_remaining(&self, now: Instant) -> Option<Duration> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .locked_until
+            .filter(|until| *until > now)
+            .map(|until| until - now)
+    }
+
+    fn record_failure(&self, now: Instant) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let window_start = now.checked_sub(AUTH_FAILURE_WINDOW).unwrap();
+        state.failures.retain(|failure| *failure > window_start);
+        state.failures.push(now);
+        let overflow = state
+            .failures
+            .len()
+            .saturating_sub(MAX_TRACKED_AUTH_FAILURES);
+        state.failures.drain(..overflow);
+        if state.failures.len() >= AUTH_FAILURE_THRESHOLD {
+            state.locked_until = Some(now + AUTH_LOCKOUT);
+            // Start the next window when the lockout expires, so a locked-out
+            // source cannot accumulate a fresh threshold while still locked.
+            state.failures.clear();
+        }
+    }
+
+    fn record_success(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A valid token is accepted even while the gate is locked out, so a
+        // success can be observed mid-lockout; clearing the failure window
+        // must not shorten that lockout, which stays for its full duration.
+        state.failures.clear();
+    }
+}
 #[derive(Clone)]
 struct BearerToken([u8; 32]);
 
@@ -511,7 +637,10 @@ fn looks_like_absolute_host_path(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{redact_config_text, redact_public_json, WebSecurityConfig};
+    use super::{
+        redact_config_text, redact_public_json, WebSecurityConfig, AUTH_FAILURE_THRESHOLD,
+        AUTH_FAILURE_WINDOW, AUTH_LOCKOUT,
+    };
     use axum::http::HeaderValue;
 
     #[test]
@@ -558,6 +687,78 @@ mod tests {
         let origin = HeaderValue::from_static("http://attacker.com:8081");
         let host = HeaderValue::from_static("attacker.com:8081");
         assert!(!config.origin_allowed(Some(&origin), Some(&host)));
+    }
+
+    #[test]
+    fn short_and_weak_tokens_are_rejected_by_the_entropy_floor() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(WebSecurityConfig::new(
+            Some("short-token".to_owned()),
+            false,
+            Vec::new(),
+            vec![root.path().to_path_buf()],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn auth_failures_lock_the_gate_and_the_lockout_expires() {
+        let root = tempfile::tempdir().unwrap();
+        let config = WebSecurityConfig::new(
+            Some("correct-horse-battery-staple".to_owned()),
+            false,
+            Vec::new(),
+            vec![root.path().to_path_buf()],
+        )
+        .expect("valid test security config");
+        let start = std::time::Instant::now();
+        for offset in 0..AUTH_FAILURE_THRESHOLD {
+            assert!(
+                config
+                    .auth_attempt_lockout_remaining(
+                        start + std::time::Duration::from_secs(u64::try_from(offset).unwrap())
+                    )
+                    .is_none(),
+                "no lockout before the threshold"
+            );
+            config.record_auth_failure(
+                start + std::time::Duration::from_secs(u64::try_from(offset).unwrap()),
+            );
+        }
+        let lockout = config
+            .auth_attempt_lockout_remaining(start + std::time::Duration::from_secs(10))
+            .expect("threshold failures within the window lock the gate");
+        assert!(lockout <= AUTH_LOCKOUT);
+        assert!(
+            config
+                .auth_attempt_lockout_remaining(start + AUTH_LOCKOUT + AUTH_FAILURE_WINDOW)
+                .is_none(),
+            "the lockout expires"
+        );
+    }
+
+    #[test]
+    fn auth_success_clears_the_failure_window() {
+        let root = tempfile::tempdir().unwrap();
+        let config = WebSecurityConfig::new(
+            Some("correct-horse-battery-staple".to_owned()),
+            false,
+            Vec::new(),
+            vec![root.path().to_path_buf()],
+        )
+        .expect("valid test security config");
+        let now = std::time::Instant::now();
+        for _ in 0..(AUTH_FAILURE_THRESHOLD - 1) {
+            config.record_auth_failure(now);
+        }
+        config.record_auth_success();
+        for _ in 0..(AUTH_FAILURE_THRESHOLD - 1) {
+            config.record_auth_failure(now);
+        }
+        assert!(
+            config.auth_attempt_lockout_remaining(now).is_none(),
+            "a success resets the window, so split failures never lock"
+        );
     }
 
     #[test]

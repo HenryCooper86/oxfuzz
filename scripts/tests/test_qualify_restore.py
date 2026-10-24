@@ -89,12 +89,25 @@ class RestoreQualificationTests(unittest.TestCase):
                 with self.assertRaises((ValueError, OSError)):
                     qualify_restore.restore(archive, target)
                 self.assertFalse(target.exists())
+                self.assertFalse(
+                    [p for p in self.root.iterdir() if p.name.startswith(f"restored-{case}")],
+                    "a refused restore must not leave staging siblings")
 
-    def test_backup_rejects_symlink_and_leaves_incomplete_archive(self):
+    def test_backup_rejects_symlink_and_leaves_no_archive(self):
         (self.workspace / "outside").symlink_to(self.database)
         with self.assertRaisesRegex(ValueError, "symlink"):
             self.archive()
-        self.assertFalse((self.root / "archive/manifest.json").exists())
+        self.assertFalse((self.root / "archive").exists())
+        self.assertFalse([p for p in self.root.iterdir() if p.name.startswith("archive")])
+
+    def test_backup_retry_after_a_failure_creates_the_archive(self):
+        (self.workspace / "outside").symlink_to(self.database)
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            self.archive()
+        (self.workspace / "outside").unlink()
+        manifest = self.archive()
+        self.assertTrue((self.root / "archive/manifest.json").is_file())
+        self.assertEqual(manifest["runs"][0]["id"], "run-1")
 
     def test_database_symlink_refuses_backup_before_output_creation(self):
         alias = self.root / "database-link"

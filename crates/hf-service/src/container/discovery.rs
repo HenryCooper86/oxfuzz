@@ -1,7 +1,6 @@
 //! Target discovery and ranking.
 
 use std::path::Path;
-use std::sync::Arc;
 
 use chrono::Utc;
 use hf_core::error::ClassifiedError;
@@ -10,7 +9,7 @@ use hf_core::target::{TargetInventory, TargetLanguage};
 use hf_guardrails::Action;
 
 use super::project_identity::{project_lookup_identity, stored_project_matches};
-use super::{fuzzing_policy_error, LlmProviderBridge, SchedulableTarget, ServiceContainer};
+use super::{fuzzing_policy_error, SchedulableTarget, ServiceContainer};
 
 /// A target inventory with the native static-analysis overlay computed from the
 /// same parse.
@@ -86,27 +85,6 @@ impl ServiceContainer {
             scores: overlay.scores,
             signal_count: signals.len(),
         })
-    }
-    /// Re-rank a target inventory using the configured LLM provider pool.
-    ///
-    /// # Errors
-    /// Returns `ClassifiedError::Provider` if no provider is configured, or the
-    /// underlying ranking error if the LLM call fails.
-    pub async fn rank(
-        &self,
-        inventory: TargetInventory,
-    ) -> Result<TargetInventory, ClassifiedError> {
-        let pool = self.provider_pool().ok_or_else(|| {
-            ClassifiedError::Provider("no LLM provider configured for ranking".to_owned())
-        })?;
-        let _workspace_operation = self.acquire_workspace_operation().await?;
-        let bridge =
-            LlmProviderBridge::new(pool).with_diagnostics(Arc::clone(&self.diagnostics), "rank");
-        let ranked = hf_discovery::rank(inventory, Box::new(bridge)).await?;
-        if let Some(store) = &self.store {
-            store.save_inventory(&ranked, Utc::now()).await?;
-        }
-        Ok(ranked)
     }
 
     /// Targets in `project` that a scheduled campaign can legally run: those a
@@ -187,8 +165,21 @@ impl ServiceContainer {
             for harness in harnesses.iter().filter(|h| {
                 h.status == HarnessStatus::Promoted && fuzzing.require_engine(h.engine).is_ok()
             }) {
+                // Emit the selector whose workspace holds the promoted
+                // harness: a harness promoted under a file-qualified selector
+                // (work-order flow, CLI disambiguation) is only runnable
+                // under that spelling, and campaign admission keys its
+                // workspace off exactly this value.
+                let qualified = crate::container::qualified_target_selector(&candidate);
+                let selector = if crate::container::workspace::workspace_has_active_harness(
+                    &identity, &qualified,
+                ) {
+                    qualified
+                } else {
+                    candidate.symbol.clone()
+                };
                 schedulable.push(SchedulableTarget {
-                    target: candidate.symbol.clone(),
+                    target: selector,
                     engine: harness.engine.as_str().to_owned(),
                     language: harness.language.as_str().to_owned(),
                     #[cfg(feature = "semgrep-enrichment")]

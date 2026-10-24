@@ -279,6 +279,20 @@ fn scheduler_api_error(error: CampaignSchedulerError) -> ApiError {
     }
 }
 
+/// The failure for a scheduler mutation when no scheduler is attached: the
+/// mutation did not take effect, so it must not report success (2.16). Same
+/// `unavailable` condition (HTTP 503) `schedule_recovery_acknowledge`
+/// reports; the message names the schedule surface instead of one-time
+/// recovery.
+fn scheduler_unavailable_error() -> ApiError {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(ErrorResponse {
+            error: "scheduler is not attached; schedule mutations are unavailable".to_owned(),
+        }),
+    )
+}
+
 fn recovery_api_error(public: RecoveryPublicError) -> RecoveryApiError {
     let status = match public.code {
         RecoveryPublicErrorCode::NotFound => StatusCode::NOT_FOUND,
@@ -654,6 +668,7 @@ fn automotive_routes() -> Router<AppState> {
             post(automotive_build_replay_plan),
         )
         .route("/automotive/replay", post(automotive_execute_replay))
+        .route("/automotive/approval/mint", post(automotive_mint_approval))
         .route("/automotive/report", post(generate_automotive_report))
         .route(
             "/automotive/operations",
@@ -942,8 +957,12 @@ fn semgrep_routes() -> Router<AppState> {
 /// Enforces [`crate::security::AuthPolicy`]: with a token configured, every request except
 /// `/health` must carry a matching `Authorization: Bearer <token>` header.
 /// With no token configured the API is fail-closed (rejects everything but
-/// `/health`) unless `HF_WEB_TOKEN_OPTIONAL=1`. Every request is logged
-/// (method + path) as a lightweight audit trail.
+/// `/health`) unless `HF_WEB_TOKEN_OPTIONAL=1`. The credential is evaluated
+/// first (constant-time), so a correct token is never rejected by the lockout;
+/// the shared in-process failure gate in
+/// [`crate::security::WebSecurityConfig`] throttles only failing attempts,
+/// answering `429` once repeated failures exhaust its threshold. Every request
+/// is logged (method + path) as a lightweight audit trail.
 async fn auth_audit(
     security: WebSecurityConfig,
     req: axum::extract::Request,
@@ -978,16 +997,38 @@ async fn auth_audit(
             .into_response();
     }
 
-    if !security.auth.authorize(&path, presented) {
-        tracing::warn!(%method, %path, "hf-web: rejected unauthorized request");
-        return (
-            StatusCode::UNAUTHORIZED,
-            [(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"))],
-            Json(ErrorResponse {
-                error: "unauthorized".to_owned(),
-            }),
-        )
-            .into_response();
+    // `/health` is the documented unauthenticated carve-out: it neither
+    // checks credentials nor records an auth attempt, so health probes can
+    // neither reset the brute-force window nor be throttled by it. Every
+    // other path evaluates its credential first: the comparison stays
+    // constant-time, and a correct bearer token is never rejected by the
+    // lockout, which exists only to rate-bound failing attempts.
+    if path != "/health" {
+        if !security.auth.authorize(presented) {
+            if let Some(wait) = security.auth_attempt_lockout_remaining(std::time::Instant::now()) {
+                let retry_after = wait.as_secs().max(1);
+                tracing::warn!(%method, %path, retry_after, "hf-web: throttled locked-out authentication attempt");
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [(header::RETRY_AFTER, HeaderValue::from(retry_after))],
+                    Json(ErrorResponse {
+                        error: "too many failed authentication attempts".to_owned(),
+                    }),
+                )
+                    .into_response();
+            }
+            security.record_auth_failure(std::time::Instant::now());
+            tracing::warn!(%method, %path, "hf-web: rejected unauthorized request");
+            return (
+                StatusCode::UNAUTHORIZED,
+                [(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"))],
+                Json(ErrorResponse {
+                    error: "unauthorized".to_owned(),
+                }),
+            )
+                .into_response();
+        }
+        security.record_auth_success();
     }
 
     tracing::info!(%method, %path, "hf-web request");
@@ -1168,8 +1209,18 @@ async fn approve_run_owner(state: &AppState, run_id: &str) -> Result<(), ApiErro
     Ok(())
 }
 
-fn public_value<T: Serialize>(value: T) -> serde_json::Value {
-    redact_public_json(serde_json::to_value(value).unwrap_or(serde_json::Value::Null))
+fn public_value<T: Serialize>(value: T) -> Result<serde_json::Value, ApiError> {
+    // A Serialize failure is a server-side defect, not an empty success: map
+    // it to 500 instead of silently emitting a `null` 200 body (2.16).
+    let value = serde_json::to_value(value).map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("response serialization failed: {error}"),
+            }),
+        )
+    })?;
+    Ok(redact_public_json(value))
 }
 
 #[cfg(feature = "proof-carrying")]
@@ -1183,7 +1234,7 @@ async fn campaign_advice(
         .container
         .campaign_advice(&request)
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(advice)))
+    Ok(Json(public_value(advice)?))
 }
 
 #[cfg(feature = "proof-carrying")]
@@ -1210,7 +1261,7 @@ async fn campaign_evidence(
         )
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(evidence)))
+    Ok(Json(public_value(evidence)?))
 }
 
 #[cfg(feature = "proof-carrying")]
@@ -1241,7 +1292,7 @@ async fn remediation_draft(
         )
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(handoff)))
+    Ok(Json(public_value(handoff)?))
 }
 
 #[cfg(feature = "automotive-lab")]
@@ -1249,12 +1300,13 @@ async fn automotive_lab_simulate(
     State(state): State<AppState>,
     Json(request): Json<hf_service::LabSimulateRequest>,
 ) -> ApiResult<serde_json::Value> {
+    let _project = approved_project(&state, std::path::Path::new(&request.project))?;
     let simulation = state
         .container
         .automotive_simulate_plan(request)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(simulation)))
+    Ok(Json(public_value(simulation)?))
 }
 
 #[cfg(feature = "automotive-lab")]
@@ -1264,7 +1316,7 @@ async fn automotive_lab_reset(
 ) -> ApiResult<serde_json::Value> {
     Ok(Json(public_value(
         state.container.automotive_reset_evidence(&request),
-    )))
+    )?))
 }
 
 #[cfg(feature = "automotive-lab")]
@@ -1272,12 +1324,13 @@ async fn automotive_lab_coverage(
     State(state): State<AppState>,
     Json(request): Json<hf_service::LabCoverageRequest>,
 ) -> ApiResult<serde_json::Value> {
+    let _project = approved_project(&state, std::path::Path::new(&request.project))?;
     let view = state
         .container
         .automotive_state_coverage(request)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(view)))
+    Ok(Json(public_value(view)?))
 }
 
 #[cfg(feature = "automotive-lab")]
@@ -1285,12 +1338,13 @@ async fn automotive_lab_plan(
     State(state): State<AppState>,
     Json(request): Json<hf_service::LabPlanRequest>,
 ) -> ApiResult<serde_json::Value> {
+    let _project = approved_project(&state, std::path::Path::new(&request.project))?;
     let plan = state
         .container
         .automotive_sequence_plan(request)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(plan)))
+    Ok(Json(public_value(plan)?))
 }
 
 #[cfg(feature = "oracle-studio")]
@@ -1302,7 +1356,7 @@ async fn oracle_scaffold(
         .container
         .oracle_scaffold(request)
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(view)))
+    Ok(Json(public_value(view)?))
 }
 
 #[cfg(feature = "oracle-studio")]
@@ -1315,7 +1369,7 @@ async fn oracle_violation(
         .oracle_violation_for_crash(id)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(violation)))
+    Ok(Json(public_value(violation)?))
 }
 
 #[cfg(feature = "coverage-blockers")]
@@ -1323,12 +1377,13 @@ async fn coverage_blockers(
     State(state): State<AppState>,
     Json(request): Json<hf_service::CoverageBlockerRequest>,
 ) -> ApiResult<serde_json::Value> {
+    let _project = approved_project(&state, std::path::Path::new(&request.project))?;
     let view = state
         .container
         .explore_coverage_blockers(request)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(view)))
+    Ok(Json(public_value(view)?))
 }
 
 #[cfg(feature = "harness-tournament")]
@@ -1336,12 +1391,13 @@ async fn harness_tournament(
     State(state): State<AppState>,
     Json(request): Json<hf_service::HarnessTournamentRequest>,
 ) -> ApiResult<serde_json::Value> {
+    let _project = approved_project(&state, std::path::Path::new(&request.project))?;
     let result = state
         .container
         .run_harness_tournament(request)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(result)))
+    Ok(Json(public_value(result)?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1361,7 +1417,7 @@ async fn build_diagnose(
         .diagnose_build(&project)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(diagnosis)))
+    Ok(Json(public_value(diagnosis)?))
 }
 
 #[cfg(feature = "build-doctor")]
@@ -1375,7 +1431,7 @@ async fn build_run(
         .run_build_plan(request)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(outcome)))
+    Ok(Json(public_value(outcome)?))
 }
 
 async fn build_profile(
@@ -1388,7 +1444,7 @@ async fn build_profile(
         .build_profile(&project)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(view)))
+    Ok(Json(public_value(view)?))
 }
 
 #[cfg(feature = "build-doctor")]
@@ -1402,7 +1458,7 @@ async fn build_profile_set(
         .save_build_profile(request)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(view)))
+    Ok(Json(public_value(view)?))
 }
 
 #[cfg(feature = "build-doctor")]
@@ -1438,7 +1494,7 @@ async fn build_history(
         .build_diagnosis_history(&project, request.limit)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(history)))
+    Ok(Json(public_value(history)?))
 }
 
 #[cfg(feature = "change-aware")]
@@ -1454,7 +1510,7 @@ async fn change_impact(
         .change_impact(request)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(view)))
+    Ok(Json(public_value(view)?))
 }
 
 #[cfg(feature = "change-aware")]
@@ -1469,7 +1525,7 @@ async fn change_compare(
         .compare_revisions(request)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(view)))
+    Ok(Json(public_value(view)?))
 }
 
 #[cfg(feature = "change-aware")]
@@ -1484,7 +1540,7 @@ async fn change_publish(
         .publish_change_comparison(request)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(published)))
+    Ok(Json(public_value(published)?))
 }
 
 #[cfg(feature = "patch-to-proof")]
@@ -1497,27 +1553,28 @@ async fn remediation_operation_create(
         .create_remediation_operation(request)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(view)))
+    Ok(Json(public_value(view)?))
 }
 
 #[cfg(feature = "patch-to-proof")]
 #[derive(Debug, Deserialize)]
-struct RemediationApproveRequest {
-    operator: String,
-}
+struct RemediationApproveRequest {}
 
 #[cfg(feature = "patch-to-proof")]
 async fn remediation_operation_approve(
     State(state): State<AppState>,
     Path(id): Path<uuid::Uuid>,
-    Json(request): Json<RemediationApproveRequest>,
+    Json(_request): Json<RemediationApproveRequest>,
 ) -> ApiResult<serde_json::Value> {
+    // The body carries no attribution: the shared web token has no identity
+    // claims, so the durable approval records the server-side transport label
+    // (VULN-009). Unknown body fields stay ignored for client compatibility.
     let view = state
         .container
-        .approve_remediation_operation(id, &request.operator)
+        .approve_remediation_operation(id, hf_service::RemediationApprover::WebApi)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(view)))
+    Ok(Json(public_value(view)?))
 }
 
 #[cfg(feature = "patch-to-proof")]
@@ -1532,7 +1589,7 @@ async fn remediation_operation_verify(
         .map_err(classified_api_error)?;
     Ok(Json(public_value(
         serde_json::json!({ "operation_id": id, "accepted": true }),
-    )))
+    )?))
 }
 
 #[cfg(feature = "patch-to-proof")]
@@ -1545,7 +1602,7 @@ async fn remediation_operation_get(
         .remediation_operation(id)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(view)))
+    Ok(Json(public_value(view)?))
 }
 
 #[cfg(feature = "run-closeout")]
@@ -1566,7 +1623,7 @@ async fn run_closeout(
         .close_out_run(id)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(report)))
+    Ok(Json(public_value(report)?))
 }
 
 #[cfg(feature = "run-closeout")]
@@ -1585,7 +1642,7 @@ async fn run_closeout_read(
         .retained_run_closeout(id)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(report)))
+    Ok(Json(public_value(report)?))
 }
 
 #[cfg(feature = "campaign-health")]
@@ -1604,7 +1661,7 @@ async fn campaign_health(
         .campaign_health(id)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(report)))
+    Ok(Json(public_value(report)?))
 }
 
 async fn run_owner(
@@ -1617,7 +1674,7 @@ async fn run_owner(
         .await
         .map_err(classified_api_error)?;
     let _approved_owner = approved_project(&state, std::path::Path::new(&owner.project_root))?;
-    Ok(Json(public_value(owner)))
+    Ok(Json(public_value(owner)?))
 }
 
 #[cfg(feature = "campaign-health")]
@@ -1636,7 +1693,7 @@ async fn campaign_telemetry(
         .campaign_telemetry(id)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(telemetry)))
+    Ok(Json(public_value(telemetry)?))
 }
 
 #[cfg(feature = "campaign-health")]
@@ -1669,7 +1726,7 @@ async fn campaign_health_events(
         )
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(page)))
+    Ok(Json(public_value(page)?))
 }
 
 #[cfg(feature = "campaign-health")]
@@ -1689,7 +1746,7 @@ async fn morning_health_summary(
         .morning_health_summary(&project, chrono::Utc::now())
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(summary)))
+    Ok(Json(public_value(summary)?))
 }
 
 #[cfg(feature = "unreached-surface")]
@@ -1704,13 +1761,14 @@ async fn unreached_surface(
     State(state): State<AppState>,
     Json(req): Json<UnreachedSurfaceRequestBody>,
 ) -> ApiResult<serde_json::Value> {
+    let project = approved_project(&state, &req.project)?;
     let lang = parse_lang(&req.lang).map_err(map_err(StatusCode::BAD_REQUEST))?;
     let view = state
         .container
-        .unreached_surface(&req.project, lang)
+        .unreached_surface(&project, lang)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(view)))
+    Ok(Json(public_value(view)?))
 }
 
 #[cfg(feature = "concolic-enrichment")]
@@ -1725,12 +1783,13 @@ async fn corpus_concolic(
     State(state): State<AppState>,
     Json(req): Json<ConcolicRequestBody>,
 ) -> ApiResult<serde_json::Value> {
+    let project = approved_project(&state, &req.project)?;
     let outcome = state
         .container
-        .corpus_concolic(&req.project, &req.target)
+        .corpus_concolic(&project, &req.target)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(outcome)))
+    Ok(Json(public_value(outcome)?))
 }
 
 #[cfg(feature = "campaign-trust")]
@@ -1749,22 +1808,42 @@ async fn campaign_trust_report(
         .campaign_trust_report(id)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(report)))
+    Ok(Json(public_value(report)?))
+}
+
+/// The "a request must carry no body" decision, in one home shared by the
+/// main router and the work-order routes (2.18): each surface maps the
+/// outcome to its own error body.
+pub(crate) enum EmptyRequestBody {
+    Ok,
+    /// The body could not be read; carries the transport error text.
+    Read(String),
+    NotEmpty,
+}
+
+pub(crate) async fn read_empty_request_body(request: axum::extract::Request) -> EmptyRequestBody {
+    match axum::body::to_bytes(request.into_body(), 1).await {
+        Ok(bytes) if bytes.is_empty() => EmptyRequestBody::Ok,
+        Ok(_) => EmptyRequestBody::NotEmpty,
+        // 2.17: the transport error text is preserved so the caller's mapping
+        // can name why the body could not be read; nothing else reaches the
+        // body after this.
+        Err(error) => EmptyRequestBody::Read(error.to_string()),
+    }
 }
 
 async fn require_empty_request_body(request: axum::extract::Request) -> Result<(), ApiError> {
-    let bytes = axum::body::to_bytes(request.into_body(), 1)
-        .await
-        .map_err(map_err(StatusCode::BAD_REQUEST))?;
-    if bytes.is_empty() {
-        Ok(())
-    } else {
-        Err((
+    match read_empty_request_body(request).await {
+        EmptyRequestBody::Ok => Ok(()),
+        EmptyRequestBody::Read(error) => {
+            Err((StatusCode::BAD_REQUEST, Json(ErrorResponse { error })))
+        }
+        EmptyRequestBody::NotEmpty => Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
                 error: "request body must be empty".to_owned(),
             }),
-        ))
+        )),
     }
 }
 
@@ -1780,7 +1859,7 @@ async fn finding_proof_card_for_crash(
         .finding_proof_card_for_crash(&project, id)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(card)))
+    Ok(Json(public_value(card)?))
 }
 
 #[cfg(any(feature = "patch-to-proof", feature = "triage-disposition"))]
@@ -1808,7 +1887,7 @@ async fn finding_review_queue(
         .finding_review_queue(&project, request.filter)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(items)))
+    Ok(Json(public_value(items)?))
 }
 
 #[cfg(feature = "triage-disposition")]
@@ -1823,7 +1902,7 @@ async fn finding_review(
         .finding_review_for_project(&project, id)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(item)))
+    Ok(Json(public_value(item)?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1843,7 +1922,7 @@ async fn discover(
         .discover(&project, lang)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(inv)))
+    Ok(Json(public_value(inv)?))
 }
 
 #[cfg(feature = "ai-target-ranking")]
@@ -2246,7 +2325,7 @@ async fn run_comparison(
             .run_comparison(request.baseline_id, request.result_id)
             .await
             .map_err(classified_api_error)?,
-    )))
+    )?))
 }
 
 async fn run_history(
@@ -2259,7 +2338,7 @@ async fn run_history(
         .run_history(Some(&project))
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(history)))
+    Ok(Json(public_value(history)?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2277,9 +2356,7 @@ async fn run_coverage_series(
         .run_coverage_series(&req.run_id)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(
-        serde_json::to_value(series).unwrap_or(serde_json::Value::Null),
-    ))
+    Ok(Json(public_value(series)?))
 }
 
 async fn run_harness_source(
@@ -2362,7 +2439,7 @@ async fn run_harness_behavior(
         .harness_behavior(id)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(evidence)))
+    Ok(Json(public_value(evidence)?))
 }
 
 async fn run_function_coverage(
@@ -2380,7 +2457,7 @@ async fn run_function_coverage(
         .run_function_coverage(id)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(evidence)))
+    Ok(Json(public_value(evidence)?))
 }
 
 async fn replay_review(
@@ -2399,7 +2476,7 @@ async fn replay_review(
         .replay_review_with_inputs(id, query.inputs)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(review)))
+    Ok(Json(public_value(review)?))
 }
 
 async fn replay_start(
@@ -2547,7 +2624,7 @@ async fn run_status(
         .await
         .map_err(classified_api_error)?;
     let _approved_owner = approved_project(&state, &owner)?;
-    Ok(Json(public_value(status)))
+    Ok(Json(public_value(status)?))
 }
 
 async fn cancel_run_by_id(
@@ -2599,6 +2676,9 @@ async fn cancel_run_by_id(
             ));
         }
     }
+    // 2.17: the publish outcome is dropped -- the cancellation was already
+    // accepted durably above, and a missing SSE subscriber (the only failure
+    // mode) must not turn an accepted cancellation into an error response.
     let _ = state.publish_event(SseEvent::RunStatus {
         run_id: run_id.to_string(),
         status: "cancellation_requested".to_owned(),
@@ -2630,7 +2710,7 @@ async fn project_auto_revert_override(
         .project_auto_revert_override(&project)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(over)))
+    Ok(Json(public_value(over)?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2651,7 +2731,7 @@ async fn auto_revert_events(
         .auto_revert_events(Some(&project), req.limit.unwrap_or(200))
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(events)))
+    Ok(Json(public_value(events)?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2669,7 +2749,7 @@ async fn policy_decisions(
         .policy_decisions(q.limit.unwrap_or(200))
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(decisions)))
+    Ok(Json(public_value(decisions)?))
 }
 
 async fn effective_auto_revert_policy(
@@ -2682,7 +2762,7 @@ async fn effective_auto_revert_policy(
         .effective_auto_revert_view(&project)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(view)))
+    Ok(Json(public_value(view)?))
 }
 
 async fn project_auto_revert_overrides(
@@ -2693,7 +2773,7 @@ async fn project_auto_revert_overrides(
         .project_auto_revert_overrides()
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(overrides)))
+    Ok(Json(public_value(overrides)?))
 }
 
 async fn set_project_auto_revert_override(
@@ -2732,7 +2812,7 @@ async fn all_crashes(
         .project_crashes(&project)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(crashes)))
+    Ok(Json(public_value(crashes)?))
 }
 
 async fn all_corpus(
@@ -2745,7 +2825,7 @@ async fn all_corpus(
         .project_corpus_entries_with_targets(&project)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(entries)))
+    Ok(Json(public_value(entries)?))
 }
 
 async fn export_project_data(
@@ -2758,7 +2838,7 @@ async fn export_project_data(
         .export_project_data(Some(&project))
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(export)))
+    Ok(Json(public_value(export)?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2830,7 +2910,7 @@ async fn corpus_import(
         .corpus_import(&project, &req.target, &source)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(outcome)))
+    Ok(Json(public_value(outcome)?))
 }
 
 async fn corpus_survival(
@@ -2843,7 +2923,7 @@ async fn corpus_survival(
         .seed_survival(&project, &req.target)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(outcome)))
+    Ok(Json(public_value(outcome)?))
 }
 
 async fn corpus_prune_coverage(
@@ -2856,7 +2936,7 @@ async fn corpus_prune_coverage(
         .corpus_prune_coverage(&project, &req.target)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(outcome)))
+    Ok(Json(public_value(outcome)?))
 }
 
 async fn corpus_minimize(
@@ -2869,7 +2949,7 @@ async fn corpus_minimize(
         .corpus_minimize(&project, &req.target)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(outcome)))
+    Ok(Json(public_value(outcome)?))
 }
 
 async fn corpus_capabilities(
@@ -2882,7 +2962,7 @@ async fn corpus_capabilities(
         .corpus_capabilities(&project, &req.target)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(capabilities)))
+    Ok(Json(public_value(capabilities)?))
 }
 
 async fn corpus(
@@ -2897,7 +2977,7 @@ async fn corpus(
                 .container
                 .corpus_list(&project, &req.target)
                 .map_err(classified_api_error)?;
-            Ok(Json(public_value(corpus.entries)))
+            Ok(Json(public_value(corpus.entries)?))
         }
         "seed" => {
             let n = state
@@ -2921,7 +3001,7 @@ async fn corpus(
                 .corpus_prune(&project, &req.target)
                 .await
                 .map_err(classified_api_error)?;
-            Ok(Json(public_value(outcome)))
+            Ok(Json(public_value(outcome)?))
         }
         other => Err((
             StatusCode::BAD_REQUEST,
@@ -2948,7 +3028,7 @@ async fn triage(
         .triage(&project, &req.target)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(deduped)))
+    Ok(Json(public_value(deduped)?))
 }
 
 #[derive(serde::Deserialize)]
@@ -2969,7 +3049,7 @@ async fn verify_crash(
     // verdict is computed from the passed crash and the provider pool.
     let _project = approved_project(&state, std::path::Path::new(&req.project))?;
     let verdict = state.container.verify_crash(&req.target, &req.crash).await;
-    Ok(Json(public_value(verdict)))
+    Ok(Json(public_value(verdict)?))
 }
 
 async fn system_snapshot(State(state): State<AppState>) -> ApiResult<serde_json::Value> {
@@ -2978,7 +3058,7 @@ async fn system_snapshot(State(state): State<AppState>) -> ApiResult<serde_json:
         .system_snapshot()
         .await
         .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
-    Ok(Json(public_value(snapshot)))
+    Ok(Json(public_value(snapshot)?))
 }
 
 async fn diagnostics_cost_summary(State(state): State<AppState>) -> ApiResult<serde_json::Value> {
@@ -2987,7 +3067,7 @@ async fn diagnostics_cost_summary(State(state): State<AppState>) -> ApiResult<se
         .cost_summary()
         .await
         .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
-    Ok(Json(public_value(summary)))
+    Ok(Json(public_value(summary)?))
 }
 
 async fn system_status(State(_): State<AppState>) -> Json<hf_service::SystemStatus> {
@@ -3016,7 +3096,7 @@ async fn workbench_dashboard(
         .workbench_dashboard(Some(&project), opt_target(req.target.as_ref()))
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(dashboard)))
+    Ok(Json(public_value(dashboard)?))
 }
 
 async fn harness_review_queue(
@@ -3029,7 +3109,7 @@ async fn harness_review_queue(
         .harness_review_queue(Some(&project), opt_target(req.target.as_ref()))
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(queue)))
+    Ok(Json(public_value(queue)?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -3155,7 +3235,7 @@ async fn list_report_drafts(State(state): State<AppState>) -> ApiResult<serde_js
         .container
         .list_report_drafts()
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(reports)))
+    Ok(Json(public_value(reports)?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -3241,7 +3321,7 @@ async fn save_report_draft(
             &req.content,
         )
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(report)))
+    Ok(Json(public_value(report)?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -3777,7 +3857,7 @@ async fn knowledge_search(
             "knowledge search task failed: {error}"
         )))
     })?;
-    Ok(Json(public_value(hits)))
+    Ok(Json(public_value(hits)?))
 }
 
 // -- Campaign scheduling ---------------------------------------------------
@@ -3793,7 +3873,7 @@ async fn schedule_list(State(state): State<AppState>) -> ApiResult<serde_json::V
             .map_err(scheduler_api_error)?,
         None => Vec::new(),
     };
-    Ok(Json(public_value(views)))
+    Ok(Json(public_value(views)?))
 }
 
 async fn schedule_recovery_list(
@@ -3806,7 +3886,12 @@ async fn schedule_recovery_list(
             .map_err(scheduler_recovery_api_error)?,
         None => Vec::new(),
     };
-    Ok(Json(public_value(recoveries)))
+    public_value(recoveries).map(Json).map_err(|_| {
+        recovery_api_error(RecoveryPublicError {
+            code: RecoveryPublicErrorCode::Internal,
+            message: "response serialization failed",
+        })
+    })
 }
 
 async fn schedule_recovery_acknowledge(
@@ -3821,7 +3906,12 @@ async fn schedule_recovery_acknowledge(
         .acknowledge_one_time_recovery_within_roots(&occurrence_id, state.security.project_roots())
         .await
         .map_err(scheduler_recovery_api_error)?;
-    Ok(Json(public_value(recovery)))
+    public_value(recovery).map(Json).map_err(|_| {
+        recovery_api_error(RecoveryPublicError {
+            code: RecoveryPublicErrorCode::Internal,
+            message: "response serialization failed",
+        })
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -3841,7 +3931,7 @@ async fn schedule_history(
             .map_err(scheduler_api_error)?,
         None => Vec::new(),
     };
-    Ok(Json(public_value(views)))
+    Ok(Json(public_value(views)?))
 }
 
 async fn schedule_history_clear(State(state): State<AppState>) -> ApiResult<u64> {
@@ -3907,7 +3997,9 @@ async fn schedule_create(
 ) -> ApiResult<serde_json::Value> {
     let project = approved_project(&state, std::path::Path::new(&req.project))?;
     let Some(scheduler) = &state.scheduler else {
-        return Ok(Json(serde_json::json!([])));
+        // A create that did not take effect must not report success (2.16);
+        // same unavailable condition the recovery acknowledge path reports.
+        return Err(scheduler_unavailable_error());
     };
     let trigger = hf_service::scheduler::parse_trigger(&req.trigger_kind, &req.trigger_value)
         .map_err(map_err(StatusCode::BAD_REQUEST))?;
@@ -3929,7 +4021,7 @@ async fn schedule_create(
         .list_views_within_roots(state.security.project_roots())
         .await
         .map_err(scheduler_api_error)?;
-    Ok(Json(public_value(views)))
+    Ok(Json(public_value(views)?))
 }
 
 /// Whether restored work is authorized to run in this process.
@@ -4033,7 +4125,8 @@ async fn schedule_concurrency_set(
             .try_set_max_concurrent_within_roots(req.max_concurrent, state.security.project_roots())
             .await
             .map_err(scheduler_api_error)?,
-        None => 0,
+        // The limit was not changed, so success would be a lie (2.16).
+        None => return Err(scheduler_unavailable_error()),
     };
     Ok(Json(max_concurrent))
 }
@@ -4055,9 +4148,11 @@ async fn schedule_delete(
                 .await
                 .map_err(scheduler_api_error)?
         }
-        None => Vec::new(),
+        // Nothing was deleted; report the unavailable scheduler instead of an
+        // empty success (2.16).
+        None => return Err(scheduler_unavailable_error()),
     };
-    Ok(Json(public_value(views)))
+    Ok(Json(public_value(views)?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -4083,9 +4178,11 @@ async fn schedule_set_enabled(
                 .await
                 .map_err(scheduler_api_error)?
         }
-        None => Vec::new(),
+        // The schedule was not toggled; fail loud instead of an empty
+        // success (2.16).
+        None => return Err(scheduler_unavailable_error()),
     };
-    Ok(Json(public_value(views)))
+    Ok(Json(public_value(views)?))
 }
 
 // -- Config endpoints ------------------------------------------------------
@@ -4225,24 +4322,9 @@ async fn write_config(
     State(state): State<AppState>,
     Json(req): Json<WriteConfigRequest>,
 ) -> ApiResult<()> {
-    // Sections with a typed endpoint must go through it: the typed route also
-    // refreshes live state (e.g. `reload_providers`), which a raw write would
-    // silently skip, diverging the file from the running process.
-    let typed_endpoint_message = match req.name.as_str() {
-        "defectdojo" | "issue_tracker" => {
-            Some("integration settings require the typed config endpoint")
-        }
-        "providers" => Some("provider settings require the typed config endpoint"),
-        _ => None,
-    };
-    if let Some(message) = typed_endpoint_message {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: message.to_owned(),
-            }),
-        ));
-    }
+    // Typed-section rejection lives in `ServiceContainer::save_config`, so
+    // the Tauri IPC path shares it; the error string arrives here unchanged
+    // and maps to the same BAD_REQUEST shape.
     if req.content.contains("<redacted>") || req.content.contains("<redacted-path>") {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -4286,12 +4368,12 @@ async fn config_value_to_toml(
     Ok(Json(toml))
 }
 
-async fn get_providers(State(_): State<AppState>) -> Json<serde_json::Value> {
+async fn get_providers(State(_): State<AppState>) -> ApiResult<serde_json::Value> {
     let providers = hf_service::config::get_providers()
         .into_iter()
         .map(public_provider_value)
-        .collect();
-    Json(serde_json::Value::Array(providers))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Json(serde_json::Value::Array(providers)))
 }
 
 async fn setup_readiness() -> Json<hf_service::system::SetupReadiness> {
@@ -4303,7 +4385,7 @@ async fn setup_providers() -> ApiResult<serde_json::Value> {
         .map_err(map_err(StatusCode::BAD_REQUEST))?
         .into_iter()
         .map(public_provider_value)
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(Json(serde_json::Value::Array(providers)))
 }
 
@@ -4331,7 +4413,9 @@ async fn provider_test(Json(request): Json<ProviderConnectionRequest>) -> ApiRes
         .map_err(map_err(StatusCode::BAD_REQUEST))
 }
 
-fn public_provider_value(provider: hf_service::config::ProviderConfig) -> serde_json::Value {
+fn public_provider_value(
+    provider: hf_service::config::ProviderConfig,
+) -> Result<serde_json::Value, ApiError> {
     let api_key_configured = provider
         .api_key
         .as_ref()
@@ -4341,7 +4425,7 @@ fn public_provider_value(provider: hf_service::config::ProviderConfig) -> serde_
         .as_ref()
         .is_some_and(|value| !value.is_empty());
     let headers_configured = !provider.headers.is_empty();
-    let mut value = public_value(provider);
+    let mut value = public_value(provider)?;
     if let Some(object) = value.as_object_mut() {
         object.insert(
             "api_key_configured".to_owned(),
@@ -4356,7 +4440,7 @@ fn public_provider_value(provider: hf_service::config::ProviderConfig) -> serde_
             serde_json::Value::Bool(headers_configured),
         );
     }
-    value
+    Ok(value)
 }
 
 #[derive(Debug, Deserialize)]
@@ -4381,11 +4465,27 @@ async fn set_providers(
     Json(req): Json<SetProvidersRequest>,
 ) -> ApiResult<()> {
     let providers = req.into_providers();
+    // An all-disabled request is an intentional pool shutdown; anything else
+    // that leaves no pool loaded is an activation failure, and `save_config`
+    // reports the same transition as an error -- the two config-write paths
+    // must agree (2.18).
+    let all_disabled = providers.iter().all(|provider| !provider.enabled);
+    let had_pool = state.container.provider_pool().is_some();
     hf_service::config::set_providers_preserving_secrets(&providers)
         .map_err(map_err(StatusCode::BAD_REQUEST))?;
     // Apply the new providers to the live pool so the change takes effect without
     // restarting the server.
-    state.container.reload_providers();
+    let loaded = state.container.reload_providers();
+    if had_pool && !loaded && !all_disabled {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Providers saved, but none could be reloaded; the live pool is empty. \
+Review the provider settings before retrying."
+                    .to_owned(),
+            }),
+        ));
+    }
     Ok(Json(()))
 }
 
@@ -4653,6 +4753,40 @@ async fn automotive_execute_replay(
         .map_err(classified_api_error)
 }
 
+/// Operator request body for the approval-mint route. It mirrors
+/// [`hf_service::automotive::AutomotiveApprovalMintRequest`] field-for-field;
+/// the mint carries no project field, so no project approval applies beyond
+/// the route's token gate.
+#[cfg(feature = "automotive-scapy")]
+#[derive(Debug, Deserialize)]
+struct AutomotiveApprovalMintRouteRequest {
+    interface: String,
+    plan: hf_service::automotive::ReplayPlan,
+    approved_by: String,
+}
+
+/// Mint keyed physical-bench approval evidence for one exact replay scope
+/// (the operator flow). The returned evidence feeds `/automotive/replay` as
+/// its `approval` field; replay verification is unchanged.
+#[cfg(feature = "automotive-scapy")]
+async fn automotive_mint_approval(
+    State(state): State<AppState>,
+    Json(request): Json<AutomotiveApprovalMintRouteRequest>,
+) -> ApiResult<hf_service::automotive::AutomotiveApprovalEvidence> {
+    state
+        .container
+        .mint_automotive_physical_bench_approval(
+            hf_service::automotive::AutomotiveApprovalMintRequest {
+                interface: request.interface,
+                plan: request.plan,
+                approved_by: request.approved_by,
+            },
+        )
+        .await
+        .map(Json)
+        .map_err(classified_api_error)
+}
+
 #[cfg(feature = "automotive-scapy")]
 #[derive(Debug, Deserialize)]
 struct AutomotiveOperationListRequest {
@@ -4854,8 +4988,8 @@ async fn patch_issue_tracker_config(
 
 // -- System endpoints ------------------------------------------------------
 
-async fn app_paths(State(_): State<AppState>) -> Json<serde_json::Value> {
-    Json(public_value(hf_service::config::app_paths()))
+async fn app_paths(State(_): State<AppState>) -> ApiResult<serde_json::Value> {
+    Ok(Json(public_value(hf_service::config::app_paths())?))
 }
 
 async fn host_arch() -> Json<String> {
@@ -4945,8 +5079,10 @@ mod request_tests {
     use axum::http::StatusCode;
 
     use super::{
-        classified_api_error, parse_role, public_provider_value, ReportRequest, SetProvidersRequest,
+        classified_api_error, parse_role, public_provider_value, public_value, ReportRequest,
+        SetProvidersRequest,
     };
+    use serde::Serialize;
 
     #[test]
     fn report_request_language_is_optional_and_defaults_to_english() {
@@ -4966,6 +5102,29 @@ mod request_tests {
             .is_err(),
             "an unsupported language is rejected, not silently rendered as English"
         );
+    }
+
+    struct FailingSerialize;
+
+    impl Serialize for FailingSerialize {
+        fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("deliberate serialize failure"))
+        }
+    }
+
+    #[test]
+    fn public_value_fails_loud_instead_of_returning_null() {
+        // A Serialize defect is a server-side error (500), never a 200 with a
+        // null body; successful values still pass the redaction stage.
+        let error = public_value(FailingSerialize).expect_err("serialize failure must be an error");
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            error.1 .0.error.contains("response serialization failed"),
+            "the failure is named: {}",
+            error.1 .0.error
+        );
+        let ok = public_value(serde_json::json!({"a": 1})).expect("serializable value maps");
+        assert_eq!(ok["a"], 1);
     }
 
     #[test]
@@ -5001,7 +5160,8 @@ Authorization = "Bearer synthetic-header"
         )
         .expect("synthetic provider config");
 
-        let public = public_provider_value(provider);
+        let public =
+            public_provider_value(provider).expect("provider serialization cannot fail here");
 
         assert_eq!(public["api_key_configured"], true);
         assert_eq!(public["api_key_env_configured"], true);

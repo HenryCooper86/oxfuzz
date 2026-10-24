@@ -153,7 +153,6 @@ impl TranscriptStore for JsonlTranscriptStore {
 
         // Atomic rewrite: write to temp file, then rename.
         let path = self.transcript_path(session_id)?;
-        let tmp_path = path.with_extension("jsonl.tmp");
 
         let mut content = String::new();
         for msg in kept {
@@ -164,47 +163,68 @@ impl TranscriptStore for JsonlTranscriptStore {
             content.push('\n');
         }
 
-        // Durable atomic rewrite: write the temp file and fsync its contents
-        // before the rename, so the rename (which is itself durable) cannot
-        // publish a temp file whose data blocks were never written back.
-        let mut tmp_file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&tmp_path)
-            .await
-            .map_err(|e| SessionError::TranscriptError {
-                message: format!("open temp transcript: {e}"),
-            })?;
-        tmp_file.write_all(content.as_bytes()).await.map_err(|e| {
-            SessionError::TranscriptError {
-                message: format!("write temp transcript: {e}"),
-            }
-        })?;
-        tmp_file
-            .sync_all()
-            .await
-            .map_err(|e| SessionError::TranscriptError {
-                message: format!("sync temp transcript: {e}"),
-            })?;
-        drop(tmp_file);
-
-        tokio::fs::rename(&tmp_path, &path)
-            .await
-            .map_err(|e| SessionError::TranscriptError {
-                message: format!("rename temp transcript: {e}"),
-            })?;
-
-        // Best-effort fsync of the containing directory so the rename itself is
-        // durable across a crash; a failure here is not fatal to the operation.
-        if let Some(parent) = path.parent() {
-            if let Ok(dir) = tokio::fs::File::open(parent).await {
-                let _ = dir.sync_all().await;
-            }
-        }
+        durable_rewrite(&path, &content).await?;
 
         Ok(removed)
     }
+}
+
+/// Durably publish a transcript rewrite: write the temp file, fsync it, rename
+/// over the live file, then best-effort fsync the parent directory.
+///
+/// Both the context and display transcripts roll back on the same paths, so
+/// they share this one implementation — a crash after the rename must leave
+/// both files equally durable, never a fresh display transcript beside a stale
+/// context transcript.
+pub(crate) async fn durable_rewrite(path: &Path, content: &str) -> Result<(), SessionError> {
+    let mut tmp_os = path.as_os_str().to_os_string();
+    tmp_os.push(".tmp");
+    let tmp_path = PathBuf::from(tmp_os);
+
+    // Durable atomic rewrite: write the temp file and fsync its contents
+    // before the rename, so the rename (which is itself durable) cannot
+    // publish a temp file whose data blocks were never written back.
+    let mut tmp_file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&tmp_path)
+        .await
+        .map_err(|e| SessionError::TranscriptError {
+            message: format!("open temp transcript: {e}"),
+        })?;
+    tmp_file
+        .write_all(content.as_bytes())
+        .await
+        .map_err(|e| SessionError::TranscriptError {
+            message: format!("write temp transcript: {e}"),
+        })?;
+    tmp_file
+        .sync_all()
+        .await
+        .map_err(|e| SessionError::TranscriptError {
+            message: format!("sync temp transcript: {e}"),
+        })?;
+    drop(tmp_file);
+
+    tokio::fs::rename(&tmp_path, path)
+        .await
+        .map_err(|e| SessionError::TranscriptError {
+            message: format!("rename temp transcript: {e}"),
+        })?;
+
+    // Best-effort fsync of the containing directory so the rename itself is
+    // durable across a crash; a failure here is not fatal to the operation.
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = tokio::fs::File::open(parent).await {
+            // §2.17: a directory-fsync failure is swallowed because the
+            // rename has already been applied; failing now would report the
+            // truncate as lost when the content is already live.
+            let _ = dir.sync_all().await;
+        }
+    }
+
+    Ok(())
 }
 
 /// Return a platform-independent safe filename stem for a session transcript.

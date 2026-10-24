@@ -445,6 +445,81 @@ describe("transport", () => {
     }
   });
 
+  it("passes unmeasured run metrics through as null instead of zero", async () => {
+    const encoder = new TextEncoder();
+    const originalFetch = globalThis.fetch;
+    let eventConnections = 0;
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/runs/start") {
+        return new Response(
+          JSON.stringify({ run_id: "11111111-1111-4111-8111-111111111111", status: "running" }),
+          { status: 202, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (path === "/events") {
+        eventConnections += 1;
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(
+                encoder.encode(
+                  eventConnections === 1
+                    ? 'event: run:progress\ndata: {"type":"RunProgress","data":{"run_id":"11111111-1111-4111-8111-111111111111","kind":"LogLine","data":"owned"}}\n\n'
+                    : 'event: run:status\ndata: {"type":"RunStatus","data":{"run_id":"11111111-1111-4111-8111-111111111111","status":"done"}}\n\n',
+                ),
+              );
+              controller.close();
+            },
+          }),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      if (path === "/runs/11111111-1111-4111-8111-111111111111/status") {
+        return new Response(
+          JSON.stringify({
+            run_id: "11111111-1111-4111-8111-111111111111",
+            status: "done",
+            active: false,
+            started_at: "2026-07-15T00:00:00Z",
+            ended_at: "2026-07-15T00:01:00Z",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (path === "/runs/history") {
+        // A run whose engine never measured edges or execs (e.g. honggfuzz):
+        // absent must not render as a false zero.
+        return new Response(
+          JSON.stringify([
+            {
+              id: "11111111-1111-4111-8111-111111111111",
+              status: "Done",
+              crashes: 1,
+              edges: null,
+              execs: null,
+            },
+          ]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      throw new Error(`unexpected request: ${String(url)}`);
+    }) as typeof fetch;
+
+    try {
+      const transport = createHttpTransport();
+      const result = await transport.invoke<FuzzerRunResult>("run_fuzzer", {
+        project: "/tmp/project",
+        target: "parse_entry",
+        engine: "honggfuzz",
+        duration: 60,
+      });
+      expect(result).toMatchObject({ edges: null, execs: null, crashes: 1 });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("reports the service admission before the HTTP run reaches a terminal state", async () => {
     const encoder = new TextEncoder();
     const admitted: string[] = [];

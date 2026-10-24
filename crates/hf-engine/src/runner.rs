@@ -245,11 +245,12 @@ impl EngineRunner {
         // finished campaign. Fill in a concrete default so the adapter bounds
         // the fuzzer and both layers agree: the fuzzer exits cleanly within the
         // sandbox window.
+        let default_duration = std::time::Duration::from_secs(DEFAULT_RUN_SECS);
         let effective_cfg = if cfg.duration.is_some() {
             std::borrow::Cow::Borrowed(cfg)
         } else {
             let mut c = cfg.clone();
-            c.duration = Some(std::time::Duration::from_secs(DEFAULT_RUN_SECS));
+            c.duration = Some(default_duration);
             std::borrow::Cow::Owned(c)
         };
         let cfg = effective_cfg.as_ref();
@@ -260,9 +261,15 @@ impl EngineRunner {
         // a libFuzzer `-max_total_time=N` campaign also spends time loading the
         // corpus and running ASan leak detection at exit, so without headroom
         // the container is killed as "command timed out" right at the finish.
-        let max_duration_secs = cfg.duration.map_or(DEFAULT_RUN_SECS, |d| {
-            d.as_secs().saturating_add(SANDBOX_TIMEOUT_HEADROOM_SECS)
-        });
+        // The effective duration is always `Some` (filled just above when
+        // absent), so the headroom is computed unconditionally from it; a
+        // fallback to the bare default would drop the headroom and reintroduce
+        // the kill-at-finish race this cap exists to prevent.
+        let max_duration_secs = cfg
+            .duration
+            .unwrap_or(default_duration)
+            .as_secs()
+            .saturating_add(SANDBOX_TIMEOUT_HEADROOM_SECS);
         let env = run_env(engine, cfg)?;
         let limits = hf_core::runtime::ResourceLimits {
             max_mem_mb: cfg.max_mem_mb,
@@ -285,8 +292,7 @@ impl EngineRunner {
             use std::sync::atomic::Ordering::Relaxed;
 
             saw_line.store(true, Relaxed);
-            let lower = line.to_ascii_lowercase();
-            if lower.contains("done") || lower.contains("summary") || lower.contains("finished") {
+            if line_signals_completion(line) {
                 saw_completion.store(true, Relaxed);
             }
             on_progress(FuzzProgress::LogLine(line.to_owned()));
@@ -354,8 +360,9 @@ impl EngineRunner {
         // -timeout_exitcode). All three are valid fuzzing outcomes -- a crash,
         // OOM, or timeout is a finding to triage, not an engine failure, so they
         // must not be turned into an error (which would discard the run's
-        // coverage). `saw_completion` stays as a fallback for engines that exit
-        // with some other code but printed a completion/summary line.
+        // coverage). `saw_completion` stays as a fallback for an engine that
+        // exits with some other code but printed an anchored terminal line
+        // (see [`line_signals_completion`]).
         let is_valid_outcome = result.exit_code == 0
             || result.exit_code == 70
             || result.exit_code == 77
@@ -374,4 +381,37 @@ impl EngineRunner {
             termination: CommandTermination::Completed,
         })
     }
+}
+
+/// Whether one engine-stdout line is an anchored terminal completion marker.
+///
+/// The sandbox interleaves the target binary's own output with the engine's,
+/// and target prose routinely contains "done", "summary", or "finished"
+/// ("parsing input done", "summary of frames", AFL++'s "cycles done : N").
+/// A bare substring over any of those words would validate a failed engine
+/// exit as a finished campaign, so the completion signal is anchored to the
+/// shapes engines actually print at the end of a bounded campaign:
+///
+/// - libFuzzer's `Done <N> runs in <T> seconds` line (and the bare `DONE`
+///   sentinel a run closes with), and
+/// - a sanitizer/UBSan report's closing `SUMMARY:` line, which starts the
+///   line in full capitals.
+///
+/// The anchors are engine-specific shapes but need no engine parameter: no
+/// other engine prints either form, and the sanitizer `SUMMARY:` can close a
+/// finding under any driver.
+fn line_signals_completion(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("SUMMARY:") {
+        return true;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower == "done" {
+        return true;
+    }
+    // `Done ` followed by a digit: libFuzzer's closing line. The digit guard
+    // rejects prose like "done parsing" while keeping "Done 4096 runs ...".
+    lower
+        .strip_prefix("done ")
+        .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
 }

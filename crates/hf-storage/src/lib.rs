@@ -66,7 +66,7 @@ pub use session_store::SqliteSessionStore;
 pub use store::{
     AutoRevertEvent, AutomotiveOperationRecord, AutomotiveOperationStatus,
     AutomotiveStateCorpusRecord, CampaignHealthEventPageRecord, CampaignHealthEventRecord,
-    CampaignHealthEvidenceRecord, GuardrailDecisionRecord, HarnessAiReviewRecord,
+    CampaignHealthEvidenceRecord, FiledIssueClaim, GuardrailDecisionRecord, HarnessAiReviewRecord,
     HarnessApprovalKind, HarnessApprovalRecord, ProjectAutoRevert, PromotedHarness,
     RetainedHealthSample, RunKind, RunRecord, RunStatus, RunTelemetryRecord, SemgrepFindingRecord,
     SemgrepFindingSeverity, SemgrepPublication, SemgrepRunRecord, SemgrepRunStatus,

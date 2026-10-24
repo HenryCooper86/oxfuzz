@@ -7,17 +7,51 @@ use hf_core::provider::{
     ChatRequest, ChatResponse, ChatStreamResponse, FinishReason, LlmProvider, ProviderError,
     ProviderMetadata,
 };
-use hf_core::runtime::{CommandResult, ResourceLimits, RuntimeAdapter};
+use hf_core::runtime::{CommandResult, ResourceLimits, RuntimeAdapter, SandboxOptions};
 use hf_core::target::{
     InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
 };
 use hf_core::types::TokenUsage;
 #[cfg(unix)]
-use hf_harness::smoke_fuzz_in_paths;
-use hf_harness::{
-    compile, draft, smoke_fuzz, smoke_fuzz_in, smoke_fuzz_in_paths_with_config,
-    smoke_fuzz_in_paths_with_config_and_sandbox_image,
-};
+use hf_harness::smoke_fuzz_in_paths_with_config_and_sandbox_image;
+use hf_harness::{compile_with_options, draft_analyzed, HarnessDraftContext};
+
+/// The caller-resolved config the removed default wrappers used to build
+/// internally; production service paths resolve their own policy snapshot.
+fn smoke_config(harness: &Harness) -> FuzzRunConfig {
+    FuzzRunConfig {
+        harness_id: harness.id,
+        engine: harness.engine,
+        duration: Some(std::time::Duration::from_secs(60)),
+        max_mem_mb: 2048,
+        max_cpus: 1,
+        seed_corpus: None,
+        sanitizer: harness.sanitizer,
+        env: vec![],
+        extra_args: vec![],
+        seed: None,
+        replay_of: None,
+        input_manifest_sha256: None,
+        input_timeout: None,
+        resume: false,
+        cmplog: false,
+    }
+}
+
+async fn smoke_with_default_config(
+    harness: Harness,
+    rt: &dyn RuntimeAdapter,
+    workspace: &Path,
+    corpus: &Path,
+    out: &Path,
+) -> Result<Harness, ClassifiedError> {
+    let cfg = smoke_config(&harness);
+    smoke_fuzz_in_paths_with_config_and_sandbox_image(
+        harness, rt, workspace, corpus, out, &cfg, None,
+    )
+    .await
+}
+
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -240,10 +274,17 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
 That's it."
             .to_owned(),
     };
-    let draft = draft(
+    let draft = draft_analyzed(
         &target(),
         EngineKind::LibFuzzer,
+        &HarnessDraftContext {
+            related: &[],
+            build: None,
+            examples: &[],
+            analysis: None,
+        },
         hf_core::target::Sanitizer::Address,
+        false,
         Box::new(llm),
     )
     .await
@@ -281,7 +322,7 @@ async fn compile_transitions_status_on_success() {
         cmplog: None,
     };
     let workspace = tempfile::tempdir().expect("temp workspace");
-    let compiled = compile(harness, &rt, workspace.path())
+    let compiled = compile_with_options(harness, &rt, workspace.path(), &SandboxOptions::default())
         .await
         .expect("compile should succeed");
     assert_eq!(compiled.status, HarnessStatus::Compiled);
@@ -312,7 +353,8 @@ async fn compile_returns_error_on_failure() {
         cmplog: None,
     };
     let workspace = tempfile::tempdir().expect("temp workspace");
-    let result = compile(harness, &rt, workspace.path()).await;
+    let result =
+        compile_with_options(harness, &rt, workspace.path(), &SandboxOptions::default()).await;
     assert!(result.is_err(), "compile should fail on exit code 1");
 }
 
@@ -344,11 +386,12 @@ async fn smoke_fuzz_passes_with_positive_execs() {
     // writes crashes into. `/work` is where the *sandbox* mounts the workspace,
     // not a path that exists on the host.
     let workspace = tempfile::tempdir().expect("temp workspace");
-    let smoked = smoke_fuzz_in(
+    let smoked = smoke_with_default_config(
         harness,
         &rt,
         workspace.path(),
-        std::path::Path::new("runs/smoke/out"),
+        Path::new("corpus"),
+        Path::new("runs/smoke/out"),
     )
     .await
     .expect("smoke should succeed");
@@ -403,13 +446,14 @@ async fn smoke_fuzz_uses_one_resolved_config_for_command_runtime_and_summary() {
     };
     let workspace = tempfile::tempdir().expect("temp workspace");
 
-    let smoked = smoke_fuzz_in_paths_with_config(
+    let smoked = smoke_fuzz_in_paths_with_config_and_sandbox_image(
         harness,
         &rt,
         workspace.path(),
         Path::new("runs/smoke/corpus"),
         Path::new("runs/smoke/out"),
         &cfg,
+        None,
     )
     .await
     .expect("configured smoke should succeed");
@@ -472,13 +516,14 @@ async fn honggfuzz_smoke_bounds_feedback_shared_memory() {
         cmplog: false,
     };
     let workspace = tempfile::tempdir().unwrap();
-    smoke_fuzz_in_paths_with_config(
+    smoke_fuzz_in_paths_with_config_and_sandbox_image(
         harness,
         &rt,
         workspace.path(),
         Path::new("runs/smoke/corpus"),
         Path::new("runs/smoke/out"),
         &cfg,
+        None,
     )
     .await
     .unwrap();
@@ -571,10 +616,11 @@ async fn smoke_fuzz_counts_a_fresh_artifact_even_without_a_log_marker() {
     };
     let workspace = tempfile::tempdir().expect("temp workspace");
 
-    let smoked = smoke_fuzz_in(
+    let smoked = smoke_with_default_config(
         harness,
         &ArtifactRuntime,
         workspace.path(),
+        Path::new("corpus"),
         Path::new("runs/smoke/out"),
     )
     .await
@@ -597,7 +643,7 @@ async fn smoke_fuzz_rejects_symlinked_corpus_and_output_directories() {
     std::fs::create_dir_all(workspace.path().join("runs/smoke")).unwrap();
     std::os::unix::fs::symlink(outside.path(), workspace.path().join("runs/smoke/out")).unwrap();
 
-    let output_error = smoke_fuzz_in_paths(
+    let output_error = smoke_with_default_config(
         compiled_harness(EngineKind::LibFuzzer),
         &rt,
         workspace.path(),
@@ -610,7 +656,7 @@ async fn smoke_fuzz_rejects_symlinked_corpus_and_output_directories() {
 
     std::fs::remove_file(workspace.path().join("runs/smoke/out")).unwrap();
     std::os::unix::fs::symlink(outside.path(), workspace.path().join("runs/smoke/corpus")).unwrap();
-    let corpus_error = smoke_fuzz_in_paths(
+    let corpus_error = smoke_with_default_config(
         compiled_harness(EngineKind::LibFuzzer),
         &rt,
         workspace.path(),
@@ -647,9 +693,15 @@ async fn smoke_fuzz_fails_on_zero_execs() {
         cmplog: None,
     };
     let workspace = tempfile::tempdir().expect("temp workspace");
-    let err = smoke_fuzz(harness, &rt, workspace.path())
-        .await
-        .expect_err("smoke should fail when the fuzzer never ran");
+    let err = smoke_with_default_config(
+        harness,
+        &rt,
+        workspace.path(),
+        Path::new("corpus"),
+        Path::new("out"),
+    )
+    .await
+    .expect_err("smoke should fail when the fuzzer never ran");
     // Assert *why* it failed. Passing a container path as the host workspace made
     // this test pass on a filesystem error instead of the check it names, so it
     // would have kept passing with the zero-activity logic deleted.
@@ -687,9 +739,15 @@ async fn smoke_fuzz_rejects_libfuzzer_inited_without_execs() {
         cmplog: None,
     };
     let workspace = tempfile::tempdir().expect("temp workspace");
-    let err = smoke_fuzz(harness, &rt, workspace.path())
-        .await
-        .expect_err("a harness that only reached INITED must be rejected");
+    let err = smoke_with_default_config(
+        harness,
+        &rt,
+        workspace.path(),
+        Path::new("corpus"),
+        Path::new("out"),
+    )
+    .await
+    .expect_err("a harness that only reached INITED must be rejected");
     assert!(
         err.to_string().contains("no fuzzer activity"),
         "expected the no-activity rejection, got: {err}"

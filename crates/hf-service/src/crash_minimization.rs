@@ -83,6 +83,9 @@ impl Drop for MinimizationRun {
 }
 
 /// Validate exact run-owned inputs and construct an argv-only minimizer command.
+///
+/// `input_timeout` is the run's resolved per-input budget (`input_timeout` on
+/// the retained run config); `None` keeps the pinned AFL++ default.
 pub(crate) fn prepare(
     workspace: &Path,
     run_id: Uuid,
@@ -90,6 +93,7 @@ pub(crate) fn prepare(
     binary: &Path,
     crash_input: &Path,
     crash_id: Uuid,
+    input_timeout: Option<std::time::Duration>,
 ) -> Result<PreparedMinimization, ClassifiedError> {
     if !matches!(engine, EngineKind::LibFuzzer | EngineKind::AflPlusPlus) {
         return Ok(PreparedMinimization::Unsupported);
@@ -148,12 +152,21 @@ pub(crate) fn prepare(
     let binary_container = container_path(&workspace, &binary)?;
     let input_container = container_path(&workspace, &crash_input)?;
     let output_container = container_path(&workspace, &partial_path)?;
-    let command = hf_crash::build_minimize_args(
-        engine,
-        &binary_container,
-        &input_container,
-        &output_container,
-    )
+    let command = match input_timeout {
+        Some(timeout) => hf_crash::build_minimize_args_with_timeout(
+            engine,
+            &binary_container,
+            &input_container,
+            &output_container,
+            timeout,
+        ),
+        None => hf_crash::build_minimize_args(
+            engine,
+            &binary_container,
+            &input_container,
+            &output_container,
+        ),
+    }
     .ok_or_else(|| ClassifiedError::Validation("engine has no crash minimizer".to_owned()))?;
     let minimized_container = container_path(&workspace, &minimized)?;
     Ok(PreparedMinimization::Run(Box::new(MinimizationRun {
@@ -296,4 +309,66 @@ fn sync_parent(parent: &Path) -> Result<(), ClassifiedError> {
                 parent.display()
             ))
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prepare;
+    use hf_core::engine::EngineKind;
+    use uuid::Uuid;
+
+    fn run_layout(root: &std::path::Path) -> std::path::PathBuf {
+        let workspace = root.join("workspace");
+        let run_root = workspace
+            .join("runs")
+            .join("11111111-1111-1111-1111-111111111111");
+        std::fs::create_dir_all(run_root.join("input")).unwrap();
+        std::fs::create_dir_all(run_root.join("out")).unwrap();
+        std::fs::write(run_root.join("input").join("harness"), b"binary").unwrap();
+        std::fs::write(run_root.join("out").join("crash-input"), b"crash").unwrap();
+        std::fs::create_dir_all(run_root.join("triage").join("minimized")).unwrap();
+        workspace
+    }
+
+    fn command_with(timeout: Option<std::time::Duration>) -> Vec<String> {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = run_layout(root.path());
+        let run_root = workspace
+            .join("runs")
+            .join("11111111-1111-1111-1111-111111111111");
+        let prepared = prepare(
+            &workspace,
+            uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
+            EngineKind::AflPlusPlus,
+            &run_root.join("input").join("harness"),
+            &run_root.join("out").join("crash-input"),
+            Uuid::nil(),
+            timeout,
+        )
+        .unwrap();
+        let command = match prepared {
+            super::PreparedMinimization::Run(run) => run.command.clone(),
+            super::PreparedMinimization::Unsupported => {
+                panic!("expected a runnable minimization, got Unsupported")
+            }
+            super::PreparedMinimization::Complete(path) => {
+                panic!("expected a runnable minimization, got Complete({path:?})")
+            }
+        };
+        command
+    }
+
+    #[test]
+    fn resolved_input_timeout_reaches_the_minimizer_argv() {
+        let argv = command_with(Some(std::time::Duration::from_millis(2500)));
+        let position = argv.iter().position(|arg| arg == "-t").expect("-t flag");
+        assert_eq!(argv[position + 1], "2500");
+    }
+
+    #[test]
+    fn absent_input_timeout_keeps_the_pinned_default() {
+        let argv = command_with(None);
+        let position = argv.iter().position(|arg| arg == "-t").expect("-t flag");
+        assert_eq!(argv[position + 1], "1000");
+    }
 }

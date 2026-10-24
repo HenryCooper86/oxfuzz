@@ -9,6 +9,64 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ## Unreleased
 
+### Fixed
+
+- CLI `harness --repair/--refine` rejects an explicit `--ai off/require`
+  (those paths always use a configured model), `corpus --op llmseed/regen`
+  take `--lang` instead of hardcoding C, and `run --replay` rejects
+  `--duration`, `--cpus`, and an explicit `--lang` it would silently drop.
+  `discover --clang` now honors Ctrl-C and a bounded wait derived from the
+  analysis budget instead of polling forever.
+- REST scheduler mutations (create/delete/set-enabled/concurrency) return
+  503 when no scheduler is attached instead of an empty success; the
+  coverage-experiment replay review maps infrastructure failures to 5xx
+  instead of 400; response serialization failures return 500 instead of a
+  null 200 body, and the coverage series response passes the same redaction
+  as every other public endpoint. Saving providers that leave enabled
+  providers unloaded reports an error, mirroring the CLI/GUI config path.
+- Skills: an unreadable `root.md` is skipped with a warning instead of
+  registering an empty playbook, the manifest no longer rewrites
+  `max_input_tokens` to a hidden default or writes unread bookkeeping
+  sections, and an agent referencing an unknown skill fails loud at prompt
+  assembly instead of running without its playbook.
+- Runtime: unknown sandbox architectures are rejected at the config/IPC
+  boundary instead of being coerced to the host arch, a failed engine probe
+  is logged and reported distinctly from "no engines", and the config no
+  longer carries memory/cpu/duration/ptrace defaults the runtime never read
+  (config-wide env defaults remain).
+- Web auth: `/health` no longer resets the brute-force lockout window, a
+  correct bearer token is now admitted even while the lockout throttles
+  failing attempts, and `oxfuzz serve` fails startup on an explicitly
+  configured but weak `HF_WEB_TOKEN` instead of serving every request a 401.
+  A token-gated `POST /automotive/approval/mint` route (with a matching
+  desktop command) mints keyed physical-bench approval evidence to feed
+  `/automotive/replay`.
+- Campaigns and discovery: a bare namespaced C++ symbol (`ns::Class::method`)
+  now matches its file-qualified emitted selector, so `campaign --target`
+  admits a harness promoted under the qualified spelling; campaign admission
+  resolves the target spelling exactly like a direct run; legacy campaign
+  schedules whose trigger interval differs no longer share one state
+  identity; and legacy run-history crash counts dedupe per run rather than
+  across runs.
+- Corpus/seed provenance: seed-generation APIs report only the seeds they
+  wrote (never the pre-existing inventory), first-time seeds persist with
+  their `Seed` source, and an empty dead-seed set reports zero requested
+  replacements.
+- Issue filing: a pending dedup claim whose remote create never completed is
+  reclaimed after a bounded TTL instead of wedging the key forever.
+- Reports: the deterministic reproduction bullet carries the crash id, so
+  identically-assessed crashes no longer suppress each other's re-injection;
+  managed-mutator review rejects the same plugin-environment keys launch
+  does; and enrichment treats a candidate's recorded span end as exclusive.
+
+### Removed
+
+- The unused prompt section/template/store subsystem of `hf-prompt` and the
+  documented-but-inert prompt override format
+  (`config/prompts/prompts.example.toml`); prompts are compile-time sections
+  of the binary. The dead `truncate_tool_result`, `hf_discovery::rank`, and
+  `render_discovery_prompt` APIs were removed with it.
+
 ## 0.7.0 - 2026-10-23
 
 ### Added

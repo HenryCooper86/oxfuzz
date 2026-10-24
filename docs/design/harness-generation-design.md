@@ -239,8 +239,9 @@ remain available with `build-doctor` disabled, including no-default builds.
 
 ## 4. Templates
 
-Per language + engine templates live in `config/prompts/harness_*`. The LLM
-fills the template; the template guarantees the engine entry point is present.
+Harness prompts are rendered by `hf-prompt`'s built-in per-language,
+per-engine renderers in the binary; each renderer guarantees the engine entry
+point is present. No template files live in `config/prompts/`.
 
 ## 5. Safety
 

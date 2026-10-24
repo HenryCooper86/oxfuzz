@@ -15,7 +15,7 @@ async fn selection_returns_only_an_authorized_canonical_directory() {
     let file = root.path().join("file.c");
     std::fs::write(&file, "fixture").unwrap();
     let security = WebSecurityConfig::new(
-        Some("fixture-token".into()),
+        Some("fixture-token-0123456789".into()),
         false,
         vec![],
         vec![root.path().into()],
@@ -37,7 +37,7 @@ async fn selection_returns_only_an_authorized_canonical_directory() {
             .uri("/projects/select")
             .header("content-type", "application/json");
         if token {
-            request = request.header("authorization", "Bearer fixture-token");
+            request = request.header("authorization", "Bearer fixture-token-0123456789");
         }
         let response = app
             .clone()

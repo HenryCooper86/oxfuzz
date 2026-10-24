@@ -276,6 +276,20 @@ impl ServiceContainer {
     /// If activation fails after saving, providers are disabled rather than retaining
     /// a stale, potentially unlimited spending policy.
     pub fn save_config(&self, name: &str, content: &str) -> Result<(), String> {
+        // Sections with a typed endpoint must go through it: the typed route
+        // also refreshes live state (e.g. `reload_providers`), which a raw
+        // write would silently skip, diverging the file from the running
+        // process. Guarded here so every surface -- REST, Tauri IPC, CLI --
+        // shares one enforcement point and one error shape.
+        match name {
+            "defectdojo" | "issue_tracker" => {
+                return Err("integration settings require the typed config endpoint".to_owned());
+            }
+            "providers" => {
+                return Err("provider settings require the typed config endpoint".to_owned());
+            }
+            _ => {}
+        }
         if name != "oxfuzz" {
             return crate::config::write_config(name, content);
         }
@@ -606,6 +620,36 @@ impl ServiceContainer {
     pub fn clear_workspace(&self) -> Result<(), ClassifiedError> {
         let (root, uses_trusted_default) = configured_workspace_root();
         self.clear_workspace_at_with_adoption(&root, uses_trusted_default)
+    }
+}
+
+#[cfg(test)]
+mod save_config_tests {
+    use super::ServiceContainer;
+
+    #[test]
+    fn raw_writes_to_typed_config_sections_are_rejected_at_the_service() {
+        let container = ServiceContainer::stubbed();
+
+        for (name, expected) in [
+            (
+                "defectdojo",
+                "integration settings require the typed config endpoint",
+            ),
+            (
+                "issue_tracker",
+                "integration settings require the typed config endpoint",
+            ),
+            (
+                "providers",
+                "provider settings require the typed config endpoint",
+            ),
+        ] {
+            let error = container
+                .save_config(name, "url = \"http://localhost\"\n")
+                .unwrap_err();
+            assert_eq!(error, expected, "a raw write to {name} must be refused");
+        }
     }
 }
 

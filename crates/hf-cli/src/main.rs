@@ -260,8 +260,9 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
             project,
             target,
             op,
+            lang,
             from,
-        }) => cmd_corpus(project, &target, &op, from.as_deref()).await?,
+        }) => cmd_corpus(project, &target, &op, &lang, from.as_deref()).await?,
         Commands::Coverage(args::CoverageArgs { project, target }) => {
             cmd_coverage(project, &target).await?;
         }
@@ -322,7 +323,10 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
             report_lang,
         }) => cmd_report(project, &target, out.as_deref(), &report_lang).await?,
         Commands::Serve(args::ServeArgs { host, port }) => {
-            let security = hf_web::WebSecurityConfig::from_env();
+            // Resolve the security policy before binding: an explicitly
+            // configured but weak `HF_WEB_TOKEN` must fail startup rather than
+            // silently serving every request a 401.
+            let security = hf_web::WebSecurityConfig::try_from_env()?;
             let addr = std::net::SocketAddr::new(host, port);
             hf_web::validate_bind_addr(addr, security.token_configured())?;
             let app = hf_web::build_bootstrapped_with_security(security).await?;

@@ -130,6 +130,50 @@ fn concurrent_schedules_cannot_spend_one_quota_twice() {
 }
 
 #[test]
+fn mutating_operations_wait_for_the_in_process_allocation_gate() {
+    // VULN-002: the advisory flock cannot exclude two admissions in one
+    // process on Linux, so reserve/propose/review must serialize behind the
+    // per-directory in-process gate. Holding the gate must hold the operation
+    // up, deterministically, and releasing it must let the admission finish.
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    let store = AllocationStore::new(&dir.path().join("state"), project.clone());
+    let plan = store.propose(proposal(&project)).unwrap();
+    let candidates = plan
+        .proposal
+        .entries
+        .iter()
+        .map(|entry| entry.candidate.clone())
+        .collect::<Vec<_>>();
+    store.review(plan.proposal.id, &plan.digest, true).unwrap();
+
+    let gate = store.process_gate_for_test();
+    let held = gate
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        let outcome = store.reserve("gated-schedule", &candidates, 10);
+        // 2.17: the receiver outlives this thread, so a failed send cannot
+        // reach anyone; the send result carries no further information.
+        let _ = sender.send(outcome.is_ok_and(|granted| granted.is_some()));
+    });
+    assert!(
+        receiver
+            .recv_timeout(std::time::Duration::from_millis(200))
+            .is_err(),
+        "reserve must block while another holder owns the in-process gate"
+    );
+    drop(held);
+    waiter.join().unwrap();
+    assert!(
+        receiver.recv().unwrap(),
+        "reserve finishes once the gate frees"
+    );
+}
+
+#[test]
 fn revoked_corrupt_and_changed_harness_plans_deny_admission() {
     let dir = tempfile::tempdir().unwrap();
     let store = AllocationStore::new(&dir.path().join("state"), dir.path().to_owned());

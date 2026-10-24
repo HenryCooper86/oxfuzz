@@ -103,3 +103,73 @@ async fn generate_seeds_llm_falls_back_to_heuristics_without_provider() {
         "heuristic fallback should seed something"
     );
 }
+
+#[tokio::test]
+async fn generate_seeds_llm_reports_only_the_seeds_it_wrote() {
+    isolate_workspace();
+    let project = write_sample_project();
+    let container = ServiceContainer::new(
+        Arc::new(hf_runtime::StubRuntime),
+        Some(Arc::new(HexSeedPool)),
+    );
+    // An input the fuzzer earned before this call: part of the persisted
+    // inventory, never something this seeding "generated".
+    let corpus = hf_service::workspace_dir(project.path(), "parse_entry").join("corpus");
+    std::fs::create_dir_all(&corpus).unwrap();
+    std::fs::write(corpus.join("fuzzer_earned"), b"kept").unwrap();
+
+    let first = container
+        .generate_seeds_llm(project.path(), "parse_entry", TargetLanguage::C, 8)
+        .await
+        .expect("seed generation should succeed");
+    assert_eq!(first.len(), 2, "{first:?}");
+    assert!(
+        !first.iter().any(|entry| entry.name == "fuzzer_earned"),
+        "a pre-existing entry is not reported as generated"
+    );
+
+    // Repeated calls rewrite the same names over the same inventory; the
+    // reported set must stay exactly as large as what the call wrote.
+    let second = container
+        .generate_seeds_llm(project.path(), "parse_entry", TargetLanguage::C, 8)
+        .await
+        .expect("seed generation should succeed");
+    assert_eq!(
+        first.len(),
+        second.len(),
+        "counts are stable across repeated calls"
+    );
+    let names_of = |entries: &[hf_service::SeedEntry]| -> Vec<String> {
+        let mut names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
+        names.sort();
+        names
+    };
+    assert_eq!(names_of(&first), names_of(&second));
+    assert!(
+        std::fs::read_dir(&corpus).unwrap().count() >= 3,
+        "the earned input stays on disk alongside the seeds"
+    );
+}
+
+#[tokio::test]
+async fn generate_seeds_reports_only_the_seeds_it_wrote() {
+    isolate_workspace();
+    let project = write_sample_project();
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
+    let corpus = hf_service::workspace_dir(project.path(), "parse_entry").join("corpus");
+    std::fs::create_dir_all(&corpus).unwrap();
+    std::fs::write(corpus.join("fuzzer_earned"), b"kept").unwrap();
+
+    let entries = container
+        .generate_seeds(project.path(), "parse_entry")
+        .await
+        .expect("seed generation should succeed");
+    assert!(
+        !entries.is_empty(),
+        "the heuristic seeder writes its own seeds"
+    );
+    assert!(
+        !entries.iter().any(|entry| entry.name == "fuzzer_earned"),
+        "a pre-existing entry is not reported as generated"
+    );
+}

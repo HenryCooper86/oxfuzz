@@ -12,10 +12,10 @@ use hf_core::target::{
 };
 use hf_storage::{
     AutoRevertEvent, AutomotiveOperationRecord, AutomotiveOperationStatus,
-    AutomotiveStateCorpusRecord, CampaignHealthEventRecord, GuardrailDecisionRecord,
-    HarnessAiReviewRecord, HarnessApprovalKind, HarnessWorkOrderAttemptCompletion,
-    HarnessWorkOrderAttemptRecord, HarnessWorkOrderAttemptStage, HarnessWorkOrderAttemptStatus,
-    HarnessWorkOrderRecord, HarnessWorkOrderSubmissionInsertError,
+    AutomotiveStateCorpusRecord, CampaignHealthEventRecord, FiledIssueClaim,
+    GuardrailDecisionRecord, HarnessAiReviewRecord, HarnessApprovalKind,
+    HarnessWorkOrderAttemptCompletion, HarnessWorkOrderAttemptRecord, HarnessWorkOrderAttemptStage,
+    HarnessWorkOrderAttemptStatus, HarnessWorkOrderRecord, HarnessWorkOrderSubmissionInsertError,
     HarnessWorkOrderSubmissionRecord, NewScheduleOccurrence, ProjectAutoRevert,
     RemediationOperationCompletion, RemediationOperationRecord, RemediationOperationStage,
     RemediationOperationStatus, RunKind, RunRecord, RunStatus, RunTelemetryRecord,
@@ -3673,6 +3673,126 @@ async fn clear_knowledge_empties_all_domain_tables() {
     assert!(store.list_all_corpus_entries().await.unwrap().is_empty());
 }
 
+/// Seed a run plus its closeout steps, a promoted harness with a digest-bound
+/// approval, and an AI review, returning the ids.
+async fn seed_run_and_harness_evidence(store: &Store, root: &str) -> (Uuid, Uuid, Uuid) {
+    let target = sample_target(root);
+    let target_id = target.id;
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    let mut harness = smoke_passed_harness(target_id);
+    store.upsert_harness(&harness).await.unwrap();
+    harness.status = HarnessStatus::Promoted;
+    store
+        .promote_harness_with_approval(
+            &harness,
+            HarnessApprovalKind::CleanSmoke,
+            &"a".repeat(64),
+            &"b".repeat(64),
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+    store
+        .record_harness_ai_review(&HarnessAiReviewRecord {
+            harness_id: harness.id,
+            source_sha256: "a".repeat(64),
+            binary_sha256: "b".repeat(64),
+            review_json: "{}".to_owned(),
+            reviewed_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+    let run = RunRecord::new(root.to_owned(), EngineKind::LibFuzzer, None, Utc::now());
+    store.insert_run(&run).await.unwrap();
+    store
+        .record_closeout_step(run.id, "corpus_replay", "completed", "")
+        .await
+        .unwrap();
+    (target_id, harness.id, run.id)
+}
+
+async fn table_count(store: &Store, table: &str) -> i64 {
+    sqlx::query_scalar::<_, i64>(&format!("SELECT COUNT(*) FROM {table}"))
+        .fetch_one(store.pool())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn delete_paths_remove_closeout_approval_and_review_rows() {
+    // delete_run cascades the run's closeout steps.
+    {
+        let (store, _dir) = temp_store().await;
+        let (_target, _harness, run_id) = seed_run_and_harness_evidence(&store, "/one").await;
+        store.delete_run(&run_id.to_string()).await.unwrap();
+        assert_eq!(
+            table_count(&store, "run_closeout_steps").await,
+            0,
+            "delete_run must not orphan closeout steps"
+        );
+    }
+
+    // clear_runs_by_id cascades each run's closeout steps.
+    {
+        let (store, _dir) = temp_store().await;
+        let (_target, _harness, run_id) = seed_run_and_harness_evidence(&store, "/batch").await;
+        store.clear_runs_by_id(&[run_id]).await.unwrap();
+        assert_eq!(
+            table_count(&store, "run_closeout_steps").await,
+            0,
+            "clear_runs_by_id must not orphan closeout steps"
+        );
+    }
+
+    // clear_all_runs cascades every run's closeout steps.
+    {
+        let (store, _dir) = temp_store().await;
+        let _ = seed_run_and_harness_evidence(&store, "/all").await;
+        store.clear_all_runs().await.unwrap();
+        assert_eq!(
+            table_count(&store, "run_closeout_steps").await,
+            0,
+            "clear_all_runs must not orphan closeout steps"
+        );
+    }
+
+    // delete_project cascades closeout steps, approvals, and AI reviews of
+    // the project while leaving other projects intact.
+    {
+        let (store, _dir) = temp_store().await;
+        let _ = seed_run_and_harness_evidence(&store, "/gone").await;
+        let (kept_target, kept_harness, kept_run) =
+            seed_run_and_harness_evidence(&store, "/kept").await;
+        store.delete_project("/gone").await.unwrap();
+        assert_eq!(table_count(&store, "run_closeout_steps").await, 1);
+        assert_eq!(table_count(&store, "harness_approvals").await, 1);
+        assert_eq!(table_count(&store, "harness_ai_reviews").await, 1);
+        // The kept project's rows are the survivors.
+        assert_eq!(store.closeout_steps(kept_run).await.unwrap().len(), 1);
+        assert!(store
+            .harness_approval(kept_harness, &"a".repeat(64), &"b".repeat(64))
+            .await
+            .unwrap()
+            .is_some());
+        assert!(store
+            .harness_ai_review(kept_harness)
+            .await
+            .unwrap()
+            .is_some());
+        let _ = kept_target;
+    }
+
+    // clear_knowledge empties all three tables with everything else.
+    {
+        let (store, _dir) = temp_store().await;
+        let _ = seed_run_and_harness_evidence(&store, "/know").await;
+        store.clear_knowledge().await.unwrap();
+        assert_eq!(table_count(&store, "run_closeout_steps").await, 0);
+        assert_eq!(table_count(&store, "harness_approvals").await, 0);
+        assert_eq!(table_count(&store, "harness_ai_reviews").await, 0);
+    }
+}
+
 #[tokio::test]
 async fn delete_project_cascades_and_isolates_other_projects() {
     let (store, _dir) = temp_store().await;
@@ -5149,13 +5269,29 @@ async fn pruning_preserves_running_and_recent_started_executions() {
 
 #[tokio::test]
 async fn chat_checkpoints_survive_a_reconnect() {
-    use hf_core::session::{ChatCheckpoint, ChatCheckpointStore};
-    use hf_core::types::SessionId;
-    use hf_storage::SqliteChatCheckpointStore;
+    use hf_core::session::{
+        ChatCheckpoint, ChatCheckpointStore, CreateSessionOptions, SessionStore, SessionType,
+    };
+    use hf_storage::{SqliteChatCheckpointStore, SqliteSessionStore};
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("cp.db");
-    let session = SessionId("s-1".to_owned());
+    // A real session row: the reconnect maintenance pass prunes checkpoints
+    // whose session no longer exists, so a synthetic id would not survive.
+    let node = {
+        let store = Store::connect(&path).await.expect("connect");
+        let sessions = SqliteSessionStore::new(store.pool().clone());
+        sessions
+            .create(CreateSessionOptions {
+                parent_id: None,
+                session_type: SessionType::Main,
+                agent_id: None,
+                title: None,
+            })
+            .await
+            .expect("session")
+    };
+    let session = node.id;
 
     let cp = |id: &str, turn: u32| ChatCheckpoint {
         checkpoint_id: id.to_owned(),
@@ -5204,6 +5340,269 @@ async fn chat_checkpoints_survive_a_reconnect() {
         cps.latest(&session).await.unwrap().map(|c| c.checkpoint_id),
         Some("cp-1".to_owned()),
         "the latest non-invalidated checkpoint is now cp-1"
+    );
+}
+
+#[tokio::test]
+async fn corrupt_checkpoint_rows_fail_the_load_naming_the_column() {
+    use hf_core::session::{ChatCheckpoint, ChatCheckpointStore};
+    use hf_core::types::SessionId;
+    use hf_storage::SqliteChatCheckpointStore;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cp.db");
+    let session = SessionId("s-corrupt".to_owned());
+
+    let store = Store::connect(&path).await.expect("connect");
+    let cps = SqliteChatCheckpointStore::new(store.pool().clone());
+    cps.save(&ChatCheckpoint {
+        checkpoint_id: "cp-bad".to_owned(),
+        session_id: session.clone(),
+        turn_number: 1,
+        message_count_before: 2,
+        journal_scope_id: "scope-1".to_owned(),
+        invalidated: false,
+        created_at: Utc::now(),
+    })
+    .await
+    .unwrap();
+
+    for (column, value) in [
+        ("turn_number", "-5"),
+        ("message_count_before", "-1"),
+        ("created_at", "'not-a-timestamp'"),
+    ] {
+        sqlx::query(&format!(
+            "UPDATE chat_checkpoints SET {column} = {value} WHERE checkpoint_id = 'cp-bad'"
+        ))
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let error = cps
+            .load("cp-bad")
+            .await
+            .expect_err("corrupt row must fail the load");
+        let message = error.to_string();
+        assert!(
+            message.contains(column),
+            "corrupt {column} must be named in the error: {message}"
+        );
+
+        // list_by_session hits the same decoder and must fail equally loud
+        // instead of presenting the corrupt row as valid.
+        assert!(
+            cps.list_by_session(&session).await.is_err(),
+            "corrupt {column} must fail list_by_session"
+        );
+
+        // Restore a sane value so the next iteration corrupts only its own
+        // column. Timestamps get a fresh valid RFC 3339 value.
+        let restore = if column == "created_at" {
+            format!("'{}'", Utc::now().to_rfc3339())
+        } else {
+            "1".to_owned()
+        };
+        sqlx::query(&format!(
+            "UPDATE chat_checkpoints SET {column} = {restore} WHERE checkpoint_id = 'cp-bad'"
+        ))
+        .execute(store.pool())
+        .await
+        .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn session_delete_cascades_chat_checkpoints() {
+    use hf_core::session::{
+        ChatCheckpoint, ChatCheckpointStore, CreateSessionOptions, SessionStore, SessionType,
+    };
+    use hf_storage::{SqliteChatCheckpointStore, SqliteSessionStore};
+
+    let (store, _dir) = temp_store().await;
+    let sessions = SqliteSessionStore::new(store.pool().clone());
+    let checkpoints = SqliteChatCheckpointStore::new(store.pool().clone());
+
+    let node = sessions
+        .create(CreateSessionOptions {
+            parent_id: None,
+            session_type: SessionType::Main,
+            agent_id: None,
+            title: None,
+        })
+        .await
+        .unwrap();
+    checkpoints
+        .save(&ChatCheckpoint {
+            checkpoint_id: "cp-del".to_owned(),
+            session_id: node.id.clone(),
+            turn_number: 1,
+            message_count_before: 1,
+            journal_scope_id: "scope".to_owned(),
+            invalidated: false,
+            created_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        checkpoints.list_by_session(&node.id).await.unwrap().len(),
+        1,
+        "checkpoint must exist before the delete"
+    );
+
+    sessions.delete(&node.id).await.unwrap();
+
+    assert!(
+        checkpoints
+            .list_by_session(&node.id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "deleting a session must cascade its chat_checkpoints"
+    );
+}
+
+#[tokio::test]
+async fn reconnect_prunes_checkpoints_of_deleted_sessions() {
+    use hf_core::session::{ChatCheckpoint, ChatCheckpointStore};
+    use hf_core::types::SessionId;
+    use hf_storage::SqliteChatCheckpointStore;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("prune.db");
+    let orphan = SessionId("s-orphanned".to_owned());
+
+    {
+        let store = Store::connect(&path).await.expect("connect");
+        let checkpoints = SqliteChatCheckpointStore::new(store.pool().clone());
+        checkpoints
+            .save(&ChatCheckpoint {
+                checkpoint_id: "cp-orphan".to_owned(),
+                session_id: orphan.clone(),
+                turn_number: 1,
+                message_count_before: 1,
+                journal_scope_id: "scope".to_owned(),
+                invalidated: false,
+                created_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+    }
+
+    // Reconnecting runs the self-healing maintenance pass.
+    let store = Store::connect(&path).await.expect("reconnect");
+    let checkpoints = SqliteChatCheckpointStore::new(store.pool().clone());
+    assert!(
+        checkpoints
+            .list_by_session(&orphan)
+            .await
+            .unwrap()
+            .is_empty(),
+        "checkpoints whose session no longer exists must be pruned on reconnect"
+    );
+}
+
+#[tokio::test]
+async fn corrupt_run_samples_and_harness_source_fail_the_read() {
+    let (store, _dir) = temp_store().await;
+    let run = RunRecord::new("/proj", EngineKind::LibFuzzer, None, Utc::now());
+    store.insert_run(&run).await.unwrap();
+    store
+        .set_run_samples(run.id, "[{\"t\":0,\"edges\":1}]")
+        .await
+        .unwrap();
+    store
+        .set_run_harness_source(run.id, "int main(){}")
+        .await
+        .unwrap();
+
+    // A non-text value in the JSON column is corruption, not absence.
+    for column in ["samples_json", "harness_source"] {
+        sqlx::query(&format!(
+            "UPDATE runs SET {column} = zeroblob(4) WHERE id = ?1"
+        ))
+        .bind(run.id.to_string())
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let result = if column == "samples_json" {
+            store.run_samples(run.id).await
+        } else {
+            store.run_harness_source(run.id).await
+        };
+        let error = result.expect_err("corrupt column must fail the read");
+        let message = error.to_string();
+        assert!(
+            message.contains(column),
+            "corrupt {column} must be named in the error: {message}"
+        );
+        assert!(
+            message.contains(&run.id.to_string()),
+            "the run id must be named in the error: {message}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn corrupt_session_metadata_fails_decode_naming_the_field() {
+    use hf_core::session::{CreateSessionOptions, SessionStore, SessionType};
+    use hf_storage::SqliteSessionStore;
+
+    let (store, _dir) = temp_store().await;
+    let sessions = SqliteSessionStore::new(store.pool().clone());
+    let node = sessions
+        .create(CreateSessionOptions {
+            parent_id: None,
+            session_type: SessionType::Main,
+            agent_id: None,
+            title: None,
+        })
+        .await
+        .unwrap();
+
+    for column in ["created_at", "updated_at", "last_compaction"] {
+        sqlx::query(&format!(
+            "UPDATE session_metadata SET {column} = 'garbage' WHERE id = ?1"
+        ))
+        .bind(node.id.as_str())
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let error = sessions
+            .get(&node.id)
+            .await
+            .expect_err("corrupt timestamp must fail the decode");
+        let message = error.to_string();
+        assert!(
+            message.contains(column),
+            "corrupt {column} must be named in the error: {message}"
+        );
+
+        sqlx::query(&format!(
+            "UPDATE session_metadata SET {column} = ?2 WHERE id = ?1"
+        ))
+        .bind(node.id.as_str())
+        .bind(Utc::now().to_rfc3339())
+        .execute(store.pool())
+        .await
+        .unwrap();
+    }
+
+    // A negative context_reset_index is corrupt, not zero.
+    sqlx::query("UPDATE session_metadata SET context_reset_index = -1 WHERE id = ?1")
+        .bind(node.id.as_str())
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let error = sessions
+        .get_context_reset_index(&node.id)
+        .await
+        .expect_err("negative context_reset_index must fail the decode");
+    assert!(
+        error.to_string().contains("context_reset_index"),
+        "corrupt context_reset_index must be named: {error}"
     );
 }
 
@@ -7247,4 +7646,108 @@ async fn upsert_target_waits_for_unrelated_wal_writer_and_preserves_identity() {
     assert_eq!(harnesses.len(), 1);
     assert_eq!(harnesses[0].id, harness.id);
     assert_eq!(harnesses[0].target_id, target.id);
+}
+
+#[tokio::test]
+async fn filed_issue_claims_are_single_winner_and_retries_return_the_recorded_issue() {
+    let (store, _dir) = temp_store().await;
+    let key = "crash-uuid-1";
+
+    // VULN-001: the atomic claim is the dedup constraint. The first caller
+    // wins, a concurrent caller observes the in-flight claim, and every
+    // later caller receives the recorded issue instead of creating again.
+    assert_eq!(
+        store.claim_filed_issue(key, Utc::now()).await.unwrap(),
+        FiledIssueClaim::Claimed
+    );
+    assert_eq!(
+        store.claim_filed_issue(key, Utc::now()).await.unwrap(),
+        FiledIssueClaim::Pending
+    );
+
+    let issue = r#"{"url":"https://gitlab.com/g/p/-/issues/7","number":7}"#;
+    store.complete_filed_issue(key, issue).await.unwrap();
+    assert_eq!(
+        store.claim_filed_issue(key, Utc::now()).await.unwrap(),
+        FiledIssueClaim::Completed(issue.to_owned())
+    );
+    // Completing an already-completed claim fails closed.
+    assert!(store.complete_filed_issue(key, issue).await.is_err());
+}
+
+#[tokio::test]
+async fn released_claims_allow_a_retried_filing() {
+    let (store, _dir) = temp_store().await;
+    let key = "crash-uuid-2";
+    assert_eq!(
+        store.claim_filed_issue(key, Utc::now()).await.unwrap(),
+        FiledIssueClaim::Claimed
+    );
+    // A failed remote create releases its claim so the filing can be retried.
+    store.release_filed_issue(key).await.unwrap();
+    assert_eq!(
+        store.claim_filed_issue(key, Utc::now()).await.unwrap(),
+        FiledIssueClaim::Claimed
+    );
+    // A completed record is never released by a late failure path.
+    let issue = r#"{"url":"https://github.com/o/r/issues/1","number":1}"#;
+    store.complete_filed_issue(key, issue).await.unwrap();
+    store.release_filed_issue(key).await.unwrap();
+    assert_eq!(
+        store.claim_filed_issue(key, Utc::now()).await.unwrap(),
+        FiledIssueClaim::Completed(issue.to_owned())
+    );
+}
+
+#[tokio::test]
+async fn a_stale_pending_claim_is_reclaimed_by_a_new_claimant() {
+    let (store, _dir) = temp_store().await;
+    let key = "crash-uuid-stale";
+    // A claimant died mid-create: the durable row is pending (no recorded
+    // issue) and its created_at is well past the reclaim TTL.
+    assert_eq!(
+        store
+            .claim_filed_issue(key, Utc::now() - Duration::minutes(11))
+            .await
+            .unwrap(),
+        FiledIssueClaim::Claimed
+    );
+    // Without age-based reclaim this reports Pending forever, wedging the
+    // dedup key; a fresh claimant must reclaim the stale row.
+    assert_eq!(
+        store.claim_filed_issue(key, Utc::now()).await.unwrap(),
+        FiledIssueClaim::Claimed
+    );
+    // A fresh (non-stale) pending claim is still single-winner: it must not
+    // be reclaimed by a second caller arriving immediately.
+    let fresh = "crash-uuid-fresh";
+    assert_eq!(
+        store.claim_filed_issue(fresh, Utc::now()).await.unwrap(),
+        FiledIssueClaim::Claimed
+    );
+    assert_eq!(
+        store.claim_filed_issue(fresh, Utc::now()).await.unwrap(),
+        FiledIssueClaim::Pending
+    );
+}
+
+#[tokio::test]
+async fn filed_issue_claims_reject_empty_keys_and_bad_records() {
+    let (store, _dir) = temp_store().await;
+    assert!(store.claim_filed_issue("  ", Utc::now()).await.is_err());
+    assert_eq!(
+        store
+            .claim_filed_issue("crash-uuid-3", Utc::now())
+            .await
+            .unwrap(),
+        FiledIssueClaim::Claimed
+    );
+    assert!(store
+        .complete_filed_issue("crash-uuid-3", "")
+        .await
+        .is_err());
+    assert!(store
+        .complete_filed_issue("unknown-key", "{}")
+        .await
+        .is_err());
 }

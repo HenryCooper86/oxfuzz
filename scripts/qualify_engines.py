@@ -7,6 +7,7 @@ import math
 import os
 import platform
 from pathlib import Path
+import selectors
 import signal
 import statistics
 import subprocess
@@ -16,6 +17,7 @@ import uuid
 from datetime import datetime, timezone
 
 ENGINES = ("libfuzzer", "afl++", "honggfuzz")
+MAX_LOG_BYTES = 16 * 1024 * 1024
 COMMAND = ["cargo", "test", "-p", "hf-service", "--features", "proof-carrying",
            "--test", "cancellation_live", "stop_button_cancels_a_real_fuzz_run",
            "--", "--ignored", "--exact", "--nocapture"]
@@ -69,12 +71,42 @@ def persist(path, value):
 
 
 def run_process(command, repo, env, log, timeout):
-    """Supervise only this child group; sandbox cleanup remains a separate outcome."""
-    with log.open("wb") as stream:
-        process = subprocess.Popen(command, cwd=repo, env=env, stdout=stream,
+    """Supervise only this child group; sandbox cleanup remains a separate outcome.
+
+    Retained output is capped at MAX_LOG_BYTES like qualify_recovery's fault
+    supervision: a `cargo test --nocapture` campaign over thousands of cycles
+    must not grow the evidence volume without bound. Past the cap the child is
+    stopped, the log ends with a marker naming the cut, and the cycle records
+    the refusal instead of keeping the bytes."""
+    marker = ("[supervisor] child output reached the {} byte log cap; further "
+              "output is not retained\n".format(MAX_LOG_BYTES)).encode("utf-8")
+    with log.open("wb") as stream, selectors.DefaultSelector() as selector:
+        process = subprocess.Popen(command, cwd=repo, env=env,
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, start_new_session=True)
+        deadline = time.monotonic() + timeout
+        written = 0
         try:
-            return process.wait(timeout=timeout)
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while selector.get_map() or process.poll() is None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(command, timeout)
+                for key, _ in selector.select(min(remaining, 0.1)):
+                    chunk = os.read(key.fileobj.fileno(), 8192)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    keep = min(len(chunk), MAX_LOG_BYTES - len(marker) - written)
+                    stream.write(chunk[:keep])
+                    written += keep
+                    if keep < len(chunk):
+                        stream.write(marker)
+                        raise ValueError(
+                            "child output exceeded the {} byte log cap".format(MAX_LOG_BYTES))
+            stream.flush()
+            os.fsync(stream.fileno())
+            return process.wait()
         except BaseException:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
@@ -83,6 +115,8 @@ def run_process(command, repo, env, log, timeout):
                 pass
             process.wait()
             raise
+        finally:
+            process.stdout.close()
 
 
 def read_reports(root):

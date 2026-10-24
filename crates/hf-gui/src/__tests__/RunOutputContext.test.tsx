@@ -1174,6 +1174,30 @@ describe("remaining foreign-data and unavailable-state cases", () => {
     await emit("run:progress", { run_id: A, type: "LogLine", data: "x".repeat(20000) });
     expect(payload().log[0].length).toBeLessThanOrEqual(4096);
   });
+
+  it("accepts a browser run whose edges and execs were never measured", async () => {
+    // The HTTP transport passes null through for unmeasured metrics; absent
+    // is not zero, so the run completes and the summary keeps Unknown
+    // instead of erroring like a malformed result.
+    invoke.mockImplementation((command: string, args?: Record<string, unknown>) =>
+      command === "run_fuzzer"
+        ? Promise.resolve({
+            run_id: A,
+            edges: null,
+            crashes: 2,
+            execs: null,
+            exit_code: null,
+            termination: "completed",
+          })
+        : standard(command, args),
+    );
+    await mount();
+    await click("start");
+    expect(payload()).toMatchObject({
+      requestError: null,
+      summary: { edges: null, crashes: 2, execs: null },
+    });
+  });
   it("keeps a retained error silent if it is redelivered live after initial hydration", async () => {
     const H = "00000000-0000-4000-8000-000000000101";
     invoke.mockImplementation((command: string, args?: Record<string, unknown>) =>

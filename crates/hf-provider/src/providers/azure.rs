@@ -716,10 +716,11 @@ impl LlmProvider for AzureOpenAiProvider {
             _ => FinishReason::Stop,
         };
 
-        let usage = azure_response.usage.unwrap_or(AzureUsage {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-        });
+        let usage = azure_response.usage.ok_or_else(|| ProviderError::Other {
+            message: "response missing 'usage': without reported token counts the \
+                caller's budget reservation can never be settled"
+                .into(),
+        })?;
 
         Ok(ChatResponse {
             id: azure_response.id,

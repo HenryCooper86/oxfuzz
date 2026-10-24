@@ -422,6 +422,101 @@ async fn run_history_exposes_service_owned_comparison_groups() {
     assert_eq!(history[0].comparison_key, history[1].comparison_key);
 }
 
+/// The history fallback (runs recorded before deterministic crash counts)
+/// must count the deduped view, matching the report/SARIF surfaces for the
+/// same rows.
+#[tokio::test]
+async fn run_history_counts_deduped_crashes_for_legacy_runs() {
+    let (container, _dir) = test_container().await;
+    let store = container.store().unwrap();
+    let target = sample_target("/proj");
+    let harness = sample_harness(target.id);
+    let run = sample_run("/proj", harness.id);
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    store.upsert_harness(&harness).await.unwrap();
+    store.insert_run(&run).await.unwrap();
+    for input in ["crash-1", "crash-2"] {
+        let crash = Crash {
+            reproduction: None,
+            id: Uuid::new_v4(),
+            run_id: run.id,
+            target_id: target.id,
+            input_path: PathBuf::from(format!("out/{input}")),
+            stack_signature: "shared-signature".to_owned(),
+            kind: CrashKind::Asan,
+            summary: "heap-buffer-overflow".to_owned(),
+            minimized: false,
+            bug_report: None,
+            casr: None,
+            origin: hf_core::crash::CrashOrigin::Unknown,
+        };
+        store.upsert_crash(&crash).await.unwrap();
+    }
+
+    let history = container
+        .run_history(Some(Path::new("/proj")))
+        .await
+        .unwrap();
+    let item = history
+        .iter()
+        .find(|item| item.id == run.id.to_string())
+        .expect("the seeded run is in the history");
+
+    assert_eq!(
+        item.crashes, 1,
+        "two raw rows sharing a stack signature are one finding"
+    );
+}
+
+/// The fallback dedups a legacy run's own rows, never one run against
+/// another: two runs that hit the same signature each keep their one
+/// finding, exactly like the per-run triage surfaces report.
+#[tokio::test]
+async fn run_history_dedups_legacy_crashes_within_each_run_not_across_runs() {
+    let (container, _dir) = test_container().await;
+    let store = container.store().unwrap();
+    let target = sample_target("/proj");
+    let harness = sample_harness(target.id);
+    let first_run = sample_run("/proj", harness.id);
+    let second_run = sample_run("/proj", harness.id);
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    store.upsert_harness(&harness).await.unwrap();
+    store.insert_run(&first_run).await.unwrap();
+    store.insert_run(&second_run).await.unwrap();
+    for (run, input) in [(&first_run, "crash-a"), (&second_run, "crash-b")] {
+        let crash = Crash {
+            reproduction: None,
+            id: Uuid::new_v4(),
+            run_id: run.id,
+            target_id: target.id,
+            input_path: PathBuf::from(format!("out/{input}")),
+            stack_signature: "shared-signature".to_owned(),
+            kind: CrashKind::Asan,
+            summary: "heap-buffer-overflow".to_owned(),
+            minimized: false,
+            bug_report: None,
+            casr: None,
+            origin: hf_core::crash::CrashOrigin::Unknown,
+        };
+        store.upsert_crash(&crash).await.unwrap();
+    }
+
+    let history = container
+        .run_history(Some(Path::new("/proj")))
+        .await
+        .unwrap();
+    for run in [&first_run, &second_run] {
+        let item = history
+            .iter()
+            .find(|item| item.id == run.id.to_string())
+            .unwrap_or_else(|| panic!("run {} is in the history", run.id));
+        assert_eq!(
+            item.crashes, 1,
+            "each legacy run keeps its own representative of the shared signature"
+        );
+    }
+}
+
 #[tokio::test]
 async fn dashboard_project_filter_does_not_leak_other_project_reviews() {
     let (container, _dir) = test_container().await;

@@ -174,10 +174,23 @@ impl ServiceContainer {
         config.seed_corpus = Some(workspace.join("corpus"));
         config.replay_of = Some(experiment.baseline_run_id);
         config.resume = false;
+        // Bind the digest to the same inputs the launch side will digest:
+        // the mutator environment re-derived from the CURRENT harness record
+        // and the currently resolved sandbox image (a baseline-run revision
+        // here would never match after a mutator/image change, which is
+        // exactly when a review must stay launchable).
+        super::super::managed_mutator::rebind_review_mutator_env(&qualified, &mut config)?;
+        let sandbox_image =
+            super::super::staging::resolve_run_sandbox_image(self.runtime.as_ref()).await?;
+        super::super::managed_mutator::verify_image(&qualified, Some(sandbox_image.reference()))?;
         review.current_input_sha256 = Some(super::super::retained_inputs::review_digest(
             &workspace,
             &workspace.join("corpus"),
-            &experiment.baseline.sandbox_rev,
+            &format!(
+                "{}{}",
+                super::super::EXACT_DOCKER_IMAGE_REV_PREFIX,
+                sandbox_image.sha256()
+            ),
             &config,
         )?);
         review.experiment_id = Some(id);

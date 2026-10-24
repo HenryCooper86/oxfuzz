@@ -481,6 +481,13 @@ impl ProviderPoolConfig {
         self.response_stream_limits
             .resolve()
             .map_err(|message| ProviderPoolError::Config { message })?;
+        if self.max_global_concurrency == Some(0) {
+            return Err(ProviderPoolError::Config {
+                message: "max_global_concurrency must be at least 1: a zero-permit \
+                    semaphore would block every request forever"
+                    .into(),
+            });
+        }
         for entry in self
             .proxy
             .global
@@ -491,6 +498,28 @@ impl ProviderPoolConfig {
         {
             if let Some(url) = &entry.url {
                 crate::http_headers::configured_proxy(&self.normalize_proxy_url(url))?;
+                if let Some(env_var) = &entry.auth_env {
+                    match std::env::var(env_var) {
+                        Ok(value) if value.split_once(':').is_some() => {}
+                        Ok(_) => {
+                            return Err(ProviderPoolError::Config {
+                                message: format!(
+                                    "proxy auth_env '{env_var}' must be set to a \
+                                    'user:pass' value, got a value without ':'"
+                                ),
+                            });
+                        }
+                        Err(_) => {
+                            return Err(ProviderPoolError::Config {
+                                message: format!(
+                                    "proxy auth_env '{env_var}' is not set in the \
+                                    environment; the proxy would send unauthenticated \
+                                    requests"
+                                ),
+                            });
+                        }
+                    }
+                }
             }
         }
         if self.providers.is_empty() {
@@ -522,6 +551,43 @@ impl ProviderPoolConfig {
                     message: format!("provider '{}' has invalid custom header: {message}", p.id),
                 }
             })?;
+            if p.max_concurrency == 0 {
+                return Err(ProviderPoolError::Config {
+                    message: format!(
+                        "provider '{}' max_concurrency must be at least 1: a \
+                        zero-permit semaphore would block every request to it forever",
+                        p.id
+                    ),
+                });
+            }
+            if p.provider_type == "azure" && p.base_url.is_none() && p.azure_resource_name.is_none()
+            {
+                return Err(ProviderPoolError::Config {
+                    message: format!(
+                        "azure provider '{}' needs base_url or azure_resource_name; \
+                        without one the endpoint is relative and every request \
+                        fails as a network error",
+                        p.id
+                    ),
+                });
+            }
+            if let Some(base_url) = &p.base_url {
+                let parsed =
+                    reqwest::Url::parse(base_url).map_err(|error| ProviderPoolError::Config {
+                        message: format!(
+                            "provider '{}' base_url '{base_url}' is not a valid URL: {error}",
+                            p.id
+                        ),
+                    })?;
+                if parsed.scheme() != "http" && parsed.scheme() != "https" {
+                    return Err(ProviderPoolError::Config {
+                        message: format!(
+                            "provider '{}' base_url '{base_url}' must use http or https",
+                            p.id
+                        ),
+                    });
+                }
+            }
         }
 
         Ok(())
@@ -979,6 +1045,141 @@ mod tests {
                 "invalid provider cost {invalid} was accepted"
             );
         }
+    }
+
+    #[test]
+    fn test_config_validate_rejects_zero_global_concurrency() {
+        let config = ProviderPoolConfig {
+            providers: vec![make_provider_config("openai")],
+            max_global_concurrency: Some(0),
+            ..ProviderPoolConfig::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("max_global_concurrency"),
+            "zero global concurrency must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn test_config_validate_rejects_zero_provider_concurrency() {
+        let mut provider = make_provider_config("openai");
+        provider.max_concurrency = 0;
+        let config = ProviderPoolConfig {
+            providers: vec![provider],
+            ..ProviderPoolConfig::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("max_concurrency") && err.to_string().contains("test"),
+            "zero per-provider concurrency must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn test_config_validate_azure_requires_endpoint() {
+        let mut config = ProviderPoolConfig {
+            providers: vec![make_provider_config("azure")],
+            ..ProviderPoolConfig::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("azure") && err.to_string().contains("base_url"),
+            "azure provider without endpoint must be rejected: {err}"
+        );
+
+        // A resource name alone builds the default endpoint.
+        let mut provider = make_provider_config("azure");
+        provider.azure_resource_name = Some("myresource".into());
+        config.providers = vec![provider];
+        config
+            .validate()
+            .expect("azure resource name should satisfy the endpoint requirement");
+
+        // A full base_url also satisfies it.
+        let mut provider = make_provider_config("azure");
+        provider.base_url = Some("https://myresource.openai.azure.com".into());
+        config.providers = vec![provider];
+        config
+            .validate()
+            .expect("azure base_url should satisfy the endpoint requirement");
+    }
+
+    #[test]
+    fn test_config_validate_rejects_malformed_base_url() {
+        for url in [
+            "not a url",
+            "http://",
+            "localhost:11434",
+            "ftp://example.com",
+        ] {
+            let mut provider = make_provider_config("openai-compat");
+            provider.base_url = Some(url.into());
+            let config = ProviderPoolConfig {
+                providers: vec![provider],
+                ..ProviderPoolConfig::default()
+            };
+            assert!(
+                config.validate().is_err(),
+                "malformed base_url '{url}' was accepted"
+            );
+        }
+
+        let mut provider = make_provider_config("openai-compat");
+        provider.base_url = Some("http://127.0.0.1:8080/v1".into());
+        let config = ProviderPoolConfig {
+            providers: vec![provider],
+            ..ProviderPoolConfig::default()
+        };
+        config
+            .validate()
+            .expect("absolute http base_url should pass validation");
+    }
+
+    #[test]
+    fn test_config_validate_proxy_auth_env_must_resolve() {
+        fn config_with_auth_env() -> ProviderPoolConfig {
+            let config: ProviderPoolConfig = toml::from_str(
+                r#"
+                [[providers]]
+                id = "test"
+                provider_type = "openai"
+                model = "gpt-4"
+
+                [proxy.global]
+                url = "socks5://proxy.company.com:1080"
+                auth_env = "OXFUZZ_TEST_PROXY_CREDS"
+                "#,
+            )
+            .expect("should parse");
+            config
+        }
+
+        // Unset variable: fail loud at load instead of sending unauthenticated
+        // proxy requests that surface as provider outages.
+        temp_env::with_var("OXFUZZ_TEST_PROXY_CREDS", Option::<&str>::None, || {
+            let err = config_with_auth_env().validate().unwrap_err();
+            assert!(
+                err.to_string().contains("OXFUZZ_TEST_PROXY_CREDS"),
+                "unset proxy auth_env must be rejected: {err}"
+            );
+        });
+
+        // Value without the `user:pass` shape.
+        temp_env::with_var("OXFUZZ_TEST_PROXY_CREDS", Some("nodelimiter"), || {
+            let err = config_with_auth_env().validate().unwrap_err();
+            assert!(
+                err.to_string().contains("user:pass"),
+                "malformed proxy auth_env value must be rejected: {err}"
+            );
+        });
+
+        // Valid value passes.
+        temp_env::with_var("OXFUZZ_TEST_PROXY_CREDS", Some("user:pass"), || {
+            config_with_auth_env()
+                .validate()
+                .expect("resolvable auth_env should pass validation");
+        });
     }
 
     #[test]

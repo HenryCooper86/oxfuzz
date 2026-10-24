@@ -11,9 +11,8 @@ use crate::finding_review::{FindingDispositionFilter, FindingReviewFilter, Findi
 use crate::triage_disposition::Disposition;
 use crate::workbench::crash_review_items;
 
-use super::project_identity::{
-    project_lookup_identity, retained_run_target_selector, stored_project_matches,
-};
+use super::project_identity::retained_run_target_selector;
+use super::project_identity::{project_lookup_identity, stored_project_matches};
 use super::ServiceContainer;
 
 const HISTORICAL_ACTION_REASON: &str =

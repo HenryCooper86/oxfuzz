@@ -44,6 +44,19 @@ fn approve(state: &AppState, project: &std::path::Path) -> Result<(), ApiError> 
         .map(|_| ())
         .map_err(|_| error(Code::ProjectNotAuthorized))
 }
+
+/// Map the replay review's `ClassifiedError` onto the coverage-experiment
+/// error surface: a validation refusal stays a client error, while any
+/// infrastructure class (storage, sandbox, harness, timeout) surfaces as a
+/// retryable 5xx instead of collapsing into `invalid_request` (the class is
+/// mapped, never discarded; raw messages stay unexposed by design).
+#[cfg(feature = "coverage-experiments")]
+fn classified_map_error(value: &hf_service::ClassifiedError) -> ApiError {
+    match value {
+        hf_service::ClassifiedError::Validation(_) => error(Code::InvalidRequest),
+        _ => error(Code::StorageError),
+    }
+}
 async fn body<T: DeserializeOwned>(request: Request) -> Result<T, ApiError> {
     let bytes = axum::body::to_bytes(request.into_body(), MAX_COVERAGE_EXPERIMENT_REQUEST_BYTES)
         .await
@@ -212,7 +225,7 @@ async fn review_replay(
                 .container
                 .coverage_experiment_replay_review(id, scope)
                 .await
-                .map_err(|_| error(Code::InvalidRequest))?,
+                .map_err(|error| classified_map_error(&error))?,
         )
     }
     #[cfg(not(feature = "coverage-experiments"))]

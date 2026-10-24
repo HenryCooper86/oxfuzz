@@ -552,6 +552,101 @@ async fn runner_accepts_libfuzzer_timeout_exit_without_a_summary_line() {
 }
 
 #[tokio::test]
+async fn runner_rejects_target_noise_lines_on_a_failed_exit() {
+    // The sandbox interleaves the target binary's own stdout with the
+    // engine's. A harness that prints "done", "summary", or "finished" (or
+    // AFL++ status text like "cycles done") must not flip the completion
+    // fallback and record a failed engine exit as a finished campaign.
+    let rt = MockRuntime {
+        exit_code: 1,
+        stdout: "\
+parsing input done
+summary of frames so far: 12
+finished first pass
+cycles done : 4
+"
+        .to_owned(),
+        termination: CommandTermination::Completed,
+    };
+    let cfg = run_config(EngineKind::LibFuzzer, 60);
+    let workspace = PathBuf::from("/work");
+    let outcome = EngineRunner::new()
+        .run(
+            EngineKind::LibFuzzer,
+            &cfg,
+            "/work/fuzz_bin",
+            "/work/corpus",
+            "/work/out",
+            &rt,
+            &workspace,
+        )
+        .await;
+    assert!(
+        outcome.is_err(),
+        "target-printed done/summary/finished noise must not validate exit 1"
+    );
+}
+
+#[tokio::test]
+async fn runner_accepts_a_libfuzzer_done_line_on_an_unlisted_exit() {
+    // libFuzzer ends a bounded campaign with `Done <N> runs in <T> seconds`.
+    // An exit code outside the enumerated set is still a completed campaign
+    // when that anchored terminal line was printed.
+    let rt = MockRuntime {
+        exit_code: 1,
+        stdout: "#4096 pulse cov: 120 exec/s: 900\nDone 4096 runs in 60 seconds\n".to_owned(),
+        termination: CommandTermination::Completed,
+    };
+    let cfg = run_config(EngineKind::LibFuzzer, 60);
+    let result = EngineRunner::new()
+        .run(
+            EngineKind::LibFuzzer,
+            &cfg,
+            "/work/fuzz_bin",
+            "/work/corpus",
+            "/work/out",
+            &rt,
+            &PathBuf::from("/work"),
+        )
+        .await
+        .expect("an anchored libFuzzer Done line completes the campaign");
+    assert!(result
+        .progress
+        .iter()
+        .any(|e| matches!(e, FuzzProgress::Done)));
+}
+
+#[tokio::test]
+async fn runner_accepts_a_sanitizer_summary_line_on_an_unlisted_exit() {
+    // A sanitizer report ends with a line starting `SUMMARY:`; the prose
+    // word "summary" inside target output is not that line.
+    let rt = MockRuntime {
+        exit_code: 1,
+        stdout: "==1==ERROR: AddressSanitizer: heap-buffer-overflow\n\
+                  SUMMARY: AddressSanitizer: heap-buffer-overflow\n"
+            .to_owned(),
+        termination: CommandTermination::Completed,
+    };
+    let cfg = run_config(EngineKind::LibFuzzer, 60);
+    let result = EngineRunner::new()
+        .run(
+            EngineKind::LibFuzzer,
+            &cfg,
+            "/work/fuzz_bin",
+            "/work/corpus",
+            "/work/out",
+            &rt,
+            &PathBuf::from("/work"),
+        )
+        .await
+        .expect("an anchored sanitizer SUMMARY: line completes the campaign");
+    assert!(result
+        .progress
+        .iter()
+        .any(|e| matches!(e, FuzzProgress::Done)));
+}
+
+#[tokio::test]
 async fn runner_returns_error_on_nonzero_exit() {
     let rt = MockRuntime {
         exit_code: 1,

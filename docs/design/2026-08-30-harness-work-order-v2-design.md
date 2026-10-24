@@ -84,7 +84,10 @@ The payload contains:
 - SHA-256 of the complete candidate source file;
 - normalized compile context and its SHA-256;
 - harness rules derived from `hf_harness::harness_rules()`;
-- at most `20` seed references, sorted by content digest; and
+- at most `20` seed references, sorted by content digest, plus an explicit
+  `seeds_truncated` flag when the retained corpus held more than the bound
+  (the marker serializes only when set, so pre-marker packets keep their
+  identifiers); and
 - typed validation steps.
 
 Absolute host paths do not enter the payload. The complete candidate source

@@ -55,7 +55,7 @@ mod lifecycle;
 mod live_recovery_tests;
 mod output_budget;
 mod policy;
-mod project_identity;
+pub(crate) mod project_identity;
 mod run;
 pub(crate) use run::CampaignRunLimits;
 pub use run::{ReplayInputs, ReplayReview};
@@ -440,6 +440,9 @@ fn retained_coverage_samples(
     let raw = series
         .lock()
         .map(|samples| samples.clone())
+        // Swallowed: only a panicked sample writer poisons this lock, and
+        // the series is intra-run bookkeeping -- retaining an empty curve
+        // beats failing the run's terminal evidence persistence.
         .unwrap_or_default();
     downsample(&raw, 150)
         .into_iter()
@@ -477,13 +480,15 @@ async fn terminal_run_metrics(
 ) -> Result<TerminalRunMetrics, ClassifiedError> {
     let mut edges = 0_u64;
     let mut execs = 0.0_f64;
-    let mut finding_reported = false;
+    let mut reported_crashes = 0_u64;
     let mut hangs: Option<u64> = None;
     for progress in &result.progress {
         match progress {
             FuzzProgress::EdgesCovered(value) => edges = edges.max(*value),
             FuzzProgress::ExecsPerSec(value) => execs = execs.max(*value),
-            FuzzProgress::CrashesFound(count) => finding_reported |= *count > 0,
+            FuzzProgress::CrashesFound(count) => {
+                reported_crashes = reported_crashes.max(u64::from(*count));
+            }
             // A snapshot's coverage/rate fields re-state the scalar events
             // from the same engine line; peaking both is idempotent.
             FuzzProgress::Stats(stats) => {
@@ -559,7 +564,7 @@ async fn terminal_run_metrics(
         edges,
         execs,
         crashes: artifact_crashes
-            .max(u64::from(finding_reported))
+            .max(reported_crashes)
             .max(terminal_afl_crashes),
         hangs,
         afl_stats,
@@ -588,7 +593,8 @@ pub(crate) fn project_workspace_dir_at(root: &Path, project: &Path) -> PathBuf {
 fn syz_kvm_usable(platform: &str) -> bool {
     #[cfg(target_os = "linux")]
     {
-        hf_runtime::norm_platform(platform) == hf_runtime::host_platform()
+        hf_runtime::norm_platform(platform)
+            .is_some_and(|normalized| normalized == hf_runtime::host_platform())
             && Path::new("/dev/kvm").exists()
     }
     #[cfg(not(target_os = "linux"))]
@@ -787,7 +793,18 @@ fn build_session_managers(
         Arc::clone(&session_store),
         Arc::clone(&transcript),
         Arc::clone(&display),
-        crate::config::effective_session_config(),
+        // Session construction happens inside `with_store`/`bootstrap`, whose
+        // signatures (used across presentations and tests) cannot fail; a
+        // broken oxfuzz.toml therefore degrades to the documented defaults
+        // WITH a loud error log, while the operation-level readers
+        // (indexing, scheduler startup) fail closed on the same file.
+        crate::config::effective_session_config().unwrap_or_else(|error| {
+            tracing::error!(
+                %error,
+                "oxfuzz.toml is unreadable; chat sessions run on default settings until it is fixed"
+            );
+            hf_session::SessionConfig::default()
+        }),
     ));
     let checkpoints = Arc::new(hf_session::ChatCheckpointManager::new(
         transcript,
@@ -931,7 +948,7 @@ impl ServiceContainer {
                 });
             }
         }
-        Ok(crate::config::auto_revert_policy())
+        crate::config::auto_revert_policy().map_err(ClassifiedError::Validation)
     }
 
     // -- Guardrail decision audit --------------------------------------------
@@ -1685,11 +1702,20 @@ pub struct HarnessGenOutcome {
     pub status: HarnessStatus,
     pub binary_name: String,
     pub workspace: PathBuf,
+    /// The id of the harness record this outcome compiled. Callers that
+    /// qualify the compiled revision (for example the tournament smoke) must
+    /// pin exactly this id instead of re-resolving the active harness, which
+    /// a concurrent generate or refine can swap between compile and smoke.
+    pub harness_id: Uuid,
     /// Number of LLM repair passes applied before the harness compiled (0 when
     /// the first draft built cleanly).
     pub repairs_used: usize,
     /// Non-blocking harness lint findings for the source that compiled.
     pub lint: Vec<hf_harness::LintFinding>,
+    /// The harness source that actually compiled, including any repair
+    /// passes. The caller that owns the workspace selection (for example the
+    /// tournament restore) must recompile this, never the original draft.
+    pub source: String,
 }
 
 /// A generated seed entry.
@@ -1901,14 +1927,20 @@ pub struct SystemSnapshot {
 }
 
 /// A cheap snapshot of a target's on-disk artifacts, for the Info panel.
+///
+/// Each field is `None` when it could not be observed -- a concurrent
+/// workspace operation holds the lease (all three), or the corpus root
+/// cannot be read (`corpus_count`). `None` means unknown, never a measured
+/// zero, so presentations can say "unknown" instead of fabricating an
+/// empty target mid-operation.
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct ArtifactSummary {
     /// Whether the compiled harness binary (`fuzz_<target>`) exists.
-    pub harness_built: bool,
+    pub harness_built: Option<bool>,
     /// Number of corpus inputs on disk.
-    pub corpus_count: usize,
+    pub corpus_count: Option<usize>,
     /// Number of crash inputs staged in the run output directory.
-    pub crash_count: usize,
+    pub crash_count: Option<usize>,
 }
 
 /// One point on a run's intra-run coverage/throughput curve.
@@ -3519,5 +3551,28 @@ mod terminal_metrics_tests {
             metrics.hangs, None,
             "no Timeouts tick was ever observed, so no count is invented"
         );
+    }
+
+    /// An engine that reports several crashes while persisting fewer
+    /// artifacts must not have its terminal count collapsed to one: the
+    /// reported peak is a source the retained metric takes the max over.
+    #[tokio::test]
+    async fn reported_crash_counts_peak_instead_of_collapsing_to_a_flag() {
+        let out = tempfile::tempdir().unwrap();
+        let progress = vec![
+            FuzzProgress::CrashesFound(1),
+            FuzzProgress::CrashesFound(7),
+            FuzzProgress::CrashesFound(3),
+        ];
+
+        let metrics = terminal_run_metrics(
+            EngineKind::LibFuzzer,
+            &artifacts(out.path().to_path_buf()),
+            &result(progress),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(metrics.crashes, 7, "the peak reported count is retained");
     }
 }

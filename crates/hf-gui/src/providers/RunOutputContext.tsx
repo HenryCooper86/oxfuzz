@@ -52,7 +52,6 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
       replayRun: controller.replayRun,
       runSyzkaller: controller.runSyzkaller,
       cancelRun: controller.cancelRun,
-      clear: controller.clear,
     }),
     [controller, selected, state.requestState, state.requestError, state.cancelling],
   );

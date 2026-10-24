@@ -9,7 +9,7 @@ async fn removed_schedule_history_filters_before_limiting_and_clearing() {
         .unwrap();
     let scheduler = fixture.scheduler();
     let roots = vec![fixture.approved_project().canonicalize().unwrap()];
-    assert!(scheduler.list().await.is_empty());
+    assert!(scheduler.list_views().await.unwrap().is_empty());
     assert!(scheduler.recent_executions(1).await.unwrap()[0]
         .execution_id
         .starts_with("foreign-"));

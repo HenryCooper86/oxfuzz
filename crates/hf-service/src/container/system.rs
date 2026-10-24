@@ -286,10 +286,9 @@ impl ServiceContainer {
         std::fs::write(docs.join(format!("{stem}.md")), &result.stdout)
             .map_err(|e| ClassifiedError::Internal(format!("write doc markdown: {e}")))?;
 
-        crate::knowledge::index_in_operation(
-            &knowledge,
-            &crate::config::effective_knowledge_config(),
-        )
+        let config = crate::config::effective_knowledge_config()
+            .map_err(|error| ClassifiedError::Validation(format!("oxfuzz.toml: {error}")))?;
+        crate::knowledge::index_in_operation(&knowledge, &config)
     }
 }
 

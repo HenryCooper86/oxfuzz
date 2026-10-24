@@ -30,7 +30,7 @@ Core:                          hf-core            <- traits, types, contracts
 | `hf-context` | Token-budget-aware prompt assembly pipeline. |
 | `hf-tools` | Tool registry and validation with project-scoped `FileRead`, `Glob`, and `Grep`; the agent adds service-backed `KnowledgeSearch`. |
 | `hf-skills` | Skill registry, versioning, experience capture. |
-| `hf-prompt` | Core prompt sections (`config/prompts/core_*.txt`) and rendered task prompts: discovery, harness, repair, refine, seeds, dictionary, crash verification, pre-execution review. |
+| `hf-prompt` | Compile-time prompt sections (`config/prompts/core_*.txt`) and rendered task prompts: AI target ranking, harness, repair, refine, seeds, dictionary, crash verification, pre-execution review. |
 | `hf-storage` | SQLite storage (sqlx), transcript persistence. |
 | `hf-runtime` | Mandatory Docker sandbox, resource limits, and build isolation. |
 | `hf-scheduler` | Cron-style and one-shot campaign scheduling. |

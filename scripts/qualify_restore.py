@@ -7,9 +7,12 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import shutil
 import sqlite3
 import stat
 import sys
+import tempfile
+
 
 MAX_FILES = 50_000
 MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
@@ -168,59 +171,68 @@ def backup(database, workspace, archive, *, progress=None):
     regular_file(database)
     if archive.exists():
         raise ValueError("archive directory already exists")
-    archive.mkdir(mode=0o700, parents=True)
-    backup_path = archive / "database.sqlite"
-    source = open_database(database)
-    destination = sqlite3.connect(backup_path)
+    # Build into a staging sibling and publish with one rename, so a backup
+    # that fails or is interrupted leaves nothing that looks like a complete
+    # archive and a retry never collides with a leftover.
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=archive.name + ".incomplete-", dir=archive.parent))
     try:
-        if source.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal":
-            raise ValueError("qualification source is not a WAL database")
-        source.backup(destination, pages=32, progress=progress, sleep=0.01)
-        if destination.execute("PRAGMA journal_mode=DELETE").fetchone()[0].lower() != "delete":
-            raise ValueError("backup database could not become self-contained")
-    finally:
-        destination.close()
-        source.close()
-    for suffix in ("-wal", "-shm"):
-        sidecar = Path(str(backup_path) + suffix)
-        if sidecar.exists():
-            if regular_file(sidecar).st_size and suffix == "-wal":
-                raise ValueError("backup database has an uncheckpointed WAL")
-            sidecar.unlink()
-    backup_path.chmod(0o600)
-    database_view = inspect_database(backup_path)
-    files = [{"path": "database.sqlite", **digest_file(backup_path)}]
-    artifact_root = archive / "workspace"
-    artifact_root.mkdir(mode=0o700)
-    directories = ["workspace"]
-    total = files[0]["size"]
-    for source in sorted(workspace.rglob("*")):
-        metadata = source.lstat()
-        if stat.S_ISLNK(metadata.st_mode):
-            raise ValueError("workspace contains a symlink")
-        relative = source.relative_to(workspace)
-        destination = artifact_root / relative
-        if stat.S_ISDIR(metadata.st_mode):
-            destination.mkdir(mode=0o700, parents=True, exist_ok=True)
-            directories.append((PurePosixPath("workspace") / relative.as_posix()).as_posix())
-        elif stat.S_ISREG(metadata.st_mode):
-            identity = copy_regular(source, destination)
-            total += identity["size"]
-            files.append({"path": (PurePosixPath("workspace") / relative.as_posix()).as_posix(),
-                          **identity})
-        else:
-            raise ValueError("workspace contains a special file")
-        if len(files) > MAX_FILES or len(directories) > MAX_FILES or total > MAX_TOTAL_BYTES:
-            raise ValueError("backup exceeds qualification file or byte limit")
-    verify_evidence_links(artifact_root, database_view["runs"])
-    with backup_path.open("rb") as stream:
-        os.fsync(stream.fileno())
-    for name in sorted(directories, key=lambda value: value.count("/"), reverse=True):
-        sync_directory(archive / name)
-    manifest = {"version": 1, "created_at": datetime.now(timezone.utc).isoformat(),
-                "files": files, "directories": directories, **database_view}
-    write_manifest(archive / "manifest.json", manifest)
-    sync_directory(archive)
+        backup_path = staging / "database.sqlite"
+        source = open_database(database)
+        destination = sqlite3.connect(backup_path)
+        try:
+            if source.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal":
+                raise ValueError("qualification source is not a WAL database")
+            source.backup(destination, pages=32, progress=progress, sleep=0.01)
+            if destination.execute("PRAGMA journal_mode=DELETE").fetchone()[0].lower() != "delete":
+                raise ValueError("backup database could not become self-contained")
+        finally:
+            destination.close()
+            source.close()
+        for suffix in ("-wal", "-shm"):
+            sidecar = Path(str(backup_path) + suffix)
+            if sidecar.exists():
+                if regular_file(sidecar).st_size and suffix == "-wal":
+                    raise ValueError("backup database has an uncheckpointed WAL")
+                sidecar.unlink()
+        backup_path.chmod(0o600)
+        database_view = inspect_database(backup_path)
+        files = [{"path": "database.sqlite", **digest_file(backup_path)}]
+        artifact_root = staging / "workspace"
+        artifact_root.mkdir(mode=0o700)
+        directories = ["workspace"]
+        total = files[0]["size"]
+        for source in sorted(workspace.rglob("*")):
+            metadata = source.lstat()
+            if stat.S_ISLNK(metadata.st_mode):
+                raise ValueError("workspace contains a symlink")
+            relative = source.relative_to(workspace)
+            destination = artifact_root / relative
+            if stat.S_ISDIR(metadata.st_mode):
+                destination.mkdir(mode=0o700, parents=True, exist_ok=True)
+                directories.append((PurePosixPath("workspace") / relative.as_posix()).as_posix())
+            elif stat.S_ISREG(metadata.st_mode):
+                identity = copy_regular(source, destination)
+                total += identity["size"]
+                files.append({"path": (PurePosixPath("workspace") / relative.as_posix()).as_posix(),
+                              **identity})
+            else:
+                raise ValueError("workspace contains a special file")
+            if len(files) > MAX_FILES or len(directories) > MAX_FILES or total > MAX_TOTAL_BYTES:
+                raise ValueError("backup exceeds qualification file or byte limit")
+        verify_evidence_links(artifact_root, database_view["runs"])
+        with backup_path.open("rb") as stream:
+            os.fsync(stream.fileno())
+        for name in sorted(directories, key=lambda value: value.count("/"), reverse=True):
+            sync_directory(staging / name)
+        manifest = {"version": 1, "created_at": datetime.now(timezone.utc).isoformat(),
+                    "files": files, "directories": directories, **database_view}
+        write_manifest(staging / "manifest.json", manifest)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    os.replace(staging, archive)
+    sync_directory(archive.parent)
     return manifest
 
 
@@ -301,23 +313,33 @@ def restore(archive, destination):
     if not archive.is_dir() or destination.exists() or archive == destination or archive in destination.parents:
         raise ValueError("restore needs an existing archive and a new separate destination")
     manifest = verified_archive(archive)
-    destination.mkdir(mode=0o700, parents=True)
-    for name in sorted(manifest["directories"], key=lambda value: (value.count("/"), value)):
-        (destination / name).mkdir(mode=0o700, parents=True, exist_ok=False)
-    for entry in manifest["files"]:
-        identity = copy_regular(archive / entry["path"], destination / entry["path"])
-        if identity != {"sha256": entry["sha256"], "size": entry["size"]}:
-            raise ValueError("archive changed during restore")
-    copy_regular(archive / "manifest.json", destination / "manifest.json")
-    verify_evidence_links(destination / "workspace", manifest["runs"])
-    if inspect_database(destination / "database.sqlite") != {
-        "runs": manifest["runs"], "approvals": manifest["approvals"],
-        "has_approval_table": manifest["has_approval_table"]
-    }:
-        raise ValueError("restored database does not match manifest")
-    for name in sorted(manifest["directories"], key=lambda value: value.count("/"), reverse=True):
-        sync_directory(destination / name)
-    sync_directory(destination)
+    # Same staging discipline as backup: a refused or interrupted restore
+    # leaves no partial destination behind for a retry to trip over.
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=destination.name + ".restoring-",
+                                    dir=destination.parent))
+    try:
+        for name in sorted(manifest["directories"], key=lambda value: (value.count("/"), value)):
+            (staging / name).mkdir(mode=0o700, parents=True, exist_ok=False)
+        for entry in manifest["files"]:
+            identity = copy_regular(archive / entry["path"], staging / entry["path"])
+            if identity != {"sha256": entry["sha256"], "size": entry["size"]}:
+                raise ValueError("archive changed during restore")
+        copy_regular(archive / "manifest.json", staging / "manifest.json")
+        verify_evidence_links(staging / "workspace", manifest["runs"])
+        if inspect_database(staging / "database.sqlite") != {
+            "runs": manifest["runs"], "approvals": manifest["approvals"],
+            "has_approval_table": manifest["has_approval_table"]
+        }:
+            raise ValueError("restored database does not match manifest")
+        for name in sorted(manifest["directories"], key=lambda value: value.count("/"), reverse=True):
+            sync_directory(staging / name)
+        sync_directory(staging)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    os.replace(staging, destination)
+    sync_directory(destination.parent)
     return manifest
 
 

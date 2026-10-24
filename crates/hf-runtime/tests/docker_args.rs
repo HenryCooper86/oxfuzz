@@ -18,18 +18,23 @@ fn limits(max_mem_mb: u64, max_cpus: u32) -> ResourceLimits {
     }
 }
 
-fn cfg_with(default_limits: ResourceLimits) -> RuntimeConfig {
+fn cfg_with(default_env: HashMap<String, String>) -> RuntimeConfig {
     RuntimeConfig {
         image: "oxfuzz/fuzz-sandbox:0.2.1".to_owned(),
         container_workspace: "/work".to_owned(),
-        default_limits,
+        default_env,
         max_pids: 512,
     }
 }
 
+/// A config with no config-wide env defaults.
+fn plain_cfg() -> RuntimeConfig {
+    cfg_with(HashMap::new())
+}
+
 #[test]
 fn build_exec_args_includes_image_and_command() {
-    let cfg = cfg_with(limits(4096, 2));
+    let cfg = plain_cfg();
     let args = hf_runtime::docker::build_exec_args(
         &cfg,
         &limits(4096, 2),
@@ -42,10 +47,11 @@ fn build_exec_args_includes_image_and_command() {
 }
 
 #[test]
-fn build_exec_args_uses_per_call_memory_and_cpu_over_defaults() {
-    // The config default is generous; the per-call limit is tighter and must
-    // win -- previously the per-call limit was silently ignored.
-    let cfg = cfg_with(limits(8192, 8));
+fn build_exec_args_applies_per_call_memory_and_cpu() {
+    // Memory/cpu/duration are per-call decisions only: the runtime config
+    // carries no scalar defaults for them, so the per-call limits are the
+    // ones the container runs with.
+    let cfg = plain_cfg();
     let args = hf_runtime::docker::build_exec_args(&cfg, &limits(1024, 1), &["echo".to_owned()]);
     let joined = args.join(" ");
     assert!(
@@ -61,10 +67,6 @@ fn build_exec_args_uses_per_call_memory_and_cpu_over_defaults() {
         joined.contains("--cpus=1"),
         "per-call cpu not applied: {joined}"
     );
-    assert!(
-        !joined.contains("--memory=8192m"),
-        "default memory leaked over per-call limit: {joined}"
-    );
 }
 
 #[test]
@@ -73,10 +75,7 @@ fn build_exec_args_passes_per_call_env_to_container() {
     // process), overlaid on any config-wide default env.
     let mut default_env = HashMap::new();
     default_env.insert("BASE_OPT".to_owned(), "1".to_owned());
-    let cfg = cfg_with(ResourceLimits {
-        env: default_env,
-        ..limits(4096, 2)
-    });
+    let cfg = cfg_with(default_env);
 
     let mut call_env = HashMap::new();
     call_env.insert("ASAN_OPTIONS".to_owned(), "detect_leaks=0".to_owned());
@@ -101,10 +100,7 @@ fn build_exec_args_passes_per_call_env_to_container() {
 fn build_exec_args_per_call_env_overrides_default() {
     let mut default_env = HashMap::new();
     default_env.insert("OPT".to_owned(), "default".to_owned());
-    let cfg = cfg_with(ResourceLimits {
-        env: default_env,
-        ..limits(4096, 2)
-    });
+    let cfg = cfg_with(default_env);
     let mut call_env = HashMap::new();
     call_env.insert("OPT".to_owned(), "override".to_owned());
     let per_call = ResourceLimits {
@@ -125,7 +121,7 @@ fn build_exec_args_per_call_env_overrides_default() {
 
 #[test]
 fn build_exec_args_mounts_workspace() {
-    let cfg = cfg_with(limits(1024, 1));
+    let cfg = plain_cfg();
     let args = hf_runtime::docker::build_exec_args(&cfg, &limits(1024, 1), &["ls".to_owned()]);
     assert!(
         args.windows(2).any(|pair| pair[0] == "--mount"
@@ -138,7 +134,7 @@ fn build_exec_args_mounts_workspace() {
 fn build_exec_args_quotes_extra_mount_csv_fields() {
     use hf_core::runtime::{SandboxMount, SandboxOptions};
 
-    let cfg = cfg_with(limits(1024, 1));
+    let cfg = plain_cfg();
     let opts = SandboxOptions {
         extra_mounts: vec![SandboxMount::read_only("/host/a\"b".into(), "/work/a\"b")],
         ..SandboxOptions::default()
@@ -154,7 +150,7 @@ fn build_exec_args_quotes_extra_mount_csv_fields() {
 
 #[test]
 fn build_exec_args_adds_ptrace_caps_when_requested() {
-    let cfg = cfg_with(limits(2048, 1));
+    let cfg = plain_cfg();
     let with_ptrace = ResourceLimits {
         ptrace: true,
         ..limits(2048, 1)
@@ -180,7 +176,7 @@ fn build_exec_args_adds_ptrace_caps_when_requested() {
 #[test]
 fn build_exec_args_with_syzkaller_profile() {
     use hf_core::runtime::{SandboxMount, SandboxOptions};
-    let cfg = cfg_with(limits(4096, 4));
+    let cfg = plain_cfg();
     let opts = SandboxOptions {
         extra_mounts: vec![
             SandboxMount::read_only("/host/inputs".into(), "/syzbench/inputs"),
@@ -272,7 +268,7 @@ fn specialized_profile_can_tighten_but_not_expand_pid_limit() {
 fn build_exec_args_supports_read_only_workspace_with_writable_run_mounts() {
     use hf_core::runtime::{SandboxMount, SandboxOptions};
 
-    let cfg = cfg_with(limits(2048, 1));
+    let cfg = plain_cfg();
     let opts = SandboxOptions {
         extra_mounts: vec![
             SandboxMount::writable("/host/corpus".into(), "/work/corpus"),
@@ -305,7 +301,7 @@ fn build_exec_args_supports_read_only_workspace_with_writable_run_mounts() {
 
 #[test]
 fn build_exec_args_applies_a_per_file_write_limit() {
-    let cfg = cfg_with(limits(2048, 1));
+    let cfg = plain_cfg();
     let opts = hf_core::runtime::SandboxOptions {
         max_file_size_bytes: Some(64 * 1024 * 1024),
         ..hf_core::runtime::SandboxOptions::default()
@@ -327,7 +323,7 @@ fn build_exec_args_applies_a_per_file_write_limit() {
 
 #[test]
 fn build_exec_args_bounds_explicit_shared_memory() {
-    let cfg = cfg_with(limits(2048, 1));
+    let cfg = plain_cfg();
     let opts = hf_core::runtime::SandboxOptions {
         shm_size_mb: Some(192),
         ..hf_core::runtime::SandboxOptions::default()

@@ -36,6 +36,49 @@ fn success_body(backend: &str) -> &'static str {
     }
 }
 
+/// Bodies identical to [`success_body`] minus every usage field: a 200
+/// response without usage must be a parse error, not a silent zeroed usage
+/// that permanently holds the caller's worst-case token reservation.
+fn usage_free_body(backend: &str) -> &'static str {
+    match backend {
+        "anthropic" => {
+            r#"{"id":"r","model":"fixture","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn"}"#
+        }
+        "gemini" => {
+            r#"{"candidates":[{"content":{"parts":[{"text":"hello"}],"role":"model"},"finishReason":"STOP"}]}"#
+        }
+        "ollama" => {
+            r#"{"model":"fixture","message":{"role":"assistant","content":"hello"},"done":true}"#
+        }
+        _ => {
+            r#"{"id":"r","model":"fixture","choices":[{"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}"#
+        }
+    }
+}
+
+#[tokio::test]
+async fn responses_without_usage_fail_the_parse_boundary() {
+    for backend in ["openai", "openai-compat", "azure", "gemini", "ollama"] {
+        let body = usage_free_body(backend).as_bytes();
+        let fixture = server(200, vec![body.to_vec()]).await;
+        let pool = ProviderPoolImpl::from_config(&config(&fixture.url, backend, 1024, 64)).unwrap();
+        let error = pool
+            .chat_completion(&request(), &RouteRequest::default())
+            .await
+            .unwrap_err();
+        let message = error.to_string().to_lowercase();
+        let expected = if backend == "ollama" {
+            "eval_count"
+        } else {
+            "usage"
+        };
+        assert!(
+            message.contains(expected),
+            "{backend}: missing usage must fail the parse: {error}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn pool_adapters_accept_exact_body_budget_and_reject_one_extra_byte() {
     for backend in ["openai", "anthropic", "azure", "gemini", "ollama"] {

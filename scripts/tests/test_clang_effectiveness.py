@@ -4,7 +4,9 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
+from scripts import clang_effectiveness
 from scripts.clang_effectiveness import CallBudget, prepare, report, verify_packet, qualification_command
 
 
@@ -37,6 +39,25 @@ class ClangEffectivenessTests(unittest.TestCase):
             (root / "comparison" / trial["directory"] / "project" / trial["source_file"]).write_text("changed")
             with self.assertRaisesRegex(ValueError, "source"):
                 verify_packet(packet, root / "comparison")
+
+    def test_a_failed_prepare_leaves_no_partial_comparison_root(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            missing = parent / "missing-fixtures"
+            for name in ("comparison", "retried-comparison"):
+                root = parent / name
+                with mock.patch.object(clang_effectiveness, "FIXTURES", missing):
+                    with self.assertRaises(OSError):
+                        prepare(root, "sha256:" + "a" * 64, "sha256:" + "b" * 64,
+                                "glm-5.3", 30)
+                self.assertFalse(root.exists())
+                self.assertEqual(
+                    [p.name for p in parent.iterdir() if p.name.startswith(name)],
+                    [], "a failed prepare must not leave the root or staging siblings")
+            # The retry on a clean path still builds the full packet.
+            packet = prepare(parent / "comparison", "sha256:" + "a" * 64,
+                             "sha256:" + "b" * 64, "glm-5.3", 30)
+            self.assertEqual(len(packet["trials"]), 6)
 
     def test_report_rejects_mixed_identities_and_keeps_missing_counters_null(self):
         with tempfile.TemporaryDirectory() as temporary:

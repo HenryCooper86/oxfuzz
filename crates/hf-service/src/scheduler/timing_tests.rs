@@ -99,3 +99,44 @@ async fn time_budget_caps_fuzzer_duration_and_stops_additional_iterations() {
 async fn one_second_allowance_can_launch_a_one_second_run() {
     assert_campaign_budget(1, &[1]).await;
 }
+
+#[tokio::test]
+async fn a_full_concurrency_gate_reports_a_skipped_not_successful_fire() {
+    let _environment = service::ServiceContainer::workspace_environment_test_gate()
+        .lock()
+        .await;
+    let _restore_environment = SavedEnvironment::capture();
+    let fixture = Fixture::new(TestRuntime::new(Duration::from_millis(1100), false)).await;
+    let state = Arc::new(
+        CampaignStateStore::try_load(fixture.root.path().join("campaign_state.json")).unwrap(),
+    );
+    let gate = Arc::new(super::ConcurrencyGate::new(1));
+    let dispatcher = super::FuzzCampaignDispatcher {
+        container: fixture.service.clone().without_provider_pool(),
+        state: Arc::clone(&state),
+        gate: Arc::clone(&gate),
+        notifier: Arc::new(Mutex::new(None)),
+        schedules: Arc::new(ScheduleFileStore::new(
+            fixture.root.path().join("schedules.json"),
+        )),
+        manager: Weak::new(),
+    };
+    let mut params = fixture.params();
+    params.schedule_id = "gate-full".into();
+
+    // Hold the only permit, as another in-flight campaign would.
+    let _held = gate.try_enter().expect("the gate starts empty");
+    let result = dispatcher
+        .dispatch(CAMPAIGN_KIND, serde_json::to_value(params).unwrap())
+        .await
+        .unwrap();
+
+    assert!(result.skipped, "{result:?}");
+    assert!(result.summary.starts_with("skipped:"), "{result:?}");
+    assert_eq!(
+        *fixture.runtime.durations.lock().unwrap(),
+        Vec::<u64>::new(),
+        "no campaign work ran behind a full gate"
+    );
+    assert_eq!(state.snapshot("gate-full").runs_done, 0);
+}

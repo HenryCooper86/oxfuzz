@@ -177,20 +177,6 @@ impl CampaignStateStore {
         })
     }
 
-    /// Load from `path`, failing fast if persisted state is damaged.
-    ///
-    /// Prefer [`Self::try_load`] at boundaries that can return an error.
-    ///
-    /// # Panics
-    /// Panics when an existing state file is unreadable or corrupt.
-    #[must_use]
-    pub fn load(path: PathBuf) -> Self {
-        match Self::try_load(path) {
-            Ok(store) => store,
-            Err(error) => panic!("campaign state cannot be loaded: {error}"),
-        }
-    }
-
     /// Reserve this schedule's allowance until the fire has persisted its outcome.
     pub(crate) fn try_dispatch(self: &Arc<Self>, id: &str) -> Option<CampaignDispatchPermit> {
         let mut dispatching = self
@@ -261,20 +247,6 @@ impl CampaignStateStore {
         Ok(result)
     }
 
-    /// Record one completed fuzz run using an explicit second count.
-    ///
-    /// This compatibility helper fails fast on persistence errors. New campaign
-    /// code should call [`Self::record_success`].
-    ///
-    /// # Panics
-    /// Panics when the updated state cannot be persisted.
-    pub fn record_run(&self, id: &str, secs: u64) -> CampaignRuntimeState {
-        match self.record_success(id, 1, Duration::from_secs(secs)) {
-            Ok(state) => state,
-            Err(error) => panic!("campaign progress cannot be persisted: {error}"),
-        }
-    }
-
     /// Drop a campaign's state transactionally.
     ///
     /// # Errors
@@ -287,16 +259,6 @@ impl CampaignStateStore {
             *guard = candidate;
         }
         Ok(())
-    }
-
-    /// Drop a campaign's state, failing fast if the change cannot be persisted.
-    ///
-    /// # Panics
-    /// Panics when the updated state cannot be persisted.
-    pub fn forget(&self, id: &str) {
-        if let Err(error) = self.try_forget(id) {
-            panic!("campaign progress cannot be removed: {error}");
-        }
     }
 
     /// The configured concurrency cap (never below 1).
@@ -316,16 +278,6 @@ impl CampaignStateStore {
         atomic_write_json(&self.path, &candidate)?;
         *guard = candidate;
         Ok(())
-    }
-
-    /// Set the concurrency cap, failing fast if it cannot be persisted.
-    ///
-    /// # Panics
-    /// Panics when the updated state cannot be persisted.
-    pub fn set_max_concurrent(&self, n: usize) {
-        if let Err(error) = self.try_set_max_concurrent(n) {
-            panic!("campaign concurrency cannot be persisted: {error}");
-        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Persisted> {
@@ -428,7 +380,7 @@ mod tests {
     #[test]
     fn same_schedule_cannot_reuse_an_in_flight_allowance() {
         let root = tempfile::tempdir().unwrap();
-        let state = Arc::new(CampaignStateStore::load(root.path().join("state.json")));
+        let state = Arc::new(CampaignStateStore::try_load(root.path().join("state.json")).unwrap());
         let permit = state.try_dispatch("first").unwrap();
         assert!(state.try_dispatch("first").is_none());
         assert!(state.try_dispatch("other").is_some());
@@ -441,13 +393,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("campaign_state.json");
         {
-            let store = CampaignStateStore::load(path.clone());
-            store.record_run("sched-1", 60);
-            store.record_run("sched-1", 60);
-            store.set_max_concurrent(4);
+            let store = CampaignStateStore::try_load(path.clone()).unwrap();
+            store
+                .record_success("sched-1", 1, Duration::from_secs(60))
+                .unwrap();
+            store
+                .record_success("sched-1", 1, Duration::from_secs(60))
+                .unwrap();
+            store.try_set_max_concurrent(4).unwrap();
         }
         // A fresh load sees the persisted state (survives a restart).
-        let reloaded = CampaignStateStore::load(path);
+        let reloaded = CampaignStateStore::try_load(path).unwrap();
         let st = reloaded.snapshot("sched-1");
         assert_eq!(st.runs_done, 2);
         assert_eq!(st.secs_done, 120);
@@ -458,7 +414,7 @@ mod tests {
     #[test]
     fn unknown_campaign_is_the_zero_state() {
         let dir = tempfile::tempdir().unwrap();
-        let store = CampaignStateStore::load(dir.path().join("s.json"));
+        let store = CampaignStateStore::try_load(dir.path().join("s.json")).unwrap();
         assert_eq!(store.snapshot("never-run"), CampaignRuntimeState::default());
         // Default concurrency applies before anything is set.
         assert_eq!(store.max_concurrent(), DEFAULT_MAX_CONCURRENT);
@@ -467,17 +423,19 @@ mod tests {
     #[test]
     fn forget_resets_a_campaign() {
         let dir = tempfile::tempdir().unwrap();
-        let store = CampaignStateStore::load(dir.path().join("s.json"));
-        store.record_run("s", 30);
-        store.forget("s");
+        let store = CampaignStateStore::try_load(dir.path().join("s.json")).unwrap();
+        store
+            .record_success("s", 1, Duration::from_secs(30))
+            .unwrap();
+        store.try_forget("s").unwrap();
         assert_eq!(store.snapshot("s"), CampaignRuntimeState::default());
     }
 
     #[test]
     fn concurrency_never_drops_below_one() {
         let dir = tempfile::tempdir().unwrap();
-        let store = CampaignStateStore::load(dir.path().join("s.json"));
-        store.set_max_concurrent(0);
+        let store = CampaignStateStore::try_load(dir.path().join("s.json")).unwrap();
+        store.try_set_max_concurrent(0).unwrap();
         assert_eq!(store.max_concurrent(), 1);
     }
 

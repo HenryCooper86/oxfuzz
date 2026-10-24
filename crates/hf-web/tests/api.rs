@@ -1646,3 +1646,74 @@ async fn scheduler_runtime_without_scheduler_is_explicitly_unavailable() {
         serde_json::Value::Null
     );
 }
+
+#[tokio::test]
+async fn schedule_mutations_without_scheduler_are_unavailable() {
+    allow_open_dev_mode();
+    // Mutations must not report success when no scheduler is attached: an
+    // embedded router would otherwise accept creates/deletes that never take
+    // effect (2.16). Reads keep their explicit empty/zero payloads.
+    let root = tempfile::tempdir().unwrap();
+    let app = hf_web::router::build_with_state_and_security(
+        hf_web::router::AppState::new(hf_service::ServiceContainer::stubbed()),
+        hf_web::WebSecurityConfig::new(None, true, Vec::new(), vec![root.path().to_path_buf()])
+            .unwrap(),
+    );
+
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/schedule")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"name":"n","trigger_kind":"cron","trigger_value":"0 3 * * *","project":"{}","engine":"afl++","duration_secs":60}}"#,
+                    root.path().to_string_lossy().replace('\\', "/")
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let deleted = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/schedule/missing")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let enabled = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/schedule/missing/enabled")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"enabled":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(enabled.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let concurrency = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/schedule/concurrency")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"max_concurrent":2}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(concurrency.status(), StatusCode::SERVICE_UNAVAILABLE);
+}

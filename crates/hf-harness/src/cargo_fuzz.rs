@@ -2,7 +2,7 @@
 //!
 //! Rust targets are fuzzed with cargo-fuzz (libfuzzer-sys under the hood), which
 //! is structurally different from the single-file C/C++ compile path in
-//! [`crate::generator::try_compile`]. cargo-fuzz needs a cargo-fuzz project laid
+//! [`crate::generator::try_compile_with_options`]. cargo-fuzz needs a cargo-fuzz project laid
 //! out beside the crate under test:
 //!
 //! ```text

@@ -142,7 +142,6 @@ impl DisplayTranscriptStore for JsonlDisplayTranscriptStore {
 
         // Atomic rewrite: write to temp file, then rename.
         let path = self.transcript_path(session_id)?;
-        let tmp_path = path.with_extension("display.jsonl.tmp");
 
         let mut content = String::new();
         for msg in kept {
@@ -153,17 +152,7 @@ impl DisplayTranscriptStore for JsonlDisplayTranscriptStore {
             content.push('\n');
         }
 
-        tokio::fs::write(&tmp_path, content.as_bytes())
-            .await
-            .map_err(|e| SessionError::TranscriptError {
-                message: format!("write temp display transcript: {e}"),
-            })?;
-
-        tokio::fs::rename(&tmp_path, &path)
-            .await
-            .map_err(|e| SessionError::TranscriptError {
-                message: format!("rename temp display transcript: {e}"),
-            })?;
+        crate::transcript::durable_rewrite(&path, &content).await?;
 
         Ok(removed)
     }

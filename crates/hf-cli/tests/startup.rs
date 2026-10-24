@@ -69,3 +69,23 @@ fn command_validation_runs_with_a_one_mebibyte_process_stack() {
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
     }
 }
+
+#[test]
+fn serve_fails_startup_on_a_short_hf_web_token() {
+    let directory = tempfile::tempdir().unwrap();
+    // A weak `HF_WEB_TOKEN` must fail `serve` before it binds, with an
+    // actionable message naming the variable -- not start a server that 401s
+    // every request. Port 1 is privileged, so even a regression that reaches
+    // bind exits instead of serving.
+    let output = Command::new(env!("CARGO_BIN_EXE_oxfuzz"))
+        .args(["serve", "--host", "127.0.0.1", "--port", "1"])
+        .current_dir(directory.path())
+        .env("HF_CONFIG_DIR", directory.path().join("absent-config"))
+        .env("HF_WEB_TOKEN", "short-token")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("HF_WEB_TOKEN"), "{stderr}");
+    assert!(stderr.contains("20"), "{stderr}");
+}

@@ -252,15 +252,23 @@ impl ServiceContainer {
             env: std::collections::HashMap::new(),
             ptrace: false,
         };
+        // The run's retained per-input budget is the one the crash reproduced
+        // under; the minimizer must judge executions by the same clock.
+        let input_timeout = run.config.as_ref().and_then(|config| config.input_timeout);
         for crash in crashes.iter_mut().take(MAX_CRASH_MINIMIZATIONS) {
             let original = crash.input_path.clone();
-            let prepared = match prepare(workspace, run.id, engine, binary, &original, crash.id) {
+            let prepared = match prepare(
+                workspace,
+                run.id,
+                engine,
+                binary,
+                &original,
+                crash.id,
+                input_timeout,
+            ) {
                 Ok(prepared) => prepared,
                 Err(error) => {
-                    tracing::warn!(
-                        crash_id = %crash.id,
-                        "crash minimization staging failed: {error}"
-                    );
+                    eprintln!("DBG staging failed: {error}");
                     continue;
                 }
             };
@@ -329,6 +337,7 @@ impl ServiceContainer {
                     crash.input_path = path;
                     crash.minimized = true;
                 }
+
                 crash.reproduction = Some(evidence);
                 if let Some(store) = &self.store {
                     store
@@ -536,8 +545,18 @@ impl ServiceContainer {
                 .join("triage")
                 .join("casr_in");
             let _ = std::fs::remove_dir_all(&staging);
-            if stage_crash_inputs(engine, out_dir, &staging) == 0 {
+            let staged = stage_crash_inputs(engine, out_dir, &staging)?;
+            if staged.staged == 0 && staged.skipped == 0 {
                 return Ok(None);
+            }
+            if staged.skipped > 0 {
+                // A crash input that could not be staged would silently be
+                // absent from triage; fail the step so the loss is visible.
+                return Err(ClassifiedError::Internal(format!(
+                    "could not stage {} of {} crash input(s) for CASR triage",
+                    staged.skipped,
+                    staged.staged + staged.skipped
+                )));
             }
             container_input_path(workspace, &staging)
         };

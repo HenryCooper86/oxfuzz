@@ -1162,6 +1162,26 @@ describe("HarnessView request ownership", () => {
     expect([...view.container.querySelectorAll("button")].find((button) => button.textContent === "harness.approveForCampaigns")?.disabled).toBe(true);
   });
 
+  it("attributes a rejected smoke invoke to the smoke step, not the compile step", async () => {
+    configureScopeTransport((command) => {
+      if (command === "harness_review_queue") return Promise.resolve([{
+        harness_id: "retained-harness", target_id: "candidate-0", target_symbol: "parse_input", target_selector: "src/parser.c::parse_input",
+        project_root: PROJECT, engine: "LibFuzzer", language: "C", status: "SmokePassed", build_output: "fuzz",
+        smoke_passed: true, smoke_execs_per_sec: 100, needs_review: true, next_action: "promote", source_preview: "retained source",
+        ai_review: { exercises_target: true, safe_to_execute: true, reasons: [], reviewed_at: "now" },
+        source_sha256: "a".repeat(64), binary_sha256: "b".repeat(64), lint: [],
+      }]);
+      if (command === "harness_smoke") return Promise.reject(new Error("docker daemon unavailable"));
+    });
+    const view = await mountHarnessScope();
+    await harnessButton(view, "harness.runSmokeTest");
+
+    // The smoke step owns its failure; the compile step (idle, never run)
+    // must not fabricate a compile error from the smoke invoke.
+    expect(view.container.textContent).toContain("harness.smokeFailed");
+    expect(view.container.textContent).not.toContain("docker daemon unavailable");
+  });
+
   it.each(["target", "project"])("discards a delayed draft after changing %s and permits a fresh build", async (changed) => {
     const pending = deferred<ReturnType<typeof draftResult>>();
     let drafted = false;

@@ -84,9 +84,9 @@ a safety check that a build configuration can remove is not one.
 ## 4. Templates
 
 Task prompts are rendered by `hf-prompt` (`crates/hf-prompt/src/render.rs`)
-from built-in templates; `config/prompts/prompts.example.toml` documents the
-configuration override format, and no per-language template files exist in the
-repository. The harness prompt contains:
+from built-in renderers in the binary; there is no prompt-override
+configuration, and no per-language template files exist in the repository.
+The harness prompt contains:
 
 - The engine entry point skeleton.
 - Include/import guidance, and the project's real include directories, defines,

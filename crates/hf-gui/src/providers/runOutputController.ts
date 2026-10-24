@@ -563,8 +563,7 @@ export class RunOutputController {
       if (!record(result) || !uuid(result.run_id) || (admittedId && result.run_id !== admittedId))
         throw new Error("Invalid run result identity");
       const summary = parseSummary(result);
-      if (!summary || summary.edges === null || summary.execs === null)
-        throw new Error("Invalid run result metrics");
+      if (!summary) throw new Error("Invalid run result metrics");
       if (this.mounted && generation === this.invocation) {
         void this.ensureOwner(result.run_id);
         if (this.state.runs[result.run_id]) {
@@ -597,8 +596,4 @@ export class RunOutputController {
     this.launch("replay_run", { runId: review.run_id, project: review.project, review }, review.engine);
   runSyzkaller: RunOutputValue["runSyzkaller"] = (opts) =>
     this.launch("run_syzkaller", { opts }, "syzkaller");
-  clear = () => {
-    const id = this.selectedId();
-    if (id) this.patch(id, (run) => ({ ...run, log: [] }));
-  };
 }

@@ -142,6 +142,7 @@ fn payload() -> HarnessWorkOrderPayload {
             sha256: "b".repeat(64),
             size: 16,
         }],
+        seeds_truncated: false,
         validation_steps: vec![
             WorkOrderStep::Import,
             WorkOrderStep::Qualify,
@@ -671,6 +672,10 @@ async fn service_export_persists_identical_packet_before_return_without_runtime_
         first.payload.compile_context.include_dirs,
         vec!["/work/system", "include"]
     );
+    assert!(
+        first.payload.seeds_truncated,
+        "a corpus larger than the packet bound must mark its seed evidence incomplete"
+    );
     assert_eq!(
         first
             .payload
@@ -683,6 +688,10 @@ async fn service_export_persists_identical_packet_before_return_without_runtime_
             .collect::<Vec<_>>()
     );
     let packet_json = serde_json::to_string(&first).expect("serialize packet");
+    assert!(
+        packet_json.contains("\"seeds_truncated\":true"),
+        "a truncated packet must serialize its marker"
+    );
     assert!(!packet_json.contains("must-not-leak"));
     assert!(!packet_json.contains(&project.display().to_string()));
     assert_eq!(runtime.calls.load(Ordering::Relaxed), 0);
@@ -731,10 +740,56 @@ async fn service_export_complete_source_digest_changes_packet_identity_outside_b
         .expect("export changed work order");
 
     assert!(first.payload.source.excerpt_truncated);
+    assert!(
+        !first.payload.seeds_truncated,
+        "a corpus within the packet bound must not claim truncation"
+    );
     assert_eq!(first.payload.source.excerpt, second.payload.source.excerpt);
     assert_ne!(first.payload.source.sha256, second.payload.source.sha256);
     assert_ne!(first.id, second.id);
     assert_eq!(runtime.calls.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn seeds_truncation_marker_is_additive_and_covers_the_digest() {
+    let mut full = payload();
+    full.seeds = (0_u8..20)
+        .map(|index| WorkOrderSeedReference {
+            sha256: format!("{index:02x}").repeat(32),
+            size: u64::from(index),
+        })
+        .collect();
+
+    let unmarked = build_work_order(full.clone()).expect("build unmarked packet");
+    let json = serde_json::to_string(&unmarked).expect("serialize unmarked packet");
+    assert!(
+        !json.contains("seeds_truncated"),
+        "an untruncated packet must digest exactly like the pre-marker format"
+    );
+    let decoded: hf_service::harness_work_order::HarnessWorkOrder =
+        serde_json::from_str(&json).expect("pre-marker packet JSON decodes");
+    verify_work_order(&decoded).expect("pre-marker packet keeps its identifier");
+
+    let mut marked_payload = full.clone();
+    marked_payload.seeds_truncated = true;
+    let marked = build_work_order(marked_payload).expect("build marked packet");
+    assert_ne!(marked.id, unmarked.id);
+    assert!(serde_json::to_string(&marked)
+        .expect("serialize marked packet")
+        .contains("\"seeds_truncated\":true"));
+    verify_work_order(&marked).expect("marked packet verifies");
+
+    // A truncated set is a full set: the marker beside fewer references
+    // would misstate the evidence the author sees.
+    let mut contradictory = full;
+    contradictory.seeds.truncate(19);
+    contradictory.seeds_truncated = true;
+    assert_eq!(
+        build_work_order(contradictory)
+            .expect_err("a marker without a full seed set must be rejected")
+            .code,
+        HarnessWorkOrderErrorCode::InvalidRequest
+    );
 }
 
 #[cfg(windows)]

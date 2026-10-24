@@ -1,9 +1,10 @@
 //! hf-prompt: canonical prompt assembly and fuzzing prompt templates.
 //!
-//! - `render`: oxfuzz's fuzzing prompt renderers (discovery, harness, triage).
+//! - `render`: oxfuzz's fuzzing prompt renderers (harness, triage, ranking).
 //! - `agent`: the invariant, token-budgeted system prompt used by `hf-agent`.
-//! - `budget`/`builtins`/`section`/`store`/`template`: structured prompt
-//!   sections, templates, and section store (used by `hf-context`).
+//! - `budget`: the byte-based token estimator and truncator shared with the
+//!   system-prompt budget.
+//! - `builtins`: the compile-time prompt sections embedded in the binary.
 
 pub mod agent;
 
@@ -12,16 +13,13 @@ mod clang_compact;
 pub mod render;
 
 pub mod budget;
-pub mod builtins;
-pub mod section;
-pub mod store;
-pub mod template;
+mod builtins;
 
 pub use render::{
     clang_context_wrapper_bytes, clang_renderer_version, render_accepted_examples_section,
     render_ai_ranking_prompt, render_build_context_section, render_crash_verify_prompt,
-    render_dictionary_prompt, render_discovery_prompt, render_harness_pre_execution_review_prompt,
-    render_harness_prompt, render_harness_prompt_with_context, render_harness_prompt_with_examples,
+    render_dictionary_prompt, render_harness_pre_execution_review_prompt, render_harness_prompt,
+    render_harness_prompt_with_context, render_harness_prompt_with_examples,
     render_harness_refine_prompt, render_harness_repair_prompt, render_persistent_harness_prompt,
     render_persistent_harness_prompt_with_examples, render_persistent_harness_refine_prompt,
     render_persistent_harness_repair_prompt, render_related_context_section, render_seed_prompt,
@@ -31,18 +29,6 @@ pub use render::{
 
 pub use agent::{build_agent_system_prompt, AgentPromptInput, AGENT_SYSTEM_PROMPT_TOKEN_BUDGET};
 
-pub use budget::{
-    estimate_tokens, truncate_to_budget, truncate_tool_result, MAX_TOOL_RESULT_CHARS,
-};
-pub use builtins::{
-    builtin_section_store, builtin_section_store_with_overrides, default_template,
-    tool_protocol_for, BUILTIN_PROMPT_FILES, PROMPT_TOOL_PROTOCOL, PROMPT_TOOL_PROTOCOL_REMOTE,
-};
-pub use section::{
-    ContentSource, PromptContext, PromptSection, SectionCategory, SectionCondition, SectionId,
-    TemplateId,
-};
-pub use store::{SectionStore, StoreError};
-pub use template::{EffectiveSection, ModeOverlay, PromptTemplate, SectionRef};
+pub use budget::{estimate_tokens, truncate_to_budget};
 
 pub use render::render_clang_context;

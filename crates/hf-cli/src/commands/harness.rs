@@ -55,6 +55,24 @@ pub(crate) async fn cmd_harness(
     if draft_only && cmplog {
         eprintln!("warning: --cmplog is ignored with --draft-only (the harness is not compiled)");
     }
+    // --repair/--refine drive service operations that call the model whenever
+    // a provider is configured and take no AiPolicy, so an explicit --ai
+    // off/require cannot be honored on them. Reject the combination instead
+    // of silently ignoring the policy on the paths that spend the most tokens
+    // (2.16); a plain draft (no --repair/--refine) honors --ai through
+    // harness_draft_with_policy.
+    if let Some(flag) = ai_policy_repair_conflict(ai, refine, repair, draft_only) {
+        anyhow::bail!(
+            "--ai {} does not combine with {flag}: that path uses the model whenever a \
+             provider is configured and does not yet honor the policy; omit --ai (auto) or \
+             run a plain draft, which enforces --ai",
+            match ai {
+                AiOption::Auto => "auto",
+                AiOption::Require => "require",
+                AiOption::Off => "off",
+            }
+        );
+    }
     let container = crate::approval::bootstrap().await;
 
     // With --refine, reshape the existing harness toward uncovered reachable
@@ -223,6 +241,29 @@ fn print_lint_findings(findings: &[hf_service::LintFinding]) {
             finding.rule, finding.line, finding.message
         );
     }
+}
+
+/// The `--repair`/`--refine` flag an explicit `--ai` policy cannot combine
+/// with, if any: those service operations call the model whenever a provider
+/// is configured and take no [`hf_service::AiPolicy`], so the policy would be
+/// silently ignored. `--draft-only --repair` never reaches the repair loop
+/// (the draft path honors the policy), so only an effective repair conflicts.
+fn ai_policy_repair_conflict(
+    ai: AiOption,
+    refine: bool,
+    repair: usize,
+    draft_only: bool,
+) -> Option<&'static str> {
+    if ai == AiOption::Auto {
+        return None;
+    }
+    if refine {
+        return Some("--refine");
+    }
+    if repair > 0 && !draft_only {
+        return Some("--repair");
+    }
+    None
 }
 
 fn promotion_required_message() -> &'static str {
@@ -504,8 +545,13 @@ pub(crate) async fn cmd_corpus(
     project: PathBuf,
     target: &str,
     op: &str,
+    lang: &str,
     from: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
+    // The LLM paths discover and resolve the target in this language, so it
+    // is parsed once up front (2.14: reject the value at the boundary) even
+    // for ops that never use it.
+    let lang = parse_lang(lang)?;
     let container = crate::approval::bootstrap().await;
     match op {
         "seed" => {
@@ -514,7 +560,7 @@ pub(crate) async fn cmd_corpus(
         }
         "llmseed" => {
             let entries = container
-                .generate_seeds_llm(&project, target, TargetLanguage::C, 12)
+                .generate_seeds_llm(&project, target, lang, 12)
                 .await?;
             println!("Generated {} LLM seed(s).", entries.len());
         }
@@ -556,7 +602,7 @@ pub(crate) async fn cmd_corpus(
         }
         "regen" => {
             let outcome = container
-                .regenerate_dead_seeds(&project, target, TargetLanguage::C)
+                .regenerate_dead_seeds(&project, target, lang)
                 .await?;
             println!(
                 "Regenerated {}/{} dying seed(s); {} replacement(s) written: {} survive, {} die at entry, {} not measured.",
@@ -722,5 +768,58 @@ mod promotion_guidance_tests {
         assert!(message.contains("rerunning `oxfuzz harness` creates a new draft"));
         assert!(message.contains("work-order promote --attempt"));
         assert!(!message.contains("rerun this command with --promote"));
+    }
+}
+
+#[cfg(test)]
+mod ai_policy_conflict_tests {
+    use super::ai_policy_repair_conflict;
+    use crate::args::AiOption;
+
+    #[test]
+    fn auto_never_conflicts() {
+        assert_eq!(
+            ai_policy_repair_conflict(AiOption::Auto, true, 3, false),
+            None
+        );
+        assert_eq!(
+            ai_policy_repair_conflict(AiOption::Auto, false, 3, false),
+            None
+        );
+    }
+
+    #[test]
+    fn an_explicit_policy_conflicts_with_effective_repair_and_refine() {
+        // Those service operations call the model whenever a provider is
+        // configured and take no AiPolicy, so `off` would still spend tokens
+        // and `require` would silently downgrade -- both must be rejected.
+        for ai in [AiOption::Off, AiOption::Require] {
+            assert_eq!(
+                ai_policy_repair_conflict(ai, true, 0, false),
+                Some("--refine")
+            );
+            // Refine is honored even under --draft-only (it recompiles), so
+            // the conflict stands.
+            assert_eq!(
+                ai_policy_repair_conflict(ai, true, 0, true),
+                Some("--refine")
+            );
+            assert_eq!(
+                ai_policy_repair_conflict(ai, false, 2, false),
+                Some("--repair")
+            );
+        }
+    }
+
+    #[test]
+    fn a_policy_stays_valid_on_paths_that_honor_it() {
+        for ai in [AiOption::Off, AiOption::Require] {
+            // Plain draft: harness_draft_with_policy enforces the policy.
+            assert_eq!(ai_policy_repair_conflict(ai, false, 0, false), None);
+            // --draft-only --repair never reaches the repair loop; the draft
+            // path runs instead and honors the policy (the CLI warns that
+            // --repair is ignored).
+            assert_eq!(ai_policy_repair_conflict(ai, false, 2, true), None);
+        }
     }
 }

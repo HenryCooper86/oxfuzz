@@ -2098,9 +2098,9 @@ async fn artifact_summary_reports_on_disk_state() {
 
     // Nothing on disk yet.
     let empty = container.artifact_summary(&project, target);
-    assert!(!empty.harness_built);
-    assert_eq!(empty.corpus_count, 0);
-    assert_eq!(empty.crash_count, 0);
+    assert_eq!(empty.harness_built, Some(false));
+    assert_eq!(empty.corpus_count, Some(0));
+    assert_eq!(empty.crash_count, Some(0));
 
     // Lay down a harness binary, two corpus inputs, and both legacy and
     // run-scoped crash evidence.
@@ -2115,9 +2115,39 @@ async fn artifact_summary_reports_on_disk_state() {
     fs::write(ws.join("runs/run-a/out/crash-2"), b"boom again").unwrap();
 
     let s = container.artifact_summary(&project, target);
-    assert!(s.harness_built, "harness detected");
-    assert_eq!(s.corpus_count, 2);
-    assert_eq!(s.crash_count, 2);
+    assert_eq!(s.harness_built, Some(true));
+    assert_eq!(s.corpus_count, Some(2));
+    assert_eq!(s.crash_count, Some(2));
+
+    let _ = fs::remove_dir_all(&ws);
+}
+
+#[tokio::test]
+async fn artifact_summary_reports_unknown_when_the_corpus_cannot_be_read() {
+    use std::fs;
+    isolate_workspace();
+
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("artifact_unreadable_proj");
+    fs::create_dir_all(&project).unwrap();
+    let target = "demo";
+
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
+
+    // A corpus root that exists but is not a readable directory makes the
+    // corpus count unknown, not zero; the harness observation still measures.
+    let ws = hf_service::workspace_dir(&project, target);
+    fs::create_dir_all(&ws).unwrap();
+    fs::write(ws.join("corpus"), b"not a directory").unwrap();
+    fs::write(ws.join(format!("fuzz_{target}")), b"bin").unwrap();
+
+    let s = container.artifact_summary(&project, target);
+    assert_eq!(
+        s.corpus_count, None,
+        "an unreadable corpus root must not be reported as an empty corpus"
+    );
+    assert_eq!(s.harness_built, Some(true));
+    assert_eq!(s.crash_count, Some(0));
 
     let _ = fs::remove_dir_all(&ws);
 }

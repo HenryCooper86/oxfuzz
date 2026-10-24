@@ -36,13 +36,42 @@ fn row_to_checkpoint(row: &sqlx::sqlite::SqliteRow) -> Result<ChatCheckpoint, Se
     Ok(ChatCheckpoint {
         checkpoint_id: row.try_get("checkpoint_id").map_err(|e| storage_err(&e))?,
         session_id: SessionId(row.try_get("session_id").map_err(|e| storage_err(&e))?),
-        turn_number: u32::try_from(turn_number).unwrap_or(0),
-        message_count_before: u32::try_from(message_count_before).unwrap_or(0),
+        turn_number: strict_u32(
+            turn_number,
+            "turn_number",
+            "a negative or oversized turn_number would silently reset the \
+                rollback boundary to turn 0",
+        )?,
+        message_count_before: strict_u32(
+            message_count_before,
+            "message_count_before",
+            "a negative or oversized message_count_before would truncate the \
+                whole transcript on rollback",
+        )?,
         journal_scope_id: row
             .try_get("journal_scope_id")
             .map_err(|e| storage_err(&e))?,
         invalidated: invalidated != 0,
-        created_at: created_at.parse().unwrap_or_else(|_| chrono::Utc::now()),
+        created_at: created_at
+            .parse()
+            .map_err(|error| SessionError::StorageError {
+                message: format!(
+                    "stored chat_checkpoints.created_at '{created_at}' is not an \
+                    RFC 3339 timestamp: {error}"
+                ),
+            })?,
+    })
+}
+
+/// Strictly decode a stored `SQLite` integer into `u32`, naming the column in
+/// the error instead of silently defaulting (a corrupt value must fail the
+/// load rather than masquerade as a valid one).
+fn strict_u32(value: i64, column: &str, reason: &str) -> Result<u32, SessionError> {
+    u32::try_from(value).map_err(|_| SessionError::StorageError {
+        message: format!(
+            "stored chat_checkpoints.{column} value {value} is outside the u32 \
+            range: {reason}"
+        ),
     })
 }
 

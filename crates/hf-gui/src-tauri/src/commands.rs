@@ -70,9 +70,18 @@ pub(crate) async fn ensure_docker_ready(
         let _ = app.emit("docker:status", serde_json::json!({ "message": message }));
     };
 
-    let platform = arch
-        .as_deref()
-        .map_or_else(hf_service::host_platform, hf_service::norm_platform);
+    // Reject an unrecognized arch at this IPC boundary rather than letting a
+    // fallback silently coerce it to the host platform (2.16): the image
+    // check would then compare the wrong architecture.
+    let Some(platform) = arch.as_deref().map_or_else(
+        || Some(hf_service::host_platform()),
+        hf_service::norm_platform,
+    ) else {
+        emit(&format!(
+            "Unknown sandbox architecture {arch:?}: expected linux/amd64 or linux/arm64."
+        ));
+        return system_status().await;
+    };
     let want_short = hf_service::platform_short(&platform).to_string();
 
     if !hf_service::docker_cli_present() {
@@ -3582,30 +3591,29 @@ pub async fn create_remediation_operation(
 pub async fn approve_remediation_operation(
     state: tauri::State<'_, crate::state::AppState>,
     operation_id: String,
-    operator: String,
 ) -> Result<serde_json::Value, String> {
     let operation_id = uuid::Uuid::parse_str(&operation_id).map_err(|error| error.to_string())?;
+    // The desktop shell is the single local principal, so the attribution is
+    // derived here rather than accepted from the caller (VULN-009).
     let view = state
         .container
-        .approve_remediation_operation(operation_id, &operator)
+        .approve_remediation_operation(
+            operation_id,
+            hf_service::RemediationApprover::DesktopOperator,
+        )
         .await
         .map_err(|error| error.to_string())?;
     serde_json::to_value(view).map_err(|error| error.to_string())
 }
-
-/// Explain that remediation approval was excluded from this build.
 #[cfg(not(feature = "patch-to-proof"))]
 #[tauri::command]
 pub async fn approve_remediation_operation(
     state: tauri::State<'_, crate::state::AppState>,
     operation_id: String,
-    operator: String,
 ) -> Result<serde_json::Value, String> {
-    let _ = (state, operation_id, operator);
+    let _ = (state, operation_id);
     Err(patch_to_proof_feature_unavailable())
 }
-
-/// Start the sandbox verification workflow for an approved remediation.
 #[cfg(feature = "patch-to-proof")]
 #[tauri::command]
 pub async fn start_remediation_verification(
@@ -4146,6 +4154,39 @@ pub async fn automotive_execute_replay(
     #[cfg(not(feature = "automotive-scapy"))]
     {
         let _ = (state, project_root, mode, plan, approval);
+        Err(automotive_feature_unavailable())
+    }
+}
+
+/// Mint keyed physical-bench approval evidence for one exact replay scope
+/// (the operator flow). The returned evidence feeds back into
+/// `automotive_execute_replay`; replay verification is unchanged.
+#[tauri::command]
+pub async fn automotive_mint_approval(
+    state: tauri::State<'_, crate::state::AppState>,
+    interface: String,
+    plan: serde_json::Value,
+    approved_by: String,
+) -> Result<serde_json::Value, String> {
+    #[cfg(feature = "automotive-scapy")]
+    {
+        let plan = serde_json::from_value(plan).map_err(|error| error.to_string())?;
+        let evidence = state
+            .container
+            .mint_automotive_physical_bench_approval(
+                hf_service::automotive::AutomotiveApprovalMintRequest {
+                    interface,
+                    plan,
+                    approved_by,
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        serde_json::to_value(evidence).map_err(|error| error.to_string())
+    }
+    #[cfg(not(feature = "automotive-scapy"))]
+    {
+        let _ = (state, interface, plan, approved_by);
         Err(automotive_feature_unavailable())
     }
 }

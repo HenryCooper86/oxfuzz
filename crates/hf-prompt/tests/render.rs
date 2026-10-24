@@ -5,7 +5,6 @@ use hf_core::target::{
     InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
 };
 use hf_prompt::render_ai_ranking_prompt;
-use hf_prompt::render_discovery_prompt;
 
 fn sample_candidate(symbol: &str, fit: f64) -> TargetCandidate {
     TargetCandidate {
@@ -30,40 +29,6 @@ fn sample_candidate(symbol: &str, fit: f64) -> TargetCandidate {
         reachable_functions: Vec::new(),
         accumulated_complexity: 0,
     }
-}
-
-#[test]
-fn discovery_prompt_includes_candidates() {
-    let candidates = vec![
-        sample_candidate("parse_value", 0.9),
-        sample_candidate("parse_array", 0.8),
-    ];
-    let prompt = render_discovery_prompt(&candidates);
-    assert!(
-        prompt.contains("parse_value"),
-        "prompt must mention parse_value"
-    );
-    assert!(
-        prompt.contains("parse_array"),
-        "prompt must mention parse_array"
-    );
-    assert!(
-        prompt.contains("fit_score"),
-        "prompt must reference fit_score"
-    );
-}
-
-#[test]
-fn discovery_prompt_distinguishes_same_named_candidates_by_file() {
-    let first = sample_candidate("parse_value", 0.9);
-    let mut second = sample_candidate("parse_value", 0.8);
-    second.location.file = std::path::PathBuf::from("src/alternate.c");
-
-    let prompt = render_discovery_prompt(&[first, second]);
-
-    assert!(prompt.contains("relative_file=src/json.c symbol=parse_value"));
-    assert!(prompt.contains("relative_file=src/alternate.c symbol=parse_value"));
-    assert!(prompt.contains("relative_file, symbol, fit_score"));
 }
 
 #[test]

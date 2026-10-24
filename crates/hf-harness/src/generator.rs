@@ -15,96 +15,6 @@ use hf_prompt::{
     render_harness_repair_prompt, render_seed_prompt, RelatedContext,
 };
 
-/// Draft a harness for a target using the LLM.
-///
-/// # Errors
-/// Returns `ClassifiedError` if the LLM call fails or the response contains
-/// no fenced code block.
-pub async fn draft(
-    target: &TargetCandidate,
-    engine: EngineKind,
-    sanitizer: hf_core::target::Sanitizer,
-    llm: Box<dyn LlmProvider>,
-) -> Result<HarnessDraft, ClassifiedError> {
-    draft_with_context(target, engine, &[], None, sanitizer, llm).await
-}
-
-/// Draft a harness for a target using the LLM, augmenting the prompt with
-/// related project context retrieved from the knowledge index (call sites,
-/// related parsers) and with the project's real compile context.
-///
-/// An empty `related` slice and a `build` of `None` render the base prompt
-/// unchanged, so a missing index, a failed retrieval, or a project without a
-/// compile database all degrade to [`draft`].
-///
-/// # Errors
-/// Returns `ClassifiedError` if the LLM call fails or the response contains
-/// no fenced code block.
-pub async fn draft_with_context(
-    target: &TargetCandidate,
-    engine: EngineKind,
-    related: &[RelatedContext],
-    build: Option<&BuildContext>,
-    sanitizer: hf_core::target::Sanitizer,
-    llm: Box<dyn LlmProvider>,
-) -> Result<HarnessDraft, ClassifiedError> {
-    draft_with_examples(target, engine, related, build, &[], sanitizer, llm).await
-}
-
-/// Draft a harness for a target using the LLM, additionally conditioning the
-/// prompt on harnesses a human previously promoted for this project: the
-/// strongest available signal about house style, entry-point shape, and which
-/// include paths actually work.
-///
-/// An empty `examples` slice renders exactly what
-/// [`draft_with_context`] renders, so a project without promotions yet
-/// drafts unchanged.
-///
-/// # Errors
-/// Returns `ClassifiedError` if the LLM call fails or the response contains
-/// no fenced code block.
-pub async fn draft_with_examples(
-    target: &TargetCandidate,
-    engine: EngineKind,
-    related: &[RelatedContext],
-    build: Option<&BuildContext>,
-    examples: &[hf_prompt::AcceptedExample],
-    sanitizer: hf_core::target::Sanitizer,
-    llm: Box<dyn LlmProvider>,
-) -> Result<HarnessDraft, ClassifiedError> {
-    let prompt = render_harness_prompt_with_examples(target, engine, related, build, examples);
-    complete_draft(target, engine, prompt, sanitizer, llm).await
-}
-
-/// Draft an AFL++ persistent-mode harness: the prompt embeds the canonical
-/// skeleton ([`crate::persistent::render_harness_source`]) for the model to
-/// fill in. The flavor is AFL++ + C/C++ only; anything else fails before a
-/// model call is spent (Engineering Protocol 2.16).
-///
-/// # Errors
-/// Returns `ClassifiedError::Validation` for a non-AFL++ engine or non-C/C++
-/// target, and `ClassifiedError` if the LLM call fails or the response
-/// contains no fenced code block.
-pub async fn draft_persistent_with_examples(
-    target: &TargetCandidate,
-    engine: EngineKind,
-    related: &[RelatedContext],
-    build: Option<&BuildContext>,
-    examples: &[hf_prompt::AcceptedExample],
-    sanitizer: hf_core::target::Sanitizer,
-    llm: Box<dyn LlmProvider>,
-) -> Result<HarnessDraft, ClassifiedError> {
-    crate::persistent::require_persistent_support(engine, target.language)?;
-    let prompt = hf_prompt::render_persistent_harness_prompt_with_examples(
-        target,
-        related,
-        build,
-        examples,
-        &persistent_prompt_skeleton(target),
-    );
-    complete_draft(target, engine, prompt, sanitizer, llm).await
-}
-
 /// The canonical persistent-mode skeleton a draft prompt embeds, with
 /// placeholders where the model fills the target's includes, declaration, and
 /// call. Rendered by [`crate::persistent::render_harness_source`] so prompt
@@ -453,25 +363,6 @@ pub enum CompileResult {
     Failed(CompileFailure),
 }
 
-/// Compile a harness in the sandbox.
-///
-/// # Errors
-/// Returns `ClassifiedError` if the build command returns a non-zero exit
-/// code (or the sandbox itself fails).
-pub async fn compile(
-    harness: Harness,
-    rt: &dyn RuntimeAdapter,
-    workspace: &Path,
-) -> Result<Harness, ClassifiedError> {
-    compile_with_options(
-        harness,
-        rt,
-        workspace,
-        &hf_core::runtime::SandboxOptions::default(),
-    )
-    .await
-}
-
 /// Compile with explicit sandbox options, including an immutable image selection.
 ///
 /// # Errors
@@ -489,27 +380,6 @@ pub async fn compile_with_options(
             f.exit_code, f.stderr
         ))),
     }
-}
-
-/// Compile a harness in the sandbox, returning a structured [`CompileResult`]
-/// so callers can inspect the diagnostics (e.g. to drive a repair attempt)
-/// rather than only receiving an opaque error string.
-///
-/// # Errors
-/// Returns `ClassifiedError` only for infrastructure failures (cannot write the
-/// source, sandbox cannot run). A non-zero compiler exit is `CompileResult::Failed`.
-pub async fn try_compile(
-    harness: Harness,
-    rt: &dyn RuntimeAdapter,
-    workspace: &Path,
-) -> Result<CompileResult, ClassifiedError> {
-    try_compile_with_options(
-        harness,
-        rt,
-        workspace,
-        &hf_core::runtime::SandboxOptions::default(),
-    )
-    .await
 }
 
 /// Compile one attempt using the supplied sandbox options for either language path.
@@ -829,39 +699,6 @@ async fn try_compile_cargo_fuzz(
     Ok(CompileResult::Ok(Box::new(harness)))
 }
 
-/// Run a 60-second smoke fuzz on a compiled harness.
-///
-/// The harness is considered valid if the fuzzer actually ran (any exec/s,
-/// libFuzzer init/done markers, or a crash). A crash found during smoke marks
-/// `passed = false` but is still a working harness; `# Errors` is only returned
-/// when no fuzzer activity is detected at all (e.g. the binary failed to exec).
-///
-/// # Errors
-/// Returns `ClassifiedError` if the sandbox command fails or no fuzzer activity
-/// is detected in the output.
-pub async fn smoke_fuzz(
-    harness: Harness,
-    rt: &dyn RuntimeAdapter,
-    workspace: &Path,
-) -> Result<Harness, ClassifiedError> {
-    smoke_fuzz_in(harness, rt, workspace, Path::new("out")).await
-}
-
-/// Run a bounded smoke fuzz with artifacts written below a caller-owned,
-/// workspace-relative output directory.
-///
-/// # Errors
-/// Returns `ClassifiedError` if the output path is unsafe, the sandbox command
-/// fails or is force-stopped, or no fuzzer activity is detected.
-pub async fn smoke_fuzz_in(
-    harness: Harness,
-    rt: &dyn RuntimeAdapter,
-    workspace: &Path,
-    output_relative: &Path,
-) -> Result<Harness, ClassifiedError> {
-    smoke_fuzz_in_paths(harness, rt, workspace, Path::new("corpus"), output_relative).await
-}
-
 fn ensure_regular_directory(
     workspace: &Path,
     relative: &Path,
@@ -908,64 +745,13 @@ fn ensure_regular_directory(
     Ok(current)
 }
 
-/// Run a bounded smoke fuzz against a caller-owned corpus snapshot and output
-/// directory, both workspace-relative.
-///
-/// # Errors
-/// Returns `ClassifiedError` if either path escapes the workspace, a directory
-/// is not regular, the sandbox command fails, or no fuzzer activity is detected.
-pub async fn smoke_fuzz_in_paths(
-    harness: Harness,
-    rt: &dyn RuntimeAdapter,
-    workspace: &Path,
-    corpus_relative: &Path,
-    output_relative: &Path,
-) -> Result<Harness, ClassifiedError> {
-    let config = smoke_cfg(&harness);
-    smoke_fuzz_in_paths_with_config(
-        harness,
-        rt,
-        workspace,
-        corpus_relative,
-        output_relative,
-        &config,
-    )
-    .await
-}
-
-/// Run a bounded smoke fuzz using one caller-resolved run configuration for
-/// the engine command, sandbox limits, and returned evidence summary.
-///
-/// # Errors
-/// Returns `ClassifiedError` when the configuration does not identify the
-/// harness, has zero duration/resources, either path escapes the workspace, the
-/// sandbox command fails, or no fuzzer activity is detected.
-pub async fn smoke_fuzz_in_paths_with_config(
-    harness: Harness,
-    rt: &dyn RuntimeAdapter,
-    workspace: &Path,
-    corpus_relative: &Path,
-    output_relative: &Path,
-    config: &hf_core::engine::FuzzRunConfig,
-) -> Result<Harness, ClassifiedError> {
-    smoke_fuzz_in_paths_with_config_and_sandbox_image(
-        harness,
-        rt,
-        workspace,
-        corpus_relative,
-        output_relative,
-        config,
-        None,
-    )
-    .await
-}
-
 /// Run a bounded smoke fuzz using one caller-resolved configuration and an
 /// optional immutable sandbox image reference.
 ///
 /// # Errors
-/// Returns `ClassifiedError` under the same conditions as
-/// [`smoke_fuzz_in_paths_with_config`].
+/// Returns `ClassifiedError` when the configuration does not identify the
+/// harness, has zero duration/resources, either path escapes the workspace,
+/// the sandbox command fails, or no fuzzer activity is detected.
 pub async fn smoke_fuzz_in_paths_with_config_and_sandbox_image(
     mut harness: Harness,
     rt: &dyn RuntimeAdapter,
@@ -1062,20 +848,13 @@ pub async fn smoke_fuzz_in_paths_with_config_and_sandbox_image(
         }
     }
 
-    let mut cmd = smoke_command(
+    let cmd = smoke_command(
         harness.engine,
         &binary,
         &corpus_container,
         &out_container,
         config,
-        duration_secs,
     )?;
-    if matches!(harness.engine, EngineKind::LibFuzzer) {
-        cmd.push(format!(
-            "-artifact_prefix={}/",
-            out_container.trim_end_matches('/')
-        ));
-    }
     let limits = hf_core::runtime::ResourceLimits {
         max_mem_mb: config.max_mem_mb,
         max_cpus: config.max_cpus,
@@ -1194,11 +973,6 @@ fn count_smoke_artifacts(engine: EngineKind, out_dir: &Path) -> u32 {
         })
 }
 
-/// Bounded smoke-fuzz duration, in seconds.
-const SMOKE_SECS: u64 = 60;
-const DEFAULT_SMOKE_MAX_MEM_MB: u64 = 2048;
-const DEFAULT_SMOKE_MAX_CPUS: u32 = 1;
-
 fn validate_smoke_config(
     harness: &Harness,
     config: &hf_core::engine::FuzzRunConfig,
@@ -1224,10 +998,10 @@ fn validate_smoke_config(
 
 /// Build the engine-appropriate smoke-fuzz command.
 ///
-/// libFuzzer compiles a libFuzzer-style binary that is run directly; AFL++ and
-/// honggfuzz are driven through their own fuzzer processes
-/// (reusing the real `hf-engine` adapter argument builders so smoke matches the
-/// production run). Syzkaller has no userspace-harness smoke run.
+/// Every engine arm reuses the real `hf-engine` adapter argument builder with
+/// the caller-resolved single-instance config, so smoke qualifies exactly the
+/// argv shape the campaign runs (flags, corpus, artifacts, resolved knobs).
+/// Syzkaller has no userspace-harness smoke run.
 ///
 /// Smoke is a bounded qualification probe, not a throughput campaign: it runs
 /// exactly one engine instance regardless of the CPU allocation, so a raised
@@ -1243,15 +1017,13 @@ fn smoke_command(
     corpus: &str,
     out: &str,
     config: &hf_core::engine::FuzzRunConfig,
-    duration_secs: u64,
 ) -> Result<Vec<String>, ClassifiedError> {
     let mut single_instance = config.clone();
     single_instance.max_cpus = 1;
     match engine {
-        EngineKind::LibFuzzer => Ok(vec![
-            binary.to_owned(),
-            format!("-max_total_time={duration_secs}"),
-        ]),
+        EngineKind::LibFuzzer => {
+            hf_engine::libfuzzer::build_run_args(&single_instance, binary, corpus, out)
+        }
         EngineKind::AflPlusPlus => {
             hf_engine::afl::build_run_args(&single_instance, binary, corpus, out)
         }
@@ -1280,35 +1052,6 @@ fn smoke_command(
 /// Mirrors `hf_engine::runner`'s production-run behavior.
 fn smoke_sandbox_duration(duration_secs: u64) -> u64 {
     duration_secs.saturating_add(hf_engine::runner::SANDBOX_TIMEOUT_HEADROOM_SECS)
-}
-
-/// Default configuration retained for direct `hf-harness` callers. Production
-/// service paths pass their resolved policy snapshot explicitly.
-///
-/// `input_timeout` stays `None` here: smoke is a short qualification probe,
-/// not a campaign, so it keeps the engine's built-in per-input default rather
-/// than the campaign knob (a 1s budget could false-fail a slow sanitized
-/// harness during qualification).
-fn smoke_cfg(harness: &Harness) -> hf_core::engine::FuzzRunConfig {
-    hf_core::engine::FuzzRunConfig {
-        harness_id: harness.id,
-        engine: harness.engine,
-        duration: Some(std::time::Duration::from_secs(SMOKE_SECS)),
-        max_mem_mb: DEFAULT_SMOKE_MAX_MEM_MB,
-        max_cpus: DEFAULT_SMOKE_MAX_CPUS,
-        seed_corpus: None,
-        sanitizer: harness.sanitizer,
-        env: Vec::new(),
-        extra_args: Vec::new(),
-        seed: None,
-        replay_of: None,
-        input_manifest_sha256: None,
-        input_timeout: None,
-        resume: false,
-        // Qualification probes the main binary only; the CmpLog companion
-        // never runs in smoke.
-        cmplog: false,
-    }
 }
 
 /// Construct the `CmpLog` companion build for an AFL++ harness: the same
@@ -1591,6 +1334,20 @@ fn parse_execs_per_sec(stdout: &str) -> f64 {
     let mut max = 0.0_f64;
     for line in stdout.lines() {
         let lower = line.to_ascii_lowercase();
+        // Go native steady-state status: `fuzz: elapsed: 3s, execs: 12345
+        // (4115/sec), ...`. The rate is the parenthesized value; consumed
+        // whole before the generic branches, which would read the elapsed
+        // seconds or the cumulative exec count as the rate.
+        if lower.contains("fuzz: elapsed:") && lower.contains("/sec)") {
+            if let Some(sec_at) = lower.find("/sec)") {
+                if let Some(open) = line[..sec_at].rfind('(') {
+                    if let Ok(rate) = line[open + 1..sec_at].trim().parse::<f64>() {
+                        max = max.max(rate);
+                    }
+                }
+            }
+            continue;
+        }
         // libFuzzer: "#1024 pulse cov: .. exec/s: 5000 ..".
         if let Some(pos) = lower.find("exec/s") {
             let after = &line[pos + "exec/s".len()..];
@@ -1889,6 +1646,26 @@ mod tests {
     use hf_test_utils::mock_provider::MockProvider;
     use std::sync::{Arc, Mutex};
 
+    /// Bounded smoke-fuzz duration, in seconds (tests exercise the command
+    /// construction paths; the production service resolves its own budget).
+    const SMOKE_SECS: u64 = 60;
+
+    /// Test-local default-options form of the production
+    /// `try_compile_with_options` (the removed public wrapper's behavior).
+    async fn try_compile(
+        harness: Harness,
+        rt: &dyn RuntimeAdapter,
+        workspace: &Path,
+    ) -> Result<CompileResult, ClassifiedError> {
+        try_compile_with_options(
+            harness,
+            rt,
+            workspace,
+            &hf_core::runtime::SandboxOptions::default(),
+        )
+        .await
+    }
+
     #[test]
     fn compile_script_places_project_flags_before_the_source() {
         let script = compile_script(
@@ -2071,19 +1848,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn draft_with_context_injects_related_context_into_prompt() {
+    async fn draft_analyzed_injects_related_context_into_prompt() {
         let target = sample_target();
         let seen = Arc::new(Mutex::new(String::new()));
         let related = vec![hf_prompt::RelatedContext {
             file: "src/caller.c".to_owned(),
             snippet: "void handle(void) { parse_header(buf, len); }".to_owned(),
         }];
-        let draft = draft_with_context(
+        let draft = draft_analyzed(
             &target,
             EngineKind::LibFuzzer,
-            &related,
-            None,
+            &HarnessDraftContext {
+                related: &related,
+                build: None,
+                examples: &[],
+                analysis: None,
+            },
             hf_core::target::Sanitizer::Address,
+            false,
             Box::new(CaptureProvider {
                 seen: Arc::clone(&seen),
             }),
@@ -2097,7 +1879,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn draft_with_context_injects_build_context_into_prompt() {
+    async fn draft_analyzed_injects_build_context_into_prompt() {
         let target = sample_target();
         let seen = Arc::new(Mutex::new(String::new()));
         let build = hf_core::build::BuildContext {
@@ -2105,12 +1887,17 @@ mod tests {
             defines: vec!["-DHAVE_CONFIG_H=1".to_owned()],
             ..hf_core::build::BuildContext::default()
         };
-        draft_with_context(
+        draft_analyzed(
             &target,
             EngineKind::LibFuzzer,
-            &[],
-            Some(&build),
+            &HarnessDraftContext {
+                related: &[],
+                build: Some(&build),
+                examples: &[],
+                analysis: None,
+            },
             hf_core::target::Sanitizer::Address,
+            false,
             Box::new(CaptureProvider {
                 seen: Arc::clone(&seen),
             }),
@@ -2124,13 +1911,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn draft_without_context_sends_base_prompt() {
+    async fn draft_analyzed_without_context_sends_base_prompt() {
         let target = sample_target();
         let seen = Arc::new(Mutex::new(String::new()));
-        draft(
+        draft_analyzed(
             &target,
             EngineKind::LibFuzzer,
+            &HarnessDraftContext {
+                related: &[],
+                build: None,
+                examples: &[],
+                analysis: None,
+            },
             hf_core::target::Sanitizer::Address,
+            false,
             Box::new(CaptureProvider {
                 seen: Arc::clone(&seen),
             }),
@@ -2146,20 +1940,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn draft_with_examples_conditions_the_prompt_on_accepted_harnesses() {
+    async fn draft_analyzed_conditions_the_prompt_on_accepted_harnesses() {
         let target = sample_target();
         let seen = Arc::new(Mutex::new(String::new()));
         let examples = vec![hf_prompt::AcceptedExample {
             target_symbol: "parse_frame".to_owned(),
             source: "int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n){return 0;}".to_owned(),
         }];
-        draft_with_examples(
+        draft_analyzed(
             &target,
             EngineKind::LibFuzzer,
-            &[],
-            None,
-            &examples,
+            &HarnessDraftContext {
+                related: &[],
+                build: None,
+                examples: &examples,
+                analysis: None,
+            },
             hf_core::target::Sanitizer::Address,
+            false,
             Box::new(CaptureProvider {
                 seen: Arc::clone(&seen),
             }),
@@ -2175,16 +1973,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn draft_with_examples_and_none_matches_the_context_prompt() {
+    async fn draft_analyzed_with_no_sections_matches_the_context_prompt() {
         let target = sample_target();
         let seen = Arc::new(Mutex::new(String::new()));
-        draft_with_examples(
+        draft_analyzed(
             &target,
             EngineKind::LibFuzzer,
-            &[],
-            None,
-            &[],
+            &HarnessDraftContext {
+                related: &[],
+                build: None,
+                examples: &[],
+                analysis: None,
+            },
             hf_core::target::Sanitizer::Address,
+            false,
             Box::new(CaptureProvider {
                 seen: Arc::clone(&seen),
             }),
@@ -2273,13 +2075,17 @@ mod tests {
     async fn persistent_draft_uses_the_persistent_prompt_and_records_the_driverless_build() {
         let target = sample_target();
         let seen = Arc::new(Mutex::new(String::new()));
-        let draft = draft_persistent_with_examples(
+        let draft = draft_analyzed(
             &target,
             EngineKind::AflPlusPlus,
-            &[],
-            None,
-            &[],
+            &HarnessDraftContext {
+                related: &[],
+                build: None,
+                examples: &[],
+                analysis: None,
+            },
             hf_core::target::Sanitizer::Address,
+            true,
             Box::new(PersistentCaptureProvider {
                 seen: Arc::clone(&seen),
             }),
@@ -2308,13 +2114,17 @@ mod tests {
     async fn persistent_draft_rejects_a_non_afl_engine_before_calling_the_model() {
         let target = sample_target();
         let seen = Arc::new(Mutex::new(String::new()));
-        let error = draft_persistent_with_examples(
+        let error = draft_analyzed(
             &target,
             EngineKind::LibFuzzer,
-            &[],
-            None,
-            &[],
+            &HarnessDraftContext {
+                related: &[],
+                build: None,
+                examples: &[],
+                analysis: None,
+            },
             hf_core::target::Sanitizer::Address,
+            true,
             Box::new(PersistentCaptureProvider {
                 seen: Arc::clone(&seen),
             }),
@@ -2738,6 +2548,23 @@ mod tests {
         assert!(
             (parse_execs_per_sec("    exec speed : 1234.5/sec") - 1234.5).abs() < f64::EPSILON,
             "AFL exec-speed line must be parsed as throughput"
+        );
+    }
+
+    #[test]
+    fn parses_go_native_status_lines_as_the_rate_not_elapsed_seconds() {
+        // Real Go native fuzzer status lines: the throughput is the
+        // parenthesized `(N/sec)` value. The generic "execs" branch would
+        // read the elapsed wall-clock seconds (3) as the rate -- the smoke
+        // summary would report the run duration as its throughput.
+        let log = "\
+fuzz: elapsed: 0s, gathering baseline coverage: 0/3 sources
+fuzz: elapsed: 3s, execs: 12345 (4115/sec), new interesting: 5 (total: 8)
+fuzz: elapsed: 60s, execs: 246900 (4115/sec), new interesting: 7 (total: 10)
+";
+        assert!(
+            (parse_execs_per_sec(log) - 4115.0).abs() < f64::EPSILON,
+            "the parenthesized rate must win over the elapsed seconds"
         );
     }
 
@@ -3573,10 +3400,53 @@ Iterations : 12345
             "/work/corpus",
             "/work/out",
             &config,
-            SMOKE_SECS,
         )
         .unwrap();
-        assert_eq!(cmd, vec!["/work/fuzz", "-max_total_time=60"]);
+        // The real libFuzzer adapter argv for the same single-instance
+        // config: self-limit, artifact prefix, value profile, and the corpus
+        // positional.
+        assert_eq!(
+            cmd,
+            vec![
+                "/work/fuzz",
+                "-max_total_time=60",
+                "-artifact_prefix=/work/out/",
+                "-use_value_profile=1",
+                "/work/corpus",
+            ]
+        );
+    }
+
+    #[test]
+    fn smoke_command_libfuzzer_honors_the_resolved_config() {
+        // A libFuzzer smoke must qualify the argv the campaign will run: an
+        // operator-supplied dictionary, a pinned seed, and the per-input
+        // timeout already reach the AFL++/honggfuzz/Go smoke paths through
+        // their adapter builders; the libFuzzer arm must not drop them.
+        let mut config = smoke_command_config(EngineKind::LibFuzzer, SMOKE_SECS);
+        config.extra_args = vec!["-dict=/work/fuzz.dict".to_owned()];
+        config.seed = Some(4242);
+        config.input_timeout = Some(std::time::Duration::from_millis(1500));
+        let cmd = smoke_command(
+            EngineKind::LibFuzzer,
+            "/work/fuzz",
+            "/work/corpus",
+            "/work/out",
+            &config,
+        )
+        .unwrap();
+        assert!(
+            cmd.contains(&"-dict=/work/fuzz.dict".to_owned()),
+            "dict must reach the smoke argv: {cmd:?}"
+        );
+        assert!(
+            cmd.contains(&"-seed=4242".to_owned()),
+            "pinned seed must reach the smoke argv: {cmd:?}"
+        );
+        assert!(
+            cmd.contains(&"-timeout=2".to_owned()),
+            "1500 ms per-input timeout rounds up to 2 s: {cmd:?}"
+        );
     }
 
     #[test]
@@ -3588,7 +3458,6 @@ Iterations : 12345
             "/work/corpus",
             "/work/out",
             &config,
-            SMOKE_SECS,
         )
         .unwrap();
         assert_eq!(cmd.first().map(String::as_str), Some("afl-fuzz"));
@@ -3614,7 +3483,6 @@ Iterations : 12345
             "/work/corpus",
             "/work/out",
             &config,
-            SMOKE_SECS,
         )
         .unwrap();
         assert_eq!(cmd.first().map(String::as_str), Some("honggfuzz"));
@@ -3635,7 +3503,6 @@ Iterations : 12345
             "/work/corpus",
             "/work/out",
             &config,
-            SMOKE_SECS,
         );
         assert!(err.is_err());
     }

@@ -9,7 +9,7 @@ use tower::ServiceExt;
 async fn provider_probe_authorizes_before_validating_an_unusable_provider() {
     let root = tempfile::tempdir().unwrap();
     let security = hf_web::WebSecurityConfig::new(
-        Some("test-token".into()),
+        Some("test-token-0123456789abcdef".into()),
         false,
         Vec::new(),
         vec![root.path().into()],
@@ -39,7 +39,10 @@ async fn provider_probe_authorizes_before_validating_an_unusable_provider() {
     }
     for (token, expected) in [
         (None, StatusCode::UNAUTHORIZED),
-        (Some("Bearer test-token"), StatusCode::BAD_REQUEST),
+        (
+            Some("Bearer test-token-0123456789abcdef"),
+            StatusCode::BAD_REQUEST,
+        ),
     ] {
         let mut request = Request::builder()
             .method("POST")

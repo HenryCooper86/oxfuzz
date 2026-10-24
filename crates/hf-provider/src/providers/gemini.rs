@@ -324,22 +324,23 @@ impl GeminiProvider {
         let finish_reason =
             map_gemini_finish_reason(candidate.finish_reason.as_deref(), !tool_calls.is_empty());
 
-        let usage = gemini_response.usage_metadata.map_or(
-            TokenUsage {
-                input_tokens: 0,
-                output_tokens: 0,
-                cache_read_tokens: None,
-                cache_write_tokens: None,
-                ..Default::default()
-            },
-            |u| TokenUsage {
-                input_tokens: u.prompt.unwrap_or(0),
-                output_tokens: u.candidates.unwrap_or(0),
-                cache_read_tokens: u.cached_content,
-                cache_write_tokens: None,
-                ..Default::default()
-            },
-        );
+        let usage_metadata =
+            gemini_response
+                .usage_metadata
+                .ok_or_else(|| ProviderError::Other {
+                    message: "response missing 'usageMetadata': without reported token \
+                    counts the caller's budget reservation can never be settled"
+                        .into(),
+                })?;
+        let usage = TokenUsage {
+            // Sub-fields may be absent on some Gemini shapes; the usage object
+            // itself is required so the budget can be settled.
+            input_tokens: usage_metadata.prompt.unwrap_or(0),
+            output_tokens: usage_metadata.candidates.unwrap_or(0),
+            cache_read_tokens: usage_metadata.cached_content,
+            cache_write_tokens: None,
+            ..Default::default()
+        };
 
         Ok(ChatResponse {
             id: String::new(), // Gemini doesn't return a response ID in the same way.
@@ -1114,7 +1115,11 @@ mod tests {
                 },
                 finish_reason: Some("STOP".into()),
             }],
-            usage_metadata: None,
+            usage_metadata: Some(GeminiUsageMetadata {
+                prompt: Some(3),
+                candidates: Some(2),
+                cached_content: None,
+            }),
         };
 
         let parsed = provider
@@ -1125,6 +1130,40 @@ mod tests {
         assert_eq!(parsed.generated_images[0].index, 0);
         assert_eq!(parsed.generated_images[0].mime_type, "image/png");
         assert_eq!(parsed.generated_images[0].data, "iVBORw0KGgo=");
+    }
+
+    #[test]
+    fn test_gemini_parse_response_requires_usage_metadata() {
+        let provider = GeminiProvider::new(
+            "test",
+            "gemini-2.0-flash",
+            "test-key".into(),
+            None,
+            None,
+            vec![],
+            vec![],
+            5,
+            1_000_000,
+            ToolCallingMode::default(),
+        )
+        .unwrap();
+        let response = GeminiResponse {
+            candidates: vec![GeminiCandidate {
+                content: GeminiContent {
+                    role: Some("model".into()),
+                    parts: vec![GeminiPart::Text {
+                        text: "hello".into(),
+                    }],
+                },
+                finish_reason: Some("STOP".into()),
+            }],
+            usage_metadata: None,
+        };
+
+        let error = provider
+            .parse_response(response, None, None)
+            .expect_err("missing usageMetadata must fail the parse");
+        assert!(error.to_string().contains("usageMetadata"), "{error}");
     }
 
     #[test]

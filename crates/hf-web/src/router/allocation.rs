@@ -35,7 +35,7 @@ async fn candidates(
             .allocation_candidates(&project)
             .await
             .map_err(classified_api_error)?,
-    )))
+    )?))
 }
 async fn status(
     State(state): State<AppState>,
@@ -48,7 +48,7 @@ async fn status(
             .allocation_status(&project)
             .await
             .map_err(classified_api_error)?,
-    )))
+    )?))
 }
 async fn propose(
     State(state): State<AppState>,
@@ -63,7 +63,7 @@ async fn propose(
             .propose_allocation(request)
             .await
             .map_err(classified_api_error)?,
-    )))
+    )?))
 }
 async fn review(
     State(state): State<AppState>,
@@ -76,5 +76,5 @@ async fn review(
             .review_allocation(&project, request.id, &request.digest, request.approve)
             .await
             .map_err(classified_api_error)?,
-    )))
+    )?))
 }

@@ -1065,6 +1065,21 @@ receipt-only replay never recreates the cleared execution row.
 Indexes: `idx_auto_revert_events_ts(ts DESC)`,
 `idx_auto_revert_events_project(project_root)`.
 
+### `filed_issues`
+
+Durable dedup ledger for issue-tracker filings. The filing path claims its
+dedup key (crash UUID, or the comparison signature) with an atomic insert
+before creating the remote issue, records the created issue, and every retry
+returns the recorded issue instead of creating again. `issue_json` is NULL
+only while a claim is held and the remote create is in flight; a failed
+create releases the claim so the filing can be retried.
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `dedup_key` | `TEXT PRIMARY KEY` | filing identity: crash UUID or `comparison:{signature}` |
+| `issue_json` | `TEXT` | recorded created issue (valid JSON, bounded); NULL while in flight |
+| `created_at` | `TEXT NOT NULL` | RFC 3339 |
+
 ### `guardrail_decisions`
 
 Durable audit trail of guardrail authorization decisions. Every authorizing
@@ -1330,6 +1345,10 @@ bounded deterministic history, and both cleanup operations.
 | `0038_run_edge_sets.sql` | retains one immutable, bounded per-run covered edge set (64 KiB AFL map bitmap) for exact run-to-run edge diffs |
 | `0039_clang_analysis.sql` | retains Clang operation lifecycle, immutable semantic results, and exact provider context |
 | `0040_harness_clang_context_v2.sql` | widens the harness context renderer version check to accept compact advanced rendering (version 2) |
+| `0041_model_budgets.sql` | retains durable model-budget scopes and per-attempt reservations with terminal outcomes |
+| `0042_guided_coverage_experiments.sql` | retains guided coverage-experiment definitions, reviewed inputs, and execution links |
+| `0043_harness_behavior.sql` | retains AFL++ behavioral qualification evidence (fresh-input and persistent-sequence maps) |
+| `0044_filed_issues.sql` | creates the issue-filing dedup ledger (`filed_issues`) |
 
 ## 7. Read failure contract
 

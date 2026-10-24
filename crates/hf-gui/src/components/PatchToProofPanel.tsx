@@ -130,11 +130,11 @@ export function PatchToProofPanel({
     setBusy(true);
     setError(null);
     try {
-      // The desktop shell has no per-user identity, so approvals are attributed
-      // to the desktop operator, matching the other desktop approval paths.
+      // The transport owns the attribution: the desktop shell is the single
+      // local principal and the service records it server-side, so the
+      // request carries only the operation id (VULN-009).
       await getTransport().invoke("approve_remediation_operation", {
         operationId: id,
-        operator: "desktop-operator",
       });
       await refresh(id);
     } catch (e) {

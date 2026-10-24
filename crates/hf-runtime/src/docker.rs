@@ -469,7 +469,7 @@ fn build_exec_args_for_workspace(
     // setting them on the host docker CLI process (`Command::env`) would not.
     // BTreeMap keeps the flag order deterministic for tests/reproducibility.
     let mut env: std::collections::BTreeMap<&str, &str> = std::collections::BTreeMap::new();
-    for (k, v) in &cfg.default_limits.env {
+    for (k, v) in &cfg.default_env {
         env.insert(k.as_str(), v.as_str());
     }
     for (k, v) in &limits.env {
@@ -862,7 +862,16 @@ impl DockerRuntime {
         cleanup.child = Some(match docker.spawn() {
             Ok(child) => child,
             Err(error) => {
-                cleanup.finish_unlaunched()?;
+                // The spawn failure is the root cause: log a failed ownership
+                // cleanup instead of masking it with the bookkeeping error.
+                if let Err(cleanup_error) = cleanup.finish_unlaunched() {
+                    tracing::warn!(
+                        error = %cleanup_error,
+                        "removing the fresh container ownership record after a \
+                        failed docker spawn also failed; the record is dropped \
+                        and reconciled on the next run"
+                    );
+                }
                 return Err(ClassifiedError::Sandbox(format!("docker spawn: {error}")));
             }
         });
@@ -955,6 +964,11 @@ impl DockerRuntime {
                     })?
                     .map_err(|e| ClassifiedError::Sandbox(format!("wait for docker: {e}")))?;
                 Ok((
+                    // §2.17: a signal-killed docker client has no exit code;
+                    // the -1 sentinel is deliberately shared with the
+                    // TimedOut/Cancelled arms because termination is reported
+                    // through CommandTermination::Completed only when a code
+                    // exists, and callers treat -1 as "no usable exit code".
                     status.code().unwrap_or(-1),
                     hf_core::runtime::CommandTermination::Completed,
                 ))
@@ -1015,6 +1029,9 @@ impl RuntimeAdapter for DockerRuntime {
         let image = image.to_owned();
         tokio::task::spawn_blocking(move || crate::config::image_present(&image))
             .await
+            // §2.17: a JoinError here means the probe task panicked (or the
+            // runtime shut down); reporting the image as absent is the safe
+            // direction — callers refuse to launch against a missing image.
             .unwrap_or(false)
     }
 

@@ -35,10 +35,10 @@ async fn schedule_list_includes_calendar_preview_without_dispatching() {
         )
         .await
         .unwrap();
-    let before = serde_json::to_value(scheduler.list().await).unwrap();
-    let views = serde_json::to_value(scheduler.list_views().await.unwrap()).unwrap();
-    let after = serde_json::to_value(scheduler.list().await).unwrap();
+    let before = serde_json::to_value(scheduler.list_views().await.unwrap()).unwrap();
     let history = scheduler.recent_executions(10).await.unwrap();
+    let views = before.clone();
+    let after = serde_json::to_value(scheduler.list_views().await.unwrap()).unwrap();
     scheduler.stop().await;
     assert_eq!(
         scheduler.runtime_status().state,

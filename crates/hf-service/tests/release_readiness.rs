@@ -5,12 +5,7 @@ mod common;
 use std::sync::Arc;
 
 use hf_core::engine::EngineKind;
-use hf_core::provider::{
-    ChatRequest, ChatResponse, ChatStreamResponse, ProviderError, ProviderPool, ProviderStatus,
-    RouteRequest,
-};
 use hf_core::target::TargetLanguage;
-use hf_core::types::ProviderId;
 use hf_service::ServiceContainer;
 
 struct SuccessfulRuntime;
@@ -61,41 +56,6 @@ impl hf_core::runtime::RuntimeAdapter for SuccessfulRuntime {
     }
 }
 
-struct EmptyRankingPool;
-
-#[async_trait::async_trait]
-impl ProviderPool for EmptyRankingPool {
-    async fn chat_completion(
-        &self,
-        _request: &ChatRequest,
-        _route: &RouteRequest,
-    ) -> Result<ChatResponse, ProviderError> {
-        Ok(hf_test_utils::fixtures::make_chat_response("[]"))
-    }
-
-    async fn chat_completion_stream(
-        &self,
-        _request: &ChatRequest,
-        _route: &RouteRequest,
-    ) -> Result<ChatStreamResponse, ProviderError> {
-        Err(ProviderError::Other {
-            message: "streaming is not used by ranking".to_owned(),
-        })
-    }
-
-    fn report_error(&self, _provider_id: &ProviderId, _error: &ProviderError) {}
-
-    async fn provider_statuses(&self) -> Vec<ProviderStatus> {
-        Vec::new()
-    }
-
-    async fn freeze(&self, _provider_id: &ProviderId, _reason: String) {}
-
-    async fn thaw(&self, _provider_id: &ProviderId) -> Result<(), ProviderError> {
-        Ok(())
-    }
-}
-
 fn sample_project() -> tempfile::TempDir {
     let project = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -128,30 +88,6 @@ async fn discovery_propagates_a_configured_store_write_failure() {
         .discover(project.path(), TargetLanguage::C)
         .await
         .expect_err("a configured broken store must not look like disabled persistence");
-    assert!(matches!(error, hf_core::error::ClassifiedError::Storage(_)));
-}
-
-#[tokio::test]
-async fn ranking_propagates_a_configured_store_write_failure() {
-    let project = sample_project();
-    let inventory = hf_discovery::discover(project.path(), TargetLanguage::C)
-        .await
-        .unwrap();
-    let store = store_in(&project).await;
-    sqlx::query("DROP TABLE targets")
-        .execute(store.pool())
-        .await
-        .unwrap();
-    let service = ServiceContainer::new(
-        Arc::new(hf_runtime::StubRuntime),
-        Some(Arc::new(EmptyRankingPool)),
-    )
-    .with_store(store);
-
-    let error = service
-        .rank(inventory)
-        .await
-        .expect_err("ranked evidence must be durable before success is returned");
     assert!(matches!(error, hf_core::error::ClassifiedError::Storage(_)));
 }
 

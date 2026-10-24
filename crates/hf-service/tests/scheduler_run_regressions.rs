@@ -197,7 +197,7 @@ async fn direct_creation_rejects_invalid_intervals_without_registering_them() {
         )
         .await
         .is_err());
-    assert!(scheduler.list().await.is_empty());
+    assert!(scheduler.list_views().await.unwrap().is_empty());
     scheduler.stop().await;
 }
 
@@ -217,12 +217,12 @@ async fn failed_cron_enable_restores_its_original_calendar_cursor() {
         .try_set_enabled(&schedule.id, false)
         .await
         .unwrap();
-    let before = scheduler.list().await.pop().unwrap();
+    let before = scheduler.list_views().await.unwrap().pop().unwrap();
     let path = fixture.root.path().join("schedules.json");
     std::fs::remove_file(&path).unwrap();
     std::fs::create_dir(&path).unwrap();
     assert!(scheduler.try_set_enabled(&schedule.id, true).await.is_err());
-    let after = scheduler.list().await.pop().unwrap();
+    let after = scheduler.list_views().await.unwrap().pop().unwrap();
     scheduler.stop().await;
     assert!(!after.enabled);
     assert_eq!(after.last_fire, before.last_fire);

@@ -1132,6 +1132,20 @@ fn with_absolute_project(params: &CampaignParams) -> CampaignParams {
 }
 
 fn validate_campaign_fuzzing_policy(params: &CampaignParams) -> Result<(), CampaignSchedulerError> {
+    // A zero budget can never run: `budget_skip_reason` treats 0 as already
+    // exhausted, so the schedule would either pause itself on the first fire
+    // (recurring) or be consumed having done nothing (one-time). Reject it at
+    // creation instead, mirroring the allocation budget validated at proposal.
+    if params.max_runs == Some(0) {
+        return Err(CampaignSchedulerError::Validation(
+            "max_runs must be at least 1 when a run budget is set".to_owned(),
+        ));
+    }
+    if params.max_total_secs == Some(0) {
+        return Err(CampaignSchedulerError::Validation(
+            "max_total_secs must be at least 1 when a time budget is set".to_owned(),
+        ));
+    }
     let engine = if params.engine.trim().is_empty() {
         None
     } else {
@@ -1404,11 +1418,13 @@ struct FuzzCampaignDispatcher {
     manager: Weak<SchedulerManager>,
 }
 
-/// A fire that ran nothing (budget spent or concurrency full). Recorded as a
-/// completed execution whose summary explains why; it never advances state.
+/// A fire that ran nothing (budget spent, concurrency full, or admission
+/// refused). Carries `skipped` so the scheduler records the execution as
+/// skipped and never consumes a one-time occurrence as completed work.
 fn skip_result(reason: &str) -> DispatchResult {
     DispatchResult {
         success: true,
+        skipped: true,
         summary: format!("skipped: {reason}"),
         output: serde_json::json!({ "skipped": true, "reason": reason }),
         duration_ms: 0,
@@ -1435,17 +1451,44 @@ fn filter_campaign_targets(
     params: &CampaignParams,
 ) -> Result<Vec<SchedulableTarget>, String> {
     let engine = requested_campaign_engine(params)?;
-    Ok(all
+    let requested = params.target.as_deref().filter(|target| !target.is_empty());
+    let mut matched: Vec<SchedulableTarget> = all
         .into_iter()
         .filter(|candidate| {
-            params
-                .target
-                .as_deref()
-                .filter(|target| !target.is_empty())
-                .is_none_or(|target| candidate.target == target)
+            requested.is_none_or(|target| target_matches(candidate.target.as_str(), target))
                 && engine.is_none_or(|engine| candidate.engine == engine.as_str())
         })
-        .collect())
+        .collect();
+    // An exact spelling always wins: when the requested selector also exists
+    // verbatim, same-symbol qualified spellings of *other* files must not join
+    // the rotation alongside it.
+    if let Some(target) = requested {
+        if matched.iter().any(|candidate| candidate.target == target) {
+            matched.retain(|candidate| candidate.target == target);
+        }
+    }
+    Ok(matched)
+}
+
+/// Whether a schedulable target's selector matches the campaign's requested
+/// target spelling.
+///
+/// [`ServiceContainer::schedulable_targets`] emits the file-qualified
+/// selector (`src/parser.c::parse_header`) whenever the promoted harness
+/// lives under that workspace, so a request spelled as the bare symbol must
+/// still match its own qualified spelling -- otherwise a schedule created
+/// before promotion (or from the CLI's `--target parse_header`) could never
+/// fire. The suffix comparison treats the request as one whole symbol, so a
+/// namespaced C++ symbol (`ns::Class::method`) matches its emitted
+/// `src/a.cpp::ns::Class::method` spelling too -- comparing only the last
+/// `::` segment would drop every namespaced request. A request that is
+/// itself file-qualified matches only itself: an emitted selector never ends
+/// in `::<file>::<symbol>` because a symbol cannot contain a path separator.
+fn target_matches(candidate: &str, requested: &str) -> bool {
+    candidate == requested
+        || candidate
+            .strip_suffix(requested)
+            .is_some_and(|prefix| prefix.ends_with("::"))
 }
 
 impl FuzzCampaignDispatcher {
@@ -1538,6 +1581,13 @@ impl FuzzCampaignDispatcher {
     /// Fire-and-forget: dispatch runs after the manager released its store lock.
     fn pause_self(&self, schedule_id: &str) {
         if schedule_id.is_empty() {
+            // Unreachable since load synthesizes an id for every legacy
+            // campaign; a silent return here would leave a spent campaign
+            // firing skips every tick, so make the residual case visible.
+            tracing::warn!(
+                "cannot pause a campaign with an empty schedule id; \
+                 it will keep firing budget skips every tick"
+            );
             return;
         }
         let manager = self.manager.clone();
@@ -1660,6 +1710,7 @@ impl FuzzCampaignDispatcher {
             Err(e) => {
                 return Ok(DispatchResult {
                     success: false,
+                    skipped: false,
                     summary: "could not resolve promoted targets".to_owned(),
                     output: serde_json::Value::Null,
                     duration_ms: 0,
@@ -1674,6 +1725,7 @@ impl FuzzCampaignDispatcher {
             );
             return Ok(DispatchResult {
                 success: false,
+                skipped: false,
                 summary: format!("no target to fuzz: {hint}"),
                 output: serde_json::Value::Null,
                 duration_ms: 0,
@@ -1689,6 +1741,7 @@ impl FuzzCampaignDispatcher {
             self.advance_rotation_after_failure(&params.schedule_id);
             return Ok(DispatchResult {
                 success: false,
+                skipped: false,
                 summary: format!("target '{}' has an unparseable engine/lang", pick.target),
                 output: serde_json::Value::Null,
                 duration_ms: 0,
@@ -1761,6 +1814,7 @@ impl FuzzCampaignDispatcher {
             {
                 Ok(DispatchResult {
                     success: false,
+                    skipped: false,
                     summary: format!("campaign cancelled on {}", outcome.target),
                     output: serde_json::json!({
                         "target": outcome.target,
@@ -1788,6 +1842,7 @@ impl FuzzCampaignDispatcher {
                 let budget = budget_note(&advanced, &params);
                 Ok(DispatchResult {
                     success: true,
+                    skipped: false,
                     summary: format!(
                         "{} crash(es), {} edges over {} iteration(s) on {}{}{budget}",
                         outcome.crashes,
@@ -1820,6 +1875,7 @@ impl FuzzCampaignDispatcher {
                 self.advance_rotation_after_failure(&params.schedule_id);
                 Ok(DispatchResult {
                     success: false,
+                    skipped: false,
                     summary: format!("campaign failed on {}", pick.target),
                     output: serde_json::Value::Null,
                     duration_ms,
@@ -2206,32 +2262,17 @@ impl CampaignScheduler {
     /// `notifier` (set by the desktop shell) is called when a scheduled run finds
     /// crashes, so the UI can toast; pass `None` for headless CLI/web.
     ///
-    /// # Panics
-    /// Panics when persisted schedule, campaign, or execution-history state is
-    /// corrupt or unreadable. Use [`Self::try_start`] to handle the error.
-    pub async fn start(
-        container: ServiceContainer,
-        store_path: PathBuf,
-        notifier: Option<CampaignNotifier>,
-    ) -> Self {
-        match Self::try_start(container, store_path, notifier).await {
-            Ok(scheduler) => scheduler,
-            Err(error) => panic!("campaign scheduler cannot start: {error}"),
-        }
-    }
-
-    /// Start the scheduler while returning corrupt or unreadable persisted state
-    /// to the caller instead of silently resetting it.
-    ///
     /// # Errors
-    /// Returns a durable-state or history error before the scheduler begins
-    /// ticking.
+    /// Returns corrupt or unreadable persisted schedule, campaign, or
+    /// execution-history state to the caller instead of silently resetting it,
+    /// before the scheduler begins ticking.
     pub async fn try_start(
         container: ServiceContainer,
         store_path: PathBuf,
         notifier: Option<CampaignNotifier>,
     ) -> Result<Self, CampaignSchedulerError> {
-        let scheduler_config = crate::config::effective_scheduler_config();
+        let scheduler_config = crate::config::effective_scheduler_config()
+            .map_err(|error| CampaignSchedulerError::Validation(format!("oxfuzz.toml: {error}")))?;
         let history_retention_limit = scheduler_config.history_retention_limit;
         let scheduler_workflow_dispatch_limit = scheduler_config.max_concurrent_executions.max(1);
         let manager = Arc::new(SchedulerManager::new(scheduler_config));
@@ -2279,6 +2320,18 @@ impl CampaignScheduler {
         let mut loaded = std::mem::take(&mut retirement.schedules);
         let mut restored = false;
         let mut receipt_cursor_restored = false;
+        // Give every legacy campaign (persisted before `schedule_id` was
+        // injected at creation) its own stable identity, so they stop sharing
+        // the single `""` rotation/budget entry in the campaign state store.
+        // The synthesized id is persisted back on this load, so the
+        // derivation runs at most once per schedule.
+        for schedule in &mut loaded {
+            if let Some(id) = synthesized_legacy_schedule_id(schedule) {
+                schedule.parameter_values["schedule_id"] = serde_json::Value::String(id);
+                restored = true;
+            }
+        }
+
         let journal_readable = if let Some(store) = &store {
             match store.inspect_schedule_occurrences().await {
                 Ok(inspections) => {
@@ -2430,6 +2483,16 @@ impl CampaignScheduler {
         if restored {
             if let Err(error) = schedules.replace_while_leased(&loaded).await {
                 if receipt_cursor_restored {
+                    // The reconciled cursors exist only in memory; the file on
+                    // disk still disagrees. Fail startup loudly but keep the
+                    // process alive with one-time scheduling blocked, because
+                    // returning here would discard an otherwise healthy
+                    // service over a sidecar write.
+                    tracing::error!(
+                        %error,
+                        "reconciled schedule cursors could not be persisted; \
+                         one-time scheduling is blocked pending operator recovery"
+                    );
                     manager.block_one_time(CURSOR_RECONCILIATION_REASON).await;
                 } else {
                     return Err(error.into());
@@ -2491,17 +2554,6 @@ impl CampaignScheduler {
             scheduler_workflow_dispatch_limit: self.scheduler_workflow_dispatch_limit,
             effective_max_concurrent_fuzz_runs: active_fuzz_campaign_limit
                 .min(self.scheduler_workflow_dispatch_limit),
-        }
-    }
-
-    /// Set the active fuzz-campaign limit (persisted; applies immediately).
-    ///
-    /// # Panics
-    /// Panics when the new limit cannot be persisted. Use
-    /// [`Self::try_set_max_concurrent`] to handle the error.
-    pub fn set_max_concurrent(&self, n: usize) {
-        if let Err(error) = self.try_set_max_concurrent(n) {
-            panic!("campaign concurrency cannot be persisted: {error}");
         }
     }
 
@@ -2669,11 +2721,6 @@ impl CampaignScheduler {
             }
         }
         Ok(admission)
-    }
-
-    /// All scheduled campaigns.
-    pub async fn list(&self) -> Vec<Schedule> {
-        self.manager.list_schedules().await
     }
 
     /// All scheduled campaigns as GUI-friendly views. After a restart the
@@ -3157,23 +3204,6 @@ impl CampaignScheduler {
         Ok(views)
     }
 
-    /// Create + register + persist a new campaign schedule.
-    ///
-    /// # Panics
-    /// Panics when the schedule cannot be persisted. Use [`Self::try_create`] to
-    /// handle the error.
-    pub async fn create(
-        &self,
-        name: &str,
-        params: &CampaignParams,
-        trigger: TriggerConfig,
-    ) -> Schedule {
-        match self.try_create(name, params, trigger).await {
-            Ok(schedule) => schedule,
-            Err(error) => panic!("campaign schedule cannot be created: {error}"),
-        }
-    }
-
     /// Create, register, and atomically persist a campaign schedule.
     ///
     /// # Errors
@@ -3199,8 +3229,14 @@ impl CampaignScheduler {
         // Inject the id so the dispatcher (handed only the constant kind) can key
         // this campaign's rotation and budget state.
         params.schedule_id.clone_from(&id);
-        let schedule = Schedule::new(id, name, trigger, CAMPAIGN_KIND)
-            .with_params(serde_json::to_value(&params).unwrap_or_default());
+        // A `Value::Null` fallback would make every later fire of the schedule
+        // fail at params decode, so surface the serialization failure here.
+        let params_value = serde_json::to_value(&params).map_err(|error| {
+            CampaignSchedulerError::Validation(format!(
+                "campaign parameters cannot be serialized: {error}"
+            ))
+        })?;
+        let schedule = Schedule::new(id, name, trigger, CAMPAIGN_KIND).with_params(params_value);
         self.register_new_schedule(schedule).await
     }
 
@@ -3297,19 +3333,6 @@ impl CampaignScheduler {
             })
     }
 
-    /// Remove a schedule by id, discarding its rotation/budget state so a
-    /// recreated campaign starts fresh.
-    ///
-    /// # Panics
-    /// Panics when the updated scheduler state cannot be persisted. Use
-    /// [`Self::try_remove`] to handle the error.
-    pub async fn remove(&self, id: &str) -> bool {
-        match self.try_remove(id).await {
-            Ok(removed) => removed,
-            Err(error) => panic!("campaign schedule cannot be removed: {error}"),
-        }
-    }
-
     /// Remove and atomically persist a schedule.
     ///
     /// # Errors
@@ -3358,18 +3381,6 @@ impl CampaignScheduler {
             self.state.try_forget(id)?;
         }
         Ok(removed)
-    }
-
-    /// Enable or disable a schedule by id.
-    ///
-    /// # Panics
-    /// Panics when the updated definition cannot be persisted. Use
-    /// [`Self::try_set_enabled`] to handle the error.
-    pub async fn set_enabled(&self, id: &str, enabled: bool) -> bool {
-        match self.try_set_enabled(id, enabled).await {
-            Ok(changed) => changed,
-            Err(error) => panic!("campaign schedule cannot be updated: {error}"),
-        }
     }
 
     /// Enable or disable a schedule and atomically persist the definition list.
@@ -3501,6 +3512,44 @@ fn atomic_write_schedules(path: &Path, schedules: &[Schedule]) -> Result<(), Sta
 /// Load persisted schedules, treating absence as empty and damage as an error.
 fn load_schedules(path: &Path) -> Result<Vec<Schedule>, StateFileError> {
     Ok(read_json_file(path)?.unwrap_or_default())
+}
+
+/// Derive a stable identity for a legacy campaign schedule whose
+/// [`CampaignParams::schedule_id`] is empty.
+///
+/// Campaign schedules created after `schedule_id` existed carry the schedule's
+/// own id in their parameters; legacy ones deserialize with an empty id, which
+/// makes every legacy campaign share the one `""` entry in the campaign state
+/// store (one shared rotation cursor and budget) and made budget-exhaustion
+/// pauses silently no-op. The identity hashes the schedule's own id, name,
+/// serialized trigger, and serialized campaign parameters, so the same legacy
+/// schedule derives the same id on every load while two schedules that differ
+/// only in their interval (or any other trigger field) stay distinct; the
+/// `legacy-` prefix keeps it out of the uuid namespace of created schedules.
+/// Returns `None` for non-campaign schedules and schedules that already carry
+/// an id.
+fn synthesized_legacy_schedule_id(schedule: &Schedule) -> Option<String> {
+    use sha2::{Digest as _, Sha256};
+    if schedule.workflow_id != CAMPAIGN_KIND {
+        return None;
+    }
+    let params: CampaignParams = serde_json::from_value(schedule.parameter_values.clone()).ok()?;
+    if !params.schedule_id.is_empty() {
+        return None;
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(schedule.id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(schedule.name.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(
+        serde_json::to_string(&schedule.trigger)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    hasher.update(b"\0");
+    hasher.update(schedule.parameter_values.to_string().as_bytes());
+    Some(format!("legacy-{:x}", hasher.finalize()))
 }
 
 #[cfg(test)]
@@ -6300,7 +6349,8 @@ mod tests {
 
         let scheduler = fixture.start().await.unwrap();
         let schedule = scheduler
-            .list()
+            .manager
+            .list_schedules()
             .await
             .into_iter()
             .find(|schedule| schedule.id == "once")
@@ -6311,6 +6361,43 @@ mod tests {
             CampaignDurabilityStatus::Consumed
         );
         scheduler.stop().await;
+    }
+
+    #[tokio::test]
+    async fn legacy_campaigns_load_with_their_own_synthesized_ids_and_persist_them() {
+        let fixture = scheduler_fixture_with_store().await;
+        // Two legacy campaigns share the empty schedule_id spelling on disk.
+        fixture.write_interval("legacy-a");
+        fixture.write_interval("legacy-b");
+
+        let scheduler = fixture.start().await.unwrap();
+        let stored = scheduler.manager.list_schedules().await;
+        let mut synthesized = Vec::new();
+        for schedule in &stored {
+            let params: CampaignParams =
+                serde_json::from_value(schedule.parameter_values.clone()).unwrap();
+            assert!(
+                params.schedule_id.starts_with("legacy-"),
+                "each legacy campaign keys its own state: {} -> {}",
+                schedule.id,
+                params.schedule_id
+            );
+            synthesized.push(params.schedule_id);
+        }
+        assert_eq!(synthesized.len(), 2);
+        assert_ne!(synthesized[0], synthesized[1]);
+        scheduler.stop().await;
+
+        // The synthesized ids were written back, so a restart derives nothing.
+        let reloaded = load_schedules(&fixture.schedules_path).unwrap();
+        for schedule in &reloaded {
+            let params: CampaignParams =
+                serde_json::from_value(schedule.parameter_values.clone()).unwrap();
+            assert!(
+                synthesized.contains(&params.schedule_id),
+                "the persisted file carries the synthesized id"
+            );
+        }
     }
 
     #[tokio::test]
@@ -7069,7 +7156,7 @@ mod tests {
             .lock()
             .await
             .record(execution);
-        assert!(scheduler.list().await.is_empty());
+        assert!(scheduler.manager.list_schedules().await.is_empty());
         assert!(matches!(
             scheduler.set_armed_within_roots(true, &roots).await,
             Err(CampaignSchedulerError::ProjectAccessDenied)
@@ -7231,10 +7318,10 @@ mod tests {
                 .is_err(),
             "registration bypassed mutation admission"
         );
-        assert!(scheduler.list().await.is_empty());
+        assert!(scheduler.manager.list_schedules().await.is_empty());
         drop(guard);
         let schedule = task.await.unwrap().unwrap();
-        assert_eq!(scheduler.list().await[0].id, schedule.id);
+        assert_eq!(scheduler.manager.list_schedules().await[0].id, schedule.id);
         scheduler.stop().await;
     }
 
@@ -7408,7 +7495,8 @@ mod tests {
         let scheduler = fixture.start().await.unwrap();
         let file_before = std::fs::read(&fixture.schedules_path).ok();
         let schedule_ids_before: Vec<_> = scheduler
-            .list()
+            .manager
+            .list_schedules()
             .await
             .into_iter()
             .map(|schedule| schedule.id)
@@ -7427,7 +7515,8 @@ mod tests {
         );
         assert_eq!(
             scheduler
-                .list()
+                .manager
+                .list_schedules()
                 .await
                 .into_iter()
                 .map(|schedule| schedule.id)
@@ -7969,8 +8058,9 @@ mod tests {
     #[tokio::test]
     async fn scheduler_concurrency_limits_report_both_caps_and_the_live_effective_minimum() {
         let dir = tempfile::tempdir().unwrap();
-        let workflow_dispatch_limit =
-            crate::config::effective_scheduler_config().max_concurrent_executions;
+        let workflow_dispatch_limit = crate::config::effective_scheduler_config()
+            .expect("default scheduler config validates")
+            .max_concurrent_executions;
         let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
         let scheduler =
             CampaignScheduler::try_start(container, dir.path().join("schedules.json"), None)
@@ -8286,5 +8376,251 @@ mod allocation_dispatch_tests {
         let selected = filter_campaign_targets(entries, &params).unwrap();
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].engine, "libfuzzer");
+    }
+}
+
+#[cfg(test)]
+mod skip_and_target_matching_tests {
+    use super::*;
+
+    #[test]
+    fn skip_result_is_marked_skipped_so_one_time_fires_stay_retryable() {
+        let result = skip_result("max concurrent campaigns reached (2)");
+        assert!(
+            result.skipped,
+            "a skip must carry the skipped status: {result:?}"
+        );
+        // The skipped marker -- not `success` -- decides how the manager
+        // records the execution, so the payload still explains itself.
+        assert_eq!(
+            result.summary,
+            "skipped: max concurrent campaigns reached (2)"
+        );
+        assert_eq!(
+            result.output,
+            serde_json::json!({"skipped": true, "reason": "max concurrent campaigns reached (2)"})
+        );
+    }
+
+    #[test]
+    fn a_bare_symbol_request_matches_its_file_qualified_emitted_target() {
+        let entries = vec![SchedulableTarget {
+            target: "src/parser.c::parse_header".into(),
+            engine: "libfuzzer".into(),
+            language: "c".into(),
+            fit_score: 1.0,
+        }];
+        let params = CampaignParams {
+            target: Some("parse_header".into()),
+            engine: "libfuzzer".into(),
+            ..CampaignParams::default()
+        };
+        let selected = filter_campaign_targets(entries, &params).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].target, "src/parser.c::parse_header");
+    }
+
+    #[test]
+    fn an_exact_spelling_beats_same_symbol_qualified_aliases() {
+        let entries = [
+            ("parse_header", "libfuzzer"),
+            ("src/parser.c::parse_header", "libfuzzer"),
+            ("other.c::parse_header", "libfuzzer"),
+        ]
+        .map(|(target, engine)| SchedulableTarget {
+            target: target.into(),
+            engine: engine.into(),
+            language: "c".into(),
+            fit_score: 1.0,
+        })
+        .to_vec();
+        let params = CampaignParams {
+            target: Some("parse_header".into()),
+            engine: "libfuzzer".into(),
+            ..CampaignParams::default()
+        };
+        let selected = filter_campaign_targets(entries, &params).unwrap();
+        assert_eq!(
+            selected
+                .iter()
+                .map(|entry| entry.target.as_str())
+                .collect::<Vec<_>>(),
+            vec!["parse_header"],
+            "the verbatim spelling wins over qualified aliases"
+        );
+    }
+
+    #[test]
+    fn a_qualified_request_matches_only_itself() {
+        let entries = [
+            ("src/parser.c::parse_header", "libfuzzer"),
+            ("other.c::parse_header", "libfuzzer"),
+        ]
+        .map(|(target, engine)| SchedulableTarget {
+            target: target.into(),
+            engine: engine.into(),
+            language: "c".into(),
+            fit_score: 1.0,
+        })
+        .to_vec();
+        let params = CampaignParams {
+            target: Some("src/parser.c::parse_header".into()),
+            engine: "libfuzzer".into(),
+            ..CampaignParams::default()
+        };
+        let selected = filter_campaign_targets(entries, &params).unwrap();
+        assert_eq!(
+            selected
+                .iter()
+                .map(|entry| entry.target.as_str())
+                .collect::<Vec<_>>(),
+            vec!["src/parser.c::parse_header"]
+        );
+    }
+
+    #[test]
+    fn a_bare_namespaced_symbol_request_matches_its_file_qualified_emitted_target() {
+        // C++ symbols carry their own `::` separators
+        // (`ns::Class::method`), so the emitted selector
+        // `src/a.cpp::ns::Class::method` cannot be matched by comparing the
+        // last `::` segment alone: the request must match as a whole-symbol
+        // suffix of the emitted spelling.
+        let entries = vec![SchedulableTarget {
+            target: "src/a.cpp::ns::Class::method".into(),
+            engine: "libfuzzer".into(),
+            language: "cpp".into(),
+            fit_score: 1.0,
+        }];
+        let params = CampaignParams {
+            target: Some("ns::Class::method".into()),
+            engine: "libfuzzer".into(),
+            ..CampaignParams::default()
+        };
+        let selected = filter_campaign_targets(entries, &params).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].target, "src/a.cpp::ns::Class::method");
+    }
+
+    #[test]
+    fn legacy_ids_diverge_for_same_name_same_params_different_interval() {
+        // Legacy schedules carry no `schedule_id`; their synthesized identity
+        // must still separate two schedules that differ only in their
+        // trigger, or they would share one rotation cursor and budget.
+        // Pinning the same schedule id makes the trigger the only
+        // difference, so the assertion fails if the hash covers only the
+        // name and parameters.
+        let id = uuid::Uuid::new_v4().to_string();
+        let legacy = |interval_secs: &str| {
+            let mut schedule = campaign_schedule("nightly sweep", &legacy_params("/proj"));
+            schedule.id = id.clone();
+            schedule.trigger = parse_trigger("interval", interval_secs).unwrap();
+            schedule
+        };
+        let hourly = legacy("3600");
+        let daily = legacy("86400");
+        assert_ne!(
+            synthesized_legacy_schedule_id(&hourly).unwrap(),
+            synthesized_legacy_schedule_id(&daily).unwrap(),
+            "same name and params must not collide across different intervals"
+        );
+        // The same schedule keeps deriving the same id on every load.
+        assert_eq!(
+            synthesized_legacy_schedule_id(&hourly).unwrap(),
+            synthesized_legacy_schedule_id(&hourly).unwrap()
+        );
+    }
+
+    fn campaign_schedule(name: &str, params: &CampaignParams) -> Schedule {
+        Schedule::new(
+            uuid::Uuid::new_v4().to_string(),
+            name,
+            parse_trigger("interval", "3600").unwrap(),
+            CAMPAIGN_KIND,
+        )
+        .with_params(serde_json::to_value(params).unwrap())
+    }
+
+    fn legacy_params(project: &str) -> CampaignParams {
+        CampaignParams {
+            project: project.to_owned(),
+            duration_secs: 60,
+            ..CampaignParams::default()
+        }
+    }
+
+    #[test]
+    fn legacy_schedules_derive_stable_distinct_ids() {
+        let first = campaign_schedule("nightly", &legacy_params("/tmp/one"));
+        // Reloading the same persisted schedule keeps its own id; the
+        // synthesized identity keys off that id, so it stays stable.
+        let mut again = campaign_schedule("nightly", &legacy_params("/tmp/one"));
+        again.id = first.id.clone();
+        let other = campaign_schedule("hourly", &legacy_params("/tmp/one"));
+
+        let id = synthesized_legacy_schedule_id(&first).expect("legacy campaign derives an id");
+        assert!(
+            id.starts_with("legacy-"),
+            "synthesized ids stay out of the created-schedule uuid namespace: {id}"
+        );
+        assert_eq!(
+            synthesized_legacy_schedule_id(&again).as_deref(),
+            Some(id.as_str()),
+            "the same schedule derives the same id on every load"
+        );
+        assert_ne!(
+            synthesized_legacy_schedule_id(&other).as_deref(),
+            Some(id.as_str()),
+            "each legacy campaign keys its own state"
+        );
+    }
+
+    #[test]
+    fn schedules_that_already_carry_an_identity_are_left_alone() {
+        let mut params = legacy_params("/tmp/one");
+        params.schedule_id = "existing-id".to_owned();
+        let schedule = campaign_schedule("nightly", &params);
+        assert_eq!(synthesized_legacy_schedule_id(&schedule), None);
+
+        let engine_schedule = Schedule::new(
+            "engine-1",
+            "engine schedule",
+            parse_trigger("interval", "60").unwrap(),
+            "other-workflow",
+        );
+        assert_eq!(synthesized_legacy_schedule_id(&engine_schedule), None);
+    }
+
+    #[tokio::test]
+    async fn zero_run_budgets_are_rejected_at_creation() {
+        let directory = tempfile::tempdir().unwrap();
+        let scheduler = CampaignScheduler::try_start(
+            ServiceContainer::stubbed(),
+            directory.path().join("schedules.json"),
+            None,
+        )
+        .await
+        .unwrap();
+        for zero in [
+            CampaignParams {
+                max_runs: Some(0),
+                ..legacy_params("/tmp/one")
+            },
+            CampaignParams {
+                max_total_secs: Some(0),
+                ..legacy_params("/tmp/one")
+            },
+        ] {
+            let error = scheduler
+                .try_create(
+                    "zero budget",
+                    &zero,
+                    parse_trigger("interval", "3600").unwrap(),
+                )
+                .await
+                .expect_err("a zero budget schedule can never run");
+            assert!(error.to_string().contains("must be at least 1"), "{error}");
+        }
+        assert!(scheduler.manager.list_schedules().await.is_empty());
+        scheduler.stop().await;
     }
 }

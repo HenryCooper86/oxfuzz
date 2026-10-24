@@ -47,7 +47,20 @@ pub async fn discover_with_signals(
     project_root: &Path,
     lang: TargetLanguage,
 ) -> Result<(TargetInventory, Vec<crate::enrichment::EnrichmentSignal>), ClassifiedError> {
-    tokio::task::yield_now().await;
+    // The recursive walk plus a tree-sitter parse of every source file is
+    // seconds of blocking work on a large tree; running it inline would
+    // monopolize a tokio worker and stall every other task on it. Off it goes
+    // to the blocking pool, the same shape as `hf_corpus::seed_with_limits`.
+    let project_root = project_root.to_path_buf();
+    tokio::task::spawn_blocking(move || discover_blocking(&project_root, lang))
+        .await
+        .map_err(|error| ClassifiedError::Internal(format!("discovery task failed: {error}")))?
+}
+
+fn discover_blocking(
+    project_root: &Path,
+    lang: TargetLanguage,
+) -> Result<(TargetInventory, Vec<crate::enrichment::EnrichmentSignal>), ClassifiedError> {
     let project_root = canonical_project_root(project_root)?;
     let (mut candidates, call_graph, signals) = match lang {
         TargetLanguage::C | TargetLanguage::Cpp => scan_c(&project_root, lang)?,

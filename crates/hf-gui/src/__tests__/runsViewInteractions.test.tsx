@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nContext } from "../i18nContext";
 import { ConfirmContext, type ConfirmFn } from "../providers/confirm";
 import { ProjectContext } from "../providers/project";
-import { RunsView } from "../views/RunsView";
+import { MiniTrend, RunsView } from "../views/RunsView";
 import type { RunHistoryItem } from "../types";
 import type * as LibModule from "../lib";
 import { ToastProvider } from "../components/ui/Toast";
@@ -294,5 +294,83 @@ describe("RunsView destructive interactions", () => {
     await act(async () => marker!.click());
     await flush();
     expect(document.querySelector('[role="alert"]')?.textContent).toContain("retained source unavailable");
+  });
+});
+
+describe("MiniTrend absent measurements", () => {
+  let host: HTMLDivElement;
+  let miniRoot: Root;
+
+  beforeEach(() => {
+    host = document.createElement("div");
+    document.body.append(host);
+    miniRoot = createRoot(host);
+  });
+
+  afterEach(async () => {
+    await act(async () => miniRoot.unmount());
+    host.remove();
+  });
+
+  function barCount(): number {
+    const bars = host.querySelector<HTMLDivElement>('div[style*="height: 40px"]');
+    return bars ? bars.children.length : -1;
+  }
+
+  function item(id: string, edges: number | null): RunHistoryItem {
+    return { ...run(id, "parse"), edges, started_at: `2026-09-08T0${id.slice(-1)}:00:00Z` };
+  }
+
+  it("skips null points instead of drawing them as a zero collapse", async () => {
+    const runs = [
+      item("10000000-0000-4000-8000-000000000001", 100),
+      item("10000000-0000-4000-8000-000000000002", null),
+      item("10000000-0000-4000-8000-000000000003", 50),
+    ];
+    await act(async () => miniRoot.render(
+      <I18nContext.Provider value={{ locale: "en", setLocale: () => undefined, t: (key) => key }}>
+        <MiniTrend
+          title="runs.coverageEdges"
+          icon={<span>icon</span>}
+          runs={runs}
+          value={(r) => r.edges}
+          color="var(--success)"
+          marks={[false, true, false]}
+          onMark={() => undefined}
+        />
+      </I18nContext.Provider>,
+    ));
+
+    // The unmeasured middle run is absent from the chart, the latest value is
+    // its own (no zero bar), and the change mark that belonged to the skipped
+    // run does not shift onto a measured one.
+    expect(barCount()).toBe(2);
+    expect(host.querySelector("span.text-lg")?.textContent).toBe("50");
+    expect(host.textContent).not.toContain("▲");
+  });
+
+  it("keeps a change marker on its own run when other points are absent", async () => {
+    const runs = [
+      item("10000000-0000-4000-8000-000000000001", 100),
+      item("10000000-0000-4000-8000-000000000002", null),
+      item("10000000-0000-4000-8000-000000000003", 50),
+    ];
+    await act(async () => miniRoot.render(
+      <I18nContext.Provider value={{ locale: "en", setLocale: () => undefined, t: (key) => key }}>
+        <MiniTrend
+          title="runs.coverageEdges"
+          icon={<span>icon</span>}
+          runs={runs}
+          value={(r) => r.edges}
+          color="var(--success)"
+          marks={[true, false, false]}
+          onMark={() => undefined}
+        />
+      </I18nContext.Provider>,
+    ));
+
+    expect(barCount()).toBe(2);
+    expect([...host.querySelectorAll("button")].filter((button) => button.textContent === "▲"))
+      .toHaveLength(1);
   });
 });

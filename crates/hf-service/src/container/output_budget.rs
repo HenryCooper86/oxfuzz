@@ -14,6 +14,11 @@ use super::staging::RunArtifacts;
 
 pub(super) const MAX_RUN_OUTPUT_BYTES: u64 = 512 * 1024 * 1024;
 pub(super) const MAX_RUN_OUTPUT_ENTRIES: usize = 100_000;
+/// Per-file ceiling for run output. The live monitor kills a run whose single
+/// output file passes it and the post-run retention check refuses to retain
+/// artifacts past it, so both decisions must read this one value -- the
+/// smoke path in `container/harness.rs` shares it for the same reason.
+pub(super) const MAX_RUN_OUTPUT_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Outcome of scanning a run-owned output tree against its retained-evidence
 /// budget.
@@ -205,5 +210,18 @@ mod tests {
         );
 
         assert!(matches!(status, OutputBudget::Within));
+    }
+
+    #[test]
+    fn per_file_limit_fits_the_run_output_budget() {
+        // Expressed as a computed relationship (not a constant-folded
+        // assertion): the per-file cap stays meaningful only while it fits
+        // the whole-tree budget.
+        let per_file = u128::from(MAX_RUN_OUTPUT_FILE_BYTES);
+        let tree = u128::from(MAX_RUN_OUTPUT_BYTES);
+        assert!(
+            per_file <= tree,
+            "a single output file must never exceed the whole-tree budget"
+        );
     }
 }

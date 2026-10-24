@@ -8,9 +8,12 @@ CallBudget reserves each real upstream request durably, including failed calls.
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import shutil
 import sqlite3
+import tempfile
 import uuid
 
 
@@ -48,36 +51,52 @@ def prepare(root, sandbox_image, analyzer_image, model, duration_secs):
                 "duration_secs": duration_secs, "engine": "libfuzzer", "sanitizer": "address",
                 "seed": 1337, "max_mem_mb": 2048, "max_cpus": 1, "max_model_calls": 12}
     identity.update(max_output_tokens=8192, reasoning_effort="low", temperature=0.2)
-    root.mkdir(parents=True, exist_ok=False)
-    trials = []
-    for fixture, filename, language, target, seed in COHORT:
-        source = (FIXTURES / fixture / filename).read_bytes()
-        for mode in ("baseline", "enriched"):
-            trial_id = f"{fixture}-{mode}"
-            directory = root / trial_id
-            project = directory / "project"
-            config = directory / "config"
-            seeds = directory / "seeds"
-            for path in (project, config, seeds):
-                path.mkdir(parents=True)
-            (project / filename).write_bytes(source)
-            (seeds / "initial").write_bytes(bytes.fromhex(seed))
-            write_json(project / "compile_commands.json", [{"directory": str(project.resolve()), "file": filename,
-                "arguments": ["clang++" if language == "cpp" else "clang", "-c", filename,
-                              "-std=c++17" if language == "cpp" else "-std=c11"]}])
-            configuration = ('[fuzzing]\ncollect_function_coverage = true\ndefault_sanitizer = "address"\n'
-                             '[fuzzing.sandbox]\nmax_mem_mb = 2048\nmax_cpus = 1\nmax_duration_secs = 300\n'
-                             f'[clang_analysis]\nimage = "{analyzer_image}"\nmax_context_bytes = 32768\n')
-            if mode == "enriched":
-                configuration += "[clang_analysis.exploration]\n"
-            (config / "oxfuzz.toml").write_text(configuration)
-            trials.append({"id": trial_id, "directory": trial_id, "mode": mode, "fixture": fixture,
-                           "source_file": filename, "language": language, "target": f"{filename}::{target}",
-                           "source_sha256": digest(source), "seed_sha256": digest(bytes.fromhex(seed)),
-                           "config_sha256": digest(configuration.encode())})
-    packet = {"schema_version": 1, "identity": identity, "trials": trials}
-    packet["id"] = digest(canonical(packet))
-    write_json(root / "comparison.json", packet)
+    root = Path(root)
+    if root.exists() or root.is_symlink():
+        # mkdir(exist_ok=False) semantics: a retry on an existing comparison
+        # fails loudly instead of merging into it.
+        raise FileExistsError("comparison root already exists: {}".format(root))
+    # Build into a staging sibling and publish with one rename, so a prepare
+    # that fails or is interrupted leaves no partial comparison root a retry
+    # would have to hand-delete.
+    root.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=root.name + ".preparing-", dir=root.parent))
+    try:
+        trials = []
+        for fixture, filename, language, target, seed in COHORT:
+            source = (FIXTURES / fixture / filename).read_bytes()
+            for mode in ("baseline", "enriched"):
+                trial_id = f"{fixture}-{mode}"
+                directory = staging / trial_id
+                project = directory / "project"
+                config = directory / "config"
+                seeds = directory / "seeds"
+                for path in (project, config, seeds):
+                    path.mkdir(parents=True)
+                (project / filename).write_bytes(source)
+                (seeds / "initial").write_bytes(bytes.fromhex(seed))
+                # The compile database names the trial's final location: the
+                # staging directory is renamed to `root` before anyone reads it.
+                write_json(project / "compile_commands.json", [{"directory": str((root / trial_id / "project").resolve()), "file": filename,
+                    "arguments": ["clang++" if language == "cpp" else "clang", "-c", filename,
+                                  "-std=c++17" if language == "cpp" else "-std=c11"]}])
+                configuration = ('[fuzzing]\ncollect_function_coverage = true\ndefault_sanitizer = "address"\n'
+                                 '[fuzzing.sandbox]\nmax_mem_mb = 2048\nmax_cpus = 1\nmax_duration_secs = 300\n'
+                                 f'[clang_analysis]\nimage = "{analyzer_image}"\nmax_context_bytes = 32768\n')
+                if mode == "enriched":
+                    configuration += "[clang_analysis.exploration]\n"
+                (config / "oxfuzz.toml").write_text(configuration)
+                trials.append({"id": trial_id, "directory": trial_id, "mode": mode, "fixture": fixture,
+                               "source_file": filename, "language": language, "target": f"{filename}::{target}",
+                               "source_sha256": digest(source), "seed_sha256": digest(bytes.fromhex(seed)),
+                               "config_sha256": digest(configuration.encode())})
+        packet = {"schema_version": 1, "identity": identity, "trials": trials}
+        packet["id"] = digest(canonical(packet))
+        write_json(staging / "comparison.json", packet)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    os.replace(staging, root)
     return packet
 
 

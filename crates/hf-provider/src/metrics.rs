@@ -44,15 +44,6 @@ impl ProviderMetrics {
         }
     }
 
-    /// Record a successful request with token usage (no cost accounting).
-    pub fn record_success(&self, input_tokens: u32, output_tokens: u32) {
-        self.total_requests.fetch_add(1, Ordering::Relaxed);
-        self.total_input_tokens
-            .fetch_add(u64::from(input_tokens), Ordering::Relaxed);
-        self.total_output_tokens
-            .fetch_add(u64::from(output_tokens), Ordering::Relaxed);
-    }
-
     /// Record a successful request with token usage and cost calculation.
     ///
     /// Cost is computed as:
@@ -151,7 +142,7 @@ mod tests {
     #[test]
     fn test_metrics_increment_total_requests() {
         let metrics = ProviderMetrics::new();
-        metrics.record_success(100, 50);
+        metrics.record_success_with_cost(100, 50, 0.0, 0.0);
         assert_eq!(metrics.total_requests.load(Ordering::Relaxed), 1);
     }
 
@@ -166,8 +157,8 @@ mod tests {
     #[test]
     fn test_metrics_track_token_usage() {
         let metrics = ProviderMetrics::new();
-        metrics.record_success(100, 50);
-        metrics.record_success(200, 100);
+        metrics.record_success_with_cost(100, 50, 0.0, 0.0);
+        metrics.record_success_with_cost(200, 100, 0.0, 0.0);
         assert_eq!(metrics.total_input_tokens.load(Ordering::Relaxed), 300);
         assert_eq!(metrics.total_output_tokens.load(Ordering::Relaxed), 150);
     }
@@ -175,7 +166,7 @@ mod tests {
     #[test]
     fn test_metrics_reset() {
         let metrics = ProviderMetrics::new();
-        metrics.record_success(100, 50);
+        metrics.record_success_with_cost(100, 50, 0.0, 0.0);
         metrics.record_error();
 
         metrics.reset();
@@ -191,8 +182,8 @@ mod tests {
     #[test]
     fn test_metrics_error_rate() {
         let metrics = ProviderMetrics::new();
-        metrics.record_success(10, 5);
-        metrics.record_success(10, 5);
+        metrics.record_success_with_cost(10, 5, 0.0, 0.0);
+        metrics.record_success_with_cost(10, 5, 0.0, 0.0);
         metrics.record_error();
 
         let snap = metrics.snapshot();

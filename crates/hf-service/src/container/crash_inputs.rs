@@ -8,6 +8,7 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use hf_core::engine::EngineKind;
+use hf_core::error::ClassifiedError;
 use uuid::Uuid;
 
 pub(super) fn is_regular_file(path: &Path) -> bool {
@@ -18,23 +19,66 @@ fn is_regular_directory(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
 }
 
-pub(super) fn stage_crash_inputs(engine: EngineKind, out_dir: &Path, staging: &Path) -> usize {
-    if !is_regular_directory(out_dir)
-        || std::fs::create_dir_all(staging).is_err()
-        || !is_regular_directory(staging)
-    {
-        return 0;
+/// How many crash inputs were staged for CASR, and how many could not be.
+///
+/// `skipped > 0` means crash artifacts exist that triage would not see;
+/// callers must treat that as a staging failure rather than as "no crashes".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) struct StagedCrashInputs {
+    pub(super) staged: usize,
+    pub(super) skipped: usize,
+}
+
+/// Stage every crash input from a run output directory into a clean flat
+/// directory for CASR.
+///
+/// Returns an error only when the staging directory itself cannot be prepared;
+/// per-input copy failures are counted in [`StagedCrashInputs::skipped`] and
+/// logged, so the caller can fail the triage step instead of silently triaging
+/// a subset of the run's crashes.
+pub(super) fn stage_crash_inputs(
+    engine: EngineKind,
+    out_dir: &Path,
+    staging: &Path,
+) -> Result<StagedCrashInputs, ClassifiedError> {
+    if !is_regular_directory(out_dir) {
+        return Ok(StagedCrashInputs::default());
     }
-    let mut staged = 0usize;
+    std::fs::create_dir_all(staging).map_err(|error| {
+        ClassifiedError::Internal(format!(
+            "create CASR staging directory {}: {error}",
+            staging.display()
+        ))
+    })?;
+    if !is_regular_directory(staging) {
+        return Err(ClassifiedError::Internal(format!(
+            "CASR staging path {} is not a regular directory",
+            staging.display()
+        )));
+    }
+    let mut outcome = StagedCrashInputs::default();
     for path in collect_crash_inputs(engine, out_dir) {
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            tracing::warn!(
+                path = %path.display(),
+                "crash input has no usable file name; not staged for CASR triage"
+            );
+            outcome.skipped += 1;
             continue;
         };
-        if std::fs::copy(&path, staging.join(name)).is_ok() {
-            staged += 1;
+        match std::fs::copy(&path, staging.join(name)) {
+            Ok(_) => outcome.staged += 1,
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "could not stage crash input for CASR triage"
+                );
+                outcome.skipped += 1;
+            }
         }
     }
-    staged
+    Ok(outcome)
 }
 
 /// Collect crash input file paths from a run output directory, skipping engine
@@ -66,7 +110,13 @@ pub(super) fn collect_crash_inputs(engine: EngineKind, out_dir: &Path) -> Vec<Pa
 
 pub(super) fn collect_legacy_crash_inputs(out_dir: &Path) -> Vec<PathBuf> {
     hf_crash::ingest(out_dir, Uuid::nil(), Uuid::nil()).map_or_else(
-        |_| Vec::new(),
+        // Swallowed: a legacy output tree that cannot be scanned holds no
+        // collectible crash inputs; logged like the engine-aware sibling
+        // above so a lost scan is observable, never a silent empty set.
+        |error| {
+            tracing::warn!(path = %out_dir.display(), %error, "legacy crash artifact scan failed");
+            Vec::new()
+        },
         |crashes| crashes.into_iter().map(|crash| crash.input_path).collect(),
     )
 }
@@ -110,7 +160,13 @@ mod crash_input_boundary_tests {
 
         let collected = collect_crash_inputs(EngineKind::LibFuzzer, &out);
         assert_eq!(collected, vec![out.join("crash-real")]);
-        assert_eq!(stage_crash_inputs(EngineKind::LibFuzzer, &out, &staging), 1);
+        assert_eq!(
+            stage_crash_inputs(EngineKind::LibFuzzer, &out, &staging).unwrap(),
+            super::StagedCrashInputs {
+                staged: 1,
+                skipped: 0
+            }
+        );
         assert_eq!(
             std::fs::read(staging.join("crash-real")).unwrap(),
             b"real crash"
@@ -128,9 +184,60 @@ mod crash_input_boundary_tests {
                 EngineKind::LibFuzzer,
                 &linked_out,
                 &root.path().join("linked-staging")
-            ),
-            0
+            )
+            .unwrap(),
+            super::StagedCrashInputs::default()
         );
+    }
+
+    #[test]
+    fn crash_staging_distinguishes_missing_output_from_failed_staging() {
+        let root = tempfile::tempdir().unwrap();
+
+        // No output directory at all: no artifacts to stage, not a failure.
+        let missing = stage_crash_inputs(
+            EngineKind::LibFuzzer,
+            &root.path().join("absent"),
+            &root.path().join("staging-a"),
+        )
+        .unwrap();
+        assert_eq!(missing, super::StagedCrashInputs::default());
+
+        // A staging path whose parent is a regular file cannot be created:
+        // a staging failure, not "no crashes".
+        let out = root.path().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("crash-real"), b"real crash").unwrap();
+        std::fs::write(root.path().join("blocker"), b"file").unwrap();
+        let error = stage_crash_inputs(
+            EngineKind::LibFuzzer,
+            &out,
+            &root.path().join("blocker").join("staging"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("CASR staging"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn crash_staging_counts_uncopyable_inputs_as_skipped() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let out = root.path().join("out");
+        let staging = root.path().join("staging");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("crash-fine"), b"fine").unwrap();
+        std::fs::write(out.join("crash-locked"), b"locked").unwrap();
+        std::fs::set_permissions(
+            out.join("crash-locked"),
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
+
+        let outcome = stage_crash_inputs(EngineKind::LibFuzzer, &out, &staging).unwrap();
+        assert_eq!(outcome.staged, 1);
+        assert_eq!(outcome.skipped, 1);
     }
 }
 

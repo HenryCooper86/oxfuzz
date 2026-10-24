@@ -11,7 +11,7 @@ use hf_core::harness::{Harness, HarnessStatus};
 use hf_core::runtime::SandboxOptions;
 use hf_core::target::TargetLanguage;
 use hf_guardrails::{Action, Decision};
-use hf_storage::{AutoRevertEvent, RunKind, RunRecord, RunStatus};
+use hf_storage::{AutoRevertEvent, RunKind, RunRecord, RunStatus, Store};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -26,6 +26,7 @@ use super::harness_workspace::{
 use super::output_budget::{monitor_run_output, run_artifacts_within_budget};
 use super::policy::CurrentHarnessEvidence;
 use super::project_identity::canonical_project_root;
+use super::project_identity::{qualified_target_selector, select_target_candidate};
 use super::staging::{
     captured_run_context_digests, resolve_run_sandbox_image, retain_run_context,
     run_sandbox_options, stage_replay_artifacts, stage_run_artifacts, verify_run_artifacts,
@@ -963,19 +964,19 @@ impl ServiceContainer {
                 &workspace.join(harness_binary_name(target)),
                 cmplog_companion.as_deref(),
             )?;
-            if let Err(error) = super::retained_inputs::capture_workspace(
-                workspace,
-                &artifacts.input_host.join("workspace"),
-            ) {
-                if let Some(root) = artifacts.input_host.parent() {
-                    if let Err(cleanup) = std::fs::remove_dir_all(root) {
-                        tracing::warn!(%cleanup, "failed to remove unreferenced campaign inputs");
-                    }
-                }
-                return Err(error);
-            }
             (artifacts, image)
         };
+        // The staged run root exists and nothing durable references it yet:
+        // every failure below removes it through this one guard instead of a
+        // hand-copied cleanup block, and the disarm at the reservation hands
+        // ownership to the run's own lifecycle.
+        let mut staged_run_root = super::guards::StagedRunRootGuard::new(&artifacts);
+        if !historical {
+            super::retained_inputs::capture_workspace(
+                workspace,
+                &artifacts.input_host.join("workspace"),
+            )?;
+        }
         super::managed_mutator::stage(
             qualified,
             &artifacts,
@@ -986,33 +987,14 @@ impl ServiceContainer {
         )?;
         #[cfg(feature = "coverage-experiments")]
         experiments::verify_inputs(replay.as_ref(), &artifacts, &sandbox_image, &config)?;
-        let context = match captured_run_context_digests(
+        let context = captured_run_context_digests(
             &artifacts.source_context_host,
             &artifacts.initial_corpus_host,
             sandbox_image.sha256(),
-        ) {
-            Ok(context) => context,
-            Err(error) => {
-                if let Some(run_root) = artifacts.output_host.parent() {
-                    // Best-effort removal of staging not referenced by a persisted run.
-                    let _ = std::fs::remove_dir_all(run_root);
-                }
-                return Err(error);
-            }
-        };
+        )?;
         retain_run_context(&mut record, context);
-        if let Err(error) = verify_staged_qualification(qualified, &artifacts) {
-            if let Some(run_root) = artifacts.output_host.parent() {
-                let _ignored_cleanup_error = std::fs::remove_dir_all(run_root);
-            }
-            return Err(error);
-        }
-        if let Err(error) = verify_run_artifacts(&artifacts) {
-            if let Some(run_root) = artifacts.output_host.parent() {
-                let _ignored_cleanup_error = std::fs::remove_dir_all(run_root);
-            }
-            return Err(error);
-        }
+        verify_staged_qualification(qualified, &artifacts)?;
+        verify_run_artifacts(&artifacts)?;
         // AFL++ session resume: continue the newest compatible output tree
         // (same project workspace, engine, harness binary) inside this run's
         // own fresh output directory. The tree is staged before the run row is
@@ -1020,32 +1002,16 @@ impl ServiceContainer {
         // (donor or cold start) is journaled once the run is durable.
         let mut resumed_from = None;
         if engine == EngineKind::AflPlusPlus && config.resume {
-            let donor = match super::staging::afl_resume_donor(
+            let donor = super::staging::afl_resume_donor(
                 store,
                 workspace,
                 &record.project_root,
                 &artifacts.binary_sha256,
                 record.id,
             )
-            .await
-            {
-                Ok(donor) => donor,
-                Err(error) => {
-                    if let Some(run_root) = artifacts.output_host.parent() {
-                        let _ignored_cleanup_error = std::fs::remove_dir_all(run_root);
-                    }
-                    return Err(error);
-                }
-            };
+            .await?;
             if let Some((donor_run, donor_tree)) = donor {
-                if let Err(error) =
-                    super::staging::copy_afl_resume_tree(&donor_tree, &artifacts.output_host)
-                {
-                    if let Some(run_root) = artifacts.output_host.parent() {
-                        let _ignored_cleanup_error = std::fs::remove_dir_all(run_root);
-                    }
-                    return Err(error);
-                }
+                super::staging::copy_afl_resume_tree(&donor_tree, &artifacts.output_host)?;
                 resumed_from = Some(donor_run);
             }
         }
@@ -1053,39 +1019,22 @@ impl ServiceContainer {
             .as_ref()
             .filter(|value| value.inputs == ReplayInputs::Retained)
             .map(|value| value.original_run_id);
-        if let Err(error) = super::retained_inputs::stage_run_mountpoints(
+        super::retained_inputs::stage_run_mountpoints(
             &artifacts.input_host,
             record.id,
             previous_run_id,
-        ) {
-            if let Some(run_root) = artifacts.output_host.parent() {
-                let _ignored_cleanup_error = std::fs::remove_dir_all(run_root);
-            }
-            return Err(error);
-        }
+        )?;
         #[cfg(feature = "proof-carrying")]
-        if let Err(error) = super::function_coverage::stage_input_workspace(
+        super::function_coverage::stage_input_workspace(
             &config,
             &artifacts.input_host.join("workspace"),
             historical,
-        ) {
-            if let Some(run_root) = artifacts.output_host.parent() {
-                let _ignored_cleanup_error = std::fs::remove_dir_all(run_root);
-            }
-            return Err(error);
-        }
-        if let Err(error) = super::retained_inputs::seal(
+        )?;
+        super::retained_inputs::seal(
             &artifacts.input_host,
             sandbox_image.reference(),
             &mut config,
-        ) {
-            if let Some(root) = artifacts.input_host.parent() {
-                if let Err(cleanup) = std::fs::remove_dir_all(root) {
-                    tracing::warn!(%cleanup, "failed to remove unreferenced campaign manifest staging");
-                }
-            }
-            return Err(error);
-        }
+        )?;
         record.config = Some(config.clone());
         let mut sandbox = run_sandbox_options(
             &artifacts,
@@ -1106,13 +1055,13 @@ impl ServiceContainer {
         record.evidence_dir = Some(workspace_relative_record(&artifacts.output_relative));
         let run_id = record.id;
         let guided_owner = experiments::acquire_owner(store, run_id, replay.as_ref())?;
-        let reservation = experiments::reserve_run(store, &record, replay.as_ref()).await;
-        if let Err(error) = reservation {
-            if let Some(run_root) = artifacts.output_host.parent() {
-                let _ignored_cleanup_error = std::fs::remove_dir_all(run_root);
-            }
-            return Err(ClassifiedError::Storage(error.to_string()));
-        }
+        experiments::reserve_run(store, &record, replay.as_ref())
+            .await
+            .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
+        // The reservation references the staged tree: it is durable run
+        // evidence now, and the failures below mark the run rather than
+        // removing what it references.
+        staged_run_root.disarm();
         self.run_journal.open_run(run_id, project, target, engine);
         if config.cmplog {
             // Cost visibility (roadmap P2 guardrail note): CmpLog runs the
@@ -1177,6 +1126,46 @@ impl ServiceContainer {
             persistence,
         })
     }
+    /// Reconcile the caller's target spelling with the workspace that holds
+    /// the active harness.
+    ///
+    /// Harness workspaces are keyed by the spelling the promoting flow used,
+    /// so a harness promoted under a file-qualified selector
+    /// (`src/parser.c::parse`, the work-order and disambiguation flows) is
+    /// invisible to a bare-symbol run unless the spelling is resolved first.
+    /// The exact spelling wins when its workspace holds the marker (replays
+    /// and re-runs keep their retained selector); otherwise the resolved
+    /// candidate's qualified spelling is probed. Anything unresolved passes
+    /// through unchanged so the run's own admission error names what the
+    /// caller actually asked for.
+    async fn resolve_run_target_selector(&self, project: &Path, target: &str) -> String {
+        if crate::container::workspace::workspace_has_active_harness(project, target) {
+            return target.to_owned();
+        }
+        let Some(store) = self.store.as_ref() else {
+            return target.to_owned();
+        };
+        // Swallowed: a store read failure here must not preempt the run's own
+        // admission error, which names the requested target.
+        let Ok(targets) = store.list_targets(&project.to_string_lossy()).await else {
+            return target.to_owned();
+        };
+        match select_target_candidate(&targets, target) {
+            Ok(Some(candidate)) => {
+                let qualified = qualified_target_selector(candidate);
+                if qualified != target
+                    && crate::container::workspace::workspace_has_active_harness(
+                        project, &qualified,
+                    )
+                {
+                    qualified
+                } else {
+                    target.to_owned()
+                }
+            }
+            _ => target.to_owned(),
+        }
+    }
 
     async fn run_fuzzer_with_started_inner(
         &self,
@@ -1191,6 +1180,12 @@ impl ServiceContainer {
         let workspace_operation = self.acquire_workspace_operation().await?;
         let project_root = canonical_project_root(project)?;
         let project = project_root.as_path();
+        // A promoted harness may live under a file-qualified selector while
+        // the caller asked for the bare symbol (or vice versa); the whole run
+        // pipeline keys its workspace off this spelling, so resolve it once
+        // here.
+        let resolved_target = self.resolve_run_target_selector(project, target).await;
+        let target = resolved_target.as_str();
 
         #[cfg(feature = "campaign-health")]
         let campaign_health_settings = crate::config::effective_campaign_health_settings()
@@ -1277,9 +1272,12 @@ impl ServiceContainer {
         on_started(run_id);
 
         // Watch edge readings for stagnation while forwarding every event.
+        // A malformed oxfuzz.toml fails here like it already did at the
+        // fuzzing-settings preflight that admitted this run.
         let feedback = CoverageFeedback::new(
             run_id,
-            crate::config::coverage_stagnation_policy(),
+            crate::config::coverage_stagnation_policy()
+                .map_err(|error| ClassifiedError::Validation(format!("oxfuzz.toml: {error}")))?,
             on_progress,
         );
         // Accumulate an intra-run coverage/throughput time series live, so the
@@ -1324,7 +1322,7 @@ impl ServiceContainer {
         let output_monitor = tokio::spawn(monitor_run_output(
             artifacts.output_host.clone(),
             artifacts.corpus_host.clone(),
-            64 * 1024 * 1024,
+            super::output_budget::MAX_RUN_OUTPUT_FILE_BYTES,
             cancel.clone(),
             output_monitor_stop.clone(),
             Arc::clone(&output_budget_exceeded),
@@ -1340,36 +1338,31 @@ impl ServiceContainer {
         #[cfg(feature = "campaign-health")]
         managed_invocation.finish();
         output_monitor_stop.cancel();
+        // Swallowed: the monitor's only output is the `output_budget_exceeded`
+        // flag; its join result carries nothing the flag does not.
         let _ = output_monitor.await;
-        if !run_artifacts_within_budget(&artifacts, 64 * 1024 * 1024).await {
+        if !run_artifacts_within_budget(&artifacts, super::output_budget::MAX_RUN_OUTPUT_FILE_BYTES)
+            .await
+        {
             output_budget_exceeded.store(true, std::sync::atomic::Ordering::Release);
         }
         if output_budget_exceeded.load(std::sync::atomic::Ordering::Acquire) {
-            let status_update = store
-                .set_run_status(run_record.id, RunStatus::Failed, Some(Utc::now()))
-                .await;
-            if status_update.is_ok() {
-                self.run_journal.close_run(run_id);
-            }
+            let primary = ClassifiedError::Sandbox(
+                "fuzz run corpus/output exceeded its retained-evidence budget".to_owned(),
+            );
+            let error =
+                Self::teardown_failed_run(store, &self.run_journal, run_id, true, primary).await;
             #[cfg(feature = "campaign-health")]
             campaign_health_monitor.finish().await;
-            status_update.map_err(|error| ClassifiedError::Storage(error.to_string()))?;
-            return Err(ClassifiedError::Sandbox(
-                "fuzz run corpus/output exceeded its retained-evidence budget".to_owned(),
-            ));
+            return Err(error);
         }
         let result = match run_result {
             Ok(result) => result,
             Err(error) => {
-                let status_update = store
-                    .set_run_status(run_record.id, RunStatus::Failed, Some(Utc::now()))
-                    .await;
-                if status_update.is_ok() {
-                    self.run_journal.close_run(run_id);
-                }
+                let error =
+                    Self::teardown_failed_run(store, &self.run_journal, run_id, true, error).await;
                 #[cfg(feature = "campaign-health")]
                 campaign_health_monitor.finish().await;
-                status_update.map_err(|e| ClassifiedError::Storage(e.to_string()))?;
                 return Err(error);
             }
         };
@@ -1386,16 +1379,10 @@ impl ServiceContainer {
         let retained = match merge_run_discoveries(engine, &artifacts, &corpus_dir).await {
             Ok(corpus) => corpus,
             Err(error) => {
-                let status_update = store
-                    .set_run_status(run_record.id, RunStatus::Failed, Some(Utc::now()))
-                    .await;
-                if status_update.is_ok() {
-                    self.run_journal.close_run(run_id);
-                }
+                let error =
+                    Self::teardown_failed_run(store, &self.run_journal, run_id, true, error).await;
                 #[cfg(feature = "campaign-health")]
                 campaign_health_monitor.finish().await;
-                status_update
-                    .map_err(|status_error| ClassifiedError::Storage(status_error.to_string()))?;
                 return Err(error);
             }
         };
@@ -1403,16 +1390,10 @@ impl ServiceContainer {
         // argument and `retained.entries`, never `retained.target_id`, so no
         // identity copy is needed here.
         if let Err(error) = self.persist_corpus(qualified.target_id, &retained).await {
-            let status_update = store
-                .set_run_status(run_record.id, RunStatus::Failed, Some(Utc::now()))
-                .await;
-            if status_update.is_ok() {
-                self.run_journal.close_run(run_id);
-            }
+            let error =
+                Self::teardown_failed_run(store, &self.run_journal, run_id, true, error).await;
             #[cfg(feature = "campaign-health")]
             campaign_health_monitor.finish().await;
-            status_update
-                .map_err(|status_error| ClassifiedError::Storage(status_error.to_string()))?;
             return Err(error);
         }
 
@@ -1429,32 +1410,20 @@ impl ServiceContainer {
         let metrics = match terminal_run_metrics(engine, &artifacts, &result).await {
             Ok(metrics) => metrics,
             Err(error) => {
-                let status_update = store
-                    .set_run_status(run_record.id, RunStatus::Failed, Some(Utc::now()))
-                    .await;
-                if status_update.is_ok() {
-                    self.run_journal.close_run(run_id);
-                }
+                let error =
+                    Self::teardown_failed_run(store, &self.run_journal, run_id, true, error).await;
                 #[cfg(feature = "campaign-health")]
                 campaign_health_monitor.finish().await;
-                status_update
-                    .map_err(|status_error| ClassifiedError::Storage(status_error.to_string()))?;
                 return Err(error);
             }
         };
         if let Err(error) =
             persist_terminal_run_evidence(store, run_record.id, &metrics, &series).await
         {
-            let status_update = store
-                .set_run_status(run_record.id, RunStatus::Failed, Some(Utc::now()))
-                .await;
-            if status_update.is_ok() {
-                self.run_journal.close_run(run_id);
-            }
+            let error =
+                Self::teardown_failed_run(store, &self.run_journal, run_id, true, error).await;
             #[cfg(feature = "campaign-health")]
             campaign_health_monitor.finish().await;
-            status_update
-                .map_err(|status_error| ClassifiedError::Storage(status_error.to_string()))?;
             return Err(error);
         }
         let TerminalRunMetrics {
@@ -1489,13 +1458,10 @@ impl ServiceContainer {
             return Err(ClassifiedError::Storage(error.to_string()));
         }
         if let Err(error) = close_run_journal(&self.run_journal, run_id) {
-            let status_update = store
-                .set_run_status(run_record.id, RunStatus::Failed, Some(Utc::now()))
-                .await;
+            let error =
+                Self::teardown_failed_run(store, &self.run_journal, run_id, false, error).await;
             #[cfg(feature = "campaign-health")]
             campaign_health_monitor.finish().await;
-            status_update
-                .map_err(|status_error| ClassifiedError::Storage(status_error.to_string()))?;
             persisted_run.disarm();
             return Err(error);
         }
@@ -1527,6 +1493,35 @@ impl ServiceContainer {
             auto_revert,
             cmplog: run_cfg.cmplog,
         })
+    }
+
+    /// The one failure teardown every post-reservation exit of
+    /// `run_fuzzer_with_started_inner` shares.
+    ///
+    /// Marks the durable row `Failed`, closes its recovery journal when the row
+    /// update landed, and surfaces the status-write failure only when it
+    /// preempts the primary error -- the error the operator needs first.
+    /// `close_journal` is `false` only on the exit whose journal close already
+    /// failed, so it is not attempted twice. Callers stop the campaign health
+    /// monitor after this: the monitor is feature-gated and consumed by
+    /// `finish`, which a shared helper cannot express for both builds.
+    async fn teardown_failed_run(
+        store: &Store,
+        journal: &crate::recovery::RunJournal,
+        run_id: Uuid,
+        close_journal: bool,
+        primary: ClassifiedError,
+    ) -> ClassifiedError {
+        let status_update = store
+            .set_run_status(run_id, RunStatus::Failed, Some(Utc::now()))
+            .await;
+        if close_journal && status_update.is_ok() {
+            journal.close_run(run_id);
+        }
+        match status_update {
+            Ok(()) => primary,
+            Err(status_error) => ClassifiedError::Storage(status_error.to_string()),
+        }
     }
 
     /// Execute the sandboxed engine run, streaming every parsed progress event
@@ -1758,6 +1753,13 @@ impl ServiceContainer {
         // 2. Scheduled/agent campaigns may use only a revision a human already
         // approved. Generation, smoke, and promotion are deliberately separate
         // workbench operations.
+        //
+        // The admission lookup keys its workspace off the target spelling, so
+        // resolve the bare symbol the same way a direct run does: a harness
+        // promoted under a file-qualified selector must be admitted from a
+        // bare-symbol request (`oxfuzz campaign --target parse`), otherwise
+        // the qualified workspace is invisible to the campaign.
+        let target = self.resolve_run_target_selector(project, &target).await;
         let harness = self.active_harness(project, &target, engine).await?;
         if harness.language != lang || harness.status != HarnessStatus::Promoted {
             return Err(ClassifiedError::Validation(format!(
@@ -1825,7 +1827,11 @@ impl ServiceContainer {
 
             let triaged = self.triage_run(project, &target, summary.run_id).await?;
             crashes = triaged.len();
-            // Feed any crash reproducers back into the corpus (close the loop).
+            // Swallowed: feeding this iteration's crash reproducers back
+            // into the corpus is enrichment, not the campaign's result --
+            // triage above already persisted every finding, and run
+            // closeout re-absorbs on its own schedule, so a failed absorb
+            // must not fail the campaign.
             let _ = self
                 .corpus_absorb_crashes_for_run(project, &target, summary.run_id)
                 .await;
@@ -2593,10 +2599,14 @@ impl ServiceContainer {
         )
         .await?;
 
-        let platform = opts
-            .arch
-            .as_deref()
-            .map_or_else(hf_runtime::host_platform, hf_runtime::norm_platform);
+        let platform = match opts.arch.as_deref() {
+            Some(arch) => hf_runtime::norm_platform(arch).ok_or_else(|| {
+                ClassifiedError::Validation(format!(
+                    "unknown sandbox architecture '{arch}'; expected amd64/x86_64 or arm64/aarch64"
+                ))
+            })?,
+            None => hf_runtime::host_platform(),
+        };
         let target_triple = format!("linux/{}", hf_runtime::platform_short(&platform));
 
         let log = |s: &str| on_progress(FuzzProgress::LogLine(s.to_owned()));

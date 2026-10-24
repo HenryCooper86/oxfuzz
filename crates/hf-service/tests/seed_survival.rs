@@ -433,9 +433,15 @@ async fn regeneration_replaces_only_dying_generated_seeds() {
         corpus.join("earned").exists(),
         "an earned input is never regenerated away"
     );
+    let regen_names = std::fs::read_dir(&corpus)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("regen_"))
+        .collect::<Vec<_>>();
+    assert_eq!(regen_names.len(), 1, "{regen_names:?}");
     assert!(
-        corpus.join("regen_0").exists(),
-        "the replacement seed is written"
+        regen_names[0].chars().filter(|c| *c == '_').count() >= 2,
+        "replacement names carry their pass namespace: {regen_names:?}"
     );
 }
 
@@ -463,7 +469,51 @@ async fn regeneration_without_dying_seeds_is_a_no_op() {
         .expect("regeneration should run");
 
     assert_eq!(outcome.removed_dead, 0, "{outcome:?}");
+    assert_eq!(
+        outcome.replacements_requested, 0,
+        "an empty dead set requests zero replacements: {outcome:?}"
+    );
     assert_eq!(outcome.replacements_added, 0, "{outcome:?}");
     assert!(corpus.join("seed_deep").exists());
     assert!(!corpus.join("regen_0").exists());
+}
+
+#[tokio::test]
+async fn regeneration_neither_overwrites_nor_recounts_prior_pass_survivors() {
+    let fixture = promoted_afl_harness_with_regen_pool("parse_regen2").await;
+    let workspace = hf_service::workspace_dir(&fixture.project, "parse_regen2");
+    let corpus = workspace.join("corpus");
+    // A surviving replacement from a previous pass, still in the reserved
+    // namespace, plus one dying generated seed for this pass to replace.
+    std::fs::write(corpus.join("regen_0"), b"prior survivor").unwrap();
+    hf_corpus::seed(
+        uuid::Uuid::new_v4(),
+        &corpus,
+        vec![(b"shallow-bytes".to_vec(), "seed_shallow".to_owned())],
+    )
+    .await
+    .unwrap();
+
+    let outcome = fixture
+        .container
+        .regenerate_dead_seeds(
+            &fixture.project,
+            "parse_regen2",
+            hf_core::target::TargetLanguage::C,
+        )
+        .await
+        .expect("regeneration should run");
+
+    assert_eq!(outcome.removed_dead, 1, "{outcome:?}");
+    assert_eq!(outcome.replacements_requested, 1, "{outcome:?}");
+    assert_eq!(outcome.replacements_added, 1, "{outcome:?}");
+    assert_eq!(
+        outcome.replacement_survives, 1,
+        "only this pass's replacement is counted, never the prior survivor: {outcome:?}"
+    );
+    assert_eq!(
+        std::fs::read(corpus.join("regen_0")).unwrap(),
+        b"prior survivor",
+        "a new pass must not overwrite a prior pass's surviving replacement by name"
+    );
 }

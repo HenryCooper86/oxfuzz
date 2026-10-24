@@ -1,9 +1,49 @@
 #![cfg(feature = "clang-analysis")]
 
 use hf_core::clang_analysis::ClangLimits;
-use hf_discovery::clang_analysis::{normalize_index, reachable_functions};
+use hf_core::target::{InputSurface, SourceLocation, TargetCandidate, TargetKind};
+use hf_discovery::clang_analysis::{normalize_index, target_context};
 use serde_json::{json, Value};
 
+/// A candidate selecting the fixture's `entry` function (a.c, line 1), the
+/// way `discover` produces one for the same definition.
+fn static_entry_target() -> TargetCandidate {
+    TargetCandidate {
+        id: uuid::Uuid::nil(),
+        project_root: "/work/project".into(),
+        language: hf_core::target::TargetLanguage::C,
+        symbol: "entry".to_owned(),
+        kind: TargetKind::Parser,
+        location: SourceLocation {
+            file: "a.c".into(),
+            line: 1,
+            col: 1,
+            end_line: Some(10),
+            end_col: Some(1),
+        },
+        signature: None,
+        input_surface: InputSurface::Bytes,
+        complexity: 1,
+        fit_score: 0.5,
+        sanitizers: Vec::new(),
+        rationale: String::new(),
+        reachable_functions: Vec::new(),
+        accumulated_complexity: 0,
+    }
+}
+
+/// The function ids `target_context` retained for the entry target, sorted.
+fn context_functions(data: &Value) -> Vec<String> {
+    let graph = normalize_index(&serde_json::to_vec(data).unwrap(), &limits()).unwrap();
+    let mut ids: Vec<String> = target_context(&graph, &static_entry_target(), &limits())
+        .unwrap()
+        .functions
+        .into_iter()
+        .map(|f| f.id)
+        .collect();
+    ids.sort();
+    ids
+}
 fn limits() -> ClangLimits {
     ClangLimits {
         max_targets: 16,
@@ -209,11 +249,14 @@ fn hf_prompt_size(context: &hf_core::clang_analysis::ClangTargetContext) -> usiz
 
 #[test]
 fn zero_argument_helpers_and_cycles_preserve_exact_identities() {
-    let graph = normalize_index(&serde_json::to_vec(&index()).unwrap(), &limits()).unwrap();
+    // The context retains exactly the resolved direct callees of `entry`:
+    // the zero-arg helper keeps its qualified id, the cycle back to entry
+    // does not duplicate it, and the virtual dispatch (setup:b) is excluded.
     assert_eq!(
-        reachable_functions(&graph, "entry"),
-        vec!["leaf", "setup:a"]
+        context_functions(&index()),
+        vec!["leaf".to_owned(), "setup:a".to_owned()]
     );
+    let graph = normalize_index(&serde_json::to_vec(&index()).unwrap(), &limits()).unwrap();
     assert!(graph.functions.iter().all(|f| f.parameters.is_empty()));
 }
 
@@ -266,14 +309,16 @@ fn external_definitions_join_only_in_an_explicit_shared_scope() {
         .unwrap()
         .extend([declaration, definition]);
     data["calls"].as_array_mut().unwrap().push(json!({"caller":"entry","callee":"declaration","dispatch":"direct","location":{"file":"a.c","line":7,"column":1}}));
-    let graph = normalize_index(&serde_json::to_vec(&data).unwrap(), &limits()).unwrap();
-    assert!(!reachable_functions(&graph, "entry").contains(&"definition".to_owned()));
+    assert!(!context_functions(&data).contains(&"definition".to_owned()));
     data["units"][0]["scope"] = json!("linked");
     data["units"][1]["scope"] = json!("linked");
-    let graph = normalize_index(&serde_json::to_vec(&data).unwrap(), &limits()).unwrap();
     assert_eq!(
-        reachable_functions(&graph, "entry"),
-        vec!["definition", "leaf", "setup:a"]
+        context_functions(&data),
+        vec![
+            "definition".to_owned(),
+            "leaf".to_owned(),
+            "setup:a".to_owned()
+        ]
     );
 }
 

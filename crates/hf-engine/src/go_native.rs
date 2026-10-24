@@ -13,21 +13,22 @@ use hf_core::error::ClassifiedError;
 /// `binary` is the compiled `go test -c` binary for the package owning the
 /// fuzz target, staged under the name `fuzz_<Symbol>.test` where `<Symbol>`
 /// is the exact exported Go function under test; the fuzz test is named
-/// `Fuzz<Symbol>`. The fixed flags
-/// select exactly that one test. An explicit duration becomes
-/// `-test.fuzztime=<N>s`; without one the fuzzer runs until stopped and the
-/// sandbox wall-clock cap bounds it, the same contract as the other engines.
-/// An allocation above one maps to `-test.parallel`. Go's fuzzer has no
-/// user-specified RNG seed (like honggfuzz), so a recorded `cfg.seed` is
-/// deliberately not translated into an invented flag.
+/// `Fuzz<Symbol>`. The fixed flags select exactly that one test. An explicit
+/// duration becomes `-test.fuzztime=<N>s`; without one the fuzzer runs until
+/// stopped and the sandbox wall-clock cap bounds it, the same contract as the
+/// other engines. An allocation above one maps to `-test.parallel`. Go's
+/// fuzzer has no user-specified RNG seed (like honggfuzz), so a recorded
+/// `cfg.seed` is deliberately not translated into an invented flag.
 ///
 /// `cfg.env` is deliberately absent from the argument list: the Go offline
 /// and cache variables (`GOPROXY=off`, `GOSUMDB=off`, `GOTOOLCHAIN=local`)
 /// are sandbox environment values with one home in `ResourceLimits.env`.
 ///
 /// # Errors
-/// Currently infallible; the shared adapter signature is fallible because
-/// other engines validate flag combinations (see AFL++'s resume rule).
+/// Returns [`ClassifiedError::Validation`] when `binary` does not match the
+/// `fuzz_<Symbol>.test` staging contract: the fuzz test name is derived from
+/// that name, so a staging or rename drift must fail here rather than fuzz a
+/// nonexistent `Fuzz` test with an argv that looks valid.
 pub fn build_run_args(
     cfg: &FuzzRunConfig,
     binary: &str,
@@ -35,10 +36,13 @@ pub fn build_run_args(
     _out: &str,
 ) -> Result<Vec<String>, ClassifiedError> {
     let duration = cfg.duration.map_or(0, |d| d.as_secs());
-    let test_name = format!(
-        "Fuzz{}",
-        go_symbol_from_binary_name(binary).unwrap_or_default()
-    );
+    let symbol = go_symbol_from_binary_name(binary).ok_or_else(|| {
+        ClassifiedError::Validation(format!(
+            "go native binary '{binary}' does not match the staging contract \
+             fuzz_<Symbol>.test, so the fuzz test name cannot be derived"
+        ))
+    })?;
+    let test_name = format!("Fuzz{symbol}");
     let mut args = vec![
         binary.to_owned(),
         format!("-test.run=^{test_name}$"),

@@ -82,14 +82,6 @@ fn parents(edges: &Edges<'_>, start: &str) -> BTreeMap<String, Option<String>> {
     }
     found
 }
-/// Reachable project definitions through resolved direct edges, excluding start.
-#[must_use]
-pub fn reachable_functions(index: &ClangIndex, start: &str) -> Vec<String> {
-    parents(&Resolution::new(index).edges(), start)
-        .into_keys()
-        .filter(|id| id != start)
-        .collect()
-}
 /// Associate by defining file, declaration range, and qualified or terminal name.
 #[must_use]
 pub fn associate_target(index: &ClangIndex, target: &TargetCandidate) -> ClangTargetAssociation {

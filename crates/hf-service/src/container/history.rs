@@ -13,9 +13,9 @@ use super::guards::ensure_run_journal_durable;
 use super::harness_workspace::{
     harness_binary_name, read_current_harness_id, read_current_harness_source,
 };
+use super::project_identity::retained_run_target_selector;
 use super::project_identity::{
-    canonical_project_root, project_lookup_identity, retained_run_target_selector,
-    stored_project_matches,
+    canonical_project_root, project_lookup_identity, stored_project_matches,
 };
 use super::staging::quarantine_corpus_entry;
 use super::workspace::{resolve_workspace_directory, run_output_relative, workspace_dir};
@@ -199,6 +199,13 @@ impl ServiceContainer {
                 })
             })
             .collect::<Vec<_>>();
+        // The fallback must feed the same deduped view every other crash
+        // surface (report, SARIF, DefectDojo) reports, or a legacy run's
+        // history count silently exceeds its own triaged findings. Dedup is
+        // scoped per run: the same stack signature surfacing in two different
+        // runs is one finding in each, so the rows are grouped by run_id
+        // before `hf_crash::dedup` collapses each group -- collapsing across
+        // runs first would steal the second run's representative.
         let crashes = store.list_all_crashes().await?;
         let harnesses: std::collections::HashMap<Uuid, Harness> = store
             .list_all_harnesses()
@@ -212,10 +219,15 @@ impl ServiceContainer {
             .into_iter()
             .map(|t| (t.id, t))
             .collect();
+        let mut by_run: std::collections::HashMap<Uuid, Vec<hf_core::crash::Crash>> =
+            std::collections::HashMap::new();
+        for crash in crashes {
+            by_run.entry(crash.run_id).or_default().push(crash);
+        }
         let mut crashes_by_run: std::collections::HashMap<Uuid, usize> =
             std::collections::HashMap::new();
-        for c in &crashes {
-            *crashes_by_run.entry(c.run_id).or_insert(0) += 1;
+        for (run_id, group) in by_run {
+            crashes_by_run.insert(run_id, hf_crash::dedup(group).len());
         }
         let mut items: Vec<RunHistoryItem> = runs
             .into_iter()
@@ -545,25 +557,41 @@ impl ServiceContainer {
 
     /// A cheap snapshot of a target's on-disk artifacts (compiled harness,
     /// corpus size, crash inputs) for the Info panel. Pure filesystem reads --
-    /// no sandbox, no LLM.
+    /// no sandbox, no LLM. Fields are `None` when unobservable, never a
+    /// fabricated zero.
     #[must_use]
     pub fn artifact_summary(&self, project: &Path, target: &str) -> ArtifactSummary {
+        // A workspace cleanup holding the write lease makes every on-disk
+        // observation unknown: reporting zeros here showed an empty target
+        // in the Info panel during any concurrent scan/run/cleanup.
         let Ok(_workspace_operation) = Self::try_acquire_workspace_operation_now() else {
             return ArtifactSummary {
-                harness_built: false,
-                corpus_count: 0,
-                crash_count: 0,
+                harness_built: None,
+                corpus_count: None,
+                crash_count: None,
             };
         };
         let workspace = workspace_dir(project, target);
         let harness_built = workspace.join(harness_binary_name(target)).exists();
-        let corpus_count =
-            hf_corpus::list(&workspace.join("corpus")).map_or(0, |c| c.entries.len());
+        let corpus_count = match hf_corpus::list(&workspace.join("corpus")) {
+            Ok(corpus) => Some(corpus.entries.len()),
+            // An unreadable corpus root leaves the count unknown; the harness
+            // and crash observations beside it stay measured, and the warn
+            // names the failure a `None` alone would hide.
+            Err(error) => {
+                tracing::warn!(
+                    corpus = %workspace.join("corpus").display(),
+                    %error,
+                    "artifact summary could not list the corpus"
+                );
+                None
+            }
+        };
         let crash_count = collect_workspace_crash_inputs(&workspace).len();
         ArtifactSummary {
-            harness_built,
+            harness_built: Some(harness_built),
             corpus_count,
-            crash_count,
+            crash_count: Some(crash_count),
         }
     }
 
@@ -1186,6 +1214,24 @@ mod workspace_lease_tests {
         )
     }
 
+    /// Hold the workspace cleanup lease until the returned task is aborted,
+    /// signalling once the write guard is held.
+    fn hold_cleanup_writer() -> (
+        tokio::task::JoinHandle<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let (_, gate) = workspace_operation_gate(&workspace_root()).unwrap();
+        let (acquired_tx, acquired_rx) = tokio::sync::oneshot::channel();
+        let writer = tokio::spawn(async move {
+            let _cleanup = gate.write_owned().await;
+            acquired_tx
+                .send(())
+                .expect("cleanup-holder observer remains active");
+            std::future::pending::<()>().await;
+        });
+        (writer, acquired_rx)
+    }
+
     fn queue_cleanup_writer() -> (
         tokio::task::JoinHandle<()>,
         tokio::sync::oneshot::Receiver<()>,
@@ -1224,6 +1270,28 @@ mod workspace_lease_tests {
 
         drop(lease);
         writer.await.unwrap();
+    }
+    #[tokio::test]
+    async fn artifact_summary_is_unknown_while_cleanup_holds_the_lease() {
+        let _environment = ServiceContainer::workspace_environment_test_gate()
+            .lock()
+            .await;
+        install_workspace();
+        let (writer, acquired) = hold_cleanup_writer();
+        acquired.await.unwrap();
+        tokio::task::yield_now().await;
+
+        let container = ServiceContainer::stubbed();
+        let summary =
+            container.artifact_summary(std::path::Path::new("/summary-busy"), "busy_target");
+
+        // Every observation is unknown -- not a fabricated empty target, which
+        // the Info panel would render as "no harness built, empty corpus".
+        assert_eq!(summary.harness_built, None);
+        assert_eq!(summary.corpus_count, None);
+        assert_eq!(summary.crash_count, None);
+
+        writer.abort();
     }
 
     #[tokio::test]

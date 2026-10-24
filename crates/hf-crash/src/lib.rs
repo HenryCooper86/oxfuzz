@@ -24,5 +24,5 @@ pub use ingest::{
     ingest, ingest_for_engine, is_timeout_artifact, CrashIngestResult, MAX_AGGREGATE_REPORT_BYTES,
     MAX_CRASH_ARTIFACTS, MAX_SANITIZER_REPORT_BYTES,
 };
-pub use minimize::build_minimize_args;
-pub use report::{draft_report, draft_report_with_context, MAX_SOURCE_CONTEXT_CHARS};
+pub use minimize::{build_minimize_args, build_minimize_args_with_timeout};
+pub use report::{draft_report_with_context, MAX_SOURCE_CONTEXT_CHARS};

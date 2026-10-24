@@ -214,7 +214,9 @@ pub(crate) struct HarnessArgs {
     pub(crate) draft: HarnessDraftArgs,
     /// Which generator writes the harness: `auto` uses the model when one
     /// is configured, `require` fails rather than substituting the
-    /// template, `off` never calls a model.
+    /// template, `off` never calls a model. An explicit `require`/`off`
+    /// does not combine with `--repair`/`--refine`: those paths always use
+    /// a configured model.
     #[arg(long, value_enum, default_value_t = AiOption::Auto)]
     pub(crate) ai: AiOption,
     /// Auto-repair: on a compile failure, feed the diagnostics back to the
@@ -291,16 +293,21 @@ pub(crate) struct RunArgs {
     /// Fuzzing engine. Required unless `--replay` is given.
     #[arg(long, required_unless_present_any = ["replay", "experiment"])]
     pub(crate) engine: Option<String>,
-    /// Target language (c, cpp, rust, go, python). Defaults to c.
-    #[arg(long, default_value = "c")]
+    /// Target language (c, cpp, rust, go, python). Defaults to c. An explicit
+    /// value cannot combine with `--replay`: the recorded run carries its own
+    /// language.
+    #[arg(long, default_value = "c", conflicts_with = "replay")]
     pub(crate) lang: String,
-    /// Duration (e.g. 60m). Defaults to the configured fuzzing duration.
-    #[arg(long)]
+    /// Duration (e.g. 60m). Defaults to the configured fuzzing duration. A
+    /// replay runs the recorded duration, so this cannot combine with
+    /// `--replay`.
+    #[arg(long, conflicts_with = "replay")]
     pub(crate) duration: Option<String>,
     /// CPU allocation for this run (engine workers where the engine supports
     /// them). Must not exceed the configured `fuzzing.sandbox.max_cpus`;
-    /// omitted means the configured allocation.
-    #[arg(long)]
+    /// omitted means the configured allocation. A replay runs the recorded
+    /// allocation, so this cannot combine with `--replay`.
+    #[arg(long, conflicts_with = "replay")]
     pub(crate) cpus: Option<u32>,
     /// Per-input timeout in milliseconds: one input running longer is a hang
     /// finding (AFL++ `-t`, libFuzzer `-timeout`, honggfuzz `--timeout`).
@@ -340,7 +347,7 @@ pub(crate) struct RunArgs {
     #[arg(long)]
     pub(crate) replay: Option<String>,
     /// Review and launch the current inputs for a prepared coverage experiment.
-    #[arg(long, conflicts_with_all = ["replay", "target", "engine", "duration", "cpus", "timeout_ms", "resume", "sanitizer", "cmplog", "seed"])]
+    #[arg(long, conflicts_with_all = ["replay", "target", "engine", "duration", "cpus", "timeout_ms", "resume", "sanitizer", "cmplog", "seed", "lang"])]
     pub(crate) experiment: Option<uuid::Uuid>,
 }
 
@@ -601,6 +608,11 @@ pub(crate) struct CorpusArgs {
     /// regen, minimize, absorb, concolic, import, list.
     #[arg(long)]
     pub(crate) op: String,
+    /// Target language the target was discovered under (c, cpp, rust, go,
+    /// python). Defaults to c. The LLM seed and regeneration paths discover
+    /// and resolve the target in this language.
+    #[arg(long, default_value = "c")]
+    pub(crate) lang: String,
     /// Source directory for `import` (an external corpus, e.g. OSS-Fuzz).
     #[arg(long)]
     pub(crate) from: Option<PathBuf>,
@@ -1892,19 +1904,71 @@ mod resume_cli_tests {
     }
 
     #[test]
-    fn replay_conflicts_with_sanitizer() {
-        // A replay re-executes the recorded config, sanitizer included, so a
-        // sanitizer request cannot combine with it.
+    fn replay_conflicts_with_duration() {
+        // A replay runs the recorded duration; a requested one would be
+        // silently dropped, so it must be rejected up front.
         assert!(Cli::try_parse_from([
             "oxfuzz",
             "run",
             "/p",
             "--replay",
             "a1b2c3d4",
-            "--sanitizer",
-            "undefined",
+            "--duration",
+            "30m",
         ])
         .is_err());
+    }
+
+    #[test]
+    fn replay_conflicts_with_cpus() {
+        // Same identity rule: the recorded CPU allocation is re-executed.
+        assert!(Cli::try_parse_from([
+            "oxfuzz", "run", "/p", "--replay", "a1b2c3d4", "--cpus", "4",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn replay_rejects_an_explicit_lang_but_keeps_the_default() {
+        // The replay carries the recorded run's own language, so an explicit
+        // `--lang` cannot combine with it; the default (never passed on the
+        // command line) must stay accepted so `--replay` alone still parses.
+        assert!(Cli::try_parse_from([
+            "oxfuzz", "run", "/p", "--replay", "a1b2c3d4", "--lang", "cpp"
+        ])
+        .is_err());
+        let parsed = Cli::try_parse_from(["oxfuzz", "run", "/p", "--replay", "a1b2c3d4"]).unwrap();
+        let Commands::Run(crate::args::RunArgs { lang, .. }) = parsed.command else {
+            panic!("expected run");
+        };
+        assert_eq!(lang, "c");
+    }
+}
+
+#[cfg(test)]
+mod corpus_lang_tests {
+    use clap::Parser as _;
+
+    use super::{Cli, Commands};
+
+    #[test]
+    fn corpus_accepts_lang_and_defaults_to_c() {
+        let parsed = Cli::try_parse_from([
+            "oxfuzz", "corpus", "/p", "--target", "t", "--op", "llmseed", "--lang", "cpp",
+        ])
+        .unwrap();
+        let Commands::Corpus(crate::args::CorpusArgs { lang, .. }) = parsed.command else {
+            panic!("expected corpus");
+        };
+        assert_eq!(lang, "cpp");
+
+        let parsed =
+            Cli::try_parse_from(["oxfuzz", "corpus", "/p", "--target", "t", "--op", "seed"])
+                .unwrap();
+        let Commands::Corpus(crate::args::CorpusArgs { lang, .. }) = parsed.command else {
+            panic!("expected corpus");
+        };
+        assert_eq!(lang, "c");
     }
 }
 

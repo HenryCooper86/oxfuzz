@@ -55,7 +55,7 @@ from scripts.effectiveness_benchmark import (
     HEX_40, HEX_64, PROJECT_ENGINES, digest, no_duplicate_keys, nonempty,
     nonempty_list, record, unique_ids, validate_cohort, trial_source_digest,
 )
-from scripts.effectiveness_report import crash_measurements
+from scripts import effectiveness_report
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -460,8 +460,13 @@ def resolve_binary(requested):
 
 
 def binary_version(binary):
-    result = subprocess.run([str(binary), "--version"], capture_output=True,
-                            text=True, check=False, timeout=30)
+    try:
+        result = subprocess.run([str(binary), "--version"], capture_output=True,
+                                text=True, check=False, timeout=30)
+    except subprocess.TimeoutExpired:
+        # TimeoutExpired is a SubprocessError, not an OSError, so main would
+        # let it escape as a traceback; name it as the RunnerError it is.
+        raise RunnerError("`{} --version` timed out after 30s".format(binary))
     if result.returncode != 0:
         raise RunnerError("`{} --version` failed: {}".format(binary, result.stderr.strip()))
     return result.stdout.strip().splitlines()[0]
@@ -866,25 +871,47 @@ def time_to_first_crash(crash_files):
     The timestamp is the crash input's file mtime minus the run's persisted
     start, an upper bound on true discovery time: ingestion can copy the file
     seconds after the engine wrote it.
+
+    Returns (bound, skipped). Every crash whose artifact could not be stat()ed
+    or whose run start did not parse is named in `skipped` so the caller
+    records the swallow in the trial's limitations instead of silently
+    widening the bound.
     """
     best = None
+    skipped = []
     for run, input_path in crash_files:
         try:
             started = parse_rfc3339(run["started_at"]).timestamp()
             mtime = Path(input_path).stat().st_mtime
-        except (OSError, ValueError):
+        except (OSError, ValueError) as error:
+            # Swallowed (policy 2.17): an unreadable artifact or malformed run
+            # start contributes no sample; the skip is returned, not dropped,
+            # so the trial's limitations name exactly what was excluded.
+            skipped.append({
+                "run_id": run.get("run_id"),
+                "input_path": str(input_path),
+                "reason": type(error).__name__,
+            })
             continue
         candidate = mtime - started
         if candidate >= 0 and (best is None or candidate < best):
             best = candidate
-    return best
+    return best, skipped
 
 
 def collect_coverage(binary, env, project_dir, target, log_path):
     """`oxfuzz coverage` text; absent coverage stays unavailable, never zero."""
-    result = subprocess.run(
-        [str(binary), "coverage", str(project_dir), "--target", target],
-        capture_output=True, text=True, check=False, env=env, timeout=300)
+    try:
+        result = subprocess.run(
+            [str(binary), "coverage", str(project_dir), "--target", target],
+            capture_output=True, text=True, check=False, env=env, timeout=300)
+    except subprocess.TimeoutExpired as expired:
+        # Swallowed: a hung coverage probe degrades this trial's coverage to
+        # unavailable instead of aborting the whole run matrix after its
+        # campaigns already spent their time and tokens.
+        log_path.write_text("coverage probe timed out after 300s: {}\n".format(expired),
+                            encoding="utf-8")
+        return None
     log_path.write_text(result.stdout + result.stderr, encoding="utf-8")
     if result.returncode != 0 or "No coverage available" in result.stderr:
         return None
@@ -1007,70 +1034,16 @@ def export_trial_evidence(binary, trial_env, approved_root, campaign_runs,
 
 
 def binding_mismatches(manifest, trial, project, condition, outcome):
-    """Pre-check the exported manifest against the cohort binding exactly as
-    `scripts.effectiveness_report.validate_manifest` would."""
-    problems = []
-    if not isinstance(manifest, dict) or not isinstance(manifest.get("body"), dict):
-        return ["campaign manifest needs a body"]
-    body = manifest["body"]
-    if body.get("schema_version") != 3:
-        problems.append("manifest schema_version is not 3")
-    expected = {
-        "target": trial["selected_function"],
-        "engine": condition["engine"],
-        "source_revision": trial_source_digest(trial, project),
-        "sandbox_image_sha256": condition["sandbox_image_sha256"],
-        "status": "done" if outcome == "completed" else outcome,
-    }
-    for field, wanted in expected.items():
-        if body.get(field) != wanted:
-            problems.append("manifest {} is {!r}, cohort wants {!r}".format(
-                field, body.get(field), wanted))
-    run_config = body.get("run_config")
-    if not isinstance(run_config, dict):
-        problems.append("manifest run_config is missing")
-    else:
-        for field in ("duration_secs", "max_mem_mb", "max_cpus"):
-            wanted = condition[field]
-            if type(run_config.get(field)) is not int or run_config[field] != wanted:
-                problems.append("manifest run_config.{} is {!r}, cohort wants {!r}".format(
-                    field, run_config.get(field), wanted))
-        seed = run_config.get("seed")
-        if type(seed) is not int or seed != trial["seed"]:
-            problems.append(
-                "manifest run_config.seed is {!r} but the frozen trial seed is {!r}"
-                .format(seed, trial["seed"]))
-        if run_config.get("sanitizer") != condition["sanitizer"]:
-            problems.append("manifest sanitizer is {!r}, cohort wants {!r}".format(
-                run_config.get("sanitizer"), condition["sanitizer"]))
-    coverage = body.get("coverage")
-    if not isinstance(coverage, dict) or type(coverage.get("edges")) is not int \
-            or coverage["edges"] < 0:
-        problems.append("manifest coverage.edges must be a non-negative integer")
-    for field in ("binary_sha256",):
-        try:
-            digest(body.get(field), field, HEX_64)
-        except ValueError as error:
-            problems.append(str(error))
+    """Pre-check the exported manifest with the report reader's own
+    `validate_manifest` instead of restating its checks: a copy here had
+    already diverged (it skipped run_id, compute_cost_usd, and total-cost
+    finiteness), letting observations.json carry evidence the reader rejects
+    one step later."""
     try:
-        digest(manifest.get("manifest_sha256"), "manifest_sha256", HEX_64)
+        effectiveness_report.validate_manifest(manifest, trial, project, condition, outcome)
     except ValueError as error:
-        problems.append(str(error))
-    cost = body.get("cost")
-    if not isinstance(cost, dict):
-        problems.append("manifest cost is missing")
-    else:
-        model_cost = cost.get("model_cost_usd")
-        if type(model_cost) not in (int, float) or model_cost < 0:
-            problems.append("manifest model_cost_usd must be non-negative")
-        elif model_cost > condition["model_cost_budget_usd"]:
-            problems.append("manifest model cost {} exceeds the frozen budget {}".format(
-                model_cost, condition["model_cost_budget_usd"]))
-    try:
-        crash_measurements(body.get("findings"))
-    except ValueError as error:
-        problems.append(str(error))
-    return problems
+        return [str(error)]
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -1320,7 +1293,16 @@ def run_trial(binary, args, trial, condition, project):
         # fields stay unavailable rather than reading as a false zero.
         if campaign_runs:
             record_data["unique_crashes"] = len(signatures)
-            record_data["time_to_first_crash_secs"] = time_to_first_crash(crash_files)
+            ttfc, ttfc_skipped = time_to_first_crash(crash_files)
+            record_data["time_to_first_crash_secs"] = ttfc
+            if ttfc_skipped:
+                record_data["limitations"].append(
+                    "time-to-first-crash excluded {} retained crash artifact(s) "
+                    "whose timestamp could not be read: {}".format(
+                        len(ttfc_skipped),
+                        "; ".join("{} ({}: {})".format(
+                            entry["input_path"], entry["run_id"], entry["reason"])
+                            for entry in ttfc_skipped)))
         edges = [run["edges"] for run in campaign_runs if run["edges"] is not None]
         record_data["peak_edges"] = max(edges) if edges else None
         if not campaign_runs:

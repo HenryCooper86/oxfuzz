@@ -385,8 +385,9 @@ function isTerminalStatus(status: RunLifecycleStatus): boolean {
   return status === "done" || status === "failed" || status === "cancelled";
 }
 
-function finiteMetric(value: number | null): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+/** Pass an unmeasured metric through as null; only finite numbers survive. */
+function finiteMetric(value: number | null): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 export function createHttpTransport(options: HttpTransportOptions = {}): Transport {
@@ -513,8 +514,10 @@ export function createHttpTransport(options: HttpTransportOptions = {}): Transpo
       }
       return {
         run_id: runId,
+        // Unmeasured edges/execs stay null so the UI renders Unknown; only
+        // crashes are structural for the run outcome and default to zero.
         edges: finiteMetric(completed.edges),
-        crashes: finiteMetric(completed.crashes),
+        crashes: finiteMetric(completed.crashes) ?? 0,
         execs: finiteMetric(completed.execs),
         exit_code: null,
         termination: status === "cancelled" ? "cancelled" : "completed",

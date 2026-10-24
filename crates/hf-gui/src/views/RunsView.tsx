@@ -307,7 +307,7 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus, onReviewFindings 
               title={t("runs.coverageEdges")}
               icon={<Activity size={13} />}
               runs={trend}
-              value={(r) => r.edges ?? 0}
+              value={(r) => r.edges}
               color="var(--success)"
               marks={changeAt}
               warn={regressAt}
@@ -317,7 +317,7 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus, onReviewFindings 
               title={t("runs.throughput")}
               icon={<Zap size={13} />}
               runs={trend}
-              value={(r) => Math.round(r.execs ?? 0)}
+              value={(r) => (r.execs === null ? null : Math.round(r.execs))}
               color="var(--accent)"
             />
             <MiniTrend
@@ -838,7 +838,10 @@ function AutoRevertPolicyCard({ project }: { project: string }) {
 }
 
 // A compact bar chart of a metric across successive runs (oldest -> newest).
-function MiniTrend({
+// Absent measurements (value null) are skipped, never coerced to zero: a run
+// without an edge count or throughput sample is not a coverage collapse, and
+// skipping it must not shift the per-run marks/warns onto other runs.
+export function MiniTrend({
   title,
   icon,
   runs,
@@ -851,17 +854,21 @@ function MiniTrend({
   title: string;
   icon: React.ReactNode;
   runs: RunHistoryItem[];
-  value: (r: RunHistoryItem) => number;
+  value: (r: RunHistoryItem) => number | null;
   color: string;
-  /** Per-bar flag: a harness revision change occurred at this run. */
+  /** Per-run flag (indexed like `runs`): a harness revision change occurred at this run. */
   marks?: boolean[];
-  /** Per-bar flag: this run regressed coverage (drop after a harness change). */
+  /** Per-run flag (indexed like `runs`): this run regressed coverage (drop after a harness change). */
   warn?: boolean[];
   /** Clicking a change marker opens the harness diff for that run. */
   onMark?: (index: number) => void;
 }) {
   const { t } = useI18n();
-  const values = runs.map(value);
+  const points = runs
+    .map((run, index) => ({ run, index, value: value(run) }))
+    .filter((point): point is { run: RunHistoryItem; index: number; value: number } =>
+      point.value !== null);
+  const values = points.map((point) => point.value);
   const max = Math.max(1, ...values);
   const latest = values[values.length - 1] ?? 0;
   const prev = values[values.length - 2] ?? latest;
@@ -882,23 +889,23 @@ function MiniTrend({
         )}
       </div>
       <div className="flex items-end gap-0.5 mt-2" style={{ height: 40 }}>
-        {values.map((v, i) => {
-          const changed = marks?.[i];
-          const regressed = warn?.[i];
+        {points.map((point, bar) => {
+          const changed = marks?.[point.index];
+          const regressed = warn?.[point.index];
           const markColor = regressed ? "var(--error)" : "var(--accent)";
           const barColor = regressed
             ? "var(--error)"
             : changed
               ? "var(--accent)"
-              : i === values.length - 1
+              : bar === points.length - 1
                 ? color
                 : "var(--border)";
           const barSuffix = regressed ? t("runs.barRegressedSuffix") : changed ? t("runs.barChangedSuffix") : "";
           return (
-            <div key={i} className="flex flex-col items-center justify-end" style={{ flex: 1, minWidth: 2, height: "100%" }}>
+            <div key={point.index} className="flex flex-col items-center justify-end" style={{ flex: 1, minWidth: 2, height: "100%" }}>
               {changed && onMark ? (
                 <button
-                  onClick={() => onMark(i)}
+                  onClick={() => onMark(point.index)}
                   title={regressed ? t("runs.markRegressedTitle") : t("runs.markChangedTitle")}
                   aria-label={t("runs.viewHarnessDiff")}
                   style={{ height: 8, lineHeight: "8px", fontSize: 8, color: markColor, background: "transparent", border: "none", cursor: "pointer", padding: 0 }}
@@ -911,10 +918,10 @@ function MiniTrend({
                 </span>
               )}
               <div
-                title={`${new Date(runs[i].started_at).toLocaleString()}: ${v.toLocaleString()}${barSuffix}`}
+                title={`${new Date(point.run.started_at).toLocaleString()}: ${point.value.toLocaleString()}${barSuffix}`}
                 style={{
                   width: "100%",
-                  height: `${Math.max(3, (v / max) * 100)}%`,
+                  height: `${Math.max(3, (point.value / max) * 100)}%`,
                   background: barColor,
                   borderRadius: 1,
                 }}

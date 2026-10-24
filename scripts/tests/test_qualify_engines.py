@@ -173,3 +173,18 @@ class QualificationTests(unittest.TestCase):
                 "import time; print('started', flush=True); time.sleep(30)"],
                 self.root, {}, self.root / "process.log", 0.2)
         self.assertIn("started", (self.root / "process.log").read_text())
+
+    def test_child_log_is_capped_and_marks_the_cut(self):
+        log = self.root / "capped.log"
+        with mock.patch.object(qualification, "MAX_LOG_BYTES", 4096):
+            with self.assertRaisesRegex(ValueError, "log cap"):
+                qualification.run_process([sys.executable, "-c",
+                    "print('started', flush=True); import sys;"
+                    " sys.stdout.write('x' * 100000)"],
+                    self.root, {}, log, 10)
+        text = log.read_text(encoding="utf-8", errors="replace")
+        self.assertIn("started", text)
+        # The refusal is visible in the retained evidence, and the artifact
+        # never exceeds the cap it enforces.
+        self.assertIn("not retained", text)
+        self.assertLessEqual(log.stat().st_size, 4096)

@@ -547,35 +547,40 @@ impl Labels {
     }
 }
 
-/// Render a campaign report as GitHub-flavored Markdown.
-#[must_use]
-pub fn render_markdown(data: &ReportData, labels: &Labels) -> String {
-    // A fault inside the generated harness is a harness bug, not a finding
-    // about the project under test. Partition here rather than at the call site
-    // so every caller -- including one assembling `ReportData` directly -- gets
-    // the same separation, and so no count, chart, or finding entry below can
-    // see a harness defect.
+/// Partition a report's crashes into harness defects and the target-only view.
+///
+/// A fault inside the generated harness is a harness bug, not a finding about
+/// the project under test. Both the deterministic rendering and the AI-report
+/// guard (`ensure_required_evidence`) partition through this one home so no
+/// count, chart, or re-injected section can present a harness defect as a
+/// project finding while another part of the same report excludes it.
+fn partition_harness_defects(data: &ReportData) -> (Vec<Crash>, std::borrow::Cow<'_, ReportData>) {
     let harness_defects: Vec<Crash> = data
         .crashes
         .iter()
         .filter(|crash| crash.origin == CrashOrigin::Harness)
         .cloned()
         .collect();
-    let target_only;
-    let data = if harness_defects.is_empty() {
-        data
-    } else {
-        target_only = ReportData {
-            crashes: data
-                .crashes
-                .iter()
-                .filter(|crash| crash.origin != CrashOrigin::Harness)
-                .cloned()
-                .collect(),
-            ..data.clone()
-        };
-        &target_only
+    if harness_defects.is_empty() {
+        return (harness_defects, std::borrow::Cow::Borrowed(data));
+    }
+    let target_only = ReportData {
+        crashes: data
+            .crashes
+            .iter()
+            .filter(|crash| crash.origin != CrashOrigin::Harness)
+            .cloned()
+            .collect(),
+        ..data.clone()
     };
+    (harness_defects, std::borrow::Cow::Owned(target_only))
+}
+
+/// Render a campaign report as GitHub-flavored Markdown.
+#[must_use]
+pub fn render_markdown(data: &ReportData, labels: &Labels) -> String {
+    let (harness_defects, data) = partition_harness_defects(data);
+    let data = data.as_ref();
 
     let mut md = String::with_capacity(4096);
 
@@ -1214,11 +1219,15 @@ fn render_reproduction(md: &mut String, crash: &Crash, labels: &Labels) {
         return;
     };
     let assessment = crate::container::crash_confirmation::assess_reproduction(crash, evidence);
-    // Formatting into a String cannot fail; no external I/O is performed.
+    // The bullet carries the crash id so two crashes that assess identically
+    // still render distinct bullets; without it, `ensure_required_evidence`
+    // would treat the second crash's bullet as already present and skip its
+    // re-injection. Formatting into a String cannot fail; no I/O happens.
     let _ = writeln!(
         md,
-        "- {}: {} {}/{}; {} {}/{}; {}: {}",
+        "- {} `{}`: {} {}/{}; {} {}/{}; {}: {}",
         labels.reproduction_observed,
+        crash.id,
         labels.reproduction_original,
         assessment.original_matches,
         evidence.original.len(),
@@ -1451,14 +1460,24 @@ pub fn report_user_prompt(facts: &str, data: &ReportData, language: ReportLangua
 /// stamps match the language of the report they are appended to.
 #[must_use]
 pub fn ensure_required_evidence(ai_markdown: &str, data: &ReportData, labels: &Labels) -> String {
+    // The same harness-defect partition the deterministic rendering applies:
+    // re-injected fallback sections must not count a harness fault as a
+    // project finding, or the appended evidence would contradict the counts
+    // the preserved fact sheet already states.
+    let (_harness_defects, data) = partition_harness_defects(data);
+    let data = data.as_ref();
     let mut out = ai_markdown.trim_end().to_owned();
     for crash in &data.crashes {
         if crash.reproduction.is_some() {
-            let mut observed = format!("{} `{}`\n", labels.reproduction_observed, crash.id);
-            render_reproduction(&mut observed, crash, labels);
-            if !out.contains(observed.trim()) {
+            // The fact sheet renders exactly this deterministic bullet, so
+            // detect that bullet -- a composite string the fact sheet never
+            // contains would never match and would duplicate every block.
+            let mut bullet = String::new();
+            render_reproduction(&mut bullet, crash, labels);
+            if !out.contains(bullet.trim()) {
                 out.push_str("\n\n");
-                out.push_str(&observed);
+                let _ = writeln!(out, "{} `{}`", labels.reproduction_observed, crash.id);
+                out.push_str(bullet.trim_end());
             }
         }
     }
@@ -1522,4 +1541,165 @@ fn truncate(s: &str, max: usize) -> String {
     }
     let kept: String = s.chars().take(max.saturating_sub(1)).collect();
     format!("{kept}…")
+}
+
+#[cfg(test)]
+mod ensure_required_evidence_tests {
+    use super::{ensure_required_evidence, render_markdown, Labels, ReportData};
+    use hf_core::crash::{
+        Crash, CrashKind, CrashOrigin, CrashReplayObservation, CrashReproduction,
+    };
+    use std::path::PathBuf;
+
+    fn observation(matches: bool) -> CrashReplayObservation {
+        CrashReplayObservation {
+            exit_code: Some(1),
+            termination: Some(hf_core::runtime::CommandTermination::Completed),
+            log: "AddressSanitizer: heap-buffer-overflow".to_owned(),
+            matches_reference: matches,
+            error: None,
+        }
+    }
+
+    fn crash(origin: CrashOrigin, with_reproduction: bool) -> Crash {
+        let id = uuid::Uuid::new_v4();
+        Crash {
+            id,
+            run_id: uuid::Uuid::new_v4(),
+            target_id: uuid::Uuid::new_v4(),
+            input_path: PathBuf::from("out/crash-1"),
+            stack_signature: "shared-signature".to_owned(),
+            kind: CrashKind::Asan,
+            summary: "heap-buffer-overflow".to_owned(),
+            minimized: true,
+            reproduction: with_reproduction.then(|| CrashReproduction {
+                version: 2,
+                run_id: uuid::Uuid::new_v4(),
+                crash_id: id,
+                requested_runs: 2,
+                reference_log: Some("AddressSanitizer: heap-buffer-overflow".to_owned()),
+                original_input: PathBuf::from("original"),
+                original_sha256: "a".repeat(64),
+                candidate_input: PathBuf::from("candidate"),
+                candidate_sha256: "b".repeat(64),
+                binary_sha256: "c".repeat(64),
+                image: format!("docker-image-id-sha256:{}", "d".repeat(64)),
+                original: vec![observation(true), observation(true)],
+                candidate: vec![observation(true), observation(true)],
+                confirmed: true,
+            }),
+            bug_report: None,
+            casr: None,
+            origin,
+        }
+    }
+
+    fn data(crashes: Vec<Crash>) -> ReportData {
+        ReportData {
+            generated_at: "2026-10-24T00:00:00Z".to_owned(),
+            project: "libfoo".to_owned(),
+            target: "parse".to_owned(),
+            tool_version: "test".to_owned(),
+            candidate: None,
+            run: None,
+            crashes,
+            coverage: None,
+            covered_functions: 0,
+            corpus: super::CorpusStats::default(),
+        }
+    }
+
+    /// The fact sheet renders only the deterministic reproduction bullet, so
+    /// the guard must detect that bullet -- not a composite string the fact
+    /// sheet never contains -- or every faithful AI report gains a duplicate
+    /// reproduction block.
+    #[test]
+    fn a_faithful_report_is_not_given_a_second_reproduction_block() {
+        let labels = Labels::english();
+        let report_data = data(vec![crash(CrashOrigin::Target, true)]);
+        let faithful = render_markdown(&report_data, &labels);
+        let bullet = format!("- {} `", labels.reproduction_observed);
+        assert!(
+            faithful.contains(&bullet),
+            "the fact sheet carries the deterministic bullet"
+        );
+
+        let guarded = ensure_required_evidence(&faithful, &report_data, &labels);
+
+        assert_eq!(
+            guarded.matches(&bullet).count(),
+            faithful.matches(&bullet).count(),
+            "a preserved fact sheet must not gain a duplicate reproduction block"
+        );
+    }
+
+    /// Re-injected fallback sections must see the same target-only view the
+    /// deterministic rendering sees; otherwise a harness defect is presented
+    /// as a project finding with a count the same report contradicts.
+    #[test]
+    fn fallback_sections_exclude_harness_defects_like_the_deterministic_rendering() {
+        let labels = Labels::english();
+        let report_data = data(vec![
+            crash(CrashOrigin::Target, false),
+            crash(CrashOrigin::Harness, false),
+        ]);
+        // The model dropped every deterministic section.
+        let stripped = "# Fuzzing report\n\nnarrative only\n";
+
+        let guarded = ensure_required_evidence(stripped, &report_data, &labels);
+
+        assert_eq!(
+            guarded
+                .matches(&format!(
+                    "- {}{}**{}**",
+                    labels.bullet_casr_verdict, labels.bullet_colon, labels.casr_unavailable
+                ))
+                .count(),
+            1,
+            "the restored CASR verdicts list counts only the target finding"
+        );
+        assert!(
+            !guarded.contains("\"Undefined\" : 2"),
+            "the restored severity pie must not count the harness defect"
+        );
+        assert!(guarded.contains("\"Undefined\" : 1"));
+    }
+
+    /// Two crashes that assess identically must not suppress each other's
+    /// re-injection: the deterministic bullet carries the crash id, so the
+    /// guard detects each crash's own bullet and restores the one the model
+    /// dropped.
+    #[test]
+    fn identical_assessments_from_distinct_crashes_are_both_reinjected() {
+        let labels = Labels::english();
+        let report_data = data(vec![
+            crash(CrashOrigin::Target, true),
+            crash(CrashOrigin::Target, true),
+        ]);
+        let mut first_bullet = String::new();
+        super::render_reproduction(&mut first_bullet, &report_data.crashes[0], &labels);
+        let mut second_bullet = String::new();
+        super::render_reproduction(&mut second_bullet, &report_data.crashes[1], &labels);
+        assert_ne!(
+            first_bullet, second_bullet,
+            "identical assessments must still render distinct bullets"
+        );
+
+        // The model kept the first crash's bullet and dropped the second's.
+        let ai_markdown = format!(
+            "# Fuzzing report\n\nnarrative only\n\n{}\n",
+            first_bullet.trim_end()
+        );
+        let guarded = ensure_required_evidence(&ai_markdown, &report_data, &labels);
+        assert!(
+            guarded.contains(second_bullet.trim_end()),
+            "the dropped crash's reproduction block is restored"
+        );
+        // And the one the model kept is not duplicated.
+        assert_eq!(
+            guarded.matches(first_bullet.trim_end()).count(),
+            1,
+            "the retained bullet is not re-injected a second time"
+        );
+    }
 }

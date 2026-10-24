@@ -244,7 +244,7 @@ async fn active_ranked_discovery_and_retry_exclude_project_cleanup() {
     }
 }
 
-async fn check_supplied_inventory_cleanup(legacy: bool) {
+async fn check_supplied_inventory_cleanup() {
     let project = sample_project();
     let inventory = hf_discovery::discover(project.path(), TargetLanguage::C)
         .await
@@ -264,15 +264,11 @@ async fn check_supplied_inventory_cleanup(legacy: bool) {
         }));
     let worker = service.clone();
     let ranking = tokio::spawn(async move {
-        if legacy {
-            worker.rank(inventory).await.unwrap()
-        } else {
-            worker
-                .rank_discovered_inventory(inventory, TargetLanguage::C, AiPolicy::Auto)
-                .await
-                .unwrap()
-                .inventory
-        }
+        worker
+            .rank_discovered_inventory(inventory, TargetLanguage::C, AiPolicy::Auto)
+            .await
+            .unwrap()
+            .inventory
     });
     entered.notified().await;
 
@@ -286,12 +282,7 @@ async fn check_supplied_inventory_cleanup(legacy: bool) {
 
 #[tokio::test]
 async fn supplied_inventory_ranking_excludes_project_cleanup() {
-    check_supplied_inventory_cleanup(false).await;
-}
-
-#[tokio::test]
-async fn legacy_inventory_ranking_excludes_project_cleanup() {
-    check_supplied_inventory_cleanup(true).await;
+    check_supplied_inventory_cleanup().await;
 }
 
 #[tokio::test]

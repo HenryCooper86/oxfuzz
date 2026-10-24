@@ -44,6 +44,11 @@ pub struct SystemStatus {
     pub honggfuzz: StatusFlag,
     /// syzkaller tooling is present in the sandbox image.
     pub syzkaller: StatusFlag,
+    /// The engine probe itself failed, so the four engine flags above are
+    /// unknown rather than measured-absent. Its own flag, so a panel can say
+    /// "unknown" instead of reading a failed probe as "the image bundles no
+    /// engine".
+    pub engine_probe_failed: StatusFlag,
     /// The configured `DefectDojo` instance is answering. False when it is not
     /// configured at all -- [`crate::defectdojo_lifecycle::status`] tells the two
     /// apart for a panel that needs to explain itself.
@@ -104,24 +109,41 @@ pub async fn system_status() -> SystemStatus {
     } else {
         hf_runtime::SandboxEngines::default()
     };
+    let (libfuzzer, aflplusplus, honggfuzz, syzkaller, engine_probe_failed) = engine_flags(engines);
     SystemStatus {
         docker: docker.into(),
         sandbox_image: sandbox_image.into(),
-        libfuzzer: engines
-            .supports(hf_core::engine::EngineKind::LibFuzzer)
-            .into(),
-        aflplusplus: engines
-            .supports(hf_core::engine::EngineKind::AflPlusPlus)
-            .into(),
-        honggfuzz: engines
-            .supports(hf_core::engine::EngineKind::Honggfuzz)
-            .into(),
-        syzkaller: engines
-            .supports(hf_core::engine::EngineKind::Syzkaller)
-            .into(),
+        libfuzzer,
+        aflplusplus,
+        honggfuzz,
+        syzkaller,
+        engine_probe_failed,
         defectdojo: crate::defectdojo_lifecycle::reachable().await.into(),
         sandbox_image_remedy: (!sandbox_image).then(sandbox_image_remedy),
     }
+}
+
+/// The engine-availability slice of [`SystemStatus`] for one probe result:
+/// the four toolchain flags, then whether the probe itself failed. Pure so
+/// the fail-closed-but-marked contract is testable without Docker.
+fn engine_flags(
+    engines: hf_runtime::SandboxEngines,
+) -> (StatusFlag, StatusFlag, StatusFlag, StatusFlag, StatusFlag) {
+    (
+        engines
+            .supports(hf_core::engine::EngineKind::LibFuzzer)
+            .into(),
+        engines
+            .supports(hf_core::engine::EngineKind::AflPlusPlus)
+            .into(),
+        engines
+            .supports(hf_core::engine::EngineKind::Honggfuzz)
+            .into(),
+        engines
+            .supports(hf_core::engine::EngineKind::Syzkaller)
+            .into(),
+        engines.probe_failed_marker().into(),
+    )
 }
 
 /// The operator-facing remedy for a missing sandbox image.
@@ -324,6 +346,7 @@ mod tests {
             aflplusplus: StatusFlag(false),
             honggfuzz: StatusFlag(false),
             syzkaller: StatusFlag(false),
+            engine_probe_failed: StatusFlag(false),
             defectdojo: StatusFlag(false),
             sandbox_image_remedy: None,
         }
@@ -355,6 +378,20 @@ mod tests {
             serde_json::to_value(&missing).unwrap()["sandbox_image_remedy"],
             "build it"
         );
+    }
+
+    #[test]
+    fn a_failed_engine_probe_is_distinguishable_from_no_engines() {
+        // A failed probe fails closed (no engine claims support) while
+        // carrying the distinct marker; an unprobed result carries no
+        // marker, so panels never show "unknown" without cause.
+        let (libfuzzer, _, _, _, probe_failed) =
+            super::engine_flags(hf_runtime::SandboxEngines::probe_failed());
+        assert!(probe_failed.is_ready());
+        assert!(!libfuzzer.is_ready());
+
+        let (_, _, _, _, probe_failed) = super::engine_flags(hf_runtime::SandboxEngines::default());
+        assert!(!probe_failed.is_ready());
     }
 
     #[test]

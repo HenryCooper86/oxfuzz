@@ -16,9 +16,9 @@ import { activeStatus } from "../../providers/runOutputValidation";
 import { useRunOutput } from "../../providers/runOutput";
 
 interface ArtifactSummary {
-  harness_built: boolean;
-  corpus_count: number;
-  crash_count: number;
+  harness_built: boolean | null;
+  corpus_count: number | null;
+  crash_count: number | null;
 }
 
 export function InfoPanel() {
@@ -80,17 +80,17 @@ export function InfoPanel() {
               <div className="flex justify-between text-xs">
                 <span className="text-text-muted">{t("info.harness")}</span>
                 <span style={{ color: artifacts.harness_built ? "var(--success)" : "var(--text-muted)" }}>
-                  {artifacts.harness_built ? t("info.compiled") : t("info.notBuilt")}
+                  {artifacts.harness_built == null ? "—" : artifacts.harness_built ? t("info.compiled") : t("info.notBuilt")}
                 </span>
               </div>
               <div className="flex justify-between text-xs">
                 <span className="text-text-muted">{t("info.corpusInputs")}</span>
-                <span className="text-text-primary">{artifacts.corpus_count}</span>
+                <span className="text-text-primary">{artifacts.corpus_count ?? "—"}</span>
               </div>
               <div className="flex justify-between text-xs">
                 <span className="text-text-muted">{t("info.crashInputs")}</span>
-                <span style={{ color: artifacts.crash_count > 0 ? "var(--error)" : "var(--text-primary)" }}>
-                  {artifacts.crash_count}
+                <span style={{ color: (artifacts.crash_count ?? 0) > 0 ? "var(--error)" : "var(--text-primary)" }}>
+                  {artifacts.crash_count ?? "—"}
                 </span>
               </div>
             </div>

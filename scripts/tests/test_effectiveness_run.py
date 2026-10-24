@@ -22,9 +22,9 @@ from unittest import mock
 
 from scripts.effectiveness_benchmark import validate_cohort
 from scripts.effectiveness_run import (
-    RunnerError, binding_mismatches, collect_coverage, collect_db_metrics,
-    collect_run_metrics, derive_trial_seed, dry_run, freeze_cohort,
-    time_to_first_crash, validate_manifest, write_trial_config,
+    RunnerError, binding_mismatches, binary_version, collect_coverage,
+    collect_db_metrics, collect_run_metrics, derive_trial_seed, dry_run,
+    freeze_cohort, time_to_first_crash, validate_manifest, write_trial_config,
 )
 
 
@@ -222,10 +222,11 @@ def cmd_fuzz():
         (RUN_ID, env("STUB_ENGINE", "libfuzzer"), rfc3339(now - 60), rfc3339(now),
          env("STUB_SOURCE_REV"), "docker-image-id-sha256:" + env("STUB_IMAGE"),
          json.dumps(config)))
+    vanished = env("STUB_VANISHED_CRASH_INPUT")
     connection.execute(
         "INSERT INTO crashes VALUES ('00000000-0000-0000-0000-000000000001',"
         " ?, 't1', 'sig-1', 'segv', 'summary', 0, NULL, ?)",
-        (RUN_ID, json.dumps({"input_path": crash, "origin": "target"})))
+        (RUN_ID, json.dumps({"input_path": vanished or crash, "origin": "target"})))
     connection.execute(
         "INSERT INTO crashes VALUES ('00000000-0000-0000-0000-000000000002',"
         " ?, 't1', 'sig-1', 'segv', 'dup', 0, NULL, ?)",
@@ -247,8 +248,13 @@ def manifest_body():
                 "SELECT id, stack_signature, minimized, data_json FROM crashes WHERE run_id=?",
                 (RUN_ID,)):
             crash = json.loads(data)
-            with open(crash["input_path"], "rb") as source:
-                reproducer = hashlib.sha256(source.read()).hexdigest()
+            try:
+                with open(crash["input_path"], "rb") as source:
+                    reproducer = hashlib.sha256(source.read()).hexdigest()
+            except OSError:
+                # The service retains the crash digest even when the raw
+                # artifact is no longer on disk.
+                reproducer = "0" * 64
             findings.append({
                 "crash_id": crash_id,
                 "stack_signature": hashlib.sha256(signature.encode()).hexdigest(),
@@ -509,9 +515,26 @@ class MetricsTests(unittest.TestCase):
         runs, _signatures, crash_files = collect_run_metrics(
             data, condition(), SOURCE_DIGEST, IMAGE_DIGEST, 7)
         self.assertEqual(len(runs), 1)
-        ttfc = time_to_first_crash(crash_files)
+        ttfc, skipped = time_to_first_crash(crash_files)
+        self.assertEqual(skipped, [])
         self.assertIsNotNone(ttfc)
         self.assertTrue(10 <= ttfc <= 20, ttfc)
+
+    def test_ttfc_returns_skipped_crashes_for_the_trial_limitations(self):
+        data = collect_db_metrics(self.make_db())
+        runs, _signatures, crash_files = collect_run_metrics(
+            data, condition(), SOURCE_DIGEST, IMAGE_DIGEST, 7)
+        vanished = (runs[0], str(self.root / "removed-input"))
+        malformed = (dict(runs[0], started_at=None), crash_files[0][1])
+        ttfc, skipped = time_to_first_crash([vanished, malformed] + crash_files)
+        # The bound still comes from the statable artifacts ...
+        self.assertTrue(10 <= ttfc <= 20, ttfc)
+        # ... and every swallow is named instead of silently widening it.
+        self.assertEqual([entry["input_path"] for entry in skipped],
+                         [str(self.root / "removed-input"), crash_files[0][1]])
+        self.assertEqual([entry["run_id"] for entry in skipped],
+                         [RUN_ID, RUN_ID])
+        self.assertTrue(all(entry["reason"] for entry in skipped), skipped)
 
     def test_conformance_names_each_mismatch(self):
         data = collect_db_metrics(self.make_db())
@@ -607,6 +630,22 @@ class CoverageParseTests(unittest.TestCase):
         self.assertEqual(coverage["lines"], {"covered": 8, "total": 10, "percent": 80.0})
         self.assertEqual(coverage["regions"]["total"], 12)
         self.assertEqual(coverage["functions"]["covered"], 1)
+
+    def test_a_hung_coverage_probe_degrades_to_unavailable(self):
+        hung = subprocess.TimeoutExpired(cmd=["oxfuzz-stub", "coverage"], timeout=300)
+        with mock.patch("scripts.effectiveness_run.subprocess.run",
+                        side_effect=hung):
+            coverage = collect_coverage(self.stub, os.environ.copy(), self.root,
+                                        "parse_record", self.root / "coverage.log")
+        self.assertIsNone(coverage)
+        self.assertIn("timed out", (self.root / "coverage.log").read_text())
+
+    def test_a_hung_version_probe_raises_a_runner_error(self):
+        hung = subprocess.TimeoutExpired(cmd=["oxfuzz-stub", "--version"], timeout=30)
+        with mock.patch("scripts.effectiveness_run.subprocess.run",
+                        side_effect=hung):
+            with self.assertRaisesRegex(RunnerError, "timed out"):
+                binary_version(self.stub)
 
 
 class EndToEndTests(unittest.TestCase):
@@ -748,6 +787,70 @@ class EndToEndTests(unittest.TestCase):
             manifest_doc, self.cohort["trials"][0], self.cohort["projects"][0],
             self.cohort["conditions"][0], "completed")
         self.assertTrue(any("seed" in problem for problem in problems), problems)
+
+    def binding_valid_manifest(self):
+        return {"body": {
+            "schema_version": 3,
+            "run_id": RUN_ID,
+            "target": "parse_record",
+            "status": "done",
+            "engine": "libfuzzer",
+            "source_revision": SOURCE_DIGEST,
+            "sandbox_image_sha256": IMAGE_DIGEST,
+            "binary_sha256": BINARY_DIGEST,
+            "run_config": {"duration_secs": 60, "max_mem_mb": 1024, "max_cpus": 2,
+                           "sanitizer": "address",
+                           "seed": self.cohort["trials"][0]["seed"]},
+            "coverage": {"edges": 0, "delta_edges": 0},
+            "cost": {"compute_cost_usd": 0.0, "model_cost_usd": 0.0},
+            "findings": [],
+        }, "manifest_sha256": "f" * 64}
+
+    def test_binding_pre_check_matches_the_report_reader_verdict(self):
+        # A manifest the report reader accepts must pre-check clean, and the
+        # checks the old copy skipped (run_id, compute_cost_usd, total
+        # finiteness) must refuse exactly what `validate_manifest` refuses.
+        self.assertEqual(binding_mismatches(
+            self.binding_valid_manifest(), self.cohort["trials"][0],
+            self.cohort["projects"][0], self.cohort["conditions"][0],
+            "completed"), [])
+        from scripts.effectiveness_report import validate_manifest
+        for field, mutate, condition in (
+                ("run_id", lambda body: body.update(run_id="not-a-uuid"),
+                 self.cohort["conditions"][0]),
+                ("compute_cost_usd", lambda body: body["cost"].update(compute_cost_usd=None),
+                 self.cohort["conditions"][0]),
+                ("total_cost_usd",
+                 # Both parts stay finite and inside the budget, yet their
+                 # sum overflows: only the reader's total-finiteness check
+                 # (which the old copy skipped) refuses this manifest.
+                 lambda body: body["cost"].update(compute_cost_usd=1e308, model_cost_usd=1e308),
+                 dict(self.cohort["conditions"][0], model_cost_budget_usd=1e308))):
+            expected = field
+            with self.subTest(field=field):
+                manifest_doc = self.binding_valid_manifest()
+                mutate(manifest_doc["body"])
+                problems = binding_mismatches(
+                    manifest_doc, self.cohort["trials"][0], self.cohort["projects"][0],
+                    condition, "completed")
+                self.assertEqual(len(problems), 1, problems)
+                self.assertIn(expected, problems[0])
+                with self.assertRaises(ValueError):
+                    validate_manifest(manifest_doc, self.cohort["trials"][0],
+                                      self.cohort["projects"][0], condition, "completed")
+
+    def test_a_vanished_crash_artifact_is_recorded_as_a_ttfc_limitation(self):
+        result = self.run_cli(*self.run_args(),
+                              env={"STUB_VANISHED_CRASH_INPUT": str(self.root / "gone")})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        results = json.loads((self.out / "results.json").read_text(encoding="utf-8"))
+        trial = results["trials"][0]
+        self.assertEqual(trial["outcome"], "completed")
+        self.assertEqual(trial["unique_crashes"], 1)
+        self.assertIsNotNone(trial["time_to_first_crash_secs"])
+        self.assertTrue(any(
+            "time-to-first-crash" in limitation and "gone" in limitation
+            for limitation in trial["limitations"]), trial["limitations"])
 
 
 if __name__ == "__main__":

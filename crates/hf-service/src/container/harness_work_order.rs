@@ -108,6 +108,7 @@ impl ServiceContainer {
             .map_err(service_validation)?
             .unwrap_or_else(empty_build_context);
         let (relative_source, source) = source_evidence(&project, candidate)?;
+        let (seeds, seeds_truncated) = seed_references(store, candidate.id).await?;
         let payload = HarnessWorkOrderPayload {
             target: WorkOrderTargetEvidence {
                 symbol: candidate.symbol.clone(),
@@ -127,7 +128,8 @@ impl ServiceContainer {
             compile_context: normalized_build_context(&project, build_context)?,
             compile_context_sha256: String::new(),
             harness_rules: crate::harness_work_order::work_order_rules(candidate.language),
-            seeds: seed_references(store, candidate.id).await?,
+            seeds,
+            seeds_truncated,
             validation_steps: vec![
                 WorkOrderStep::Import,
                 WorkOrderStep::Qualify,
@@ -1478,10 +1480,17 @@ fn empty_build_context() -> BuildContext {
     }
 }
 
+/// Retained seed references for a packet, plus whether the corpus held more
+/// than the packet bound carries.
+///
+/// The truncation marker travels beside the set (`excerpt_truncated` for the
+/// source excerpt is the parallel): the read-side validator rejects an
+/// oversized set, so an unmarked truncation would present itself as the
+/// target's complete seed evidence.
 async fn seed_references(
     store: &hf_storage::Store,
     target_id: uuid::Uuid,
-) -> Result<Vec<WorkOrderSeedReference>, HarnessWorkOrderError> {
+) -> Result<(Vec<WorkOrderSeedReference>, bool), HarnessWorkOrderError> {
     let mut seeds = store
         .list_corpus_entries(target_id)
         .await
@@ -1494,8 +1503,9 @@ async fn seed_references(
         .collect::<Vec<_>>();
     seeds.sort_unstable();
     seeds.dedup();
+    let seeds_truncated = seeds.len() > MAX_WORK_ORDER_SEEDS;
     seeds.truncate(MAX_WORK_ORDER_SEEDS);
-    Ok(seeds)
+    Ok((seeds, seeds_truncated))
 }
 
 fn retained_packet(

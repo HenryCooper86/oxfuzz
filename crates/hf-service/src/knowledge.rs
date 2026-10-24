@@ -164,9 +164,12 @@ fn code_normalize(s: &str) -> String {
 /// Refresh source/document entries, reusing unchanged chunks and vectors.
 ///
 /// # Errors
-/// Returns `ClassifiedError` if the project tree cannot be walked.
+/// Returns `ClassifiedError` if `oxfuzz.toml` cannot be read/validated or the
+/// project tree cannot be walked.
 pub fn index_project(project: &Path) -> Result<KnowledgeStats, ClassifiedError> {
-    index_project_with_config(project, &crate::config::effective_knowledge_config())
+    let config = crate::config::effective_knowledge_config()
+        .map_err(|error| ClassifiedError::Validation(format!("oxfuzz.toml: {error}")))?;
+    index_project_with_config(project, &config)
 }
 
 fn retrieval_config(config: &KnowledgeConfig) -> RetrievalConfig {
@@ -385,9 +388,28 @@ pub fn is_indexed(project: &Path) -> bool {
 /// Read-only status of a project's knowledge base. Never builds an index: an
 /// unindexed project reports `indexed: false` with zero counts plus the config
 /// a future `index_project` would apply.
-#[must_use]
 pub fn stats_project(project: &Path) -> KnowledgeIndexStatus {
-    stats_project_with_config(project, &crate::config::effective_knowledge_config())
+    match crate::config::effective_knowledge_config() {
+        Ok(config) => stats_project_with_config(project, &config),
+        Err(error) => {
+            // The status shape is fixed for the GUI/web readers, which cannot
+            // take an error here; name the failure in the status instead of
+            // presenting defaults as if they were configured (indexing itself
+            // fails loud through `index_project`).
+            tracing::error!(%error, "oxfuzz.toml is unreadable; knowledge status is degraded");
+            let mut status = stats_project_with_config(
+                project,
+                &hf_knowledge::config::KnowledgeConfig::default(),
+            );
+            status.warnings.insert(
+                0,
+                format!(
+                    "oxfuzz.toml is unreadable; indexing is blocked until it is fixed: {error}"
+                ),
+            );
+            status
+        }
+    }
 }
 
 fn stats_project_with_config(project: &Path, config: &KnowledgeConfig) -> KnowledgeIndexStatus {
@@ -459,7 +481,17 @@ fn count_docs(project: &Path) -> usize {
 /// run this on a blocking thread.
 #[must_use]
 pub fn search_project_ensured(project: &Path, query: &str, limit: usize) -> Vec<KnowledgeHit> {
-    match refresh_project_snapshot(project, &crate::config::effective_knowledge_config(), false) {
+    let config = match crate::config::effective_knowledge_config() {
+        Ok(config) => config,
+        Err(error) => {
+            // Same boundary as `stats_project`: the signature is fixed for the
+            // presentation callers, so the failure is named loudly instead of
+            // searched against fabricated defaults.
+            tracing::error!(%error, "oxfuzz.toml is unreadable; knowledge search is unavailable");
+            return Vec::new();
+        }
+    };
+    match refresh_project_snapshot(project, &config, false) {
         Ok((_, index)) => search_snapshot(&index, query, limit),
         Err(error) => {
             tracing::warn!(%error, "knowledge refresh failed");

@@ -151,10 +151,21 @@ fn contains_start(candidate: &TargetCandidate, signal: &EnrichmentSignal) -> boo
     let Some(end_col) = candidate.location.end_col else {
         return false;
     };
-    let start = (candidate.location.line, candidate.location.col);
-    let end = (end_line, end_col);
+    // Candidate columns are one-based (the C scanner records
+    // `start.column + 1` and the exclusive tree-sitter end as
+    // `end.column + 1`) while signals are zero-based, so the candidate bounds
+    // are converted to the signal base here -- the one place the join
+    // compares them. Before the conversion, a signal at the candidate's exact
+    // start column on its first line failed `point >= start` and was dropped.
+    // The recorded end is exclusive, so a signal exactly at the end column
+    // falls outside the span (`point < end`, not `point <= end`).
+    let start = (
+        candidate.location.line,
+        candidate.location.col.saturating_sub(1),
+    );
+    let end = (end_line, end_col.saturating_sub(1));
     let point = (signal.start_line, signal.start_col);
-    start <= point && point <= end
+    start <= point && point < end
 }
 
 #[cfg(test)]
@@ -301,6 +312,59 @@ mod tests {
         assert_eq!(overlay.matched_candidate_count, 0);
     }
 
+    #[test]
+    fn boundary_signals_at_the_recorded_span_edges_are_attributed_exactly() {
+        // The candidate records one-based columns (the C scanner writes
+        // `start.column + 1` and the exclusive tree-sitter end as
+        // `end.column + 1`); signals are zero-based by contract. A signal
+        // at the candidate's exact start column on its first line must be
+        // attributed, and -- because the recorded end is the exclusive
+        // zero-based bound -- a signal exactly at the end column must not
+        // be, on any producer feeding this join.
+        let candidate = candidate_at(
+            "00000000-0000-0000-0000-000000000001",
+            "spanned",
+            "src/parse.c",
+            10,
+            20,
+            0.50,
+        );
+        // Widen the span to (10, 5)-(20, 40), one-based.
+        let mut candidate = candidate;
+        candidate.location.col = 5;
+        candidate.location.end_col = Some(40);
+        let inventory = TargetInventory {
+            candidates: vec![candidate],
+            ..sample_inventory()
+        };
+        let at = |line: u32, col: u32| {
+            let mut s = signal("rule-b", 0.10);
+            s.start_line = line;
+            s.start_col = col;
+            s
+        };
+        // Exact start column (zero-based 4): attributed.
+        assert_eq!(
+            score_overlay(&inventory, &[at(10, 4)]).matches,
+            vec![Some(
+                Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap()
+            )]
+        );
+        // One column before the start: outside.
+        assert_eq!(score_overlay(&inventory, &[at(10, 3)]).matches, vec![None]);
+        // The last column inside the span (zero-based 38): attributed.
+        assert_eq!(
+            score_overlay(&inventory, &[at(20, 38)]).matches,
+            vec![Some(
+                Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap()
+            )]
+        );
+        // A signal exactly at the recorded end column (zero-based 39) is
+        // NOT attributed: the end bound is exclusive.
+        assert_eq!(score_overlay(&inventory, &[at(20, 39)]).matches, vec![None]);
+        // One column further past the end: outside as well.
+        assert_eq!(score_overlay(&inventory, &[at(20, 40)]).matches, vec![None]);
+    }
     #[test]
     fn a_signal_outside_every_candidate_maps_to_nothing() {
         let inventory = sample_inventory();

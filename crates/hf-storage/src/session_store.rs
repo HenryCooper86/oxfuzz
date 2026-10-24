@@ -333,6 +333,18 @@ impl SessionStore for SqliteSessionStore {
             return Err(SessionError::NotFound { id: id.to_string() });
         }
 
+        // Cascade the session's chat checkpoints: with the metadata row gone
+        // they reference a session that can never be listed or rolled back
+        // again. If this delete fails the rows are orphaned only until the
+        // next `Store::connect` prune repairs them.
+        sqlx::query("DELETE FROM chat_checkpoints WHERE session_id = ?1")
+            .bind(id.as_str())
+            .execute(&self.pool)
+            .await
+            .map_err(|e| SessionError::StorageError {
+                message: e.to_string(),
+            })?;
+
         Ok(())
     }
 
@@ -348,7 +360,16 @@ impl SessionStore for SqliteSessionStore {
                 })?;
 
         match row {
-            Some((val,)) => Ok(val.and_then(|v| u32::try_from(v).ok())),
+            Some((val,)) => Ok(val
+                .map(|v| {
+                    u32::try_from(v).map_err(|_| SessionError::StorageError {
+                        message: format!(
+                            "stored session_metadata.context_reset_index value {v} is \
+                            outside the u32 range"
+                        ),
+                    })
+                })
+                .transpose()?),
             None => Err(SessionError::NotFound { id: id.to_string() }),
         }
     }
@@ -465,12 +486,14 @@ impl SessionRow {
         let session_type = str_to_session_type(&self.session_type)?;
         let state = str_to_state(&self.state)?;
 
-        let created_at = chrono::DateTime::parse_from_rfc3339(&self.created_at)
-            .map_or_else(|_| chrono::Utc::now(), |dt| dt.with_timezone(&chrono::Utc));
+        let created_at = parse_rfc3339_column("created_at", &self.created_at)?;
 
-        let updated_at = chrono::DateTime::parse_from_rfc3339(&self.updated_at)
-            .map_or_else(|_| chrono::Utc::now(), |dt| dt.with_timezone(&chrono::Utc));
+        let updated_at = parse_rfc3339_column("updated_at", &self.updated_at)?;
 
+        let last_compaction = self
+            .last_compaction
+            .map(|value| parse_rfc3339_column("last_compaction", &value))
+            .transpose()?;
         Ok(SessionNode {
             id: SessionId::from_string(self.id),
             parent_id: self.parent_id.map(SessionId::from_string),
@@ -486,16 +509,29 @@ impl SessionRow {
             label: self.label,
             token_count: u32::try_from(self.token_count).unwrap_or(0),
             message_count: u32::try_from(self.message_count).unwrap_or(0),
-            last_compaction: self.last_compaction.and_then(|s| {
-                chrono::DateTime::parse_from_rfc3339(&s)
-                    .ok()
-                    .map(|dt| dt.with_timezone(&chrono::Utc))
-            }),
+            last_compaction,
             compaction_count: u32::try_from(self.compaction_count).unwrap_or(0),
             created_at,
             updated_at,
         })
     }
+}
+
+/// Strictly decode a stored RFC 3339 timestamp, naming the column instead of
+/// substituting `now()` (a corrupt timestamp must fail the load rather than
+/// masquerade as a brand-new session).
+fn parse_rfc3339_column(
+    column: &str,
+    value: &str,
+) -> Result<chrono::DateTime<chrono::Utc>, SessionError> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .map_err(|error| SessionError::StorageError {
+            message: format!(
+                "stored session_metadata.{column} value '{value}' is not an RFC \
+                3339 timestamp: {error}"
+            ),
+        })
 }
 
 // ---------------------------------------------------------------------------

@@ -118,7 +118,7 @@ pub(super) fn project_slug(project: &Path) -> String {
 }
 
 /// Recover only a known workspace selector; retained paths never become execution roots.
-pub(super) fn retained_run_target_selector(
+pub(crate) fn retained_run_target_selector(
     run: &hf_storage::RunRecord,
     target: &TargetCandidate,
 ) -> Result<String, ClassifiedError> {

@@ -266,6 +266,9 @@ impl ServiceContainer {
                 ClassifiedError::Internal(format!("back up active harness binary: {error}"))
             })?;
         }
+        // Swallowed: the marker files are optional bookkeeping -- an absent
+        // and an unreadable marker both mean "no prior value to restore",
+        // and nothing else reaches these reads.
         let old_source = std::fs::read(workspace.join("harness.source")).ok();
         let old_id = std::fs::read(workspace.join("harness.active")).ok();
 
@@ -281,20 +284,33 @@ impl ServiceContainer {
             Ok(())
         })();
         if let Err(error) = activate {
+            // Swallowed: the activation failure reported below is the
+            // primary error; a failed binary restore cannot preempt it, and
+            // the marker restores below run best-effort for the same reason.
             if had_active_binary {
                 let _ = std::fs::copy(&backup, &active_binary);
             } else {
+                // Swallowed: removing the half-written binary is the
+                // best-effort inverse of the failed activation above.
                 let _ = std::fs::remove_file(&active_binary);
             }
             if let Some(bytes) = old_source {
+                // Swallowed: a marker rewrite failure cannot preempt the
+                // activation error; the workspace then simply has no
+                // `harness.source` marker until the next promotion.
                 let _ = std::fs::write(workspace.join("harness.source"), bytes);
             }
             if let Some(bytes) = old_id {
+                // Swallowed: same best-effort marker rule as `harness.source`.
                 let _ = std::fs::write(workspace.join("harness.active"), bytes);
             }
+            // Swallowed: the backup is single-use; a failed removal leaves
+            // one unreferenced file beside the workspace.
             let _ = std::fs::remove_file(&backup);
             return Err(error);
         }
+        // Swallowed: the backup is single-use; a failed removal leaves one
+        // unreferenced file beside the workspace.
         let _ = std::fs::remove_file(&backup);
         self.verify_harness_qualification_locked(&project, &symbol, &harness)
             .await?;

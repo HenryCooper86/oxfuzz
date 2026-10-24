@@ -20,6 +20,66 @@ async fn discover_returns_non_empty_inventory() {
     assert!(!inv.candidates.is_empty(), "inventory must not be empty");
 }
 
+#[test]
+fn discovery_scan_runs_on_the_blocking_pool_not_the_runtime_thread() {
+    // A current-thread runtime with a single blocking thread: occupy that
+    // thread, then attempt discovery under a short timeout. A scan moved to
+    // `spawn_blocking` (the `hf_corpus::seed` precedent) cannot start while
+    // the pool is saturated; a scan that still runs inline on the calling
+    // task completes regardless and this test fails.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .expect("runtime should build");
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(
+        project.path().join("parser.c"),
+        "int parse_pool(const unsigned char *d, unsigned long n) { return n && d[0]; }\n",
+    )
+    .unwrap();
+    rt.block_on(async {
+        let entered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // The occupier is itself a spawn_blocking task that spins until
+        // released, holding the runtime's only blocking thread.
+        let occupier = tokio::task::spawn_blocking({
+            let entered = std::sync::Arc::clone(&entered);
+            let released = std::sync::Arc::clone(&released);
+            move || {
+                entered.store(true, std::sync::atomic::Ordering::SeqCst);
+                while !released.load(std::sync::atomic::Ordering::SeqCst) {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+        });
+        while !entered.load(std::sync::atomic::Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+        let starved = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            hf_discovery::discover_with_signals(project.path(), TargetLanguage::C),
+        )
+        .await;
+        assert!(
+            starved.is_err(),
+            "discovery must wait for a blocking-pool thread while the pool is saturated"
+        );
+        released.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (inventory, _signals) =
+            hf_discovery::discover_with_signals(project.path(), TargetLanguage::C)
+                .await
+                .expect("discovery completes once the pool frees");
+        assert!(inventory
+            .candidates
+            .iter()
+            .any(|candidate| candidate.symbol == "parse_pool"));
+        occupier
+            .await
+            .expect("occupier should finish after release");
+    });
+}
+
 #[tokio::test]
 async fn candidates_carry_their_project_root() {
     let root = fixture_root();

@@ -13,9 +13,8 @@ use uuid::Uuid;
 
 use super::crash_inputs::is_regular_file;
 use super::harness_workspace::read_current_harness_source;
-use super::project_identity::{
-    canonical_project_root, defectdojo_project_name, retained_run_target_selector,
-};
+use super::project_identity::retained_run_target_selector;
+use super::project_identity::{canonical_project_root, defectdojo_project_name};
 use super::workspace::workspace_dir;
 
 /// How many project translation units one reproduction bundle carries.
@@ -353,20 +352,41 @@ impl ServiceContainer {
         dest: &Path,
     ) -> Result<PathBuf, ClassifiedError> {
         let crashes = self.crashes_for_latest_run(project, Some(target)).await?;
-        let crash = match crash_id {
-            Some(id) => crashes
+        // Crash-id selection mirrors `resolve_run_id`: an empty or ambiguous
+        // prefix must fail loudly instead of silently bundling the first
+        // match -- a typo'd prefix would otherwise export the wrong finding.
+        let crash = if let Some(id) = crash_id {
+            let prefix = id.trim();
+            if prefix.is_empty() {
+                return Err(ClassifiedError::Validation(
+                    "crash id must not be empty".to_owned(),
+                ));
+            }
+            let matches: Vec<_> = crashes
                 .iter()
-                .find(|crash| crash.id.to_string().starts_with(id))
-                .ok_or_else(|| {
-                    ClassifiedError::Validation(format!(
-                        "no crash matching id '{id}' in the latest run for '{target}'"
-                    ))
-                })?,
-            None => crashes.first().ok_or_else(|| {
+                .filter(|crash| crash.id.to_string().starts_with(prefix))
+                .collect();
+            match matches.as_slice() {
+                [] => {
+                    return Err(ClassifiedError::Validation(format!(
+                        "no crash matching id '{prefix}' in the latest run for '{target}'"
+                    )));
+                }
+                [only] => *only,
+                many => {
+                    return Err(ClassifiedError::Validation(format!(
+                        "crash id prefix '{prefix}' is ambiguous: {} crashes match; use more \
+                         characters",
+                        many.len()
+                    )));
+                }
+            }
+        } else {
+            crashes.first().ok_or_else(|| {
                 ClassifiedError::Validation(format!(
                     "the latest run for '{target}' has no crashes to bundle"
                 ))
-            })?,
+            })?
         };
         let run = self.run_record(crash.run_id).await?;
         let candidate = self

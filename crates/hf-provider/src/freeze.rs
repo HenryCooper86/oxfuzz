@@ -139,11 +139,6 @@ impl FreezeManager {
         state.permanent = false;
     }
 
-    /// Freeze with a specific retry-after duration (from rate limit headers).
-    pub fn freeze_with_retry_after(&self, reason: String, retry_after: Duration) {
-        self.freeze(reason, Some(retry_after));
-    }
-
     /// Get freeze status information.
     pub fn status(&self) -> FreezeStatus {
         let state = self.read_state();
@@ -219,7 +214,7 @@ mod tests {
     #[test]
     fn test_freeze_on_rate_limit() {
         let fm = FreezeManager::new(30, 3600);
-        fm.freeze_with_retry_after("rate limited".into(), Duration::from_mins(1));
+        fm.freeze("rate limited".into(), Some(Duration::from_mins(1)));
 
         assert!(fm.is_frozen());
         let status = fm.status();
@@ -233,7 +228,7 @@ mod tests {
         // A `retry-after: 0` must not produce a no-op freeze (thaw_at == now);
         // it falls back to the adaptive backoff so we do not hammer the provider.
         let fm = FreezeManager::new(30, 3600);
-        fm.freeze_with_retry_after("rate limited".into(), Duration::ZERO);
+        fm.freeze("rate limited".into(), Some(Duration::ZERO));
         assert!(fm.is_frozen(), "zero retry-after should still freeze");
         let status = fm.status();
         let held = status

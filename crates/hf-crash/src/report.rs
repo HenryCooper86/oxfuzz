@@ -22,29 +22,10 @@ fn char_floor(s: &str, max: usize) -> usize {
     end
 }
 
-/// Draft a bug report for a crash using an LLM.
-///
-/// When `source` is provided (the relevant target source), the model is asked
-/// to also infer the root cause and propose a fix (ideally a unified diff),
-/// which is the output users act on. `source` is truncated by the caller to a
-/// sane budget.
-///
-/// # Errors
-/// Returns `ClassifiedError` if the LLM call fails. Invalid JSON is tolerated:
-/// a minimal report is returned.
-pub async fn draft_report(
-    crash: &Crash,
-    log: &str,
-    source: Option<&str>,
-    llm: Box<dyn LlmProvider>,
-) -> Result<BugReport, ClassifiedError> {
-    draft_report_with_context(crash, log, source, None, llm).await
-}
-
 /// Draft a bug report for a crash using an LLM, optionally augmented with
 /// related project context retrieved from the knowledge index (rendered by
-/// the caller). `None` renders the [`draft_report`] prompt unchanged, so a
-/// missing index or failed retrieval degrades gracefully.
+/// the caller). `None` renders the base prompt unchanged, so a missing index
+/// or failed retrieval degrades gracefully.
 ///
 /// # Errors
 /// Returns `ClassifiedError` if the LLM call fails. Invalid JSON is tolerated:
@@ -258,9 +239,10 @@ mod tests {
     #[tokio::test]
     async fn draft_report_without_context_sends_base_prompt() {
         let seen = Arc::new(Mutex::new(String::new()));
-        draft_report(
+        draft_report_with_context(
             &crash(),
             "asan log",
+            None,
             None,
             Box::new(CaptureLlm {
                 seen: Arc::clone(&seen),

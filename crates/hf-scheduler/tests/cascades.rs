@@ -36,6 +36,7 @@ impl WorkflowDispatcher for EchoDispatcher {
             .await;
         Ok(DispatchResult {
             success: true,
+            skipped: false,
             summary: "echo".into(),
             output: serde_json::Value::Null,
             duration_ms: 0,

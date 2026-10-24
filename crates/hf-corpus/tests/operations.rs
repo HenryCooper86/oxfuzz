@@ -2,7 +2,7 @@
 
 use hf_core::corpus::CorpusSource;
 use hf_corpus::{
-    absorb, grow, import_with_limits, list, list_with_limits, merge, merge_snapshot,
+    absorb, grow, import_with_limits, list, list_with_limits, merge_snapshot,
     merge_snapshot_with_limits, minimize, prune, seed, seed_with_limits, snapshot,
     snapshot_with_limits, CorpusLimits, DEFAULT_CORPUS_LIMITS,
 };
@@ -36,7 +36,74 @@ async fn seed_writes_inputs_and_computes_sha256() {
         hello_entry.sha256,
         "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
     );
+    // The written entry keeps its Seed provenance even though the returned
+    // inventory is a fresh root listing (see
+    // `seed_tags_written_entries_and_keeps_preexisting_sources`).
     assert!(matches!(hello_entry.source, CorpusSource::Seed));
+}
+
+#[tokio::test]
+async fn seed_returns_the_full_root_inventory() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    fs::create_dir_all(&corpus_root).unwrap();
+    fs::write(corpus_root.join("retained"), b"already-here").unwrap();
+
+    let corpus = seed(
+        target_id(),
+        &corpus_root,
+        vec![(b"hello".to_vec(), "seed1".to_owned())],
+    )
+    .await
+    .unwrap();
+
+    // Every other corpus write operation (grow, absorb, remove, minimize)
+    // returns the inventory of the full root after the writes. The service
+    // persists the returned corpus as a replacement, so a seed that reported
+    // only its own inputs would drop retained entries from the durable
+    // record.
+    let names: Vec<String> = corpus
+        .entries
+        .iter()
+        .map(|e| e.path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, vec!["retained", "seed1"], "full root expected");
+}
+
+#[tokio::test]
+async fn seed_tags_written_entries_and_keeps_preexisting_sources() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    fs::create_dir_all(&corpus_root).unwrap();
+    fs::write(corpus_root.join("retained"), b"already-here").unwrap();
+
+    let corpus = seed(
+        target_id(),
+        &corpus_root,
+        vec![(b"hello".to_vec(), "seed1".to_owned())],
+    )
+    .await
+    .unwrap();
+
+    let seeded = corpus
+        .entries
+        .iter()
+        .find(|e| e.path.file_name().unwrap() == "seed1")
+        .unwrap();
+    assert!(
+        matches!(seeded.source, CorpusSource::Seed),
+        "a first-time seed must keep its Seed provenance through the relist, \
+         or the durable record the caller persists loses it"
+    );
+    let retained = corpus
+        .entries
+        .iter()
+        .find(|e| e.path.file_name().unwrap() == "retained")
+        .unwrap();
+    assert!(
+        matches!(retained.source, CorpusSource::Manual),
+        "entries this call did not write keep the listing's source"
+    );
 }
 
 #[tokio::test]
@@ -314,7 +381,7 @@ async fn prune_propagates_a_failed_removal() {
 }
 
 #[tokio::test]
-async fn merge_combines_without_duplicates() {
+async fn merge_snapshot_combines_without_duplicates() {
     let dir = TempDir::new().unwrap();
     let root_a = dir.path().join("a");
     let root_b = dir.path().join("b");
@@ -324,12 +391,10 @@ async fn merge_combines_without_duplicates() {
     fs::write(root_b.join("file2"), b"content2").unwrap();
     fs::write(root_b.join("file1_dup"), b"content1").unwrap(); // same content as file1
 
-    let _tid = target_id();
-    let a = list(&root_a).unwrap();
-    let b = list(&root_b).unwrap();
-    let merged = merge(a, b).unwrap();
+    let (merged, added) = merge_snapshot(&root_a, &root_b).unwrap();
     // file1 and file1_dup have the same sha256 -> deduped. file2 is unique.
     assert_eq!(merged.entries.len(), 2, "should merge to 2 unique entries");
+    assert_eq!(added, 1, "only file2 is a new retained input");
 }
 
 #[tokio::test]

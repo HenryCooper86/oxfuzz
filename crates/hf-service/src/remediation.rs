@@ -151,10 +151,38 @@ impl ServiceContainer {
         let run_config = run.config.as_ref().ok_or_else(|| {
             ClassifiedError::Validation("run has no retained configuration".to_owned())
         })?;
+        // The manifest body carries the bare symbol; the reproducer lives
+        // under the workspace spelling the run was actually staged under, so
+        // resolve the retained selector exactly as the manifest does.
+        let qualification_harness =
+            store
+                .get_harness(run_config.harness_id)
+                .await?
+                .ok_or_else(|| {
+                    ClassifiedError::Validation(format!(
+                        "harness {} referenced by run was not found",
+                        run_config.harness_id
+                    ))
+                })?;
+        let qualification_target = store
+            .list_targets(&run.project_root)
+            .await?
+            .into_iter()
+            .find(|candidate| candidate.id == qualification_harness.target_id)
+            .ok_or_else(|| {
+                ClassifiedError::Validation(format!(
+                    "target {} referenced by harness was not found",
+                    qualification_harness.target_id
+                ))
+            })?;
+        let retained_selector = crate::container::project_identity::retained_run_target_selector(
+            &run,
+            &qualification_target,
+        )?;
         let (reproducer, reproducer_sha256) = read_run_crash_file(
             &managed_workspace_root,
             Path::new(&run.project_root),
-            &manifest.body.target,
+            &retained_selector,
             run_id,
             &crash.input_path,
         )?;

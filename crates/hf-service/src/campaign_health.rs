@@ -288,7 +288,7 @@ pub fn assess_campaign_health(
                     settings,
                     HealthCondition::WorkerStatsStale,
                     HealthSeverity::Error,
-                    &format!("{}s", stale / settings.stale_progress_secs.max(1)),
+                    &format!("{stale}s"),
                     &format!("The engine progress record has not advanced for {stale}s."),
                 ));
             }

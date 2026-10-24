@@ -695,6 +695,16 @@ impl ProviderPool for ProviderPoolImpl {
                                 None => {
                                     if !st.recorded {
                                         st.recorded = true;
+                                        // §2.17: a stream that completes without a
+                                        // usage frame is recorded as zero usage
+                                        // here; hf-provider cannot release the
+                                        // caller's budget reservation because the
+                                        // reservation/settle ledger lives in
+                                        // hf-service's model_budget dispatch.
+                                        // Releasing the reservation delta for a
+                                        // usage-less stream requires the hf-service
+                                        // settle API and is left to the service
+                                        // owner.
                                         let (input, output) = st.usage.unwrap_or((0, 0));
                                         st.metrics.record_success_with_cost(
                                             input,

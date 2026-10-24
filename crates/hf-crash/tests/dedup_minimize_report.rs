@@ -7,7 +7,7 @@ use hf_core::provider::{
     ProviderMetadata,
 };
 use hf_core::types::TokenUsage;
-use hf_crash::{build_minimize_args, dedup, draft_report};
+use hf_crash::{build_minimize_args, dedup, draft_report_with_context};
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -118,6 +118,71 @@ fn minimize_args_honggfuzz_none() {
     assert!(args.is_none(), "honggfuzz has no built-in minimizer");
 }
 
+#[test]
+fn minimize_args_thread_the_resolved_per_input_timeout() {
+    use std::time::Duration;
+
+    // afl-tmin takes the per-execution timeout in exact milliseconds via
+    // `-t`, the same granularity afl-fuzz/afl-cmin take: a crash that needs
+    // longer than the pinned 1000 ms default to reproduce would otherwise
+    // make afl-tmin FATAL ("Target binary times out").
+    let afl = hf_crash::build_minimize_args_with_timeout(
+        EngineKind::AflPlusPlus,
+        "/work/fuzz_bin",
+        "/work/crash-1",
+        "/work/minimized",
+        Duration::from_millis(2500),
+    )
+    .expect("AFL++ should have a minimizer");
+    let flag = afl.iter().position(|a| a == "-t").expect("-t flag");
+    assert_eq!(afl.get(flag + 1).map(String::as_str), Some("2500"));
+
+    // libFuzzer takes whole seconds via `-timeout=`; a sub-second budget
+    // rounds up so the flag never reads as "no timeout".
+    let libfuzzer = hf_crash::build_minimize_args_with_timeout(
+        EngineKind::LibFuzzer,
+        "/work/fuzz_bin",
+        "/work/crash-1",
+        "/work/out",
+        Duration::from_millis(2500),
+    )
+    .expect("libFuzzer should have a minimizer");
+    assert!(
+        libfuzzer.contains(&"-timeout=3".to_owned()),
+        "2500 ms must round up to 3 s: {libfuzzer:?}"
+    );
+    // The crash file stays the positional input.
+    assert_eq!(libfuzzer.last().map(String::as_str), Some("/work/crash-1"));
+}
+
+#[test]
+fn minimize_args_default_to_the_afl_tmin_pinned_timeout() {
+    // Without a resolved policy budget the argv pins afl-tmin's own default
+    // (EXEC_TIMEOUT = 1000 ms in AFL++ 4.09c) instead of leaving it implicit,
+    // and libFuzzer gets the same budget in its whole-second form.
+    let afl = build_minimize_args(
+        EngineKind::AflPlusPlus,
+        "/work/fuzz_bin",
+        "/work/crash-1",
+        "/work/minimized",
+    )
+    .expect("AFL++ should have a minimizer");
+    let flag = afl.iter().position(|a| a == "-t").expect("-t flag");
+    assert_eq!(afl.get(flag + 1).map(String::as_str), Some("1000"));
+
+    let libfuzzer = build_minimize_args(
+        EngineKind::LibFuzzer,
+        "/work/fuzz_bin",
+        "/work/crash-1",
+        "/work/out",
+    )
+    .expect("libFuzzer should have a minimizer");
+    assert!(
+        libfuzzer.contains(&"-timeout=1".to_owned()),
+        "the 1000 ms default is 1 s: {libfuzzer:?}"
+    );
+}
+
 struct MockLlm {
     response: String,
 }
@@ -182,7 +247,7 @@ async fn draft_report_parses_llm_json() {
         .to_owned(),
     };
     let crash = crash("sig", CrashKind::Asan);
-    let report = draft_report(&crash, "==ERROR: asan==", None, Box::new(llm))
+    let report = draft_report_with_context(&crash, "==ERROR: asan==", None, None, Box::new(llm))
         .await
         .expect("draft should succeed");
     assert_eq!(report.title, "heap-buffer-overflow in parse_string");
@@ -196,7 +261,7 @@ async fn draft_report_falls_back_on_invalid_json() {
         response: "not json".to_owned(),
     };
     let crash = crash("sig", CrashKind::Asan);
-    let report = draft_report(&crash, "asan log", None, Box::new(llm))
+    let report = draft_report_with_context(&crash, "asan log", None, None, Box::new(llm))
         .await
         .expect("should not error on bad json");
     assert!(report.title.contains("Asan"));

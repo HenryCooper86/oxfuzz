@@ -279,23 +279,29 @@ impl Agent {
             .clone()
     }
 
-    fn system_prompt(&self) -> String {
+    fn system_prompt(&self) -> Result<String, ClassifiedError> {
         let catalog = tools::catalog_for(&self.definition.allowed_tools);
         // Inject the playbooks the agent references. Built-in skills are always
         // available; user skills come from the repo's `skills/` directory.
+        // An unknown skill name fails the turn: `None` means "no skills
+        // requested" and cannot silently stand in for a missing playbook.
         let skills = if self.definition.skills.is_empty() {
             None
         } else {
             let registry = hf_skills::SkillRegistry::with_user_dir(self.backend.skills_dir());
-            registry.render(&self.definition.skills)
+            registry.render(&self.definition.skills).map_err(|error| {
+                ClassifiedError::Validation(format!("agent references an unknown skill: {error}"))
+            })?
         };
-        hf_prompt::build_agent_system_prompt(hf_prompt::AgentPromptInput {
-            role_prompt: &self.definition.system_prompt,
-            project_workspace: self.project.as_deref(),
-            skills: skills.as_deref(),
-            tool_catalog: &catalog,
-            inspection_catalog: agent_tools::INSPECTION_CATALOG,
-        })
+        Ok(hf_prompt::build_agent_system_prompt(
+            hf_prompt::AgentPromptInput {
+                role_prompt: &self.definition.system_prompt,
+                project_workspace: self.project.as_deref(),
+                skills: skills.as_deref(),
+                tool_catalog: &catalog,
+                inspection_catalog: agent_tools::INSPECTION_CATALOG,
+            },
+        ))
     }
 
     /// Run one agent turn: reason, optionally call tools, and produce a final
@@ -319,7 +325,7 @@ impl Agent {
         })?;
 
         let mut messages = Vec::with_capacity(history.len() + 2);
-        messages.push(Message::system(self.system_prompt()));
+        messages.push(Message::system(self.system_prompt()?));
         messages.extend(history);
         messages.push(Message::user(user_message.to_owned()));
 

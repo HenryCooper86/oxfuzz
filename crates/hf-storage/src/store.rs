@@ -631,6 +631,29 @@ pub struct Store {
     pub(crate) work_order_publish_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
+/// Outcome of claiming a filed-issue dedup key.
+///
+/// The claim is the race-free half of issue dedup: the `PRIMARY KEY` on
+/// `filed_issues.dedup_key` makes exactly one caller the filer without any
+/// read-then-write check, so concurrent filings of one crash (or one
+/// comparison) cannot both reach `create_issue`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FiledIssueClaim {
+    /// This call won the claim and owes a follow-up
+    /// [`Store::complete_filed_issue`] or [`Store::release_filed_issue`].
+    Claimed,
+    /// The key was already filed; carries the recorded issue JSON to return
+    /// verbatim to the retrying caller.
+    Completed(String),
+    /// Another caller holds the claim while its remote create is in flight.
+    Pending,
+}
+
+/// How long a pending [`FiledIssueClaim`] may stay uncompleted before a new
+/// claimant may reclaim it. Bounded well past any remote create latency, yet
+/// short enough that a process death mid-create cannot wedge a dedup key
+/// indefinitely.
+pub const FILED_ISSUE_CLAIM_TTL: chrono::Duration = chrono::Duration::minutes(10);
 impl Store {
     /// Connect to (creating if missing) the database at `db_path` and run
     /// pending migrations.
@@ -743,8 +766,8 @@ impl Store {
         )
         .bind(run.id.to_string())
         .bind(&run.project_root)
-        .bind(enum_str(&run.engine))
-        .bind(enum_str(&run.status))
+        .bind(enum_str(&run.engine)?)
+        .bind(enum_str(&run.status)?)
         .bind(run.started_at.to_rfc3339())
         .bind(run.ended_at.map(|t| t.to_rfc3339()))
         .bind(config_json)
@@ -754,7 +777,7 @@ impl Store {
         .bind(run.harness_rev.as_deref())
         .bind(run.binary_rev.as_deref())
         .bind(run.evidence_dir.as_deref())
-        .bind(enum_str(&run.kind))
+        .bind(enum_str(&run.kind)?)
         .bind(run.context_rev.as_deref())
         .bind(run.source_rev.as_deref())
         .bind(run.corpus_rev.as_deref())
@@ -807,7 +830,7 @@ impl Store {
         .bind(&run.rules_commit)
         .bind(&run.rules_tree_sha256)
         .bind(i64::from(run.command_schema_version))
-        .bind(enum_str(&run.status))
+        .bind(enum_str(&run.status)?)
         .bind(run.started_at.to_rfc3339())
         .bind(run.ended_at.map(|value| value.to_rfc3339()))
         .bind(run.output_sha256.as_deref())
@@ -863,8 +886,8 @@ impl Store {
              WHERE id = ?1 AND status = ?2",
         )
         .bind(id.to_string())
-        .bind(enum_str(&expected))
-        .bind(enum_str(&next))
+        .bind(enum_str(&expected)?)
+        .bind(enum_str(&next)?)
         .bind(source_sha256)
         .execute(&self.pool)
         .await?;
@@ -911,7 +934,7 @@ impl Store {
             .bind(finding.scan_id.to_string())
             .bind(&finding.fingerprint)
             .bind(&finding.rule_id)
-            .bind(enum_str(&finding.severity))
+            .bind(enum_str(&finding.severity)?)
             .bind(&finding.message)
             .bind(&finding.relative_file)
             .bind(i64::from(finding.start_line))
@@ -1166,7 +1189,7 @@ impl Store {
         .bind(&operation.operation)
         .bind(&operation.mode)
         .bind(operation.protocol.as_deref())
-        .bind(enum_str(&operation.status))
+        .bind(enum_str(&operation.status)?)
         .bind(operation.started_at.to_rfc3339())
         .bind(operation.ended_at.map(|value| value.to_rfc3339()))
         .bind(&operation.request_hash)
@@ -1204,7 +1227,7 @@ impl Store {
              WHERE id = ?1 AND status = 'running'",
         )
         .bind(id.to_string())
-        .bind(enum_str(&status))
+        .bind(enum_str(&status)?)
         .bind(ended_at.to_rfc3339())
         .bind(transcript_hash)
         .bind(result_json)
@@ -1445,6 +1468,113 @@ impl Store {
         Ok(result.rows_affected() == 1)
     }
 
+    /// Atomically claim the right to file one dedup key (crash UUID or
+    /// comparison signature), or observe the already-filed issue.
+    ///
+    /// A pending claim whose remote create never completed (for example the
+    /// process died mid-flight) is reclaimable once its `created_at` is older
+    /// than `FILED_ISSUE_CLAIM_TTL`, so a wedged dedup key self-heals
+    /// instead of blocking every later filing with "already in progress".
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure or when `dedup_key` is empty.
+    pub async fn claim_filed_issue(
+        &self,
+        dedup_key: &str,
+        claimed_at: DateTime<Utc>,
+    ) -> Result<FiledIssueClaim, StorageError> {
+        if dedup_key.trim().is_empty() {
+            return Err(StorageError::InvalidData(
+                "filed issue dedup key must not be empty".to_owned(),
+            ));
+        }
+        let result = sqlx::query(
+            "INSERT INTO filed_issues (dedup_key, issue_json, created_at)
+             VALUES (?1, NULL, ?2)
+             ON CONFLICT(dedup_key) DO NOTHING",
+        )
+        .bind(dedup_key)
+        .bind(claimed_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 1 {
+            return Ok(FiledIssueClaim::Claimed);
+        }
+        // The row already exists. A pending (uncompleted) row older than the
+        // TTL is reclaimed atomically: the `created_at` rewrite is the
+        // single-winner gate, so at most one new claimant takes it over.
+        let cutoff = (claimed_at - FILED_ISSUE_CLAIM_TTL).to_rfc3339();
+        let reclaimed = sqlx::query(
+            "UPDATE filed_issues SET created_at = ?2
+             WHERE dedup_key = ?1 AND issue_json IS NULL AND created_at < ?3",
+        )
+        .bind(dedup_key)
+        .bind(claimed_at.to_rfc3339())
+        .bind(cutoff)
+        .execute(&self.pool)
+        .await?;
+        if reclaimed.rows_affected() == 1 {
+            return Ok(FiledIssueClaim::Claimed);
+        }
+        let recorded: Option<Option<String>> =
+            sqlx::query("SELECT issue_json FROM filed_issues WHERE dedup_key = ?1")
+                .bind(dedup_key)
+                .fetch_optional(&self.pool)
+                .await?
+                .map(|row| row.try_get("issue_json"))
+                .transpose()?;
+        Ok(match recorded {
+            Some(Some(json)) => FiledIssueClaim::Completed(json),
+            // A conflicting row exists with no recorded issue -- another
+            // filing owns the in-flight create -- or the conflicting row was
+            // released between insert and read and a retry will re-claim it.
+            _ => FiledIssueClaim::Pending,
+        })
+    }
+
+    /// Record the created (or remotely found) issue for a held claim.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure, a malformed issue JSON, or when the
+    /// claim is not held (already completed or released).
+    pub async fn complete_filed_issue(
+        &self,
+        dedup_key: &str,
+        issue_json: &str,
+    ) -> Result<(), StorageError> {
+        if issue_json.trim().is_empty() || issue_json.len() > 4096 {
+            return Err(StorageError::InvalidData(
+                "filed issue record must be non-empty JSON up to 4096 bytes".to_owned(),
+            ));
+        }
+        let result = sqlx::query(
+            "UPDATE filed_issues SET issue_json = ?2 WHERE dedup_key = ?1 AND issue_json IS NULL",
+        )
+        .bind(dedup_key)
+        .bind(issue_json)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 1 {
+            Ok(())
+        } else {
+            Err(StorageError::InvalidData(format!(
+                "filed issue claim for {dedup_key} is not held"
+            )))
+        }
+    }
+
+    /// Release an uncompleted claim so a failed filing can be retried.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure.
+    pub async fn release_filed_issue(&self, dedup_key: &str) -> Result<(), StorageError> {
+        sqlx::query("DELETE FROM filed_issues WHERE dedup_key = ?1 AND issue_json IS NULL")
+            .bind(dedup_key)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Record a finished run's peak coverage (edges), throughput (execs/sec),
     /// and raw crash count.
     ///
@@ -1492,11 +1622,13 @@ impl Store {
             .bind(id.to_string())
             .fetch_optional(&self.pool)
             .await?;
-        Ok(row.and_then(|r| {
-            r.try_get::<Option<String>, _>("samples_json")
-                .ok()
-                .flatten()
-        }))
+        row.map(|r| {
+            r.try_get::<Option<String>, _>("samples_json").map_err(|e| {
+                StorageError::InvalidData(format!("run {id} samples_json decode: {e}"))
+            })
+        })
+        .transpose()
+        .map(std::option::Option::flatten)
     }
 
     /// Persist the latest bounded telemetry snapshot for one campaign run.
@@ -1816,11 +1948,14 @@ impl Store {
             .bind(id.to_string())
             .fetch_optional(&self.pool)
             .await?;
-        Ok(row.and_then(|r| {
+        row.map(|r| {
             r.try_get::<Option<String>, _>("harness_source")
-                .ok()
-                .flatten()
-        }))
+                .map_err(|e| {
+                    StorageError::InvalidData(format!("run {id} harness_source decode: {e}"))
+                })
+        })
+        .transpose()
+        .map(std::option::Option::flatten)
     }
 
     /// Upsert a project's auto-revert policy override. A stored row fully
@@ -2135,7 +2270,7 @@ impl Store {
     ) -> Result<(), StorageError> {
         let result = sqlx::query("UPDATE runs SET status = ?2, ended_at = ?3 WHERE id = ?1")
             .bind(id.to_string())
-            .bind(enum_str(&status))
+            .bind(enum_str(&status)?)
             .bind(ended_at.map(|t| t.to_rfc3339()))
             .execute(&self.pool)
             .await?;
@@ -2250,7 +2385,7 @@ impl Store {
         .bind(&project)
         .bind(&persisted.symbol)
         .bind(&file)
-        .bind(enum_str(&persisted.language))
+        .bind(enum_str(&persisted.language)?)
         .bind(persisted.fit_score)
         .bind(&persisted.rationale)
         .bind(discovered_at.to_rfc3339())
@@ -2286,6 +2421,9 @@ impl Store {
             "harness_work_order_attempts",
             "harness_work_order_submissions",
             "harness_work_orders",
+            "run_closeout_steps",
+            "harness_ai_reviews",
+            "harness_approvals",
             "crashes",
             "corpus_entries",
             "harnesses",
@@ -2392,6 +2530,20 @@ impl Store {
                 .bind(project_root)
                 .fetch_all(&mut *tx)
                 .await?;
+        // Approval and review evidence is harness-keyed: drop it while the
+        // project's harness ids are still resolvable.
+        for table in ["harness_ai_reviews", "harness_approvals"] {
+            sqlx::query(&format!(
+                "DELETE FROM {table} WHERE harness_id IN (
+                    SELECT id FROM harnesses WHERE target_id IN (
+                        SELECT id FROM targets WHERE project_root = ?1
+                    )
+                )"
+            ))
+            .bind(project_root)
+            .execute(&mut *tx)
+            .await?;
+        }
         for tid in &target_ids {
             for table in ["harnesses", "corpus_entries", "crashes"] {
                 sqlx::query(&format!("DELETE FROM {table} WHERE target_id = ?1"))
@@ -2400,6 +2552,15 @@ impl Store {
                     .await?;
             }
         }
+        // Closeout steps are run-keyed: cascade them while the project's run
+        // ids are still resolvable.
+        sqlx::query(
+            "DELETE FROM run_closeout_steps
+             WHERE run_id IN (SELECT id FROM runs WHERE project_root = ?1)",
+        )
+        .bind(project_root)
+        .execute(&mut *tx)
+        .await?;
         for rid in &run_ids {
             sqlx::query("DELETE FROM crashes WHERE run_id = ?1")
                 .bind(rid)
@@ -2460,6 +2621,10 @@ impl Store {
                 role: reference.role,
             });
         }
+        sqlx::query("DELETE FROM run_closeout_steps WHERE run_id = ?1")
+            .bind(run_id)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("DELETE FROM crashes WHERE run_id = ?1")
             .bind(run_id)
             .execute(&mut *tx)
@@ -2569,6 +2734,9 @@ impl Store {
                 });
             }
         }
+        sqlx::query("DELETE FROM run_closeout_steps")
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("DELETE FROM crashes").execute(&mut *tx).await?;
         sqlx::query("DELETE FROM runs").execute(&mut *tx).await?;
         tx.commit().await?;
@@ -2592,6 +2760,10 @@ impl Store {
                     role: reference.role,
                 });
             }
+            sqlx::query("DELETE FROM run_closeout_steps WHERE run_id = ?1")
+                .bind(&id)
+                .execute(&mut *tx)
+                .await?;
             sqlx::query("DELETE FROM crashes WHERE run_id = ?1")
                 .bind(&id)
                 .execute(&mut *tx)
@@ -2649,6 +2821,15 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         }
+        // Chat checkpoints whose session metadata row is gone (deleted by an
+        // older binary before the delete cascade existed) are unreachable
+        // dead weight; prune them with the other orphans.
+        sqlx::query(
+            "DELETE FROM chat_checkpoints
+             WHERE session_id NOT IN (SELECT id FROM session_metadata)",
+        )
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         Ok(())
     }
@@ -2746,7 +2927,7 @@ impl Store {
                  WHERE id = ?1",
             )
             .bind(h.id.to_string())
-            .bind(enum_str(&h.status))
+            .bind(enum_str(&h.status)?)
             .bind(smoke_json)
             .bind(serde_json::to_string(h)?)
             .execute(&mut *transaction)
@@ -2759,9 +2940,9 @@ impl Store {
             )
             .bind(h.id.to_string())
             .bind(h.target_id.to_string())
-            .bind(enum_str(&h.engine))
+            .bind(enum_str(&h.engine)?)
             .bind(&h.source)
-            .bind(enum_str(&h.status))
+            .bind(enum_str(&h.status)?)
             .bind(smoke_json)
             .bind(serde_json::to_string(h)?)
             .execute(&mut *transaction)
@@ -2956,7 +3137,7 @@ impl Store {
             ));
         }
 
-        let approval_kind_text = enum_str(&approval_kind);
+        let approval_kind_text = enum_str(&approval_kind)?;
         let current_row = sqlx::query("SELECT data_json FROM harnesses WHERE id = ?1")
             .bind(harness.id.to_string())
             .fetch_optional(&mut *transaction)
@@ -3046,10 +3227,10 @@ impl Store {
                  WHERE id = ?1 AND status = ?5 AND data_json = ?6",
             )
             .bind(harness.id.to_string())
-            .bind(enum_str(&harness.status))
+            .bind(enum_str(&harness.status)?)
             .bind(smoke_json)
             .bind(&requested_json)
-            .bind(enum_str(&hf_core::harness::HarnessStatus::SmokePassed))
+            .bind(enum_str(&hf_core::harness::HarnessStatus::SmokePassed)?)
             .bind(&current_json)
             .execute(&mut *transaction)
             .await?;
@@ -3141,7 +3322,7 @@ impl Store {
             .bind(crash.run_id.to_string())
             .bind(crash.target_id.to_string())
             .bind(&crash.stack_signature)
-            .bind(enum_str(&crash.kind))
+            .bind(enum_str(&crash.kind)?)
             .bind(&crash.summary)
             .bind(i64::from(crash.minimized))
             .bind(bug_json)
@@ -3391,7 +3572,7 @@ impl Store {
         .bind(target_id.to_string())
         .bind(&e.sha256)
         .bind(i64::try_from(e.size).unwrap_or(i64::MAX))
-        .bind(enum_str(&e.source))
+        .bind(enum_str(&e.source)?)
         .bind(e.coverage_hash.clone())
         .bind(serde_json::to_string(e)?)
         .execute(&self.pool)
@@ -3469,7 +3650,7 @@ impl Store {
             .bind(target_id.to_string())
             .bind(&entry.sha256)
             .bind(i64::try_from(entry.size).unwrap_or(i64::MAX))
-            .bind(enum_str(&entry.source))
+            .bind(enum_str(&entry.source)?)
             .bind(entry.coverage_hash.clone())
             .bind(json)
             .execute(&mut *tx)
@@ -3618,11 +3799,17 @@ const SEMGREP_ACTIVE_RUNS_SELECT: &str = "SELECT id, project_root, language, sou
     ORDER BY started_at, id";
 
 /// Serialize an enum to its bare serde string name (no surrounding quotes).
-fn enum_str<T: Serialize>(v: &T) -> String {
-    serde_json::to_value(v)
-        .ok()
-        .and_then(|val| val.as_str().map(str::to_owned))
-        .unwrap_or_default()
+///
+/// Fails the write when the value does not serialize to a bare string: an
+/// empty-string fallback would store a row that `enum_from` can never decode
+/// again (silent data poisoning at write time).
+fn enum_str<T: Serialize>(v: &T) -> Result<String, StorageError> {
+    let value = serde_json::to_value(v)?;
+    value.as_str().map(str::to_owned).ok_or_else(|| {
+        StorageError::InvalidData(format!(
+            "value serialized to {value:?} instead of a bare enum string"
+        ))
+    })
 }
 
 fn validate_semgrep_run(run: &SemgrepRunRecord) -> Result<(), StorageError> {
@@ -4112,11 +4299,11 @@ async fn terminate_semgrep_run(
          WHERE id = ?1 AND status = ?6",
     )
     .bind(id.to_string())
-    .bind(enum_str(&status))
+    .bind(enum_str(&status)?)
     .bind(ended_at.to_rfc3339())
     .bind(failure_code)
     .bind(failure_message)
-    .bind(enum_str(&existing_status))
+    .bind(enum_str(&existing_status)?)
     .execute(&mut *tx)
     .await?;
     if result.rows_affected() != 1 {
@@ -4136,7 +4323,7 @@ fn require_one_semgrep_run(
     } else {
         Err(StorageError::NotFound(format!(
             "{} Semgrep run {id}",
-            enum_str(&expected)
+            enum_str(&expected)?
         )))
     }
 }
@@ -4609,4 +4796,31 @@ fn optional_i64_to_u64(value: Option<i64>, name: &str) -> Result<Option<u64>, St
 fn i64_to_u32(value: i64, name: &str) -> Result<u32, StorageError> {
     u32::try_from(value)
         .map_err(|_| StorageError::InvalidData(format!("stored {name} is outside the u32 range")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Serialize)]
+    enum Colour {
+        Red,
+    }
+
+    #[derive(Serialize)]
+    struct NotAnEnum {
+        value: u8,
+    }
+
+    #[test]
+    fn enum_str_serializes_enum_names_and_fails_loud_for_non_enums() {
+        assert_eq!(enum_str(&Colour::Red).unwrap(), "Red");
+        // A non-string serialization must fail the write instead of storing
+        // an empty string that can never be decoded back (enum_from rejects "").
+        let error = enum_str(&NotAnEnum { value: 1 }).unwrap_err();
+        assert!(
+            error.to_string().contains("bare enum string"),
+            "enum_str must fail for non-enum values: {error}"
+        );
+    }
 }

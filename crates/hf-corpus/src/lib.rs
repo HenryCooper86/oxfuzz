@@ -66,10 +66,15 @@ pub struct ImportOutcome {
 
 /// Seed a corpus with initial inputs.
 ///
-/// Each input is written to `corpus_root/<name>` with `CorpusSource::Seed`.
+/// Each input is written to `corpus_root/<name>`. The returned corpus is the
+/// full root inventory after the writes (the same contract as [`grow`],
+/// [`remove`], and [`minimize`]): existing entries appear alongside the new
+/// seeds, so a caller that persists the result keeps the retained corpus
+/// intact. Entries this call wrote are tagged [`CorpusSource::Seed`]; every
+/// other listed entry carries the listing's [`CorpusSource::Manual`].
 ///
 /// # Errors
-/// Returns `ClassifiedError` if files cannot be written.
+/// Returns `ClassifiedError` if validation, bounded listing, or writing fails.
 pub async fn seed(
     target_id: Uuid,
     corpus_root: &Path,
@@ -81,7 +86,8 @@ pub async fn seed(
 /// Seed a corpus under an explicit I/O budget.
 ///
 /// Existing regular entries and replacements are included in the resulting
-/// entry and aggregate-byte checks before the first payload is written.
+/// entry and aggregate-byte checks before the first payload is written, and in
+/// the returned inventory after the writes.
 ///
 /// # Errors
 /// Returns `ClassifiedError` if validation, bounded listing, or writing fails.
@@ -107,19 +113,32 @@ fn seed_blocking(
     validate_seed_inputs(&inputs, limits)?;
     ensure_regular_directory(corpus_root)?;
     validate_seed_result(corpus_root, &inputs, limits)?;
-    let mut entries = Vec::new();
+    // The final listing cannot know provenance, so remember the on-disk
+    // names this call writes and re-tag exactly those entries as `Seed`.
+    let mut written: HashSet<OsString> = HashSet::with_capacity(inputs.len());
     for (data, name) in inputs {
         let name = safe_entry_name(&name)?;
+        written.insert(name.to_owned());
         let path = corpus_root.join(name);
         atomic_write(&path, &data)?;
-        entries.push(make_entry(&path, &data, CorpusSource::Seed));
     }
-    Ok(Corpus {
-        id: Uuid::new_v4(),
-        target_id,
-        root: corpus_root.to_path_buf(),
-        entries,
-    })
+    // End with a bounded listing of the full root, exactly like `remove` and
+    // `absorb`: the returned inventory must cover entries the run did not
+    // write, or a caller replacing its durable record from this corpus would
+    // silently drop them. Entries written above are re-tagged so a first-time
+    // seed keeps its `Seed` provenance through the relist.
+    let mut corpus = list_with_limits(corpus_root, limits)?;
+    for entry in &mut corpus.entries {
+        if entry
+            .path
+            .file_name()
+            .is_some_and(|name| written.contains(name))
+        {
+            entry.source = CorpusSource::Seed;
+        }
+    }
+    corpus.target_id = target_id;
+    Ok(corpus)
 }
 
 /// Remove named entries from a corpus root, returning the corpus as it stands
@@ -874,23 +893,6 @@ pub fn minimize(corpus_root: &Path, minimized_dir: &Path) -> Result<Corpus, Clas
         id: Uuid::new_v4(),
         target_id: Uuid::nil(),
         root: corpus_root.to_path_buf(),
-        entries,
-    })
-}
-
-/// Merge two corpora, deduplicating by sha256.
-pub fn merge(a: Corpus, b: Corpus) -> Result<Corpus, ClassifiedError> {
-    let mut seen = HashSet::new();
-    let mut entries = Vec::new();
-    for entry in a.entries.into_iter().chain(b.entries) {
-        if seen.insert(entry.sha256.clone()) {
-            entries.push(entry);
-        }
-    }
-    Ok(Corpus {
-        id: Uuid::new_v4(),
-        target_id: a.target_id,
-        root: a.root,
         entries,
     })
 }

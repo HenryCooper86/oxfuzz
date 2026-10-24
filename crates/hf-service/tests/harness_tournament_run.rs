@@ -405,3 +405,218 @@ async fn qualified_refinement_keeps_the_active_binary_name() {
         .expect("refined artifacts preserve the file-qualified selector");
     assert!(smoke.summary.passed);
 }
+
+/// A runtime that only compiles harness sources carrying the `REPAIRED`
+/// marker: every original draft (heuristic or model) fails to build, and each
+/// repair pass produces a source that does.
+struct RepairOnlyRuntime {
+    compiles: AtomicUsize,
+    last_harness_source: std::sync::Mutex<String>,
+}
+
+impl RepairOnlyRuntime {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            compiles: AtomicUsize::new(0),
+            last_harness_source: std::sync::Mutex::new(String::new()),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl hf_core::runtime::RuntimeAdapter for RepairOnlyRuntime {
+    async fn resolve_image_reference(
+        &self,
+        _image: &str,
+    ) -> Result<Option<hf_core::runtime::ImmutableImageReference>, hf_core::error::ClassifiedError>
+    {
+        Ok(Some(hf_test_utils::immutable_test_image()?))
+    }
+
+    async fn run_command(
+        &self,
+        cmd: &[String],
+        cwd: &std::path::Path,
+        _limits: &hf_core::runtime::ResourceLimits,
+    ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
+        self.compiles.fetch_add(1, Ordering::SeqCst);
+        let source = self.last_harness_source.lock().unwrap().clone();
+        let builds = source.contains("REPAIRED");
+        if builds {
+            if let Some((_, output)) = cmd.get(2).and_then(|script| script.rsplit_once("/work/'")) {
+                let (name, _) = output.split_once('\'').expect("quoted compile output");
+                std::fs::write(cwd.join(name), b"inert compiled harness").unwrap();
+            }
+        }
+        Ok(hf_core::runtime::CommandResult {
+            exit_code: i32::from(!builds),
+            stdout: if builds {
+                "DONE cov: 12 ft: 24 corp: 2/8b exec/s: 128".to_owned()
+            } else {
+                String::new()
+            },
+            stderr: if builds {
+                String::new()
+            } else {
+                "harness.c:2:5: error: implicit declaration of function 'deliberate_missing_symbol_xyz'"
+                    .to_owned()
+            },
+            workspace: cwd.to_path_buf(),
+            termination: hf_core::runtime::CommandTermination::Completed,
+        })
+    }
+
+    async fn write_file(
+        &self,
+        path: &std::path::Path,
+        content: &str,
+    ) -> Result<(), hf_core::error::ClassifiedError> {
+        std::fs::write(path, content).unwrap();
+        if content.contains("LLVMFuzzerTestOneInput") {
+            *self.last_harness_source.lock().unwrap() = content.to_string();
+        }
+        Ok(())
+    }
+
+    async fn read_file(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<String, hf_core::error::ClassifiedError> {
+        std::fs::read_to_string(path)
+            .map_err(|error| hf_core::error::ClassifiedError::Sandbox(error.to_string()))
+    }
+}
+
+/// Answers model drafts with a harness calling a deliberately missing
+/// function, and repair requests (recognized by the compiler diagnostics
+/// embedded in the repair prompt) with a distinct repair per pass.
+struct RepairPool {
+    repairs: AtomicUsize,
+}
+
+impl RepairPool {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            repairs: AtomicUsize::new(0),
+        })
+    }
+
+    fn harness(mark: &str) -> String {
+        format!(
+            "```c\n#include <stddef.h>\n#include <stdint.h>\n\
+             int parse_entry(const uint8_t *, size_t);\n\
+             int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n) {{ \
+             {mark} return parse_entry(d, n); }}\n```"
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl hf_core::provider::ProviderPool for RepairPool {
+    async fn chat_completion(
+        &self,
+        request: &hf_core::provider::ChatRequest,
+        _route: &hf_core::provider::RouteRequest,
+    ) -> Result<hf_core::provider::ChatResponse, hf_core::provider::ProviderError> {
+        let prompt = request
+            .messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<String>();
+        let reply = if prompt.contains("deliberate_missing_symbol_xyz") {
+            let pass = self.repairs.fetch_add(1, Ordering::SeqCst) + 1;
+            Self::harness(&format!("/* REPAIRED-{pass} */"))
+        } else {
+            Self::harness("deliberate_missing_symbol_xyz();")
+        };
+        Ok(hf_test_utils::fixtures::make_chat_response(&reply))
+    }
+    async fn chat_completion_stream(
+        &self,
+        _request: &hf_core::provider::ChatRequest,
+        _route: &hf_core::provider::RouteRequest,
+    ) -> Result<hf_core::provider::ChatStreamResponse, hf_core::provider::ProviderError> {
+        Err(hf_core::provider::ProviderError::Other {
+            message: "unused".to_owned(),
+        })
+    }
+    fn report_error(
+        &self,
+        _provider_id: &hf_core::types::ProviderId,
+        _error: &hf_core::provider::ProviderError,
+    ) {
+    }
+    async fn provider_statuses(&self) -> Vec<hf_core::provider::ProviderStatus> {
+        Vec::new()
+    }
+    async fn freeze(&self, _provider_id: &hf_core::types::ProviderId, _reason: String) {}
+    async fn thaw(
+        &self,
+        _provider_id: &hf_core::types::ProviderId,
+    ) -> Result<(), hf_core::provider::ProviderError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn the_workspace_is_restored_to_the_winners_post_repair_source() {
+    let (project, _root) = {
+        isolate_workspace();
+        let project = write_sample_project();
+        std::fs::write(
+            project.path().join("compile_commands.json"),
+            serde_json::to_vec(&serde_json::json!([{
+                "directory":project.path(), "file":"parse.c", "arguments":["cc","-c","parse.c"],
+            }]))
+            .unwrap(),
+        )
+        .unwrap();
+        (project, ())
+    };
+    let container = ServiceContainer::new(RepairOnlyRuntime::new(), Some(RepairPool::new()))
+        .with_store(Arc::new(
+            hf_storage::Store::connect(project.path().join("state.db"))
+                .await
+                .unwrap(),
+        ))
+        .with_guardrails(hf_guardrails::Guardrails::new(
+            hf_guardrails::GuardrailPolicy::default(),
+            Arc::new(hf_guardrails::AutoApprove),
+        ));
+
+    let mut request = request(project.path(), 2);
+    request.max_repairs = 1;
+    request.target = "parse.c::parse_entry".to_owned();
+    let result = container.run_harness_tournament(request).await.unwrap();
+
+    assert!(
+        result.candidates.iter().all(|candidate| candidate.compiled),
+        "{result:?}"
+    );
+    assert!(
+        result
+            .candidates
+            .iter()
+            .all(|candidate| candidate.repairs_used == 1),
+        "{result:?}"
+    );
+    assert_eq!(result.winner_index, Some(0));
+
+    // The winner compiled only after its repair pass, so the workspace must
+    // hold the winner's POST-REPAIR source -- not the last-evaluated
+    // candidate's, and not the winner's original draft.
+    let workspace = hf_service::workspace_dir(project.path(), "parse.c::parse_entry");
+    let restored = std::fs::read_to_string(workspace.join("harness.source")).unwrap();
+    assert!(
+        restored.contains("REPAIRED-1"),
+        "the winner's post-repair source must be restored: {restored}"
+    );
+    assert!(
+        !restored.contains("REPAIRED-2"),
+        "the last-evaluated candidate's source must not remain: {restored}"
+    );
+    assert!(
+        !restored.contains("deliberate_missing_symbol_xyz"),
+        "the winner's never-compiling draft must not be restored: {restored}"
+    );
+}

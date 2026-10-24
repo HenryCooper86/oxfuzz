@@ -15,11 +15,51 @@ use hf_storage::{RunStatus, Store};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+/// Remove a freshly staged run root when staging fails before the run
+/// reservation makes it durable evidence.
+///
+/// `prepare_userspace_run` writes `<workspace>/runs/<run_id>` before any
+/// persisted row references it. Every failure between staging and the
+/// reservation must remove that tree, or it leaks as unattributable
+/// input/output; once the reservation lands, the run's own lifecycle owns
+/// the tree and the guard is disarmed.
+pub(super) struct StagedRunRootGuard(Option<PathBuf>);
+
+impl StagedRunRootGuard {
+    /// Arm over the run root the staged artifacts live under.
+    pub(super) fn new(artifacts: &super::staging::RunArtifacts) -> Self {
+        Self(
+            artifacts
+                .output_host
+                .parent()
+                .map(std::path::Path::to_path_buf),
+        )
+    }
+
+    /// Disarm: a durable record now references the staged tree.
+    pub(super) fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for StagedRunRootGuard {
+    fn drop(&mut self) {
+        // Best-effort removal of staging not referenced by a persisted run:
+        // `drop` cannot propagate, and a failed removal leaves only an
+        // unreferenced directory for a later cleanup pass.
+        if let Some(run_root) = &self.0 {
+            let _ = std::fs::remove_dir_all(run_root);
+        }
+    }
+}
+
 /// Remove a sensitive staging directory even if the async import is aborted.
 pub(super) struct StagingDirectoryGuard(pub(super) PathBuf);
 
 impl Drop for StagingDirectoryGuard {
     fn drop(&mut self) {
+        // Swallowed: `drop` cannot propagate a removal failure, and the
+        // staging path stays inspectable for a later cleanup pass.
         std::fs::remove_dir_all(&self.0).ok();
     }
 }

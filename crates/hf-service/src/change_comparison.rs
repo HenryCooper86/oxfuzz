@@ -324,7 +324,7 @@ impl ServiceContainer {
             .collect();
         let url = match req.destination {
             PublishDestination::IssueTracker => {
-                self.publish_to_issue_tracker(&comparison, &signatures)
+                self.publish_to_issue_tracker(store, &comparison, &signatures)
                     .await?
             }
             PublishDestination::DefectDojo => {
@@ -344,6 +344,7 @@ impl ServiceContainer {
     /// a re-published comparison does not open a duplicate.
     async fn publish_to_issue_tracker(
         &self,
+        store: &Store,
         comparison: &RevisionComparisonView,
         signatures: &[&str],
     ) -> Result<Option<String>, ClassifiedError> {
@@ -351,18 +352,26 @@ impl ServiceContainer {
         let token = crate::issue_tracker::resolve_token(&cfg)?;
         let client = crate::issue_tracker::IssueTrackerClient::from_config(&cfg, &token)?;
         // Dedup on the first head-only signature, matching how a single crash
-        // is deduped when filed on its own.
-        if let Some(first) = signatures.first() {
-            if let Some(existing) = client.find_existing_issue(first).await {
-                return Ok(Some(existing.url));
-            }
-        }
+        // is deduped when filed on its own. The durable claim keyed by that
+        // marker closes the search->create race (VULN-001b).
+        let first = signatures.first().ok_or_else(|| {
+            ClassifiedError::Validation(
+                "publishing a comparison requires at least one head-only observation".to_owned(),
+            )
+        })?;
+        let dedup_key = format!("comparison:{first}");
         let title = format!(
             "oxfuzz: {} finding observation(s) retained only in the head run",
             signatures.len()
         );
         let body = comparison_issue_body(comparison, signatures);
-        let created = client.create_issue(&title, &body, &cfg.labels).await?;
+        let created = crate::workbench::file_issue_exactly_once(store, &dedup_key, async {
+            if let Some(existing) = client.find_existing_issue(first).await {
+                return Ok(existing);
+            }
+            client.create_issue(&title, &body, &cfg.labels).await
+        })
+        .await?;
         Ok(Some(created.url))
     }
 

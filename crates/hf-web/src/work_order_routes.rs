@@ -461,13 +461,14 @@ fn parse_identifier(value: &str) -> Result<Uuid, WorkOrderApiError> {
 }
 
 async fn require_empty_body(request: Request) -> Result<(), WorkOrderApiError> {
-    let bytes = axum::body::to_bytes(request.into_body(), 1)
-        .await
-        .map_err(|_| invalid_request("request body must be empty".to_owned()))?;
-    if bytes.is_empty() {
-        Ok(())
-    } else {
-        Err(invalid_request("request body must be empty".to_owned()))
+    // One home for the empty-body contract (see `router::read_empty_request_body`);
+    // this surface maps the outcome to its work-order error body.
+    match crate::router::read_empty_request_body(request).await {
+        crate::router::EmptyRequestBody::Ok => Ok(()),
+        crate::router::EmptyRequestBody::Read(error) => Err(invalid_request(error)),
+        crate::router::EmptyRequestBody::NotEmpty => {
+            Err(invalid_request("request body must be empty".to_owned()))
+        }
     }
 }
 

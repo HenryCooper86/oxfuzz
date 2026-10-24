@@ -293,6 +293,94 @@ async fn latest_reproduction_uses_the_retained_qualified_workspace_source() {
     );
 }
 
+/// A crash-id prefix selects exactly one crash, mirroring `resolve_run_id`:
+/// an empty or ambiguous prefix must fail loudly instead of silently
+/// bundling the first match.
+#[tokio::test]
+async fn crash_id_selection_rejects_empty_and_ambiguous_prefixes() {
+    let (container, directory, mut target, harness) = fixture().await;
+    target.project_root = directory.path().to_path_buf();
+    let store = container.store().unwrap();
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    let workspace = hf_service::workspace_dir(directory.path(), &target.symbol);
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("harness.source"), "bundle harness").unwrap();
+    let mut retained = run(
+        directory.path().to_str().unwrap(),
+        harness.id,
+        EngineKind::LibFuzzer,
+        0,
+    );
+    retained.config.as_mut().unwrap().seed_corpus = Some(workspace.join("corpus"));
+    store.insert_run(&retained).await.unwrap();
+    // Two crashes whose ids share their first seven characters.
+    let mut first = crash(&retained, &target, CrashOrigin::Target);
+    first.id = Uuid::from_u128(0xaaaa_0000_0000_0000_0000_0000_0000_0001);
+    first.input_path = directory.path().join("first-input");
+    std::fs::write(&first.input_path, b"first").unwrap();
+    let mut second = crash(&retained, &target, CrashOrigin::Target);
+    second.id = Uuid::from_u128(0xaaaa_0000_0000_0000_0000_0000_0000_0002);
+    second.input_path = directory.path().join("second-input");
+    std::fs::write(&second.input_path, b"second").unwrap();
+    store.upsert_crash(&first).await.unwrap();
+    store.upsert_crash(&second).await.unwrap();
+    let destination = directory.path().join("prefix-bundle");
+
+    let empty = container
+        .export_repro_bundle_for_latest(
+            directory.path(),
+            &target.symbol,
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+            Some("   "),
+            &destination,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        empty.contains("must not be empty"),
+        "an empty prefix must not silently bundle the first crash: {empty}"
+    );
+
+    let ambiguous = container
+        .export_repro_bundle_for_latest(
+            directory.path(),
+            &target.symbol,
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+            Some("aaaa000"),
+            &destination,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        ambiguous.contains("ambiguous"),
+        "a prefix matching two crashes must not pick one silently: {ambiguous}"
+    );
+
+    // The two ids differ only in their final character, so a full id is the
+    // shortest unambiguous selector.
+    let unambiguous = first.id.to_string();
+    let bundle = container
+        .export_repro_bundle_for_latest(
+            directory.path(),
+            &target.symbol,
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+            Some(&unambiguous),
+            &destination,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read(bundle.join("crash_input")).unwrap(),
+        b"first",
+        "an unambiguous prefix selects exactly that crash"
+    );
+}
+
 #[tokio::test]
 async fn queue_requires_persistence_but_an_empty_store_is_a_valid_empty_queue() {
     let without_store = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);

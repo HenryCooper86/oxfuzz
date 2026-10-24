@@ -111,12 +111,15 @@ impl RunTelemetryRegistry {
         }
     }
 
-    /// Prepare a new run entry. Returns `false` when the ID already exists.
-    pub fn prepare(&self, run_id: Uuid) -> bool {
-        self.prepare_with_limit(run_id, self.max_live_samples)
-    }
-
-    pub(crate) fn prepare_with_limit(&self, run_id: Uuid, max_live_samples: usize) -> bool {
+    /// Prepare a new run entry under an explicit retained-sample limit.
+    ///
+    /// The limit is the run's configured campaign-health
+    /// `max_live_samples`; it must be at least 1 and no larger than the
+    /// registry's own cap. Returns `false` when the ID already exists or
+    /// the limit is out of range -- callers fail the run rather than
+    /// silently running unmeasured.
+    #[must_use]
+    pub fn prepare_with_limit(&self, run_id: Uuid, max_live_samples: usize) -> bool {
         let mut runs = self
             .runs
             .lock()
@@ -442,7 +445,7 @@ mod tests {
         let start = DateTime::parse_from_rfc3339("2026-09-07T00:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        registry.prepare(run_id);
+        assert!(registry.prepare_with_limit(run_id, 3));
         registry.observe_progress(run_id, &FuzzProgress::EdgesCovered(9), start);
         registry.observe_progress(
             run_id,
@@ -471,7 +474,7 @@ mod tests {
     async fn aborting_finish_still_aborts_the_owned_task_and_removes_live_state() {
         let run_id = Uuid::from_u128(36);
         let registry = Arc::new(RunTelemetryRegistry::new(3));
-        assert!(registry.prepare(run_id));
+        assert!(registry.prepare_with_limit(run_id, 3));
         let task_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let signal = DropSignal(Arc::clone(&task_dropped));
         let handle = tokio::spawn(async move {
@@ -524,7 +527,7 @@ mod tests {
         run.status = hf_storage::RunStatus::Failed;
         store.insert_run(&run).await.unwrap();
         let registry = Arc::new(RunTelemetryRegistry::new(3));
-        assert!(registry.prepare(run_id));
+        assert!(registry.prepare_with_limit(run_id, 3));
         let settings = crate::config::CampaignHealthSettings {
             stale_progress_secs: 37,
             disk_floor_bytes: 1,
@@ -575,7 +578,7 @@ mod tests {
         run.status = hf_storage::RunStatus::Failed;
         store.insert_run(&run).await.unwrap();
         let registry = Arc::new(RunTelemetryRegistry::new(3));
-        assert!(registry.prepare(run_id));
+        assert!(registry.prepare_with_limit(run_id, 3));
         let container =
             crate::container::ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None)
                 .with_store(Arc::clone(&store));
@@ -649,7 +652,7 @@ mod tests {
             crate::container::ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None)
                 .with_store(Arc::clone(&store));
         let registry = Arc::clone(&container.campaign_telemetry);
-        assert!(registry.prepare(run_id));
+        assert!(registry.prepare_with_limit(run_id, 3));
         let started_at = Utc::now();
         for offset in 0..3 {
             let observed_at = started_at + chrono::Duration::seconds(offset);

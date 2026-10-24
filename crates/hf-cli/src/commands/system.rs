@@ -28,6 +28,11 @@ fn doctor_lines(status: &hf_service::SystemStatus) -> Vec<String> {
             }
         ),
     ];
+    // A failed probe must not read as "the image bundles no engine": the
+    // availability flags above are unknown, and only this line says so.
+    if status.engine_probe_failed.is_ready() {
+        lines.push("engine probe failed: availability above is unknown".to_owned());
+    }
     // A missing image must name its remedy, not just its absence.
     if let Some(remedy) = &status.sandbox_image_remedy {
         lines.push(format!("sandbox image missing: {remedy}"));
@@ -531,6 +536,7 @@ mod doctor_tests {
             aflplusplus: StatusFlag::from(false),
             honggfuzz: StatusFlag::from(false),
             syzkaller: StatusFlag::from(false),
+            engine_probe_failed: StatusFlag::from(false),
             defectdojo: StatusFlag::from(false),
             sandbox_image_remedy: None,
         };
@@ -549,6 +555,32 @@ mod doctor_tests {
     }
 
     #[test]
+    fn doctor_output_distinguishes_a_failed_probe_from_missing_engines() {
+        let mut status = SystemStatus {
+            docker: StatusFlag::from(true),
+            sandbox_image: StatusFlag::from(true),
+            libfuzzer: StatusFlag::from(false),
+            aflplusplus: StatusFlag::from(false),
+            honggfuzz: StatusFlag::from(false),
+            syzkaller: StatusFlag::from(false),
+            engine_probe_failed: StatusFlag::from(true),
+            defectdojo: StatusFlag::from(false),
+            sandbox_image_remedy: None,
+        };
+
+        let output = doctor_lines(&status).join("\n");
+        assert!(
+            output.contains("engine probe failed: availability above is unknown"),
+            "{output}"
+        );
+
+        status.engine_probe_failed = StatusFlag::from(false);
+        assert!(!doctor_lines(&status)
+            .join("\n")
+            .contains("engine probe failed"));
+    }
+
+    #[test]
     fn doctor_output_names_the_sandbox_image_remedy_when_the_image_is_missing() {
         let status = SystemStatus {
             docker: StatusFlag::from(true),
@@ -557,6 +589,7 @@ mod doctor_tests {
             aflplusplus: StatusFlag::from(false),
             honggfuzz: StatusFlag::from(false),
             syzkaller: StatusFlag::from(false),
+            engine_probe_failed: StatusFlag::from(false),
             defectdojo: StatusFlag::from(false),
             sandbox_image_remedy: Some(
                 "build it with `oxfuzz doctor --build-image` or `scripts/build-sandbox.sh` (from /repo)"

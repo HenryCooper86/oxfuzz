@@ -26,6 +26,25 @@ pub struct ManagedMutatorStatus {
 fn invalid(message: &str) -> ClassifiedError {
     ClassifiedError::Validation(format!("managed mutator: {message}"))
 }
+
+/// Environment keys only a harness carrying a reviewed custom mutator may set.
+///
+/// Launch ([`stage`]) and guided review ([`rebind_review_mutator_env`]) must
+/// reject the same set, or a baseline carrying `AFL_CUSTOM_MUTATOR_ONLY` (or
+/// `AFL_PYTHON_MODULE`) passes review only to be refused when the run
+/// launches.
+fn requests_absent_plugin_env(config: &FuzzRunConfig) -> bool {
+    config.env.iter().any(|(key, _)| {
+        matches!(
+            key.as_str(),
+            hf_engine::managed_mutator::LIBRARY_ENV
+                | hf_engine::managed_mutator::DIGEST_ENV
+                | hf_engine::managed_mutator::IMAGE_ENV
+                | "AFL_CUSTOM_MUTATOR_ONLY"
+                | "AFL_PYTHON_MODULE"
+        )
+    })
+}
 fn enabled() -> Result<(), ClassifiedError> {
     if cfg!(feature = "managed-mutators") {
         Ok(())
@@ -178,16 +197,7 @@ pub(super) fn stage(
     qualification: bool,
 ) -> Result<(), ClassifiedError> {
     let Some(record) = &harness.custom_mutator else {
-        if config.env.iter().any(|(key, _)| {
-            matches!(
-                key.as_str(),
-                hf_engine::managed_mutator::LIBRARY_ENV
-                    | hf_engine::managed_mutator::DIGEST_ENV
-                    | hf_engine::managed_mutator::IMAGE_ENV
-                    | "AFL_CUSTOM_MUTATOR_ONLY"
-                    | "AFL_PYTHON_MODULE"
-            )
-        }) {
+        if requests_absent_plugin_env(config) {
             return Err(invalid(
                 "run environment requests a plugin absent from its reviewed harness",
             ));
@@ -253,6 +263,117 @@ pub(super) fn normalize_review_paths(config: &mut FuzzRunConfig) {
     for (key, value) in &mut config.env {
         if key == hf_engine::managed_mutator::LIBRARY_ENV {
             *value = "/work/runs/<run>/input/harness.mutator.so".into();
+        }
+    }
+}
+
+/// Re-derive the managed-mutator environment for a guided review from the
+/// CURRENT harness record, exactly as [`stage`] will at launch, without
+/// staging artifacts. The launch-side rewrite happens after this review binds
+/// its digest, so a mutator change between review and launch must not make
+/// the two digests diverge by construction.
+#[cfg(feature = "coverage-experiments")]
+pub(super) fn rebind_review_mutator_env(
+    harness: &Harness,
+    config: &mut FuzzRunConfig,
+) -> Result<(), ClassifiedError> {
+    let Some(record) = &harness.custom_mutator else {
+        if requests_absent_plugin_env(config) {
+            return Err(invalid(
+                "run environment requests a plugin absent from its reviewed harness",
+            ));
+        }
+        return Ok(());
+    };
+    enabled()?;
+    if record.api == MutatorApi::AflPlusPlus {
+        let keys = [
+            hf_engine::managed_mutator::LIBRARY_ENV,
+            hf_engine::managed_mutator::DIGEST_ENV,
+            hf_engine::managed_mutator::IMAGE_ENV,
+            "AFL_CUSTOM_MUTATOR_ONLY",
+        ];
+        config.env.retain(|(key, _)| !keys.contains(&key.as_str()));
+        config.env.extend([
+            // The launch side writes a run-specific container path here that
+            // `normalize_review_paths` then normalizes; bind that normalized
+            // form directly.
+            (
+                hf_engine::managed_mutator::LIBRARY_ENV.into(),
+                "/work/runs/<run>/input/harness.mutator.so".into(),
+            ),
+            (
+                hf_engine::managed_mutator::DIGEST_ENV.into(),
+                record.artifact_sha256.clone(),
+            ),
+            (
+                hf_engine::managed_mutator::IMAGE_ENV.into(),
+                record.sandbox_image_id.clone(),
+            ),
+        ]);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[cfg(feature = "coverage-experiments")]
+mod tests {
+    use super::*;
+    use hf_core::harness::BuildCommand;
+    use std::path::PathBuf;
+
+    fn baseline(env: (&str, &str)) -> (Harness, FuzzRunConfig) {
+        let harness = Harness {
+            id: Uuid::new_v4(),
+            target_id: Uuid::new_v4(),
+            engine: EngineKind::AflPlusPlus,
+            source: "int main(void) { return 0; }".to_owned(),
+            language: TargetLanguage::C,
+            build_cmd: BuildCommand {
+                compiler: "clang".to_owned(),
+                args: Vec::new(),
+                output: PathBuf::from("fuzz_baseline"),
+                extra_flags: Vec::new(),
+            },
+            sanitizer: hf_core::target::Sanitizer::Address,
+            status: HarnessStatus::Promoted,
+            smoke_run: None,
+            custom_mutator: None,
+            cmplog: None,
+        };
+        let config = FuzzRunConfig {
+            harness_id: harness.id,
+            engine: EngineKind::AflPlusPlus,
+            duration: Some(std::time::Duration::from_secs(60)),
+            max_mem_mb: 2048,
+            max_cpus: 1,
+            seed_corpus: None,
+            sanitizer: hf_core::target::Sanitizer::Address,
+            env: vec![(env.0.to_owned(), env.1.to_owned())],
+            extra_args: Vec::new(),
+            seed: None,
+            replay_of: None,
+            input_manifest_sha256: None,
+            input_timeout: None,
+            resume: false,
+            cmplog: false,
+        };
+        (harness, config)
+    }
+
+    /// A guided review must reject the same plugin-environment keys launch
+    /// rejects for a harness with no custom mutator; otherwise a baseline
+    /// carrying `AFL_CUSTOM_MUTATOR_ONLY` (or `AFL_PYTHON_MODULE`) sails
+    /// through review only to be refused when the run launches.
+    #[test]
+    fn review_rejects_plugin_env_for_a_harness_without_a_custom_mutator() {
+        for key in ["AFL_CUSTOM_MUTATOR_ONLY", "AFL_PYTHON_MODULE"] {
+            let (harness, mut config) = baseline((key, "1"));
+            let error = rebind_review_mutator_env(&harness, &mut config).unwrap_err();
+            assert!(
+                error.to_string().contains("plugin absent"),
+                "review must reject {key} like launch: {error}"
+            );
         }
     }
 }

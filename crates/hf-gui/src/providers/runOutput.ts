@@ -55,7 +55,6 @@ export interface RunOutputValue {
   replayRun: (review: ReplayReview) => Promise<number>;
   runSyzkaller: (options: Record<string, unknown>) => Promise<number>;
   cancelRun: () => Promise<void>;
-  clear: () => void;
 }
 
 export const EMPTY_RUN_STATS: RunStats = {
@@ -84,7 +83,6 @@ export function useRunOutput(): RunOutputValue {
       replayRun: async () => { throw new Error("Run controller unavailable"); },
       runSyzkaller: async () => 0,
       cancelRun: async () => {},
-      clear: () => {},
     }
   );
 }

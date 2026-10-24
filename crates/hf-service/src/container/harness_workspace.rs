@@ -207,26 +207,75 @@ pub(super) fn read_dictionary_source_excerpt(workspace: &Path, max_bytes: usize)
 const MAX_DICTIONARY_SOURCE_BYTES: usize = 8 * 1024 * 1024;
 
 fn dictionary_source_paths(workspace: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(workspace) else {
-        // Dictionary enrichment is optional when the workspace cannot be listed.
-        return Vec::new();
-    };
+    // Staging preserves each source's project-relative path (`stage_file`
+    // recreates `src/foo.c` under the workspace), so dictionary inspection
+    // must walk the staged tree rather than the workspace root: a flat
+    // `read_dir` never sees the common `src/`-below-root layout and the
+    // engine dictionary silently never exists.
     let mut paths = Vec::new();
-    for entry in entries.take(MAX_STAGED_FILES) {
-        let Ok(entry) = entry else {
-            // Unreadable entries cannot supply optional source tokens.
-            continue;
-        };
-        let path = PathBuf::from(entry.file_name());
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if matches!(ext, "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh")
-            && path.file_stem().and_then(|s| s.to_str()) != Some("harness")
-        {
-            paths.push(path);
-        }
-    }
+    let mut inspected = 0usize;
+    walk_dictionary_sources(
+        workspace,
+        Path::new(""),
+        workspace,
+        &mut paths,
+        &mut inspected,
+    );
     paths.sort();
     paths
+}
+
+/// Bounded recursive descent mirroring `stage_tree`: same skipped directory
+/// names, same symlink refusal, same file cap, sorted for determinism.
+fn walk_dictionary_sources(
+    root: &Path,
+    relative: &Path,
+    directory: &Path,
+    paths: &mut Vec<PathBuf>,
+    inspected: &mut usize,
+) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        // Dictionary enrichment is optional when the workspace cannot be listed.
+        return;
+    };
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        if *inspected >= MAX_STAGED_FILES {
+            tracing::warn!(
+                "stopped dictionary inspection {} at the {MAX_STAGED_FILES} file limit",
+                root.display()
+            );
+            return;
+        }
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_symlink() {
+            continue;
+        }
+        let name = entry.file_name();
+        let child_relative = relative.join(&name);
+        if kind.is_dir() {
+            if STAGING_SKIP_DIRS
+                .iter()
+                .any(|skipped| std::ffi::OsStr::new(skipped) == name)
+            {
+                continue;
+            }
+            walk_dictionary_sources(root, &child_relative, &entry.path(), paths, inspected);
+        } else if kind.is_file() {
+            *inspected += 1;
+            let is_source = matches!(
+                Path::new(&name).extension().and_then(|e| e.to_str()),
+                Some("c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh")
+            ) && Path::new(&name).file_stem()
+                != Some(std::ffi::OsStr::new("harness"));
+            if is_source {
+                paths.push(child_relative);
+            }
+        }
+    }
 }
 
 fn read_dictionary_source(
@@ -537,7 +586,7 @@ pub fn stage_generated_build_inputs(
         {
             continue;
         }
-        stage_one_generated_source(&file, &workspace.join(relative), &mut staged)?;
+        stage_one_generated_source(build_dir, &file, &workspace.join(relative), &mut staged)?;
     }
     Ok(staged)
 }
@@ -556,7 +605,16 @@ fn database_file_in_project(file: &Path, project: &Path) -> Option<PathBuf> {
 }
 
 /// Copy one database-referenced generated source at its project-relative path.
+///
+/// The source must stay inside `root` (the configured build directory) along
+/// its whole path: the final-component regular-file check below cannot see an
+/// intermediate symlinked directory, and `fs::copy` follows one, which would
+/// read attacker-chosen bytes from elsewhere on the host into the sandbox
+/// workspace. Canonicalizing source and root and comparing component-wise
+/// (`Path::starts_with`) resolves every intermediate link, so only links that
+/// stay within the build directory survive.
 fn stage_one_generated_source(
+    root: &Path,
     source: &Path,
     destination: &Path,
     staged: &mut usize,
@@ -570,6 +628,24 @@ fn stage_one_generated_source(
     if !metadata.file_type().is_file() {
         return Err(ClassifiedError::Validation(format!(
             "generated source {} is not a regular file",
+            source.display()
+        )));
+    }
+    let resolved_root = root.canonicalize().map_err(|error| {
+        ClassifiedError::Validation(format!(
+            "resolve build directory {}: {error}",
+            root.display()
+        ))
+    })?;
+    let resolved_source = source.canonicalize().map_err(|error| {
+        ClassifiedError::Validation(format!(
+            "resolve generated source {}: {error}",
+            source.display()
+        ))
+    })?;
+    if !resolved_source.starts_with(&resolved_root) {
+        return Err(ClassifiedError::Validation(format!(
+            "generated source {} resolves outside the configured build directory",
             source.display()
         )));
     }
@@ -871,6 +947,57 @@ mod harness_source_tests {
             read_current_harness_source(workspace.path()).as_deref(),
             Some("active Rust source")
         );
+    }
+}
+
+#[cfg(test)]
+mod dictionary_source_tests {
+    use super::{build_workspace_dictionary, dictionary_source_paths};
+    use std::path::PathBuf;
+
+    /// Staging recreates each source at its project-relative path, so the
+    /// common `src/`-below-root layout must still yield dictionary tokens: a
+    /// flat scan of the workspace root would find no sources at all.
+    #[test]
+    fn dictionary_sources_walk_the_staged_tree() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path();
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::fs::create_dir_all(workspace.join("include")).unwrap();
+        std::fs::write(
+            workspace.join("src/parser.c"),
+            b"if (memcmp(tag, \"MAGI\", 4)) { return 1; }",
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.join("include/const.h"),
+            b"#define MAGIC_KEYWORD \"OPAQUE\"\n",
+        )
+        .unwrap();
+        // The generated harness itself is excluded from dictionary mining.
+        std::fs::write(workspace.join("harness.c"), b"\"NOT_A_TOKEN\"").unwrap();
+        // Build output is never a source of literals.
+        std::fs::create_dir_all(workspace.join("build")).unwrap();
+        std::fs::write(workspace.join("build/gen.c"), b"\"BUILD_TOKEN\"").unwrap();
+
+        let paths = dictionary_source_paths(workspace);
+
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("include/const.h"),
+                PathBuf::from("src/parser.c")
+            ],
+            "nested staged sources are found; harness and build output are not"
+        );
+        let dictionary = build_workspace_dictionary(workspace, "test.dict");
+        let dictionary = dictionary.expect("nested literals produce a dictionary");
+        let rendered = std::fs::read_to_string(workspace.join("test.dict")).unwrap();
+        assert!(dictionary.ends_with("test.dict"));
+        assert!(rendered.contains("MAGI"), "{rendered}");
+        assert!(rendered.contains("OPAQUE"), "{rendered}");
+        assert!(!rendered.contains("NOT_A_TOKEN"), "{rendered}");
+        assert!(!rendered.contains("BUILD_TOKEN"), "{rendered}");
     }
 }
 
@@ -1349,5 +1476,51 @@ mod sandbox_link_tests {
             "a symlinked referenced source must fail closed"
         );
         assert!(!workspace.path().join("build/gen.c").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generated_input_staging_refuses_an_intermediate_symlink_directory() {
+        // The referenced file itself is a regular file; the directory on its
+        // path is a symlink out of the build tree. A final-component-only
+        // check passes this shape, and `fs::copy` would follow the link, so
+        // the whole path must be resolved and contained (VULN-003).
+        let project = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let build = project.path().join("build");
+        std::fs::create_dir_all(&build).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(
+            outside.path().join("generated.c"),
+            "int main(void) { return 0; }\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(outside.path(), build.join("gen")).unwrap();
+        let database = build.join("compile_commands.json");
+        std::fs::write(
+            &database,
+            serde_json::json!([
+                {
+                    "directory": &build,
+                    "file": build.join("gen/generated.c"),
+                    "arguments": ["cc", "-c", build.join("gen/generated.c")]
+                }
+            ])
+            .to_string(),
+        )
+        .unwrap();
+
+        let outcome = stage_generated_build_inputs(project.path(), &database, workspace.path());
+
+        assert!(
+            outcome.is_err(),
+            "a generated source reached through an intermediate symlink outside the build \
+             directory must fail closed"
+        );
+        assert!(!workspace.path().join("build/gen/generated.c").exists());
+        assert!(
+            !workspace.path().join("build/gen").exists(),
+            "no byte of the outside tree may land in the workspace"
+        );
     }
 }

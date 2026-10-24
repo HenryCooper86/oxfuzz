@@ -340,8 +340,9 @@ async fn schedule_definitions_and_id_mutations_stay_within_approved_roots() {
     }
     assert!(
         scheduler
-            .list()
+            .list_views()
             .await
+            .unwrap()
             .iter()
             .find(|s| s.id == ids[1])
             .unwrap()
@@ -763,7 +764,7 @@ async fn bearer_auth_is_fail_closed_and_never_echoes_the_token() {
 async fn cors_preflight_allows_only_an_exact_configured_origin() {
     let root = tempfile::tempdir().unwrap();
     let security = WebSecurityConfig::new(
-        Some("cors-test-token".to_owned()),
+        Some("cors-test-token-0123456789".to_owned()),
         false,
         vec!["http://localhost:5173".to_owned()],
         vec![root.path().to_path_buf()],
@@ -827,7 +828,7 @@ async fn cors_preflight_allows_only_an_exact_configured_origin() {
                 .method(Method::POST)
                 .uri("/config/toml_to_value")
                 .header(header::ORIGIN, "https://evil.example")
-                .header(header::AUTHORIZATION, "Bearer cors-test-token")
+                .header(header::AUTHORIZATION, "Bearer cors-test-token-0123456789")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"content":"enabled = true"}"#))
                 .unwrap(),
@@ -841,7 +842,7 @@ async fn cors_preflight_allows_only_an_exact_configured_origin() {
 async fn cors_preflight_allows_typed_config_patch_from_an_approved_origin() {
     let root = tempfile::tempdir().unwrap();
     let security = WebSecurityConfig::new(
-        Some("cors-patch-token".to_owned()),
+        Some("cors-patch-token-0123456789".to_owned()),
         false,
         vec!["http://localhost:5173".to_owned()],
         vec![root.path().to_path_buf()],

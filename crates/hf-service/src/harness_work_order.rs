@@ -170,6 +170,14 @@ pub struct HarnessWorkOrderPayload {
     pub harness_rules: Vec<WorkOrderRule>,
     /// Content-addressed seed references.
     pub seeds: Vec<WorkOrderSeedReference>,
+    /// Whether more retained seed references existed than [`MAX_WORK_ORDER_SEEDS`]
+    /// carries, so the seed evidence is deliberately incomplete -- the
+    /// authoring party must be able to tell. Serialized only when `true`:
+    /// the wire format predates the marker, so an untruncated packet
+    /// digests byte-identically to the pre-marker format and retained rows
+    /// keep verifying.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub seeds_truncated: bool,
     /// Semantic validation operations in execution order.
     pub validation_steps: Vec<WorkOrderStep>,
 }
@@ -548,10 +556,24 @@ pub fn work_order_commands(work_order: &HarnessWorkOrder) -> Vec<WorkOrderComman
 
 /// Remove credentials and absolute host paths from one bounded public
 /// diagnostic.
+///
+/// Non-whitespace control characters (ANSI escapes from colored compiler
+/// output, stray `\u{1}` bytes) are replaced with separators: the read-side
+/// validator rejects any control character, so the write path must satisfy it
+/// by construction rather than persisting a row no later read can decode.
 #[must_use]
 pub fn sanitize_work_order_diagnostic(message: &str, maximum_bytes: usize) -> String {
     let mut redact_next = false;
     let sanitized = message
+        .chars()
+        .map(|character| {
+            if character.is_control() && !character.is_whitespace() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
         .split_whitespace()
         .map(|token| sanitize_diagnostic_token(token, &mut redact_next))
         .collect::<Vec<_>>()
@@ -857,6 +879,14 @@ pub fn render_work_order(work_order: &HarnessWorkOrder) -> String {
             );
         }
     }
+    if payload.seeds_truncated {
+        line(
+            &mut output,
+            &format!(
+                "- Truncated: only the first {MAX_WORK_ORDER_SEEDS} retained references are carried"
+            ),
+        );
+    }
     line(&mut output, "");
     line(&mut output, "## Validation steps");
     line(&mut output, "");
@@ -902,7 +932,7 @@ fn canonical_payload(
     normalize_strings(&mut payload.compile_context.extra_flags);
     normalize_strings(&mut payload.compile_context.dropped_flags);
     normalize_rules(&mut payload.harness_rules);
-    normalize_seeds(&mut payload.seeds)?;
+    normalize_seeds(&mut payload.seeds, payload.seeds_truncated)?;
     normalize_steps(&mut payload.validation_steps);
     payload.compile_context_sha256 = sha256_hex(&canonical_json(&payload.compile_context)?);
     Ok(payload)
@@ -986,7 +1016,10 @@ fn normalize_rules(rules: &mut Vec<WorkOrderRule>) {
     rules.dedup();
 }
 
-fn normalize_seeds(seeds: &mut Vec<WorkOrderSeedReference>) -> Result<(), HarnessWorkOrderError> {
+fn normalize_seeds(
+    seeds: &mut Vec<WorkOrderSeedReference>,
+    seeds_truncated: bool,
+) -> Result<(), HarnessWorkOrderError> {
     for seed in &*seeds {
         validate_sha256(&seed.sha256, "seed SHA-256")?;
     }
@@ -996,6 +1029,12 @@ fn normalize_seeds(seeds: &mut Vec<WorkOrderSeedReference>) -> Result<(), Harnes
         return Err(HarnessWorkOrderError::validation(
             HarnessWorkOrderErrorCode::SeedLimitExceeded,
             format!("packet has more than {MAX_WORK_ORDER_SEEDS} seed references"),
+        ));
+    }
+    if seeds_truncated && seeds.len() != MAX_WORK_ORDER_SEEDS {
+        return Err(HarnessWorkOrderError::validation(
+            HarnessWorkOrderErrorCode::InvalidRequest,
+            "a truncated seed set must carry exactly the packet bound",
         ));
     }
     Ok(())
@@ -1166,5 +1205,36 @@ fn step_label(step: &WorkOrderStep) -> &'static str {
         WorkOrderStep::Promote => "Promote",
         WorkOrderStep::RunCampaign { .. } => "Run campaign",
         WorkOrderStep::Coverage => "Coverage",
+    }
+}
+
+#[cfg(test)]
+mod sanitize_diagnostic_tests {
+    use super::sanitize_work_order_diagnostic;
+
+    /// The read-side validator (`valid_failure_message`) rejects any control
+    /// character and requires the sanitized form to be a fixed point, so the
+    /// write path must strip compiler-diagnostic controls (ANSI color escapes
+    /// are the norm) and stay idempotent.
+    #[test]
+    fn sanitize_strips_control_characters_and_is_idempotent() {
+        let maximum_bytes = 4_096;
+        let raw = "clang \u{1b}[31merror\u{1b}[0m: expected ';' after token\u{7f}";
+
+        let sanitized = sanitize_work_order_diagnostic(raw, maximum_bytes);
+
+        assert!(
+            !sanitized.chars().any(char::is_control),
+            "a written failure message must satisfy the read validator: {sanitized:?}"
+        );
+        assert!(
+            sanitized.contains("clang"),
+            "the readable words survive: {sanitized:?}"
+        );
+        assert_eq!(
+            sanitize_work_order_diagnostic(&sanitized, maximum_bytes),
+            sanitized,
+            "sanitization must be a fixed point so the row reads back"
+        );
     }
 }

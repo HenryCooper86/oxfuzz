@@ -934,8 +934,10 @@ impl ServiceContainer {
                         status: compiled.status,
                         binary_name,
                         workspace: workspace.to_path_buf(),
+                        harness_id: compiled.id,
                         repairs_used,
                         lint,
+                        source: compiled.source,
                     });
                 }
                 hf_harness::CompileResult::Failed(failure) => {
@@ -1836,7 +1838,7 @@ impl ServiceContainer {
             &artifacts.output_host,
             MAX_RUN_OUTPUT_BYTES,
             MAX_RUN_OUTPUT_ENTRIES,
-            64 * 1024 * 1024,
+            super::output_budget::MAX_RUN_OUTPUT_FILE_BYTES,
         ) == OutputBudget::Exceeded
             || output_budget_status(
                 &artifacts.corpus_host,
@@ -2136,13 +2138,24 @@ impl ServiceContainer {
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
         let seeds = generate_target_seeds(target);
+        // The report covers exactly the entries this call wrote, never the
+        // pre-existing inventory the relist folds in.
+        let written: std::collections::HashSet<String> =
+            seeds.iter().map(|(_, name)| name.clone()).collect();
         let target_id = self.resolve_target_id_any_language(project, target).await?;
         let corpus = hf_corpus::seed(target_id, &corpus_dir, seeds).await?;
-        self.persist_corpus(target_id, &hf_corpus::list(&corpus_dir)?)
-            .await?;
+        // Persist the full inventory (with Seed provenance on the writes).
+        self.persist_corpus(target_id, &corpus).await?;
         corpus
             .entries
             .into_iter()
+            .filter(|entry| {
+                entry
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| written.contains(name))
+            })
             .map(|entry| {
                 let name = entry
                     .path
@@ -2262,10 +2275,21 @@ impl ServiceContainer {
             self.verify_harness_build_inputs(project, harness, true)
                 .await?;
         }
+        // The report covers exactly the entries this call wrote, never the
+        // pre-existing inventory the relist folds in.
+        let written: std::collections::HashSet<String> =
+            named_seeds.iter().map(|(_, name)| name.clone()).collect();
         let generated = hf_corpus::seed(target_id, &corpus_dir, named_seeds).await?;
         let entries = generated
             .entries
-            .into_iter()
+            .iter()
+            .filter(|entry| {
+                entry
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| written.contains(name))
+            })
             .map(|entry| {
                 let name = entry
                     .path
@@ -2277,12 +2301,12 @@ impl ServiceContainer {
                 Ok(SeedEntry {
                     name,
                     size,
-                    sha256: entry.sha256,
+                    sha256: entry.sha256.clone(),
                 })
             })
             .collect::<Result<Vec<_>, ClassifiedError>>()?;
-        let corpus = hf_corpus::list(&corpus_dir)?;
-        self.persist_corpus(target_id, &corpus).await?;
+        // Persist the full inventory (with Seed provenance on the writes).
+        self.persist_corpus(target_id, &generated).await?;
         Ok(entries)
     }
 
@@ -2333,9 +2357,13 @@ impl ServiceContainer {
                 dies.then_some(name)
             })
             .collect();
+        // The generation request is bounded, so the reported request count is
+        // the clamped value the provider actually sees, not the dead count.
+        // Clamping happens only once there is a non-empty dead set to replace:
+        // an empty pass reports zero requested, never a phantom clamped one.
         let mut outcome = super::SeedRegenerationOutcome {
             removed_dead: dead_generated.len(),
-            replacements_requested: dead_generated.len(),
+            replacements_requested: 0,
             replacements_added: 0,
             replacement_survives: 0,
             replacement_dies_at_entry: 0,
@@ -2344,6 +2372,8 @@ impl ServiceContainer {
         if dead_generated.is_empty() {
             return Ok(outcome);
         }
+        let requested = dead_generated.len().clamp(1, 64);
+        outcome.replacements_requested = requested;
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
         self.verify_corpus_build_inputs(
@@ -2355,7 +2385,11 @@ impl ServiceContainer {
         .await?;
         hf_corpus::remove(&corpus_dir, &dead_generated)?;
 
-        let count = dead_generated.len().clamp(1, 64);
+        // One namespace per pass: a later pass must never overwrite a prior
+        // pass's surviving replacements by reusing their names, and the
+        // outcome below must count only this pass's names.
+        let pass_id = uuid::Uuid::new_v4().simple().to_string();
+        let pass = &pass_id[..8];
         let mut replacements: Vec<(Vec<u8>, String)> = Vec::new();
         if let Some(pool) = self.provider_pool() {
             if let Ok(inv) = self.discover(project, lang).await {
@@ -2369,7 +2403,8 @@ impl ServiceContainer {
                     .await?;
                     let provider = LlmProviderBridge::new(pool)
                         .with_diagnostics(Arc::clone(&self.diagnostics), "seed_regen");
-                    match hf_harness::generate_seeds(candidate, count, Box::new(provider)).await {
+                    match hf_harness::generate_seeds(candidate, requested, Box::new(provider)).await
+                    {
                         Ok(seeds) => {
                             let mut seen = std::collections::HashSet::new();
                             for (i, data) in seeds.into_iter().enumerate() {
@@ -2378,7 +2413,7 @@ impl ServiceContainer {
                                 if !seen.insert(sha) {
                                     continue;
                                 }
-                                replacements.push((data, format!("regen_{i}")));
+                                replacements.push((data, format!("regen_{pass}_{i}")));
                             }
                         }
                         Err(e) => {
@@ -2396,15 +2431,31 @@ impl ServiceContainer {
             "regenerate_dead_seeds",
         )
         .await?;
+        let this_pass: std::collections::HashSet<String> =
+            replacements.iter().map(|(_, name)| name.clone()).collect();
         if !replacements.is_empty() {
             let seeded = hf_corpus::seed(target_id, &corpus_dir, replacements).await?;
-            outcome.replacements_added = seeded.entries.len();
+            // `seed` returns the full relisted corpus; only this pass's
+            // names are replacements it added.
+            outcome.replacements_added = seeded
+                .entries
+                .iter()
+                .filter(|entry| {
+                    entry
+                        .path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| this_pass.contains(name))
+                })
+                .count();
         }
         let (_corpus_after, _report_after, verdicts_after) = self
             .measure_corpus_survival(project, target, "regenerate_dead_seeds")
             .await?;
         for (name, verdict) in verdicts_after {
-            if !name.starts_with("regen_") {
+            // Only this pass's names: survivors of earlier passes are not
+            // replacements this pass added, and must not inflate the verdicts.
+            if !this_pass.contains(&name) {
                 continue;
             }
             match verdict {
@@ -2503,7 +2554,10 @@ impl ServiceContainer {
         }
 
         let mut evidence: Vec<HarnessCandidateEvidence> = Vec::with_capacity(sources.len());
-        let mut winning_sources: Vec<(usize, String)> = Vec::new();
+        // Each compiled candidate's POST-REPAIR source: the workspace's final
+        // selection must be restored from what actually compiled, never from
+        // the original draft (which may never have built).
+        let mut compiled_sources: Vec<(usize, String)> = Vec::new();
         for (index, (origin, source)) in sources.into_iter().enumerate() {
             let source_sha256 = sha256_hex(source.as_bytes());
             match self
@@ -2523,7 +2577,14 @@ impl ServiceContainer {
                     // one. A smoke that cannot run leaves the evidence absent
                     // rather than inventing a verdict.
                     let smoke = match self
-                        .harness_smoke(project, &req.target, req.engine, req.lang)
+                        .harness_smoke_exact(
+                            project,
+                            &req.target,
+                            req.engine,
+                            req.lang,
+                            outcome.harness_id,
+                            HarnessReviewBypass::NotRequested,
+                        )
                         .await
                     {
                         Ok(outcome) => Some(SmokeEvidence {
@@ -2536,7 +2597,7 @@ impl ServiceContainer {
                             None
                         }
                     };
-                    winning_sources.push((index, source));
+                    compiled_sources.push((index, outcome.source));
                     evidence.push(HarnessCandidateEvidence {
                         index,
                         origin,
@@ -2568,31 +2629,29 @@ impl ServiceContainer {
             .iter()
             .copied()
             .find(|index| evidence[*index].compiled);
-
         // Each compile overwrote the workspace's active-harness marker and
-        // binary, so the last candidate's artifacts are in place. Recompile the
-        // winner so the workspace holds the selection. Bookkeeping over an
-        // already-evaluated source, not new evidence.
+        // binary, so the last candidate's artifacts are in place. Recompile
+        // the winner -- from the source that actually compiled -- so the
+        // workspace holds the selection the result names. Bookkeeping over
+        // already-evaluated evidence, not new evidence; a failure means the
+        // workspace does not hold the reported winner, which is an error
+        // rather than a silent mismatch.
         if let Some(winner) = winner_index {
-            if let Some((_, source)) = winning_sources
+            if let Some((_, source)) = compiled_sources
                 .iter()
                 .find(|(index, _)| *index == winner)
                 .cloned()
             {
-                if let Err(error) = self
-                    .compile_source_with_repair(
-                        &candidate,
-                        &req.target,
-                        req.engine,
-                        req.lang,
-                        &workspace,
-                        source,
-                        0,
-                    )
-                    .await
-                {
-                    tracing::warn!(%error, "could not restore the tournament winner's artifacts");
-                }
+                self.compile_source_with_repair(
+                    &candidate,
+                    &req.target,
+                    req.engine,
+                    req.lang,
+                    &workspace,
+                    source,
+                    0,
+                )
+                .await?;
             }
         }
 

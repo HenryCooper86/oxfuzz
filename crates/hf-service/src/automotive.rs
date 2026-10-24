@@ -28,10 +28,12 @@ use crate::container::{
     ensure_workspace_directory, initialize_workspace_root_at, project_workspace_dir_at,
 };
 use crate::ServiceContainer;
-
 pub use hf_automotive::{
     AutomotiveMode, AutomotiveProtocol, AutomotiveResult, ModeConfig, ReplayPlan, StateSignature,
 };
+use hmac::Mac as _;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt as _;
 
 const SIDECAR_INPUT_ROOT: &str = "/work/inputs";
 const SIDECAR_OUTPUT_ROOT: &str = "/work/output";
@@ -49,12 +51,23 @@ const DANGEROUS_UDS_SERVICES: &[u8] = &[
 pub struct AutomotiveApprovalEvidence {
     /// Correlation id copied into the physical [`ModeConfig`].
     pub approval_id: String,
-    /// Operator identity or local desktop attribution.
+    /// Operator identity or local desktop attribution. Authenticated data:
+    /// covered by [`Self::scope_hmac`], so a minted approval cannot be
+    /// relabelled after the fact.
     pub approved_by: String,
-    /// Time approval was recorded.
+    /// Time approval was recorded. Set by the server at mint time and covered
+    /// by [`Self::scope_hmac`].
     pub approved_at: DateTime<Utc>,
-    /// SHA-256 over the exact command, limits, and physical allowlists.
+    /// SHA-256 over the exact command, limits, and physical allowlists. The
+    /// pinned sidecar recomputes this unkeyed digest inside the sandbox, so it
+    /// stays plain; it is no longer the authorization gate (see
+    /// [`Self::scope_hmac`]).
     pub scope_sha256: String,
+    /// Keyed binding (HMAC-SHA256, server-held key) over the scope fields
+    /// *including* `approval_id`, `approved_by` and `approved_at`. Unlike the
+    /// plain scope hash, this cannot be recomputed by a caller, so presenting
+    /// self-made evidence fails verification (VULN-010/VULN-012).
+    pub scope_hmac: String,
     /// Immutable sidecar image content digest included in the approved scope.
     pub sidecar_image_sha256: String,
 }
@@ -309,6 +322,28 @@ struct PreparedOperation {
     execution_config: Option<String>,
 }
 
+/// Operator request to mint keyed physical-bench approval evidence.
+///
+/// This is the operator-side mint path (VULN-010): no production code minted
+/// approval evidence before, so callers computed the unkeyed scope hash
+/// themselves. The mint validates the requested scope against the persisted
+/// operator policy, sets `approved_at` server-side, and returns evidence whose
+/// `scope_hmac` is computed under the server-held key. Storage stays the
+/// existing single-use model: nothing is pre-persisted at mint time, and the
+/// atomic `automotive_consumed_approvals` ledger still makes each approval id
+/// usable exactly once at execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutomotiveApprovalMintRequest {
+    /// Physical interface the approval covers.
+    pub interface: String,
+    /// Exact replay plan the approval authorizes.
+    pub plan: ReplayPlan,
+    /// Local operator identity recorded into the keyed evidence. It is bound
+    /// into the HMAC, so a minted approval cannot be relabelled later.
+    pub approved_by: String,
+}
+
 impl ServiceContainer {
     /// Execute an automotive operation using the current persisted operator
     /// policy. Every sidecar call uses `hf-runtime`; no host Python is invoked.
@@ -323,10 +358,89 @@ impl ServiceContainer {
         let settings =
             crate::config::effective_automotive_settings().map_err(ClassifiedError::Validation)?;
         let workspace = crate::workspace_root();
-        self.execute_automotive_with_context(request, settings, &workspace)
+        let mac_key_dir = approval_mac_key_dir();
+        self.execute_automotive_with_context(request, settings, &workspace, &mac_key_dir)
             .await
     }
 
+    /// Mint keyed approval evidence for one exact physical-bench replay scope
+    /// (the operator flow; see [`AutomotiveApprovalMintRequest`]).
+    ///
+    /// # Errors
+    /// Returns a validation error when the scope violates the persisted
+    /// physical-bench policy, the sidecar image is missing, or the approval
+    /// MAC key cannot be loaded.
+    pub async fn mint_automotive_physical_bench_approval(
+        &self,
+        request: AutomotiveApprovalMintRequest,
+    ) -> Result<AutomotiveApprovalEvidence, ClassifiedError> {
+        let settings =
+            crate::config::effective_automotive_settings().map_err(ClassifiedError::Validation)?;
+        settings.validate().map_err(ClassifiedError::Validation)?;
+        if !settings.enabled {
+            return Err(ClassifiedError::Validation(
+                "automotive Scapy support is disabled in Settings".to_owned(),
+            ));
+        }
+        require_protocol(&settings, request.plan.protocol)?;
+        require_mode(&settings, AutomotiveMode::PhysicalBench)?;
+        let policy = &settings.physical_bench;
+        validate_physical_scope_policy(&request.interface, &request.plan, policy)?;
+        request
+            .plan
+            .validate()
+            .map_err(|error| ClassifiedError::Validation(error.to_string()))?;
+        if request.approved_by.trim().is_empty() {
+            return Err(ClassifiedError::Validation(
+                "approval attribution must not be empty".to_owned(),
+            ));
+        }
+        // Bind to the exact sidecar image the execution will resolve, so a
+        // minted approval cannot be replayed against a different image.
+        if !self
+            .runtime_adapter()
+            .image_present(&settings.sidecar_image)
+            .await
+        {
+            return Err(missing_sidecar_image_error(&settings.sidecar_image));
+        }
+        let sidecar_image = self
+            .runtime_adapter()
+            .resolve_image_reference(&settings.sidecar_image)
+            .await?
+            .ok_or_else(|| missing_sidecar_image_error(&settings.sidecar_image))?;
+        let image_sha256 = sidecar_image.sha256();
+        let mac_key = load_or_create_approval_mac_key(&approval_mac_key_dir())?;
+        let limits = operation_limits(&settings)?;
+        let approval_id = Uuid::new_v4().to_string();
+        let approved_at = Utc::now();
+        let scope_sha256 = approval_scope_hash(
+            &request.interface,
+            &request.plan,
+            policy,
+            &limits,
+            image_sha256,
+        )?;
+        let scope_hmac = approval_scope_hmac(
+            &mac_key,
+            &request.interface,
+            &request.plan,
+            policy,
+            &limits,
+            image_sha256,
+            &approval_id,
+            &request.approved_by,
+            approved_at,
+        )?;
+        Ok(AutomotiveApprovalEvidence {
+            approval_id,
+            approved_by: request.approved_by,
+            approved_at,
+            scope_sha256,
+            scope_hmac,
+            sidecar_image_sha256: image_sha256.to_owned(),
+        })
+    }
     /// List redacted automotive operation history for one canonical project.
     ///
     /// # Errors
@@ -733,8 +847,25 @@ impl ServiceContainer {
         request: AutomotiveOperationRequest,
         settings: AutomotiveSettings,
         workspace: &Path,
+        mac_key_dir: &Path,
     ) -> Result<AutomotiveOperationOutcome, ClassifiedError> {
-        let mut prepared = preflight(request, &settings)?;
+        // Resolve the server-held approval MAC key only on the physical-bench
+        // path: loading the module or running non-physical operations must
+        // never read or create key material, and the key lives in durable
+        // service state beside the database -- never inside the managed
+        // workspace this function initializes below.
+        let mac_key = if matches!(
+            &request.command,
+            AutomotiveCommand::ExecuteReplay {
+                mode: ModeConfig::PhysicalBench { .. },
+                ..
+            }
+        ) {
+            Some(load_or_create_approval_mac_key(mac_key_dir)?)
+        } else {
+            None
+        };
+        let mut prepared = preflight(request, &settings, mac_key.as_ref())?;
         let store = self.store().cloned().ok_or_else(|| {
             ClassifiedError::Storage(
                 "automotive operations require durable evidence storage".to_owned(),
@@ -756,7 +887,12 @@ impl ServiceContainer {
             .resolve_image_reference(&settings.sidecar_image)
             .await?
             .ok_or_else(|| missing_sidecar_image_error(&settings.sidecar_image))?;
-        validate_resolved_image_approval(&prepared, &settings, sidecar_image.sha256())?;
+        validate_resolved_image_approval(
+            &prepared,
+            &settings,
+            sidecar_image.sha256(),
+            mac_key.as_ref(),
+        )?;
         prepared.execution_config = build_execution_config(
             &prepared.command,
             prepared.approval.as_ref(),
@@ -799,6 +935,7 @@ impl ServiceContainer {
                 &prepared,
                 &settings,
                 sidecar_image.sha256(),
+                mac_key.as_ref(),
                 claimed_at,
             )?;
             let claimed = store
@@ -1823,6 +1960,7 @@ fn state_corpus_entry(
 fn preflight(
     request: AutomotiveOperationRequest,
     settings: &AutomotiveSettings,
+    mac_key: Option<&[u8; 32]>,
 ) -> Result<PreparedOperation, ClassifiedError> {
     settings.validate().map_err(ClassifiedError::Validation)?;
     if !settings.enabled {
@@ -1917,7 +2055,14 @@ fn preflight(
             })
         }
         AutomotiveCommand::ExecuteReplay { mode, plan } => {
-            validate_replay_policy(mode, plan, request.approval.as_ref(), settings, &limits)?;
+            validate_replay_policy(
+                mode,
+                plan,
+                request.approval.as_ref(),
+                settings,
+                &limits,
+                mac_key,
+            )?;
             AutomotiveRequest::ExecuteReplay(ReplayRequest {
                 mode: mode.clone(),
                 plan: plan.clone(),
@@ -2377,6 +2522,7 @@ fn validate_replay_policy(
     approval: Option<&AutomotiveApprovalEvidence>,
     settings: &AutomotiveSettings,
     limits: &OperationLimits,
+    mac_key: Option<&[u8; 32]>,
 ) -> Result<(), ClassifiedError> {
     plan.validate()
         .map_err(|error| ClassifiedError::Validation(error.to_string()))?;
@@ -2407,6 +2553,7 @@ fn validate_replay_policy(
             &settings.physical_bench,
             limits,
             None,
+            mac_key,
         ),
     }
 }
@@ -2503,6 +2650,7 @@ fn validate_physical_policy(
     policy: &AutomotivePhysicalBenchSettings,
     limits: &OperationLimits,
     sidecar_image_sha256: Option<&str>,
+    mac_key: Option<&[u8; 32]>,
 ) -> Result<(), ClassifiedError> {
     validate_physical_policy_at(
         interface,
@@ -2514,6 +2662,7 @@ fn validate_physical_policy(
         PhysicalApprovalContext {
             sidecar_image_sha256,
             now: Utc::now(),
+            mac_key,
         },
     )
 }
@@ -2522,16 +2671,19 @@ fn validate_physical_policy(
 struct PhysicalApprovalContext<'a> {
     sidecar_image_sha256: Option<&'a str>,
     now: DateTime<Utc>,
+    /// Server-held key verifying the keyed approval binding (VULN-010/012).
+    /// `None` only on paths that never verify the binding; a resolved-image
+    /// physical-bench context fails closed without it.
+    mac_key: Option<&'a [u8; 32]>,
 }
 
-fn validate_physical_policy_at(
+/// Policy conformance of the scope itself, independent of any approval
+/// evidence. Shared by verification and minting so both admit exactly the
+/// same scopes.
+fn validate_physical_scope_policy(
     interface: &str,
-    approval_id: &str,
     plan: &ReplayPlan,
-    approval: Option<&AutomotiveApprovalEvidence>,
     policy: &AutomotivePhysicalBenchSettings,
-    limits: &OperationLimits,
-    context: PhysicalApprovalContext<'_>,
 ) -> Result<(), ClassifiedError> {
     if !policy.enabled || !policy.interfaces.iter().any(|allowed| allowed == interface) {
         return Err(ClassifiedError::Validation(
@@ -2564,6 +2716,19 @@ fn validate_physical_policy_at(
             "replay contains a dangerous UDS service denied by policy".to_owned(),
         ));
     }
+    Ok(())
+}
+
+fn validate_physical_policy_at(
+    interface: &str,
+    approval_id: &str,
+    plan: &ReplayPlan,
+    approval: Option<&AutomotiveApprovalEvidence>,
+    policy: &AutomotivePhysicalBenchSettings,
+    limits: &OperationLimits,
+    context: PhysicalApprovalContext<'_>,
+) -> Result<(), ClassifiedError> {
+    validate_physical_scope_policy(interface, plan, policy)?;
     let approval = approval.ok_or_else(|| {
         ClassifiedError::Validation("physical automotive bench approval is required".to_owned())
     })?;
@@ -2588,6 +2753,27 @@ fn validate_physical_policy_at(
                 "physical automotive bench approval scope does not match".to_owned(),
             ));
         }
+        // The keyed binding is the authorization gate (VULN-010/012): the
+        // plain scope hash above is recomputable by any caller, but this HMAC
+        // is computed under the server-held key over the scope INCLUDING
+        // approved_by/approved_at, so self-made or relabelled evidence fails.
+        // Fail closed: a resolved physical-bench image context without the
+        // server key can never skip keyed verification.
+        let mac_key = context.mac_key.ok_or_else(|| {
+            ClassifiedError::Internal(
+                "physical automotive bench approval verification requires the server MAC key"
+                    .to_owned(),
+            )
+        })?;
+        verify_approval_scope_hmac(
+            mac_key,
+            interface,
+            plan,
+            policy,
+            limits,
+            sidecar_image_sha256,
+            approval,
+        )?;
     }
     Ok(())
 }
@@ -2610,14 +2796,22 @@ fn validate_resolved_image_approval(
     prepared: &PreparedOperation,
     settings: &AutomotiveSettings,
     sidecar_image_sha256: &str,
+    mac_key: Option<&[u8; 32]>,
 ) -> Result<(), ClassifiedError> {
-    validate_resolved_image_approval_at(prepared, settings, sidecar_image_sha256, Utc::now())
+    validate_resolved_image_approval_at(
+        prepared,
+        settings,
+        sidecar_image_sha256,
+        mac_key,
+        Utc::now(),
+    )
 }
 
 fn validate_resolved_image_approval_at(
     prepared: &PreparedOperation,
     settings: &AutomotiveSettings,
     sidecar_image_sha256: &str,
+    mac_key: Option<&[u8; 32]>,
     now: DateTime<Utc>,
 ) -> Result<(), ClassifiedError> {
     if let AutomotiveCommand::ExecuteReplay {
@@ -2638,6 +2832,7 @@ fn validate_resolved_image_approval_at(
             PhysicalApprovalContext {
                 sidecar_image_sha256: Some(sidecar_image_sha256),
                 now,
+                mac_key,
             },
         )?;
     }
@@ -2796,9 +2991,17 @@ fn build_execution_config(
         value["interface"] = serde_json::Value::String(interface);
     }
     if let Some(approval) = approval {
-        value["approval"] = serde_json::to_value(approval).map_err(|error| {
-            ClassifiedError::Internal(format!("serialize automotive approval: {error}"))
-        })?;
+        // The pinned sidecar validates approval objects against a strict
+        // five-key contract, so the server-held `scope_hmac` is withheld from
+        // the sandbox config: it is transport-layer authorization evidence,
+        // not sidecar input.
+        value["approval"] = serde_json::json!({
+            "approval_id": approval.approval_id,
+            "approved_by": approval.approved_by,
+            "approved_at": approval.approved_at,
+            "scope_sha256": approval.scope_sha256,
+            "sidecar_image_sha256": approval.sidecar_image_sha256,
+        });
     }
     serde_json::to_string(&value).map(Some).map_err(|error| {
         ClassifiedError::Internal(format!("serialize automotive execution policy: {error}"))
@@ -2812,21 +3015,13 @@ fn approval_scope_hash(
     limits: &OperationLimits,
     sidecar_image_sha256: &str,
 ) -> Result<String, ClassifiedError> {
-    let mut arbitration_ids = policy.arbitration_ids.clone();
-    arbitration_ids.sort_unstable();
-    arbitration_ids.dedup();
-    let mut uds_services = policy.uds_services.clone();
-    uds_services.sort_unstable();
-    uds_services.dedup();
-    let bytes = serde_json::to_vec(&serde_json::json!({
-        "interface": interface,
-        "plan": plan,
-        "limits": limits,
-        "arbitration_ids": arbitration_ids,
-        "uds_services": uds_services,
-        "allow_dangerous_services": policy.allow_dangerous_services,
-        "sidecar_image_sha256": sidecar_image_sha256,
-    }))
+    let bytes = serde_json::to_vec(&approval_scope_value(
+        interface,
+        plan,
+        policy,
+        limits,
+        sidecar_image_sha256,
+    ))
     .map_err(|error| {
         ClassifiedError::Internal(format!("serialize automotive approval scope: {error}"))
     })?;
@@ -2880,6 +3075,206 @@ fn serde_json_string(value: &impl Serialize) -> String {
         .unwrap_or_else(|| "unknown".to_owned())
 }
 
+/// HMAC-SHA256 over approval scope plus attribution, under the server-held key.
+type ApprovalHmac = hmac::Hmac<Sha256>;
+
+/// Where the approval MAC key lives: durable service state beside the
+/// database, outside the managed fuzz workspace (so workspace initialization
+/// and adoption never see it) and never part of any project tree a client
+/// can write.
+fn approval_mac_key_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("automotive-approval-mac.key")
+}
+
+/// Resolve the durable service-state directory for the approval MAC key: the
+/// parent of the database path, resolved exactly the way
+/// [`hf_storage::Store::connect_from_env`] and `init` resolve it
+/// (`HF_DB_PATH`, default `data/oxfuzz.db`), so the key always sits beside
+/// the database the service actually uses.
+fn approval_mac_key_dir() -> PathBuf {
+    let db_path =
+        PathBuf::from(std::env::var("HF_DB_PATH").unwrap_or_else(|_| "data/oxfuzz.db".to_owned()));
+    match db_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
+}
+
+/// Load the server-held approval MAC key, creating it on first use.
+///
+/// The key is the secret that turns approval evidence from a recomputable
+/// digest into proof of server issuance: minting computes the HMAC under it
+/// and verification accepts only HMACs made under it. It is generated from
+/// the OS RNG (two v4 UUIDs -> 32 bytes, 244 random bits) with owner-only
+/// permissions, and never leaves the host.
+///
+/// # Errors
+/// Returns a classified error when the key cannot be read, written or secured.
+fn load_or_create_approval_mac_key(state_dir: &Path) -> Result<[u8; 32], ClassifiedError> {
+    let path = approval_mac_key_path(state_dir);
+    if let Ok(bytes) = std::fs::read(&path) {
+        let key: [u8; 32] = bytes.try_into().map_err(|_| {
+            ClassifiedError::Storage(format!(
+                "approval MAC key {} has an unexpected size",
+                path.display()
+            ))
+        })?;
+        return Ok(key);
+    }
+    let directory = path.parent().ok_or_else(|| {
+        ClassifiedError::Storage("approval MAC key path has no parent".to_owned())
+    })?;
+    std::fs::create_dir_all(directory).map_err(|error| {
+        ClassifiedError::Storage(format!("create approval MAC key directory: {error}"))
+    })?;
+    let key: [u8; 32] = concatenate_uuid_bytes(&Uuid::new_v4(), &Uuid::new_v4());
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let written = options
+        .open(&path)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, &key));
+    match written {
+        Ok(()) => Ok(key),
+        // Another process won the create race; read whatever it stored.
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or_else(|| {
+                ClassifiedError::Storage(format!(
+                    "approval MAC key {} is unreadable",
+                    path.display()
+                ))
+            }),
+        Err(error) => Err(ClassifiedError::Storage(format!(
+            "write approval MAC key {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+fn concatenate_uuid_bytes(first: &Uuid, second: &Uuid) -> [u8; 32] {
+    let mut bytes = [0_u8; 32];
+    bytes[..16].copy_from_slice(first.as_bytes());
+    bytes[16..].copy_from_slice(second.as_bytes());
+    bytes
+}
+
+/// The exact approval-scope value shared by the plain scope hash and the keyed
+/// binding, so the two can never diverge (2.18).
+fn approval_scope_value(
+    interface: &str,
+    plan: &ReplayPlan,
+    policy: &AutomotivePhysicalBenchSettings,
+    limits: &OperationLimits,
+    sidecar_image_sha256: &str,
+) -> serde_json::Value {
+    let mut arbitration_ids = policy.arbitration_ids.clone();
+    arbitration_ids.sort_unstable();
+    arbitration_ids.dedup();
+    let mut uds_services = policy.uds_services.clone();
+    uds_services.sort_unstable();
+    uds_services.dedup();
+    serde_json::json!({
+        "interface": interface,
+        "plan": plan,
+        "limits": limits,
+        "arbitration_ids": arbitration_ids,
+        "uds_services": uds_services,
+        "allow_dangerous_services": policy.allow_dangerous_services,
+        "sidecar_image_sha256": sidecar_image_sha256,
+    })
+}
+
+/// The MAC input: the exact scope value plus the attribution fields, so the
+/// binding authenticates who approved and when (VULN-012), not only what.
+fn approval_mac_input(
+    interface: &str,
+    plan: &ReplayPlan,
+    policy: &AutomotivePhysicalBenchSettings,
+    limits: &OperationLimits,
+    sidecar_image_sha256: &str,
+    approval_id: &str,
+    approved_by: &str,
+    approved_at: DateTime<Utc>,
+) -> Result<Vec<u8>, ClassifiedError> {
+    let mut value = approval_scope_value(interface, plan, policy, limits, sidecar_image_sha256);
+    let map = value
+        .as_object_mut()
+        .ok_or_else(|| ClassifiedError::Internal("approval scope must be an object".to_owned()))?;
+    map.insert("approval_id".to_owned(), serde_json::json!(approval_id));
+    map.insert("approved_by".to_owned(), serde_json::json!(approved_by));
+    map.insert("approved_at".to_owned(), serde_json::json!(approved_at));
+    serde_json::to_vec(&value)
+        .map_err(|error| ClassifiedError::Internal(format!("serialize approval binding: {error}")))
+}
+
+/// Compute the keyed binding minted into approval evidence.
+fn approval_scope_hmac(
+    mac_key: &[u8; 32],
+    interface: &str,
+    plan: &ReplayPlan,
+    policy: &AutomotivePhysicalBenchSettings,
+    limits: &OperationLimits,
+    sidecar_image_sha256: &str,
+    approval_id: &str,
+    approved_by: &str,
+    approved_at: DateTime<Utc>,
+) -> Result<String, ClassifiedError> {
+    let mut mac = ApprovalHmac::new_from_slice(mac_key)
+        .map_err(|error| ClassifiedError::Internal(format!("approval MAC key: {error}")))?;
+    mac.update(&approval_mac_input(
+        interface,
+        plan,
+        policy,
+        limits,
+        sidecar_image_sha256,
+        approval_id,
+        approved_by,
+        approved_at,
+    )?);
+    Ok(hex::encode(mac.finalize().into_bytes()))
+}
+
+/// Constant-time verification of the keyed approval binding.
+///
+/// # Errors
+/// Returns a validation error when the recorded HMAC is malformed or does not
+/// match the server-keyed binding over scope plus attribution.
+fn verify_approval_scope_hmac(
+    mac_key: &[u8; 32],
+    interface: &str,
+    plan: &ReplayPlan,
+    policy: &AutomotivePhysicalBenchSettings,
+    limits: &OperationLimits,
+    sidecar_image_sha256: &str,
+    approval: &AutomotiveApprovalEvidence,
+) -> Result<(), ClassifiedError> {
+    let mut mac = ApprovalHmac::new_from_slice(mac_key)
+        .map_err(|error| ClassifiedError::Internal(format!("approval MAC key: {error}")))?;
+    mac.update(&approval_mac_input(
+        interface,
+        plan,
+        policy,
+        limits,
+        sidecar_image_sha256,
+        &approval.approval_id,
+        &approval.approved_by,
+        approval.approved_at,
+    )?);
+    let recorded = hex::decode(&approval.scope_hmac).map_err(|_| {
+        ClassifiedError::Validation(
+            "physical automotive bench approval binding is malformed".to_owned(),
+        )
+    })?;
+    mac.verify_slice(&recorded).map_err(|_| {
+        ClassifiedError::Validation(
+            "physical automotive bench approval is not server-issued".to_owned(),
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -2908,9 +3303,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        approval_scope_hash, build_execution_config, operation_limits, sha256_bytes,
-        validate_approval_freshness_at, validate_physical_policy, verify_result_artifacts,
-        wire_uds_service, AutomotiveApprovalEvidence, AutomotiveCommand,
+        approval_mac_key_path, approval_scope_hash, approval_scope_hmac, build_execution_config,
+        operation_limits, sha256_bytes, validate_approval_freshness_at, validate_physical_policy,
+        verify_result_artifacts, wire_uds_service, AutomotiveApprovalEvidence, AutomotiveCommand,
         AutomotiveOperationRequest, AutomotiveStateArtifactSource, AutomotiveStatePromotionRequest,
         APPROVAL_MAX_AGE, REQUEST_EVIDENCE_FILE,
     };
@@ -2920,6 +3315,57 @@ mod tests {
 
     const IMMUTABLE_SIDECAR_SHA256: &str =
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    /// Fixed server-held key for tests: installed into fixture workspaces so
+    /// minted test evidence verifies exactly like production evidence.
+    const TEST_MAC_KEY: [u8; 32] = [0x42; 32];
+
+    /// Mint approval evidence the way the production mint path does, under the
+    /// test key.
+    fn minted_approval(
+        settings: &AutomotiveSettings,
+        limits: &super::OperationLimits,
+        plan: &super::ReplayPlan,
+        approval_id: &str,
+        image_sha256: &str,
+    ) -> AutomotiveApprovalEvidence {
+        let approved_at = Utc::now();
+        AutomotiveApprovalEvidence {
+            approval_id: approval_id.to_owned(),
+            approved_by: "desktop-operator".to_owned(),
+            approved_at,
+            scope_sha256: approval_scope_hash(
+                "can0",
+                plan,
+                &settings.physical_bench,
+                limits,
+                image_sha256,
+            )
+            .unwrap(),
+            scope_hmac: approval_scope_hmac(
+                &TEST_MAC_KEY,
+                "can0",
+                plan,
+                &settings.physical_bench,
+                limits,
+                image_sha256,
+                approval_id,
+                "desktop-operator",
+                approved_at,
+            )
+            .unwrap(),
+            sidecar_image_sha256: image_sha256.to_owned(),
+        }
+    }
+
+    /// Install the test key into durable service state (beside the test
+    /// store's database) where the execute path will load it.
+    fn install_test_mac_key(state_dir: &Path) {
+        let path = approval_mac_key_path(state_dir);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, TEST_MAC_KEY).unwrap();
+    }
+
     const IMMUTABLE_SIDECAR_IMAGE: &str =
         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -2931,6 +3377,8 @@ mod tests {
             approved_by: "operator".to_owned(),
             approved_at: first_check - APPROVAL_MAX_AGE + chrono::Duration::seconds(1),
             scope_sha256: "a".repeat(64),
+            // Freshness-only test: the binding is never verified here.
+            scope_hmac: "0".repeat(64),
             sidecar_image_sha256: IMMUTABLE_SIDECAR_SHA256.to_owned(),
         };
 
@@ -3228,6 +3676,7 @@ mod tests {
                     ..AutomotiveSettings::default()
                 },
                 &workspace,
+                root,
             )
             .await
             .unwrap();
@@ -3646,7 +4095,7 @@ mod tests {
             ..AutomotiveSettings::default()
         };
         let error = service
-            .execute_automotive_with_context(request, disabled, &workspace)
+            .execute_automotive_with_context(request, disabled, &workspace, temp.path())
             .await
             .unwrap_err();
 
@@ -3703,7 +4152,7 @@ mod tests {
         // The operation must error with the actionable build message, which only
         // the pre-sandbox guard produces.
         let msg = service
-            .execute_automotive_with_context(request, settings, &workspace)
+            .execute_automotive_with_context(request, settings, &workspace, temp.path())
             .await
             .expect_err("a missing sidecar image must be an error")
             .to_string();
@@ -3725,6 +4174,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let (project, _) = project_fixture(temp.path());
         let workspace = temp.path().join("workspace");
+        install_test_mac_key(temp.path());
         let transcript = Sha256Digest::parse("ef".repeat(32)).unwrap();
         let response = ResponseEnvelope::success(
             "request-placeholder",
@@ -3748,20 +4198,13 @@ mod tests {
         let limits = operation_limits(&settings).unwrap();
         let approval_id = "approval-image-guard".to_owned();
         let make_request = || {
-            let approval = AutomotiveApprovalEvidence {
-                approval_id: approval_id.clone(),
-                approved_by: "desktop-operator".to_owned(),
-                approved_at: chrono::Utc::now(),
-                scope_sha256: approval_scope_hash(
-                    "can0",
-                    &plan,
-                    &settings.physical_bench,
-                    &limits,
-                    IMMUTABLE_SIDECAR_SHA256,
-                )
-                .unwrap(),
-                sidecar_image_sha256: IMMUTABLE_SIDECAR_SHA256.to_owned(),
-            };
+            let approval = minted_approval(
+                &settings,
+                &limits,
+                &plan,
+                &approval_id,
+                IMMUTABLE_SIDECAR_SHA256,
+            );
             AutomotiveOperationRequest {
                 project_root: project.clone(),
                 command: AutomotiveCommand::ExecuteReplay {
@@ -3780,7 +4223,12 @@ mod tests {
         let missing = Arc::new(RecordingRuntime::with_missing_image());
         let (svc_missing, _) = service(Arc::clone(&missing), temp.path()).await;
         let err = svc_missing
-            .execute_automotive_with_context(make_request(), settings.clone(), &workspace)
+            .execute_automotive_with_context(
+                make_request(),
+                settings.clone(),
+                &workspace,
+                temp.path(),
+            )
             .await
             .expect_err("a missing sidecar image must fail the operation");
         assert!(
@@ -3794,7 +4242,12 @@ mod tests {
         let ready = Arc::new(RecordingRuntime::with_response(&response));
         let (svc_ready, _) = service(Arc::clone(&ready), temp.path()).await;
         svc_ready
-            .execute_automotive_with_context(make_request(), settings.clone(), &workspace)
+            .execute_automotive_with_context(
+                make_request(),
+                settings.clone(),
+                &workspace,
+                temp.path(),
+            )
             .await
             .expect("the unspent approval authorizes the replay once the image exists");
         assert_eq!(
@@ -3846,7 +4299,7 @@ mod tests {
         };
 
         let outcome = service
-            .execute_automotive_with_context(request, settings, &workspace)
+            .execute_automotive_with_context(request, settings, &workspace, temp.path())
             .await
             .unwrap();
 
@@ -3951,7 +4404,7 @@ mod tests {
         };
 
         let outcome = service
-            .execute_automotive_with_context(request, settings, &workspace)
+            .execute_automotive_with_context(request, settings, &workspace, temp.path())
             .await
             .unwrap();
 
@@ -4007,7 +4460,7 @@ mod tests {
         // whether by the mode allowlist or the live-monitor policy, it never
         // reaches the sandbox.
         service
-            .execute_automotive_with_context(request, settings, &workspace)
+            .execute_automotive_with_context(request, settings, &workspace, temp.path())
             .await
             .unwrap_err();
         assert!(runtime.calls().is_empty());
@@ -4039,7 +4492,7 @@ mod tests {
         };
 
         let error = service
-            .execute_automotive_with_context(request, settings, &workspace)
+            .execute_automotive_with_context(request, settings, &workspace, temp.path())
             .await
             .unwrap_err();
         assert!(error.to_string().contains("0x27"));
@@ -4094,7 +4547,7 @@ mod tests {
         };
 
         let outcome = service
-            .execute_automotive_with_context(request, settings, &workspace)
+            .execute_automotive_with_context(request, settings, &workspace, temp.path())
             .await
             .unwrap();
 
@@ -4143,7 +4596,7 @@ mod tests {
         enable_physical_bench(&mut settings);
 
         let error = service
-            .execute_automotive_with_context(request, settings, &workspace)
+            .execute_automotive_with_context(request, settings, &workspace, temp.path())
             .await
             .unwrap_err();
 
@@ -4189,7 +4642,7 @@ mod tests {
         };
 
         service
-            .execute_automotive_with_context(request, settings, &workspace)
+            .execute_automotive_with_context(request, settings, &workspace, temp.path())
             .await
             .unwrap();
 
@@ -4215,6 +4668,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let (project, _) = project_fixture(temp.path());
         let workspace = temp.path().join("workspace");
+        install_test_mac_key(temp.path());
         let transcript = Sha256Digest::parse("ef".repeat(32)).unwrap();
         let response = ResponseEnvelope::success(
             "request-placeholder",
@@ -4240,20 +4694,13 @@ mod tests {
         let limits = operation_limits(&settings).unwrap();
         let approval_id = "approval-exact-scope".to_owned();
         let substituted_image_sha256 = "b".repeat(64);
-        let substituted_approval = AutomotiveApprovalEvidence {
-            approval_id: approval_id.clone(),
-            approved_by: "desktop-operator".to_owned(),
-            approved_at: chrono::Utc::now(),
-            scope_sha256: approval_scope_hash(
-                "can0",
-                &plan,
-                &settings.physical_bench,
-                &limits,
-                &substituted_image_sha256,
-            )
-            .unwrap(),
-            sidecar_image_sha256: substituted_image_sha256,
-        };
+        let substituted_approval = minted_approval(
+            &settings,
+            &limits,
+            &plan,
+            &approval_id,
+            &substituted_image_sha256,
+        );
         let mismatch = service
             .execute_automotive_with_context(
                 AutomotiveOperationRequest {
@@ -4269,6 +4716,7 @@ mod tests {
                 },
                 settings.clone(),
                 &workspace,
+                temp.path(),
             )
             .await
             .expect_err("approval for a substituted sidecar image must be rejected");
@@ -4281,20 +4729,13 @@ mod tests {
             "image mismatch must fail before sandbox execution"
         );
 
-        let approval = AutomotiveApprovalEvidence {
-            approval_id: approval_id.clone(),
-            approved_by: "desktop-operator".to_owned(),
-            approved_at: chrono::Utc::now(),
-            scope_sha256: approval_scope_hash(
-                "can0",
-                &plan,
-                &settings.physical_bench,
-                &limits,
-                IMMUTABLE_SIDECAR_SHA256,
-            )
-            .unwrap(),
-            sidecar_image_sha256: IMMUTABLE_SIDECAR_SHA256.to_owned(),
-        };
+        let approval = minted_approval(
+            &settings,
+            &limits,
+            &plan,
+            &approval_id,
+            IMMUTABLE_SIDECAR_SHA256,
+        );
         let request = AutomotiveOperationRequest {
             project_root: project,
             command: AutomotiveCommand::ExecuteReplay {
@@ -4308,7 +4749,7 @@ mod tests {
         };
 
         service
-            .execute_automotive_with_context(request, settings, &workspace)
+            .execute_automotive_with_context(request, settings, &workspace, temp.path())
             .await
             .unwrap();
 
@@ -4332,6 +4773,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let (project, _) = project_fixture(temp.path());
         let workspace = temp.path().join("workspace");
+        install_test_mac_key(temp.path());
         let transcript = Sha256Digest::parse("ef".repeat(32)).unwrap();
         let response = ResponseEnvelope::success(
             "request-placeholder",
@@ -4359,20 +4801,13 @@ mod tests {
         // A helper to build a fresh request carrying the SAME approval evidence:
         // the operator scripts a second execution with the one approval.
         let make_request = || {
-            let approval = AutomotiveApprovalEvidence {
-                approval_id: approval_id.clone(),
-                approved_by: "desktop-operator".to_owned(),
-                approved_at: chrono::Utc::now(),
-                scope_sha256: approval_scope_hash(
-                    "can0",
-                    &plan,
-                    &settings.physical_bench,
-                    &limits,
-                    IMMUTABLE_SIDECAR_SHA256,
-                )
-                .unwrap(),
-                sidecar_image_sha256: IMMUTABLE_SIDECAR_SHA256.to_owned(),
-            };
+            let approval = minted_approval(
+                &settings,
+                &limits,
+                &plan,
+                &approval_id,
+                IMMUTABLE_SIDECAR_SHA256,
+            );
             AutomotiveOperationRequest {
                 project_root: project.clone(),
                 command: AutomotiveCommand::ExecuteReplay {
@@ -4388,7 +4823,12 @@ mod tests {
 
         // First execution consumes the approval and runs the sidecar.
         service
-            .execute_automotive_with_context(make_request(), settings.clone(), &workspace)
+            .execute_automotive_with_context(
+                make_request(),
+                settings.clone(),
+                &workspace,
+                temp.path(),
+            )
             .await
             .expect("first physical replay is authorized");
         assert_eq!(runtime.calls().len(), 1, "the first transmission fired");
@@ -4396,7 +4836,12 @@ mod tests {
         // A second execution reusing the same approval is rejected before any
         // further bus access -- the approval is single-use.
         let err = service
-            .execute_automotive_with_context(make_request(), settings.clone(), &workspace)
+            .execute_automotive_with_context(
+                make_request(),
+                settings.clone(),
+                &workspace,
+                temp.path(),
+            )
             .await
             .expect_err("the reused approval must be rejected");
         assert!(
@@ -4459,6 +4904,7 @@ mod tests {
             &settings.physical_bench,
             &limits,
             Some(IMMUTABLE_SIDECAR_SHA256),
+            Some(&TEST_MAC_KEY),
         )
         .unwrap_err();
         assert!(
@@ -4531,7 +4977,7 @@ mod tests {
         };
 
         let error = service
-            .execute_automotive_with_context(request, settings, &workspace)
+            .execute_automotive_with_context(request, settings, &workspace, temp.path())
             .await
             .unwrap_err();
 
@@ -4593,7 +5039,7 @@ mod tests {
         };
 
         let error = service
-            .execute_automotive_with_context(request, settings, &workspace)
+            .execute_automotive_with_context(request, settings, &workspace, temp.path())
             .await
             .unwrap_err();
 
@@ -5132,5 +5578,149 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("retained hash"));
+    }
+
+    #[test]
+    fn client_recomputed_plain_scope_hash_is_rejected_without_the_keyed_binding() {
+        // VULN-010: before the keyed binding, a caller who knew the inputs
+        // could recompute the unkeyed scope hash and pass verification. The
+        // plain hash still matches here -- only `scope_hmac` is wrong.
+        let mut settings = AutomotiveSettings {
+            enabled: true,
+            ..AutomotiveSettings::default()
+        };
+        enable_physical_bench(&mut settings);
+        let plan = uds_replay_plan(AutomotiveMode::PhysicalBench);
+        let limits = operation_limits(&settings).unwrap();
+        let mut approval = minted_approval(
+            &settings,
+            &limits,
+            &plan,
+            "approval-forged",
+            IMMUTABLE_SIDECAR_SHA256,
+        );
+        approval.scope_hmac = "0".repeat(64);
+        let error = validate_physical_policy(
+            "can0",
+            "approval-forged",
+            &plan,
+            Some(&approval),
+            &settings.physical_bench,
+            &limits,
+            Some(IMMUTABLE_SIDECAR_SHA256),
+            Some(&TEST_MAC_KEY),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("not server-issued"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn relabelled_approval_attribution_fails_the_keyed_binding() {
+        // VULN-012: `approved_by` is authenticated data. Tampering with the
+        // attribution after minting must fail even though every other field,
+        // including the plain scope hash, still matches.
+        let mut settings = AutomotiveSettings {
+            enabled: true,
+            ..AutomotiveSettings::default()
+        };
+        enable_physical_bench(&mut settings);
+        let plan = uds_replay_plan(AutomotiveMode::PhysicalBench);
+        let limits = operation_limits(&settings).unwrap();
+        let mut approval = minted_approval(
+            &settings,
+            &limits,
+            &plan,
+            "approval-relabel",
+            IMMUTABLE_SIDECAR_SHA256,
+        );
+        approval.approved_by = "someone-else".to_owned();
+        let error = validate_physical_policy(
+            "can0",
+            "approval-relabel",
+            &plan,
+            Some(&approval),
+            &settings.physical_bench,
+            &limits,
+            Some(IMMUTABLE_SIDECAR_SHA256),
+            Some(&TEST_MAC_KEY),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("not server-issued"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn minted_evidence_verifies_under_the_same_key() {
+        let mut settings = AutomotiveSettings {
+            enabled: true,
+            ..AutomotiveSettings::default()
+        };
+        enable_physical_bench(&mut settings);
+        let plan = uds_replay_plan(AutomotiveMode::PhysicalBench);
+        let limits = operation_limits(&settings).unwrap();
+        let approval = minted_approval(
+            &settings,
+            &limits,
+            &plan,
+            "approval-good",
+            IMMUTABLE_SIDECAR_SHA256,
+        );
+        validate_physical_policy(
+            "can0",
+            "approval-good",
+            &plan,
+            Some(&approval),
+            &settings.physical_bench,
+            &limits,
+            Some(IMMUTABLE_SIDECAR_SHA256),
+            Some(&TEST_MAC_KEY),
+        )
+        .expect("server-minted evidence must verify");
+    }
+
+    #[test]
+    fn execution_config_withholds_the_keyed_binding_from_the_sidecar() {
+        // The pinned sidecar validates approval objects against a strict
+        // five-key contract; leaking `scope_hmac` into the config would make
+        // every physical replay fail inside the sandbox.
+        let mut settings = AutomotiveSettings {
+            enabled: true,
+            ..AutomotiveSettings::default()
+        };
+        enable_physical_bench(&mut settings);
+        let plan = uds_replay_plan(AutomotiveMode::PhysicalBench);
+        let limits = operation_limits(&settings).unwrap();
+        let approval = minted_approval(
+            &settings,
+            &limits,
+            &plan,
+            "approval-config",
+            IMMUTABLE_SIDECAR_SHA256,
+        );
+        let config = build_execution_config(
+            &AutomotiveCommand::ExecuteReplay {
+                mode: ModeConfig::PhysicalBench {
+                    interface: "can0".to_owned(),
+                    approval_id: "approval-config".to_owned(),
+                },
+                plan: plan.clone(),
+            },
+            Some(&approval),
+            &settings,
+            &limits,
+            IMMUTABLE_SIDECAR_SHA256,
+        )
+        .unwrap()
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&config).unwrap();
+        let sent = value["approval"].as_object().unwrap();
+        assert_eq!(sent.len(), 5, "sidecar approval stays exactly five keys");
+        assert!(sent.contains_key("scope_sha256"));
+        assert!(!sent.contains_key("scope_hmac"));
     }
 }

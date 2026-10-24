@@ -56,6 +56,7 @@ tower = { workspace = true }
 tower-http = { workspace = true }
 
 [dev-dependencies]
+hf-core = { workspace = true }
 hf-service = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
 tower = { workspace = true, features = ["util"] }

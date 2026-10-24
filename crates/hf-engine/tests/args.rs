@@ -814,6 +814,23 @@ fn go_native_single_cpu_omits_parallel_and_zero_duration_omits_fuzztime() {
 }
 
 #[test]
+fn go_native_rejects_a_binary_that_breaks_the_staging_contract() {
+    // The adapter derives the fuzz test name from the staged binary's
+    // `fuzz_<Symbol>.test` name. A binary outside that contract used to
+    // silently produce `-test.run=^Fuzz$` (fuzzing a nonexistent test);
+    // it must fail at argv construction instead, naming the contract.
+    let c = cfg(EngineKind::GoNative, 300);
+    for binary in ["/work/fuzz_bin", "/work/ParseRecord.test", "/work/fuzz_"] {
+        let error = hf_engine::go_native::build_run_args(&c, binary, "/work/corpus", "/work/out")
+            .expect_err("a non-contract binary name must be rejected");
+        assert!(
+            error.to_string().contains("fuzz_<Symbol>.test"),
+            "the error must name the staging contract: {error}"
+        );
+    }
+}
+
+#[test]
 fn afl_resume_keeps_the_argv_identical_to_a_cold_start() {
     // Resume is environment-driven: the runner injects AFL_AUTORESUME=1 for a
     // run whose config opted in and whose service staging copied a prior

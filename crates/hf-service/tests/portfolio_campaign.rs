@@ -19,7 +19,9 @@ async fn scheduler_with_store() -> (CampaignScheduler, tempfile::TempDir) {
     let container =
         ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None).with_store(store);
     let scheduler =
-        CampaignScheduler::start(container, dir.path().join("schedules.json"), None).await;
+        CampaignScheduler::try_start(container, dir.path().join("schedules.json"), None)
+            .await
+            .expect("scheduler starts");
     (scheduler, dir)
 }
 
@@ -37,7 +39,10 @@ async fn a_portfolio_campaign_has_no_fixed_target_and_starts_at_zero_progress() 
         schedule_id: String::new(),
     };
     let trigger = hf_service::scheduler::parse_trigger("interval", "3600").unwrap();
-    scheduler.create("nightly sweep", &params, trigger).await;
+    scheduler
+        .try_create("nightly sweep", &params, trigger)
+        .await
+        .expect("schedule created");
 
     let views = scheduler.list_views().await.unwrap();
     assert_eq!(views.len(), 1);
@@ -52,9 +57,9 @@ async fn a_portfolio_campaign_has_no_fixed_target_and_starts_at_zero_progress() 
 #[tokio::test]
 async fn concurrency_cap_round_trips_and_floors_at_one() {
     let (scheduler, _dir) = scheduler_with_store().await;
-    scheduler.set_max_concurrent(5);
+    scheduler.try_set_max_concurrent(5).unwrap();
     assert_eq!(scheduler.max_concurrent(), 5);
-    scheduler.set_max_concurrent(0);
+    scheduler.try_set_max_concurrent(0).unwrap();
     assert_eq!(scheduler.max_concurrent(), 1, "never below one");
 }
 
@@ -62,7 +67,7 @@ async fn concurrency_cap_round_trips_and_floors_at_one() {
 async fn deleting_a_campaign_clears_it_from_the_list() {
     let (scheduler, _dir) = scheduler_with_store().await;
     let sched = scheduler
-        .create(
+        .try_create(
             "one",
             &CampaignParams {
                 project: "/tmp/p".to_owned(),
@@ -71,12 +76,13 @@ async fn deleting_a_campaign_clears_it_from_the_list() {
             },
             hf_service::scheduler::parse_trigger("interval", "60").unwrap(),
         )
-        .await;
+        .await
+        .expect("schedule created");
     assert_eq!(scheduler.list_views().await.unwrap().len(), 1);
-    assert!(scheduler.remove(&sched.id).await);
+    assert!(scheduler.try_remove(&sched.id).await.unwrap());
     assert!(scheduler.list_views().await.unwrap().is_empty());
     // A bogus id is not a success.
-    assert!(!scheduler.remove("no-such-id").await);
+    assert!(!scheduler.try_remove("no-such-id").await.unwrap());
 }
 
 #[tokio::test]
@@ -146,7 +152,7 @@ async fn scoped_definitions_refuse_foreign_mutations_and_preserve_approved_acces
         .await
         .unwrap()
         .is_empty());
-    assert_eq!(scheduler.list().await[0].id, ids[1]);
+    assert_eq!(scheduler.list_views().await.unwrap()[0].id, ids[1]);
     assert!(!scheduler
         .try_remove_within_roots("missing", &roots)
         .await

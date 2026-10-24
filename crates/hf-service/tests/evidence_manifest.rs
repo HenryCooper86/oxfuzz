@@ -53,8 +53,8 @@ fn body() -> EvidenceManifestBody {
             approved_at: "2026-07-21T23:00:00Z".to_owned(),
         },
         coverage: EvidenceCoverage {
-            edges: 100,
-            delta_edges: 10,
+            edges: Some(100),
+            delta_edges: Some(10),
         },
         findings: vec![EvidenceFinding {
             crash_id: Uuid::from_u128(5),
@@ -68,6 +68,30 @@ fn body() -> EvidenceManifestBody {
             model_cost_usd: 0.05,
         },
     }
+}
+
+#[test]
+fn the_wire_form_verifies_on_read_back_and_detects_tampering() {
+    let manifest = EvidenceManifest::new(body()).expect("valid manifest");
+
+    // The serialized form is what every consumer (GUI, REST, remediation
+    // handoff) receives and reads back through `Deserialize`; reading it
+    // back must still verify against the retained digest.
+    let wire = serde_json::to_value(&manifest).expect("serialize manifest");
+    let read_back: EvidenceManifest = serde_json::from_value(wire).expect("decode manifest");
+    read_back
+        .verify()
+        .expect("the wire form carries the digested body");
+
+    let mut tampered = serde_json::to_value(&manifest).expect("serialize manifest");
+    tampered["body"]["target"] = serde_json::json!("tampered_target");
+    let tampered: EvidenceManifest =
+        serde_json::from_value(tampered).expect("decode tampered manifest");
+    assert_eq!(
+        tampered.verify(),
+        Err(EvidenceError::DigestMismatch),
+        "a body mutated in transit must not verify"
+    );
 }
 
 #[test]
@@ -88,7 +112,7 @@ fn manifest_digest_is_canonical_and_detects_mutation() {
     first.verify().expect("unchanged manifest verifies");
 
     let mut tampered = first;
-    tampered.body.coverage.edges += 1;
+    tampered.body.coverage.edges = tampered.body.coverage.edges.map(|edges| edges + 1);
     assert_eq!(tampered.verify(), Err(EvidenceError::DigestMismatch));
 }
 
@@ -142,6 +166,39 @@ fn non_finite_cost_and_nonterminal_runs_fail_closed() {
     );
 }
 
+/// Unmeasured coverage is absent, not zero: an evidence manifest must not
+/// assert figures the run never measured.
+#[test]
+fn unmeasured_coverage_is_absent_rather_than_fabricated() {
+    let mut unmeasured = body();
+    unmeasured.coverage = EvidenceCoverage {
+        edges: None,
+        delta_edges: None,
+    };
+    let manifest = EvidenceManifest::new(unmeasured).expect("optional coverage validates");
+    assert_eq!(manifest.body.coverage.edges, None);
+    assert_eq!(manifest.body.coverage.delta_edges, None);
+    manifest
+        .verify()
+        .expect("optional pair verifies like any other");
+}
+
+/// One managed workspace root per test process: production refuses an
+/// unowned `HF_WORKSPACE_DIR` override, so every test in this binary that
+/// stages workspace files directly shares one root initialized together
+/// with its ownership manifest. The root is deliberately not removed at the
+/// end of any test -- the tests run concurrently and share it.
+static WORKSPACE: std::sync::LazyLock<std::path::PathBuf> = std::sync::LazyLock::new(|| {
+    let root = std::env::temp_dir().join(format!(
+        "oxfuzz_evidence_it_{}_{}",
+        std::process::id(),
+        Uuid::new_v4()
+    ));
+    std::env::set_var("HF_WORKSPACE_DIR", &root);
+    hf_service::initialize_workspace_root().expect("initialize evidence-test workspace");
+    root
+});
+
 // Proof-carrying evidence reads walk the run root with descriptor-relative,
 // symlink-refusing opens (rustix openat) and fail closed as Sandbox off unix,
 // so the full-assembly path this test drives is a unix-only capability. Its
@@ -168,17 +225,7 @@ async fn service_assembles_a_manifest_from_durable_run_and_approval_evidence() {
     const EPS: f64 = 1e-9;
 
     fn isolate_workspace() -> &'static Path {
-        static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-        ROOT.get_or_init(|| {
-            let root = std::env::temp_dir().join(format!(
-                "oxfuzz_evidence_it_{}_{}",
-                std::process::id(),
-                Uuid::new_v4()
-            ));
-            std::env::set_var("HF_WORKSPACE_DIR", &root);
-            hf_service::initialize_workspace_root().expect("initialize evidence-test workspace");
-            root
-        })
+        WORKSPACE.as_path()
     }
 
     let workspace_root = isolate_workspace().to_path_buf();
@@ -399,7 +446,15 @@ async fn service_assembles_a_manifest_from_durable_run_and_approval_evidence() {
     assert_eq!(manifest.body.findings[0].origin, CrashOrigin::Target);
     assert_eq!(manifest.body.findings[1].origin, CrashOrigin::Harness);
     assert!((manifest.body.cost.compute_cost_usd - 0.05).abs() < EPS);
-    assert_eq!(manifest.body.sandbox_image_sha256, digest('f'));
+    // The first campaign run for this target has no comparable baseline, so
+    // the delta is absent rather than a fabricated "gained every edge".
+    assert_eq!(
+        manifest.body.coverage,
+        EvidenceCoverage {
+            edges: Some(42),
+            delta_edges: None,
+        }
+    );
 
     let bundle = directory.path().join("remediation-bundle");
     let handoff = container
@@ -431,5 +486,171 @@ async fn service_assembles_a_manifest_from_durable_run_and_approval_evidence() {
 
     drop(container);
     drop(store);
-    std::fs::remove_dir_all(workspace_root).expect("remove evidence-test workspace");
+    // WORKSPACE is shared by every test in this binary and is not removed:
+    // a parallel test may still be reading its staged files.
+    drop(workspace_root);
+}
+
+/// A run staged under a file-qualified selector keeps its crash paths under
+/// that workspace; the manifest must resolve the run's retained selector
+/// instead of the bare symbol, or every such export fails with "crash
+/// reproducer escapes its approved run root".
+#[cfg(unix)]
+#[tokio::test]
+async fn manifest_resolves_crash_files_under_the_qualified_workspace() {
+    use chrono::Utc;
+    use hf_core::crash::CrashKind;
+    use hf_core::engine::{EngineKind, FuzzRunConfig};
+    use hf_core::harness::{BuildCommand, Harness, HarnessStatus, SmokeRunSummary};
+    use hf_core::target::{
+        InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
+    };
+    use hf_storage::{HarnessApprovalKind, RunRecord, RunStatus, Store};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    let _workspace_root = WORKSPACE.clone();
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::connect(directory.path().join("qualified.db"))
+        .await
+        .unwrap();
+    let target_id = Uuid::from_u128(30);
+    let target = TargetCandidate {
+        id: target_id,
+        project_root: directory.path().to_path_buf(),
+        symbol: "parse_header".to_owned(),
+        language: TargetLanguage::C,
+        kind: TargetKind::Function,
+        location: SourceLocation {
+            file: directory.path().join("src/parser.c"),
+            line: 1,
+            col: 1,
+            end_line: None,
+            end_col: None,
+        },
+        signature: None,
+        input_surface: InputSurface::Bytes,
+        complexity: 1,
+        accumulated_complexity: 1,
+        reachable_functions: Vec::new(),
+        fit_score: 1.0,
+        sanitizers: vec![Sanitizer::Address],
+        rationale: "fixture".to_owned(),
+    };
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+
+    let harness_id = Uuid::from_u128(32);
+    let harness_sha256 = digest('b');
+    let binary_sha256 = digest('c');
+    let mut harness = Harness {
+        id: harness_id,
+        target_id,
+        engine: EngineKind::LibFuzzer,
+        source: "int LLVMFuzzerTestOneInput(const unsigned char*d,unsigned long n){return 0;}"
+            .to_owned(),
+        language: TargetLanguage::C,
+        build_cmd: BuildCommand {
+            compiler: "clang".to_owned(),
+            args: Vec::new(),
+            output: PathBuf::from("fuzz_bin"),
+            extra_flags: Vec::new(),
+        },
+        sanitizer: Sanitizer::Address,
+        status: HarnessStatus::SmokePassed,
+        smoke_run: Some(SmokeRunSummary {
+            duration_secs: 60,
+            execs_per_sec: 1.0,
+            crashes: 0,
+            passed: true,
+            source_sha256: Some(harness_sha256.clone()),
+            binary_sha256: Some(binary_sha256.clone()),
+            run_id: Some(Uuid::new_v4()),
+        }),
+        custom_mutator: None,
+        cmplog: None,
+    };
+    store.upsert_harness(&harness).await.unwrap();
+    harness.status = HarnessStatus::Promoted;
+    store
+        .promote_harness_with_approval(
+            &harness,
+            HarnessApprovalKind::CleanSmoke,
+            &harness_sha256,
+            &binary_sha256,
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+
+    let selector = "src/parser.c::parse_header";
+    let qualified_workspace = hf_service::workspace_dir(directory.path(), selector);
+    let now = Utc::now();
+    let mut run = RunRecord::new(
+        directory.path().to_string_lossy().to_string(),
+        EngineKind::LibFuzzer,
+        Some(FuzzRunConfig {
+            harness_id,
+            engine: EngineKind::LibFuzzer,
+            duration: Some(std::time::Duration::from_secs(60)),
+            max_mem_mb: 1024,
+            max_cpus: 1,
+            seed_corpus: Some(qualified_workspace.join("corpus")),
+            sanitizer: Sanitizer::Address,
+            env: Vec::new(),
+            extra_args: Vec::new(),
+            seed: Some(9),
+            replay_of: None,
+            input_manifest_sha256: None,
+            input_timeout: None,
+            resume: false,
+            cmplog: false,
+        }),
+        now,
+    );
+    run.status = RunStatus::Done;
+    run.ended_at = Some(now + chrono::Duration::seconds(60));
+    run.edges = Some(42);
+    run.harness_rev = Some(harness_sha256.clone());
+    run.binary_rev = Some(binary_sha256.clone());
+    run.context_rev = Some(digest('d'));
+    run.source_rev = Some(digest('a'));
+    run.corpus_rev = Some(digest('e'));
+    run.sandbox_rev = Some(format!("docker-image-id-sha256:{}", digest('f')));
+    store.insert_run(&run).await.unwrap();
+
+    let run_output = qualified_workspace
+        .join("runs")
+        .join(run.id.to_string())
+        .join("out");
+    std::fs::create_dir_all(&run_output).unwrap();
+    let crash = hf_core::crash::Crash {
+        reproduction: None,
+        id: Uuid::from_u128(33),
+        run_id: run.id,
+        target_id,
+        input_path: run_output.join("crash-input"),
+        stack_signature: digest('1'),
+        kind: CrashKind::Asan,
+        summary: "overflow".to_owned(),
+        minimized: true,
+        bug_report: None,
+        casr: None,
+        origin: CrashOrigin::Target,
+    };
+    std::fs::write(&crash.input_path, b"crash").unwrap();
+    let store = Arc::new(store);
+    store.upsert_crash(&crash).await.unwrap();
+
+    let container = hf_service::ServiceContainer::stubbed().with_store(store);
+    let manifest = container
+        .campaign_evidence_manifest(
+            run.id,
+            hf_service::evidence::CampaignEvidencePricing {
+                compute_usd_per_hour: 3.0,
+                model_cost_usd: 0.25,
+            },
+        )
+        .await
+        .expect("a qualified run's crash resolves under its own workspace");
+    assert_eq!(manifest.body.findings.len(), 1);
 }

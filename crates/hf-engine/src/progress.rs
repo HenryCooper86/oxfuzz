@@ -195,11 +195,9 @@ fn fork_aggregate_execs(line: &str) -> Option<f64> {
     if total <= 0.0 {
         return None;
     }
-    let lower = line.to_ascii_lowercase();
-    let time_at = lower.find("time:")?;
-    let after = lower[time_at + "time:".len()..].trim_start();
-    let seconds: String = after.chars().take_while(char::is_ascii_digit).collect();
-    let seconds: f64 = seconds.parse().ok()?;
+    // The same ` time:` needle as `uptime_from_fork_line`: the space keeps a
+    // `dft_time:` field on the line from being read as the elapsed time.
+    let seconds = uptime_from_fork_line(&line.to_ascii_lowercase())? as f64;
     // Sub-second elapsed times produce unstable rates.
     (seconds >= 1.0).then_some(total / seconds)
 }
@@ -289,42 +287,6 @@ fn go_native_status_events(line: &str, lower: &str) -> Option<Vec<FuzzProgress>>
         }
     }
     Some(events)
-}
-
-/// Parse a full stdout buffer into a list of progress events.
-#[must_use]
-pub fn parse_progress(stdout: &str) -> Vec<FuzzProgress> {
-    stdout.lines().filter_map(parse_progress_line).collect()
-}
-
-/// Parse a `syz-manager` stdout buffer into final progress events.
-///
-/// syz-manager reports absolute, cumulative counters on each status line, so
-/// unlike [`parse_progress`] (which treats every `crashes N` token as one
-/// finding) this collapses the stream to the peak coverage and the peak crash
-/// count -- yielding at most one [`FuzzProgress::EdgesCovered`] and one
-/// [`FuzzProgress::CrashesFound`], matching how the service layer maxes edges
-/// and sums crash events.
-#[must_use]
-pub fn parse_syzkaller_progress(stdout: &str) -> Vec<FuzzProgress> {
-    let mut peak_cover = 0u64;
-    let mut peak_crashes = 0u64;
-    for line in stdout.lines() {
-        if let Some((cover, _executed, crashes)) = parse_syzkaller_status(line) {
-            peak_cover = peak_cover.max(cover);
-            peak_crashes = peak_crashes.max(crashes);
-        }
-    }
-    let mut events = Vec::new();
-    if peak_cover > 0 {
-        events.push(FuzzProgress::EdgesCovered(peak_cover));
-    }
-    if peak_crashes > 0 {
-        events.push(FuzzProgress::CrashesFound(
-            u32::try_from(peak_crashes).unwrap_or(u32::MAX),
-        ));
-    }
-    events
 }
 
 /// Extract an edge/coverage count from a single stdout line, if it reports one.
@@ -618,37 +580,21 @@ mod tests {
     }
 
     #[test]
-    fn syzkaller_progress_collapses_to_peak_cover_and_crashes() {
-        use super::parse_syzkaller_progress;
-        let log = "\
-booting test machines...
-VMs 2, executed 100, cover 50, signal 40, crashes 0, repro 0
-VMs 2, executed 5000, cover 6789, signal 5432, crashes 2, repro 0
-VMs 2, executed 9000, cover 6789, signal 5432, crashes 2, repro 0";
-        let events = parse_syzkaller_progress(log);
-        // Peak coverage, reported once.
+    fn syzkaller_status_lines_report_absolute_counters_per_line() {
+        // The per-line parser the runner streams reports each status line's
+        // absolute counters; aggregation (peaks, crash deltas) belongs to the
+        // caller, the same split `parse_progress_events` uses.
         assert_eq!(
-            events
-                .iter()
-                .filter(|e| matches!(e, FuzzProgress::EdgesCovered(6789)))
-                .count(),
-            1
+            parse_syzkaller_status(
+                "VMs 2, executed 5000, cover 6789, signal 5432, crashes 2, repro 0"
+            ),
+            Some((6789, 5000, 2))
         );
-        // The absolute crash count, not one-per-status-line.
         assert_eq!(
-            events
-                .iter()
-                .filter(|e| matches!(e, FuzzProgress::CrashesFound(2)))
-                .count(),
-            1
-        );
-        // No spurious extra crash events from the repeated status lines.
-        assert_eq!(
-            events
-                .iter()
-                .filter(|e| matches!(e, FuzzProgress::CrashesFound(_)))
-                .count(),
-            1
+            parse_syzkaller_status(
+                "VMs 2, executed 9000, cover 6789, signal 5432, crashes 2, repro 0"
+            ),
+            Some((6789, 9000, 2))
         );
     }
 }

@@ -276,10 +276,11 @@ async fn crash_found_at_triage_completion_fires_matching_event_schedule() {
 
     // last_fire is recorded for event fires exactly like cron fires.
     let stored = scheduler
-        .list()
+        .list_views()
         .await
+        .expect("schedule views readable")
         .into_iter()
-        .find(|s| s.id == on_crash.id)
+        .find(|view| view.id == on_crash.id)
         .unwrap();
     assert!(stored.last_fire.is_some());
 }
@@ -318,15 +319,13 @@ async fn persisted_event_schedule_loads_on_restart_and_evaluates() {
         .await
         .expect("scheduler restarts");
     let loaded = scheduler
-        .list()
+        .list_views()
         .await
+        .expect("schedule views readable")
         .into_iter()
-        .find(|s| s.id == schedule_id)
+        .find(|view| view.id == schedule_id)
         .expect("event schedule survived the restart");
-    assert!(matches!(
-        loaded.trigger,
-        hf_scheduler::TriggerConfig::Event { .. }
-    ));
+    assert_eq!(loaded.trigger, "on crash.found");
 
     let crashes = container
         .triage_run(&fixture.project, &fixture.target.symbol, fixture.run.id)

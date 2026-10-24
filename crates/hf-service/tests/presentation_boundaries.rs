@@ -11,7 +11,15 @@ fn presentations_depend_on_internal_logic_only_through_service() {
         "hf-gui/src-tauri/Cargo.toml",
     ] {
         let manifest = std::fs::read_to_string(crates_dir.join(relative)).unwrap();
-        for line in manifest.lines().map(str::trim_start) {
+        // Shipping dependencies carry the boundary; dev-dependencies only
+        // build tests, where constructing hf-core doubles (for example a
+        // provider pool stub) does not put logic into the presentation
+        // crate. Skip everything from [dev-dependencies] onward.
+        let shipping = manifest
+            .split("[dev-dependencies]")
+            .next()
+            .unwrap_or(manifest.as_str());
+        for line in shipping.lines().map(str::trim_start) {
             if line.starts_with("hf-")
                 && !line.starts_with("hf-service =")
                 && !(relative.starts_with("hf-cli") && line.starts_with("hf-web ="))

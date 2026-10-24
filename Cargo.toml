@@ -69,6 +69,7 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
 # Hashing / Crypto
 sha2 = "0.10"
+hmac = "0.12"
 hex = "0.4"
 regex = "1"
 subtle = "2"

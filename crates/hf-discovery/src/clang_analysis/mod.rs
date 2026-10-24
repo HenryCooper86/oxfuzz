@@ -2,7 +2,7 @@
 mod exploration;
 mod graph;
 mod normalize;
-pub use graph::{associate_target, reachable_functions, selected_roots, target_context};
+pub use graph::{associate_target, selected_roots, target_context};
 pub use normalize::normalize_index;
 
 /// Invalid or unsupported analyzer evidence.

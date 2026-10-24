@@ -7,13 +7,11 @@ pub mod ai_ranking;
 #[cfg(feature = "build-context")]
 pub mod build_context;
 pub mod enrichment;
-pub mod ranking;
 mod reachability;
 pub mod scanner;
 #[cfg(feature = "semgrep-enrichment")]
 pub mod semgrep;
 
-pub use ranking::rank;
 pub use scanner::{discover, discover_with_signals, discoverable_source_files};
 
 #[cfg(feature = "clang-analysis")]

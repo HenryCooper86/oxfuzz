@@ -152,7 +152,7 @@ impl ServiceContainer {
     pub async fn approve_remediation_operation(
         &self,
         operation_id: Uuid,
-        operator: &str,
+        approver: RemediationApprover,
     ) -> Result<RemediationApprovalView, ClassifiedError> {
         let store = self.store().ok_or_else(|| {
             ClassifiedError::Storage("remediation operations require persistent storage".to_owned())
@@ -168,9 +168,13 @@ impl ServiceContainer {
                 ))
             })?;
         let binding_sha256 = sha256_bytes(record.binding_json.as_bytes());
+        // Attribution is server-authored (VULN-009): the caller's transport
+        // picks the label and no request body can name an operator, so the
+        // retained approval record cannot be forged by whoever holds the
+        // shared token.
         let approval = serde_json::json!({
             "approval_id": Uuid::new_v4(),
-            "operator": operator,
+            "operator": approver.label(),
             "approved_at": now.to_rfc3339(),
             "binding_sha256": binding_sha256,
         });
@@ -575,6 +579,33 @@ impl ServiceContainer {
             failure_message,
         )
         .await
+    }
+}
+/// Server-authored attribution for a remediation approval.
+/// The durable approval record must never carry a caller-supplied operator
+/// string: the shared web token authenticates possession of the token and
+/// nothing else, so a client-provided name is forgeable audit evidence. Each
+/// transport that owns a real principal constructs its own variant; there is
+/// deliberately no way to build one from a request body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemediationApprover {
+    /// The shared-token REST API. No identity claims travel with the request,
+    /// so the record attributes the transport; the approval id in the same
+    /// JSON object is the correlation key.
+    WebApi,
+    /// The single-principal desktop shell, where the approving human is the
+    /// local operator session itself.
+    DesktopOperator,
+}
+
+impl RemediationApprover {
+    /// Label persisted into the immutable approval record.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::WebApi => "web-api",
+            Self::DesktopOperator => "desktop-operator",
+        }
     }
 }
 

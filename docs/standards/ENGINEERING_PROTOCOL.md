@@ -35,8 +35,8 @@ oxfuzz/
     design/            -- detailed design documents
     standards/         -- engineering, testing, DB, skills, tool-call, target, harness standards
   config/
-    prompts/           -- core prompt sections bundled by hf-prompt; prompts.example.toml
-                          documents the override format
+    prompts/           -- compile-time prompt sections embedded by hf-prompt; prompts are
+                          binary constants with no runtime override mechanism
   crates/              -- Rust workspace crates (skills and agent definitions are built into
                           hf-skills and hf-agent; user definitions may be dropped into the
                           runtime config dir, none ship as repository files)

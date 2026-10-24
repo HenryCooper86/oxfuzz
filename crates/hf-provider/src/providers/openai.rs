@@ -712,10 +712,11 @@ impl LlmProvider for OpenAiProvider {
             _ => FinishReason::Stop,
         };
 
-        let usage = openai_response.usage.unwrap_or(OpenAiUsage {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-        });
+        let usage = openai_response.usage.ok_or_else(|| ProviderError::Other {
+            message: "response missing 'usage': without reported token counts the \
+                caller's budget reservation can never be settled"
+                .into(),
+        })?;
 
         Ok(ChatResponse {
             id: openai_response.id,

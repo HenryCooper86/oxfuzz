@@ -4,17 +4,18 @@
 //! targets, harnesses, runs, crashes, and corpus metadata into dashboard-ready
 //! DTOs. It does not build harnesses, run fuzzers, or publish bug reports.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fmt::Write as _;
-use std::path::Path;
-
 use chrono::{DateTime, Utc};
 use hf_core::crash::Crash;
 use hf_core::error::ClassifiedError;
 use hf_core::harness::{Harness, HarnessStatus};
 use hf_core::target::TargetCandidate;
-use hf_storage::{RemediationOperationRecord, RunRecord, RunStatus, Store};
+use hf_storage::{FiledIssueClaim, RemediationOperationRecord, RunRecord, RunStatus, Store};
 use serde::Serialize;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt::Write as _;
+use std::future::Future;
+use std::path::Path;
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 use uuid::Uuid;
 
 #[cfg(feature = "patch-to-proof")]
@@ -541,16 +542,105 @@ pub(crate) async fn file_issue(
     let title = issue_title(&crash, target);
     let description = issue_description(&crash, target);
 
-    // Best-effort dedup: if this crash was already filed (same stack signature),
-    // return the existing issue instead of opening a duplicate on a re-file or a
-    // retried request. A search failure falls through to creating.
-    if let Some(existing) = client.find_existing_issue(&crash.stack_signature).await {
-        return Ok(existing);
-    }
-
-    client.create_issue(&title, &description, &cfg.labels).await
+    // Durable dedup keyed by the crash UUID (VULN-001): the atomic claim
+    // closes the search->create race, and retries return the recorded issue
+    // instead of opening a duplicate.
+    file_issue_exactly_once(store, &crash.id.to_string(), async {
+        // Best-effort dedup: if this crash was already filed (same stack
+        // signature), return the existing issue instead of opening a duplicate.
+        // A search failure falls through to creating.
+        if let Some(existing) = client.find_existing_issue(&crash.stack_signature).await {
+            return Ok(existing);
+        }
+        client.create_issue(&title, &description, &cfg.labels).await
+    })
+    .await
 }
 
+/// In-process per-key locks serializing issue filings (VULN-001). Defense in
+/// depth on top of the durable `filed_issues` claim: same-process retries wait
+/// for the in-flight filing and then observe its recorded issue, instead of
+/// racing to the remote create.
+static FILE_ISSUE_LOCKS: LazyLock<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn file_issue_lock(dedup_key: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let mut locks = FILE_ISSUE_LOCKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    locks
+        .get(dedup_key)
+        .and_then(Weak::upgrade)
+        .unwrap_or_else(|| {
+            let lock = Arc::new(tokio::sync::Mutex::new(()));
+            locks.insert(dedup_key.to_owned(), Arc::downgrade(&lock));
+            lock
+        })
+}
+
+/// File at most one tracker issue per durable dedup key (VULN-001).
+///
+/// The `filed_issues` claim is the race-free constraint: exactly one caller
+/// reaches `file`, retries receive the recorded issue, and a concurrent
+/// in-process caller waits on the per-key lock first. The `file` future
+/// performs the caller's best-effort remote search followed by the create;
+/// whichever issue it yields (found or created) is recorded durably.
+///
+/// # Errors
+/// Returns [`ClassifiedError`] when the claim cannot be persisted, another
+/// filing holds the claim, or `file` fails (its claim is then released so the
+/// filing can be retried).
+pub(crate) async fn file_issue_exactly_once<F>(
+    store: &Store,
+    dedup_key: &str,
+    file: F,
+) -> Result<crate::issue_tracker::CreatedIssue, ClassifiedError>
+where
+    F: Future<Output = Result<crate::issue_tracker::CreatedIssue, ClassifiedError>>,
+{
+    let lock = file_issue_lock(dedup_key);
+    let _guard = lock.lock().await;
+    match store
+        .claim_filed_issue(dedup_key, Utc::now())
+        .await
+        .map_err(ClassifiedError::from)?
+    {
+        FiledIssueClaim::Completed(recorded) => serde_json::from_str(&recorded).map_err(|error| {
+            ClassifiedError::Storage(format!("decode filed issue for {dedup_key}: {error}"))
+        }),
+        FiledIssueClaim::Pending => Err(ClassifiedError::Validation(format!(
+            "an issue filing for {dedup_key} is already in progress"
+        ))),
+        FiledIssueClaim::Claimed => {
+            match file.await {
+                Ok(issue) => {
+                    let recorded = serde_json::to_string(&issue).map_err(|error| {
+                        ClassifiedError::Internal(format!("serialize filed issue: {error}"))
+                    })?;
+                    store
+                        .complete_filed_issue(dedup_key, &recorded)
+                        .await
+                        .map_err(ClassifiedError::from)?;
+                    Ok(issue)
+                }
+                Err(error) => {
+                    // Release the claim so this filing can be retried; the
+                    // release failure cannot mask the original create error,
+                    // and the next attempt either re-claims or reports busy.
+                    if let Err(release_error) = store.release_filed_issue(dedup_key).await {
+                        tracing::warn!(
+                            %release_error,
+                            %dedup_key,
+                            "failed to release the filed-issue claim"
+                        );
+                    }
+                    Err(error)
+                }
+            }
+        }
+    }
+}
 fn empty_dashboard(
     active_project: Option<String>,
     active_target: Option<&str>,
@@ -1223,5 +1313,41 @@ mod tests {
         assert_f64_eq(view.top_targets[0].fit_score, 0.4);
         assert_eq!(view.top_targets[1].id, high_base.id.to_string());
         assert_f64_eq(view.top_targets[1].fit_score, 0.9);
+    }
+
+    /// A claimant whose process died mid-create leaves a Pending row that used
+    /// to wedge the dedup key forever. A stale claim is reclaimed so a later
+    /// filing completes instead of failing with "already in progress".
+    #[tokio::test]
+    async fn a_stale_pending_claim_is_reclaimed_and_the_filing_succeeds() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::connect(root.path().join("workbench.db"))
+            .await
+            .unwrap();
+        let key = "stale-dedup-key";
+        assert_eq!(
+            store
+                .claim_filed_issue(key, Utc::now() - chrono::Duration::minutes(11))
+                .await
+                .unwrap(),
+            FiledIssueClaim::Claimed
+        );
+
+        let issue = crate::issue_tracker::CreatedIssue {
+            url: "https://github.com/acme/app/issues/7".to_owned(),
+            number: Some(7),
+        };
+        let filed = file_issue_exactly_once(&store, key, async { Ok(issue.clone()) })
+            .await
+            .expect("the stale claim is reclaimed and the filing completes");
+        assert_eq!(filed.url, issue.url);
+
+        // The reclaimed row now carries the recorded issue, so a later caller
+        // observes Completed rather than re-creating.
+        let recorded = serde_json::to_string(&issue).unwrap();
+        assert_eq!(
+            store.claim_filed_issue(key, Utc::now()).await.unwrap(),
+            FiledIssueClaim::Completed(recorded)
+        );
     }
 }

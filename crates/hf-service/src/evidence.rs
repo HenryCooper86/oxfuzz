@@ -80,12 +80,17 @@ pub struct EvidenceApproval {
 }
 
 /// Coverage totals bound to a campaign.
+///
+/// Both fields are optional: a run without a retained edge measurement
+/// asserts `None` rather than a fabricated zero, and the delta is asserted
+/// only when a comparable baseline exists (a first run has no baseline, so
+/// delta == total edges would be a measurement never made).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvidenceCoverage {
-    /// Peak comparable source edges.
-    pub edges: u64,
-    /// Edge delta against the comparable baseline.
-    pub delta_edges: i64,
+    /// Peak comparable source edges, when the run retained a measurement.
+    pub edges: Option<u64>,
+    /// Edge delta against the comparable baseline, when one exists.
+    pub delta_edges: Option<i64>,
 }
 
 /// One crash and its immutable reproducer identity.
@@ -255,8 +260,11 @@ impl ServiceContainer {
         pricing: CampaignEvidencePricing,
     ) -> Result<EvidenceManifest, ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
-        self.campaign_evidence_manifest_locked(run_id, pricing)
-            .await
+        let manifest = self
+            .campaign_evidence_manifest_locked(run_id, pricing)
+            .await?;
+        verify_manifest_wire_form(&manifest)?;
+        Ok(manifest)
     }
 
     pub(crate) async fn campaign_evidence_manifest_locked(
@@ -330,6 +338,11 @@ impl ServiceContainer {
                 )
             })?;
 
+        // A run staged under a file-qualified selector keeps its crash paths
+        // under that workspace; resolve the run's retained selector (exactly
+        // as history.rs does) instead of assuming the bare symbol.
+        let retained_target_selector =
+            crate::container::project_identity::retained_run_target_selector(&run, &target)?;
         let findings = store
             .list_crashes_by_run(run.id)
             .await?
@@ -338,7 +351,7 @@ impl ServiceContainer {
                 let (_, reproducer_sha256) = read_run_crash_file(
                     &managed_workspace_root,
                     Path::new(&run.project_root),
-                    &target.symbol,
+                    &retained_target_selector,
                     run.id,
                     &crash.input_path,
                 )?;
@@ -409,7 +422,7 @@ impl ServiceContainer {
                 approved_at: approval.approved_at.to_rfc3339(),
             },
             coverage: EvidenceCoverage {
-                edges: run.edges.unwrap_or(0),
+                edges: run.edges,
                 delta_edges,
             },
             findings,
@@ -433,6 +446,27 @@ fn validate_pricing(pricing: CampaignEvidencePricing) -> Result<(), ClassifiedEr
         ));
     }
     Ok(())
+}
+
+/// The read-back path for [`EvidenceManifest::verify`].
+///
+/// No shipped surface persists a manifest as a standalone artifact -- every
+/// consumer (GUI, REST evidence route, remediation handoff) receives the
+/// serialized form and reads it back through `Deserialize`. Re-verifying
+/// that round trip at the exporting operation proves the wire form carries
+/// a digest that covers its body: a serialization change that ever made the
+/// wire lossy fails here instead of shipping manifests no external consumer
+/// could verify.
+fn verify_manifest_wire_form(manifest: &EvidenceManifest) -> Result<(), ClassifiedError> {
+    let wire = serde_json::to_value(manifest).map_err(|error| {
+        ClassifiedError::Internal(format!("serialize evidence manifest: {error}"))
+    })?;
+    let read_back: EvidenceManifest = serde_json::from_value(wire).map_err(|error| {
+        ClassifiedError::Internal(format!("evidence manifest wire form is lossy: {error}"))
+    })?;
+    read_back.verify().map_err(|error| {
+        ClassifiedError::Internal(format!("evidence manifest failed verification: {error}"))
+    })
 }
 
 fn evidence_status(status: RunStatus) -> Result<EvidenceRunStatus, ClassifiedError> {
@@ -478,7 +512,7 @@ async fn comparable_coverage_delta(
     store: &hf_storage::Store,
     run: &RunRecord,
     target_id: Uuid,
-) -> Result<i64, ClassifiedError> {
+) -> Result<Option<i64>, ClassifiedError> {
     let mut baseline = None;
     for prior in store.list_runs(Some(&run.project_root)).await? {
         if prior.id == run.id
@@ -501,15 +535,19 @@ async fn comparable_coverage_delta(
             break;
         }
     }
-    let current = i128::from(run.edges.unwrap_or(0));
-    let previous = i128::from(baseline.unwrap_or(0));
-    Ok(i64::try_from(current - previous).unwrap_or({
-        if current >= previous {
-            i64::MAX
-        } else {
-            i64::MIN
+    // No comparable baseline (or no current measurement) means no delta: a
+    // first run's full edge count is a coverage total, not a gain it made.
+    match (run.edges, baseline) {
+        (Some(current), Some(previous)) => {
+            let delta = i128::from(current) - i128::from(previous);
+            Ok(Some(i64::try_from(delta).unwrap_or(if delta >= 0 {
+                i64::MAX
+            } else {
+                i64::MIN
+            })))
         }
-    }))
+        _ => Ok(None),
+    }
 }
 
 pub(crate) fn read_run_crash_file(

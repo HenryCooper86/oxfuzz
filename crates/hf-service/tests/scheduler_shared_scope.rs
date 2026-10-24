@@ -19,7 +19,7 @@ async fn restarted_shared_control_checks_nonterminal_orphan_ownership() {
     )
     .await
     .unwrap();
-    assert!(scheduler.list().await.is_empty());
+    assert!(scheduler.list_views().await.unwrap().is_empty());
     let outside = tempfile::tempdir().unwrap();
     let foreign_roots = vec![outside.path().canonicalize().unwrap()];
     let owned_roots = vec![fixture.directory_path().canonicalize().unwrap()];

@@ -429,6 +429,11 @@ where
                 signal_result = signal.as_mut() => {
                     signal_result?;
                     output.stderr_line("Semgrep enrichment: cancellation requested".to_owned());
+                    // 2.17: the cancel outcome (Accepted/Inactive/NotFound) is
+                    // dropped -- the loop re-reads the durable status either
+                    // way, so an Inactive or NotFound operation surfaces as
+                    // its terminal state or the "was not found" error below
+                    // instead of being swallowed here.
                     let _ = service.cancel_semgrep(operation_id).await?;
                     cancellation_requested = true;
                     continue;
@@ -461,6 +466,9 @@ where
                 signal_result = signal.as_mut() => {
                     signal_result?;
                     output.stderr_line("Semgrep enrichment: cancellation requested".to_owned());
+                    // 2.17: same discard as the pre-poll cancel above: the
+                    // durable status re-read decides the outcome, not this
+                    // cancel's return value.
                     let _ = service.cancel_semgrep(operation_id).await?;
                     cancellation_requested = true;
                 }
@@ -1276,6 +1284,139 @@ mod semgrep_cli_tests {
     }
 }
 
+/// Service surface the clang wait needs: durable status reads and a
+/// cancellation request. `ServiceContainer` implements it; tests double it.
+#[cfg(feature = "clang-analysis")]
+#[async_trait::async_trait]
+trait ClangCommandService {
+    async fn clang_status(
+        &self,
+        operation_id: uuid::Uuid,
+    ) -> Result<Option<hf_service::clang_analysis::ClangOperationRecord>, ClassifiedError>;
+
+    async fn cancel_clang(
+        &self,
+        operation_id: uuid::Uuid,
+    ) -> Result<Option<hf_service::clang_analysis::ClangOperationRecord>, ClassifiedError>;
+}
+
+#[cfg(feature = "clang-analysis")]
+#[async_trait::async_trait]
+impl ClangCommandService for ServiceContainer {
+    async fn clang_status(
+        &self,
+        operation_id: uuid::Uuid,
+    ) -> Result<Option<hf_service::clang_analysis::ClangOperationRecord>, ClassifiedError> {
+        self.clang_analysis_operation(operation_id).await
+    }
+
+    async fn cancel_clang(
+        &self,
+        operation_id: uuid::Uuid,
+    ) -> Result<Option<hf_service::clang_analysis::ClangOperationRecord>, ClassifiedError> {
+        self.cancel_clang_analysis(operation_id).await
+    }
+}
+
+/// The bounded wait for one clang operation: its own sandbox budget (the
+/// analysis runs in one bounded container, `clang_analysis.timeout_secs`)
+/// plus slack for staging, queueing behind another workspace operation, and
+/// persistence. A healthy run is never cut short by its own bound, while a
+/// lost operation still ends the wait instead of hanging the CLI forever.
+#[cfg(feature = "clang-analysis")]
+fn clang_wait_budget() -> anyhow::Result<std::time::Duration> {
+    let settings =
+        hf_service::config::effective_clang_analysis_settings().map_err(anyhow::Error::msg)?;
+    let limits = settings.resolve().map_err(anyhow::Error::msg)?;
+    Ok(std::time::Duration::from_secs(limits.timeout_secs + 600))
+}
+
+/// Poll a clang analysis operation until it reaches a terminal state, with
+/// the same cancellation contract as `wait_for_semgrep`: Ctrl-C requests a
+/// service-side cancel and the loop keeps polling until the durable status
+/// confirms the terminal state. The whole wait is bounded by `deadline`; a
+/// lost operation fails the command instead of hanging it.
+///
+/// Returns the terminal `Done` record; a non-`Done` terminal state is an
+/// error naming it.
+#[cfg(feature = "clang-analysis")]
+async fn wait_for_clang<S, Signal, Delay, DelayFuture>(
+    service: &S,
+    operation_id: uuid::Uuid,
+    mut signal: std::pin::Pin<&mut Signal>,
+    delay: &mut Delay,
+    deadline: std::time::Instant,
+) -> anyhow::Result<hf_service::clang_analysis::ClangOperationRecord>
+where
+    S: ClangCommandService + Sync,
+    Signal: Future<Output = std::io::Result<()>>,
+    Delay: FnMut() -> DelayFuture,
+    DelayFuture: Future<Output = ()>,
+{
+    let mut previous_state = "";
+    let mut cancellation_requested = false;
+    loop {
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "Clang analysis {operation_id} did not reach a terminal state within the wait \
+                 budget; it may still be running server-side -- inspect or cancel it there"
+            );
+        }
+        let status = if cancellation_requested {
+            service.clang_status(operation_id).await?
+        } else {
+            tokio::select! {
+                signal_result = signal.as_mut() => {
+                    signal_result?;
+                    eprintln!("Clang analysis: cancellation requested");
+                    // 2.17: the cancel outcome (the post-cancel record) is
+                    // dropped here -- the loop re-reads the durable status
+                    // either way, so a NotFound surfaces as the "was not
+                    // found" error below rather than being swallowed.
+                    let _ = service.cancel_clang(operation_id).await?;
+                    cancellation_requested = true;
+                    continue;
+                }
+                status = service.clang_status(operation_id) => status?,
+            }
+        };
+        let record = status
+            .ok_or_else(|| anyhow::anyhow!("Clang operation {operation_id} was not found"))?;
+        if previous_state != record.state.as_str() {
+            eprintln!("Clang analysis: {}", record.state.as_str());
+            previous_state = record.state.as_str();
+        }
+        if record.state.terminal() {
+            if record.state != hf_service::clang_analysis::ClangOperationState::Done {
+                anyhow::bail!(
+                    "Clang analysis {}: {}",
+                    record.state.as_str(),
+                    record.failure.as_deref().unwrap_or("no successful result")
+                );
+            }
+            return Ok(record);
+        }
+
+        if cancellation_requested {
+            delay().await;
+        } else {
+            let delay_future = delay();
+            tokio::pin!(delay_future);
+            tokio::select! {
+                () = &mut delay_future => {}
+                signal_result = signal.as_mut() => {
+                    signal_result?;
+                    eprintln!("Clang analysis: cancellation requested");
+                    // 2.17: same as the pre-poll cancel above -- the durable
+                    // status re-read decides, not this discard.
+                    let _ = service.cancel_clang(operation_id).await?;
+                    cancellation_requested = true;
+                }
+            }
+        }
+    }
+}
+
 /// Run explicit semantic analysis through the service and render its retained result.
 #[cfg(feature = "clang-analysis")]
 pub(crate) async fn cmd_discover_clang(project: PathBuf, lang: &str) -> anyhow::Result<()> {
@@ -1292,36 +1433,213 @@ pub(crate) async fn cmd_discover_clang(project: PathBuf, lang: &str) -> anyhow::
             target_ids: vec![],
         })
         .await?;
-    let mut previous = String::new();
-    loop {
-        let status = service
-            .clang_analysis_operation(operation.id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Clang operation disappeared"))?;
-        if previous != status.state.as_str() {
-            eprintln!("Clang analysis: {}", status.state.as_str());
-            status.state.as_str().clone_into(&mut previous);
-        }
-        if status.state.terminal() {
-            if status.state != hf_service::clang_analysis::ClangOperationState::Done {
-                anyhow::bail!(
-                    "Clang analysis {}: {}",
-                    status.state.as_str(),
-                    status.failure.as_deref().unwrap_or("no successful result")
-                );
+    let deadline = std::time::Instant::now() + clang_wait_budget()?;
+    let signal = tokio::signal::ctrl_c();
+    tokio::pin!(signal);
+    wait_for_clang(
+        &service,
+        operation.id,
+        signal.as_mut(),
+        &mut || tokio::time::sleep(std::time::Duration::from_millis(100)),
+        deadline,
+    )
+    .await?;
+    let analysis = service
+        .clang_analysis_result(operation.id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Clang result unavailable"))?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(
+            &serde_json::json!({"inventory":inventory,"analysis":analysis})
+        )?
+    );
+    Ok(())
+}
+
+#[cfg(all(test, feature = "clang-analysis"))]
+mod clang_cli_tests {
+    use std::collections::VecDeque;
+    use std::future::Future;
+    use std::pin::pin;
+    use std::sync::Mutex;
+
+    use hf_service::clang_analysis::{ClangOperationRecord, ClangOperationState};
+    use hf_service::ClassifiedError;
+    use uuid::Uuid;
+
+    use super::{wait_for_clang, ClangCommandService};
+
+    struct FakeClangService {
+        operation_id: Uuid,
+        statuses: Mutex<VecDeque<ClangOperationState>>,
+        cancelled: Mutex<Vec<Uuid>>,
+    }
+
+    impl FakeClangService {
+        fn new(states: Vec<ClangOperationState>) -> Self {
+            Self {
+                operation_id: Uuid::from_u128(0x5678),
+                statuses: Mutex::new(states.into()),
+                cancelled: Mutex::new(Vec::new()),
             }
-            let analysis = service
-                .clang_analysis_result(operation.id)
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("Clang result unavailable"))?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(
-                    &serde_json::json!({"inventory":inventory,"analysis":analysis})
-                )?
-            );
-            return Ok(());
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        fn cancelled_ids(&self) -> Vec<Uuid> {
+            self.cancelled.lock().unwrap().clone()
+        }
+    }
+
+    fn record(id: Uuid, state: ClangOperationState) -> ClangOperationRecord {
+        ClangOperationRecord {
+            id,
+            project_root: "/p".to_owned(),
+            language: "c".to_owned(),
+            state,
+            request_json: "{}".to_owned(),
+            started_at: "2026-10-24T00:00:00Z".to_owned(),
+            ended_at: None,
+            failure: (state == ClangOperationState::Failed).then(|| "bounded failure".to_owned()),
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ClangCommandService for FakeClangService {
+        async fn clang_status(
+            &self,
+            operation_id: Uuid,
+        ) -> Result<Option<ClangOperationRecord>, ClassifiedError> {
+            assert_eq!(operation_id, self.operation_id);
+            Ok(self
+                .statuses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .map(|state| record(operation_id, state)))
+        }
+
+        async fn cancel_clang(
+            &self,
+            operation_id: Uuid,
+        ) -> Result<Option<ClangOperationRecord>, ClassifiedError> {
+            self.cancelled.lock().unwrap().push(operation_id);
+            Ok(None)
+        }
+    }
+
+    fn far_deadline() -> std::time::Instant {
+        std::time::Instant::now() + std::time::Duration::from_secs(3600)
+    }
+
+    fn immediate_delay() -> impl Future<Output = ()> {
+        std::future::ready(())
+    }
+
+    #[tokio::test]
+    async fn clang_wait_returns_the_done_record_after_progress_states() {
+        let service = FakeClangService::new(vec![
+            ClangOperationState::Staging,
+            ClangOperationState::Analyzing,
+            ClangOperationState::Done,
+        ]);
+        let done = wait_for_clang(
+            &service,
+            service.operation_id,
+            pin!(std::future::pending::<std::io::Result<()>>()),
+            &mut immediate_delay,
+            far_deadline(),
+        )
+        .await
+        .expect("a Done operation resolves with its record");
+        assert_eq!(done.state, ClangOperationState::Done);
+        assert!(service.cancelled_ids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn clang_wait_fails_closed_on_non_done_terminal_states() {
+        for state in [ClangOperationState::Failed, ClangOperationState::Cancelled] {
+            let service = FakeClangService::new(vec![state]);
+            let error = wait_for_clang(
+                &service,
+                service.operation_id,
+                pin!(std::future::pending::<std::io::Result<()>>()),
+                &mut immediate_delay,
+                far_deadline(),
+            )
+            .await
+            .expect_err("a non-Done terminal state must fail");
+            assert!(
+                error.to_string().contains(state.as_str()),
+                "the terminal state is named: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn clang_wait_fails_when_the_operation_disappears() {
+        let service = FakeClangService::new(vec![]);
+        let error = wait_for_clang(
+            &service,
+            service.operation_id,
+            pin!(std::future::pending::<std::io::Result<()>>()),
+            &mut immediate_delay,
+            far_deadline(),
+        )
+        .await
+        .expect_err("a lost operation must fail, not hang");
+        assert!(error.to_string().contains("was not found"));
+    }
+
+    #[tokio::test]
+    async fn clang_wait_is_bounded_and_names_the_operation() {
+        // An operation that never reaches a terminal state must end the wait
+        // with an error naming it, instead of hanging the CLI forever.
+        let service = FakeClangService::new(vec![ClangOperationState::Analyzing]);
+        let passed_deadline = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        let error = wait_for_clang(
+            &service,
+            service.operation_id,
+            pin!(std::future::pending::<std::io::Result<()>>()),
+            &mut immediate_delay,
+            passed_deadline,
+        )
+        .await
+        .expect_err("the wait must be bounded");
+        assert!(
+            error.to_string().contains("did not reach a terminal state"),
+            "the bound is named: {error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains(&service.operation_id.to_string()),
+            "the operation id is named: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn clang_wait_cancels_on_ctrl_c_and_fails_on_the_cancelled_state() {
+        // Ctrl-C requests the service-side cancel and keeps polling: the
+        // durable Cancelled state then fails the command, so a teardown that
+        // never completes cannot hang either.
+        let service = FakeClangService::new(vec![
+            ClangOperationState::Analyzing,
+            ClangOperationState::Cancelled,
+        ]);
+        let error = wait_for_clang(
+            &service,
+            service.operation_id,
+            pin!(std::future::ready(Ok::<()>(()))),
+            &mut immediate_delay,
+            far_deadline(),
+        )
+        .await
+        .expect_err("the cancelled terminal state fails the wait");
+        assert_eq!(
+            service.cancelled_ids(),
+            vec![service.operation_id],
+            "Ctrl-C must request exactly one service-side cancel"
+        );
+        assert!(error.to_string().contains("cancelled"));
     }
 }

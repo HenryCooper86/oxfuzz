@@ -185,6 +185,7 @@ type OneTimeAdmissions = Arc<StdMutex<HashMap<String, PendingOneTimeAdmission>>>
 const ONE_TIME_ID_NOT_RESERVED: &str = "not_reserved";
 const WORKFLOW_FAILURE_RECOVERY: &str = "workflow_failure";
 const DISPATCHER_FAILURE_RECOVERY: &str = "dispatcher_failure";
+const ONE_TIME_SKIP_RECOVERY: &str = "one-time dispatch was skipped before its workflow ran; acknowledge to close it or re-create the schedule";
 
 /// Snapshot of scheduler-owned one-time occurrence counters.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1615,75 +1616,18 @@ impl SchedulerManager {
             }
         };
 
-        let mut running = pending.clone();
-        running.status = ExecutionStatus::Running;
-        running.started_at = Some(Utc::now());
-        let running_transition = OneTimeOccurrenceTransition {
-            occurrence_id: occurrence.id.clone(),
-            schedule_id: occurrence.schedule_id.clone(),
-            execution_id: occurrence.execution_id.clone(),
-            owner_id: occurrence.owner_id.clone(),
-            from: OneTimeOccurrenceState::Reserved,
-            to: OneTimeOccurrenceState::Running,
-            lease_expires_at: Some(
-                Utc::now()
-                    + chrono::Duration::from_std(ONE_TIME_LEASE)
-                        .expect("one-time lease duration fits chrono"),
-            ),
-            recovery_detail: None,
+        let Some(running) = Self::transition_one_time_to_running(
+            &pending,
+            &occurrence,
+            &persistence,
+            &execution_store,
+            &one_time_status,
+            &occurrence_metrics,
+        )
+        .await
+        else {
+            return;
         };
-        let transition_started = std::time::Instant::now();
-        let running_result = persistence
-            .transition_one_time_occurrence(&running_transition, &running)
-            .await;
-        let transition_duration_ms =
-            u64::try_from(transition_started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        match running_result {
-            Ok(OneTimeTransitionResult::Applied(_) | OneTimeTransitionResult::Idempotent(_)) => {
-                debug!(
-                    occurrence_id = %running_transition.occurrence_id,
-                    schedule_id = %running_transition.schedule_id,
-                    execution_id = %running_transition.execution_id,
-                    from = %running_transition.from,
-                    to = %running_transition.to,
-                    duration_ms = transition_duration_ms,
-                    "Persisted one-time occurrence transition"
-                );
-                execution_store
-                    .lock()
-                    .await
-                    .update(&running.execution_id, |record| *record = running.clone());
-            }
-            Ok(OneTimeTransitionResult::Conflict(_) | OneTimeTransitionResult::Missing)
-            | Err(_) => {
-                occurrence_metrics.record_transition_failure();
-                Self::mark_recovery_required(
-                    &one_time_status,
-                    &occurrence.schedule_id,
-                    "one-time reserved-to-running transition failed",
-                )
-                .await;
-                let _released = persistence
-                    .release_one_time_lease(
-                        &occurrence.id,
-                        &occurrence.owner_id,
-                        Utc::now(),
-                        "running transition failed before dispatcher entry",
-                    )
-                    .await;
-                warn!(
-                    occurrence_id = %running_transition.occurrence_id,
-                    schedule_id = %running_transition.schedule_id,
-                    execution_id = %running_transition.execution_id,
-                    from = %running_transition.from,
-                    to = %running_transition.to,
-                    duration_ms = transition_duration_ms,
-                    recovery_reason = "running_transition",
-                    "One-time running transition failed closed"
-                );
-                return;
-            }
-        }
 
         let dispatch_start = std::time::Instant::now();
         let dispatch = dispatcher.dispatch(&workflow_id, parameter_values);
@@ -1732,6 +1676,59 @@ impl SchedulerManager {
 
         let duration_ms = u64::try_from(dispatch_start.elapsed().as_millis()).unwrap_or(u64::MAX);
         let mut terminal_execution = running;
+        if let Ok(result) = &dispatch_result {
+            if result.skipped {
+                // A skip means the dispatcher declined to run the workflow at
+                // all (concurrency gate full, allocation not approved).
+                // Recording it as `Completed` would terminally consume a
+                // one-time occurrence whose scheduled work never ran, so
+                // instead record the skipped execution, release the durable
+                // lease, and leave the occurrence non-terminal: startup
+                // reconciliation then flags the schedule for operator
+                // recovery instead of marking it consumed. The durable
+                // execution row deliberately stays `running` to match the
+                // non-terminal occurrence (the paired-row invariant); the
+                // skip itself is visible in the recovery detail.
+                terminal_execution.status = ExecutionStatus::Skipped;
+                terminal_execution.completed_at = Some(Utc::now());
+                terminal_execution.response_summary = serde_json::json!({
+                    "status": "skipped",
+                    "summary": result.summary,
+                    "output": result.output,
+                    "duration_ms": duration_ms,
+                });
+                execution_store
+                    .lock()
+                    .await
+                    .update(&terminal_execution.execution_id, |record| {
+                        *record = terminal_execution.clone();
+                    });
+                if lease_healthy {
+                    let _released = persistence
+                        .release_one_time_lease(
+                            &occurrence.id,
+                            &occurrence.owner_id,
+                            Utc::now(),
+                            ONE_TIME_SKIP_RECOVERY,
+                        )
+                        .await;
+                    Self::mark_recovery_required(
+                        &one_time_status,
+                        &schedule_id,
+                        ONE_TIME_SKIP_RECOVERY,
+                    )
+                    .await;
+                }
+                warn!(
+                    occurrence_id = %occurrence.id,
+                    schedule_id = %schedule_id,
+                    execution_id = %occurrence.execution_id,
+                    recovery_reason = "dispatch_skipped",
+                    "One-time dispatch was skipped; the occurrence stays recoverable instead of consumed"
+                );
+                return;
+            }
+        }
         let terminal_recovery_detail = match dispatch_result {
             Ok(result) => {
                 let succeeded = result.success;
@@ -1840,6 +1837,95 @@ impl SchedulerManager {
                     recovery_reason = "terminal_transition",
                     "One-time terminal transition is ambiguous"
                 );
+            }
+        }
+    }
+
+    /// Move a claimed one-time occurrence from Reserved to Running durably.
+    ///
+    /// Returns the Running execution when the transition applied; None when
+    /// it did not, in which case the lease has already been released with a
+    /// recovery marker so startup flags the occurrence for recovery instead
+    /// of losing the scheduled work.
+    async fn transition_one_time_to_running(
+        pending: &ScheduleExecution,
+        occurrence: &OneTimeOccurrence,
+        persistence: &Arc<dyn SchedulerPersistence>,
+        execution_store: &Arc<Mutex<ExecutionStore>>,
+        one_time_status: &Arc<Mutex<HashMap<String, OneTimeRuntimeStatus>>>,
+        occurrence_metrics: &OccurrenceMetrics,
+    ) -> Option<ScheduleExecution> {
+        let mut running = pending.clone();
+        running.status = ExecutionStatus::Running;
+        running.started_at = Some(Utc::now());
+        let running_transition = OneTimeOccurrenceTransition {
+            occurrence_id: occurrence.id.clone(),
+            schedule_id: occurrence.schedule_id.clone(),
+            execution_id: occurrence.execution_id.clone(),
+            owner_id: occurrence.owner_id.clone(),
+            from: OneTimeOccurrenceState::Reserved,
+            to: OneTimeOccurrenceState::Running,
+            lease_expires_at: Some(
+                Utc::now()
+                    + chrono::Duration::from_std(ONE_TIME_LEASE)
+                        .expect("one-time lease duration fits chrono"),
+            ),
+            recovery_detail: None,
+        };
+        let transition_started = std::time::Instant::now();
+        let running_result = persistence
+            .transition_one_time_occurrence(&running_transition, &running)
+            .await;
+        let transition_duration_ms =
+            u64::try_from(transition_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        match running_result {
+            Ok(OneTimeTransitionResult::Applied(_) | OneTimeTransitionResult::Idempotent(_)) => {
+                debug!(
+                    occurrence_id = %running_transition.occurrence_id,
+                    schedule_id = %running_transition.schedule_id,
+                    execution_id = %running_transition.execution_id,
+                    from = %running_transition.from,
+                    to = %running_transition.to,
+                    duration_ms = transition_duration_ms,
+                    "Persisted one-time occurrence transition"
+                );
+                execution_store
+                    .lock()
+                    .await
+                    .update(&running.execution_id, |record| *record = running.clone());
+                Some(running)
+            }
+            Ok(OneTimeTransitionResult::Conflict(_) | OneTimeTransitionResult::Missing)
+            | Err(_) => {
+                occurrence_metrics.record_transition_failure();
+                Self::mark_recovery_required(
+                    one_time_status,
+                    &occurrence.schedule_id,
+                    "one-time reserved-to-running transition failed",
+                )
+                .await;
+                // The lease is unrecoverable for this attempt, so it is
+                // released with the failure reason; nothing else can be
+                // reached by holding it (the dispatch never started).
+                let _released = persistence
+                    .release_one_time_lease(
+                        &occurrence.id,
+                        &occurrence.owner_id,
+                        Utc::now(),
+                        "running transition failed before dispatcher entry",
+                    )
+                    .await;
+                warn!(
+                    occurrence_id = %running_transition.occurrence_id,
+                    schedule_id = %running_transition.schedule_id,
+                    execution_id = %running_transition.execution_id,
+                    from = %running_transition.from,
+                    to = %running_transition.to,
+                    duration_ms = transition_duration_ms,
+                    recovery_reason = "running_transition",
+                    "One-time running transition failed closed"
+                );
+                None
             }
         }
     }
@@ -2122,14 +2208,20 @@ impl SchedulerManager {
                             u64::try_from(dispatch_start.elapsed().as_millis()).unwrap_or(0);
                         let mut store = exec_store_clone.lock().await;
                         store.update(&exec_id_clone, |rec| {
-                            rec.status = if result.success {
+                            // A skipped fire declined to run its workflow, so
+                            // it is neither completed nor failed: the cursor
+                            // already advanced, and the skip is recorded
+                            // visibly instead of being counted a success.
+                            rec.status = if result.skipped {
+                                ExecutionStatus::Skipped
+                            } else if result.success {
                                 ExecutionStatus::Completed
                             } else {
                                 ExecutionStatus::Failed
                             };
                             rec.completed_at = Some(chrono::Utc::now());
                             rec.response_summary = serde_json::json!({
-                                "status": if result.success { "completed" } else { "failed" },
+                                "status": if result.skipped { "skipped" } else if result.success { "completed" } else { "failed" },
                                 "summary": result.summary,
                                 "output": result.output,
                                 "duration_ms": duration_ms,
@@ -2143,7 +2235,11 @@ impl SchedulerManager {
                         if let Some(updated) = updated {
                             Self::persist_update(persistence_clone.as_ref(), &updated).await;
                         }
-                        debug!(execution_id = %exec_id_clone, "Dispatched workflow completed");
+                        if result.skipped {
+                            debug!(execution_id = %exec_id_clone, "Dispatched workflow skipped");
+                        } else {
+                            debug!(execution_id = %exec_id_clone, "Dispatched workflow completed");
+                        }
                     }
                     Err(e) => {
                         let mut store = exec_store_clone.lock().await;
@@ -3198,6 +3294,7 @@ mod tests {
             self.workflows.lock().await.push(workflow_id.to_owned());
             Ok(DispatchResult {
                 success: true,
+                skipped: false,
                 summary: "ok".to_owned(),
                 output: serde_json::Value::Null,
                 duration_ms: 1,
@@ -3216,6 +3313,7 @@ mod tests {
             match self.kind {
                 SensitiveFailureKind::Workflow => Ok(DispatchResult {
                     success: false,
+                    skipped: false,
                     summary: "workflow failed".to_owned(),
                     output: serde_json::Value::Null,
                     duration_ms: 1,
@@ -3225,6 +3323,28 @@ mod tests {
                     Err(DispatchError::Internal(self.message.clone()))
                 }
             }
+        }
+    }
+
+    /// A dispatcher whose fires are always declined as skips, mirroring a
+    /// campaign dispatcher whose concurrency gate is full.
+    struct SkippingDispatcher;
+
+    #[async_trait::async_trait]
+    impl WorkflowDispatcher for SkippingDispatcher {
+        async fn dispatch(
+            &self,
+            _workflow_id: &str,
+            _parameter_values: serde_json::Value,
+        ) -> Result<DispatchResult, DispatchError> {
+            Ok(DispatchResult {
+                success: true,
+                skipped: true,
+                summary: "skipped: max concurrent campaigns reached (2)".to_owned(),
+                output: serde_json::json!({ "skipped": true }),
+                duration_ms: 0,
+                error: None,
+            })
         }
     }
 
@@ -4177,6 +4297,95 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn skipped_one_time_dispatch_stays_recoverable_instead_of_consumed() {
+        let (manager, persistence) = manager_and_persistence(OccurrenceFailure::None).await;
+        manager.set_dispatcher(Arc::new(SkippingDispatcher)).await;
+        manager.register(due_one_time("skip-once")).await;
+        manager.start(Duration::from_millis(10)).await;
+        wait_for_one_time_recovery(&manager, "skip-once").await;
+        manager.stop().await;
+
+        // The occurrence must NOT be terminally consumed: it stays non-terminal
+        // with a released lease and the skip named in its recovery detail.
+        let receipt = persistence.occurrence.lock().await.clone().unwrap();
+        assert_eq!(receipt.state, OneTimeOccurrenceState::Running);
+        assert!(!receipt.terminal());
+        assert!(receipt.recovery_eligible(Utc::now()));
+        assert_eq!(
+            receipt.recovery_detail.as_deref(),
+            Some(ONE_TIME_SKIP_RECOVERY)
+        );
+        // The only durable transition is reserved -> running; no terminal
+        // transition was applied and no execution was paired to a terminal
+        // state.
+        assert_eq!(
+            persistence.transitions.lock().await.as_slice(),
+            [(
+                OneTimeOccurrenceState::Reserved,
+                OneTimeOccurrenceState::Running
+            )]
+        );
+        assert_eq!(
+            persistence.execution.lock().await.as_ref().unwrap().status,
+            ExecutionStatus::Running
+        );
+        // The in-process execution history shows the skip visibly.
+        let history = manager.execution_history("skip-once").await;
+        assert_eq!(history[0].status, ExecutionStatus::Skipped);
+        assert_eq!(
+            history[0].response_summary["status"],
+            serde_json::json!("skipped")
+        );
+    }
+
+    #[tokio::test]
+    async fn skipped_recurring_dispatch_records_a_skipped_execution_and_advances_the_cursor() {
+        let manager = SchedulerManager::with_defaults();
+        manager.set_dispatcher(Arc::new(SkippingDispatcher)).await;
+        let schedule = Schedule::new(
+            "skip-interval",
+            "Skip Interval",
+            TriggerConfig::Interval { interval_secs: 1 },
+            "wf",
+        );
+        manager.register(schedule).await;
+        manager.start(Duration::from_millis(20)).await;
+        manager.arm();
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let history = manager.execution_history("skip-interval").await;
+                if history
+                    .first()
+                    .is_some_and(|record| record.status == ExecutionStatus::Skipped)
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("skipped execution was not recorded");
+        manager.stop().await;
+
+        let history = manager.execution_history("skip-interval").await;
+        assert_eq!(history[0].status, ExecutionStatus::Skipped);
+        assert_eq!(
+            history[0].response_summary["status"],
+            serde_json::json!("skipped")
+        );
+        assert!(history[0].completed_at.is_some());
+        // The fire advanced the cursor, so the schedule keeps ticking instead
+        // of hot-looping on the same instant.
+        assert!(manager
+            .get_schedule("skip-interval")
+            .await
+            .expect("schedule retained")
+            .last_fire
+            .is_some());
+    }
+
     #[tokio::test(start_paused = true)]
     async fn heartbeat_renews_only_the_current_owner_lease() {
         let (manager, persistence) = manager_and_persistence(OccurrenceFailure::None).await;
@@ -4591,6 +4800,7 @@ mod tests {
         ) -> Result<DispatchResult, DispatchError> {
             Ok(DispatchResult {
                 success: true,
+                skipped: false,
                 summary: format!("ok: {workflow_id}"),
                 output: serde_json::Value::Null,
                 duration_ms: 1,
@@ -4763,6 +4973,7 @@ mod tests {
             self.completed_notify.notify_waiters();
             Ok(DispatchResult {
                 success: true,
+                skipped: false,
                 summary: "ok".to_owned(),
                 output: serde_json::Value::Null,
                 duration_ms: 10,
@@ -5117,6 +5328,7 @@ mod tests {
             } else {
                 Ok(DispatchResult {
                     success: true,
+                    skipped: false,
                     summary: "replacement completed".to_owned(),
                     output: serde_json::Value::Null,
                     duration_ms: 1,
@@ -5192,6 +5404,7 @@ mod tests {
             self.received.lock().await.push(parameter_values);
             Ok(DispatchResult {
                 success: true,
+                skipped: false,
                 summary: "ok".to_owned(),
                 output: serde_json::Value::Null,
                 duration_ms: 1,

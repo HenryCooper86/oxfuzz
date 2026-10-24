@@ -162,9 +162,11 @@ export interface MorningHealthSummary {
 /** Result shape expected by the existing Run output provider. */
 export interface FuzzerRunResult {
   run_id: string;
-  edges: number;
+  /** Null when the engine never measured coverage (e.g. honggfuzz). */
+  edges: number | null;
   crashes: number;
-  execs: number;
+  /** Null when the engine never reported a throughput sample. */
+  execs: number | null;
   exit_code: number | null;
   termination: "completed" | "timed_out" | "cancelled";
   stagnation: string | null;

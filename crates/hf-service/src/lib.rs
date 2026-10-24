@@ -253,7 +253,7 @@ pub use oracle_studio::{
 };
 #[cfg(feature = "patch-to-proof")]
 pub use remediation_workflow::{
-    RemediationApprovalView, RemediationDraftRequest, RemediationDraftView,
+    RemediationApprovalView, RemediationApprover, RemediationDraftRequest, RemediationDraftView,
     RemediationOperationView, RemediationStartRequest,
 };
 pub use report::ReportLanguage;

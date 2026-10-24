@@ -17,6 +17,17 @@ use serde::{Deserialize, Serialize};
 pub struct DispatchResult {
     /// Whether the workflow completed without errors.
     pub success: bool,
+    /// Whether the dispatch declined to run the workflow at all (for example a
+    /// campaign whose concurrency gate was full or whose allocation was not
+    /// approved).
+    ///
+    /// A skip is neither a success nor a failure: the scheduled work never
+    /// ran, so a one-time occurrence must not be terminally consumed as
+    /// `Completed` and the execution is recorded as skipped instead.
+    /// Defaults to `false` so results persisted before the field existed (or
+    /// produced by dispatchers without a skip concept) decode unchanged.
+    #[serde(default)]
+    pub skipped: bool,
     /// Human-readable summary of the execution outcome.
     pub summary: String,
     /// Structured output from the workflow (task results, LLM content, etc.).
@@ -84,6 +95,7 @@ mod tests {
     fn test_dispatch_result_serde_roundtrip() {
         let result = DispatchResult {
             success: true,
+            skipped: false,
             summary: "ok".into(),
             output: serde_json::json!({"tasks_completed": 3}),
             duration_ms: 42,
@@ -92,6 +104,7 @@ mod tests {
         let json = serde_json::to_string(&result).unwrap();
         let back: DispatchResult = serde_json::from_str(&json).unwrap();
         assert!(back.success);
+        assert!(!back.skipped);
         assert_eq!(back.duration_ms, 42);
         assert!(back.error.is_none());
     }
@@ -100,6 +113,7 @@ mod tests {
     fn test_dispatch_result_failure_serde() {
         let result = DispatchResult {
             success: false,
+            skipped: false,
             summary: "task failed".into(),
             output: serde_json::Value::Null,
             duration_ms: 100,
@@ -108,7 +122,35 @@ mod tests {
         let json = serde_json::to_string(&result).unwrap();
         let back: DispatchResult = serde_json::from_str(&json).unwrap();
         assert!(!back.success);
+        assert!(!back.skipped);
         assert_eq!(back.error.as_deref(), Some("step_1 timed out"));
+    }
+
+    #[test]
+    fn test_dispatch_result_skip_decodes_from_legacy_json_without_the_field() {
+        // Results persisted before `skipped` existed carry no such field; they
+        // must decode as ordinary completions rather than as skips.
+        let legacy = r#"{
+            "success": true,
+            "summary": "ok",
+            "output": null,
+            "duration_ms": 7,
+            "error": null
+        }"#;
+        let back: DispatchResult = serde_json::from_str(legacy).unwrap();
+        assert!(!back.skipped);
+
+        let skipped = r#"{
+            "success": true,
+            "skipped": true,
+            "summary": "skipped: max concurrent campaigns reached (2)",
+            "output": {"skipped": true},
+            "duration_ms": 0,
+            "error": null
+        }"#;
+        let back: DispatchResult = serde_json::from_str(skipped).unwrap();
+        assert!(back.skipped);
+        assert!(back.summary.contains("skipped"));
     }
 
     #[test]

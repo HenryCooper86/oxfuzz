@@ -111,8 +111,6 @@ pub struct SkillDefinition {
     pub domain: Vec<String>,
     /// The LLM-facing instruction body (the `root.md` content).
     pub body: String,
-    /// Maximum input tokens the skill expects to consume.
-    pub max_input_tokens: u32,
     /// Provenance, set by the registry on load.
     pub trust_tier: TrustTier,
 }
@@ -132,20 +130,12 @@ struct SkillTomlInner {
     description: String,
     #[serde(default)]
     classification: Classification,
-    #[serde(default)]
-    constraints: Constraints,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct Classification {
     #[serde(default)]
     domain: Vec<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct Constraints {
-    #[serde(default)]
-    max_input_tokens: u32,
 }
 
 fn default_version() -> String {
@@ -165,13 +155,15 @@ impl SkillDefinition {
             description: parsed.skill.description,
             domain: parsed.skill.classification.domain,
             body: body.to_owned(),
-            max_input_tokens: parsed.skill.constraints.max_input_tokens,
             trust_tier: TrustTier::UserDefined,
         })
     }
 
     /// Render the `skill.toml` manifest for persistence (the body is written
     /// separately as `root.md`).
+    ///
+    /// Persists exactly the definition's own fields: no value is defaulted or
+    /// rewritten here, and no section is emitted that no loader reads.
     fn manifest_toml(&self) -> String {
         let domain = self
             .domain
@@ -179,18 +171,10 @@ impl SkillDefinition {
             .map(|d| format!("\"{}\"", toml_escape(d)))
             .collect::<Vec<_>>()
             .join(", ");
-        let token_count = self.body.chars().count() / 4;
-        let max_in = if self.max_input_tokens == 0 {
-            12000
-        } else {
-            self.max_input_tokens
-        };
         format!(
             "[skill]\nname = \"{name}\"\nversion = \"{version}\"\ndescription = \"{desc}\"\n\
 author = \"oxfuzz\"\nsource_format = \"markdown\"\n\n\
-[skill.classification]\ntype = \"llm_reasoning\"\ndomain = [{domain}]\natomic = true\n\n\
-[skill.constraints]\nmax_input_tokens = {max_in}\nmax_output_tokens = 4000\n\n\
-[skill.root]\npath = \"root.md\"\ntoken_count = {token_count}\n",
+[skill.classification]\ntype = \"llm_reasoning\"\ndomain = [{domain}]\natomic = true\n",
             name = toml_escape(&self.name),
             version = toml_escape(&self.version),
             desc = toml_escape(&self.description),
@@ -291,10 +275,19 @@ impl SkillRegistry {
 
     fn load_user_skills(&mut self) {
         let Some(dir) = &self.skills_dir else { return };
+        // 2.17: an absent or unreadable skills directory means "no user
+        // skills" -- the same state as an empty one -- so the error is
+        // dropped; the built-ins below are the whole registry then.
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
-        for entry in entries.flatten() {
+        for entry in entries {
+            // 2.17: one unreadable entry must not hide the remaining skills;
+            // name it and keep scanning.
+            let Ok(entry) = entry else {
+                tracing::warn!("cannot read an entry of skills dir {}", dir.display());
+                continue;
+            };
             let skill_dir = entry.path();
             if !skill_dir.is_dir() {
                 continue;
@@ -305,16 +298,30 @@ impl SkillRegistry {
             }
             let body_path = skill_dir.join("root.md");
             let manifest = std::fs::read_to_string(&manifest_path);
-            let body = std::fs::read_to_string(&body_path).unwrap_or_default();
-            match manifest.map(|m| SkillDefinition::from_files(&m, &body)) {
-                Ok(Ok(mut def)) => {
-                    def.trust_tier = TrustTier::UserDefined;
-                    self.skills.insert(def.name.clone(), def);
+            let body = std::fs::read_to_string(&body_path);
+            match (manifest, body) {
+                (Ok(manifest), Ok(body)) => match SkillDefinition::from_files(&manifest, &body) {
+                    Ok(mut def) => {
+                        def.trust_tier = TrustTier::UserDefined;
+                        self.skills.insert(def.name.clone(), def);
+                    }
+                    Err(e) => {
+                        tracing::warn!("skipping invalid skill {}: {e}", manifest_path.display());
+                    }
+                },
+                // An unreadable root.md is skipped like an unreadable
+                // manifest: registering the skill with an empty body would
+                // inject a present-looking playbook that carries no
+                // instructions into every agent turn (2.16).
+                (_, Err(e)) => {
+                    tracing::warn!(
+                        "skipping skill with an unreadable root.md {}: {e}",
+                        body_path.display()
+                    );
                 }
-                Ok(Err(e)) => {
-                    tracing::warn!("skipping invalid skill {}: {e}", manifest_path.display());
+                (Err(e), _) => {
+                    tracing::warn!("cannot read skill {}: {e}", manifest_path.display());
                 }
-                Err(e) => tracing::warn!("cannot read skill {}: {e}", manifest_path.display()),
             }
         }
     }
@@ -339,14 +346,18 @@ impl SkillRegistry {
     }
 
     /// Render the given skills into a prompt section for injection into an
-    /// agent's context, or `None` if none resolve. Each body is capped so an
-    /// oversized playbook cannot dominate the prompt.
-    #[must_use]
-    pub fn render(&self, names: &[String]) -> Option<String> {
+    /// agent's context, or `None` if none were requested. Each body is capped
+    /// so an oversized playbook cannot dominate the prompt.
+    ///
+    /// # Errors
+    /// Returns [`SkillError::NotFound`] for a requested name the registry
+    /// does not resolve: an agent referencing a typo'd or since-deleted skill
+    /// fails loud instead of silently running without its playbook (2.16).
+    pub fn render(&self, names: &[String]) -> Result<Option<String>, SkillError> {
         let mut sections = Vec::new();
         for name in names {
             let Some(skill) = self.get(name) else {
-                continue;
+                return Err(SkillError::NotFound(name.clone()));
             };
             let body: String = if skill.body.chars().count() > INJECT_CHAR_CAP {
                 let mut t: String = skill.body.chars().take(INJECT_CHAR_CAP).collect();
@@ -363,12 +374,12 @@ impl SkillRegistry {
             ));
         }
         if sections.is_empty() {
-            return None;
+            return Ok(None);
         }
-        Some(format!(
+        Ok(Some(format!(
             "## Reference skills\nApply these playbooks where relevant:\n\n{}",
             sections.join("\n\n---\n\n")
-        ))
+        )))
     }
 
     /// Persist a user skill to `skills/<name>/{skill.toml,root.md}` and register
@@ -441,20 +452,82 @@ mod tests {
     }
 
     #[test]
-    fn render_injects_named_skills() {
+    fn render_injects_named_skills_and_rejects_unknown_names() {
         let reg = SkillRegistry::builtin();
         let out = reg
-            .render(&["crash-triage".to_owned(), "missing".to_owned()])
+            .render(&["crash-triage".to_owned()])
+            .expect("render must succeed for a known skill")
             .expect("some");
         assert!(out.contains("### Skill: crash-triage"));
         assert!(out.contains("Reference skills"));
-        assert!(!out.contains("Skill: missing"));
     }
 
     #[test]
-    fn render_empty_when_none_resolve() {
+    fn render_fails_loud_on_an_unknown_skill_name() {
+        // A typo'd or since-deleted skill name must fail the render, not
+        // silently run the agent without its playbook: `None` already means
+        // "no skills requested" and cannot carry the loss (2.16).
         let reg = SkillRegistry::builtin();
-        assert!(reg.render(&["nope".to_owned()]).is_none());
+        let error = reg
+            .render(&["missing".to_owned()])
+            .expect_err("unknown name must be an error");
+        assert!(matches!(error, SkillError::NotFound(name) if name == "missing"));
+        // The failure is whole-render, not per-name: a known name alongside
+        // an unknown one must not render a partial prompt.
+        assert!(reg
+            .render(&["crash-triage".to_owned(), "missing".to_owned()])
+            .is_err());
+    }
+
+    #[test]
+    fn render_is_none_only_when_no_skills_are_requested() {
+        let reg = SkillRegistry::builtin();
+        assert!(reg.render(&[]).expect("empty request renders").is_none());
+    }
+
+    #[test]
+    fn unreadable_root_md_skips_the_skill_instead_of_registering_an_empty_body() {
+        let dir =
+            std::env::temp_dir().join(format!("hf-skills-missing-body-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let skill_dir = dir.join("broken-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("skill.toml"),
+            "[skill]\nname = \"broken-skill\"\ndescription = \"looks present\"\n",
+        )
+        .unwrap();
+        // No root.md: the body read fails.
+        let reg = SkillRegistry::with_user_dir(&dir);
+        assert!(
+            reg.get("broken-skill").is_none(),
+            "a manifest without a readable root.md must be skipped with a warning, \
+             not registered as a present-looking empty playbook"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_toml_neither_rewrites_defaults_nor_writes_dead_fields() {
+        // The manifest persists exactly what was provided: no hidden 12000
+        // default substitution, and no constraint/root bookkeeping sections
+        // that no loader ever reads.
+        let skill = SkillDefinition {
+            name: "my-skill".to_owned(),
+            version: "1.0.0".to_owned(),
+            description: "d".to_owned(),
+            domain: Vec::new(),
+            body: "root body".to_owned(),
+            trust_tier: TrustTier::UserDefined,
+        };
+        let manifest = skill.manifest_toml();
+        assert!(!manifest.contains("max_input_tokens"));
+        assert!(!manifest.contains("token_count"));
+        assert!(!manifest.contains("12000"));
+        let reparsed =
+            SkillDefinition::from_files(&manifest, &skill.body).expect("manifest must parse");
+        assert_eq!(reparsed.name, skill.name);
+        assert_eq!(reparsed.description, skill.description);
     }
 
     #[test]
@@ -468,7 +541,6 @@ mod tests {
             description: "matches \\d+ and \"quoted\"\nsecond line".to_owned(),
             domain: vec!["path\\with\\slash".to_owned(), "plain".to_owned()],
             body: "root body".to_owned(),
-            max_input_tokens: 0,
             trust_tier: TrustTier::UserDefined,
         };
         let manifest = skill.manifest_toml();

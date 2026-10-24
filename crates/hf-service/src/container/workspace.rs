@@ -498,6 +498,17 @@ pub fn workspace_dir(project: &Path, target: &str) -> PathBuf {
         .join(sanitize_target(target))
 }
 
+/// Whether the target's workspace under this exact selector holds the active
+/// harness marker (`harness.active`). Workspaces are keyed by the spelling
+/// the promoting flow used, so a harness promoted under a file-qualified
+/// selector lives in a different directory than the bare symbol's; this probe
+/// is how a caller's spelling is reconciled with where the harness is.
+#[must_use]
+pub fn workspace_has_active_harness(project: &Path, selector: &str) -> bool {
+    let marker = workspace_dir(project, selector).join("harness.active");
+    std::fs::symlink_metadata(&marker).is_ok_and(|metadata| metadata.file_type().is_file())
+}
+
 /// The on-disk workspace directory holding every target's artifacts for a
 /// single project (compiled harnesses, corpora, crash reproducers, coverage
 /// builds). This is the parent of the per-target [`workspace_dir`] directories,

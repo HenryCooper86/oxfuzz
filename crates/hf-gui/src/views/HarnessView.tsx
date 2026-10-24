@@ -412,8 +412,9 @@ export function HarnessView({
     } catch (error) {
       if (!isCurrentDraft(generation)) return false;
       const message = error instanceof Error ? error.message : String(error);
+      // The smoke step owns its error; fabricating a compile failure here
+      // blamed build problems on a compile step that never ran.
       setSmokeResult({ status: "Failed", duration_secs: 0, execs_per_sec: 0, crashes: 0, passed: false, error: message });
-      setCompileResult((current) => current ?? { status: "Failed", message: String(error) });
       setSmokeStatus("error");
       return false;
     }

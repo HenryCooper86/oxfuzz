@@ -61,42 +61,6 @@ fn bound_field(value: &str) -> String {
     bounded
 }
 
-/// Render the discovery (target ranking) prompt.
-///
-/// Given the heuristic-ranked candidates, produce a prompt asking the LLM
-/// to refine fit scores and add rationale.
-#[must_use]
-pub fn render_discovery_prompt(candidates: &[TargetCandidate]) -> String {
-    let mut lines = vec![
-        "You are the discovery-agent for oxfuzz.".to_owned(),
-        "Your job: refine fuzzing fit scores and add rationale for each candidate.".to_owned(),
-        "Output a JSON array of objects with fields:".to_owned(),
-        "  relative_file, symbol, fit_score (0.0-1.0), rationale (one sentence).".to_owned(),
-        "Only include functions that accept untrusted input.".to_owned(),
-        "Do not include trivial wrappers or pure formatting functions.".to_owned(),
-        "Prefer targets with high accumulated_complexity / reaches: they exercise \
-         more reachable code per run."
-            .to_owned(),
-        String::new(),
-        "Candidates (heuristic-ranked):".to_owned(),
-    ];
-    for c in candidates {
-        lines.push(format!(
-            "- relative_file={} symbol={} kind={:?} input_surface={:?} complexity={} accumulated_complexity={} reaches={} fit_score={:.3} signature={}",
-            c.relative_file(),
-            c.symbol,
-            c.kind,
-            c.input_surface,
-            c.complexity,
-            c.accumulated_complexity,
-            c.reachable_functions.len(),
-            c.fit_score,
-            c.signature.as_deref().unwrap_or("(unknown)")
-        ));
-    }
-    lines.join("\n")
-}
-
 /// Render the harness generation prompt for a target + engine.
 #[must_use]
 pub fn render_harness_prompt(target: &TargetCandidate, engine: EngineKind) -> String {

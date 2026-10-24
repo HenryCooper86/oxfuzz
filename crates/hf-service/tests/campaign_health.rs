@@ -336,6 +336,33 @@ fn a_dedup_key_is_scoped_to_its_run() {
     );
 }
 
+/// The `dedup_key` contract: a condition that worsens is delivered again.
+/// Staleness must therefore key on the exact observed value, not on a
+/// whole-threshold bucket that stays flat while the stall deepens.
+#[test]
+fn a_deepening_stall_is_delivered_again_within_one_threshold_bucket() {
+    let mut input = healthy();
+    input.progress_stale_secs = Some(181);
+
+    let first = assess_campaign_health(&input, &settings()).events;
+    let stale = first
+        .iter()
+        .find(|event| event.condition == HealthCondition::WorkerStatsStale)
+        .expect("a stalled active run is a condition");
+    let emitted: HashSet<String> = std::iter::once(stale.dedup_key.clone()).collect();
+
+    // 181s and 359s fall in the same whole multiple of the 180s threshold;
+    // the deepened stall must still be delivered rather than suppressed.
+    input.progress_stale_secs = Some(359);
+    let worsened = assess_campaign_health(&input, &settings()).events;
+    let fresh = undelivered(&worsened, &emitted);
+    assert_eq!(
+        fresh.len(),
+        1,
+        "a deeper stall must re-alert within the same threshold bucket"
+    );
+}
+
 #[test]
 fn every_condition_carries_a_dedup_key_and_a_sentence() {
     let mut input = healthy();
@@ -436,7 +463,7 @@ fn live_registry_retains_a_bounded_series_and_whole_run_sample_mean() {
     let start = chrono::DateTime::parse_from_rfc3339("2026-09-07T00:00:00Z")
         .unwrap()
         .with_timezone(&chrono::Utc);
-    assert!(registry.prepare(run_id));
+    assert!(registry.prepare_with_limit(run_id, 2));
 
     for (offset, edges, execs) in [(1, 10, 100.0), (2, 20, 25.0), (3, 30, 75.0)] {
         let observed_at = start + chrono::Duration::seconds(offset);
@@ -472,7 +499,7 @@ fn live_registry_rejects_aggregate_overflow_without_partial_state() {
     let start = chrono::DateTime::parse_from_rfc3339("2026-09-07T00:00:00Z")
         .unwrap()
         .with_timezone(&chrono::Utc);
-    registry.prepare(run_id);
+    assert!(registry.prepare_with_limit(run_id, 3));
     registry.observe_progress(run_id, &FuzzProgress::EdgesCovered(9), start);
     registry.observe_progress(
         run_id,
@@ -495,7 +522,7 @@ fn throughput_before_the_first_edge_does_not_fabricate_an_edge_sample() {
     let run_id = Uuid::from_u128(34);
     let registry = RunTelemetryRegistry::new(3);
     let observed_at = chrono::Utc::now();
-    registry.prepare(run_id);
+    assert!(registry.prepare_with_limit(run_id, 3));
 
     registry.observe_progress(run_id, &FuzzProgress::ExecsPerSec(25.0), observed_at);
 
@@ -513,7 +540,7 @@ fn logs_and_invalid_throughput_do_not_refresh_metric_time_or_reopen_closed_state
     let start = chrono::DateTime::parse_from_rfc3339("2026-09-07T00:00:00Z")
         .unwrap()
         .with_timezone(&chrono::Utc);
-    registry.prepare(run_id);
+    assert!(registry.prepare_with_limit(run_id, 3));
     registry.observe_progress(run_id, &FuzzProgress::EdgesCovered(4), start);
     registry.observe_progress(
         run_id,
@@ -552,7 +579,7 @@ fn logs_and_invalid_throughput_do_not_refresh_metric_time_or_reopen_closed_state
 fn managed_invocation_registration_moves_expected_and_alive_together() {
     let run_id = Uuid::from_u128(32);
     let registry = Arc::new(RunTelemetryRegistry::new(3));
-    registry.prepare(run_id);
+    assert!(registry.prepare_with_limit(run_id, 3));
     let before = registry.snapshot(run_id).unwrap();
     assert_eq!(
         (

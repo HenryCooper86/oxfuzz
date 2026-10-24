@@ -218,7 +218,12 @@ pub fn map_and_score(
         .map(|finding| crate::enrichment::EnrichmentSignal {
             relative_path: finding.relative_path.clone(),
             start_line: finding.range.start_line,
-            start_col: finding.range.start_col,
+            // Semgrep reports one-based columns; `EnrichmentSignal` is
+            // zero-based by contract (like the native-analysis producer), so
+            // the base is converted once, here at the producer boundary.
+            // `SemgrepRange::from_raw` rejects column zero, so this cannot
+            // underflow.
+            start_col: finding.range.start_col - 1,
             rule_key: finding.rule_id.clone(),
             weight: finding.severity.weight(),
         })
@@ -643,7 +648,7 @@ mod tests {
                 SemgrepSeverity::Info,
                 "src/parser.c",
                 20,
-                30,
+                29,
             ),
         ];
 
@@ -666,6 +671,52 @@ mod tests {
             Some(parse_packet_id)
         );
         assert_eq!(analysis.matched_candidate_count, 1);
+    }
+
+    #[test]
+    fn map_attributes_findings_at_exact_span_columns_and_drops_one_past_the_end() {
+        // The producer converts Semgrep's one-based columns to the zero-based
+        // `EnrichmentSignal` contract at this boundary. The candidate records a
+        // tree-sitter exclusive end (`end.column + 1`), so a finding at the
+        // last real column (one-based 39) is attributed, while a finding at
+        // the exclusive end boundary itself (one-based 40) is dropped, and one
+        // column past either edge is dropped.
+        let inventory = inventory(
+            "/work/project",
+            vec![candidate(
+                "00000000-0000-0000-0000-000000000020",
+                "/work/project",
+                TargetLanguage::C,
+                "/work/project/src/parser.c",
+                (10, 5, Some(20), Some(40)),
+                0.40,
+            )],
+        );
+        let matched = Uuid::parse_str("00000000-0000-0000-0000-000000000020").unwrap();
+        for (label, line, col, expect) in [
+            ("exact start", 10, 5, Some(matched)),
+            ("one before start", 10, 4, None),
+            ("last real column", 20, 39, Some(matched)),
+            ("exclusive end boundary", 20, 40, None),
+            ("one past end", 20, 41, None),
+        ] {
+            let analysis = map_and_score(
+                &inventory,
+                vec![finding(
+                    "fp",
+                    "rule.edge",
+                    SemgrepSeverity::Error,
+                    "src/parser.c",
+                    line,
+                    col,
+                )],
+            )
+            .expect("valid inventory should map");
+            assert_eq!(
+                analysis.findings[0].matched_target_id, expect,
+                "{label}: {line}:{col}"
+            );
+        }
     }
 
     // Production break caught: allowing a non-C/C++ candidate into Semgrep containment.

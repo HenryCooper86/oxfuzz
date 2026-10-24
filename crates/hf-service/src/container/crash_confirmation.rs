@@ -378,11 +378,15 @@ impl ServiceContainer {
             observation.matches_reference =
                 reference.is_some() && failure_identity(observation) == reference;
         }
+        // Seed the operation flag from the saved observations before the
+        // authoritative assessment: assess_reproduction reads
+        // `evidence.confirmed` as the retained operation's own verdict, so
+        // this store is load-bearing, not dead.
         evidence.confirmed = evidence
             .original
             .iter()
             .chain(&evidence.candidate)
-            .all(|o| o.matches_reference);
+            .all(|observation| observation.matches_reference);
         evidence.confirmed = assess_reproduction(crash, &evidence).confirmed;
         super::staging::run_binary_path(workspace, run, "")?;
         Ok(evidence)

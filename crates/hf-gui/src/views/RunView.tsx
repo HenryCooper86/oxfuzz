@@ -15,7 +15,7 @@ import { useFuzzingSettings } from "../hooks/useFuzzingSettings";
 import { enabledEngineOptions } from "../lib/fuzzingSettings";
 import { FuzzingPolicyNotice } from "../components/FuzzingPolicyNotice";
 import { TargetSelectionRepairNotice } from "../components/TargetSelectionRepairNotice";
-import { matchesTargetSelection } from "../lib/harnessScope";
+import { canonicalHarnessEngine, matchesTargetSelection } from "../lib/harnessScope";
 import { projectStorageKey } from "../lib/projectState";
 
 export function RunView({
@@ -119,7 +119,7 @@ export function RunView({
     if (selectionBlocked || isSyz) return;
     let cancelled = false;
     Promise.all([
-      getTransport().invoke<{ harness_built: boolean }>("artifact_summary", { project: project ?? "", target: target ?? "" }),
+      getTransport().invoke<{ harness_built: boolean | null }>("artifact_summary", { project: project ?? "", target: target ?? "" }),
       getTransport().invoke<HarnessReviewItem[]>("harness_review_queue", { project: project ?? "", target: target ?? "" }),
     ])
       .then(([artifacts, harnesses]) => {
@@ -128,7 +128,7 @@ export function RunView({
           setHarnessApproved(harnesses.some((item) =>
             matchesTargetSelection(item.target_symbol, item.target_selector, target)
             && item.status === "Promoted"
-            && normalizeEngine(item.engine) === normalizeEngine(engine),
+            && canonicalHarnessEngine(item.engine) === canonicalHarnessEngine(engine),
           ));
         }
       })
@@ -539,9 +539,6 @@ export function RunView({
   );
 }
 
-function normalizeEngine(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
-}
 
 /** Translation key for the user-facing guidance on a backend
  *  coverage-stagnation proposal. */

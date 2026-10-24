@@ -355,10 +355,24 @@ impl LlmProvider for OllamaProvider {
             FinishReason::Unknown
         };
 
-        // Ollama reports token counts.
+        // Token counts are required: without them the caller's budget
+        // reservation can never be settled.
         let usage = TokenUsage {
-            input_tokens: ollama_response.prompt_eval_count.unwrap_or(0),
-            output_tokens: ollama_response.eval_count.unwrap_or(0),
+            input_tokens: ollama_response.prompt_eval_count.ok_or_else(|| {
+                ProviderError::Other {
+                    message: "response missing 'prompt_eval_count': without reported \
+                        token counts the caller's budget reservation can never be \
+                        settled"
+                        .into(),
+                }
+            })?,
+            output_tokens: ollama_response
+                .eval_count
+                .ok_or_else(|| ProviderError::Other {
+                    message: "response missing 'eval_count': without reported token \
+                        counts the caller's budget reservation can never be settled"
+                        .into(),
+                })?,
             cache_read_tokens: None,
             cache_write_tokens: None,
             ..Default::default()

@@ -16,9 +16,9 @@ use hf_core::target::{
     InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
 };
 use hf_service::evidence::CampaignEvidencePricing;
-use hf_service::{RemediationDraftRequest, ServiceContainer};
 #[cfg(unix)]
-use hf_service::{RemediationOperationStatus, RemediationStartRequest};
+use hf_service::{RemediationApprover, RemediationOperationStatus, RemediationStartRequest};
+use hf_service::{RemediationDraftRequest, ServiceContainer};
 use hf_storage::{HarnessApprovalKind, RunRecord, RunStatus, Store};
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
@@ -297,7 +297,7 @@ async fn approved_patch_runs_all_required_stages_and_persists_verified_evidence(
     );
 
     let approved = container
-        .approve_remediation_operation(draft.operation_id, "local-operator")
+        .approve_remediation_operation(draft.operation_id, RemediationApprover::DesktopOperator)
         .await
         .unwrap();
     assert_eq!(approved.status, RemediationOperationStatus::Approved);
@@ -352,6 +352,46 @@ async fn approved_patch_runs_all_required_stages_and_persists_verified_evidence(
 
 #[cfg(unix)]
 #[tokio::test]
+async fn remediation_approval_persists_only_server_authored_attribution() {
+    let (container, _runtime, _project, run_id, finding_id) = fixture().await;
+    let draft = container
+        .create_remediation_operation(RemediationDraftRequest {
+            run_id,
+            finding_id,
+            patch: "--- a/parser.c\n+++ b/parser.c\n@@ -1 +1 @@\n-unsafe();\n+safe();\n".to_owned(),
+            follow_up_fuzz_seconds: 1,
+            pricing: CampaignEvidencePricing {
+                compute_usd_per_hour: 0.0,
+                model_cost_usd: 0.0,
+            },
+        })
+        .await
+        .unwrap();
+
+    // VULN-009: the web transport carries no identity, so the durable record
+    // attributes the transport itself. The API takes no operator parameter,
+    // so no caller string can reach the approval JSON.
+    container
+        .approve_remediation_operation(draft.operation_id, RemediationApprover::WebApi)
+        .await
+        .unwrap();
+    let record = container
+        .store()
+        .expect("fixture store")
+        .remediation_operation(draft.operation_id)
+        .await
+        .unwrap()
+        .expect("approved operation");
+    let approval: serde_json::Value =
+        serde_json::from_str(record.approval_json.as_deref().expect("approval json"))
+            .expect("valid approval json");
+    assert_eq!(approval["operator"], "web-api");
+    assert!(approval
+        .get("approval_id")
+        .is_some_and(serde_json::Value::is_string));
+}
+#[cfg(unix)]
+#[tokio::test]
 async fn unapproved_operation_cannot_start_or_claim_verified_status() {
     let (container, runtime, _project, run_id, finding_id) = fixture().await;
     let draft = container
@@ -401,7 +441,7 @@ async fn verification_does_not_start_without_guardrail_authorization() {
         .await
         .unwrap();
     container
-        .approve_remediation_operation(draft.operation_id, "local-operator")
+        .approve_remediation_operation(draft.operation_id, RemediationApprover::DesktopOperator)
         .await
         .unwrap();
 

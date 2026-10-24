@@ -9,11 +9,3 @@ source_format = "markdown"
 type = "llm_reasoning"
 domain = ["fuzzing", "harness-generation", "code-generation"]
 atomic = true
-
-[skill.constraints]
-max_input_tokens = 16000
-max_output_tokens = 4000
-
-[skill.root]
-path = "root.md"
-token_count = 520
