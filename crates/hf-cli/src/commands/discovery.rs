@@ -476,6 +476,7 @@ where
                     let _ = service.cancel_semgrep(operation_id).await?;
                     cancellation_requested = true;
                 }
+                () = &mut delay_future => {}
             }
         }
     }
