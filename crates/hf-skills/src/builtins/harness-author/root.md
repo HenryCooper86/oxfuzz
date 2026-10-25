@@ -12,7 +12,9 @@ Write a fuzzing harness for a target function.
 1. Read the target signature and surrounding types/includes.
 2. Select the engine entry point:
    - libFuzzer / AFL++: `int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)`
-   - honggfuzz: `int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)` with `HF_ITER`
+   - honggfuzz: `int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)`; libhfuzz
+     supplies `main` and runs it in persistent mode, so define no `main`, always return 0,
+     and reset target state before each call
    - Go: `func FuzzX(f *testing.F)`
    - Rust (cargo-fuzz): `fuzz_target!(|data: &[u8]| { ... })`
    - Python (Atheris): `def TestOneInput(data):`

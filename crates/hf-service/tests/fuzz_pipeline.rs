@@ -997,3 +997,136 @@ async fn prepared_source_rejects_another_promoted_revision_at_campaign_dispatch(
         1
     );
 }
+
+/// Like [`PipelineRuntime`], but the first smoke run never reaches the
+/// harness (no fuzzer activity); every later one reports throughput.
+struct SilentFirstSmokeRuntime {
+    smokes: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl hf_core::runtime::RuntimeAdapter for SilentFirstSmokeRuntime {
+    async fn resolve_image_reference(
+        &self,
+        _image: &str,
+    ) -> Result<Option<hf_core::runtime::ImmutableImageReference>, hf_core::error::ClassifiedError>
+    {
+        Ok(Some(hf_test_utils::immutable_test_image()?))
+    }
+
+    async fn run_command(
+        &self,
+        cmd: &[String],
+        cwd: &std::path::Path,
+        limits: &hf_core::runtime::ResourceLimits,
+    ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
+        let smoke = cmd.iter().any(|arg| arg.starts_with("-max_total_time"));
+        if smoke
+            && self
+                .smokes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                == 0
+        {
+            return Ok(hf_core::runtime::CommandResult {
+                exit_code: 0,
+                stdout: "[!] the entry point never ran".to_owned(),
+                stderr: String::new(),
+                workspace: cwd.to_path_buf(),
+                termination: hf_core::runtime::CommandTermination::Completed,
+            });
+        }
+        PipelineRuntime.run_command(cmd, cwd, limits).await
+    }
+    async fn write_file(
+        &self,
+        path: &std::path::Path,
+        content: &str,
+    ) -> Result<(), hf_core::error::ClassifiedError> {
+        PipelineRuntime.write_file(path, content).await
+    }
+    async fn read_file(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<String, hf_core::error::ClassifiedError> {
+        PipelineRuntime.read_file(path).await
+    }
+}
+
+#[tokio::test]
+async fn fuzz_repairs_a_harness_whose_smoke_run_never_reaches_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let _workspace_root = common::install_managed_workspace("oxfuzz_fuzz_smoke_repair_it");
+    let project = c_project(&dir);
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("fuzz.db"))
+            .await
+            .unwrap(),
+    );
+    let pool = hf_test_utils::RecordingHarnessPool::new(|index, _| {
+        format!(
+            "```c\n/* revision {index} */\nint LLVMFuzzerTestOneInput(const uint8_t *d, size_t n){{ return 0; }}\n```"
+        )
+    });
+    let container = ServiceContainer::new(
+        Arc::new(SilentFirstSmokeRuntime {
+            smokes: std::sync::atomic::AtomicUsize::new(0),
+        }),
+        Some(pool.clone()),
+    )
+    .with_store(Arc::clone(&store));
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    let on_progress = {
+        let lines = Arc::clone(&lines);
+        move |progress: hf_service::FuzzProgress| {
+            if let hf_service::FuzzProgress::LogLine(line) = progress {
+                lines.lock().unwrap().push(line);
+            }
+        }
+    };
+
+    let outcome = container
+        .fuzz_onboard(
+            FuzzRequest {
+                prepared_harness: None,
+                project: &project,
+                target: Some("parse_entry"),
+                engine: EngineKind::LibFuzzer,
+                lang: Some(TargetLanguage::C),
+                duration_secs: 1,
+                iterations: 1,
+                timeout_ms: None,
+                resume: None,
+                review_bypass: hf_service::HarnessReviewBypass::NotRequested,
+                fresh: false,
+                sanitizer: None,
+                cmplog: false,
+                seed: None,
+            },
+            &noop_stage(),
+            &on_progress,
+        )
+        .await
+        .expect("the repaired harness qualifies and the campaign runs");
+
+    assert_eq!(outcome.smoke_repairs, 1);
+    assert_eq!(
+        outcome.campaign.harness_status,
+        hf_core::harness::HarnessStatus::Promoted
+    );
+    let repair = pool.prompts_containing("A previous attempt");
+    assert_eq!(repair.len(), 1, "one smoke repair prompt");
+    assert!(
+        repair[0].contains("the entry point never ran"),
+        "{}",
+        repair[0]
+    );
+    assert!(
+        lines
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.contains("smoke repair 1/")),
+        "the operator sees the repair: {:?}",
+        lines.lock().unwrap()
+    );
+}

@@ -745,6 +745,37 @@ fn ensure_regular_directory(
     Ok(current)
 }
 
+/// Smoke error prefix: the engine ran but never exercised the harness (it
+/// printed no progress, no throughput, and found no crash).
+pub const SMOKE_NO_ACTIVITY: &str = "smoke fuzz: no fuzzer activity detected";
+
+/// Smoke error: the sandbox wall-clock limit ended the run, so the harness
+/// hung (or blocked) instead of returning to the engine.
+pub const SMOKE_WALL_CLOCK_EXPIRED: &str = "smoke fuzz: sandbox wall-clock limit expired";
+
+/// Engine output characters carried by a no-activity smoke error. The output
+/// is the repair loop's only evidence of why the harness never ran, for
+/// example libhfuzz's "Define `LLVMFuzzerTestOneInput`" or a non-zero return.
+const SMOKE_FAILURE_OUTPUT_CHARS: usize = 2000;
+
+/// The diagnostics of a smoke failure that a harness rewrite can address, or
+/// `None` for every other error.
+///
+/// Only two smoke outcomes are harness-source defects: no fuzzer activity and
+/// a hung run. A crash is a finding to triage, not to repair away; a rejected
+/// review must stay independent of the generator; cancellation, staging,
+/// configuration, and sandbox errors are not fixed by changing the source.
+/// The matching is on this module's own messages, so producer and classifier
+/// share one definition.
+#[must_use]
+pub fn repairable_smoke_failure(error: &ClassifiedError) -> Option<String> {
+    let ClassifiedError::Harness(message) = error else {
+        return None;
+    };
+    (message.starts_with(SMOKE_NO_ACTIVITY) || message == SMOKE_WALL_CLOCK_EXPIRED)
+        .then(|| message.clone())
+}
+
 /// Run a bounded smoke fuzz using one caller-resolved configuration and an
 /// optional immutable sandbox image reference.
 ///
@@ -892,7 +923,7 @@ pub async fn smoke_fuzz_in_paths_with_config_and_sandbox_image(
         hf_core::runtime::CommandTermination::Completed => {}
         hf_core::runtime::CommandTermination::TimedOut => {
             return Err(ClassifiedError::Harness(
-                "smoke fuzz: sandbox wall-clock limit expired".to_owned(),
+                SMOKE_WALL_CLOCK_EXPIRED.to_owned(),
             ));
         }
         hf_core::runtime::CommandTermination::Cancelled => {
@@ -936,8 +967,11 @@ pub async fn smoke_fuzz_in_paths_with_config_and_sandbox_image(
     };
     if !ran && harness.custom_mutator.is_none() {
         return Err(ClassifiedError::Harness(format!(
-            "smoke fuzz: no fuzzer activity detected; output: {}",
-            combined.chars().take(800).collect::<String>()
+            "{SMOKE_NO_ACTIVITY}; output: {}",
+            combined
+                .chars()
+                .take(SMOKE_FAILURE_OUTPUT_CHARS)
+                .collect::<String>()
         )));
     }
     let passed = crashes == 0 && ran && mutator_exercised;
@@ -1597,6 +1631,9 @@ pub struct HarnessDraftContext<'a> {
     pub examples: &'a [hf_prompt::AcceptedExample],
     /// Exact analysis section already retained by the service before dispatch.
     pub analysis: Option<&'a str>,
+    /// Exact target-definition section already retained by the service before
+    /// dispatch (`hf_prompt::render_target_source_section`).
+    pub target_source: Option<&'a str>,
 }
 
 /// Draft with explicit persisted semantic context for either supported harness flavor.
@@ -1632,6 +1669,9 @@ pub async fn draft_analyzed(
     if let Some(section) = context.analysis {
         prompt.push_str(section);
     }
+    if let Some(section) = context.target_source {
+        prompt.push_str(section);
+    }
     complete_draft(target, engine, prompt, sanitizer, llm).await
 }
 
@@ -1664,6 +1704,40 @@ mod tests {
             &hf_core::runtime::SandboxOptions::default(),
         )
         .await
+    }
+
+    #[test]
+    fn a_smoke_run_with_no_fuzzer_activity_is_repairable() {
+        let error = ClassifiedError::Harness(format!(
+            "{SMOKE_NO_ACTIVITY}; output: [!] Define LLVMFuzzerTestOneInput"
+        ));
+        let diagnostics = repairable_smoke_failure(&error).expect("repairable");
+        assert!(
+            diagnostics.contains("Define LLVMFuzzerTestOneInput"),
+            "{diagnostics}"
+        );
+    }
+
+    #[test]
+    fn a_hung_smoke_run_is_repairable() {
+        let error = ClassifiedError::Harness(SMOKE_WALL_CLOCK_EXPIRED.to_owned());
+        assert!(repairable_smoke_failure(&error).is_some());
+    }
+
+    #[test]
+    fn other_smoke_errors_are_not_repairable() {
+        // Path, staging, and configuration errors are not harness-source
+        // defects; a rewrite cannot fix them.
+        for error in [
+            ClassifiedError::Harness("smoke fuzz: execution was cancelled".to_owned()),
+            ClassifiedError::Harness(
+                "smoke fuzz: run configuration does not identify the active harness".to_owned(),
+            ),
+            ClassifiedError::Validation(format!("{SMOKE_NO_ACTIVITY}; output: spoofed")),
+            ClassifiedError::Sandbox("docker unavailable".to_owned()),
+        ] {
+            assert!(repairable_smoke_failure(&error).is_none(), "{error}");
+        }
     }
 
     #[test]
@@ -1863,6 +1937,7 @@ mod tests {
                 build: None,
                 examples: &[],
                 analysis: None,
+                target_source: None,
             },
             hf_core::target::Sanitizer::Address,
             false,
@@ -1895,6 +1970,7 @@ mod tests {
                 build: Some(&build),
                 examples: &[],
                 analysis: None,
+                target_source: None,
             },
             hf_core::target::Sanitizer::Address,
             false,
@@ -1922,6 +1998,7 @@ mod tests {
                 build: None,
                 examples: &[],
                 analysis: None,
+                target_source: None,
             },
             hf_core::target::Sanitizer::Address,
             false,
@@ -1955,6 +2032,7 @@ mod tests {
                 build: None,
                 examples: &examples,
                 analysis: None,
+                target_source: None,
             },
             hf_core::target::Sanitizer::Address,
             false,
@@ -1973,6 +2051,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn draft_analyzed_carries_the_retained_target_definition() {
+        let target = sample_target();
+        let seen = Arc::new(Mutex::new(String::new()));
+        let section = hf_prompt::render_target_source_section(
+            "src/parse.c",
+            7,
+            "int parse(void) { return 1; }",
+        );
+        draft_analyzed(
+            &target,
+            EngineKind::LibFuzzer,
+            &HarnessDraftContext {
+                related: &[],
+                build: None,
+                examples: &[],
+                analysis: None,
+                target_source: Some(&section),
+            },
+            hf_core::target::Sanitizer::Address,
+            false,
+            Box::new(CaptureProvider {
+                seen: Arc::clone(&seen),
+            }),
+        )
+        .await
+        .expect("draft should succeed");
+        let prompt = seen.lock().expect("capture lock").clone();
+        assert!(
+            prompt.ends_with(&section),
+            "the retained section must reach the model verbatim: {prompt}"
+        );
+    }
+
+    #[tokio::test]
     async fn draft_analyzed_with_no_sections_matches_the_context_prompt() {
         let target = sample_target();
         let seen = Arc::new(Mutex::new(String::new()));
@@ -1984,6 +2096,7 @@ mod tests {
                 build: None,
                 examples: &[],
                 analysis: None,
+                target_source: None,
             },
             hf_core::target::Sanitizer::Address,
             false,
@@ -2083,6 +2196,7 @@ mod tests {
                 build: None,
                 examples: &[],
                 analysis: None,
+                target_source: None,
             },
             hf_core::target::Sanitizer::Address,
             true,
@@ -2122,6 +2236,7 @@ mod tests {
                 build: None,
                 examples: &[],
                 analysis: None,
+                target_source: None,
             },
             hf_core::target::Sanitizer::Address,
             true,

@@ -281,6 +281,7 @@ That's it."
             build: None,
             examples: &[],
             analysis: None,
+            target_source: None,
         },
         hf_core::target::Sanitizer::Address,
         false,

@@ -498,6 +498,23 @@ pub fn workspace_dir(project: &Path, target: &str) -> PathBuf {
         .join(sanitize_target(target))
 }
 
+/// Where a coverage-plateau refine proposal for `target` is compiled:
+/// `<workspace_root>/<project_name>/.refine-proposals/<target>`.
+///
+/// A proposal is a new, unqualified revision. Compiling it in the target's own
+/// workspace would replace the promoted binary and active marker a campaign
+/// runs, so it is built here and adopted into the target workspace only by an
+/// explicit human action. The leading dot keeps the directory distinct from
+/// every target workspace, because sanitized target names never start with a
+/// dot.
+#[must_use]
+pub fn refine_proposal_dir(project: &Path, target: &str) -> PathBuf {
+    workspace_root()
+        .join(project_slug(project))
+        .join(".refine-proposals")
+        .join(sanitize_target(target))
+}
+
 /// Whether the target's workspace under this exact selector holds the active
 /// harness marker (`harness.active`). Workspaces are keyed by the spelling
 /// the promoting flow used, so a harness promoted under a file-qualified

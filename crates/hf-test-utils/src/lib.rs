@@ -11,6 +11,7 @@ pub mod mock_storage;
 
 pub use harness_review::{
     approving_harness_review_pool, approving_harness_review_response, is_harness_review_request,
+    HarnessAnswer, RecordingHarnessPool,
 };
 
 /// Stable content-addressed image identity for runtime test doubles that

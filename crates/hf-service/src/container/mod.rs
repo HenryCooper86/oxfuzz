@@ -70,6 +70,7 @@ pub use function_coverage::RunFunctionCoverage;
 mod run_closeout;
 mod staging;
 mod system;
+mod target_source;
 mod triage;
 #[cfg(feature = "unreached-surface")]
 mod unreached_surface;
@@ -80,7 +81,7 @@ mod workspace_file;
 pub use discovery::AnalyzedInventory;
 pub use fuzz::{
     FuzzOutcome, FuzzRequest, FuzzStage, PreparedHarnessSource, FUZZ_PIPELINE_REPAIRS,
-    MAX_PREPARED_HARNESS_SOURCE_BYTES,
+    LLM_SEED_COUNT, MAX_PREPARED_HARNESS_SOURCE_BYTES,
 };
 pub use guards::AgentTurnGuard;
 pub use harness_workspace::{
@@ -1695,6 +1696,15 @@ pub struct CompileOutcome {
     pub lint: Vec<hf_harness::LintFinding>,
 }
 
+/// A smoke qualification that may have repaired the harness on the way: the
+/// final smoke outcome plus how many smoke-failure repairs produced the
+/// qualified revision (0 when the first revision ran).
+#[derive(Debug, Clone)]
+pub struct QualifiedSmoke {
+    pub smoke: crate::verification::SmokeOutcome,
+    pub smoke_repairs: usize,
+}
+
 /// Outcome of an end-to-end harness generation with automatic repair: the
 /// compiled harness plus how many repair attempts it took to get there.
 #[derive(Debug, Clone)]
@@ -1834,10 +1844,11 @@ pub struct CampaignOutcome {
     pub termination: hf_core::runtime::CommandTermination,
     /// When the campaign plateaued on coverage without finding a crash, the
     /// result of the automatic targeted-refinement *proposal*. The refined
-    /// harness is left `Compiled` (never promoted or auto-run), preserving the
-    /// human promotion gate. `None` when no plateau was detected or refinement
-    /// was not attempted (no provider, non-C target, or the compile action
-    /// requires approval).
+    /// harness is compiled beside the target workspace and left `Compiled`
+    /// (never activated, promoted or auto-run), preserving the human
+    /// promotion gate and the promoted revision the next campaign runs.
+    /// `None` when no plateau was detected or refinement was not attempted
+    /// (no provider, non-C target, or the compile action requires approval).
     #[serde(default)]
     pub refine: Option<RefineProposal>,
 }
@@ -1851,6 +1862,11 @@ pub struct RefineProposal {
     /// Whether a refined harness compiled successfully (still only `Compiled`,
     /// awaiting human review and promotion).
     pub compiled: bool,
+    /// The proposal's persisted revision, when it compiled. It is not the
+    /// active revision; `harness_adopt_revision` takes it into the target
+    /// workspace.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub harness_id: Option<Uuid>,
     /// A short human-readable note for the run log.
     pub note: String,
 }

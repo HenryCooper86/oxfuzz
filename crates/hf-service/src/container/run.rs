@@ -419,8 +419,10 @@ impl ServiceContainer {
     /// applicable: no LLM provider, no uncovered frontier (non-C target or full
     /// coverage), or the compile action is not already policy-allowed (so we
     /// never block a headless campaign on an approval prompt, nor compile
-    /// without an Allow decision). The refined harness stays `Compiled`; the
-    /// existing promotion gate keeps it from being auto-run.
+    /// without an Allow decision). The proposal compiles in its own workspace
+    /// and stays `Compiled`: the promoted revision remains active, so the next
+    /// campaign runs unchanged, and the proposal reaches a campaign only after
+    /// a human adopts, qualifies and promotes it.
     async fn propose_refine_on_plateau(
         &self,
         project: &Path,
@@ -443,13 +445,19 @@ impl ServiceContainer {
         }
         // Two corrective passes is enough for a targeted re-draft; keep it small
         // so a plateau does not turn into a long repair loop.
-        match self.harness_refine(project, target, engine, lang, 2).await {
+        match self
+            .harness_refine_proposal(project, target, engine, lang, 2)
+            .await
+        {
             Ok(outcome) => Some(RefineProposal {
                 frontier_locations,
                 compiled: outcome.status == HarnessStatus::Compiled,
+                harness_id: Some(outcome.harness_id),
                 note: format!(
-                    "coverage plateaued; proposed a refined harness for {frontier_locations} \
-                     uncovered location(s), left Compiled for human review"
+                    "coverage plateaued; proposed refined harness {} for {frontier_locations} \
+                     uncovered location(s); the promoted harness stays active until the \
+                     proposal is adopted, qualified and promoted",
+                    outcome.harness_id
                 ),
             }),
             Err(error) => {
@@ -457,6 +465,7 @@ impl ServiceContainer {
                 Some(RefineProposal {
                     frontier_locations,
                     compiled: false,
+                    harness_id: None,
                     note: format!("coverage plateaued; refine proposal failed: {error}"),
                 })
             }
@@ -1768,8 +1777,14 @@ impl ServiceContainer {
         }
         self.verify_harness_build_inputs(project, &harness, true)
             .await?;
-        self.generate_seeds_llm_with_campaign_harness(project, &target, lang, 12, Some(&harness))
-            .await?;
+        self.generate_seeds_llm_with_campaign_harness(
+            project,
+            &target,
+            lang,
+            super::fuzz::LLM_SEED_COUNT,
+            Some(&harness),
+        )
+        .await?;
 
         // 3. Run -> triage loop, stopping on the first crash or the iteration cap.
         // Forward each iteration's structured events to the campaign sink, but
@@ -1814,8 +1829,9 @@ impl ServiceContainer {
                 hangs = Some(hangs.map_or(value, |total| total.saturating_add(value)));
             }
             last_stagnation = summary.stagnation.clone();
-            // A refine step between iterations can regress coverage; the policy
-            // (armed via config) then restores the last-good harness, or, in
+            // An iteration whose harness revision regressed coverage against a
+            // comparable earlier run trips the auto-revert policy (armed via
+            // config), which restores the last-good harness or, in
             // notify-only mode, flags it. Count either so history shows it.
             if summary.auto_revert.is_some() {
                 auto_reverts += 1;

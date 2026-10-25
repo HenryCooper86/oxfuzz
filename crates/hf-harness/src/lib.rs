@@ -16,9 +16,10 @@ pub use lint::{
 pub use generator::{
     build_command, build_command_for_source, cmplog_build_command, cmplog_build_command_for_source,
     compile_with_options, draft_analyzed, generate_seeds, list_c_files, refine, repair,
-    smoke_fuzz_in_paths_with_config_and_sandbox_image, summarize_diagnostics,
-    try_compile_with_options, CompileFailure, CompileResult, HarnessDraftContext,
-    AFL_LLVM_CMPLOG_ENV, MAX_DISTINCT_DIAGNOSTIC_LINES, MAX_REPAIR_DIAGNOSTICS_CHARS,
+    repairable_smoke_failure, smoke_fuzz_in_paths_with_config_and_sandbox_image,
+    summarize_diagnostics, try_compile_with_options, CompileFailure, CompileResult,
+    HarnessDraftContext, AFL_LLVM_CMPLOG_ENV, MAX_DISTINCT_DIAGNOSTIC_LINES,
+    MAX_REPAIR_DIAGNOSTICS_CHARS, SMOKE_NO_ACTIVITY, SMOKE_WALL_CLOCK_EXPIRED,
 };
 
 /// Native mutator source composition and sandbox build helpers.

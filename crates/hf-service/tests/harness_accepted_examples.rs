@@ -1,6 +1,6 @@
-//! Executor tests for accepted-example conditioning: a harness draft must
-//! carry the project's previously promoted harnesses, and a project without
-//! promotions must draft exactly as before.
+//! Executor tests for draft-context conditioning: a harness draft must carry
+//! the project's previously promoted harnesses and the target's own retained
+//! definition, and a project without them must draft exactly as before.
 
 mod common;
 
@@ -174,75 +174,50 @@ async fn fixture_with_pool(
     (project, store, container)
 }
 
-#[tokio::test]
-async fn harness_generate_conditions_the_draft_on_promoted_harnesses() {
-    let pool = Arc::new(DraftCapturePool {
-        prompts: Mutex::new(Vec::new()),
-    });
-    let (project, store, container) = fixture_with_pool(Arc::clone(&pool)).await;
-
-    // One promoted harness for another target of the same project, and one
-    // draft-status harness that must never qualify.
-    let canonical = std::fs::canonicalize(project.path()).unwrap();
+/// Persist one promoted harness for another target of the project, and one
+/// draft-status harness that must never qualify as an accepted example.
+async fn seed_promoted_and_draft_harnesses(project: &Path, store: &hf_storage::Store) {
+    let canonical = std::fs::canonicalize(project).unwrap();
     let promoted_target = example_target(&canonical, "parse_other");
     let draft_target = example_target(&canonical, "parse_yetAnother");
     let now = chrono::Utc::now();
     store.upsert_target(&promoted_target, now).await.unwrap();
     store.upsert_target(&draft_target, now).await.unwrap();
-    let promoted = Harness {
+    let harness = |target: &TargetCandidate, status: HarnessStatus| {
+        Harness {
         id: uuid::Uuid::new_v4(),
-        target_id: promoted_target.id,
+        target_id: target.id,
         engine: EngineKind::LibFuzzer,
-        source: "int LLVMFuzzerTestOneInput(const unsigned char *d, unsigned long n) { return parse_other(d, n); }".to_owned(),
+        source: format!(
+            "int LLVMFuzzerTestOneInput(const unsigned char *d, unsigned long n) {{ return {}(d, n); }}",
+            target.symbol
+        ),
         language: TargetLanguage::C,
         build_cmd: BuildCommand {
             compiler: "clang".to_owned(),
             args: Vec::new(),
-            output: PathBuf::from("fuzz_parse_other"),
+            output: PathBuf::from(format!("fuzz_{}", target.symbol)),
             extra_flags: Vec::new(),
         },
         sanitizer: hf_core::target::Sanitizer::Address,
-        status: HarnessStatus::Promoted,
+        status,
         smoke_run: None,
         custom_mutator: None,
         cmplog: None,
+    }
     };
-    let not_promoted = Harness {
-        id: uuid::Uuid::new_v4(),
-        target_id: draft_target.id,
-        engine: EngineKind::LibFuzzer,
-        source: "int LLVMFuzzerTestOneInput(const unsigned char *d, unsigned long n) { return parse_yetAnother(d, n); }".to_owned(),
-        language: TargetLanguage::C,
-        build_cmd: BuildCommand {
-            compiler: "clang".to_owned(),
-            args: Vec::new(),
-            output: PathBuf::from("fuzz_parse_yetAnother"),
-            extra_flags: Vec::new(),
-        },
-        sanitizer: hf_core::target::Sanitizer::Address,
-        status: HarnessStatus::Draft,
-        smoke_run: None,
-        custom_mutator: None,
-        cmplog: None,
-    };
-    store.upsert_harness(&promoted).await.unwrap();
-    store.upsert_harness(&not_promoted).await.unwrap();
-
-    container
-        .harness_generate(
-            project.path(),
-            "parse_entry",
-            EngineKind::LibFuzzer,
-            TargetLanguage::C,
-            0,
-            None,
-            false,
-            false,
-        )
+    store
+        .upsert_harness(&harness(&promoted_target, HarnessStatus::Promoted))
         .await
-        .expect("generation should complete");
+        .unwrap();
+    store
+        .upsert_harness(&harness(&draft_target, HarnessStatus::Draft))
+        .await
+        .unwrap();
+}
 
-    let prompts = pool.prompts.lock().unwrap().clone();
+/// The draft prompt among `prompts` must carry the promoted example only.
+fn assert_draft_carries_only_the_promoted_example(prompts: &[String]) {
     let draft = prompts
         .iter()
         .find(|prompt| prompt.contains("Previously accepted"))
@@ -259,6 +234,59 @@ async fn harness_generate_conditions_the_draft_on_promoted_harnesses() {
         !draft.contains("parse_yetAnother"),
         "a draft-status harness is not an accepted example: {draft}"
     );
+}
+
+#[tokio::test]
+async fn harness_generate_conditions_the_draft_on_promoted_harnesses() {
+    let pool = Arc::new(DraftCapturePool {
+        prompts: Mutex::new(Vec::new()),
+    });
+    let (project, store, container) = fixture_with_pool(Arc::clone(&pool)).await;
+    seed_promoted_and_draft_harnesses(project.path(), &store).await;
+
+    container
+        .harness_generate(
+            project.path(),
+            "parse_entry",
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+            0,
+            None,
+            false,
+            false,
+        )
+        .await
+        .expect("generation should complete");
+
+    assert_draft_carries_only_the_promoted_example(&pool.prompts.lock().unwrap());
+}
+
+#[tokio::test]
+async fn harness_draft_conditions_the_draft_on_promoted_harnesses() {
+    // `oxfuzz harness` without --repair drafts through
+    // `harness_draft_with_policy`; it must see the same accepted examples as
+    // the generate path (harness-generation-design section 3 step 1).
+    let pool = Arc::new(DraftCapturePool {
+        prompts: Mutex::new(Vec::new()),
+    });
+    let (project, store, container) = fixture_with_pool(Arc::clone(&pool)).await;
+    seed_promoted_and_draft_harnesses(project.path(), &store).await;
+
+    let draft = container
+        .harness_draft_with_policy(
+            project.path(),
+            "parse_entry",
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+            hf_service::AiPolicy::Require,
+            None,
+            false,
+        )
+        .await
+        .expect("drafting should complete");
+    assert_eq!(draft.generator, hf_core::harness::DraftGenerator::Llm);
+
+    assert_draft_carries_only_the_promoted_example(&pool.prompts.lock().unwrap());
 }
 
 #[tokio::test]
@@ -292,5 +320,85 @@ async fn harness_generate_without_promotions_drafts_without_the_section() {
             .iter()
             .all(|prompt| !prompt.contains("Previously accepted")),
         "no promotions means no examples section: {prompts:?}"
+    );
+}
+
+#[tokio::test]
+async fn harness_draft_shows_the_target_definition_and_retains_it() {
+    let pool = Arc::new(DraftCapturePool {
+        prompts: Mutex::new(Vec::new()),
+    });
+    let (project, store, container) = fixture_with_pool(Arc::clone(&pool)).await;
+
+    container
+        .harness_draft_with_policy(
+            project.path(),
+            "parse_entry",
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+            hf_service::AiPolicy::Require,
+            None,
+            false,
+        )
+        .await
+        .expect("drafting should complete");
+
+    let prompts = pool.prompts.lock().unwrap().clone();
+    let draft = prompts
+        .iter()
+        .find(|prompt| prompt.contains("Target definition"))
+        .expect("the draft prompt must carry the target definition");
+    assert!(
+        draft.contains("return size && data[0];"),
+        "the target body must reach the model: {draft}"
+    );
+    // Engineering Protocol 2.13: the exact model-visible section is retained.
+    let canonical = std::fs::canonicalize(project.path()).unwrap();
+    let retained = store
+        .harness_target_sources_for_project(&canonical.to_string_lossy(), 10)
+        .await
+        .unwrap();
+    assert_eq!(retained.len(), 1, "one draft retains one section");
+    assert!(
+        draft.ends_with(&retained[0].rendered),
+        "the retained section must be exactly what was sent"
+    );
+    assert_eq!(retained[0].source_file, "parse.c");
+}
+
+#[tokio::test]
+async fn a_draft_without_a_store_omits_the_unretainable_target_definition() {
+    common::install_managed_workspace("oxfuzz_accepted_examples_it");
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(
+        project.path().join("parse.c"),
+        "#include <stddef.h>\nint parse_entry(const unsigned char *data, size_t size) { return size && data[0]; }\n",
+    )
+    .unwrap();
+    let pool = Arc::new(DraftCapturePool {
+        prompts: Mutex::new(Vec::new()),
+    });
+    let container = ServiceContainer::new(Arc::new(CompilingRuntime), Some(pool.clone()));
+
+    container
+        .harness_draft_with_policy(
+            project.path(),
+            "parse_entry",
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+            hf_service::AiPolicy::Require,
+            None,
+            false,
+        )
+        .await
+        .expect("drafting should complete");
+
+    let prompts = pool.prompts.lock().unwrap().clone();
+    assert!(!prompts.is_empty());
+    assert!(
+        prompts
+            .iter()
+            .all(|prompt| !prompt.contains("Target definition")),
+        "a section that cannot be retained must not reach the model: {prompts:?}"
     );
 }

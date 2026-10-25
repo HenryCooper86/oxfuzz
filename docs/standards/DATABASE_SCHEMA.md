@@ -1355,6 +1355,7 @@ bounded deterministic history, and both cleanup operations.
 | `0042_guided_coverage_experiments.sql` | retains guided coverage-experiment definitions, reviewed inputs, and execution links |
 | `0043_harness_behavior.sql` | retains AFL++ behavioral qualification evidence (fresh-input and persistent-sequence maps) |
 | `0044_filed_issues.sql` | creates the issue-filing dedup ledger (`filed_issues`) |
+| `0045_harness_target_sources.sql` | retains the exact target-definition section rendered into each harness draft prompt |
 
 ## 7. Read failure contract
 
@@ -1549,3 +1550,29 @@ explicitly unmeasured. Both promotion executors read this retained evidence.
 | `sandbox_rev` | `TEXT NOT NULL` | Content-addressed run image revision |
 | `report_sha256` | `TEXT NOT NULL` | Digest of the exact JSON bytes |
 | `report_json` | `TEXT NOT NULL` | Valid JSON at most 1 MiB |
+
+## Harness target definitions (0045)
+
+### `harness_target_sources`
+
+Migration 0045 retains the target-definition section a harness draft sends to
+a provider, before dispatch. The section is cut from the project's source file
+at draft time and the project can change afterwards, so the exact
+model-visible text is kept rather than re-read. A storage failure stops the
+provider call; without a store the section is not rendered. Rows are
+immutable: identical retries are accepted, differing retries, `UPDATE`, and
+duplicate inserts are refused. There is no harness foreign key, because
+drafting precedes compilation and may fail. Project deletion and
+`clear_knowledge` delete these rows.
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | Immutable record UUID |
+| `project_root` | `TEXT NOT NULL` | Canonical project root the source was read from |
+| `target_id` | `TEXT NOT NULL` | Discovery target the section describes |
+| `source_file` | `TEXT NOT NULL` | Source file relative to the project root |
+| `source_sha256` | `TEXT NOT NULL` | 64-character digest of the complete source file |
+| `rendered` | `TEXT NOT NULL` | Exact provider section, at most 16 KiB |
+| `created_at` | `TEXT NOT NULL` | UTC capture time, RFC 3339 with nanoseconds |
+
+Index: `idx_harness_target_sources_project(project_root, created_at DESC, id DESC)`.

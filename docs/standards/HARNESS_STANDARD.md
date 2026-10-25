@@ -7,7 +7,11 @@ Status: **active**. Scope: `hf-harness`, `hf-engine`, `hf-service`.
 A harness is acceptable only if it satisfies all of:
 
 1. **Engine entry point present** -- e.g. `LLVMFuzzerTestOneInput` for
-   libFuzzer/AFL++, `HF_ITER` for honggfuzz, `Fuzz` function for Go.
+   libFuzzer, AFL++ and honggfuzz, `Fuzz` function for Go. For honggfuzz the
+   harness defines no `main`: libhfuzz supplies one, detects persistent mode
+   from the binary, calls the entry point for many inputs in one process, and
+   aborts the fuzzer when it returns non-zero. honggfuzz's alternative
+   `HF_ITER` form (a harness-owned `main` that pulls inputs) is not generated.
 2. **No host I/O** -- the harness does not read from or write to the host
    filesystem; all input comes from the fuzzer.
 3. **Deterministic** -- same input -> same behavior (no time-based or RNG
@@ -95,6 +99,12 @@ The harness prompt contains:
 - Previously promoted harnesses of the project as accepted examples: at most
   two, same language as the target, each source bounded, read from the
   persisted harness records. A project without promotions drafts unchanged.
+- The target's own definition, cut from the project source, bounded, and
+  retained before dispatch (`harness_target_sources`). It is omitted when it
+  cannot be read or retained.
+- Engine rules for C/C++ entry points: no harness `main`, return 0, and for
+  honggfuzz the persistent-process facts (state reset per input, one-time
+  setup in `LLVMFuzzerInitialize`).
 - Compiler definitions are portable values only: embedded Unix, UNC, and
   drive-qualified Windows absolute paths are excluded before persistence or
   model use, while relative values and non-file URIs remain valid.

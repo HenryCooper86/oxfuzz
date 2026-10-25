@@ -52,6 +52,15 @@ pub struct Harness {
    approved, each source bounded to 6 000 characters. A project without
    promotions, a failed read, or a missing store renders the prompt exactly
    as without this step, so the conditioning only ever adds signal.
+   Every draft path also shows the target's own definition: the discovered
+   `location.line..end_line` span (120 lines when no end line was recorded),
+   read from inside the canonical project root (no symlink escape, regular
+   file, at most 1 MiB), bounded to 6 000 characters, and labelled as
+   untrusted data. The signature alone hides how the target consumes its
+   input, for example a `char *filename` that is passed to `fopen`. The
+   exact rendered section is retained in `harness_target_sources` before
+   dispatch; a storage failure stops the provider call, and without a store
+   or a readable definition the section is omitted.
 2. **Compile** -- `hf-runtime` builds the harness in-sandbox with the
    selected sanitizer + engine link flags, plus the step 0 flags. Project
    sources are staged preserving the complete project directory layout, so
@@ -84,7 +93,15 @@ pub struct Harness {
 5. **Iterate** -- on a static-rule error (`docs/standards/HARNESS_STANDARD.md`
    section 2), compile failure, or smoke failure, feed diagnostics back to the
    LLM for up to N rounds (default 3). A rule error short-circuits before the
-   container starts.
+   container starts, and no repair is requested once the budget is spent.
+   Smoke repair (`harness_smoke_with_repair`, used by `oxfuzz fuzz` and
+   `oxfuzz harness --repair N`) covers the two smoke outcomes a source rewrite
+   can fix, as classified by `hf_harness::repairable_smoke_failure`: no fuzzer
+   activity, and a hung run. The engine output is the repair diagnostics; the
+   rewrite compiles through the compile-repair loop as a new revision, which
+   is reviewed and approved again before it runs. A smoke crash is a finding,
+   not a defect to repair away, and a rejected review is never fed to the
+   generator, so the review stays independent of it.
 6. **Review** -- persist the smoke evidence on the exact active harness record;
    the evidence binds the full source and executable SHA-256 digests to the
    smoke-run id, and a crash-free run leaves it at `SmokePassed`.
@@ -276,6 +293,21 @@ point is present. No template files live in `config/prompts/`.
   source and executable digests that actually ran. Every successful recompile
   creates a new active revision and invalidates prior approval.
 - Agents may prepare and smoke-test a harness, but they cannot promote it.
+
+### 5.1 Coverage-Plateau Refine Proposals
+
+A campaign whose final iteration plateaus on coverage without a crash may
+draft a refined harness aimed at the uncovered frontier (only when a provider
+is configured and `CompileHarness` is already policy-allowed). The proposal is
+compiled in `<project workspace>/.refine-proposals/<target>`, not in the target
+workspace: compiling there would replace the promoted binary and active marker
+and block the next campaign until the unqualified revision was smoke-tested and
+promoted. The proposal is persisted as a `Compiled` revision and its id is
+reported in `CampaignOutcome.refine.harness_id`. `harness_adopt_revision`
+(`oxfuzz harness --adopt <id>`) recompiles that exact source in the target
+workspace as a new revision with the stored sanitizer and CmpLog setup; it
+requires the same target, engine and language, and carries no approval, so the
+normal review, smoke qualification and promotion follow.
 
 ## 6. Harness Tournament
 

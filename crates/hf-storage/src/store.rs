@@ -2543,6 +2543,7 @@ impl Store {
         // because it holds a foreign key into it.
         for table in [
             "harness_clang_contexts",
+            "harness_target_sources",
             "clang_analysis_results",
             "clang_analysis_operations",
             "ai_discovery_operations",
@@ -2592,6 +2593,7 @@ impl Store {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         for table in [
             "harness_clang_contexts",
+            "harness_target_sources",
             "clang_analysis_results",
             "clang_analysis_operations",
             "ai_discovery_operations",

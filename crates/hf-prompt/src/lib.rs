@@ -8,6 +8,7 @@
 
 pub mod agent;
 
+
 mod clang_compact;
 
 pub mod render;
@@ -23,8 +24,8 @@ pub use render::{
     render_harness_refine_prompt, render_harness_repair_prompt, render_persistent_harness_prompt,
     render_persistent_harness_prompt_with_examples, render_persistent_harness_refine_prompt,
     render_persistent_harness_repair_prompt, render_related_context_section, render_seed_prompt,
-    AcceptedExample, PromptSizeError, RelatedContext, MAX_ACCEPTED_EXAMPLE_CHARS,
-    MAX_RELATED_CONTEXT_CHARS,
+    render_target_source_section, AcceptedExample, PromptSizeError, RelatedContext,
+    MAX_ACCEPTED_EXAMPLE_CHARS, MAX_RELATED_CONTEXT_CHARS, MAX_TARGET_SOURCE_CHARS,
 };
 
 pub use agent::{build_agent_system_prompt, AgentPromptInput, AGENT_SYSTEM_PROMPT_TOKEN_BUDGET};

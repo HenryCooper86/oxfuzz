@@ -12,6 +12,8 @@ pub use ai_ranking_store::{
 };
 mod harness_behavior;
 pub use harness_behavior::HarnessBehaviorRecord;
+mod harness_target_sources;
+pub use harness_target_sources::{HarnessTargetSourceRecord, MAX_TARGET_SOURCE_SECTION_BYTES};
 mod run_function_coverage;
 pub use run_function_coverage::RunFunctionCoverageRecord;
 mod run_edge_sets;

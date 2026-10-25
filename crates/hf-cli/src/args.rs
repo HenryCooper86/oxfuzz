@@ -219,14 +219,28 @@ pub(crate) struct HarnessArgs {
     /// a configured model.
     #[arg(long, value_enum, default_value_t = AiOption::Auto)]
     pub(crate) ai: AiOption,
-    /// Auto-repair: on a compile failure, feed the diagnostics back to the
-    /// LLM and retry up to N times before giving up (0 = no repair).
+    /// Auto-repair: on a compile failure, or a smoke run in which the fuzzer
+    /// never reached the harness (or the harness hung), feed the diagnostics
+    /// back to the LLM and retry up to N times before giving up (0 = no
+    /// repair). Each repaired revision is reviewed and approved again before
+    /// it runs.
     #[arg(long, default_value_t = 0)]
     pub(crate) repair: usize,
     /// Coverage-guided refinement: reshape the EXISTING harness to reach the
     /// target's still-uncovered reachable functions, then recompile.
     #[arg(long)]
     pub(crate) refine: bool,
+    /// Adopt a stored harness revision of this target, such as the refine
+    /// proposal a campaign printed after a coverage plateau: recompile its
+    /// exact source as the new active revision, then smoke-qualify it. The
+    /// revision keeps its sanitizer, `CmpLog` setup and shape, and still needs
+    /// review and explicit promotion.
+    #[arg(
+        long,
+        value_name = "HARNESS_ID",
+        conflicts_with_all = ["refine", "draft_only", "persistent", "cmplog", "sanitizer"]
+    )]
+    pub(crate) adopt: Option<uuid::Uuid>,
     /// Explicitly approve the revision for full campaigns after a clean
     /// persisted smoke run.
     #[arg(long)]
@@ -1977,6 +1991,73 @@ mod cmplog_cli_tests {
     use clap::Parser as _;
 
     use super::{Cli, Commands};
+
+    #[test]
+    fn harness_adopt_takes_a_revision_id_and_refuses_identity_flags() {
+        let id = "6f2c1f2e-8a0e-4c2b-9d4e-0d1f6b3a9c11";
+        let parsed = Cli::try_parse_from([
+            "oxfuzz",
+            "harness",
+            "/p",
+            "--target",
+            "t",
+            "--engine",
+            "libfuzzer",
+            "--adopt",
+            id,
+            "--repair",
+            "2",
+        ])
+        .unwrap();
+        let Commands::Harness(crate::args::HarnessArgs { adopt, repair, .. }) = parsed.command
+        else {
+            panic!("expected harness");
+        };
+        assert_eq!(adopt.map(|uuid| uuid.to_string()).as_deref(), Some(id));
+        assert_eq!(
+            repair, 2,
+            "--repair still budgets smoke repairs of the adopted revision"
+        );
+
+        // The adopted revision fixes the source, sanitizer, CmpLog and shape,
+        // so flags that would choose them are refused rather than ignored.
+        for conflicting in [
+            &["--refine"][..],
+            &["--draft-only"],
+            &["--persistent"],
+            &["--cmplog"],
+            &["--sanitizer", "undefined"],
+        ] {
+            let mut argv = vec![
+                "oxfuzz",
+                "harness",
+                "/p",
+                "--target",
+                "t",
+                "--engine",
+                "libfuzzer",
+                "--adopt",
+                id,
+            ];
+            argv.extend_from_slice(conflicting);
+            assert!(
+                Cli::try_parse_from(&argv).is_err(),
+                "--adopt must refuse {conflicting:?}"
+            );
+        }
+        assert!(Cli::try_parse_from([
+            "oxfuzz",
+            "harness",
+            "/p",
+            "--target",
+            "t",
+            "--engine",
+            "libfuzzer",
+            "--adopt",
+            "not-a-uuid",
+        ])
+        .is_err());
+    }
 
     #[test]
     fn harness_run_campaign_and_fuzz_accept_cmplog_and_default_it_off() {

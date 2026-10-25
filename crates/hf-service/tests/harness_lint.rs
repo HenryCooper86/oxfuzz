@@ -83,3 +83,46 @@ async fn a_lint_warning_does_not_block_the_compile() {
         "warning blocked: {text}"
     );
 }
+
+#[tokio::test]
+async fn a_spent_repair_budget_sends_no_repair_prompt_for_a_lint_error() {
+    // With no repairs left, a lint error is terminal: asking the model for a
+    // repair that will be discarded spends a provider call for nothing.
+    common::install_managed_workspace("oxfuzz-harness-lint");
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(
+        project.path().join("a.c"),
+        "int a(const unsigned char *d, unsigned long n){return d && n;}",
+    )
+    .unwrap();
+    let pool = hf_test_utils::RecordingHarnessPool::new(|_, _| {
+        "```c\nint LLVMFuzzerTestOneInput(const unsigned char *d, unsigned long n){ if(!n) exit(1); return 0; }\n```"
+            .to_owned()
+    });
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), Some(pool.clone()))
+        .with_store(Arc::new(
+            hf_storage::Store::connect(project.path().join("state.db"))
+                .await
+                .unwrap(),
+        ));
+
+    let error = container
+        .harness_generate(
+            project.path(),
+            "a",
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+            0,
+            None,
+            false,
+            false,
+        )
+        .await
+        .expect_err("a lint error with no repair budget fails the build");
+
+    assert!(format!("{error}").contains("no-process-exit"), "{error}");
+    assert!(
+        pool.prompts_containing("A previous attempt").is_empty(),
+        "no repair prompt may be sent once the budget is spent"
+    );
+}

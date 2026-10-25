@@ -216,6 +216,61 @@ fn cmplog_companion_spec(
     }))
 }
 
+/// Where a refined harness is compiled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefineDestination {
+    /// The target workspace: the refined revision becomes the active one.
+    TargetWorkspace,
+    /// The proposal workspace: the active revision stays in place.
+    Proposal,
+}
+
+/// Recreate `dir` empty and stage the project sources into it. A previous
+/// proposal's files are removed first, so a build never mixes two proposals.
+fn prepare_refine_proposal_dir(project: &Path, dir: &Path) -> Result<(), ClassifiedError> {
+    prepare_configured_workspace_root()?;
+    match std::fs::remove_dir_all(dir) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(ClassifiedError::Internal(format!(
+                "clear refine proposal workspace {}: {error}",
+                dir.display()
+            )))
+        }
+    }
+    std::fs::create_dir_all(dir).map_err(|error| {
+        ClassifiedError::Internal(format!(
+            "create refine proposal workspace {}: {error}",
+            dir.display()
+        ))
+    })?;
+    copy_project_sources(project, dir);
+    Ok(())
+}
+
+/// The gathered model-visible inputs of one harness draft; see
+/// [`ServiceContainer::draft_inputs`].
+struct DraftInputs {
+    related: Vec<hf_prompt::RelatedContext>,
+    build: Option<BuildContext>,
+    examples: Vec<hf_prompt::AcceptedExample>,
+    analysis: Option<String>,
+    target_source: Option<String>,
+}
+
+impl DraftInputs {
+    fn context(&self) -> hf_harness::generator::HarnessDraftContext<'_> {
+        hf_harness::generator::HarnessDraftContext {
+            related: &self.related,
+            build: self.build.as_ref(),
+            examples: &self.examples,
+            analysis: self.analysis.as_deref(),
+            target_source: self.target_source.as_deref(),
+        }
+    }
+}
+
 /// Retain configured provider context before rendering; legacy prompts remain best-effort.
 async fn project_build_context(
     container: &ServiceContainer,
@@ -667,22 +722,11 @@ impl ServiceContainer {
         if let Some(pool) = self.provider_pool() {
             let provider = LlmProviderBridge::new(pool)
                 .with_diagnostics(Arc::clone(&self.diagnostics), "harness_draft");
-            let related = crate::knowledge::harness_related_context(project, candidate);
-            let build = project_build_context(self, project, candidate.language).await?;
-            let examples = self.accepted_examples(project, candidate).await;
-            #[cfg(feature = "clang-analysis")]
-            let analysis = self.retained_clang_context(project, candidate).await?;
-            #[cfg(not(feature = "clang-analysis"))]
-            let analysis: Option<String> = None;
+            let inputs = self.draft_inputs(project, candidate).await?;
             let drafted = hf_harness::generator::draft_analyzed(
                 candidate,
                 engine,
-                &hf_harness::generator::HarnessDraftContext {
-                    related: &related,
-                    build: build.as_ref(),
-                    examples: &examples,
-                    analysis: analysis.as_deref(),
-                },
+                &inputs.context(),
                 sanitizer,
                 persistent,
                 Box::new(provider),
@@ -697,6 +741,39 @@ impl ServiceContainer {
             }
         }
         Ok(heuristic_draft(candidate, engine, sanitizer, persistent)?.source)
+    }
+
+    /// Every model-visible input of one harness draft beyond the target
+    /// itself. Both draft entry points (`harness_draft_with_policy` and the
+    /// generate/fuzz path) gather them here, so a new prompt section reaches
+    /// every draft and the two paths cannot drift apart (Engineering Protocol
+    /// 2.18).
+    ///
+    /// # Errors
+    /// Returns build-context and durable analysis-input errors; each stops
+    /// dispatch before any model call.
+    async fn draft_inputs(
+        &self,
+        project: &Path,
+        candidate: &TargetCandidate,
+    ) -> Result<DraftInputs, ClassifiedError> {
+        // Related project context is empty when the project is not indexed,
+        // which renders the un-augmented prompt.
+        let related = crate::knowledge::harness_related_context(project, candidate);
+        let build = project_build_context(self, project, candidate.language).await?;
+        let examples = self.accepted_examples(project, candidate).await;
+        #[cfg(feature = "clang-analysis")]
+        let analysis = self.retained_clang_context(project, candidate).await?;
+        #[cfg(not(feature = "clang-analysis"))]
+        let analysis: Option<String> = None;
+        let target_source = self.retained_target_source(project, candidate).await?;
+        Ok(DraftInputs {
+            related,
+            build,
+            examples,
+            analysis,
+            target_source,
+        })
     }
 
     /// Accepted examples for one draft: previously promoted harnesses of this
@@ -849,16 +926,21 @@ impl ServiceContainer {
                 // container round-trip that would have produced a clean build
                 // of an unusable harness.
                 last_diagnostics = hf_harness::render_findings(&lint);
+                // Check the budget before the provider call: a repair that
+                // would be discarded is a model call for nothing.
+                if repairs_used >= max_repairs {
+                    break;
+                }
                 match self
                     .repair_harness_source(candidate, engine, &source, &last_diagnostics, sanitizer)
                     .await?
                 {
-                    Some(repaired) if repairs_used < max_repairs => {
+                    Some(repaired) => {
                         source = repaired;
                         repairs_used += 1;
                         continue;
                     }
-                    _ => break,
+                    None => break,
                 }
             }
             // The build variant derives from the current source's structure
@@ -1067,24 +1149,11 @@ impl ServiceContainer {
         {
             let provider = LlmProviderBridge::new(pool)
                 .with_diagnostics(Arc::clone(&self.diagnostics), "harness_draft");
-            // Augment the prompt with related project context when this
-            // project has been indexed; empty on any failure, which renders
-            // the un-augmented prompt.
-            let related = crate::knowledge::harness_related_context(project, &candidate);
-            let build = project_build_context(self, project, candidate.language).await?;
-            #[cfg(feature = "clang-analysis")]
-            let analysis = self.retained_clang_context(project, &candidate).await?;
-            #[cfg(not(feature = "clang-analysis"))]
-            let analysis: Option<String> = None;
+            let inputs = self.draft_inputs(project, &candidate).await?;
             let drafted = hf_harness::generator::draft_analyzed(
                 &candidate,
                 engine,
-                &hf_harness::generator::HarnessDraftContext {
-                    related: &related,
-                    build: build.as_ref(),
-                    examples: &[],
-                    analysis: analysis.as_deref(),
-                },
+                &inputs.context(),
                 sanitizer,
                 persistent,
                 Box::new(provider),
@@ -1362,6 +1431,119 @@ impl ServiceContainer {
         lang: TargetLanguage,
         max_repairs: usize,
     ) -> Result<HarnessGenOutcome, ClassifiedError> {
+        self.refine_into(
+            project,
+            target,
+            engine,
+            lang,
+            max_repairs,
+            RefineDestination::TargetWorkspace,
+        )
+        .await
+    }
+
+    /// Coverage-guided refinement compiled as a *proposal*: the same refined
+    /// source as [`Self::harness_refine`], built in
+    /// `<project workspace>/.refine-proposals/<target>` so the target's active
+    /// (possibly promoted) revision, binary and source stay in place. The
+    /// proposal is persisted as a `Compiled` revision; a human adopts it with
+    /// [`Self::harness_adopt_revision`].
+    ///
+    /// # Errors
+    /// The same as [`Self::harness_refine`].
+    pub async fn harness_refine_proposal(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+        lang: TargetLanguage,
+        max_repairs: usize,
+    ) -> Result<HarnessGenOutcome, ClassifiedError> {
+        self.refine_into(
+            project,
+            target,
+            engine,
+            lang,
+            max_repairs,
+            RefineDestination::Proposal,
+        )
+        .await
+    }
+
+    /// Recompile a stored revision's exact source as the new active revision
+    /// of `target`, keeping its sanitizer and `CmpLog` setup. This is how a
+    /// refine proposal (or any other retained revision of the same target,
+    /// engine and language) is taken into the target workspace. The result is
+    /// a new `Compiled` revision that needs the normal review, smoke
+    /// qualification and human promotion; adoption never carries approval.
+    ///
+    /// # Errors
+    /// Returns a validation error for an unknown revision, one of another
+    /// target, engine or language, or one that never compiled, and compile
+    /// errors from the rebuild.
+    pub async fn harness_adopt_revision(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+        lang: TargetLanguage,
+        harness_id: Uuid,
+    ) -> Result<CompileOutcome, ClassifiedError> {
+        let revision = self
+            .compilation_store()?
+            .get_harness(harness_id)
+            .await?
+            .ok_or_else(|| {
+                ClassifiedError::Validation(format!("harness revision {harness_id} not found"))
+            })?;
+        if revision.engine != engine || revision.language != lang {
+            return Err(ClassifiedError::Validation(format!(
+                "harness revision {harness_id} is a {} {:?} harness, not {} {lang:?}",
+                revision.engine.as_str(),
+                revision.language,
+                engine.as_str()
+            )));
+        }
+        if !matches!(
+            revision.status,
+            HarnessStatus::Compiled | HarnessStatus::SmokePassed | HarnessStatus::Promoted
+        ) {
+            return Err(ClassifiedError::Validation(format!(
+                "harness revision {harness_id} never compiled (status {:?})",
+                revision.status
+            )));
+        }
+        let target_id = self.resolve_target_id(project, target, lang).await?;
+        if revision.target_id != target_id {
+            return Err(ClassifiedError::Validation(format!(
+                "harness revision {harness_id} belongs to another target than '{target}'"
+            )));
+        }
+        self.harness_compile(
+            revision.source,
+            project,
+            engine,
+            target,
+            lang,
+            Some(revision.sanitizer),
+            revision.cmplog.is_some(),
+        )
+        .await
+    }
+
+    /// Shared body of [`Self::harness_refine`] and
+    /// [`Self::harness_refine_proposal`]: draft the refined source from the
+    /// active revision and the uncovered frontier, then compile it into
+    /// `destination`.
+    async fn refine_into(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+        lang: TargetLanguage,
+        max_repairs: usize,
+        destination: RefineDestination,
+    ) -> Result<HarnessGenOutcome, ClassifiedError> {
         self.compilation_store()?;
         require_fuzzing_harness_engine(engine, lang)?;
         self.admit_harness_build(project, lang).await?;
@@ -1432,16 +1614,152 @@ impl ServiceContainer {
         )
         .await?;
 
+        let build_workspace = match destination {
+            RefineDestination::TargetWorkspace => workspace,
+            RefineDestination::Proposal => {
+                let proposal = super::workspace::refine_proposal_dir(project, target);
+                prepare_refine_proposal_dir(project, &proposal)?;
+                self.stage_generated_build_inputs_for_project(project, &proposal)
+                    .await?;
+                proposal
+            }
+        };
+        self.compile_source_with_repair_locked(
+            &candidate,
+            target,
+            engine,
+            lang,
+            &build_workspace,
+            refined.source,
+            max_repairs,
+            active_sanitizer,
+            active_cmplog,
+        )
+        .await
+    }
+
+    /// Smoke-qualify the active harness, repairing it from the engine output
+    /// when the smoke run shows a harness-source defect.
+    ///
+    /// A failure that [`hf_harness::repairable_smoke_failure`] accepts (no
+    /// fuzzer activity, or a hung run) is fed to one LLM repair, the result is
+    /// compiled as a new revision through the compile-repair loop, and that
+    /// revision is smoke-qualified again from the start: a new independent
+    /// review and a new human `RunHarness` approval. At most `max_repairs`
+    /// smoke repairs run; `on_repair(attempt, diagnostics)` is called before
+    /// each. Every other outcome, including a crash (a finding to triage) and a
+    /// rejected review, returns unchanged.
+    ///
+    /// # Errors
+    /// Returns the last smoke error when the budget is spent or the failure is
+    /// not repairable, and repair or compile errors from a repair round.
+    pub async fn harness_smoke_with_repair(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+        lang: TargetLanguage,
+        bypass: HarnessReviewBypass,
+        max_repairs: usize,
+        on_repair: &(dyn Fn(usize, &str) + Send + Sync),
+    ) -> Result<super::QualifiedSmoke, ClassifiedError> {
+        let mut smoke_repairs = 0usize;
+        loop {
+            let error = match self
+                .harness_smoke_with_review_bypass(project, target, engine, lang, bypass)
+                .await
+            {
+                Ok(smoke) => {
+                    return Ok(super::QualifiedSmoke {
+                        smoke,
+                        smoke_repairs,
+                    })
+                }
+                Err(error) => error,
+            };
+            let Some(diagnostics) = hf_harness::repairable_smoke_failure(&error) else {
+                return Err(error);
+            };
+            if smoke_repairs >= max_repairs {
+                return Err(error);
+            }
+            smoke_repairs += 1;
+            on_repair(smoke_repairs, &diagnostics);
+            self.harness_repair_after_smoke(
+                project,
+                target,
+                engine,
+                lang,
+                &diagnostics,
+                max_repairs,
+            )
+            .await?;
+        }
+    }
+
+    /// Rewrite the active harness from a failed smoke run's diagnostics and
+    /// compile the result as a new active revision (through the same
+    /// compile-repair loop as generation, with up to `max_repairs` compile
+    /// repairs). The active revision's sanitizer and `CmpLog` setup are kept.
+    ///
+    /// # Errors
+    /// Returns a validation error for an unknown target, a harness error when
+    /// no provider can repair, and compile errors from the rebuilt source.
+    pub async fn harness_repair_after_smoke(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+        lang: TargetLanguage,
+        smoke_diagnostics: &str,
+        max_repairs: usize,
+    ) -> Result<HarnessGenOutcome, ClassifiedError> {
+        self.compilation_store()?;
+        require_fuzzing_harness_engine(engine, lang)?;
+        self.admit_harness_build(project, lang).await?;
+        let _workspace_operation = self.acquire_workspace_operation().await?;
+        self.authorize_recorded(
+            Action::CompileHarness,
+            "harness_smoke_repair",
+            Some(project),
+        )
+        .await?;
+        let inv = self.discover(project, lang).await?;
+        let candidate = select_target_candidate(&inv.candidates, target)?
+            .ok_or_else(|| ClassifiedError::Validation(format!("target '{target}' not found")))?
+            .clone();
+        let _target_revision = self
+            .acquire_target_revision(&candidate.project_root, target)
+            .await?;
+        let workspace = workspace_dir(project, target);
+        let active = self.active_harness_locked(project, target, engine).await?;
+        let diagnostics =
+            format!("The harness compiled, but its smoke run failed:\n{smoke_diagnostics}");
+        let Some(repaired) = self
+            .repair_harness_source(
+                &candidate,
+                engine,
+                &active.source,
+                &diagnostics,
+                active.sanitizer,
+            )
+            .await?
+        else {
+            return Err(ClassifiedError::Harness(format!(
+                "the smoke failure of '{target}' could not be repaired (no LLM provider, or \
+                 the repair call failed): {smoke_diagnostics}"
+            )));
+        };
         self.compile_source_with_repair_locked(
             &candidate,
             target,
             engine,
             lang,
             &workspace,
-            refined.source,
+            repaired,
             max_repairs,
-            active_sanitizer,
-            active_cmplog,
+            active.sanitizer,
+            active.cmplog.is_some(),
         )
         .await
     }

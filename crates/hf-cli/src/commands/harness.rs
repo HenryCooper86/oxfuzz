@@ -18,6 +18,7 @@ pub(crate) async fn cmd_harness(
     ai: AiOption,
     repair: usize,
     refine: bool,
+    adopt: Option<uuid::Uuid>,
     promote: bool,
     review_bypass: hf_service::HarnessReviewBypass,
     build: &crate::args::HarnessBuildArgs,
@@ -74,6 +75,33 @@ pub(crate) async fn cmd_harness(
         );
     }
     let container = crate::approval::bootstrap().await;
+
+    // With --adopt, take a stored revision (for example a campaign's refine
+    // proposal) into the target workspace and qualify it. Clap refuses the
+    // flags that would choose another source or build identity.
+    if let Some(harness_id) = adopt {
+        println!("--- Adopting harness revision {harness_id} ---");
+        let outcome = container
+            .harness_adopt_revision(&project, target, engine, lang, harness_id)
+            .await?;
+        println!(
+            "compile: status={:?} revision={}",
+            outcome.status, outcome.harness_id
+        );
+        print_lint_findings(&outcome.lint);
+        qualify_harness(
+            &container,
+            &project,
+            target,
+            engine,
+            lang,
+            promote,
+            review_bypass,
+            repair,
+        )
+        .await?;
+        return Ok(());
+    }
 
     // With --refine, reshape the existing harness toward uncovered reachable
     // functions (coverage-guided), then recompile with auto-repair.
@@ -133,6 +161,7 @@ pub(crate) async fn cmd_harness(
             lang,
             promote,
             review_bypass,
+            repair,
         )
         .await?;
         return Ok(());
@@ -160,6 +189,7 @@ pub(crate) async fn cmd_harness(
             lang,
             promote,
             review_bypass,
+            repair,
         )
         .await?;
         return Ok(());
@@ -223,9 +253,30 @@ pub(crate) async fn cmd_harness(
         lang,
         promote,
         review_bypass,
+        0,
     )
     .await?;
     Ok(())
+}
+
+/// Print a campaign's coverage-plateau refine proposal and, when it
+/// compiled, the command that adopts it. The proposal never replaced the
+/// promoted revision, so nothing changes until the operator adopts it.
+pub(crate) fn print_refine_proposal(
+    note: &str,
+    harness_id: Option<uuid::Uuid>,
+    project: &std::path::Path,
+    target: &str,
+    engine: EngineKind,
+) {
+    println!("  coverage-plateau refine: {note}");
+    if let Some(id) = harness_id {
+        println!(
+            "  adopt it: oxfuzz harness {} --target {target} --engine {} --adopt {id}",
+            project.display(),
+            engine.as_str()
+        );
+    }
 }
 
 /// Print non-blocking harness lint findings. A blocking finding never reaches
@@ -270,6 +321,9 @@ fn promotion_required_message() -> &'static str {
     "promotion required: review this harness before a full campaign; rerunning `oxfuzz harness` creates a new draft. To approve a retained source after separate review, use the Work Order import/qualify flow and `oxfuzz work-order promote --attempt <attempt UUID>`"
 }
 
+/// Smoke-qualify the active harness. `smoke_repairs` is the number of
+/// smoke-failure repairs the service may make (the `--repair` budget; 0 on a
+/// plain draft); each repaired revision is reviewed and approved again.
 async fn qualify_harness(
     container: &ServiceContainer,
     project: &std::path::Path,
@@ -278,6 +332,7 @@ async fn qualify_harness(
     lang: TargetLanguage,
     promote: bool,
     review_bypass: hf_service::HarnessReviewBypass,
+    smoke_repairs: usize,
 ) -> anyhow::Result<()> {
     if review_bypass == hf_service::HarnessReviewBypass::Requested {
         eprintln!(
@@ -287,9 +342,27 @@ async fn qualify_harness(
         );
     }
     println!("\n--- Smoke qualification ---");
-    let smoke = container
-        .harness_smoke_with_review_bypass(project, target, engine, lang, review_bypass)
+    let report_repair = |attempt: usize, diagnostics: &str| {
+        println!(
+            "smoke failed; repairing ({attempt}/{smoke_repairs}): {}",
+            diagnostics.lines().next().unwrap_or_default()
+        );
+    };
+    let qualified = container
+        .harness_smoke_with_repair(
+            project,
+            target,
+            engine,
+            lang,
+            review_bypass,
+            smoke_repairs,
+            &report_repair,
+        )
         .await?;
+    if qualified.smoke_repairs > 0 {
+        println!("smoke repairs used: {}", qualified.smoke_repairs);
+    }
+    let smoke = qualified.smoke;
     println!(
         "smoke: execs/sec={:.0} crashes={} passed={}",
         smoke.summary.execs_per_sec, smoke.summary.crashes, smoke.summary.passed
@@ -421,10 +494,9 @@ pub(crate) async fn cmd_run(
             anyhow::bail!("--target and --engine are required unless --replay is given");
         };
         let engine_kind = parse_engine(engine)?;
-        // `run` drives the already-built harness, which carries its own language, so
-        // the value is not threaded further. Still validate it (like triage/ci) so an
-        // invalid `--lang` is rejected up front rather than silently ignored.
-        parse_lang(lang)?;
+        // `run` drives the already-built harness, which carries its own
+        // language; the parsed value selects the target for seed generation.
+        let lang = parse_lang(lang)?;
         let sanitizer = sanitizer.map(parse_sanitizer).transpose()?;
         let requested_duration = duration.map(parse_duration).transpose()?;
         // An absent flag defers to the configured `fuzzing.default_resume`;
@@ -447,9 +519,15 @@ pub(crate) async fn cmd_run(
         .map_err(anyhow::Error::msg)?;
         let duration_secs = resolved.duration_secs;
         let container = std::sync::Arc::new(crate::approval::bootstrap().await);
-        // Ensure a seed corpus exists before running. A failure here is not fatal
-        // (the engine can still run on an empty corpus) but must not be silent.
-        if let Err(e) = container.generate_seeds(&project, target).await {
+        // Ensure a seed corpus exists before running: format-aware LLM seeds
+        // when a provider is configured, the service's heuristic seeds
+        // otherwise (the same seeding a campaign does). A failure here is not
+        // fatal (the engine can still run on an empty corpus) but must not be
+        // silent.
+        if let Err(e) = container
+            .generate_seeds_llm(&project, target, lang, hf_service::LLM_SEED_COUNT)
+            .await
+        {
             eprintln!("warning: could not generate seed corpus: {e}");
         }
 
@@ -560,7 +638,7 @@ pub(crate) async fn cmd_corpus(
         }
         "llmseed" => {
             let entries = container
-                .generate_seeds_llm(&project, target, lang, 12)
+                .generate_seeds_llm(&project, target, lang, hf_service::LLM_SEED_COUNT)
                 .await?;
             println!("Generated {} LLM seed(s).", entries.len());
         }

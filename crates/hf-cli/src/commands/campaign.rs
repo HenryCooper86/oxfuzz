@@ -388,9 +388,15 @@ pub(crate) async fn cmd_campaign(
         println!("  hangs (per-input timeouts across iterations): {hangs}");
     }
     if let Some(refine) = &outcome.refine {
-        // A coverage plateau proposed a targeted refined harness. It is only
-        // Compiled (never promoted/auto-run); the operator reviews and promotes.
-        println!("  coverage-plateau refine: {}", refine.note);
+        // A coverage plateau proposed a targeted refined harness beside the
+        // promoted one; the operator adopts, qualifies and promotes it.
+        crate::commands::harness::print_refine_proposal(
+            &refine.note,
+            refine.harness_id,
+            &project,
+            &outcome.target,
+            engine,
+        );
     }
     Ok(())
 }

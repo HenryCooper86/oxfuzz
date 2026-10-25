@@ -37,6 +37,11 @@ use crate::verification::VerdictLevel;
 /// or config field varies it.
 pub const FUZZ_PIPELINE_REPAIRS: usize = 2;
 
+/// LLM seeds requested when a campaign, a run, or `corpus llmseed` seeds a
+/// target's corpus. One count for every caller, so a run and a campaign over
+/// the same target start from comparable corpora.
+pub const LLM_SEED_COUNT: usize = 12;
+
 /// Operator request for the onboarding pipeline. Every field is explicit:
 /// `target: None` auto-picks the highest-fit candidate with a working harness
 /// path (`TargetLanguage::harnessable`) that the engine can drive, and
@@ -161,6 +166,9 @@ pub struct FuzzOutcome {
     pub harness_reused: bool,
     /// LLM repair passes the compile needed (always 0 for a reused harness).
     pub repairs_used: usize,
+    /// Smoke-failure repairs before the harness qualified (always 0 for a
+    /// reused or supplied harness).
+    pub smoke_repairs: usize,
     /// The campaign outcome (iterations, coverage, crashes, termination).
     pub campaign: CampaignOutcome,
 }
@@ -278,13 +286,13 @@ impl ServiceContainer {
                 .filter(|harness| !request.cmplog || harness.cmplog.is_some())
         };
 
-        let (harness, repairs_used, harness_reused) = if let Some(harness) = reused {
+        let (harness, repairs_used, smoke_repairs, harness_reused) = if let Some(harness) = reused {
             on_stage(FuzzStage::Harness {
                 target: target.clone(),
                 engine,
                 reused: true,
             });
-            (harness, 0, true)
+            (harness, 0, 0, true)
         } else {
             let (repairs_used, exact_harness_id) = if let Some(source) = &request.prepared_harness {
                 on_stage(FuzzStage::PreparedHarness {
@@ -335,25 +343,32 @@ impl ServiceContainer {
                 target: target.clone(),
                 engine,
             });
-            let smoke = match exact_harness_id {
-                Some(id) => {
-                    self.harness_smoke_exact(
-                        project,
-                        &target,
-                        engine,
-                        lang,
-                        id,
-                        request.review_bypass,
-                    )
+            // A supplied source is never repaired; a generated one is repaired
+            // from its smoke output within the pipeline's repair budget, and
+            // each repaired revision is reviewed and approved again.
+            let report_repair = |attempt: usize, diagnostics: &str| {
+                on_progress(FuzzProgress::LogLine(format!(
+                    "smoke repair {attempt}/{FUZZ_PIPELINE_REPAIRS} for '{target}': {}",
+                    diagnostics.lines().next().unwrap_or_default()
+                )));
+            };
+            let qualified = match exact_harness_id {
+                Some(id) => self
+                    .harness_smoke_exact(project, &target, engine, lang, id, request.review_bypass)
                     .await
-                }
+                    .map(|smoke| super::QualifiedSmoke {
+                        smoke,
+                        smoke_repairs: 0,
+                    }),
                 None => {
-                    self.harness_smoke_with_review_bypass(
+                    self.harness_smoke_with_repair(
                         project,
                         &target,
                         engine,
                         lang,
                         request.review_bypass,
+                        FUZZ_PIPELINE_REPAIRS,
+                        &report_repair,
                     )
                     .await
                 }
@@ -366,6 +381,8 @@ impl ServiceContainer {
                          the explicit --no-llm-review opt-in",
                 )
             })?;
+            let smoke_repairs = qualified.smoke_repairs;
+            let smoke = qualified.smoke;
             if smoke.summary.crashes > 0 {
                 return Err(ClassifiedError::Validation(format!(
                     "fuzz smoke stopped: the qualification run of '{target}' found {} \
@@ -408,7 +425,7 @@ impl ServiceContainer {
                 _ => self.harness_promote(project, &target, engine).await,
             }
             .map_err(|error| promote_failure(&target, &error))?;
-            (promoted, repairs_used, false)
+            (promoted, repairs_used, smoke_repairs, false)
         };
 
         // Stage 5: the bounded campaign over the promoted revision. The campaign
@@ -459,6 +476,7 @@ impl ServiceContainer {
             harness_id: harness.id,
             harness_reused,
             repairs_used,
+            smoke_repairs,
             campaign,
         })
     }

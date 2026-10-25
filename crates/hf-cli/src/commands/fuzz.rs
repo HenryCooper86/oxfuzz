@@ -69,18 +69,19 @@ fn render_stage(project: &Path, stage: &FuzzStage) -> String {
     }
 }
 
-fn render_outcome(outcome: &FuzzOutcome) {
+fn render_outcome(project: &Path, outcome: &FuzzOutcome) {
     if let Some(digest) = &outcome.prepared_harness_sha256 {
         println!("[fuzz] supplied source SHA-256: {digest}");
     }
     println!(
-        "[fuzz] done: target={} lang={} engine={} harness={} reused={} repairs={}",
+        "[fuzz] done: target={} lang={} engine={} harness={} reused={} repairs={} smoke_repairs={}",
         outcome.target,
         outcome.lang.as_str(),
         outcome.engine.as_str(),
         outcome.harness_id,
         outcome.harness_reused,
         outcome.repairs_used,
+        outcome.smoke_repairs,
     );
     println!(
         "[fuzz] campaign: iterations={} edges={} crashes={} termination={:?}",
@@ -93,9 +94,15 @@ fn render_outcome(outcome: &FuzzOutcome) {
         println!("  hangs (per-input timeouts across iterations): {hangs}");
     }
     if let Some(refine) = &outcome.campaign.refine {
-        // A coverage plateau proposed a targeted refined harness. It is only
-        // Compiled (never promoted/auto-run); the operator reviews and promotes.
-        println!("  coverage-plateau refine: {}", refine.note);
+        // A coverage plateau proposed a targeted refined harness beside the
+        // promoted one; the operator adopts, qualifies and promotes it.
+        crate::commands::harness::print_refine_proposal(
+            &refine.note,
+            refine.harness_id,
+            project,
+            &outcome.target,
+            outcome.engine,
+        );
     }
 }
 
@@ -194,7 +201,7 @@ pub(crate) async fn cmd_fuzz(args: crate::args::FuzzArgs) -> anyhow::Result<()> 
     if json {
         println!("{}", serde_json::to_string_pretty(&outcome)?);
     } else {
-        render_outcome(&outcome);
+        render_outcome(&project, &outcome);
     }
     Ok(())
 }
