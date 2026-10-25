@@ -9,7 +9,10 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ## Unreleased
 
-## 0.8.0 - 2026-10-25
+## 0.8.1 - 2026-10-25
+
+The v0.8.0 tag was never published: its Windows tests failed on the
+prompt-path separator fixed below.
 
 ### Added
 
@@ -49,6 +52,8 @@ Versions match the release commits that bump `Cargo.toml`.
   dedup hash as the stack.
 - The harness lint gate no longer requests a model repair after the repair
   budget is spent.
+- Target-definition and crash-site prompt sections name their file with `/`
+  on every host, including Windows.
 
 ## 0.7.2 - 2026-10-25
 
