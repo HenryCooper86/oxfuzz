@@ -161,7 +161,11 @@ export function HarnessView({
   const scopeKey = JSON.stringify([activeProject, project, selectedTarget, engine, lang, selectionBlocked]);
   const [requestScope, setRequestScope] = useState({ key: scopeKey, project, lang });
   const currentScope = useRef(requestScope);
-  currentScope.current = requestScope;
+  // Refs are synced in effects, never during render; reads happen only in
+  // async callbacks after commit, so effect timing preserves the semantics.
+  useEffect(() => {
+    currentScope.current = requestScope;
+  }, [requestScope]);
   const mounted = useRef(true);
   const draftGeneration = useRef(0);
   const canUseExisting = harness === null && harnessStatus === "idle";
@@ -215,17 +219,21 @@ export function HarnessView({
 
   const { snapshot: discovery, save: saveDiscovery } = useDiscoveryInventory(project, lang);
   const selectedTargetRef = useRef(selectedTarget);
-  selectedTargetRef.current = selectedTarget;
+  useEffect(() => {
+    selectedTargetRef.current = selectedTarget;
+  }, [selectedTarget]);
   // Retain admission across hydration retries; late replies cannot restore a removed project.
   const registrationRef = useRef<{ project: string; wasInRecents: boolean }>({
     project,
     wasInRecents: recentProjects.includes(project),
   });
-  if (registrationRef.current.project !== project) {
-    registrationRef.current = { project, wasInRecents: recentProjects.includes(project) };
-  } else if (recentProjects.includes(project)) {
-    registrationRef.current.wasInRecents = true;
-  }
+  useEffect(() => {
+    if (registrationRef.current.project !== project) {
+      registrationRef.current = { project, wasInRecents: recentProjects.includes(project) };
+    } else if (recentProjects.includes(project)) {
+      registrationRef.current.wasInRecents = true;
+    }
+  }, [project, recentProjects]);
 
   // Auto-run discover when project is set.
   useEffect(() => {
