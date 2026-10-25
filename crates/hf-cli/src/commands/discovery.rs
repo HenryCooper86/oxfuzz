@@ -1,5 +1,9 @@
+#[cfg(feature = "clang-analysis")]
+use hf_service::ClassifiedError;
 use hf_service::{ServiceContainer, TargetLanguage};
 use std::collections::HashSet;
+#[cfg(feature = "clang-analysis")]
+use std::future::Future;
 use std::path::PathBuf;
 
 use crate::args::AiOption;
@@ -1629,7 +1633,7 @@ mod clang_cli_tests {
         let error = wait_for_clang(
             &service,
             service.operation_id,
-            pin!(std::future::ready(Ok::<()>(()))),
+            pin!(std::future::ready(Ok::<(), std::io::Error>(()))),
             &mut immediate_delay,
             far_deadline(),
         )
