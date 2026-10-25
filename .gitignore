@@ -103,3 +103,6 @@ config/issue_tracker.toml
 /docs/reviews/
 /docs/superpowers/
 oxfuzz_VULNHUNT_RESULTS_*/
+
+### Vendored example library checkouts (examples/honggfuzz_upstream/fetch-libs.sh)
+examples/honggfuzz_upstream/third_party/

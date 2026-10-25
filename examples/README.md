@@ -89,10 +89,23 @@ a fuzzable kind. That layer is deterministic and toolchain-free, so it runs in
 CI. Reproducing the actual *crash* requires a real fuzzing engine and sanitizer
 toolchain and is exercised by the manual / engine-gated runs shown above.
 
+## Upstream honggfuzz examples
+
+`honggfuzz_upstream/` holds unmodified upstream honggfuzz code, under
+Apache-2.0 with its `LICENSE` beside it. It contains:
+
+- a file-path target, `badcode1.c`
+- the stateful `vulnserver_cov.c` protocol handlers
+- the human-written persistent harnesses for libxml2, libpng, libjpeg,
+  libmagic and OpenSSL, kept as baselines for comparing LLM-drafted harnesses
+
+See [`honggfuzz_upstream/README.md`](honggfuzz_upstream/README.md).
+
 ## Attribution
 
-These targets are original, clean-room implementations written for oxfuzz; they
-are not copied from upstream sources. They are modeled on the introductory
+The targets in the table above are original, clean-room implementations
+written for oxfuzz; they are not copied from upstream sources. The exception
+is `honggfuzz_upstream/`, which is vendored verbatim (see its README). They are modeled on the introductory
 examples published by the following projects, all under permissive licenses:
 
 - LLVM libFuzzer (part of LLVM, Apache-2.0 with LLVM exceptions).
