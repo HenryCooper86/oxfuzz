@@ -8,6 +8,12 @@
 
 pub mod agent;
 
+mod bug_report;
+pub use bug_report::{
+    render_bug_report_prompt, render_crash_site_section, BugReportEvidence,
+    BUG_REPORT_PROMPT_VERSION, MAX_BUG_REPORT_FRAMES, MAX_BUG_REPORT_HARNESS_CHARS,
+    MAX_BUG_REPORT_LOG_CHARS, MAX_CRASH_SITE_CHARS,
+};
 
 mod clang_compact;
 

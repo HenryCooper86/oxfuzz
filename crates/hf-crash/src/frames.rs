@@ -162,6 +162,34 @@ pub fn root_target_frame(frames: &[StackFrame]) -> Option<&StackFrame> {
         .find(|frame| frame_origin(frame) == FrameOrigin::Target)
 }
 
+/// Where in the code under test a crash faulted, as `(file, line)` in the
+/// form the report printed (a sandbox path such as `/work/src/a.c`, or a
+/// relative path).
+///
+/// Prefers the root target frame of the sanitizer log, which names the
+/// innermost project function; falls back to CASR's crashline
+/// (`file:line[:col]`). `None` when neither names a project line, including a
+/// fault that only touches harness and runtime frames.
+#[must_use]
+pub fn fault_location(
+    log: &str,
+    casr: Option<&hf_core::crash::CasrReport>,
+) -> Option<(String, u32)> {
+    let frames = parse_frames(log);
+    if let Some(frame) = root_target_frame(&frames) {
+        if let (Some(file), Some(line)) = (&frame.file, frame.line) {
+            if line > 0 {
+                return Some((file.clone(), line));
+            }
+        }
+    }
+    let crashline = casr?.crashline.trim();
+    let mut parts = crashline.split(':');
+    let file = parts.next().filter(|file| !file.is_empty())?;
+    let line = parts.next()?.parse::<u32>().ok().filter(|line| *line > 0)?;
+    Some((file.to_owned(), line))
+}
+
 /// Which layer a whole sanitizer report blames.
 ///
 /// Keys on the first frame that is not runtime. An `ASan` frame `#0` is the
@@ -267,5 +295,54 @@ pub(crate) mod tests {
         // dedup already handles unsymbolized frames through its own path.
         let frames = parse_frames("    #0 0x4f1a2b  (/work/fuzz_p+0x1a2b)\n");
         assert!(frames.is_empty(), "{frames:?}");
+    }
+
+    fn casr(crashline: &str) -> hf_core::crash::CasrReport {
+        hf_core::crash::CasrReport {
+            severity: hf_core::crash::CrashSeverity::NotExploitable,
+            severity_short: String::new(),
+            crashline: crashline.to_owned(),
+            stack: Vec::new(),
+            cluster: None,
+        }
+    }
+
+    #[test]
+    fn the_fault_location_is_the_root_target_frame_of_the_log() {
+        let log = "    #0 0x1 in parse_value /work/parser.c:7:9\n    #1 0x2 in LLVMFuzzerTestOneInput /work/harness.c:6:12\n";
+        assert_eq!(
+            fault_location(log, Some(&casr("/work/other.c:1:1"))),
+            Some(("/work/parser.c".to_owned(), 7)),
+            "a symbolized log frame is more specific than a crashline"
+        );
+    }
+
+    #[test]
+    fn without_a_target_frame_the_casr_crashline_locates_the_fault() {
+        assert_eq!(
+            fault_location("no frames", Some(&casr("/work/src/a.c:42:7"))),
+            Some(("/work/src/a.c".to_owned(), 42))
+        );
+        assert_eq!(
+            fault_location("", Some(&casr("src/a.c:42"))),
+            Some(("src/a.c".to_owned(), 42))
+        );
+    }
+
+    #[test]
+    fn an_unusable_crashline_locates_nothing() {
+        for crashline in ["", "a.c", "a.c:zero", "a.c:0"] {
+            assert_eq!(
+                fault_location("", Some(&casr(crashline))),
+                None,
+                "{crashline}"
+            );
+        }
+        assert_eq!(fault_location("", None), None);
+    }
+
+    #[test]
+    fn a_harness_only_log_does_not_locate_a_target_fault() {
+        assert_eq!(fault_location(HARNESS_FAULT, None), None);
     }
 }

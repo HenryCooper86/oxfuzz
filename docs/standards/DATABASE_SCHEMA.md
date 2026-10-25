@@ -1356,6 +1356,7 @@ bounded deterministic history, and both cleanup operations.
 | `0043_harness_behavior.sql` | retains AFL++ behavioral qualification evidence (fresh-input and persistent-sequence maps) |
 | `0044_filed_issues.sql` | creates the issue-filing dedup ledger (`filed_issues`) |
 | `0045_harness_target_sources.sql` | retains the exact target-definition section rendered into each harness draft prompt |
+| `0046_crash_report_drafts.sql` | retains each bug-report drafting prompt before dispatch and its response once |
 
 ## 7. Read failure contract
 
@@ -1576,3 +1577,30 @@ drafting precedes compilation and may fail. Project deletion and
 | `created_at` | `TEXT NOT NULL` | UTC capture time, RFC 3339 with nanoseconds |
 
 Index: `idx_harness_target_sources_project(project_root, created_at DESC, id DESC)`.
+
+## Bug-report drafts (0046)
+
+### `crash_report_drafts`
+
+Migration 0046 retains each bug-report drafting request before provider
+dispatch and the model's response once it arrives. The prompt carries the
+crash evidence, the harness and target source excerpts, and retrieved project
+context, so the exact text is kept rather than rebuilt. A row whose prompt
+cannot be written is never dispatched; without a store no report is drafted.
+`crash_id` references `crashes(id)` with cascading deletion; crash upserts
+update in place, so only deleting the crash removes its drafts. The only
+permitted update sets `response` and `completed_at` on a pending row, once.
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | Immutable draft UUID |
+| `crash_id` | `TEXT NOT NULL` | Crash foreign key; cascading deletion |
+| `run_id` | `TEXT NOT NULL` | Run that found the crash |
+| `project_root` | `TEXT NOT NULL` | Canonical project root |
+| `prompt_version` | `INTEGER NOT NULL` | `hf_prompt::BUG_REPORT_PROMPT_VERSION` |
+| `prompt` | `TEXT NOT NULL` | Exact provider prompt, at most 64 KiB |
+| `response` | `TEXT` | Provider response, at most 64 KiB; NULL while pending |
+| `created_at` | `TEXT NOT NULL` | UTC capture time, RFC 3339 with nanoseconds |
+| `completed_at` | `TEXT` | Response time; NULL exactly when `response` is NULL |
+
+Index: `idx_crash_report_drafts_crash(crash_id, created_at DESC, id DESC)`.

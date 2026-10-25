@@ -1,13 +1,8 @@
-//! Tests for dedup, minimize args, and LLM bug report drafting.
+//! Tests for dedup, minimize args, and bug-report response parsing.
 
 use hf_core::crash::{Crash, CrashKind};
 use hf_core::engine::EngineKind;
-use hf_core::provider::{
-    ChatRequest, ChatResponse, ChatStreamResponse, FinishReason, LlmProvider, ProviderError,
-    ProviderMetadata,
-};
-use hf_core::types::TokenUsage;
-use hf_crash::{build_minimize_args, dedup, draft_report_with_context};
+use hf_crash::{bug_report_from_response, build_minimize_args, dedup};
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -183,87 +178,47 @@ fn minimize_args_default_to_the_afl_tmin_pinned_timeout() {
     );
 }
 
-struct MockLlm {
-    response: String,
-}
-
-#[async_trait::async_trait]
-impl LlmProvider for MockLlm {
-    async fn chat_completion(&self, _request: &ChatRequest) -> Result<ChatResponse, ProviderError> {
-        Ok(ChatResponse {
-            id: "mock".to_owned(),
-            model: "mock".to_owned(),
-            content: Some(self.response.clone()),
-            reasoning_content: None,
-            tool_calls: Vec::new(),
-            usage: TokenUsage::default(),
-            finish_reason: FinishReason::Stop,
-            raw_request: None,
-            raw_response: None,
-            provider_id: None,
-            generated_images: Vec::new(),
-        })
-    }
-    async fn chat_completion_stream(
-        &self,
-        _request: &ChatRequest,
-    ) -> Result<ChatStreamResponse, ProviderError> {
-        Err(ProviderError::Other {
-            message: "no stream".to_owned(),
-        })
-    }
-    fn metadata(&self) -> &ProviderMetadata {
-        mock_provider_metadata()
-    }
-}
-
-fn mock_provider_metadata() -> &'static ProviderMetadata {
-    use hf_core::provider::{ProviderCapability, ProviderType, ToolCallingMode};
-    static M: std::sync::OnceLock<ProviderMetadata> = std::sync::OnceLock::new();
-    M.get_or_init(|| ProviderMetadata {
-        id: hf_core::types::ProviderId::from_string("mock"),
-        provider_type: ProviderType::Custom,
-        model: "mock".to_owned(),
-        tags: Vec::new(),
-        capabilities: vec![ProviderCapability::Text],
-        max_concurrency: 1,
-        context_window: 128_000,
-        cost_per_1k_input: 0.0,
-        cost_per_1k_output: 0.0,
-        tool_calling_mode: ToolCallingMode::Native,
-    })
-}
-
-#[tokio::test]
-async fn draft_report_parses_llm_json() {
-    let llm = MockLlm {
-        response: r##"{
-            "title": "heap-buffer-overflow in parse_string",
-            "summary": "parse_string reads past buffer end on truncated input.",
-            "repro_steps": "clang -fsanitize=fuzzer,address fuzz.c && ./fuzz_bin crash-1",
-            "stack": "#0 parse_string #1 parse_value",
-            "severity_guess": "high"
-        }"##
-        .to_owned(),
-    };
-    let crash = crash("sig", CrashKind::Asan);
-    let report = draft_report_with_context(&crash, "==ERROR: asan==", None, None, Box::new(llm))
-        .await
-        .expect("draft should succeed");
+#[test]
+fn a_model_response_becomes_a_bug_report() {
+    let response = r##"{
+        "title": "heap-buffer-overflow in parse_string",
+        "summary": "parse_string reads past buffer end on truncated input.",
+        "repro_steps": "clang -fsanitize=fuzzer,address fuzz.c && ./fuzz_bin crash-1",
+        "stack": "#0 parse_string #1 parse_value",
+        "severity_guess": "high",
+        "root_cause": "the length check runs after the read",
+        "suggested_fix": "--- a/parse.c\n+++ b/parse.c\n"
+    }"##;
+    let report = bug_report_from_response(&crash("sig", CrashKind::Asan), response);
     assert_eq!(report.title, "heap-buffer-overflow in parse_string");
     assert_eq!(report.severity_guess, "high");
     assert!(report.repro_steps.contains("clang"));
+    assert_eq!(
+        report.root_cause.as_deref(),
+        Some("the length check runs after the read")
+    );
 }
 
-#[tokio::test]
-async fn draft_report_falls_back_on_invalid_json() {
-    let llm = MockLlm {
-        response: "not json".to_owned(),
-    };
-    let crash = crash("sig", CrashKind::Asan);
-    let report = draft_report_with_context(&crash, "asan log", None, None, Box::new(llm))
-        .await
-        .expect("should not error on bad json");
+#[test]
+fn an_unparseable_response_falls_back_to_the_crash_evidence() {
+    let mut framed = crash("sig", CrashKind::Asan);
+    framed.casr = Some(hf_core::crash::CasrReport {
+        severity: hf_core::crash::CrashSeverity::NotExploitable,
+        severity_short: "abort".to_owned(),
+        crashline: "src/a.c:3".to_owned(),
+        stack: vec!["#0 abort".to_owned(), "#1 match_magic src/a.c:3".to_owned()],
+        cluster: None,
+    });
+    let report = bug_report_from_response(&framed, "not json");
     assert!(report.title.contains("Asan"));
     assert_eq!(report.severity_guess, "uncertain");
+    assert_eq!(
+        report.stack, "#0 abort\n#1 match_magic src/a.c:3",
+        "the fallback stack is the normalized frames, not the dedup hash"
+    );
+    assert_eq!(
+        bug_report_from_response(&crash("sig", CrashKind::Asan), "not json").stack,
+        "",
+        "without frames the fallback leaves the stack empty"
+    );
 }

@@ -120,6 +120,46 @@ pub(super) fn read_target_definition(
     })
 }
 
+/// Lines shown on each side of a faulting line.
+const CRASH_SITE_RADIUS: u32 = 20;
+
+/// The sandbox mount point of the staged project: a report's `/work/src/a.c`
+/// is the project's `src/a.c`.
+const SANDBOX_PROJECT_PREFIX: &str = "/work/";
+
+/// The source lines around a faulting line.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct CrashSite {
+    /// Source file relative to the canonical project root.
+    pub(super) relative_file: String,
+    /// Line number of the excerpt's first line.
+    pub(super) first_line: u32,
+    /// The faulting line.
+    pub(super) crash_line: u32,
+    /// Lines `first_line` through `crash_line + CRASH_SITE_RADIUS`.
+    pub(super) excerpt: String,
+}
+
+/// Read the lines around `line` of `file`, a path as a crash report printed
+/// it (sandbox `/work/...`, project-relative, or absolute), from inside
+/// `canonical_root`. `None` when the file is outside the project, unreadable,
+/// or shorter than `line`.
+pub(super) fn read_crash_site(canonical_root: &Path, file: &str, line: u32) -> Option<CrashSite> {
+    let path = file.strip_prefix(SANDBOX_PROJECT_PREFIX).unwrap_or(file);
+    let project_file = read_project_file(canonical_root, Path::new(path))?;
+    if usize::try_from(line).ok()? > project_file.text.lines().count() {
+        return None;
+    }
+    let first = line.saturating_sub(CRASH_SITE_RADIUS).max(1);
+    let last = line.saturating_add(CRASH_SITE_RADIUS);
+    Some(CrashSite {
+        excerpt: line_window(&project_file.text, first, last)?,
+        relative_file: project_file.relative_file,
+        first_line: first,
+        crash_line: line,
+    })
+}
+
 impl ServiceContainer {
     /// The rendered target-definition section for one draft, retained before
     /// it is returned.
@@ -167,7 +207,7 @@ impl ServiceContainer {
 
 #[cfg(test)]
 mod tests {
-    use super::read_target_definition;
+    use super::{read_crash_site, read_target_definition};
     use hf_core::target::{
         InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
     };
@@ -288,5 +328,41 @@ mod tests {
         assert!(
             read_target_definition(&root, &candidate(&root, "src/parse.c", 40, Some(41))).is_none()
         );
+    }
+
+    #[test]
+    fn a_sandbox_crash_path_maps_into_the_project() {
+        let source = (1..=100)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (_dir, root) = project(&source);
+        let site = read_crash_site(&root, "/work/src/parse.c", 50).unwrap();
+        assert_eq!(site.relative_file, "src/parse.c");
+        assert_eq!(site.first_line, 30);
+        assert_eq!(site.crash_line, 50);
+        assert!(site.excerpt.starts_with("line 30\n"));
+        assert!(site.excerpt.ends_with("line 70"));
+    }
+
+    #[test]
+    fn a_crash_near_the_file_start_clamps_the_window() {
+        let (_dir, root) = project("a\nb\nc\n");
+        let site = read_crash_site(&root, "src/parse.c", 2).unwrap();
+        assert_eq!(site.first_line, 1);
+        assert_eq!(site.excerpt, "a\nb\nc");
+    }
+
+    #[test]
+    fn a_crash_outside_the_project_is_not_read() {
+        let (_dir, root) = project("a\n");
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("libc.c"), "x\n").unwrap();
+        let path = std::fs::canonicalize(outside.path())
+            .unwrap()
+            .join("libc.c");
+        assert!(read_crash_site(&root, &path.to_string_lossy(), 1).is_none());
+        assert!(read_crash_site(&root, "/work/../../etc/passwd", 1).is_none());
+        assert!(read_crash_site(&root, "src/parse.c", 99).is_none());
     }
 }

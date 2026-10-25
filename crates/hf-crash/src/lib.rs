@@ -18,11 +18,12 @@ pub use classify::{classify, looks_like_crash};
 pub use dedup::dedup;
 pub use frames::is_harness_function;
 pub use frames::{
-    crash_origin, frame_origin, parse_frames, root_target_frame, FrameOrigin, StackFrame,
+    crash_origin, fault_location, frame_origin, parse_frames, root_target_frame, FrameOrigin,
+    StackFrame,
 };
 pub use ingest::{
     ingest, ingest_for_engine, is_timeout_artifact, CrashIngestResult, MAX_AGGREGATE_REPORT_BYTES,
     MAX_CRASH_ARTIFACTS, MAX_SANITIZER_REPORT_BYTES,
 };
 pub use minimize::{build_minimize_args, build_minimize_args_with_timeout};
-pub use report::{draft_report_with_context, MAX_SOURCE_CONTEXT_CHARS};
+pub use report::bug_report_from_response;

@@ -53,6 +53,21 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
 }
 ```";
 
+/// Fixed LLM reply for the bug-report draft.
+const REPORT_REPLY: &str = r#"{"title":"heap-buffer-overflow in parse_value","summary":"reads past the input","repro_steps":"replay crash-e2e","stack":"parse_value","severity_guess":"high","root_cause":"the magic check reads data[3] before checking len","suggested_fix":""}"#;
+
+/// Answers the bug-report prompt with [`REPORT_REPLY`] and every other prompt
+/// with [`HARNESS_REPLY`]; reviews are approved by the pool itself.
+fn recording_pool() -> Arc<hf_test_utils::RecordingHarnessPool> {
+    hf_test_utils::RecordingHarnessPool::new(|_, prompt| {
+        if prompt.contains("You are the triage-agent") {
+            REPORT_REPLY.to_owned()
+        } else {
+            HARNESS_REPLY.to_owned()
+        }
+    })
+}
+
 /// What the stubbed harness prints when the crashing input is replayed: an
 /// `ASan` heap-buffer-overflow with a symbolized stack into `parse_value`.
 const ASAN_TRACE: &str = r"==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602000000011
@@ -285,9 +300,10 @@ async fn discover_harness_run_triage_end_to_end() {
             .await
             .unwrap(),
     );
+    let pool = recording_pool();
     let container = ServiceContainer::new(
         Arc::new(PipelineRuntime::new(Minimize::NeverConverges)),
-        Some(Arc::new(HarnessDraftPool)),
+        Some(pool.clone()),
     )
     .with_store(Arc::clone(&store));
 
@@ -464,6 +480,42 @@ async fn discover_harness_run_triage_end_to_end() {
     let persisted = store.list_crashes_by_run(summary.run_id).await.unwrap();
     assert_eq!(persisted.len(), 1);
     assert_eq!(persisted[0].id, crash.id);
+
+    // The bug report was drafted from the code under test: the target
+    // definition and the faulting line, with the harness labelled as the
+    // driver, never as target source.
+    let report_prompts = pool.prompts_containing("You are the triage-agent");
+    assert_eq!(report_prompts.len(), 1, "one unique crash, one draft");
+    let prompt = &report_prompts[0];
+    assert!(
+        prompt.contains("Target definition (parser.c, line 6"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("int parse_value(const uint8_t *data, size_t len)"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("Crash site (parser.c"), "{prompt}");
+    assert!(prompt.contains("    7 >|     if (len >= 4"), "{prompt}");
+    assert!(prompt.contains("Fuzz harness"), "{prompt}");
+    assert!(!prompt.contains("Target source"), "{prompt}");
+    assert!(!prompt.contains(&crash.stack_signature), "{prompt}");
+    assert_eq!(
+        crash
+            .bug_report
+            .as_ref()
+            .map(|report| report.title.as_str()),
+        Some("heap-buffer-overflow in parse_value")
+    );
+    // Engineering Protocol 2.13: the exact prompt and response are retained.
+    let drafts = store.crash_report_drafts_for_crash(crash.id).await.unwrap();
+    assert_eq!(drafts.len(), 1);
+    assert_eq!(&drafts[0].prompt, prompt);
+    assert_eq!(drafts[0].response.as_deref(), Some(REPORT_REPLY));
+    assert_eq!(
+        drafts[0].prompt_version,
+        hf_prompt::BUG_REPORT_PROMPT_VERSION
+    );
 
     #[cfg(feature = "triage-disposition")]
     {

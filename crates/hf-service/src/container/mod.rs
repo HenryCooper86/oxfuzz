@@ -10,6 +10,7 @@ use crate::advisory_lock::unlock_advisory_file;
 
 #[cfg(feature = "ai-target-ranking")]
 mod ai_target_ranking;
+mod bug_report;
 pub(crate) mod build_context;
 mod campaign_allocation;
 #[cfg(feature = "campaign-health")]

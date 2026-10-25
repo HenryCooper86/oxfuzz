@@ -48,7 +48,16 @@ pub struct Crash {
 3. **Dedup** -- group by `stack_signature`; keep one representative per group.
 4. **Minimize** -- call `engine.minimize` (afl-tmin / libFuzzer `-minimize_crash`).
 5. **Draft report** -- LLM produces a bug report: title, summary, repro steps,
-   stack, severity guess. Every campaign report also carries a deterministic
+   stack, severity guess, root cause, and suggested fix. The prompt
+   (`hf_prompt::render_bug_report_prompt`, version 2) shows the code under
+   test: the target's definition and the source lines around the faulting
+   line (the log's innermost project frame, else CASR's crashline; `/work/`
+   maps to the project root, read with containment checks). It carries the
+   fault origin, CASR crash class, crashline and normalized frames, and the
+   log fenced and bounded as untrusted output. The run's harness is labelled
+   as the driver, not the code under test; the dedup hash is not sent. The
+   prompt is retained in `crash_report_drafts` before dispatch and the
+   response after, so a report is reconstructable from durable state. Every campaign report also carries a deterministic
    `CASR Vulnerability Verdicts` section. It records CASR's exploitability
    classification for every target finding, or states that CASR evidence is
    unavailable; it does not treat that classification as independent proof

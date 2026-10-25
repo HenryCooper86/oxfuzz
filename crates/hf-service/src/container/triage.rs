@@ -151,38 +151,34 @@ impl ServiceContainer {
         }
 
         // Draft an LLM bug report for each unique crash when a provider is
-        // configured, using the captured sanitizer trace (capped, see above).
-        if let Some(pool) = self.provider_pool() {
+        // configured. Each prompt is retained before dispatch, so without a
+        // store no report is drafted (Engineering Protocol 2.13).
+        if let (Some(pool), Some(store)) = (self.provider_pool(), self.store.as_deref()) {
+            let root = canonical_project_root(project)?;
+            let targets = store
+                .list_all_targets()
+                .await
+                .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
             let unique = deduped.len();
             for crash in deduped.iter_mut().take(MAX_BUG_REPORT_DRAFTS) {
-                let bridge = LlmProviderBridge::new(Arc::clone(&pool))
-                    .with_diagnostics(Arc::clone(&self.diagnostics), "triage_report");
                 let log = logs
                     .get(&crash.input_path)
                     .filter(|l| !l.trim().is_empty())
                     .cloned()
                     .unwrap_or_else(|| crash.summary.clone());
-                // Augment the report prompt with related project context when
-                // this project has been indexed; empty on any failure, which
-                // renders the un-augmented prompt.
-                let related =
-                    crate::knowledge::triage_related_context(project, target, &crash.summary);
-                let related_section = hf_prompt::render_related_context_section(&related);
-                match hf_crash::draft_report_with_context(
-                    crash,
-                    &log,
-                    source_context.as_deref(),
-                    if related_section.is_empty() {
-                        None
-                    } else {
-                        Some(related_section.as_str())
-                    },
-                    Box::new(bridge),
-                )
-                .await
+                let evidence = super::bug_report::BugReportInputs {
+                    root: &root,
+                    project,
+                    target,
+                    log: &log,
+                    harness_source: source_context.as_deref(),
+                    candidate: targets.iter().find(|t| t.id == crash.target_id),
+                };
+                if let Some(report) = self
+                    .draft_bug_report(store, Arc::clone(&pool), crash, &evidence)
+                    .await
                 {
-                    Ok(report) => crash.bug_report = Some(report),
-                    Err(e) => tracing::warn!("bug report drafting failed for {}: {e}", crash.id),
+                    crash.bug_report = Some(report);
                 }
             }
             if unique > MAX_BUG_REPORT_DRAFTS {
