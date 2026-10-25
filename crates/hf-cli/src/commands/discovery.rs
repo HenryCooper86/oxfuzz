@@ -1599,7 +1599,9 @@ mod clang_cli_tests {
         // An operation that never reaches a terminal state must end the wait
         // with an error naming it, instead of hanging the CLI forever.
         let service = FakeClangService::new(vec![ClangOperationState::Analyzing]);
-        let passed_deadline = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        let passed_deadline = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(1))
+            .unwrap_or(std::time::Instant::now());
         let error = wait_for_clang(
             &service,
             service.operation_id,

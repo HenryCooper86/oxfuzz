@@ -12,7 +12,6 @@ use hf_core::target::{
     InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
 };
 use hf_core::types::TokenUsage;
-#[cfg(unix)]
 use hf_harness::smoke_fuzz_in_paths_with_config_and_sandbox_image;
 use hf_harness::{compile_with_options, draft_analyzed, HarnessDraftContext};
 
