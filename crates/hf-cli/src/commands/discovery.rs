@@ -466,7 +466,7 @@ where
             let delay_future = delay();
             tokio::pin!(delay_future);
             tokio::select! {
-                () = &mut delay_future => {}
+                biased;
                 signal_result = signal.as_mut() => {
                     signal_result?;
                     output.stderr_line("Semgrep enrichment: cancellation requested".to_owned());
@@ -1369,7 +1369,11 @@ where
         let status = if cancellation_requested {
             service.clang_status(operation_id).await?
         } else {
+            // Biased toward the signal: a Ctrl-C that is already pending must
+            // request the cancel before another status read can observe a
+            // terminal state and return without it.
             tokio::select! {
+                biased;
                 signal_result = signal.as_mut() => {
                     signal_result?;
                     eprintln!("Clang analysis: cancellation requested");
@@ -1407,7 +1411,7 @@ where
             let delay_future = delay();
             tokio::pin!(delay_future);
             tokio::select! {
-                () = &mut delay_future => {}
+                biased;
                 signal_result = signal.as_mut() => {
                     signal_result?;
                     eprintln!("Clang analysis: cancellation requested");
@@ -1416,6 +1420,7 @@ where
                     let _ = service.cancel_clang(operation_id).await?;
                     cancellation_requested = true;
                 }
+                () = &mut delay_future => {}
             }
         }
     }
