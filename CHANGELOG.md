@@ -9,6 +9,49 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ## Unreleased
 
+## 0.8.0 - 2026-10-25
+
+### Added
+
+- Harness drafts show the model the target's own definition, read from inside
+  the project, bounded, and retained before dispatch (migration 0045,
+  `harness_target_sources`). Every draft path, including a plain
+  `oxfuzz harness`, also carries the project's promoted harnesses.
+- Smoke-failure repair: a smoke run in which the fuzzer never reached the
+  harness, or the harness hung, is fed back to the model and the rewrite is
+  compiled and qualified again, with a new review and human approval. Used by
+  `oxfuzz fuzz` and `oxfuzz harness --repair N`; crashes are never repaired.
+- `oxfuzz harness --adopt <harness-id>` recompiles a stored revision, such as
+  a campaign's coverage-plateau refine proposal, as the active revision for
+  normal qualification and promotion.
+- `examples/honggfuzz_upstream/`: unmodified upstream honggfuzz examples
+  (Apache-2.0) and reference harnesses, with `fetch-libs.sh` for the pinned
+  library sources.
+
+### Changed
+
+- Coverage-plateau refine proposals compile in a separate proposal workspace;
+  the promoted revision stays active, so the next campaign is no longer
+  blocked by an unqualified revision.
+- `oxfuzz run` seeds with LLM seeds when a provider is configured, with the
+  heuristic seeds as fallback.
+- Bug reports are drafted from the code under test: the target definition and
+  the lines around the faulting line, CASR frames and crashline, and the
+  harness labelled as the driver. Each prompt and response is retained
+  (migration 0046, `crash_report_drafts`).
+
+### Fixed
+
+- honggfuzz harness prompts no longer ask for `HF_ITER`; C/C++ prompts state
+  the engine rules (no harness `main`, return 0, per-input state reset for
+  honggfuzz's persistent process).
+- The bug-report prompt labelled the harness as target source and sent the
+  dedup hash as the stack.
+- The harness lint gate no longer requests a model repair after the repair
+  budget is spent.
+
+## 0.7.2 - 2026-10-25
+
 ### Fixed
 
 - CLI `harness --repair/--refine` rejects an explicit `--ai off/require`
