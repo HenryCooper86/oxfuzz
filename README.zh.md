@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust 1.94](https://img.shields.io/badge/Rust-1.94-orange.svg)](rust-toolchain.toml)
 
-> 面向开源模糊测试引擎的统一 GUI：集中管理目标、测试桩、测试任务、覆盖率、崩溃和历史。AFL++、honggfuzz、libFuzzer 和 syzkaller 通过共用的服务工作流、人工审批与沙箱执行。
+> AI 辅助的模糊测试工作台：发现测试目标，借助大语言模型起草并修复测试桩，在沙箱中驱动 AFL++、honggfuzz、libFuzzer 和 syzkaller，并对崩溃进行分诊——任何内容运行前都需人工审批。提供桌面 GUI、命令行和 REST API。
 
 **目标发现** &middot; **测试桩生成** &middot; **引擎集成** &middot; **崩溃三查** &middot; **语料库与覆盖率闭环** &middot; **用户可扩展技能**
 

@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust 1.94](https://img.shields.io/badge/Rust-1.94-orange.svg)](rust-toolchain.toml)
 
-> A unified GUI for open-source fuzzing engines: manage targets, harnesses, campaigns, coverage, crashes, and history in one place. AFL++, honggfuzz, libFuzzer, and syzkaller run through shared service workflows, human approval, and sandboxed execution.
+> AI-assisted fuzzing workbench: discovers targets, drafts and repairs harnesses with an LLM, drives AFL++, honggfuzz, libFuzzer and syzkaller in a sandbox, and triages crashes -- with human approval before anything runs. Desktop GUI, CLI, and REST API.
 
 **Target Discovery** &middot; **Harness Generation** &middot; **Engine Integration** &middot; **Crash Triage** &middot; **Corpus & Coverage Loop** &middot; **User-Extensible Skills**
 

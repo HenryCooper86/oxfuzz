@@ -2,7 +2,7 @@
   "name": "hf-gui",
   "private": true,
   "version": "0.7.2",
-  "description": "Desktop and web frontend for oxfuzz, the Rust-first AI fuzzing agent.",
+  "description": "Desktop and web frontend for oxfuzz, the AI-assisted fuzzing workbench.",
   "license": "MIT",
   "repository": {
     "type": "git",
