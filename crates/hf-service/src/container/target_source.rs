@@ -73,11 +73,11 @@ fn read_project_file(canonical_root: &Path, path: &Path) -> Option<ProjectFile> 
         return None;
     }
     Some(ProjectFile {
-        relative_file: resolved
-            .strip_prefix(canonical_root)
-            .ok()?
-            .to_string_lossy()
-            .into_owned(),
+        // `/`-separated on every host: the path reaches prompts and durable
+        // records, which must name the same file on any machine.
+        relative_file: hf_core::runtime::posix_relative(
+            resolved.strip_prefix(canonical_root).ok()?,
+        ),
         sha256: format!("{:x}", Sha256::digest(&bytes)),
         text: String::from_utf8_lossy(&bytes).into_owned(),
     })
