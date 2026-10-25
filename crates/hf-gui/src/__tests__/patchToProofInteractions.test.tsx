@@ -72,7 +72,9 @@ it("reviews exact HTTP operation, separately approves and starts, polls retained
   expect(host.querySelector(`[title="${digest}"]`)).toBeTruthy();
   expect(starts()).toHaveLength(0);
   await act(async () => button("Approve this exact scope").click());
-  expect(requests.find(item => item.path.endsWith("/approve"))).toEqual({ path: `/remediation/operations/${operation}/approve`, method: "POST", body: { operator: "desktop-operator" } });
+  // The approval body is empty: the operator attribution is authored by the
+  // server per candidate identity, never sent by the client.
+  expect(requests.find(item => item.path.endsWith("/approve"))).toEqual({ path: `/remediation/operations/${operation}/approve`, method: "POST", body: {} });
   expect(starts()).toHaveLength(0);
   expect(button("Run sandbox verification").disabled).toBe(true);
   await act(async () => button("Run sandbox verification").click());
