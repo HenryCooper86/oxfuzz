@@ -719,7 +719,7 @@ impl LlmProvider for AnthropicProvider {
                                     state.current_tool_args.push_str(&partial_json);
                                     continue;
                                 }
-                                AnthropicDelta::Signature { .. } => {
+                                AnthropicDelta::Signature { .. } | AnthropicDelta::Unknown => {
                                     continue;
                                 }
                             },
@@ -932,20 +932,22 @@ struct AnthropicStreamUsage {
     cache_creation_input_tokens: Option<u32>,
 }
 
+#[derive(Deserialize)]
+#[serde(tag = "type")]
 enum AnthropicDelta {
-    Text {
-        text: String,
-    },
-    Thinking {
-        thinking: String,
-    },
+    #[serde(rename = "text_delta")]
+    Text { text: String },
+    #[serde(rename = "thinking_delta")]
+    Thinking { thinking: String },
+    #[serde(rename = "signature_delta")]
     Signature {
         #[allow(dead_code)]
         signature: String,
     },
-    InputJson {
-        partial_json: String,
-    },
+    #[serde(rename = "input_json_delta")]
+    InputJson { partial_json: String },
+    #[serde(other)]
+    Unknown,
 }
 
 /// Extract one Anthropic SSE event from the buffer.
@@ -998,55 +1000,16 @@ fn extract_anthropic_sse_event(buffer: &mut String) -> Option<AnthropicSseEvent>
             })
         }
         "content_block_delta" => {
-            let delta = serde_json::from_str::<serde_json::Value>(&data).ok()?;
-            let delta_obj = delta.get("delta")?;
-            let delta_type = delta_obj.get("type")?.as_str()?;
-
-            match delta_type {
-                "text_delta" => {
-                    let text = delta_obj
-                        .get("text")
-                        .and_then(|t| t.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    Some(AnthropicSseEvent::ContentBlockDelta {
-                        delta: AnthropicDelta::Text { text },
-                    })
-                }
-                "thinking_delta" => {
-                    let thinking = delta_obj
-                        .get("thinking")
-                        .and_then(|t| t.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    Some(AnthropicSseEvent::ContentBlockDelta {
-                        delta: AnthropicDelta::Thinking { thinking },
-                    })
-                }
-                "signature_delta" => {
-                    let signature = delta_obj
-                        .get("signature")
-                        .and_then(|t| t.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    Some(AnthropicSseEvent::ContentBlockDelta {
-                        delta: AnthropicDelta::Signature { signature },
-                    })
-                }
-                "input_json_delta" => {
-                    let partial = delta_obj
-                        .get("partial_json")
-                        .and_then(|t| t.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    Some(AnthropicSseEvent::ContentBlockDelta {
-                        delta: AnthropicDelta::InputJson {
-                            partial_json: partial,
-                        },
-                    })
-                }
-                _ => Some(AnthropicSseEvent::Unknown),
+            #[derive(Deserialize)]
+            struct DeltaEvent {
+                delta: AnthropicDelta,
             }
+            Some(match serde_json::from_str::<DeltaEvent>(&data) {
+                Ok(event) => AnthropicSseEvent::ContentBlockDelta { delta: event.delta },
+                Err(_) => AnthropicSseEvent::Error {
+                    message: "malformed Anthropic content_block_delta event".to_owned(),
+                },
+            })
         }
         "content_block_stop" => Some(AnthropicSseEvent::ContentBlockStop),
         "message_delta" => {

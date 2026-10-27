@@ -75,6 +75,11 @@ Without one, a repeated call ID selects the existing call, an anonymous argument
 fragment continues the latest call, and a new identity starts a separate call.
 Fragments for parallel calls with the same tool name remain separate by call ID.
 
+Anthropic content deltas require valid JSON and the string field declared by
+their delta type. Malformed required events fail the stream rather than silently
+discarding model text, reasoning, signatures, or tool arguments. Unknown delta
+types remain ignorable for protocol extension.
+
 A limit violation drops receive buffers and the HTTP stream, emits one typed
 error naming only the budget and limit, and then ends. It cannot flush pending
 tool calls or turn into clean completion. Previously emitted deltas are

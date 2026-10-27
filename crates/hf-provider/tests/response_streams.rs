@@ -37,6 +37,45 @@ fn text_frame(backend: &str) -> &'static str {
     }
 }
 
+#[tokio::test]
+async fn malformed_anthropic_deltas_fail_without_flushing_later_frames() {
+    for data in [
+        "not JSON",
+        "{}",
+        r#"{"delta":{}}"#,
+        r#"{"delta":{"type":"text_delta","text":42}}"#,
+        r#"{"delta":{"type":"thinking_delta"}}"#,
+        r#"{"delta":{"type":"signature_delta"}}"#,
+        r#"{"delta":{"type":"input_json_delta","partial_json":null}}"#,
+    ] {
+        let body = format!(
+            "event: content_block_delta\ndata: {data}\n\n{}event: message_stop\ndata: {{}}\n\n",
+            text_frame("anthropic")
+        );
+        let fixture = server(200, vec![body.as_bytes().to_vec()]).await;
+        let pool = ProviderPoolImpl::from_config(&config(
+            &fixture.url,
+            "anthropic",
+            body.len(),
+            body.len(),
+            body.len(),
+        ))
+        .unwrap();
+        let mut stream = pool
+            .chat_completion_stream(&request(), &RouteRequest::default())
+            .await
+            .unwrap()
+            .stream;
+        let first = stream.next().await;
+        assert!(matches!(first, Some(Err(_))), "{data}: {first:?}");
+        assert!(
+            stream.next().await.is_none(),
+            "no later text after malformed model data"
+        );
+        assert_eq!(pool.provider_statuses().await[0].total_errors, 1);
+    }
+}
+
 #[test]
 fn stream_config_accepts_finite_budgets_and_rejects_invalid_fields() {
     let _ = config("http://127.0.0.1:1", "openai", 1, 1, 1);
