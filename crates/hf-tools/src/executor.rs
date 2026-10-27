@@ -36,22 +36,14 @@ impl ToolExecutor {
         input: ToolInput,
     ) -> Result<ToolOutput, ToolRegistryError> {
         // 1. Look up the tool.
-        let tool = registry
-            .get_tool(name)
+        let (tool, definition) = registry
+            .executable_registration(name)
             .await
             .ok_or_else(|| ToolRegistryError::NotFound {
                 name: name.as_str().to_string(),
             })?;
 
         // 2. Validate parameters against the tool's JSON Schema.
-        let definition =
-            registry
-                .get_definition(name)
-                .await
-                .ok_or_else(|| ToolRegistryError::NotFound {
-                    name: name.as_str().to_string(),
-                })?;
-
         self.validator
             .validate(&definition.parameters, &input.arguments)?;
 

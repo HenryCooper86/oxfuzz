@@ -91,6 +91,17 @@ impl ToolRegistryImpl {
         inner.tools.get(name).cloned()
     }
 
+    pub(crate) async fn executable_registration(
+        &self,
+        name: &ToolName,
+    ) -> Option<(Arc<dyn Tool>, ToolDefinition)> {
+        let inner = self.inner.read().await;
+        Some((
+            inner.tools.get(name)?.clone(),
+            inner.definitions.get(name)?.clone(),
+        ))
+    }
+
     /// Get a tool definition by name.
     pub async fn get_definition(&self, name: &ToolName) -> Option<ToolDefinition> {
         let inner = self.inner.read().await;
@@ -344,5 +355,59 @@ mod tests {
         let index = ToolRegistry::tool_index(&reg).await;
         assert_eq!(index.len(), 1);
         assert_eq!(index[0].name.as_str(), "FileRead");
+    }
+
+    #[tokio::test]
+    async fn replacement_cannot_mix_an_implementation_with_another_schema() {
+        use std::future::{poll_fn, Future};
+        use std::task::Poll;
+
+        let registry = ToolRegistryImpl::new(ToolRegistryConfig::default());
+        let (tool, mut definition) = make_tool("echo");
+        registry
+            .register_tool(tool, definition.clone())
+            .await
+            .unwrap();
+        let name = definition.name.clone();
+        let mut executor = crate::executor::ToolExecutor::new();
+        let input = ToolInput {
+            call_id: "replacement-race".to_owned(),
+            name: name.clone(),
+            arguments: serde_json::json!({}),
+            session_id: hf_core::types::SessionId::new(),
+            working_dir: None,
+            additional_read_dirs: Vec::new(),
+            command_runner: None,
+        };
+        let held = registry.inner.write().await;
+        let mut execution = Box::pin(executor.execute(&registry, &name, input));
+        assert!(poll_fn(|cx| Poll::Ready(execution.as_mut().poll(cx)))
+            .await
+            .is_pending());
+        let mut replacement = Box::pin(registry.inner.write());
+        assert!(poll_fn(|cx| Poll::Ready(replacement.as_mut().poll(cx)))
+            .await
+            .is_pending());
+        drop(held);
+        let initial = poll_fn(|cx| Poll::Ready(execution.as_mut().poll(cx))).await;
+        let mut replacement = replacement.await;
+        definition.parameters =
+            serde_json::json!({"type":"object", "required":["replacement_only"]});
+        replacement.tools.insert(
+            name.clone(),
+            Arc::new(NoopTool {
+                def: definition.clone(),
+            }),
+        );
+        replacement.definitions.insert(name.clone(), definition);
+        drop(replacement);
+        let result = match initial {
+            Poll::Ready(result) => result,
+            Poll::Pending => execution.await,
+        };
+        assert!(
+            result.is_ok(),
+            "the captured implementation must use its original schema: {result:?}"
+        );
     }
 }

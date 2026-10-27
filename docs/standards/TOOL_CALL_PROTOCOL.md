@@ -18,6 +18,8 @@ pub trait Tool: Send + Sync {
 
 - A registry starts empty. Its owner registers executable implementations and
   definitions by name; JSON Schema is validated before execution.
+- Execution captures the implementation and registered definition under one
+  registry read lock, so replacement cannot pair different registrations.
 - The active agent advertises its complete four-tool inspection surface
   directly and exposes no discovery meta-tool. `ToolIndex` and
   `ToolRegistry::search` remain available for an owner whose registry outgrows
