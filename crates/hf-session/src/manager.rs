@@ -5,7 +5,6 @@ use std::sync::RwLock;
 
 use tracing::instrument;
 
-use hf_core::agent::{AgentDelegator, ContextStrategyHint};
 use hf_core::session::{
     CreateSessionOptions, DisplayTranscriptStore, SessionFilter, SessionNode, SessionState,
     SessionStore, TranscriptStore,
@@ -531,70 +530,6 @@ impl SessionManager {
             .set_custom_system_prompt(id, prompt)
             .await?;
         Ok(())
-    }
-
-    /// Generate a session title by summarizing the conversation via agent delegation.
-    ///
-    /// Delegates to the `title-generator` built-in agent defined in
-    /// `config/agents/title-generator.toml`. The agent's system prompt,
-    /// model preferences, and temperature are managed externally.
-    #[instrument(skip(self, delegator, messages), fields(session_id = %session_id))]
-    pub async fn generate_title(
-        &self,
-        delegator: &dyn AgentDelegator,
-        session_id: &SessionId,
-        messages: &[Message],
-    ) -> Result<String, SessionManagerError> {
-        // Only consider text content sent by the user. Tool results
-        // (`Role::Tool`) and assistant turns can dominate the payload with
-        // tool-call JSON that biases the generated title, so they are
-        // excluded. Take at most the last 6 user messages to keep the
-        // input compact.
-        let user_msgs: Vec<&Message> = messages
-            .iter()
-            .filter(|m| m.role == hf_core::types::Role::User)
-            .collect();
-        let context: Vec<_> = user_msgs
-            .iter()
-            .rev()
-            .take(6)
-            .rev()
-            .map(|m| serde_json::json!({ "role": format!("{:?}", m.role), "content": m.content }))
-            .collect();
-
-        let input = serde_json::json!({ "messages": context });
-
-        let session_uuid = uuid::Uuid::parse_str(&session_id.0).ok();
-
-        let output = delegator
-            .delegate(
-                "title-generator",
-                input,
-                ContextStrategyHint::None,
-                session_uuid,
-            )
-            .await
-            .map_err(|e| SessionManagerError::Other {
-                message: format!("title generation delegation failed: {e}"),
-            })?;
-
-        let title = output
-            .text
-            .trim()
-            .trim_matches('"')
-            .trim_matches('\'')
-            .to_string();
-
-        if title.is_empty() {
-            return Err(SessionManagerError::Other {
-                message: "title-generator agent returned empty title".into(),
-            });
-        }
-
-        // Persist the generated title.
-        self.update_title(session_id, title.clone()).await?;
-
-        Ok(title)
     }
 
     /// Get a reference to the underlying context transcript store.
@@ -1605,130 +1540,6 @@ mod tests {
                 .unwrap()
                 .len(),
             1
-        );
-    }
-
-    #[tokio::test]
-    async fn test_generate_title_only_includes_user_text_messages() {
-        use async_trait::async_trait;
-        use hf_core::agent::{
-            AgentDelegator, ContextStrategyHint, DelegationError, DelegationOutput,
-        };
-        use std::sync::{Arc, Mutex};
-
-        #[derive(Debug, Default)]
-        struct CapturingDelegator {
-            captured_input: Arc<Mutex<Option<serde_json::Value>>>,
-        }
-
-        #[async_trait]
-        impl AgentDelegator for CapturingDelegator {
-            async fn delegate(
-                &self,
-                _agent_name: &str,
-                input: serde_json::Value,
-                _context_strategy: ContextStrategyHint,
-                _session_id: Option<uuid::Uuid>,
-            ) -> Result<DelegationOutput, DelegationError> {
-                *self.captured_input.lock().unwrap() = Some(input);
-                Ok(DelegationOutput {
-                    text: "Generated Title".to_string(),
-                    tokens_used: 10,
-                    input_tokens: 6,
-                    output_tokens: 4,
-                    model_used: "test-model".to_string(),
-                    duration_ms: 1,
-                })
-            }
-        }
-
-        let mgr = setup().await;
-        let session = mgr
-            .create_session(CreateSessionOptions {
-                parent_id: None,
-                session_type: SessionType::Main,
-                agent_id: None,
-                title: None,
-            })
-            .await
-            .unwrap();
-
-        let user_msg = Message {
-            message_id: hf_core::types::generate_message_id(),
-            role: Role::User,
-            content: "draft a release plan".into(),
-            tool_call_id: None,
-            tool_calls: vec![],
-            timestamp: chrono::Utc::now(),
-            metadata: serde_json::Value::Null,
-        };
-        let assistant_msg = Message {
-            message_id: hf_core::types::generate_message_id(),
-            role: Role::Assistant,
-            content: "Sure, let me look at the tests first.".into(),
-            tool_call_id: None,
-            tool_calls: vec![],
-            timestamp: chrono::Utc::now(),
-            metadata: serde_json::Value::Null,
-        };
-        let tool_msg = Message {
-            message_id: hf_core::types::generate_message_id(),
-            role: Role::Tool,
-            content: r#"{"exit_code":0,"stdout":"...","stderr":""}"#.into(),
-            tool_call_id: Some("call_29ddfe381fed43528e4b4cc8".into()),
-            tool_calls: vec![],
-            timestamp: chrono::Utc::now(),
-            metadata: serde_json::Value::Null,
-        };
-        let second_user_msg = Message {
-            message_id: hf_core::types::generate_message_id(),
-            role: Role::User,
-            content: "thanks, also add a smoke test".into(),
-            tool_call_id: None,
-            tool_calls: vec![],
-            timestamp: chrono::Utc::now(),
-            metadata: serde_json::Value::Null,
-        };
-
-        let messages = vec![user_msg, assistant_msg, tool_msg, second_user_msg];
-
-        let captured = Arc::new(Mutex::new(None));
-        let delegator = CapturingDelegator {
-            captured_input: Arc::clone(&captured),
-        };
-
-        let title = mgr
-            .generate_title(&delegator, &session.id, &messages)
-            .await
-            .unwrap();
-        assert_eq!(title, "Generated Title");
-
-        let input = captured.lock().unwrap().clone().expect("delegator called");
-        let arr = input
-            .get("messages")
-            .and_then(|v| v.as_array())
-            .expect("input.messages is an array");
-
-        assert_eq!(
-            arr.len(),
-            2,
-            "only user-role text messages should reach the title generator, got {arr:?}"
-        );
-        for entry in arr {
-            let role = entry.get("role").and_then(|v| v.as_str()).unwrap();
-            assert_eq!(
-                role, "User",
-                "unexpected role in title generator input: {role}"
-            );
-        }
-
-        let contents: Vec<&str> = arr
-            .iter()
-            .filter_map(|e| e.get("content").and_then(|v| v.as_str()))
-            .collect();
-        assert_eq!(
-            contents,
-            vec!["draft a release plan", "thanks, also add a smoke test"]
         );
     }
 }

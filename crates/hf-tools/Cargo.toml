@@ -15,7 +15,6 @@ jsonschema = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 ignore = { workspace = true }
-globset = { workspace = true }
 grep-searcher = { workspace = true }
 grep-regex = { workspace = true }
 grep-matcher = { workspace = true }

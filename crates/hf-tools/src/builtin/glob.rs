@@ -1,6 +1,6 @@
 //! `Glob` built-in tool: fast file pattern matching.
 //!
-//! Uses the `ignore` and `globset` crates (from ripgrep) for performant,
+//! Uses the `ignore` crate (from ripgrep) for performant,
 //! in-process file discovery. Supports standard glob patterns
 //! (e.g. `**/*.rs`, `src/**/*.ts`) and returns matching file paths
 //! sorted by modification time.

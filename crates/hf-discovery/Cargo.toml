@@ -16,9 +16,7 @@ clang-analysis = []
 [dependencies]
 hf-core = { workspace = true }
 hf-analysis = { workspace = true, optional = true }
-hf-provider = { workspace = true }
 hf-prompt = { workspace = true }
-async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
@@ -27,9 +25,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
-chrono = { workspace = true }
 ignore = { workspace = true }
-globset = { workspace = true }
 tree-sitter = { workspace = true }
 tree-sitter-c = { workspace = true }
 tree-sitter-cpp = { workspace = true }

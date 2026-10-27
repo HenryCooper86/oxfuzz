@@ -62,7 +62,6 @@ anyhow = "1"
 # Logging / Tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-tracing-appender = "0.2"
 
 # Identifiers
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
@@ -110,9 +109,6 @@ axum = { version = "0.8", features = ["multipart"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
 
-# Encoding
-base64 = "0.22"
-
 # JSON Schema validation
 jsonschema = "0.28"
 
@@ -131,8 +127,6 @@ tree-sitter-cpp = "0.23"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
-clap_complete = "4"
-dialoguer = "0.11"
 criterion = { version = "0.5", features = ["async_tokio"] }
 tempfile = "3"
 rustix = { version = "1", features = ["fs"] }
@@ -140,14 +134,9 @@ fs2 = "0.4.3"
 cap-primitives = "4.0.3"
 windows-sys = "0.61"
 
-# Markdown rendering
-pulldown-cmark = { version = "0.12", default-features = false, features = ["simd"] }
-
 # TUI
 ratatui = "0.28"
 crossterm = "0.28"
-tui-textarea = "0.6"
-unicode-width = "0.2"
 
 # Internal crates
 hf-core = { path = "crates/hf-core" }
@@ -175,7 +164,6 @@ hf-automotive = { path = "crates/hf-automotive", default-features = false }
 hf-service = { path = "crates/hf-service", default-features = false }
 hf-agent = { path = "crates/hf-agent" }
 hf-web = { path = "crates/hf-web", default-features = false }
-hf-cli = { path = "crates/hf-cli" }
 hf-test-utils = { path = "crates/hf-test-utils" }
 
 [workspace.lints.clippy]

@@ -2343,7 +2343,6 @@ name = "hf-agent"
 version = "0.8.1"
 dependencies = [
  "async-trait",
- "chrono",
  "hf-context",
  "hf-core",
  "hf-guardrails",
@@ -2412,7 +2411,6 @@ name = "hf-context"
 version = "0.8.1"
 dependencies = [
  "async-trait",
- "chrono",
  "hf-core",
  "serde",
  "serde_json",
@@ -2439,17 +2437,11 @@ dependencies = [
 name = "hf-corpus"
 version = "0.8.1"
 dependencies = [
- "async-trait",
- "chrono",
  "hex",
  "hf-core",
- "serde",
- "serde_json",
  "sha2",
  "tempfile",
- "thiserror 2.0.19",
  "tokio",
- "tracing",
  "uuid",
 ]
 
@@ -2468,8 +2460,6 @@ dependencies = [
 name = "hf-crash"
 version = "0.8.1"
 dependencies = [
- "async-trait",
- "chrono",
  "futures",
  "hex",
  "hf-core",
@@ -2504,14 +2494,10 @@ dependencies = [
 name = "hf-discovery"
 version = "0.8.1"
 dependencies = [
- "async-trait",
- "chrono",
  "futures",
- "globset",
  "hf-analysis",
  "hf-core",
  "hf-prompt",
- "hf-provider",
  "ignore",
  "serde",
  "serde_json",
@@ -2532,17 +2518,14 @@ name = "hf-engine"
 version = "0.8.1"
 dependencies = [
  "async-trait",
- "chrono",
  "futures",
  "hf-core",
  "serde",
- "serde_json",
  "sha2",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
  "tokio-util",
- "tracing",
  "uuid",
 ]
 
@@ -2551,34 +2534,28 @@ name = "hf-guardrails"
 version = "0.8.1"
 dependencies = [
  "async-trait",
- "chrono",
  "hf-core",
  "serde",
- "serde_json",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
- "uuid",
 ]
 
 [[package]]
 name = "hf-gui"
 version = "0.8.1"
 dependencies = [
- "anyhow",
  "async-trait",
  "chrono",
  "hf-service",
  "serde",
  "serde_json",
- "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "tempfile",
  "tokio",
- "toml 0.8.23",
  "uuid",
 ]
 
@@ -2587,7 +2564,6 @@ name = "hf-harness"
 version = "0.8.1"
 dependencies = [
  "async-trait",
- "chrono",
  "futures",
  "hf-core",
  "hf-crash",
@@ -2599,9 +2575,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
- "thiserror 2.0.19",
  "tokio",
- "tracing",
  "uuid",
 ]
 
@@ -2626,14 +2600,11 @@ dependencies = [
 name = "hf-prompt"
 version = "0.8.1"
 dependencies = [
- "async-trait",
  "hf-core",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.19",
- "toml 0.8.23",
- "tracing",
  "uuid",
 ]
 
@@ -2664,13 +2635,11 @@ name = "hf-runtime"
 version = "0.8.1"
 dependencies = [
  "async-trait",
- "chrono",
  "hf-core",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
- "thiserror 2.0.19",
  "tokio",
  "tokio-util",
  "tracing",
@@ -2757,7 +2726,6 @@ dependencies = [
  "hf-test-utils",
  "serde",
  "serde_json",
- "sha2",
  "temp-env",
  "tempfile",
  "thiserror 2.0.19",
@@ -2826,7 +2794,6 @@ dependencies = [
  "cap-primitives",
  "chardetng",
  "criterion",
- "globset",
  "grep-matcher",
  "grep-regex",
  "grep-searcher",

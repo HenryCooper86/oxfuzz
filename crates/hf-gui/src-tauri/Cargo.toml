@@ -55,21 +55,14 @@ tauri-plugin-opener = "2"
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
-toml = { workspace = true }
 
 # Async
 tokio = { workspace = true }
 async-trait = { workspace = true }
 
-# Error handling
-anyhow = { workspace = true }
-
 # Identifiers
 uuid = { workspace = true }
 chrono = { workspace = true }
-
-# Hashing
-sha2 = { workspace = true }
 
 # Internal service facade
 hf-service = { workspace = true }
