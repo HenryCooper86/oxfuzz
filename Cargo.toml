@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["third_party/include-flate-compress"]
 members = [
     "crates/hf-core",
     "crates/hf-provider",
@@ -179,3 +180,8 @@ undocumented_unsafe_blocks = "deny"
 
 [workspace.lints.rust]
 unused_assignments = "allow"
+
+[patch.crates-io]
+# Upstream include-flate 0.3.4 still requires the vulnerable Zstd 0.13 series.
+# Keep its adapter unchanged and select the repaired Zstd release locally.
+include-flate-compress = { path = "third_party/include-flate-compress" }

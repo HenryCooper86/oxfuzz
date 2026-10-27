@@ -61,8 +61,8 @@ fn get_jieba() -> &'static Jieba {
 
 /// Chinese tokenizer based on `jieba-rs`.
 ///
-/// Uses jieba's `cut_all` mode (全模式分词) for maximum recall,
-/// which is better suited for keyword indexing and BM25.
+/// Uses Jieba's default segmentation with HMM disabled for keyword indexing
+/// and BM25 retrieval.
 /// Inspired by `MaxKB`'s jieba segmentation approach.
 #[derive(Debug, Default, Clone)]
 pub struct ChineseTokenizer;
@@ -76,7 +76,6 @@ impl ChineseTokenizer {
 impl Tokenizer for ChineseTokenizer {
     fn tokenize(&self, text: &str) -> Vec<String> {
         let jieba = get_jieba();
-        // Use cut (default mode, HMM enabled) for accurate segmentation.
         let words = jieba.cut(text, false);
         words
             .into_iter()
