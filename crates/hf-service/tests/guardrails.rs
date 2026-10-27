@@ -391,7 +391,10 @@ async fn strict_policy_denies_external_finding_publication_before_integration_io
     let (container, _gate) = strict_container(None);
     let project = fixture_project();
 
-    let issue_error = container.file_issue("missing-crash").await.unwrap_err();
+    let issue_error = container
+        .file_issue(project.path(), "missing-crash")
+        .await
+        .unwrap_err();
     assert_guardrail_denied(&issue_error, "publish findings to issue-tracker");
 
     let defectdojo_error = container

@@ -629,6 +629,22 @@ async fn issue_export_rejects_a_crash_owned_by_another_project() {
     assert!(error.contains("belongs to project"));
 }
 
+#[tokio::test]
+async fn issue_filing_rejects_a_crash_owned_by_another_project() {
+    let (container, _directory, target, harness) = fixture().await;
+    let store = container.store().unwrap();
+    let run = run("/project-a", harness.id, EngineKind::LibFuzzer, 0);
+    store.insert_run(&run).await.unwrap();
+    let retained = crash(&run, &target, CrashOrigin::Target);
+    store.upsert_crash(&retained).await.unwrap();
+    let error = container
+        .file_issue(Path::new("/project-b"), &retained.id.to_string())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("belongs to project"), "{error}");
+}
+
 #[cfg(feature = "patch-to-proof")]
 #[tokio::test]
 async fn proof_card_read_rejects_a_finding_owned_by_another_project() {

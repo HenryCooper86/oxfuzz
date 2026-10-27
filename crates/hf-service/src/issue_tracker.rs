@@ -286,15 +286,14 @@ fn api_user_endpoint(provider: Provider, web_base: &str) -> String {
 
 /// A stable, hidden marker embedded in a filed issue's body so a later filing of
 /// the same crash can find it and avoid opening a duplicate. Keyed on the crash
-/// stack signature, which is deterministic per distinct crash.
+/// stack signature, or the durable crash identity for a frameless finding.
 #[must_use]
 pub fn dedup_marker(stack_signature: &str) -> String {
     format!("oxfuzz-signature:{stack_signature}")
 }
 
 /// The endpoint that searches open issues for an existing filing of a crash,
-/// keyed on its [`dedup_marker`]. Best-effort: the caller treats any failure as
-/// "not found" and proceeds to create.
+/// keyed on its [`dedup_marker`]. Reconciliation requires a successful search.
 fn api_search_endpoint(provider: Provider, web_base: &str, repo: &str, marker: &str) -> String {
     match provider {
         // GitHub issue search: restrict to this repo, open issues, body match.
@@ -322,25 +321,55 @@ fn parse_search_match(
     provider: Provider,
     json: &serde_json::Value,
     marker: &str,
-) -> Option<CreatedIssue> {
-    let (items, url_key, num_key, body_key) = match provider {
-        Provider::GitHub => (json.get("items")?.as_array()?, "html_url", "number", "body"),
-        Provider::GitLab => (json.as_array()?, "web_url", "iid", "description"),
+) -> Result<Option<CreatedIssue>, ClassifiedError> {
+    if provider == Provider::GitHub
+        && json
+            .get("incomplete_results")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    {
+        return Err(ClassifiedError::Provider(
+            "issue tracker search returned incomplete results".to_owned(),
+        ));
+    }
+    let (items, body_key) = match provider {
+        Provider::GitHub => (
+            json.get("items").and_then(serde_json::Value::as_array),
+            "body",
+        ),
+        Provider::GitLab => (json.as_array(), "description"),
     };
-    items.iter().find_map(|item| {
-        let body = item.get(body_key).and_then(|v| v.as_str()).unwrap_or("");
-        if !body.contains(marker) {
-            return None;
+    let items = items.ok_or_else(|| {
+        ClassifiedError::Provider("issue tracker search response lacks its issue list".to_owned())
+    })?;
+    for item in items {
+        let body = match item.get(body_key) {
+            Some(serde_json::Value::String(body)) => body.as_str(),
+            Some(serde_json::Value::Null) => "",
+            _ => {
+                return Err(ClassifiedError::Provider(
+                    "issue tracker search item lacks a valid description".to_owned(),
+                ))
+            }
+        };
+        if body.contains(marker) {
+            return parse_created(provider, item).map(Some);
         }
-        Some(CreatedIssue {
-            url: item
-                .get(url_key)
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_owned(),
-            number: item.get(num_key).and_then(serde_json::Value::as_u64),
-        })
-    })
+    }
+    if provider == Provider::GitHub {
+        let total = json
+            .get("total_count")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                ClassifiedError::Provider("issue tracker search lacks its total count".to_owned())
+            })?;
+        if total != items.len() as u64 {
+            return Err(ClassifiedError::Provider(
+                "issue tracker search has unexamined results".to_owned(),
+            ));
+        }
+    }
+    Ok(None)
 }
 
 /// The JSON body for creating an issue, in the provider's shape.
@@ -466,27 +495,72 @@ impl IssueTrackerClient {
             .json()
             .await
             .map_err(|e| ClassifiedError::Provider(format!("issue tracker bad response: {e}")))?;
-        Ok(parse_created(self.provider, &json))
+        parse_created(self.provider, &json)
     }
 
-    /// Best-effort search for an already-filed issue for this crash, keyed on
+    /// Search for an already-filed issue for this crash, keyed on
     /// its [`dedup_marker`]. Returns the existing issue when found so the caller
     /// can avoid opening a duplicate on a re-file or a retried request.
     ///
-    /// Never errors: search is an optimization, so any transport/auth/parse
-    /// failure yields `None` and the caller proceeds to create.
-    pub(crate) async fn find_existing_issue(&self, stack_signature: &str) -> Option<CreatedIssue> {
+    /// # Errors
+    /// Returns an error on transport, status, incomplete search, or malformed
+    /// responses so recovery cannot interpret an outage as an absent issue.
+    pub(crate) async fn find_existing_issue(
+        &self,
+        stack_signature: &str,
+    ) -> Result<Option<CreatedIssue>, ClassifiedError> {
         if stack_signature.trim().is_empty() {
-            return None;
+            return Err(ClassifiedError::Validation(
+                "issue search requires a stack signature".to_owned(),
+            ));
         }
         let marker = dedup_marker(stack_signature);
         let endpoint = api_search_endpoint(self.provider, &self.web_base, &self.repo, &marker);
-        let resp = self.auth(self.http.get(&endpoint)).send().await.ok()?;
+        let resp = self
+            .auth(self.http.get(&endpoint))
+            .send()
+            .await
+            .map_err(|error| {
+                ClassifiedError::Provider(format!("issue tracker search unreachable: {error}"))
+            })?;
         if !resp.status().is_success() {
-            return None;
+            return Err(classify_status(resp.status()));
         }
-        let json: serde_json::Value = resp.json().await.ok()?;
-        parse_search_match(self.provider, &json, &marker)
+        let has_more_pages = resp
+            .headers()
+            .get("x-next-page")
+            .is_some_and(|value| !value.as_bytes().is_empty())
+            || resp
+                .headers()
+                .get_all(reqwest::header::LINK)
+                .iter()
+                .any(|value| {
+                    value.to_str().map_or(true, |links| {
+                        links.split(',').any(|link| {
+                            link.split(';').skip(1).any(|parameter| {
+                                parameter
+                                    .trim()
+                                    .strip_prefix("rel=")
+                                    .is_some_and(|relation| {
+                                        relation
+                                            .trim_matches('"')
+                                            .split_whitespace()
+                                            .any(|name| name == "next")
+                                    })
+                            })
+                        })
+                    })
+                });
+        let json: serde_json::Value = resp.json().await.map_err(|error| {
+            ClassifiedError::Provider(format!("issue tracker bad search response: {error}"))
+        })?;
+        let found = parse_search_match(self.provider, &json, &marker)?;
+        if found.is_none() && has_more_pages {
+            return Err(ClassifiedError::Provider(
+                "issue tracker search has unexamined pages".to_owned(),
+            ));
+        }
+        Ok(found)
     }
 
     /// Verify the host + token by fetching the authenticated user.
@@ -510,19 +584,29 @@ impl IssueTrackerClient {
 }
 
 /// Read the created issue's URL + number from the provider's response JSON.
-fn parse_created(provider: Provider, json: &serde_json::Value) -> CreatedIssue {
+fn parse_created(
+    provider: Provider,
+    json: &serde_json::Value,
+) -> Result<CreatedIssue, ClassifiedError> {
     let (url_key, num_key) = match provider {
         Provider::GitHub => ("html_url", "number"),
         Provider::GitLab => ("web_url", "iid"),
     };
-    CreatedIssue {
-        url: json
-            .get(url_key)
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_owned(),
+    let url = json
+        .get(url_key)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| {
+            reqwest::Url::parse(value).is_ok_and(|url| {
+                matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
+            })
+        })
+        .ok_or_else(|| {
+            ClassifiedError::Provider("issue tracker response lacks a valid issue URL".to_owned())
+        })?;
+    Ok(CreatedIssue {
+        url: url.to_owned(),
         number: json.get(num_key).and_then(serde_json::Value::as_u64),
-    }
+    })
 }
 
 /// Map an HTTP error status to a classified error (auth vs server), token-free.
@@ -539,6 +623,98 @@ fn classify_status(status: reqwest::StatusCode) -> ClassifiedError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn search_fixture(
+        provider: Provider,
+        status: &'static str,
+        body: &'static str,
+        headers: &'static str,
+    ) -> Result<Option<CreatedIssue>, ClassifiedError> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            socket.write_all(format!("HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        });
+        let client = IssueTrackerClient {
+            provider,
+            web_base: format!("http://{address}"),
+            repo: "owner/repo".to_owned(),
+            token: "test-token".to_owned(),
+            http: reqwest::Client::builder().no_proxy().build().unwrap(),
+        };
+        let result = client.find_existing_issue("signature").await;
+        server.await.unwrap();
+        result
+    }
+
+    #[tokio::test]
+    async fn tracker_search_reports_failed_or_malformed_responses() {
+        for (status, body) in [
+            ("503 Service Unavailable", "{}"),
+            ("200 OK", "not JSON"),
+            ("200 OK", "{}"),
+            ("200 OK", r#"{"items":[],"incomplete_results":true}"#),
+            (
+                "200 OK",
+                r#"{"items":[{}],"total_count":1,"incomplete_results":false}"#,
+            ),
+            (
+                "200 OK",
+                r#"{"items":[],"total_count":1,"incomplete_results":false}"#,
+            ),
+        ] {
+            let result = search_fixture(Provider::GitHub, status, body, "").await;
+            assert!(result.is_err(), "{status}: {body}: {result:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn tracker_search_cannot_report_absence_with_unexamined_pages() {
+        for (provider, body, headers) in [
+            (
+                Provider::GitHub,
+                r#"{"items":[],"total_count":0,"incomplete_results":false}"#,
+                "Link: <https://tracker/page/2>; rel=\"next\"\r\n",
+            ),
+            (Provider::GitLab, "[]", "X-Next-Page: 2\r\n"),
+            (
+                Provider::GitLab,
+                "[]",
+                "Link: <https://tracker/page/2>; rel=\"next\"\r\n",
+            ),
+        ] {
+            let result = search_fixture(provider, "200 OK", body, headers).await;
+            assert!(result.is_err(), "{provider:?}: {result:?}");
+        }
+        for (provider, body) in [
+            (
+                Provider::GitHub,
+                r#"{"items":[],"total_count":0,"incomplete_results":false}"#,
+            ),
+            (Provider::GitLab, "[]"),
+        ] {
+            assert!(search_fixture(provider, "200 OK", body, "")
+                .await
+                .unwrap()
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn created_issue_requires_an_absolute_web_url() {
+        for json in [
+            serde_json::json!({}),
+            serde_json::json!({"html_url":""}),
+            serde_json::json!({"html_url":"javascript:alert(1)"}),
+        ] {
+            let result = parse_created(Provider::GitHub, &json);
+            assert!(result.is_err(), "{result:?}");
+        }
+    }
 
     fn cfg(provider: &str, host: &str, repo: &str) -> IssueTrackerConfig {
         let toml = format!(
@@ -654,20 +830,25 @@ mod tests {
                   "body": format!("crash\n<!-- {marker} -->") }
             ]
         });
-        let found = parse_search_match(Provider::GitHub, &github_json, &marker).unwrap();
+        let found = parse_search_match(Provider::GitHub, &github_json, &marker)
+            .unwrap()
+            .unwrap();
         assert_eq!(found.number, Some(7));
 
         // No body actually containing the marker => no false-positive match.
-        let none =
-            serde_json::json!({ "items": [ { "html_url": "x", "number": 1, "body": "nope" } ] });
-        assert!(parse_search_match(Provider::GitHub, &none, &marker).is_none());
+        let none = serde_json::json!({ "total_count":1, "items": [ { "html_url": "x", "number": 1, "body": "nope" } ] });
+        assert!(parse_search_match(Provider::GitHub, &none, &marker)
+            .unwrap()
+            .is_none());
 
         // GitLab returns a bare array with `description`/`web_url`/`iid`.
         let gitlab_json = serde_json::json!([
             { "web_url": "https://gitlab.com/g/p/-/issues/3", "iid": 3,
               "description": format!("d <!-- {marker} -->") }
         ]);
-        let gl = parse_search_match(Provider::GitLab, &gitlab_json, &marker).unwrap();
+        let gl = parse_search_match(Provider::GitLab, &gitlab_json, &marker)
+            .unwrap()
+            .unwrap();
         assert_eq!(gl.number, Some(3));
     }
 
@@ -690,13 +871,15 @@ mod tests {
         let gh = parse_created(
             Provider::GitHub,
             &serde_json::json!({ "html_url": "https://github.com/a/b/issues/7", "number": 7 }),
-        );
+        )
+        .unwrap();
         assert_eq!(gh.url, "https://github.com/a/b/issues/7");
         assert_eq!(gh.number, Some(7));
         let gl = parse_created(
             Provider::GitLab,
             &serde_json::json!({ "web_url": "https://gitlab.com/g/p/-/issues/3", "iid": 3 }),
-        );
+        )
+        .unwrap();
         assert_eq!(gl.url, "https://gitlab.com/g/p/-/issues/3");
         assert_eq!(gl.number, Some(3));
     }

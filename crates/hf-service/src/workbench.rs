@@ -2,14 +2,16 @@
 //!
 //! This module is read-only over fuzz artifacts: it aggregates persisted
 //! targets, harnesses, runs, crashes, and corpus metadata into dashboard-ready
-//! DTOs. It does not build harnesses, run fuzzers, or publish bug reports.
+//! DTOs, and files findings through the configured issue tracker.
 
 use chrono::{DateTime, Utc};
 use hf_core::crash::Crash;
 use hf_core::error::ClassifiedError;
 use hf_core::harness::{Harness, HarnessStatus};
 use hf_core::target::TargetCandidate;
-use hf_storage::{FiledIssueClaim, RemediationOperationRecord, RunRecord, RunStatus, Store};
+use hf_storage::{
+    FiledIssueClaim, FiledIssueComplete, RemediationOperationRecord, RunRecord, RunStatus, Store,
+};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
@@ -545,12 +547,13 @@ pub(crate) async fn file_issue(
     // Durable dedup keyed by the crash UUID (VULN-001): the atomic claim
     // closes the search->create race, retries return the recorded issue, and
     // a stale claim is reconciled (searched) before any re-create.
+    let finding_key = issue_filing_key(&crash);
     file_issue_exactly_once(
         store,
         &crash.id.to_string(),
         // Best-effort search: the same stack signature means the crash was
         // already filed, so return the existing issue.
-        || async { Ok(client.find_existing_issue(&crash.stack_signature).await) },
+        || async { client.find_existing_issue(&finding_key).await },
         || async { client.create_issue(&title, &description, &cfg.labels).await },
     )
     .await
@@ -600,7 +603,7 @@ fn file_issue_lock(dedup_key: &str) -> Arc<tokio::sync::Mutex<()>> {
 ///
 /// # Errors
 /// Returns [`ClassifiedError`] when the claim cannot be persisted, another
-/// non-stale filing holds the claim, `create` fails (its claim is released),
+/// non-stale filing holds the claim, `create` fails (its claim is retained),
 /// or reconciliation against the remote tracker fails.
 pub(crate) async fn file_issue_exactly_once<Search, Create, SFut, CFut>(
     store: &Store,
@@ -619,18 +622,12 @@ where
     let attempt_id = uuid::Uuid::new_v4().to_string();
     let mut search = search;
     let mut create = create;
-    let record = |issue: &crate::issue_tracker::CreatedIssue| {
-        serde_json::to_string(issue)
-            .map_err(|error| ClassifiedError::Internal(format!("serialize filed issue: {error}")))
-    };
     match store
         .claim_filed_issue(dedup_key, &attempt_id, Utc::now())
         .await
         .map_err(ClassifiedError::from)?
     {
-        FiledIssueClaim::Completed(recorded) => serde_json::from_str(&recorded).map_err(|error| {
-            ClassifiedError::Storage(format!("decode filed issue for {dedup_key}: {error}"))
-        }),
+        FiledIssueClaim::Completed(recorded) => decode_filed_issue(dedup_key, &recorded),
         FiledIssueClaim::Claimed => {
             // Fresh claim: best-effort pre-claim search, then create. The
             // durable claim already closed the search->create race, so a
@@ -639,22 +636,11 @@ where
                 Ok(Some(existing)) => existing,
                 // Search miss or search failure are both safe to fall through
                 // on a fresh claim: the claim serializes creates for this key.
-                _ => match create().await {
-                    Ok(issue) => issue,
-                    Err(error) => {
-                        // Release the claim so a failed create can be retried;
-                        // the release failure cannot mask the create error.
-                        let _ = store.release_filed_issue(dedup_key, &attempt_id).await;
-                        return Err(error);
-                    }
-                },
+                // A failed create may have reached the tracker. Retaining the
+                // claim forces reconciliation before a later retry can create.
+                _ => create().await?,
             };
-            let recorded = record(&issue)?;
-            store
-                .complete_filed_issue(dedup_key, &attempt_id, &recorded)
-                .await
-                .map_err(ClassifiedError::from)?;
-            Ok(issue)
+            record_filed_issue(store, dedup_key, &attempt_id, issue).await
         }
         FiledIssueClaim::Pending {
             attempt_id: holder,
@@ -675,43 +661,19 @@ where
                 ))
             })?;
             match existing {
-                Some(found) => {
-                    // Adopt the found issue as this key's record. Complete the
-                    // stale holder's row; if a newer attempt already recorded,
-                    // its record is the canonical one and we return the found
-                    // issue either way.
-                    let recorded = record(&found)?;
-                    let _ = store
-                        .complete_filed_issue(dedup_key, &holder, &recorded)
-                        .await;
-                    Ok(found)
-                }
+                Some(found) => record_filed_issue(store, dedup_key, &holder, found).await,
                 None => match store
                     .reclaim_filed_issue(dedup_key, &attempt_id, Utc::now())
                     .await
                     .map_err(ClassifiedError::from)?
                 {
                     FiledIssueClaim::Claimed => {
-                        let issue = match create().await {
-                            Ok(issue) => issue,
-                            Err(error) => {
-                                let _ = store.release_filed_issue(dedup_key, &attempt_id).await;
-                                return Err(error);
-                            }
-                        };
-                        let recorded = record(&issue)?;
-                        store
-                            .complete_filed_issue(dedup_key, &attempt_id, &recorded)
-                            .await
-                            .map_err(ClassifiedError::from)?;
-                        Ok(issue)
+                        let issue = create().await?;
+                        record_filed_issue(store, dedup_key, &attempt_id, issue).await
                     }
-                    FiledIssueClaim::Completed(recorded) => serde_json::from_str(&recorded)
-                        .map_err(|error| {
-                            ClassifiedError::Storage(format!(
-                                "decode filed issue for {dedup_key}: {error}"
-                            ))
-                        }),
+                    FiledIssueClaim::Completed(recorded) => {
+                        decode_filed_issue(dedup_key, &recorded)
+                    }
                     FiledIssueClaim::Pending { .. } => Err(ClassifiedError::Validation(format!(
                         "an issue filing for {dedup_key} is already in progress"
                     ))),
@@ -719,6 +681,32 @@ where
             }
         }
     }
+}
+
+async fn record_filed_issue(
+    store: &Store,
+    dedup_key: &str,
+    attempt_id: &str,
+    issue: crate::issue_tracker::CreatedIssue,
+) -> Result<crate::issue_tracker::CreatedIssue, ClassifiedError> {
+    let recorded = serde_json::to_string(&issue)
+        .map_err(|error| ClassifiedError::Internal(format!("serialize filed issue: {error}")))?;
+    match store
+        .complete_filed_issue(dedup_key, attempt_id, &recorded)
+        .await?
+    {
+        FiledIssueComplete::Recorded => Ok(issue),
+        FiledIssueComplete::AlreadyCompleted(recorded) => decode_filed_issue(dedup_key, &recorded),
+    }
+}
+
+fn decode_filed_issue(
+    dedup_key: &str,
+    recorded: &str,
+) -> Result<crate::issue_tracker::CreatedIssue, ClassifiedError> {
+    serde_json::from_str(recorded).map_err(|error| {
+        ClassifiedError::Storage(format!("decode filed issue for {dedup_key}: {error}"))
+    })
 }
 fn empty_dashboard(
     active_project: Option<String>,
@@ -1181,6 +1169,14 @@ fn issue_title(crash: &Crash, target: Option<&TargetCandidate>) -> String {
     format!("[oxfuzz] {target_name}: {summary}")
 }
 
+fn issue_filing_key(crash: &Crash) -> String {
+    if crash.stack_signature.trim().is_empty() {
+        format!("crash:{}", crash.id)
+    } else {
+        crash.stack_signature.clone()
+    }
+}
+
 fn issue_description(crash: &Crash, target: Option<&TargetCandidate>) -> String {
     let target_name = target.map_or("unknown".to_owned(), |t| t.symbol.clone());
     let project_root = target
@@ -1226,14 +1222,13 @@ fn issue_description(crash: &Crash, target: Option<&TargetCandidate>) -> String 
     }
     // Hidden dedup marker (HTML comment, invisible in rendered markdown) so a
     // later filing of the same crash can find this issue instead of opening a
-    // duplicate. Keyed on the deterministic stack signature.
-    if !crash.stack_signature.is_empty() {
-        let _ = writeln!(
-            body,
-            "\n<!-- {} -->",
-            crate::issue_tracker::dedup_marker(&crash.stack_signature)
-        );
-    }
+    // duplicate. Frameless findings retain their distinct crash identities.
+    // String formatting cannot fail for this owned buffer.
+    let _ = writeln!(
+        body,
+        "\n<!-- {} -->",
+        crate::issue_tracker::dedup_marker(&issue_filing_key(crash))
+    );
     body
 }
 
@@ -1512,5 +1507,170 @@ mod tests {
                 stale: true
             }
         );
+    }
+
+    #[tokio::test]
+    async fn ambiguous_create_failures_keep_fresh_and_reclaimed_claims() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::connect(root.path().join("claims.db")).await.unwrap();
+        for stale in [false, true] {
+            let key = format!("ambiguous-{stale}");
+            if stale {
+                store
+                    .claim_filed_issue(&key, "dead", Utc::now() - chrono::Duration::minutes(11))
+                    .await
+                    .unwrap();
+            }
+            let result = file_issue_exactly_once(
+                &store,
+                &key,
+                || async { Ok(None) },
+                || async {
+                    Err(ClassifiedError::Provider(
+                        "response lost after remote acceptance".to_owned(),
+                    ))
+                },
+            )
+            .await;
+            assert!(result.is_err());
+            assert!(
+                matches!(
+                    store
+                        .claim_filed_issue(&key, "retry", Utc::now())
+                        .await
+                        .unwrap(),
+                    FiledIssueClaim::Pending { stale: false, .. }
+                ),
+                "an ambiguous create must remain reconciliation-gated"
+            );
+            let retry = file_issue_exactly_once(
+                &store,
+                &key,
+                || async { Err(ClassifiedError::Provider("tracker unavailable".to_owned())) },
+                || async { panic!("an ambiguous create cannot be retried as a fresh filing") },
+            )
+            .await;
+            assert!(retry.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn frameless_issue_lost_response_can_be_reconciled_by_crash_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::connect(root.path().join("claims.db")).await.unwrap();
+        let crash = Crash {
+            id: Uuid::new_v4(),
+            run_id: Uuid::new_v4(),
+            target_id: Uuid::new_v4(),
+            input_path: "crashes/frameless".into(),
+            stack_signature: String::new(),
+            kind: hf_core::crash::CrashKind::Segv,
+            summary: "frameless fault".to_owned(),
+            minimized: false,
+            reproduction: None,
+            bug_report: None,
+            casr: None,
+            origin: hf_core::crash::CrashOrigin::Unknown,
+        };
+        let body = issue_description(&crash, None);
+        let key = crash.id.to_string();
+        let marker = crate::issue_tracker::dedup_marker(&format!("crash:{}", crash.id));
+        let existing = crate::issue_tracker::CreatedIssue {
+            url: "https://tracker/issues/1".to_owned(),
+            number: Some(1),
+        };
+        assert!(file_issue_exactly_once(
+            &store,
+            &key,
+            || async { Ok(None) },
+            || async { Err(ClassifiedError::Provider("lost create response".to_owned())) },
+        )
+        .await
+        .is_err());
+        sqlx::query("UPDATE filed_issues SET created_at = ? WHERE dedup_key = ?")
+            .bind((Utc::now() - chrono::Duration::minutes(11)).to_rfc3339())
+            .bind(&key)
+            .execute(store.pool())
+            .await
+            .unwrap();
+        let recovered = file_issue_exactly_once(
+            &store,
+            &key,
+            || async { Ok(body.contains(&marker).then(|| existing.clone())) },
+            || async { panic!("a remotely accepted frameless finding must not be created again") },
+        )
+        .await
+        .unwrap();
+        assert_eq!(recovered.url, existing.url);
+    }
+
+    #[tokio::test]
+    async fn adopting_a_stale_issue_propagates_persistence_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::connect(root.path().join("claims.db")).await.unwrap();
+        store
+            .claim_filed_issue("key", "dead", Utc::now() - chrono::Duration::minutes(11))
+            .await
+            .unwrap();
+        let result = file_issue_exactly_once(
+            &store,
+            "key",
+            || async {
+                store.pool().close().await;
+                Ok(Some(crate::issue_tracker::CreatedIssue {
+                    url: "https://tracker/issues/1".to_owned(),
+                    number: Some(1),
+                }))
+            },
+            || async { panic!("found issues must not be recreated") },
+        )
+        .await;
+        assert!(
+            matches!(result, Err(ClassifiedError::Storage(_))),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_issue_adoption_returns_a_competing_durable_completion() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::connect(root.path().join("claims.db")).await.unwrap();
+        store
+            .claim_filed_issue("key", "dead", Utc::now() - chrono::Duration::minutes(11))
+            .await
+            .unwrap();
+        let canonical = crate::issue_tracker::CreatedIssue {
+            url: "https://tracker/issues/2".to_owned(),
+            number: Some(2),
+        };
+        let result = file_issue_exactly_once(
+            &store,
+            "key",
+            || async {
+                assert_eq!(
+                    store
+                        .reclaim_filed_issue("key", "other", Utc::now())
+                        .await
+                        .unwrap(),
+                    FiledIssueClaim::Claimed
+                );
+                store
+                    .complete_filed_issue(
+                        "key",
+                        "other",
+                        &serde_json::to_string(&canonical).unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                Ok(Some(crate::issue_tracker::CreatedIssue {
+                    url: "https://tracker/issues/1".to_owned(),
+                    number: Some(1),
+                }))
+            },
+            || async { panic!("found issues must not be recreated") },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.url, canonical.url);
     }
 }

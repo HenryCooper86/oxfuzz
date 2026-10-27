@@ -3149,6 +3149,7 @@ async fn issue_export(
 
 #[derive(Debug, Deserialize)]
 struct FileIssueRequest {
+    project: String,
     crash_id: String,
 }
 
@@ -3156,9 +3157,10 @@ async fn file_issue(
     State(state): State<AppState>,
     Json(req): Json<FileIssueRequest>,
 ) -> ApiResult<hf_service::CreatedIssue> {
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
     let created = state
         .container
-        .file_issue(&req.crash_id)
+        .file_issue(&project, &req.crash_id)
         .await
         .map_err(classified_api_error)?;
     Ok(Json(created))

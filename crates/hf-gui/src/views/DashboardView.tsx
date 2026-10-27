@@ -983,13 +983,13 @@ function GitLabIntegration({
         )}
       </section>
       <div style={{ flex: "2 1 380px", minWidth: 0 }}>
-        {issue ? <IssueDraft draft={issue} /> : <EmptyState icon={<GitPullRequest size={18} />} hint={t("dashboard.chooseCrashPreview")} />}
+        {issue ? <IssueDraft draft={issue} project={project} /> : <EmptyState icon={<GitPullRequest size={18} />} hint={t("dashboard.chooseCrashPreview")} />}
       </div>
     </div>
   );
 }
 
-function IssueDraft({ draft }: { draft: IssueExport }) {
+function IssueDraft({ draft, project }: { draft: IssueExport; project: string }) {
   const { toast } = useToast();
   const { t } = useI18n();
   const [copied, setCopied] = useState(false);
@@ -1007,6 +1007,7 @@ function IssueDraft({ draft }: { draft: IssueExport }) {
     setFiling(true);
     try {
       const created = await getTransport().invoke<CreatedIssue>("file_issue", {
+        project,
         crashId: draft.crash_id,
       });
       toast({ title: t("dashboard.filedIssue", { provider: providerLabel }), description: created.url, variant: "success" });

@@ -942,10 +942,11 @@ pub async fn issue_export(
 #[tauri::command]
 pub async fn file_issue(
     state: tauri::State<'_, crate::state::AppState>,
+    project: String,
     crash_id: String,
 ) -> Result<hf_service::CreatedIssue, String> {
     with_user_approval(&state.container, ExplicitAction::PublishFindings)
-        .file_issue(&crash_id)
+        .file_issue(std::path::Path::new(&project), &crash_id)
         .await
         .map_err(|e| e.to_string())
 }

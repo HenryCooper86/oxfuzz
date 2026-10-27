@@ -339,7 +339,10 @@ async fn file_issue_ipc_retains_consent_and_reaches_integration_configuration() 
         .unwrap();
     let ipc = DesktopIpc::new(service.clone(), fixture.project_root()).await;
     let error = ipc
-        .invoke("file_issue", json!({"crashId":crash.id}))
+        .invoke(
+            "file_issue",
+            json!({"project":fixture.project_root(), "crashId":crash.id}),
+        )
         .expect_err("unconfigured integration must refuse publication");
     ipc.scheduler.stop().await;
     assert!(

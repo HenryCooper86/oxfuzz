@@ -720,6 +720,7 @@ impl ServiceContainer {
     /// the crash is unknown, or the API rejects the request.
     pub async fn file_issue(
         &self,
+        project: &Path,
         crash_id: &str,
     ) -> Result<crate::issue_tracker::CreatedIssue, ClassifiedError> {
         self.authorize_recorded(
@@ -727,9 +728,12 @@ impl ServiceContainer {
                 destination: "issue-tracker".to_owned(),
             },
             "file_issue",
-            None,
+            Some(project),
         )
         .await?;
+        let id = Uuid::parse_str(crash_id)
+            .map_err(|error| ClassifiedError::Validation(format!("bad crash id: {error}")))?;
+        self.ensure_crash_owned_by_project(project, id).await?;
         crate::workbench::file_issue(self.store.as_deref(), crash_id).await
     }
 

@@ -37,6 +37,22 @@ or create requests reach the provider. Lower-level REST clients do not expose a
 public create method, so presentation or same-process callers cannot bypass the
 service decision point.
 
+Filing requires an explicit project and validates the crash's retained run and
+target against that project before accessing integration configuration. The web
+transport approves the project against its configured roots; the service records
+the publication authorization with that project.
+
+Durable filing claims survive every ambiguous create failure, including a lost
+response after remote acceptance. Retries reconcile a stale claim using a
+successful tracker search before creating again. Search transport, status, or
+response-format errors must remain errors during reconciliation. A successful
+filing response requires a persisted completion, and a competing completion's
+recorded issue is authoritative. Trackers without idempotency keys still permit
+a duplicate if a delayed create arrives after reconciliation has found nothing.
+The issue body and search share the same marker key: the stack signature when
+available, otherwise the durable crash UUID so frameless findings remain distinct.
+Searches with unexamined pages cannot establish that an issue is absent.
+
 ## Config -- `config/issue_tracker.toml` (+ `.example`)
 
 | key | meaning |

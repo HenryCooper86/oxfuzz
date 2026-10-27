@@ -368,7 +368,7 @@ impl ServiceContainer {
         let created = crate::workbench::file_issue_exactly_once(
             store,
             &dedup_key,
-            || async { Ok(client.find_existing_issue(first).await) },
+            || async { client.find_existing_issue(first).await },
             || async { client.create_issue(&title, &body, &cfg.labels).await },
         )
         .await?;
@@ -632,7 +632,15 @@ fn comparison_issue_body(comparison: &RevisionComparisonView, signatures: &[&str
     );
     let _ = writeln!(body, "\n## Findings observed only in the head run\n");
     for signature in signatures {
+        // String formatting cannot fail for this owned buffer.
         let _ = writeln!(body, "- `{signature}`");
+        // Match the marker used by tracker reconciliation after a lost response.
+        // String formatting cannot fail for this owned buffer.
+        let _ = writeln!(
+            body,
+            "<!-- {} -->",
+            crate::issue_tracker::dedup_marker(signature)
+        );
     }
     let _ = writeln!(
         body,
@@ -689,6 +697,66 @@ fn coverage_publication_text(coverage: CoverageComparison) -> String {
             format!("measured coverage change of {delta_pct:+.2}%")
         }
         CoverageComparison::Unavailable => "measured coverage unavailable".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod issue_recovery_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn comparison_lost_create_response_is_reconciled_from_its_body() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::connect(directory.path().join("comparison.db"))
+            .await
+            .unwrap();
+        let comparison = RevisionComparisonView {
+            schema_version: CHANGE_AWARE_SCHEMA_VERSION,
+            base_run_id: Uuid::new_v4(),
+            head_run_id: Uuid::new_v4(),
+            comparable: true,
+            refusal: None,
+            findings: Vec::new(),
+            coverage: CoverageComparison::Unavailable,
+        };
+        let signature = "retained-signature";
+        let key = format!("comparison:{signature}");
+        let body = comparison_issue_body(&comparison, &[signature]);
+        let existing = crate::issue_tracker::CreatedIssue {
+            url: "https://tracker/issues/1".to_owned(),
+            number: Some(1),
+        };
+        let first = crate::workbench::file_issue_exactly_once(
+            &store,
+            &key,
+            || async { Ok(None) },
+            || async {
+                Err(ClassifiedError::Provider(
+                    "response lost after accepting issue body".to_owned(),
+                ))
+            },
+        )
+        .await;
+        assert!(first.is_err());
+        sqlx::query("UPDATE filed_issues SET created_at = ? WHERE dedup_key = ?")
+            .bind((chrono::Utc::now() - chrono::Duration::minutes(11)).to_rfc3339())
+            .bind(&key)
+            .execute(store.pool())
+            .await
+            .unwrap();
+        let recovered = crate::workbench::file_issue_exactly_once(
+            &store,
+            &key,
+            || async {
+                Ok(body
+                    .contains(&crate::issue_tracker::dedup_marker(signature))
+                    .then(|| existing.clone()))
+            },
+            || async { panic!("a remotely accepted comparison must not be created again") },
+        )
+        .await
+        .unwrap();
+        assert_eq!(recovered.url, existing.url);
     }
 }
 
