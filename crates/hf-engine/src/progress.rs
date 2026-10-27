@@ -191,15 +191,15 @@ fn honggfuzz_stats_from_line(line: &str) -> Option<EngineStats> {
 fn fork_aggregate_execs(line: &str) -> Option<f64> {
     let rest = line.strip_prefix('#')?;
     let colon = rest.find(':')?;
-    let total: f64 = rest[..colon].trim().parse().ok()?;
-    if total <= 0.0 {
+    let total = rest[..colon].trim().parse::<u64>().ok()?;
+    if total == 0 {
         return None;
     }
     // The same ` time:` needle as `uptime_from_fork_line`: the space keeps a
     // `dft_time:` field on the line from being read as the elapsed time.
     let seconds = uptime_from_fork_line(&line.to_ascii_lowercase())? as f64;
     // Sub-second elapsed times produce unstable rates.
-    (seconds >= 1.0).then_some(total / seconds)
+    (seconds >= 1.0).then_some(total as f64 / seconds)
 }
 
 /// Whether a raw engine-stdout line reports an individual crash/finding event.
@@ -275,7 +275,9 @@ fn go_native_status_events(line: &str, lower: &str) -> Option<Vec<FuzzProgress>>
     if let Some(sec_at) = lower.find("/sec)") {
         if let Some(open) = line[..sec_at].rfind('(') {
             if let Ok(rate) = line[open + 1..sec_at].trim().parse::<f64>() {
-                events.push(FuzzProgress::ExecsPerSec(rate));
+                if rate.is_finite() && !rate.is_sign_negative() {
+                    events.push(FuzzProgress::ExecsPerSec(rate));
+                }
             }
         }
     }
@@ -401,12 +403,12 @@ fn rate_after_keyword(line: &str, keyword: &str) -> Option<f64> {
 }
 
 fn rate_numbers(text: &str) -> impl DoubleEndedIterator<Item = f64> + '_ {
-    text.split(|c: char| !c.is_ascii_digit() && c != '.')
+    text.split(|c: char| !c.is_ascii_digit() && c != '.' && c != '-')
         .filter_map(|token| {
             // Non-numeric log tokens do not carry a throughput measurement.
             token.parse::<f64>().ok()
         })
-        .filter(|value| value.is_finite())
+        .filter(|value| value.is_finite() && !value.is_sign_negative())
 }
 
 fn last_number(s: &str) -> Option<u64> {
@@ -426,6 +428,28 @@ fn first_number(s: &str) -> Option<u64> {
 mod tests {
     use super::{parse_progress_events, parse_syzkaller_status};
     use hf_core::engine::FuzzProgress;
+
+    #[test]
+    fn malformed_engine_rates_never_emit_nonfinite_or_negative_values() {
+        for line in [
+            "fuzz: elapsed: 3s, execs: 42 (NaN/sec), new interesting: 1 (total: 1)",
+            "fuzz: elapsed: 3s, execs: 42 (-1/sec), new interesting: 1 (total: 1)",
+            "#NaN: cov: 1 exec/s: 4 time: 1s",
+            "#inf: cov: 1 exec/s: 4 time: 1s",
+        ] {
+            for event in parse_progress_events(line) {
+                if let FuzzProgress::ExecsPerSec(rate) = event {
+                    assert!(
+                        rate.is_finite() && rate >= 0.0,
+                        "invalid rate from {line}: {rate}"
+                    );
+                }
+            }
+        }
+        assert!(parse_progress_events("Speed : -1/sec")
+            .iter()
+            .all(|event| !matches!(event, FuzzProgress::ExecsPerSec(_))));
+    }
 
     #[test]
     fn libfuzzer_pulse_line_yields_edges_and_execs() {
