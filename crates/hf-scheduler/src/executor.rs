@@ -117,6 +117,14 @@ impl ExecutionStore {
 
     /// Update an existing execution record by ID.
     pub fn update(&mut self, execution_id: &str, updater: impl FnOnce(&mut ScheduleExecution)) {
+        drop(self.update_and_get(execution_id, updater));
+    }
+
+    pub(crate) fn update_and_get(
+        &mut self,
+        execution_id: &str,
+        updater: impl FnOnce(&mut ScheduleExecution),
+    ) -> Option<ScheduleExecution> {
         let changed = if let Some(rec) = self
             .records
             .iter_mut()
@@ -124,22 +132,18 @@ impl ExecutionStore {
         {
             let previously_started = rec.started_at.is_some();
             updater(rec);
-            Some((rec.schedule_id.clone(), !previously_started))
+            Some((rec.clone(), !previously_started))
         } else {
             None
         };
-        if let Some((schedule_id, may_have_started)) = changed {
+        if let Some((record, may_have_started)) = changed {
             if may_have_started {
-                let started = self
-                    .records
-                    .iter()
-                    .find(|record| record.execution_id == execution_id)
-                    .cloned();
-                if let Some(started) = started.as_ref() {
-                    self.remember_start(started);
-                }
+                self.remember_start(&record);
             }
-            self.enforce_retention(&schedule_id);
+            self.enforce_retention(&record.schedule_id);
+            Some(record)
+        } else {
+            None
         }
     }
 
@@ -314,11 +318,21 @@ impl ScheduleExecutor {
         store: &mut ScheduleStore,
         execution_store: &mut ExecutionStore,
     ) -> String {
+        self.trigger_execution_at(schedule, store, execution_store, Utc::now())
+            .execution_id
+    }
+
+    pub(crate) fn trigger_execution_at(
+        &mut self,
+        schedule: &Schedule,
+        store: &mut ScheduleStore,
+        execution_store: &mut ExecutionStore,
+        now: DateTime<Utc>,
+    ) -> ScheduleExecution {
         let seq = self.next_sequence.entry(schedule.id.clone()).or_insert(0);
         *seq += 1;
 
         let execution_id = format!("exec-{}-{seq}", schedule.id);
-        let now = Utc::now();
 
         // Build request summary from schedule context.
         let request_summary = serde_json::json!({
@@ -351,12 +365,12 @@ impl ScheduleExecutor {
             error_message: None,
         };
 
-        execution_store.record(execution);
+        execution_store.record(execution.clone());
 
         // Update last-fire time in schedule store.
         store.update_last_fire(&schedule.id, now);
 
-        execution_id
+        execution
     }
 
     /// Get next sequence number for a schedule (for external callers).

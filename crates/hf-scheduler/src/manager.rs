@@ -54,6 +54,23 @@ pub trait SchedulerPersistence: Send + Sync {
     /// Persist a changed schedule definition, including its latest fire cursor.
     async fn update_schedule(&self, schedule: &Schedule) -> Result<(), PersistenceError>;
 
+    /// Persist a changed schedule definition, including its enabled state.
+    async fn update_schedule_definition(
+        &self,
+        schedule: &Schedule,
+    ) -> Result<(), PersistenceError> {
+        self.update_schedule(schedule).await
+    }
+
+    /// Persist a completed recovery, clearing only the expected checkpoint.
+    async fn complete_recovery(
+        &self,
+        schedule: &Schedule,
+        _checkpoint: &recovery::RecoveryCheckpoint,
+    ) -> Result<(), PersistenceError> {
+        self.update_schedule(schedule).await
+    }
+
     /// Count executions that started at or after `since` for rate-limit recovery.
     ///
     /// In-memory-only adapters may keep the default zero; the manager combines
@@ -162,12 +179,61 @@ pub trait SchedulerPersistence: Send + Sync {
     }
 }
 
+struct RecoveryPersistence {
+    inner: Arc<dyn SchedulerPersistence>,
+    failed: Arc<AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl SchedulerPersistence for RecoveryPersistence {
+    async fn record_execution(
+        &self,
+        execution: &ScheduleExecution,
+    ) -> Result<(), PersistenceError> {
+        let result = self.inner.record_execution(execution).await;
+        if result.is_err() {
+            self.failed.store(true, Ordering::SeqCst);
+        }
+        result
+    }
+
+    async fn update_execution(
+        &self,
+        execution: &ScheduleExecution,
+    ) -> Result<(), PersistenceError> {
+        let result = self.inner.update_execution(execution).await;
+        if result.is_err() {
+            self.failed.store(true, Ordering::SeqCst);
+        }
+        result
+    }
+
+    async fn update_schedule(&self, schedule: &Schedule) -> Result<(), PersistenceError> {
+        let result = self.inner.update_schedule(schedule).await;
+        if result.is_err() {
+            self.failed.store(true, Ordering::SeqCst);
+        }
+        result
+    }
+
+    async fn executions_started_since(
+        &self,
+        schedule_id: &str,
+        since: DateTime<Utc>,
+    ) -> Result<u64, PersistenceError> {
+        self.inner
+            .executions_started_since(schedule_id, since)
+            .await
+    }
+}
+
 struct TrackedDispatch {
     execution_id: String,
     schedule_id: String,
     occurrence_id: Option<String>,
     owner_id: Option<String>,
     one_time_terminal_allowed: Option<Arc<AtomicBool>>,
+    recovery_failed: Option<Arc<AtomicBool>>,
     handle: JoinHandle<()>,
 }
 
@@ -181,6 +247,32 @@ struct PendingOneTimeAdmission {
 type SerialLocks = Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>;
 type DispatchTasks = Arc<StdMutex<Vec<TrackedDispatch>>>;
 type OneTimeAdmissions = Arc<StdMutex<HashMap<String, PendingOneTimeAdmission>>>;
+type RecoveryFailures = Arc<HashMap<String, Arc<AtomicBool>>>;
+type SerialRequest =
+    std::pin::Pin<Box<dyn std::future::Future<Output = tokio::sync::OwnedMutexGuard<()>> + Send>>;
+
+#[derive(Clone)]
+struct RecoveryContext {
+    store: Arc<Mutex<ScheduleStore>>,
+    executor: Arc<Mutex<ScheduleExecutor>>,
+    executions: Arc<Mutex<ExecutionStore>>,
+    dispatcher: Arc<Mutex<Option<Arc<dyn WorkflowDispatcher>>>>,
+    persistence: Arc<Mutex<Option<Arc<dyn SchedulerPersistence>>>>,
+    slots: Arc<Semaphore>,
+    serial_locks: SerialLocks,
+    admission_locks: SerialLocks,
+    tasks: DispatchTasks,
+    admissions: OneTimeAdmissions,
+    one_time_status: Arc<Mutex<HashMap<String, OneTimeRuntimeStatus>>>,
+    one_time_global_block: Arc<Mutex<Option<String>>>,
+    metrics: Arc<OccurrenceMetrics>,
+    owner_id: String,
+    max_event_cascade_depth: u32,
+    held: Arc<Mutex<HashSet<String>>>,
+    failures: RecoveryFailures,
+    arm: crate::arming::ArmSignal,
+    shutdown: Arc<Notify>,
+}
 
 const ONE_TIME_ID_NOT_RESERVED: &str = "not_reserved";
 const WORKFLOW_FAILURE_RECOVERY: &str = "workflow_failure";
@@ -279,22 +371,26 @@ pub enum SchedulerRuntimeStatus {
 /// Runtime-owned scheduler state that changes when the trigger loop starts/stops.
 struct RuntimeState {
     recovery_handle: Option<JoinHandle<()>>,
+    recovery_cancel: Option<tokio::sync::oneshot::Sender<()>>,
     eval_handle: Option<JoinHandle<()>>,
     exec_handle: Option<JoinHandle<()>>,
     shutdown: Arc<Notify>,
     trigger_tx: Option<TriggerSender>,
     starting: bool,
+    startup_failed: bool,
 }
 
 impl RuntimeState {
     fn new() -> Self {
         Self {
             recovery_handle: None,
+            recovery_cancel: None,
             eval_handle: None,
             exec_handle: None,
             shutdown: Arc::new(Notify::new()),
             trigger_tx: None,
             starting: false,
+            startup_failed: false,
         }
     }
 }
@@ -314,6 +410,8 @@ pub struct SchedulerManager {
     config: SchedulerConfig,
     /// Runtime lifecycle state for the trigger and executor loops.
     runtime: StdMutex<RuntimeState>,
+    /// Serialize startup and shutdown across their asynchronous operations.
+    lifecycle: Mutex<()>,
     /// Optional workflow dispatcher injected after construction.
     ///
     /// When `Some`, fired triggers are dispatched through the real workflow
@@ -331,6 +429,7 @@ pub struct SchedulerManager {
     event_bridge: Mutex<EventBridge>,
     /// Backfill and explicit queue policies serialize on a per-schedule lock.
     serial_locks: SerialLocks,
+    admission_locks: SerialLocks,
     /// Every dispatched workflow task is retained until reaped or stopped.
     dispatch_tasks: DispatchTasks,
     /// Reserved occurrences that have not yet reached tracked task creation.
@@ -346,6 +445,14 @@ pub struct SchedulerManager {
 }
 
 impl SchedulerManager {
+    fn cursor_time(fired: &FiredTrigger, now: DateTime<Utc>) -> DateTime<Utc> {
+        if fired.is_recovery {
+            fired.fired_at
+        } else {
+            fired.fired_at.max(now)
+        }
+    }
+
     /// Create a new scheduler manager with the given configuration.
     pub fn new(config: SchedulerConfig) -> Self {
         let execution_slots = Arc::new(Semaphore::new(config.max_concurrent_executions.max(1)));
@@ -358,11 +465,13 @@ impl SchedulerManager {
             ))),
             config,
             runtime: StdMutex::new(RuntimeState::new()),
+            lifecycle: Mutex::new(()),
             dispatcher: Arc::new(Mutex::new(None)),
             persistence: Arc::new(Mutex::new(None)),
             execution_slots,
             event_bridge: Mutex::new(EventBridge::new()),
             serial_locks: Arc::new(Mutex::new(HashMap::new())),
+            admission_locks: Arc::new(Mutex::new(HashMap::new())),
             dispatch_tasks: Arc::new(StdMutex::new(Vec::new())),
             one_time_admissions: Arc::new(StdMutex::new(HashMap::new())),
             owner_id: uuid::Uuid::new_v4().to_string(),
@@ -492,7 +601,7 @@ impl SchedulerManager {
         drop(store);
         if let Some(schedule) = &schedule {
             let persistence = self.persistence.lock().await.clone();
-            Self::persist_schedule(persistence.as_ref(), schedule).await;
+            Self::persist_schedule_definition(persistence.as_ref(), schedule).await;
         }
         changed
     }
@@ -505,7 +614,7 @@ impl SchedulerManager {
         drop(store);
         if let Some(schedule) = &schedule {
             let persistence = self.persistence.lock().await.clone();
-            Self::persist_schedule(persistence.as_ref(), schedule).await;
+            Self::persist_schedule_definition(persistence.as_ref(), schedule).await;
         }
         changed
     }
@@ -628,6 +737,7 @@ impl SchedulerManager {
     ///
     /// Panics if the internal scheduler runtime mutex is poisoned.
     pub async fn start(&self, tick_interval: Duration) {
+        let _lifecycle = self.lifecycle.lock().await;
         let (tx, rx) = trigger_queue();
         let shutdown = {
             let mut runtime = self
@@ -639,6 +749,7 @@ impl SchedulerManager {
                 return;
             }
             runtime.starting = true;
+            runtime.startup_failed = false;
             runtime.trigger_tx = Some(tx.clone());
             Arc::clone(&runtime.shutdown)
         };
@@ -648,10 +759,9 @@ impl SchedulerManager {
             tick_interval, self.config.max_concurrent_executions
         );
 
-        // Plan recovery and move every affected cursor before the normal
-        // evaluator starts. Skip therefore cannot fire on the immediate first
-        // tick, while backfill remains a compact, lazily submitted batch.
-        let (recovery_plan, advanced_schedules) = {
+        // Keep cursors for held work unchanged until the operator arms it.
+        // Skip cursors can be advanced immediately because they have no work.
+        let (recovery_plan, advanced_schedules, held_advances, marked_schedules) = {
             let mut store_guard = self.store.lock().await;
             let recovery_now = Utc::now();
             let one_time_ids: HashSet<String> = store_guard
@@ -679,19 +789,60 @@ impl SchedulerManager {
             plan.result
                 .backfilled
                 .retain(|(schedule_id, _)| !one_time_ids.contains(schedule_id));
-            let mut advanced = Vec::with_capacity(plan.advances.len());
-            for advance in &plan.advances {
+            let held_ids: HashSet<_> = plan
+                .batches
+                .iter()
+                .map(|batch| batch.schedule_id.clone())
+                .collect();
+            let (held, skipped): (Vec<_>, Vec<_>) = plan
+                .advances
+                .drain(..)
+                .partition(|advance| held_ids.contains(&advance.schedule_id));
+            let mut advanced = Vec::with_capacity(skipped.len());
+            for advance in &skipped {
                 store_guard.update_last_fire(&advance.schedule_id, advance.last_fire);
                 if let Some(schedule) = store_guard.get(&advance.schedule_id) {
                     advanced.push(schedule.clone());
                 }
             }
-            (plan, advanced)
+            let mut marked = Vec::new();
+            for batch in &plan.batches {
+                if let Some(mut schedule) = store_guard.get(&batch.schedule_id).cloned() {
+                    let Some(advance) = held
+                        .iter()
+                        .find(|advance| advance.schedule_id == batch.schedule_id)
+                    else {
+                        continue;
+                    };
+                    schedule.recovery_pending = Some(recovery::RecoveryCheckpoint {
+                        batch: batch.clone(),
+                        last_fire: advance.last_fire,
+                    });
+                    store_guard.update(schedule.clone());
+                    marked.push(schedule);
+                }
+            }
+            (plan, advanced, held, marked)
         };
 
         let persistence_snapshot = self.persistence.lock().await.clone();
         for schedule in &advanced_schedules {
             Self::persist_schedule(persistence_snapshot.as_ref(), schedule).await;
+        }
+        if let Some(persistence) = persistence_snapshot.as_ref() {
+            for schedule in &marked_schedules {
+                if let Err(error) = persistence.update_schedule(schedule).await {
+                    error!(schedule_id = %schedule.id, %error, "Cannot persist pending recovery; scheduler not started");
+                    let mut runtime = self
+                        .runtime
+                        .lock()
+                        .expect("scheduler runtime lock poisoned");
+                    runtime.starting = false;
+                    runtime.startup_failed = true;
+                    runtime.trigger_tx = None;
+                    return;
+                }
+            }
         }
         info!(
             "Recovery: {} caught up, {} skipped, {} backfilled ({} total triggers)",
@@ -712,13 +863,32 @@ impl SchedulerManager {
         let exec_persistence = self.persistence.clone();
         let exec_slots = Arc::clone(&self.execution_slots);
         let exec_serial_locks = Arc::clone(&self.serial_locks);
+        let exec_admission_locks = Arc::clone(&self.admission_locks);
         let exec_tasks = Arc::clone(&self.dispatch_tasks);
         let exec_one_time_admissions = Arc::clone(&self.one_time_admissions);
         let exec_one_time_status = Arc::clone(&self.one_time_status);
         let exec_one_time_global_block = Arc::clone(&self.one_time_global_block);
         let exec_occurrence_metrics = Arc::clone(&self.occurrence_metrics);
         let exec_owner_id = self.owner_id.clone();
+        let held_schedules = Arc::new(Mutex::new(
+            held_advances
+                .iter()
+                .map(|advance| advance.schedule_id.clone())
+                .collect::<HashSet<_>>(),
+        ));
         let max_event_cascade_depth = self.config.max_event_cascade_depth;
+        let recovery_failures = Arc::new(
+            held_advances
+                .iter()
+                .map(|advance| {
+                    (
+                        advance.schedule_id.clone(),
+                        Arc::new(AtomicBool::new(false)),
+                    )
+                })
+                .collect::<HashMap<_, _>>(),
+        );
+        let exec_recovery_failures = recovery_failures.clone();
         let exec_handle = tokio::spawn(async move {
             Self::executor_loop(
                 rx,
@@ -729,6 +899,7 @@ impl SchedulerManager {
                 exec_persistence,
                 exec_slots,
                 exec_serial_locks,
+                exec_admission_locks,
                 exec_tasks,
                 exec_one_time_admissions,
                 exec_one_time_status,
@@ -736,17 +907,63 @@ impl SchedulerManager {
                 exec_occurrence_metrics,
                 exec_owner_id,
                 max_event_cascade_depth,
+                exec_recovery_failures,
                 exec_shutdown,
             )
             .await;
         });
 
-        let recovery_shutdown = shutdown.clone();
-        let recovery_tx = tx.clone();
-        let recovery_arm = self.arm.clone();
+        let recovery_context = RecoveryContext {
+            store: self.store.clone(),
+            executor: self.executor.clone(),
+            executions: self.execution_store.clone(),
+            dispatcher: self.dispatcher.clone(),
+            persistence: self.persistence.clone(),
+            slots: self.execution_slots.clone(),
+            serial_locks: self.serial_locks.clone(),
+            admission_locks: self.admission_locks.clone(),
+            tasks: self.dispatch_tasks.clone(),
+            admissions: self.one_time_admissions.clone(),
+            one_time_status: self.one_time_status.clone(),
+            one_time_global_block: self.one_time_global_block.clone(),
+            metrics: self.occurrence_metrics.clone(),
+            owner_id: self.owner_id.clone(),
+            max_event_cascade_depth,
+            held: held_schedules.clone(),
+            failures: recovery_failures,
+            arm: self.arm.clone(),
+            shutdown: shutdown.clone(),
+        };
+        let (recovery_cancel, mut recovery_cancelled) = tokio::sync::oneshot::channel();
         let recovery_handle = tokio::spawn(async move {
-            Self::submit_recovery(recovery_plan, recovery_tx, recovery_shutdown, recovery_arm)
-                .await;
+            let mut jobs = tokio::task::JoinSet::new();
+            for batch in recovery_plan.batches {
+                if let Some(advance) = held_advances
+                    .iter()
+                    .find(|advance| advance.schedule_id == batch.schedule_id)
+                    .cloned()
+                {
+                    jobs.spawn(Self::run_recovery_batch(
+                        batch,
+                        advance,
+                        recovery_context.clone(),
+                    ));
+                }
+            }
+            while !jobs.is_empty() {
+                tokio::select! {
+                    _ = &mut recovery_cancelled => {
+                        jobs.abort_all();
+                        while jobs.join_next().await.is_some() {}
+                        return;
+                    }
+                    result = jobs.join_next() => {
+                        if let Some(Err(error)) = result {
+                            error!(%error, "Recovery batch task failed");
+                        }
+                    }
+                }
+            }
         });
 
         let store = self.store.clone();
@@ -763,10 +980,20 @@ impl SchedulerManager {
                     }
                     _ = interval.tick() => {
                         let store_guard = store.lock().await;
+                        let held = held_schedules.lock().await;
                         let schedules: Vec<Schedule> = store_guard.list_enabled()
                             .into_iter()
+                            .filter(|schedule| !held.contains(&schedule.id))
                             .cloned()
+                            .map(|mut schedule| {
+                                if let Some(checkpoint) = &schedule.recovery_pending {
+                                    let covered_until = checkpoint.latest_fire();
+                                    schedule.last_fire = Some(schedule.last_fire.map_or(covered_until, |last| last.max(covered_until)));
+                                }
+                                schedule
+                            })
                             .collect();
+                        drop(held);
                         drop(store_guard);
 
                         let now = Utc::now();
@@ -789,9 +1016,209 @@ impl SchedulerManager {
             .lock()
             .expect("scheduler runtime lock poisoned");
         runtime.recovery_handle = Some(recovery_handle);
+        runtime.recovery_cancel = Some(recovery_cancel);
         runtime.eval_handle = Some(eval_handle);
         runtime.exec_handle = Some(exec_handle);
         runtime.starting = false;
+    }
+
+    async fn run_recovery_batch(
+        batch: recovery::RecoveryBatch,
+        advance: recovery::RecoveryAdvance,
+        context: RecoveryContext,
+    ) {
+        let Some(failed) = context.failures.get(&advance.schedule_id).cloned() else {
+            return;
+        };
+        let checkpoint = {
+            let store = context.store.lock().await;
+            let Some(checkpoint) = store
+                .get(&advance.schedule_id)
+                .and_then(|schedule| schedule.recovery_pending.clone())
+            else {
+                return;
+            };
+            checkpoint
+        };
+        let (tx, mut rx) = trigger_queue();
+        let count = batch.count;
+        let mut producer = tokio::task::JoinSet::new();
+        let mut plan = recovery::RecoveryPlan::default();
+        plan.batches.push(batch);
+        producer.spawn(Self::submit_recovery(
+            plan,
+            tx,
+            context.shutdown.clone(),
+            context.arm.clone(),
+        ));
+        for _ in 0..count {
+            loop {
+                if failed.load(Ordering::SeqCst) {
+                    return;
+                }
+                let pending = context
+                    .executions
+                    .lock()
+                    .await
+                    .pending_count(&advance.schedule_id);
+                if pending < crate::queue::DEFAULT_QUEUE_CAPACITY {
+                    break;
+                }
+                tokio::select! {
+                    () = context.shutdown.notified() => return,
+                    () = tokio::time::sleep(Duration::from_millis(10)) => {},
+                }
+            }
+            let fired = tokio::select! {
+                () = context.shutdown.notified() => return,
+                fired = rx.recv() => match fired { Some(fired) => fired, None => return },
+            };
+            loop {
+                tokio::select! {
+                    () = context.shutdown.notified() => return,
+                    () = context.arm.wait_until_armed() => {},
+                }
+                let schedule = context
+                    .store
+                    .lock()
+                    .await
+                    .get(&advance.schedule_id)
+                    .cloned();
+                match schedule {
+                    Some(schedule) if schedule.enabled && context.arm.is_armed() => break,
+                    Some(_) => {}
+                    None => return,
+                }
+                tokio::select! {
+                    () = context.shutdown.notified() => return,
+                    () = tokio::time::sleep(Duration::from_millis(10)) => {},
+                }
+            }
+            let dispatcher = context.dispatcher.lock().await.clone();
+            let persistence = context.persistence.lock().await.clone().map(|inner| {
+                Arc::new(RecoveryPersistence {
+                    inner,
+                    failed: failed.clone(),
+                }) as Arc<dyn SchedulerPersistence>
+            });
+            Self::handle_fired_trigger(
+                fired,
+                &context.store,
+                &context.executor,
+                &context.executions,
+                dispatcher,
+                persistence,
+                &context.serial_locks,
+                &context.admission_locks,
+                &context.tasks,
+                &context.slots,
+                &context.admissions,
+                &context.one_time_status,
+                &context.one_time_global_block,
+                &context.metrics,
+                &context.owner_id,
+                context.max_event_cascade_depth,
+                &failed,
+                Some(&checkpoint),
+            )
+            .await;
+            if failed.load(Ordering::SeqCst) {
+                return;
+            }
+        }
+        if !matches!(producer.join_next().await, Some(Ok(true))) {
+            return;
+        }
+        context.held.lock().await.remove(&advance.schedule_id);
+        loop {
+            if failed.load(Ordering::SeqCst) {
+                context
+                    .held
+                    .lock()
+                    .await
+                    .insert(advance.schedule_id.clone());
+                return;
+            }
+            let active = context
+                .tasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .any(|task| {
+                    task.schedule_id == advance.schedule_id
+                        && task
+                            .recovery_failed
+                            .as_ref()
+                            .is_some_and(|state| Arc::ptr_eq(state, &failed))
+                        && !task.handle.is_finished()
+                });
+            let unfinished = context
+                .executions
+                .lock()
+                .await
+                .list_recent(usize::MAX)
+                .iter()
+                .any(|execution| {
+                    execution.schedule_id == advance.schedule_id
+                        && execution.request_summary["is_recovery"].as_bool() == Some(true)
+                        && matches!(
+                            execution.status,
+                            ExecutionStatus::Pending | ExecutionStatus::Running
+                        )
+                });
+            if !active && !unfinished && !failed.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::select! {
+                () = context.shutdown.notified() => return,
+                () = tokio::time::sleep(Duration::from_millis(10)) => {},
+            }
+        }
+        let current = context
+            .store
+            .lock()
+            .await
+            .get(&advance.schedule_id)
+            .cloned();
+        if let Some(mut schedule) = current {
+            let Some(checkpoint) = schedule.recovery_pending.clone() else {
+                return;
+            };
+            schedule.last_fire = Some(
+                schedule
+                    .last_fire
+                    .map_or(advance.last_fire, |last| last.max(advance.last_fire)),
+            );
+            schedule.recovery_pending = None;
+            let persistence = context.persistence.lock().await.clone();
+            if let Some(persistence) = persistence {
+                if let Err(error) = persistence.complete_recovery(&schedule, &checkpoint).await {
+                    failed.store(true, Ordering::SeqCst);
+                    error!(schedule_id = %schedule.id, %error, "Cannot persist completed recovery; schedule remains held");
+                    context
+                        .held
+                        .lock()
+                        .await
+                        .insert(advance.schedule_id.clone());
+                    return;
+                }
+            }
+            let mut store = context.store.lock().await;
+            if let Some(mut current) = store.get(&advance.schedule_id).cloned() {
+                if current.recovery_pending.as_ref() != Some(&checkpoint) {
+                    failed.store(true, Ordering::SeqCst);
+                    return;
+                }
+                current.last_fire = Some(
+                    current
+                        .last_fire
+                        .map_or(advance.last_fire, |last| last.max(advance.last_fire)),
+                );
+                current.recovery_pending = None;
+                store.update(current);
+            }
+        }
+        context.held.lock().await.remove(&advance.schedule_id);
     }
 
     async fn submit_recovery(
@@ -799,41 +1226,44 @@ impl SchedulerManager {
         tx: TriggerSender,
         shutdown: Arc<Notify>,
         arm: crate::arming::ArmSignal,
-    ) {
+    ) -> bool {
         // Recovery restored what this scheduler was doing. Acting on it needs a
         // fresh decision, so the plan is held here rather than discarded: an
         // operator who arms the scheduler gets the missed occurrences, and one
         // who never does gets none of them.
-        let released = tokio::select! {
-            () = shutdown.notified() => false,
-            () = arm.wait_until_armed() => true,
-        };
-        if !released {
-            return;
-        }
-
         for batch in plan.batches {
             let mut fired_at = batch.first_fire;
             let mut remaining = batch.count;
             while remaining > 0 {
                 let trigger = recovery::trigger_at(&batch, fired_at);
-                let sent = tokio::select! {
-                    () = shutdown.notified() => false,
-                    result = tx.send(trigger) => result.is_ok(),
-                };
-                if !sent {
-                    return;
+                loop {
+                    tokio::select! {
+                        () = shutdown.notified() => return false,
+                        () = arm.wait_until_armed() => {},
+                    }
+                    let permit = tokio::select! {
+                        () = shutdown.notified() => return false,
+                        result = tx.reserve() => match result {
+                            Ok(permit) => permit,
+                            Err(_) => return false,
+                        },
+                    };
+                    if arm.is_armed() {
+                        permit.send(trigger);
+                        break;
+                    }
                 }
                 remaining -= 1;
                 if remaining > 0 {
                     let Some(next) = batch.next_fire(fired_at) else {
                         warn!(schedule_id = %batch.schedule_id, "Cannot advance recovery schedule");
-                        return;
+                        return false;
                     };
                     fired_at = next;
                 }
             }
         }
+        true
     }
 
     /// Authorize restored work to run, releasing any recovery held since start.
@@ -865,6 +1295,7 @@ impl SchedulerManager {
         persistence: Arc<Mutex<Option<Arc<dyn SchedulerPersistence>>>>,
         execution_slots: Arc<Semaphore>,
         serial_locks: SerialLocks,
+        admission_locks: SerialLocks,
         dispatch_tasks: DispatchTasks,
         one_time_admissions: OneTimeAdmissions,
         one_time_status: Arc<Mutex<HashMap<String, OneTimeRuntimeStatus>>>,
@@ -872,41 +1303,51 @@ impl SchedulerManager {
         occurrence_metrics: Arc<OccurrenceMetrics>,
         owner_id: String,
         max_event_cascade_depth: u32,
+        recovery_failures: RecoveryFailures,
         shutdown: Arc<Notify>,
     ) {
         loop {
-            tokio::select! {
+            let trigger = tokio::select! {
                 () = shutdown.notified() => {
                     info!("Executor loop shutting down");
                     break;
                 }
-                trigger = rx.recv() => {
-                    if let Some(fired) = trigger {
-                        // Re-read the dispatcher on every trigger so that
-                        // late injection (after loop start) takes effect.
-                        let current_dispatcher = dispatcher.lock().await.clone();
-                        Self::handle_fired_trigger(
-                            fired,
-                            &store,
-                            &executor,
-                            &execution_store,
-                            current_dispatcher,
-                            persistence.lock().await.clone(),
-                            &serial_locks,
-                            &dispatch_tasks,
-                            &execution_slots,
-                            &one_time_admissions,
-                            &one_time_status,
-                            &one_time_global_block,
-                            &occurrence_metrics,
-                            &owner_id,
-                            max_event_cascade_depth,
-                        ).await;
-                    } else {
-                        info!("Trigger queue closed, executor stopping");
-                        break;
-                    }
-                }
+                trigger = rx.recv() => trigger,
+            };
+            if let Some(mut fired) = trigger {
+                fired.is_recovery = false;
+                let recovery_failed = recovery_failures
+                    .get(&fired.schedule_id)
+                    .cloned()
+                    .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+                // Re-read the dispatcher on every trigger so that
+                // late injection (after loop start) takes effect.
+                let current_dispatcher = dispatcher.lock().await.clone();
+                let current_persistence = persistence.lock().await.clone();
+                Self::handle_fired_trigger(
+                    fired,
+                    &store,
+                    &executor,
+                    &execution_store,
+                    current_dispatcher,
+                    current_persistence,
+                    &serial_locks,
+                    &admission_locks,
+                    &dispatch_tasks,
+                    &execution_slots,
+                    &one_time_admissions,
+                    &one_time_status,
+                    &one_time_global_block,
+                    &occurrence_metrics,
+                    &owner_id,
+                    max_event_cascade_depth,
+                    &recovery_failed,
+                    None,
+                )
+                .await;
+            } else {
+                info!("Trigger queue closed, executor stopping");
+                break;
             }
         }
     }
@@ -1024,6 +1465,9 @@ impl SchedulerManager {
                 continue;
             }
             if task.schedule_id == schedule_id {
+                if let Some(failed) = &task.recovery_failed {
+                    failed.store(true, Ordering::SeqCst);
+                }
                 cancelled.push(task);
             } else {
                 retained.push(task);
@@ -1047,7 +1491,7 @@ impl SchedulerManager {
             let _ = task.handle.await;
             let updated = {
                 let mut executions = execution_store.lock().await;
-                executions.update(&task.execution_id, |record| {
+                executions.update_and_get(&task.execution_id, |record| {
                     if matches!(
                         record.status,
                         ExecutionStatus::Pending | ExecutionStatus::Running
@@ -1061,8 +1505,7 @@ impl SchedulerManager {
                             "reason": "cancelled by newer schedule trigger",
                         });
                     }
-                });
-                executions.get(&task.execution_id).cloned()
+                })
             };
             if let Some(updated) = updated {
                 Self::persist_update(persistence, &updated).await;
@@ -1095,6 +1538,7 @@ impl SchedulerManager {
                 "parameter_values": schedule.parameter_values,
                 "trigger_time": fired.fired_at.to_rfc3339(),
                 "cascade_depth": fired.cascade_depth,
+                "is_recovery": fired.is_recovery,
             }),
             response_summary: serde_json::json!({
                 "status": "skipped",
@@ -1105,7 +1549,7 @@ impl SchedulerManager {
         execution_store.lock().await.record(record.clone());
         let updated_schedule = {
             let mut schedules = store.lock().await;
-            schedules.update_last_fire(&schedule.id, fired.fired_at.max(now));
+            schedules.update_last_fire(&schedule.id, Self::cursor_time(fired, now));
             schedules.get(&schedule.id).cloned()
         };
         if let Some(updated_schedule) = &updated_schedule {
@@ -1153,7 +1597,7 @@ impl SchedulerManager {
         execution_store.lock().await.record(record.clone());
         let updated_schedule = {
             let mut schedules = store.lock().await;
-            schedules.update_last_fire(&schedule.id, fired.fired_at.max(now));
+            schedules.update_last_fire(&schedule.id, Self::cursor_time(fired, now));
             schedules.get(&schedule.id).cloned()
         };
         if let Some(updated_schedule) = &updated_schedule {
@@ -1425,7 +1869,7 @@ impl SchedulerManager {
 
         let updated_schedule = {
             let mut schedules = store.lock().await;
-            schedules.update_last_fire(&schedule.id, fired.fired_at.max(now));
+            schedules.update_last_fire(&schedule.id, Self::cursor_time(&fired, now));
             schedules.get(&schedule.id).cloned()
         };
         let cursor_persisted = match updated_schedule {
@@ -1525,6 +1969,7 @@ impl SchedulerManager {
             occurrence_id: Some(occurrence_id),
             owner_id: Some(occurrence_owner_id),
             one_time_terminal_allowed: Some(one_time_terminal_allowed),
+            recovery_failed: None,
             handle,
         });
     }
@@ -1957,6 +2402,158 @@ impl SchedulerManager {
         Some((schedule, one_time))
     }
 
+    async fn reserve_serial(
+        lock: Option<Arc<Mutex<()>>>,
+    ) -> (
+        Option<tokio::sync::OwnedMutexGuard<()>>,
+        Option<SerialRequest>,
+    ) {
+        let mut request: Option<SerialRequest> =
+            lock.map(|lock| Box::pin(lock.lock_owned()) as SerialRequest);
+        let guard = if let Some(request) = request.as_mut() {
+            match std::future::poll_fn(|cx| {
+                std::task::Poll::Ready(std::future::Future::poll(request.as_mut(), cx))
+            })
+            .await
+            {
+                std::task::Poll::Ready(guard) => Some(guard),
+                std::task::Poll::Pending => None,
+            }
+        } else {
+            None
+        };
+        if guard.is_some() {
+            request = None;
+        }
+        (guard, request)
+    }
+
+    async fn reserve_schedule_serial(
+        locks: &SerialLocks,
+        schedule_id: &str,
+        serialize: bool,
+    ) -> (
+        Option<tokio::sync::OwnedMutexGuard<()>>,
+        Option<SerialRequest>,
+    ) {
+        let lock = if serialize {
+            let mut locks = locks.lock().await;
+            Some(
+                locks
+                    .entry(schedule_id.to_owned())
+                    .or_insert_with(|| Arc::new(Mutex::new(())))
+                    .clone(),
+            )
+        } else {
+            None
+        };
+        Self::reserve_serial(lock).await
+    }
+
+    async fn acquire_execution_permit(
+        slots: &Arc<Semaphore>,
+        store: &Arc<Mutex<ScheduleStore>>,
+        schedule_id: &str,
+        recovery_failed: Option<&Arc<AtomicBool>>,
+    ) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        loop {
+            if let Some(failed) = recovery_failed {
+                let enabled = store
+                    .lock()
+                    .await
+                    .get(schedule_id)
+                    .map(|schedule| schedule.enabled);
+                match enabled {
+                    Some(true) => {}
+                    Some(false) => {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        continue;
+                    }
+                    None => {
+                        failed.store(true, Ordering::SeqCst);
+                        return None;
+                    }
+                }
+            }
+            let permit = slots
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("scheduler execution semaphore is never closed");
+            if let Some(failed) = recovery_failed {
+                let enabled = store
+                    .lock()
+                    .await
+                    .get(schedule_id)
+                    .map(|schedule| schedule.enabled);
+                match enabled {
+                    Some(true) => {}
+                    Some(false) => {
+                        drop(permit);
+                        continue;
+                    }
+                    None => {
+                        failed.store(true, Ordering::SeqCst);
+                        return None;
+                    }
+                }
+            }
+            return Some(permit);
+        }
+    }
+
+    fn pending_execution(
+        id: &str,
+        schedule: &Schedule,
+        fired: &FiredTrigger,
+        parameters: &serde_json::Value,
+        sequence: u64,
+    ) -> ScheduleExecution {
+        ScheduleExecution {
+            execution_id: id.to_owned(),
+            schedule_id: schedule.id.clone(),
+            triggered_at: fired.fired_at,
+            started_at: None,
+            completed_at: None,
+            status: ExecutionStatus::Pending,
+            workflow_execution_id: None,
+            request_summary: serde_json::json!({
+                "schedule_id": schedule.id,
+                "schedule_name": schedule.name,
+                "workflow_id": schedule.workflow_id,
+                "trigger": &schedule.trigger,
+                "parameter_values": parameters,
+                "execution_sequence": sequence,
+                "trigger_time": fired.fired_at.to_rfc3339(),
+                "cascade_depth": fired.cascade_depth,
+                "is_recovery": fired.is_recovery,
+            }),
+            response_summary: serde_json::json!({}),
+            error_message: None,
+        }
+    }
+
+    fn recovery_admission_allowed(
+        schedule: &Schedule,
+        fired: &FiredTrigger,
+        failed: &AtomicBool,
+        expected: Option<&recovery::RecoveryCheckpoint>,
+    ) -> bool {
+        if schedule.recovery_pending.is_some() && failed.load(Ordering::SeqCst) {
+            warn!(schedule_id = %schedule.id, "Trigger denied while recovery persistence is blocked");
+            return false;
+        }
+        if fired.is_recovery
+            && (schedule.recovery_pending.as_ref() != expected
+                || expected.is_none_or(|checkpoint| !checkpoint.matches_identity(schedule)))
+        {
+            failed.store(true, Ordering::SeqCst);
+            warn!(schedule_id = %schedule.id, "Recovery schedule no longer matches its checkpoint");
+            return false;
+        }
+        true
+    }
+
     /// Handle a single fired trigger.
     ///
     /// When a `WorkflowDispatcher` is available, creates a `Running` execution
@@ -1973,6 +2570,7 @@ impl SchedulerManager {
         dispatcher: Option<Arc<dyn WorkflowDispatcher>>,
         persistence: Option<Arc<dyn SchedulerPersistence>>,
         serial_locks: &SerialLocks,
+        admission_locks: &SerialLocks,
         dispatch_tasks: &DispatchTasks,
         execution_slots: &Arc<Semaphore>,
         one_time_admissions: &OneTimeAdmissions,
@@ -1981,13 +2579,31 @@ impl SchedulerManager {
         occurrence_metrics: &Arc<OccurrenceMetrics>,
         owner_id: &str,
         max_event_cascade_depth: u32,
+        recovery_failed: &Arc<AtomicBool>,
+        expected_recovery: Option<&recovery::RecoveryCheckpoint>,
     ) {
+        let admission_lock = {
+            let mut locks = admission_locks.lock().await;
+            locks
+                .entry(fired.schedule_id.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let _admission = admission_lock.lock().await;
         let Some((schedule, one_time)) =
             Self::load_unblocked_schedule(&fired, store, one_time_status, one_time_global_block)
                 .await
         else {
+            if fired.is_recovery {
+                recovery_failed.store(true, Ordering::SeqCst);
+            }
             return;
         };
+
+        if !Self::recovery_admission_allowed(&schedule, &fired, recovery_failed, expected_recovery)
+        {
+            return;
+        }
 
         if fired.cascade_depth > u64::from(max_event_cascade_depth) {
             Self::record_policy_skip(
@@ -2114,30 +2730,15 @@ impl SchedulerManager {
             // Reserve the execution before spawning so the rolling-hour policy
             // cannot over-admit while tasks wait for dispatch capacity.
             let execution_id = format!("exec-{}-{}", schedule.id, uuid::Uuid::new_v4());
+            let failed_recovery = fired.is_recovery.then(|| recovery_failed.clone());
 
-            let request_summary = serde_json::json!({
-                "schedule_id": schedule.id,
-                "schedule_name": schedule.name,
-                "workflow_id": schedule.workflow_id,
-                "trigger": serde_json::to_value(&schedule.trigger).unwrap_or_default(),
-                "parameter_values": parameter_values,
-                "execution_sequence": sequence,
-                "trigger_time": fired.fired_at.to_rfc3339(),
-                "cascade_depth": fired.cascade_depth,
-            });
-
-            let pending_record = ScheduleExecution {
-                execution_id: execution_id.clone(),
-                schedule_id: schedule.id.clone(),
-                triggered_at: fired.fired_at,
-                started_at: None,
-                completed_at: None,
-                status: ExecutionStatus::Pending,
-                workflow_execution_id: None,
-                request_summary,
-                response_summary: serde_json::json!({}),
-                error_message: None,
-            };
+            let pending_record = Self::pending_execution(
+                &execution_id,
+                &schedule,
+                &fired,
+                &parameter_values,
+                sequence,
+            );
 
             {
                 let mut exec_store_guard = execution_store.lock().await;
@@ -2149,13 +2750,16 @@ impl SchedulerManager {
             // the durable cursor backwards while they drain.
             let updated_schedule = {
                 let mut store_guard = store.lock().await;
-                store_guard.update_last_fire(&schedule.id, fired.fired_at.max(now));
+                store_guard.update_last_fire(&schedule.id, Self::cursor_time(&fired, now));
                 store_guard.get(&schedule.id).cloned()
             };
             if let Some(updated_schedule) = &updated_schedule {
                 Self::persist_schedule(persistence.as_ref(), updated_schedule).await;
             }
             Self::persist_record(persistence.as_ref(), &pending_record).await;
+            if schedule.recovery_pending.is_some() && recovery_failed.load(Ordering::SeqCst) {
+                return;
+            }
 
             // Spawn real execution without blocking the trigger loop.
             let workflow_id = schedule.workflow_id.clone();
@@ -2163,28 +2767,44 @@ impl SchedulerManager {
             let exec_id_clone = execution_id.clone();
             let persistence_clone = persistence.clone();
             let execution_slots_clone = Arc::clone(execution_slots);
-            let serialize = concurrency_policy == ConcurrencyPolicy::Queue;
-            let serial_lock = if serialize {
-                let mut locks = serial_locks.lock().await;
-                Some(
-                    locks
-                        .entry(schedule.id.clone())
-                        .or_insert_with(|| Arc::new(Mutex::new(())))
-                        .clone(),
-                )
-            } else {
-                None
-            };
+            let task_recovery_failed = failed_recovery.clone();
+            let schedule_recovery_failed = schedule
+                .recovery_pending
+                .is_some()
+                .then(|| recovery_failed.clone());
+            let task_schedule_store = store.clone();
+            let task_schedule_id = schedule.id.clone();
+            // Register each queued lock request while admission is serialized,
+            // before task scheduling can reorder the requests.
+            let (immediate_guard, serial_request) = Self::reserve_schedule_serial(
+                serial_locks,
+                &schedule.id,
+                concurrency_policy == ConcurrencyPolicy::Queue,
+            )
+            .await;
 
             let handle = tokio::spawn(async move {
-                let _serial_guard = match serial_lock {
-                    Some(lock) => Some(lock.lock_owned().await),
-                    None => None,
+                let _serial_guard = match (immediate_guard, serial_request) {
+                    (Some(guard), _) => Some(guard),
+                    (None, Some(request)) => Some(request.await),
+                    (None, None) => None,
                 };
-                let _execution_permit = execution_slots_clone
-                    .acquire_owned()
-                    .await
-                    .expect("scheduler execution semaphore is never closed");
+                let Some(_execution_permit) = Self::acquire_execution_permit(
+                    &execution_slots_clone,
+                    &task_schedule_store,
+                    &task_schedule_id,
+                    task_recovery_failed.as_ref(),
+                )
+                .await
+                else {
+                    return;
+                };
+                if schedule_recovery_failed
+                    .as_ref()
+                    .is_some_and(|failed| failed.load(Ordering::SeqCst))
+                {
+                    return;
+                }
                 let started = {
                     let mut store = exec_store_clone.lock().await;
                     store.update(&exec_id_clone, |record| {
@@ -2195,6 +2815,12 @@ impl SchedulerManager {
                 };
                 if let Some(started) = started {
                     Self::persist_update(persistence_clone.as_ref(), &started).await;
+                }
+                if schedule_recovery_failed
+                    .as_ref()
+                    .is_some_and(|failed| failed.load(Ordering::SeqCst))
+                {
+                    return;
                 }
                 let dispatch_start = std::time::Instant::now();
                 match crate::with_cascade_depth(
@@ -2207,7 +2833,7 @@ impl SchedulerManager {
                         let duration_ms =
                             u64::try_from(dispatch_start.elapsed().as_millis()).unwrap_or(0);
                         let mut store = exec_store_clone.lock().await;
-                        store.update(&exec_id_clone, |rec| {
+                        let updated = store.update_and_get(&exec_id_clone, |rec| {
                             // A skipped fire declined to run its workflow, so
                             // it is neither completed nor failed: the cursor
                             // already advanced, and the skip is recorded
@@ -2230,7 +2856,6 @@ impl SchedulerManager {
                                 rec.error_message = result.error;
                             }
                         });
-                        let updated = store.get(&exec_id_clone).cloned();
                         drop(store);
                         if let Some(updated) = updated {
                             Self::persist_update(persistence_clone.as_ref(), &updated).await;
@@ -2243,7 +2868,7 @@ impl SchedulerManager {
                     }
                     Err(e) => {
                         let mut store = exec_store_clone.lock().await;
-                        store.update(&exec_id_clone, |rec| {
+                        let updated = store.update_and_get(&exec_id_clone, |rec| {
                             rec.status = ExecutionStatus::Failed;
                             rec.completed_at = Some(chrono::Utc::now());
                             rec.response_summary = serde_json::json!({
@@ -2252,7 +2877,6 @@ impl SchedulerManager {
                             });
                             rec.error_message = Some(e.to_string());
                         });
-                        let updated = store.get(&exec_id_clone).cloned();
                         drop(store);
                         if let Some(updated) = updated {
                             Self::persist_update(persistence_clone.as_ref(), &updated).await;
@@ -2273,6 +2897,7 @@ impl SchedulerManager {
                 occurrence_id: None,
                 owner_id: None,
                 one_time_terminal_allowed: None,
+                recovery_failed: failed_recovery,
                 handle,
             });
         } else {
@@ -2366,23 +2991,27 @@ impl SchedulerManager {
         let mut store_guard = store.lock().await;
         let mut exec_guard = executor.lock().await;
         let mut exec_store_guard = execution_store.lock().await;
-        let execution_id =
-            exec_guard.trigger_execution(schedule, &mut store_guard, &mut exec_store_guard);
-        exec_store_guard.update(&execution_id, |record| {
+        let mut persisted = exec_guard.trigger_execution_at(
+            schedule,
+            &mut store_guard,
+            &mut exec_store_guard,
+            Self::cursor_time(fired, Utc::now()),
+        );
+        persisted.request_summary["cascade_depth"] = serde_json::json!(fired.cascade_depth);
+        persisted.request_summary["is_recovery"] = serde_json::json!(fired.is_recovery);
+        exec_store_guard.update(&persisted.execution_id, |record| {
             record.request_summary["cascade_depth"] = serde_json::json!(fired.cascade_depth);
+            record.request_summary["is_recovery"] = serde_json::json!(fired.is_recovery);
         });
-        let persisted = exec_store_guard.get(&execution_id).cloned();
         let updated_schedule = store_guard.get(&schedule.id).cloned();
-        debug!(execution_id = %execution_id, "Dispatcher-less fallback execution triggered");
+        debug!(execution_id = %persisted.execution_id, "Dispatcher-less fallback execution triggered");
         drop(exec_store_guard);
         drop(exec_guard);
         drop(store_guard);
         if let Some(updated_schedule) = &updated_schedule {
             Self::persist_schedule(persistence, updated_schedule).await;
         }
-        if let Some(persisted) = persisted {
-            Self::persist_record(persistence, &persisted).await;
-        }
+        Self::persist_record(persistence, &persisted).await;
     }
 
     async fn persist_record(
@@ -2430,13 +3059,26 @@ impl SchedulerManager {
         }
     }
 
+    async fn persist_schedule_definition(
+        persistence: Option<&Arc<dyn SchedulerPersistence>>,
+        schedule: &Schedule,
+    ) {
+        if let Some(persistence) = persistence {
+            if let Err(error) = persistence.update_schedule_definition(schedule).await {
+                warn!(schedule_id = %schedule.id, %error, "Failed to persist schedule definition");
+            }
+        }
+    }
+
     /// Stop the scheduler gracefully.
     ///
     /// # Panics
     ///
     /// Panics if the internal scheduler runtime mutex is poisoned.
     pub async fn stop(&self) {
-        let (recovery_handle, eval_handle, exec_handle, shutdown) = {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.arm.disarm();
+        let (recovery_handle, recovery_cancel, eval_handle, exec_handle, shutdown) = {
             let mut runtime = self
                 .runtime
                 .lock()
@@ -2446,17 +3088,26 @@ impl SchedulerManager {
                 && runtime.exec_handle.is_none()
                 && !runtime.starting
             {
+                runtime.startup_failed = false;
                 return;
             }
 
             let shutdown = Arc::clone(&runtime.shutdown);
             let recovery_handle = runtime.recovery_handle.take();
+            let recovery_cancel = runtime.recovery_cancel.take();
             let eval_handle = runtime.eval_handle.take();
             let exec_handle = runtime.exec_handle.take();
             runtime.trigger_tx = None;
             runtime.starting = false;
+            runtime.startup_failed = false;
             runtime.shutdown = Arc::new(Notify::new());
-            (recovery_handle, eval_handle, exec_handle, shutdown)
+            (
+                recovery_handle,
+                recovery_cancel,
+                eval_handle,
+                exec_handle,
+                shutdown,
+            )
         };
 
         info!("Stopping scheduler");
@@ -2465,8 +3116,12 @@ impl SchedulerManager {
         // be registered while the tracked set is drained below.
         shutdown.notify_waiters();
 
+        if let Some(cancel) = recovery_cancel {
+            // The coordinator may already have finished; no worker remains in that case.
+            let _ = cancel.send(());
+        }
         if let Some(handle) = recovery_handle {
-            handle.abort();
+            // Join the coordinator after it cancels and joins every recovery worker.
             let _ = handle.await;
         }
         if let Some(handle) = eval_handle {
@@ -2532,6 +3187,7 @@ impl SchedulerManager {
                 occurrence_id,
                 owner_id,
                 one_time_terminal_allowed,
+                recovery_failed: _,
                 handle,
             } = task;
             let was_running = !handle.is_finished();
@@ -2747,6 +3403,8 @@ impl SchedulerManager {
             .expect("scheduler runtime lock poisoned");
         if runtime.starting {
             SchedulerRuntimeStatus::Starting
+        } else if runtime.startup_failed {
+            SchedulerRuntimeStatus::Failed
         } else {
             match (&runtime.eval_handle, &runtime.exec_handle) {
                 (None, None) => SchedulerRuntimeStatus::Stopped,
@@ -3188,6 +3846,328 @@ mod tests {
 
         mgr.stop().await;
         assert!(!mgr.is_running());
+    }
+
+    struct StartupGate {
+        entered: Notify,
+        release: Notify,
+    }
+
+    struct RecoveryCompletionGate {
+        entered: Notify,
+        release: Notify,
+    }
+
+    struct RecoveryWriteFailure;
+
+    struct RecoveryHistoryWriteFailure;
+
+    struct BlockingWorkerDrop {
+        dropping: Arc<Notify>,
+        release: Arc<AtomicBool>,
+    }
+
+    impl Drop for BlockingWorkerDrop {
+        fn drop(&mut self) {
+            self.dropping.notify_one();
+            while !self.release.load(Ordering::SeqCst) {
+                std::thread::yield_now();
+            }
+        }
+    }
+
+    struct RecoveryWorkerDropGate {
+        entered: Notify,
+        dropping: Arc<Notify>,
+        release: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl SchedulerPersistence for RecoveryWorkerDropGate {
+        async fn record_execution(&self, _: &ScheduleExecution) -> Result<(), PersistenceError> {
+            let _guard = BlockingWorkerDrop {
+                dropping: self.dropping.clone(),
+                release: self.release.clone(),
+            };
+            self.entered.notify_one();
+            std::future::pending().await
+        }
+        async fn update_execution(&self, _: &ScheduleExecution) -> Result<(), PersistenceError> {
+            Ok(())
+        }
+        async fn update_schedule(&self, _: &Schedule) -> Result<(), PersistenceError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stop_joins_recovery_workers_before_returning() {
+        let mgr = Arc::new(SchedulerManager::with_defaults());
+        let gate = Arc::new(RecoveryWorkerDropGate {
+            entered: Notify::new(),
+            dropping: Arc::new(Notify::new()),
+            release: Arc::new(AtomicBool::new(false)),
+        });
+        mgr.set_persistence(gate.clone()).await;
+        mgr.set_dispatcher(Arc::new(AlwaysOkDispatcher)).await;
+        mgr.register(missed_schedule("worker-drop", 2, MissedPolicy::CatchUp))
+            .await;
+        mgr.arm();
+        mgr.start(Duration::from_mins(1)).await;
+        tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+            .await
+            .expect("worker did not enter persistence");
+        let mut stopping = {
+            let mgr = mgr.clone();
+            tokio::spawn(async move { mgr.stop().await })
+        };
+        tokio::time::timeout(Duration::from_secs(2), gate.dropping.notified())
+            .await
+            .expect("worker was not cancelled");
+        let early = tokio::time::timeout(Duration::from_millis(100), &mut stopping)
+            .await
+            .is_ok();
+        gate.release.store(true, Ordering::SeqCst);
+        if !early {
+            stopping.await.unwrap();
+        }
+        assert!(
+            !early,
+            "stop returned before the recovery worker was joined"
+        );
+    }
+
+    struct HourlyAdmissionGate {
+        entered: Notify,
+        release: Notify,
+        open: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl SchedulerPersistence for HourlyAdmissionGate {
+        async fn record_execution(&self, _: &ScheduleExecution) -> Result<(), PersistenceError> {
+            Ok(())
+        }
+        async fn update_execution(&self, _: &ScheduleExecution) -> Result<(), PersistenceError> {
+            Ok(())
+        }
+        async fn update_schedule(&self, _: &Schedule) -> Result<(), PersistenceError> {
+            Ok(())
+        }
+        async fn executions_started_since(
+            &self,
+            _: &str,
+            _: DateTime<Utc>,
+        ) -> Result<u64, PersistenceError> {
+            self.entered.notify_one();
+            loop {
+                let wait = self.release.notified();
+                if self.open.load(Ordering::SeqCst) {
+                    break;
+                }
+                wait.await;
+            }
+            Ok(0)
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_and_explicit_trigger_share_hourly_admission() {
+        let mgr = SchedulerManager::with_defaults();
+        let gate = Arc::new(HourlyAdmissionGate {
+            entered: Notify::new(),
+            release: Notify::new(),
+            open: AtomicBool::new(false),
+        });
+        mgr.set_persistence(gate.clone()).await;
+        let dispatcher = Arc::new(CountingDispatcher::default());
+        mgr.set_dispatcher(dispatcher.clone()).await;
+        let mut schedule = policy_schedule("admission-race", ConcurrencyPolicy::Allow, 1);
+        schedule.policies.missed_policy = Some(MissedPolicy::CatchUp);
+        schedule.last_fire = Some(Utc::now() - TimeDelta::hours(2));
+        mgr.register(schedule).await;
+        mgr.arm();
+        mgr.start(Duration::from_mins(1)).await;
+        tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+            .await
+            .expect("first admission did not start");
+        send_now(&mgr, "admission-race").await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        gate.open.store(true, Ordering::SeqCst);
+        gate.release.notify_waiters();
+        wait_for_history(&mgr, "admission-race", 2).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        mgr.stop().await;
+        assert_eq!(
+            dispatcher.total_calls().await,
+            1,
+            "hourly admission was exceeded"
+        );
+    }
+
+    #[async_trait::async_trait]
+    impl SchedulerPersistence for RecoveryHistoryWriteFailure {
+        async fn record_execution(&self, _: &ScheduleExecution) -> Result<(), PersistenceError> {
+            Err(PersistenceError::new("execution write failed"))
+        }
+        async fn update_execution(&self, _: &ScheduleExecution) -> Result<(), PersistenceError> {
+            Err(PersistenceError::new("execution write failed"))
+        }
+        async fn update_schedule(&self, _: &Schedule) -> Result<(), PersistenceError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_history_failure_keeps_checkpoint() {
+        let mgr = SchedulerManager::with_defaults();
+        mgr.set_persistence(Arc::new(RecoveryHistoryWriteFailure))
+            .await;
+        let dispatcher = Arc::new(CountingDispatcher::default());
+        mgr.set_dispatcher(dispatcher.clone()).await;
+        mgr.register(missed_schedule("history-failure", 2, MissedPolicy::CatchUp))
+            .await;
+        mgr.arm();
+        mgr.start(Duration::from_mins(1)).await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while mgr.execution_count().await == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("recovery admission did not run");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        send_now(&mgr, "history-failure").await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let checkpoint = mgr
+            .get_schedule("history-failure")
+            .await
+            .unwrap()
+            .recovery_pending;
+        mgr.stop().await;
+        assert!(checkpoint.is_some(), "missing history must retain recovery");
+        assert_eq!(
+            dispatcher.total_calls().await,
+            0,
+            "unrecorded work must not dispatch"
+        );
+    }
+
+    #[async_trait::async_trait]
+    impl SchedulerPersistence for RecoveryWriteFailure {
+        async fn record_execution(&self, _: &ScheduleExecution) -> Result<(), PersistenceError> {
+            Ok(())
+        }
+        async fn update_execution(&self, _: &ScheduleExecution) -> Result<(), PersistenceError> {
+            Ok(())
+        }
+        async fn update_schedule(&self, _: &Schedule) -> Result<(), PersistenceError> {
+            Err(PersistenceError::new("recovery write failed"))
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_checkpoint_write_failure_reports_failed_startup() {
+        let mgr = SchedulerManager::with_defaults();
+        mgr.set_persistence(Arc::new(RecoveryWriteFailure)).await;
+        mgr.register(missed_schedule("write-failure", 2, MissedPolicy::CatchUp))
+            .await;
+        mgr.start(Duration::from_mins(1)).await;
+        assert_eq!(mgr.runtime_status(), SchedulerRuntimeStatus::Failed);
+        assert!(mgr.trigger_sender().is_none());
+        mgr.stop().await;
+    }
+
+    #[async_trait::async_trait]
+    impl SchedulerPersistence for RecoveryCompletionGate {
+        async fn record_execution(&self, _: &ScheduleExecution) -> Result<(), PersistenceError> {
+            Ok(())
+        }
+        async fn update_execution(&self, _: &ScheduleExecution) -> Result<(), PersistenceError> {
+            Ok(())
+        }
+        async fn update_schedule(&self, _: &Schedule) -> Result<(), PersistenceError> {
+            Ok(())
+        }
+        async fn complete_recovery(
+            &self,
+            _: &Schedule,
+            _: &recovery::RecoveryCheckpoint,
+        ) -> Result<(), PersistenceError> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_completion_write_does_not_block_schedule_reads() {
+        let mgr = SchedulerManager::with_defaults();
+        let gate = Arc::new(RecoveryCompletionGate {
+            entered: Notify::new(),
+            release: Notify::new(),
+        });
+        mgr.set_persistence(gate.clone()).await;
+        mgr.set_dispatcher(Arc::new(AlwaysOkDispatcher)).await;
+        mgr.register(missed_schedule("completion", 2, MissedPolicy::CatchUp))
+            .await;
+        mgr.arm();
+        mgr.start(Duration::from_mins(1)).await;
+        tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+            .await
+            .expect("completion was not persisted");
+        let read =
+            tokio::time::timeout(Duration::from_millis(100), mgr.get_schedule("completion")).await;
+        gate.release.notify_one();
+        mgr.stop().await;
+        assert!(read.is_ok(), "schedule reads blocked on persistence");
+    }
+
+    #[async_trait::async_trait]
+    impl SchedulerPersistence for StartupGate {
+        async fn record_execution(&self, _: &ScheduleExecution) -> Result<(), PersistenceError> {
+            Ok(())
+        }
+
+        async fn update_execution(&self, _: &ScheduleExecution) -> Result<(), PersistenceError> {
+            Ok(())
+        }
+
+        async fn update_schedule(&self, _: &Schedule) -> Result<(), PersistenceError> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_during_startup_leaves_no_running_scheduler() {
+        let mgr = Arc::new(SchedulerManager::with_defaults());
+        let gate = Arc::new(StartupGate {
+            entered: Notify::new(),
+            release: Notify::new(),
+        });
+        mgr.set_persistence(gate.clone()).await;
+        mgr.register(missed_schedule("startup", 5, MissedPolicy::Skip))
+            .await;
+        let starting = {
+            let mgr = mgr.clone();
+            tokio::spawn(async move { mgr.start(Duration::from_secs(60)).await })
+        };
+        tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+            .await
+            .expect("startup did not reach persistence");
+        let stopping = {
+            let mgr = mgr.clone();
+            tokio::spawn(async move { mgr.stop().await })
+        };
+        tokio::task::yield_now().await;
+        gate.release.notify_one();
+        starting.await.unwrap();
+        stopping.await.unwrap();
+        assert_eq!(mgr.runtime_status(), SchedulerRuntimeStatus::Stopped);
+        assert!(mgr.trigger_sender().is_none());
+        mgr.stop().await;
     }
 
     #[tokio::test]
@@ -4930,6 +5910,217 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn restart_before_arming_preserves_missed_recovery() {
+        let mgr = SchedulerManager::with_defaults();
+        let dispatcher = Arc::new(CountingDispatcher::default());
+        mgr.set_dispatcher(dispatcher.clone()).await;
+        let mut schedule = Schedule::new(
+            "restart-recovery",
+            "restart-recovery",
+            TriggerConfig::Interval {
+                interval_secs: 3600,
+            },
+            "restart-recovery",
+        )
+        .with_policies(SchedulePolicies {
+            missed_policy: Some(MissedPolicy::CatchUp),
+            ..SchedulePolicies::default()
+        });
+        schedule.last_fire = Some(Utc::now() - TimeDelta::hours(2));
+        mgr.register(schedule).await;
+
+        mgr.start(Duration::from_mins(1)).await;
+        let saved =
+            serde_json::to_vec(&mgr.get_schedule("restart-recovery").await.unwrap()).unwrap();
+        mgr.stop().await;
+        let mgr = SchedulerManager::with_defaults();
+        mgr.set_dispatcher(dispatcher.clone()).await;
+        mgr.register(serde_json::from_slice(&saved).unwrap()).await;
+        mgr.start(Duration::from_mins(1)).await;
+        mgr.arm();
+        let delivered = tokio::time::timeout(Duration::from_secs(2), async {
+            while dispatcher.total_calls().await == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        mgr.stop().await;
+        assert!(delivered.is_ok(), "missed work was lost before arming");
+    }
+
+    #[tokio::test]
+    async fn paused_checkpoint_resumes_recovery_after_restart() {
+        let mgr = SchedulerManager::with_defaults();
+        let mut schedule = Schedule::new(
+            "paused-recovery",
+            "paused-recovery",
+            TriggerConfig::Interval {
+                interval_secs: 3600,
+            },
+            "wf",
+        )
+        .with_policies(SchedulePolicies {
+            missed_policy: Some(MissedPolicy::CatchUp),
+            ..SchedulePolicies::default()
+        });
+        schedule.last_fire = Some(Utc::now() - TimeDelta::hours(2));
+        mgr.register(schedule).await;
+        mgr.start(Duration::from_mins(1)).await;
+        assert!(mgr.pause("paused-recovery").await);
+        let saved =
+            serde_json::to_vec(&mgr.get_schedule("paused-recovery").await.unwrap()).unwrap();
+        mgr.stop().await;
+
+        let restarted = SchedulerManager::with_defaults();
+        let dispatcher = Arc::new(CountingDispatcher::default());
+        restarted.set_dispatcher(dispatcher.clone()).await;
+        restarted
+            .register(serde_json::from_slice(&saved).unwrap())
+            .await;
+        restarted.start(Duration::from_mins(1)).await;
+        restarted.arm();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(dispatcher.total_calls().await, 0);
+        assert!(restarted.resume("paused-recovery").await);
+        let resumed = tokio::time::timeout(Duration::from_secs(2), async {
+            while dispatcher.total_calls().await == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        restarted.stop().await;
+        assert!(
+            resumed.is_ok(),
+            "pending recovery was stranded after resume"
+        );
+    }
+
+    struct SlotGateDispatcher {
+        started: Notify,
+        release: Notify,
+        recovered: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl WorkflowDispatcher for SlotGateDispatcher {
+        async fn dispatch(
+            &self,
+            workflow_id: &str,
+            _: serde_json::Value,
+        ) -> Result<DispatchResult, DispatchError> {
+            if workflow_id == "blocker" {
+                self.started.notify_one();
+                self.release.notified().await;
+            } else {
+                self.recovered.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(DispatchResult {
+                success: true,
+                skipped: false,
+                summary: "ok".into(),
+                output: serde_json::Value::Null,
+                duration_ms: 0,
+                error: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn paused_recovery_waiting_for_a_slot_does_not_dispatch_until_resumed() {
+        let mgr = SchedulerManager::new(SchedulerConfig {
+            max_concurrent_executions: 1,
+            ..SchedulerConfig::default()
+        });
+        let dispatcher = Arc::new(SlotGateDispatcher {
+            started: Notify::new(),
+            release: Notify::new(),
+            recovered: AtomicUsize::new(0),
+        });
+        mgr.set_dispatcher(dispatcher.clone()).await;
+        let mut blocker = policy_schedule("blocker", ConcurrencyPolicy::Allow, 0);
+        blocker.workflow_id = "blocker".into();
+        mgr.register(blocker).await;
+        let mut recovery = Schedule::new(
+            "paused-slot",
+            "paused-slot",
+            TriggerConfig::Interval {
+                interval_secs: 3600,
+            },
+            "recovery",
+        )
+        .with_policies(SchedulePolicies {
+            missed_policy: Some(MissedPolicy::CatchUp),
+            ..SchedulePolicies::default()
+        });
+        recovery.last_fire = Some(Utc::now() - TimeDelta::hours(2));
+        mgr.register(recovery).await;
+        mgr.start(Duration::from_mins(1)).await;
+        send_now(&mgr, "blocker").await;
+        tokio::time::timeout(Duration::from_secs(2), dispatcher.started.notified())
+            .await
+            .expect("blocker did not start");
+        mgr.arm();
+        wait_for_history(&mgr, "paused-slot", 1).await;
+        mgr.pause("paused-slot").await;
+        dispatcher.release.notify_one();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let while_paused = dispatcher.recovered.load(Ordering::SeqCst);
+        mgr.resume("paused-slot").await;
+        let resumed = tokio::time::timeout(Duration::from_secs(2), async {
+            while dispatcher.recovered.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        mgr.stop().await;
+        assert_eq!(while_paused, 0);
+        assert!(resumed.is_ok(), "recovery did not resume");
+    }
+
+    #[tokio::test]
+    async fn paused_recovery_does_not_block_other_schedules() {
+        let initial = SchedulerManager::with_defaults();
+        for id in ["paused", "active"] {
+            let mut schedule = Schedule::new(
+                id,
+                id,
+                TriggerConfig::Interval {
+                    interval_secs: 3600,
+                },
+                id,
+            )
+            .with_policies(SchedulePolicies {
+                missed_policy: Some(MissedPolicy::CatchUp),
+                ..SchedulePolicies::default()
+            });
+            schedule.last_fire = Some(Utc::now() - TimeDelta::hours(2));
+            initial.register(schedule).await;
+        }
+        initial.start(Duration::from_mins(1)).await;
+        initial.pause("paused").await;
+        let saved = serde_json::to_vec(&initial.list_schedules().await).unwrap();
+        initial.stop().await;
+        let mgr = SchedulerManager::with_defaults();
+        let dispatcher = Arc::new(CountingDispatcher::default());
+        mgr.set_dispatcher(dispatcher.clone()).await;
+        for schedule in serde_json::from_slice::<Vec<Schedule>>(&saved).unwrap() {
+            mgr.register(schedule).await;
+        }
+        mgr.start(Duration::from_mins(1)).await;
+        mgr.arm();
+        let active = tokio::time::timeout(Duration::from_secs(2), async {
+            while dispatcher.calls_for("active").await == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        let paused = dispatcher.calls_for("paused").await;
+        mgr.stop().await;
+        assert!(active.is_ok(), "paused recovery blocked another schedule");
+        assert_eq!(paused, 0);
+    }
+
     struct SerialRecordingDispatcher {
         active: AtomicUsize,
         maximum: AtomicUsize,
@@ -5006,6 +6197,110 @@ mod tests {
             dispatcher.maximum.load(Ordering::SeqCst),
             1,
             "backfill occurrences for one schedule must be explicitly queued"
+        );
+    }
+
+    #[tokio::test]
+    async fn backfill_persists_terminal_records_even_when_memory_retention_prunes_them() {
+        let mgr = SchedulerManager::new(SchedulerConfig {
+            history_retention_limit: 1,
+            ..SchedulerConfig::default()
+        });
+        let persistence = Arc::new(RecordingPersistence::default());
+        mgr.set_persistence(persistence.clone()).await;
+        let dispatcher = Arc::new(SerialRecordingDispatcher::new());
+        mgr.set_dispatcher(dispatcher.clone()).await;
+        mgr.register(missed_schedule(
+            "retained-backfill",
+            3,
+            MissedPolicy::Backfill,
+        ))
+        .await;
+        mgr.arm();
+        mgr.start(Duration::from_mins(1)).await;
+        dispatcher.wait_for(3).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        mgr.stop().await;
+        let records = persistence.recorded.lock().await;
+        let terminal = records
+            .iter()
+            .filter(|record| {
+                record.schedule_id == "retained-backfill"
+                    && record.status == ExecutionStatus::Completed
+            })
+            .count();
+        assert_eq!(
+            terminal, 3,
+            "all completed executions must reach persistence"
+        );
+    }
+
+    #[tokio::test]
+    async fn fallback_persists_completion_even_when_memory_retention_prunes_it() {
+        let mgr = SchedulerManager::new(SchedulerConfig {
+            history_retention_limit: 1,
+            ..SchedulerConfig::default()
+        });
+        let persistence = Arc::new(RecordingPersistence::default());
+        mgr.set_persistence(persistence.clone()).await;
+        mgr.register(missed_schedule("fallback-pruned", 1, MissedPolicy::CatchUp))
+            .await;
+        mgr.execution_store()
+            .lock()
+            .await
+            .record(ScheduleExecution {
+                execution_id: "other-pending".into(),
+                schedule_id: "fallback-pruned".into(),
+                triggered_at: Utc::now(),
+                started_at: None,
+                completed_at: None,
+                status: ExecutionStatus::Pending,
+                workflow_execution_id: None,
+                request_summary: serde_json::json!({}),
+                response_summary: serde_json::json!({}),
+                error_message: None,
+            });
+        mgr.arm();
+        mgr.start(Duration::from_mins(1)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let completed = persistence.recorded.lock().await.iter().any(|record| {
+            record.schedule_id == "fallback-pruned" && record.status == ExecutionStatus::Completed
+        });
+        mgr.stop().await;
+        assert!(
+            completed,
+            "fallback completion was pruned before persistence"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn backfill_dispatches_occurrences_in_trigger_order() {
+        let mgr = SchedulerManager::with_defaults();
+        let dispatcher = Arc::new(ParamRecordingDispatcher::default());
+        mgr.set_dispatcher(dispatcher.clone()).await;
+        let schedule = missed_schedule("ordered-backfill", 100, MissedPolicy::Backfill)
+            .with_params(serde_json::json!({"at": "{{ trigger.time }}"}));
+        mgr.register(schedule).await;
+        let serial = Arc::new(Mutex::new(()));
+        let guard = serial.lock().await;
+        mgr.serial_locks
+            .lock()
+            .await
+            .insert("ordered-backfill".into(), serial.clone());
+        mgr.arm();
+        mgr.start(Duration::from_mins(1)).await;
+        wait_for_history(&mgr, "ordered-backfill", 100).await;
+        drop(guard);
+        wait_for_params(&dispatcher, 100).await;
+        mgr.stop().await;
+        let received = dispatcher.received.lock().await;
+        let times: Vec<_> = received
+            .iter()
+            .map(|params| params["at"].as_str().unwrap())
+            .collect();
+        assert!(
+            times.windows(2).all(|pair| pair[0] < pair[1]),
+            "backfill executed out of order"
         );
     }
 
@@ -5222,6 +6517,36 @@ mod tests {
                 .count()
                 <= 2,
             "at most max_executions_per_hour occurrences may start or queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn backfill_bounds_waiting_reservations() {
+        let mgr = SchedulerManager::new(SchedulerConfig {
+            max_concurrent_executions: 1,
+            ..SchedulerConfig::default()
+        });
+        mgr.set_dispatcher(Arc::new(BlockingDispatcher::new()))
+            .await;
+        mgr.register(missed_schedule(
+            "bounded-backfill",
+            300,
+            MissedPolicy::Backfill,
+        ))
+        .await;
+        mgr.arm();
+        mgr.start(Duration::from_mins(1)).await;
+        wait_for_history(&mgr, "bounded-backfill", 200).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let pending = mgr
+            .execution_store()
+            .lock()
+            .await
+            .pending_count("bounded-backfill");
+        mgr.stop().await;
+        assert!(
+            pending <= 256,
+            "backfill admitted {pending} waiting executions"
         );
     }
 
@@ -5920,6 +7245,217 @@ mod tests {
             .as_deref()
             .is_some_and(|message| message.contains("stopped")));
     }
+
+    #[tokio::test]
+    async fn interrupted_backfill_is_recovered_after_restart() {
+        let mgr = SchedulerManager::with_defaults();
+        let blocking = Arc::new(BlockingDispatcher::new());
+        mgr.set_dispatcher(blocking.clone()).await;
+        let mut schedule = Schedule::new(
+            "interrupted-backfill",
+            "interrupted-backfill",
+            TriggerConfig::Interval {
+                interval_secs: 3600,
+            },
+            "interrupted-backfill",
+        )
+        .with_policies(SchedulePolicies {
+            missed_policy: Some(MissedPolicy::Backfill),
+            ..SchedulePolicies::default()
+        });
+        schedule.last_fire = Some(Utc::now() - TimeDelta::hours(3));
+        mgr.register(schedule).await;
+        mgr.arm();
+        mgr.start(Duration::from_mins(1)).await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while blocking.calls.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("backfill did not start");
+        let saved =
+            serde_json::to_vec(&mgr.get_schedule("interrupted-backfill").await.unwrap()).unwrap();
+        mgr.stop().await;
+
+        let mgr = SchedulerManager::with_defaults();
+        mgr.register(serde_json::from_slice(&saved).unwrap()).await;
+        let dispatcher = Arc::new(CountingDispatcher::default());
+        mgr.set_dispatcher(dispatcher.clone()).await;
+        mgr.start(Duration::from_mins(1)).await;
+        mgr.arm();
+        let recovered = tokio::time::timeout(Duration::from_secs(2), async {
+            while dispatcher.total_calls().await < 3 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        mgr.stop().await;
+        assert!(recovered.is_ok(), "interrupted backfill was lost");
+    }
+
+    #[tokio::test]
+    async fn restarting_manager_requires_a_fresh_arm() {
+        let mgr = SchedulerManager::with_defaults();
+        let blocking = Arc::new(BlockingDispatcher::new());
+        mgr.set_dispatcher(blocking.clone()).await;
+        mgr.register(missed_schedule("fresh-arm", 2, MissedPolicy::Backfill))
+            .await;
+        mgr.arm();
+        mgr.start(Duration::from_mins(1)).await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while blocking.calls.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("recovery did not start");
+        mgr.stop().await;
+        let dispatcher = Arc::new(CountingDispatcher::default());
+        mgr.set_dispatcher(dispatcher.clone()).await;
+        mgr.start(Duration::from_mins(1)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let calls_before_arming = dispatcher.total_calls().await;
+        mgr.arm();
+        let resumed = tokio::time::timeout(Duration::from_secs(2), async {
+            while dispatcher.total_calls().await == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        mgr.stop().await;
+        assert_eq!(
+            calls_before_arming, 0,
+            "restart reused previous authorization"
+        );
+        assert!(resumed.is_ok());
+    }
+
+    #[tokio::test]
+    async fn backfill_does_not_advance_the_cursor_to_dispatch_time() {
+        let mgr = SchedulerManager::with_defaults();
+        let dispatcher = Arc::new(BlockingDispatcher::new());
+        mgr.set_dispatcher(dispatcher.clone()).await;
+        let now = Utc::now();
+        let mut schedule = Schedule::new(
+            "old-backfill",
+            "old-backfill",
+            TriggerConfig::Interval {
+                interval_secs: 3600,
+            },
+            "wf",
+        )
+        .with_policies(SchedulePolicies {
+            missed_policy: Some(MissedPolicy::Backfill),
+            ..SchedulePolicies::default()
+        });
+        schedule.last_fire = Some(now - TimeDelta::minutes(210));
+        mgr.register(schedule).await;
+        mgr.arm();
+        mgr.start(Duration::from_mins(1)).await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while dispatcher.calls.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("backfill did not start");
+        let cursor = mgr
+            .get_schedule("old-backfill")
+            .await
+            .unwrap()
+            .last_fire
+            .unwrap();
+        mgr.stop().await;
+        assert!(
+            cursor <= now - TimeDelta::minutes(30),
+            "historical recovery advanced to {cursor}"
+        );
+    }
+
+    struct CancelledRecoveryDispatcher(AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl WorkflowDispatcher for CancelledRecoveryDispatcher {
+        async fn dispatch(
+            &self,
+            _: &str,
+            _: serde_json::Value,
+        ) -> Result<DispatchResult, DispatchError> {
+            if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                std::future::pending().await
+            } else {
+                Ok(DispatchResult {
+                    success: true,
+                    skipped: false,
+                    summary: "completed".to_owned(),
+                    output: serde_json::Value::Null,
+                    duration_ms: 0,
+                    error: None,
+                })
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_backfill_keeps_its_recovery_checkpoint() {
+        let mgr = SchedulerManager::with_defaults();
+        let dispatcher = Arc::new(CancelledRecoveryDispatcher(AtomicUsize::new(0)));
+        mgr.set_dispatcher(dispatcher.clone()).await;
+        let mut schedule = Schedule::new(
+            "cancelled-backfill",
+            "cancelled-backfill",
+            TriggerConfig::Interval {
+                interval_secs: 3600,
+            },
+            "wf",
+        )
+        .with_policies(SchedulePolicies {
+            missed_policy: Some(MissedPolicy::Backfill),
+            concurrency_policy: Some(ConcurrencyPolicy::CancelPrevious),
+            max_executions_per_hour: 0,
+        });
+        schedule.last_fire = Some(Utc::now() - TimeDelta::hours(1));
+        mgr.register(schedule).await;
+        mgr.arm();
+        mgr.start(Duration::from_mins(1)).await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while dispatcher.0.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("backfill did not start");
+        send_now(&mgr, "cancelled-backfill").await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !mgr
+                .execution_history("cancelled-backfill")
+                .await
+                .iter()
+                .any(|execution| execution.status == ExecutionStatus::Cancelled)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("recovery was not cancelled");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let checkpoint = mgr
+            .get_schedule("cancelled-backfill")
+            .await
+            .unwrap()
+            .recovery_pending;
+        mgr.stop().await;
+        assert!(
+            checkpoint.is_some(),
+            "cancelled recovery must remain pending"
+        );
+        assert_eq!(
+            dispatcher.0.load(Ordering::SeqCst),
+            1,
+            "blocked recovery must not launch a replacement"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -5992,6 +7528,40 @@ mod arming_tests {
                 .is_some(),
             "an armed scheduler must submit its restored work"
         );
+    }
+
+    #[tokio::test]
+    async fn disarming_pauses_recovery_waiting_for_queue_space() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let observer = tx.clone();
+        let arm = ArmSignal::default();
+        arm.arm();
+        let mut plan = plan_with_one_batch();
+        plan.batches.extend(plan_with_one_batch().batches);
+        let handle = tokio::spawn(SchedulerManager::submit_recovery(
+            plan,
+            tx,
+            Arc::new(Notify::new()),
+            arm.clone(),
+        ));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while observer.capacity() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first recovery trigger was not queued");
+        arm.disarm();
+        rx.recv().await.expect("first recovery trigger");
+        assert!(tokio::time::timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .is_err());
+        arm.arm();
+        assert!(tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("rearming did not resume recovery")
+            .is_some());
+        handle.await.expect("producer finished");
     }
 
     #[tokio::test]

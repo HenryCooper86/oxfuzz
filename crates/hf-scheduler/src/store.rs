@@ -106,6 +106,9 @@ pub struct Schedule {
     pub updated_at: DateTime<Utc>,
     /// Last fire timestamp.
     pub last_fire: Option<DateTime<Utc>>,
+    /// A recovery batch has not yet been durably completed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_pending: Option<crate::recovery::RecoveryCheckpoint>,
 }
 
 impl Schedule {
@@ -130,6 +133,7 @@ impl Schedule {
             created_at: now,
             updated_at: now,
             last_fire: None,
+            recovery_pending: None,
         }
     }
 

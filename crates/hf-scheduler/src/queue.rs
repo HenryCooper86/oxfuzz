@@ -11,7 +11,7 @@ pub type TriggerSender = mpsc::Sender<FiredTrigger>;
 pub type TriggerReceiver = mpsc::Receiver<FiredTrigger>;
 
 /// Default capacity for the trigger queue.
-const DEFAULT_QUEUE_CAPACITY: usize = 256;
+pub(crate) const DEFAULT_QUEUE_CAPACITY: usize = 256;
 
 /// Create a new trigger queue with the default capacity.
 pub fn trigger_queue() -> (TriggerSender, TriggerReceiver) {

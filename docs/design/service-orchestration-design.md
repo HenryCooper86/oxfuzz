@@ -309,6 +309,14 @@ reconciliation with direct remove and enable/disable, then re-reads and updates
 only the current definition; it never recreates a removed schedule or restores
 a stale enabled value.
 
+Recurring catch-up and backfill persist a compact checkpoint in the schedule
+definition before admission. The service rejects malformed checkpoints, prevents
+stale cursor writes from recreating removed definitions or clearing pending
+recovery, and clears only the expected checkpoint after terminal history is
+durable. Missing SQLite or a history-write failure blocks recovered dispatch and
+retains the checkpoint. Interrupted batches require a fresh arm decision and
+provide at-least-once execution, as described in `portfolio-campaigns.md`.
+
 Schedule-file mutations acquire the per-path process mutex before the
 advisory file lock. Completion and cancellation explicitly unlock the file
 while retaining the process mutex, before waking a queued local waiter.

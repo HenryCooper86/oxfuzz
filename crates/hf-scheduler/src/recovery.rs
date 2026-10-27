@@ -1,6 +1,7 @@
 //! Recovery manager: detects and handles missed schedule fires after restart.
 
 use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
 use crate::config::MissedPolicy;
@@ -23,8 +24,8 @@ pub struct RecoveryResult {
 /// Backfills stay compact even after a long outage. The manager expands each
 /// batch lazily into its bounded trigger channel, so recovery is lossless
 /// without allocating one object or task per missed occurrence up front.
-#[derive(Debug, Clone)]
-pub(crate) struct RecoveryBatch {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryBatch {
     pub(crate) schedule_id: String,
     pub(crate) first_fire: DateTime<Utc>,
     cadence: RecoveryCadence,
@@ -34,13 +35,138 @@ pub(crate) struct RecoveryBatch {
 
 /// How to advance a compact recovery batch without assuming cron occurrences
 /// have fixed UTC spacing across month boundaries or daylight-saving changes.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum RecoveryCadence {
     Fixed(Duration),
     Cron {
         expression: String,
         timezone: String,
     },
+}
+
+/// A compact batch retained until its executions finish.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryCheckpoint {
+    pub(crate) batch: RecoveryBatch,
+    pub(crate) last_fire: DateTime<Utc>,
+}
+
+impl RecoveryCheckpoint {
+    /// Latest occurrence covered by this checkpoint.
+    #[must_use]
+    pub fn latest_fire(&self) -> DateTime<Utc> {
+        self.last_fire
+    }
+
+    pub(crate) fn matches_identity(&self, schedule: &Schedule) -> bool {
+        if self.batch.schedule_id != schedule.id {
+            return false;
+        }
+        match (
+            &schedule.trigger,
+            &self.batch.cadence,
+            self.batch.trigger_type,
+        ) {
+            (
+                TriggerConfig::Interval { interval_secs },
+                RecoveryCadence::Fixed(interval),
+                TriggerType::Interval,
+            ) => {
+                (*interval == Duration::zero() && self.batch.count == 1)
+                    || crate::interval::IntervalSchedule::new(*interval_secs).duration()
+                        == Some(*interval)
+            }
+            (
+                TriggerConfig::Cron {
+                    expression,
+                    timezone,
+                },
+                RecoveryCadence::Cron {
+                    expression: saved_expression,
+                    timezone: saved_timezone,
+                },
+                TriggerType::Cron,
+            ) => expression == saved_expression && timezone == saved_timezone,
+            (TriggerConfig::Cron { .. }, RecoveryCadence::Fixed(interval), TriggerType::Cron) => {
+                *interval == Duration::zero() && self.batch.count == 1
+            }
+            _ => false,
+        }
+    }
+
+    /// Validate a checkpoint loaded from durable schedule data.
+    #[must_use]
+    pub fn matches_schedule(&self, schedule: &Schedule) -> bool {
+        if !self.matches_identity(schedule)
+            || self.batch.count == 0
+            || self.batch.first_fire > self.last_fire
+        {
+            return false;
+        }
+        match (
+            &schedule.trigger,
+            &self.batch.cadence,
+            self.batch.trigger_type,
+        ) {
+            (
+                TriggerConfig::Interval { interval_secs },
+                RecoveryCadence::Fixed(interval),
+                TriggerType::Interval,
+            ) => {
+                if self.batch.count == 1 && *interval == Duration::zero() {
+                    return self.batch.first_fire == self.last_fire;
+                }
+                crate::interval::IntervalSchedule::new(*interval_secs).duration() == Some(*interval)
+                    && add_intervals(self.batch.first_fire, *interval, self.batch.count - 1)
+                        == Some(self.last_fire)
+            }
+            (
+                TriggerConfig::Cron {
+                    expression,
+                    timezone,
+                },
+                RecoveryCadence::Cron {
+                    expression: saved_expression,
+                    timezone: saved_timezone,
+                },
+                TriggerType::Cron,
+            ) => {
+                if expression != saved_expression || timezone != saved_timezone {
+                    return false;
+                }
+                let cron = crate::cron::CronSchedule::new(expression).with_timezone(timezone);
+                if !cron.is_valid() || !cron.matches(&self.batch.first_fire) {
+                    return false;
+                }
+                let elapsed = self
+                    .last_fire
+                    .signed_duration_since(self.batch.first_fire)
+                    .num_minutes();
+                if u64::try_from(elapsed)
+                    .map_or(true, |minutes| self.batch.count > minutes.saturating_add(1))
+                {
+                    return false;
+                }
+                let mut at = self.batch.first_fire;
+                for _ in 1..self.batch.count {
+                    let Some(next) = cron.next_fire(at) else {
+                        return false;
+                    };
+                    if next <= at || next > self.last_fire {
+                        return false;
+                    }
+                    at = next;
+                }
+                at == self.last_fire
+            }
+            (TriggerConfig::Cron { .. }, RecoveryCadence::Fixed(interval), TriggerType::Cron) => {
+                self.batch.count == 1
+                    && *interval == Duration::zero()
+                    && self.batch.first_fire == self.last_fire
+            }
+            _ => false,
+        }
+    }
 }
 
 impl RecoveryBatch {
@@ -99,7 +225,18 @@ impl RecoveryPlan {
 pub(crate) fn recover_missed(store: &ScheduleStore, now: DateTime<Utc>) -> RecoveryPlan {
     let mut plan = RecoveryPlan::default();
 
-    for schedule in store.list_enabled() {
+    for schedule in store.list() {
+        if !schedule.enabled && schedule.recovery_pending.is_none() {
+            continue;
+        }
+        if let Some(checkpoint) = &schedule.recovery_pending {
+            plan.batches.push(checkpoint.batch.clone());
+            plan.advances.push(RecoveryAdvance {
+                schedule_id: schedule.id.clone(),
+                last_fire: checkpoint.last_fire,
+            });
+            continue;
+        }
         let last_fire = match schedule.last_fire {
             Some(last) => last,
             None if matches!(schedule.trigger, TriggerConfig::Cron { .. }) => schedule.created_at,
@@ -408,6 +545,41 @@ mod tests {
             plan.advances[0].last_fire.to_rfc3339(),
             "2026-04-01T01:00:00+00:00"
         );
+    }
+
+    #[test]
+    fn cron_checkpoint_rejects_a_count_that_does_not_reach_its_cursor() {
+        let mut store = ScheduleStore::new();
+        let mut schedule = Schedule::new(
+            "monthly",
+            "monthly",
+            TriggerConfig::Cron {
+                expression: "0 9 1 * *".to_owned(),
+                timezone: "Asia/Shanghai".to_owned(),
+            },
+            "wf",
+        )
+        .with_policies(SchedulePolicies {
+            missed_policy: Some(MissedPolicy::Backfill),
+            ..SchedulePolicies::default()
+        });
+        schedule.last_fire = Some(
+            DateTime::parse_from_rfc3339("2026-01-01T01:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        );
+        store.register(schedule.clone());
+        let now = DateTime::parse_from_rfc3339("2026-04-15T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let plan = recover_missed(&store, now);
+        let mut checkpoint = RecoveryCheckpoint {
+            batch: plan.batches[0].clone(),
+            last_fire: plan.advances[0].last_fire,
+        };
+        assert!(checkpoint.matches_schedule(&schedule));
+        checkpoint.batch.count = 2;
+        assert!(!checkpoint.matches_schedule(&schedule));
     }
 
     #[test]

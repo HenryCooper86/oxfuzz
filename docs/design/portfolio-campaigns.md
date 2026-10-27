@@ -134,6 +134,26 @@ dispatching, `CatchUp` queues one occurrence, and `Backfill` lazily submits ever
 missed occurrence through the bounded channel. Backfills serialize per schedule;
 the scheduler-wide semaphore bounds active workflow execution.
 
+For catch-up and backfill, a compact recovery checkpoint is persisted in the
+schedule before submission. It records the original batch and its target cursor,
+and remains until every occurrence reaches a terminal execution state. Normal
+time evaluation is held until the recovered occurrences are admitted, then uses
+the batch's target cursor to avoid generating them again. Newly due occurrences
+follow the configured concurrency policy. Explicit triggers remain available.
+If the process stops before checkpoint removal, it
+restores the recorded batch and requires a new arm decision. This gives
+at-least-once execution: an interruption can cause already completed occurrences
+in the batch to run again. A cancelled or unrecorded occurrence cannot clear the
+checkpoint. A persistence error leaves the schedule held and is logged rather
+than discarding recovery work. Skip policies have no checkpoint and advance
+their cursors immediately.
+
+Recovery dispatch requires its pending execution record in SQLite, and clearing
+the checkpoint requires terminal execution history there. If SQLite is not
+configured or a history write fails, the checkpoint remains pending and the
+affected schedule stays held; other schedules continue. This avoids executing
+unrecorded recovered work or reporting it as durably complete without evidence.
+
 The scheduler retains every spawned workflow task. `stop` first stops trigger
 production and queue consumption, then aborts and joins active campaign tasks and
 reconciles recurring execution records from `Running` or `Pending` to `Cancelled`.

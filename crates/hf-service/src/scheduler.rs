@@ -249,7 +249,18 @@ impl ScheduleFileStore {
         self.accept_written_generation(written).await
     }
 
+    #[cfg(test)]
     async fn upsert(&self, schedule: &Schedule) -> Result<(), StateFileError> {
+        self.upsert_recovery(schedule, None, false, false).await
+    }
+
+    async fn upsert_recovery(
+        &self,
+        schedule: &Schedule,
+        completed: Option<&hf_scheduler::recovery::RecoveryCheckpoint>,
+        cursor_only: bool,
+        require_existing: bool,
+    ) -> Result<(), StateFileError> {
         let _lease = acquire_schedule_path_lease(&self.path).await?;
         let _guard = self.write_lock.lock().await;
         self.require_expected_generation().await?;
@@ -264,8 +275,67 @@ impl ScheduleFileStore {
             return Ok(());
         }
         let mut schedules = load_schedules(&self.path)?;
+        let existing = schedules.iter().find(|existing| existing.id == schedule.id);
+        if require_existing && existing.is_none() {
+            return Err(StateFileError::Conflict {
+                path: self.path.clone(),
+            });
+        }
+        let mut updated = schedule.clone();
+        if let Some(expected) = completed {
+            if existing.and_then(|schedule| schedule.recovery_pending.as_ref()) != Some(expected) {
+                return Err(StateFileError::Conflict {
+                    path: self.path.clone(),
+                });
+            }
+            if let Some(current) = existing {
+                updated = current.clone();
+                updated.recovery_pending = None;
+                updated.last_fire = match (current.last_fire, schedule.last_fire) {
+                    (Some(left), Some(right)) => Some(left.max(right)),
+                    (left, right) => left.or(right),
+                };
+            }
+        } else if let Some(checkpoint) =
+            existing.and_then(|schedule| schedule.recovery_pending.as_ref())
+        {
+            if updated
+                .recovery_pending
+                .as_ref()
+                .is_some_and(|incoming| incoming != checkpoint)
+            {
+                return Err(StateFileError::Conflict {
+                    path: self.path.clone(),
+                });
+            }
+            updated.recovery_pending = Some(checkpoint.clone());
+        } else if let (Some(existing), Some(checkpoint)) =
+            (existing, updated.recovery_pending.as_ref())
+        {
+            if existing
+                .last_fire
+                .is_some_and(|last| last >= checkpoint.latest_fire())
+            {
+                return Err(StateFileError::Conflict {
+                    path: self.path.clone(),
+                });
+            }
+        }
+        if let Some(existing) = existing {
+            updated.last_fire = match (existing.last_fire, updated.last_fire) {
+                (Some(left), Some(right)) => Some(left.max(right)),
+                (left, right) => left.or(right),
+            };
+            if cursor_only {
+                let last_fire = updated.last_fire;
+                let recovery_pending = updated.recovery_pending;
+                updated = existing.clone();
+                updated.last_fire = last_fire;
+                updated.recovery_pending = recovery_pending;
+            }
+        }
         schedules.retain(|existing| existing.id != schedule.id);
-        schedules.push(schedule.clone());
+        schedules.push(updated);
         let written = expected_written_generation(&self.path, &schedules)?;
         atomic_write_schedules(&self.path, &schedules)?;
         #[cfg(test)]
@@ -532,7 +602,9 @@ impl CampaignSchedulerPersistence {
             .await
             .map_err(|error| PersistenceError::new(error.to_string()))?;
         let Some(store) = &self.store else {
-            return Ok(());
+            return Err(PersistenceError::new(
+                "SQLite storage is required to persist schedule history",
+            ));
         };
         let data = serde_json::to_string(ex).map_err(|e| PersistenceError::new(e.to_string()))?;
         store
@@ -733,7 +805,38 @@ impl SchedulerPersistence for CampaignSchedulerPersistence {
             ));
         }
         self.schedules
-            .upsert(schedule)
+            .upsert_recovery(schedule, None, true, true)
+            .await
+            .map_err(|error| PersistenceError::new(error.to_string()))
+    }
+
+    async fn update_schedule_definition(
+        &self,
+        schedule: &Schedule,
+    ) -> Result<(), PersistenceError> {
+        if self.schedule_is_quarantined(&schedule.id).await {
+            return Err(PersistenceError::new(
+                "schedule definition writes are blocked by one-time journal corruption",
+            ));
+        }
+        self.schedules
+            .upsert_recovery(schedule, None, false, true)
+            .await
+            .map_err(|error| PersistenceError::new(error.to_string()))
+    }
+
+    async fn complete_recovery(
+        &self,
+        schedule: &Schedule,
+        checkpoint: &hf_scheduler::recovery::RecoveryCheckpoint,
+    ) -> Result<(), PersistenceError> {
+        if self.schedule_is_quarantined(&schedule.id).await {
+            return Err(PersistenceError::new(
+                "schedule cursor writes are blocked by one-time journal corruption",
+            ));
+        }
+        self.schedules
+            .upsert_recovery(schedule, Some(checkpoint), true, true)
             .await
             .map_err(|error| PersistenceError::new(error.to_string()))
     }
@@ -1989,6 +2092,9 @@ pub enum CampaignSchedulerError {
     /// Persisted execution history could not be inspected.
     #[error("scheduler history error: {0}")]
     History(String),
+    /// Recurring recovery could not be initialized durably.
+    #[error("scheduler startup failed: {0}")]
+    Startup(String),
     /// A persisted history timestamp was invalid.
     #[error("invalid persisted last-fire timestamp for schedule {schedule_id}: {value}")]
     InvalidLastFire { schedule_id: String, value: String },
@@ -2089,6 +2195,7 @@ impl CampaignSchedulerError {
             | Self::RetiredScheduleArchive { .. }
             | Self::RetiredScheduleReceipt { .. }
             | Self::History(_)
+            | Self::Startup(_)
             | Self::InvalidLastFire { .. }
             | Self::DurabilityUnavailable(_)
             | Self::OccurrenceJournal(_) => RecoveryPublicError::unavailable(),
@@ -2318,6 +2425,18 @@ impl CampaignScheduler {
             .await;
 
         let mut loaded = std::mem::take(&mut retirement.schedules);
+        for schedule in &loaded {
+            if schedule
+                .recovery_pending
+                .as_ref()
+                .is_some_and(|checkpoint| !checkpoint.matches_schedule(schedule))
+            {
+                return Err(CampaignSchedulerError::Validation(format!(
+                    "invalid recovery checkpoint for schedule {}",
+                    schedule.id
+                )));
+            }
+        }
         let mut restored = false;
         let mut receipt_cursor_restored = false;
         // Give every legacy campaign (persisted before `schedule_id` was
@@ -2466,6 +2585,7 @@ impl CampaignScheduler {
             for schedule in &mut loaded {
                 if !matches!(schedule.trigger, TriggerConfig::OneTime { .. })
                     && schedule.last_fire.is_none()
+                    && schedule.recovery_pending.is_none()
                     && !occurrences.schedule_is_quarantined(&schedule.id).await
                 {
                     if let Some(value) = fires.get(&schedule.id) {
@@ -2509,6 +2629,12 @@ impl CampaignScheduler {
         }
         drop(retirement);
         manager.start(TICK).await;
+        if manager.runtime_status() == SchedulerRuntimeStatus::Failed {
+            manager.stop().await;
+            return Err(CampaignSchedulerError::Startup(
+                "recovery state could not be initialized".to_owned(),
+            ));
+        }
         Ok(Self {
             manager,
             schedules,
@@ -6420,13 +6546,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unavailable_journal_blocks_one_time_but_keeps_recurring_scheduler_live() {
+    async fn unavailable_history_keeps_scheduler_live_and_holds_recovered_work() {
         let fixture = scheduler_fixture_without_store();
         fixture.write_due_one_time("once");
         fixture.write_interval("recurring");
         let scheduler = fixture.start().await.unwrap();
-        // Recurring recovery is held until armed; this test is about one-time
-        // occurrences being blocked while recurring ones still run.
+        // Arming attempts admission, but unavailable history must prevent dispatch.
         scheduler.arm();
 
         assert!(scheduler.manager.is_running());
@@ -6437,8 +6562,19 @@ mod tests {
                 .execution_history("recurring")
                 .await
                 .is_empty(),
-            "recurring schedule must continue while one-time durability is blocked"
+            "recurring admission remains visible while persistence is unavailable"
         );
+        let history = scheduler.manager.execution_history("recurring").await;
+        assert!(history
+            .iter()
+            .all(|execution| execution.started_at.is_none()));
+        assert!(scheduler
+            .manager
+            .get_schedule("recurring")
+            .await
+            .unwrap()
+            .recovery_pending
+            .is_some());
         assert!(matches!(
             scheduler
                 .try_create("new once", &fixture.params(), due_trigger())
@@ -8156,6 +8292,197 @@ mod tests {
 
         let loaded = load_schedules(&path).unwrap();
         assert_eq!(loaded[0].last_fire, Some(fired_at));
+    }
+
+    #[tokio::test]
+    async fn restart_rejects_recovery_checkpoint_for_another_schedule() {
+        let fixture = scheduler_fixture_without_store();
+        fixture.write_interval("recurring");
+        let scheduler = fixture.start().await.unwrap();
+        scheduler.stop().await;
+        let mut persisted: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&fixture.schedules_path).unwrap()).unwrap();
+        persisted[0]["recovery_pending"]["batch"]["schedule_id"] =
+            serde_json::json!("different-schedule");
+        std::fs::write(
+            &fixture.schedules_path,
+            serde_json::to_vec(&persisted).unwrap(),
+        )
+        .unwrap();
+
+        if let Ok(scheduler) = fixture.start().await {
+            scheduler.stop().await;
+            panic!("a mismatched recovery checkpoint must fail startup");
+        }
+    }
+
+    #[tokio::test]
+    async fn restart_rejects_recovery_checkpoint_with_inconsistent_cursor() {
+        let fixture = scheduler_fixture_without_store();
+        fixture.write_interval("recurring");
+        let scheduler = fixture.start().await.unwrap();
+        scheduler.stop().await;
+        let mut persisted: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&fixture.schedules_path).unwrap()).unwrap();
+        persisted[0]["recovery_pending"]["last_fire"] =
+            serde_json::json!((Utc::now() + chrono::Duration::days(10)).to_rfc3339());
+        std::fs::write(
+            &fixture.schedules_path,
+            serde_json::to_vec(&persisted).unwrap(),
+        )
+        .unwrap();
+        if let Ok(scheduler) = fixture.start().await {
+            scheduler.stop().await;
+            panic!("an inconsistent recovery cursor must fail startup");
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_schedule_update_does_not_erase_pending_recovery() {
+        let fixture = scheduler_fixture_without_store();
+        fixture.write_interval("recurring");
+        let stale = load_schedules(&fixture.schedules_path).unwrap().remove(0);
+        let scheduler = fixture.start().await.unwrap();
+        scheduler.occurrences.update_schedule(&stale).await.unwrap();
+        let stored = load_schedules(&fixture.schedules_path).unwrap();
+        scheduler.stop().await;
+        assert!(
+            stored[0].recovery_pending.is_some(),
+            "stale update erased recovery"
+        );
+    }
+
+    #[tokio::test]
+    async fn conflicting_pending_checkpoint_is_rejected() {
+        let first = scheduler_fixture_without_store();
+        let second = scheduler_fixture_without_store();
+        first.write_interval("recurring");
+        second.write_interval("recurring");
+        let left = first.start().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let right = second.start().await.unwrap();
+        let other = right.manager.get_schedule("recurring").await.unwrap();
+        let result = left.occurrences.update_schedule(&other).await;
+        left.stop().await;
+        right.stop().await;
+        assert!(
+            result.is_err(),
+            "a different checkpoint must not report a successful write"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_schedule_update_does_not_restore_completed_recovery() {
+        let fixture = scheduler_fixture_without_store();
+        fixture.write_interval("recurring");
+        let scheduler = fixture.start().await.unwrap();
+        let stale = load_schedules(&fixture.schedules_path).unwrap().remove(0);
+        let mut completed = stale.clone();
+        let checkpoint = completed.recovery_pending.take().unwrap();
+        completed.last_fire = Some(Utc::now());
+        scheduler
+            .occurrences
+            .complete_recovery(&completed, &checkpoint)
+            .await
+            .unwrap();
+        let stale_result = scheduler.occurrences.update_schedule(&stale).await;
+        let stored = load_schedules(&fixture.schedules_path).unwrap();
+        scheduler.stop().await;
+        assert!(stale_result.is_err());
+        assert!(stored[0].recovery_pending.is_none());
+    }
+
+    #[tokio::test]
+    async fn stale_schedule_update_does_not_rewind_completed_cursor() {
+        let fixture = scheduler_fixture_without_store();
+        fixture.write_interval("recurring");
+        let stale = load_schedules(&fixture.schedules_path).unwrap().remove(0);
+        let scheduler = fixture.start().await.unwrap();
+        let mut completed = load_schedules(&fixture.schedules_path).unwrap().remove(0);
+        let checkpoint = completed.recovery_pending.take().unwrap();
+        let completed_at = Utc::now();
+        completed.last_fire = Some(completed_at);
+        scheduler
+            .occurrences
+            .complete_recovery(&completed, &checkpoint)
+            .await
+            .unwrap();
+        scheduler.occurrences.update_schedule(&stale).await.unwrap();
+        let stored = load_schedules(&fixture.schedules_path).unwrap();
+        scheduler.stop().await;
+        assert_eq!(stored[0].last_fire, Some(completed_at));
+    }
+
+    #[tokio::test]
+    async fn stale_cursor_update_does_not_recreate_removed_schedule() {
+        let fixture = scheduler_fixture_without_store();
+        fixture.write_interval("recurring");
+        let scheduler = fixture.start().await.unwrap();
+        let stale = scheduler.manager.get_schedule("recurring").await.unwrap();
+        assert!(scheduler.try_remove("recurring").await.unwrap());
+        assert!(scheduler.occurrences.update_schedule(&stale).await.is_err());
+        let stored = load_schedules(&fixture.schedules_path).unwrap();
+        scheduler.stop().await;
+        assert!(
+            stored.is_empty(),
+            "stale cursor write resurrected removed schedule"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_definition_update_does_not_recreate_removed_schedule() {
+        let fixture = scheduler_fixture_without_store();
+        fixture.write_interval("recurring");
+        let scheduler = fixture.start().await.unwrap();
+        let stale = scheduler.manager.get_schedule("recurring").await.unwrap();
+        assert!(scheduler.try_remove("recurring").await.unwrap());
+        let result = scheduler
+            .occurrences
+            .update_schedule_definition(&stale)
+            .await;
+        let stored = load_schedules(&fixture.schedules_path).unwrap();
+        scheduler.stop().await;
+        assert!(result.is_err());
+        assert!(stored.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unavailable_history_does_not_report_terminal_execution_as_persisted() {
+        let fixture = scheduler_fixture_without_store();
+        fixture.write_interval("recurring");
+        let scheduler = fixture.start().await.unwrap();
+        let execution =
+            schedule_execution("exec", "recurring", Utc::now(), ExecutionStatus::Completed);
+        let result = scheduler.occurrences.update_execution(&execution).await;
+        let pending = schedule_execution(
+            "pending-exec",
+            "recurring",
+            Utc::now(),
+            ExecutionStatus::Pending,
+        );
+        let pending_result = scheduler.occurrences.record_execution(&pending).await;
+        scheduler.stop().await;
+        assert!(
+            result.is_err(),
+            "missing SQLite cannot persist terminal history"
+        );
+        assert!(
+            pending_result.is_err(),
+            "missing SQLite cannot persist recovery admission"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_cursor_update_preserves_a_paused_schedule() {
+        let fixture = scheduler_fixture_without_store();
+        fixture.write_interval("recurring");
+        let scheduler = fixture.start().await.unwrap();
+        let stale = scheduler.manager.get_schedule("recurring").await.unwrap();
+        assert!(scheduler.try_set_enabled("recurring", false).await.unwrap());
+        scheduler.occurrences.update_schedule(&stale).await.unwrap();
+        let stored = load_schedules(&fixture.schedules_path).unwrap();
+        scheduler.stop().await;
+        assert!(!stored[0].enabled, "stale cursor write re-enabled schedule");
     }
 
     #[tokio::test]
