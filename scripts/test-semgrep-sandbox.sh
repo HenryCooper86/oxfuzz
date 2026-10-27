@@ -11,7 +11,6 @@ if [[ "$repository_root" != "$git_repository_root" ]]; then
 fi
 cd "$repository_root"
 
-readonly REPOSITORY_ROOT="$repository_root"
 readonly IMAGE="${OXFUZZ_SANDBOX_IMAGE:-oxfuzz/fuzz-sandbox:0.2.1}"
 readonly SEMGREP_VERSION="1.169.0"
 readonly RULES_COMMIT="4d66ecf30bfb1809a984085f2c86a8c3915bfc71"
@@ -112,7 +111,7 @@ docker_hardening=(
     --memory 4096m
     --cpus 2
     --ulimit "fsize=${OUTPUT_LIMIT_BYTES}:${OUTPUT_LIMIT_BYTES}"
-    --tmpfs /tmp:rw,nosuid,nodev,size=64m
+    --tmpfs "/tmp:rw,nosuid,nodev,size=64m"
 )
 
 echo "Verifying Semgrep provenance in ${IMAGE} ..."

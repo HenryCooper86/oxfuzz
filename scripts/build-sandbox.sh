@@ -74,52 +74,9 @@ docker run "${run_args[@]}" \
         # p/semgrep-rule-lints. This network-disabled fixed-wrapper scan loads
         # and executes the complete bundled local configuration instead.
         oxfuzz-semgrep-scan
-        python3 - <<'"'"'PY'"'"'
-import json
-import pathlib
-
-report = json.loads(pathlib.Path("/work/output/semgrep.json").read_text())
-if report.get("errors") != []:
-    raise SystemExit(f"unexpected Semgrep errors: {report.get('errors')!r}")
-
-paths = report.get("paths")
-if not isinstance(paths, dict):
-    raise SystemExit(f"invalid Semgrep paths object: {paths!r}")
-if paths.get("skipped", []) != []:
-    raise SystemExit(f"unexpected skipped Semgrep paths: {paths.get('skipped')!r}")
-
-scanned = paths.get("scanned")
-if not isinstance(scanned, list) or not all(isinstance(path, str) for path in scanned):
-    raise SystemExit(f"invalid scanned Semgrep paths: {scanned!r}")
-normalized_scanned = set()
-for path in scanned:
-    normalized = pathlib.PurePosixPath(path)
-    if normalized.is_absolute() or ".." in normalized.parts:
-        raise SystemExit(f"unsafe scanned Semgrep path: {path!r}")
-    normalized_scanned.add(normalized.as_posix().removeprefix("./"))
-expected_scanned = {"clean.c", "vulnerable.c"}
-if normalized_scanned != expected_scanned:
-    raise SystemExit(f"unexpected scanned Semgrep paths: {sorted(normalized_scanned)!r}")
-
-findings = [
-    (finding.get("check_id"), finding.get("path"))
-    for finding in report["results"]
-    if finding.get("check_id") == "raptor-insecure-api-gets"
-]
-expected = [("raptor-insecure-api-gets", "vulnerable.c")]
-if findings != expected:
-    raise SystemExit(f"unexpected raptor-insecure-api-gets findings: {findings!r}")
-print("Semgrep version verified: 1.169.0")
-print("Rules digest verified:", pathlib.Path(
-    "/opt/oxfuzz/semgrep-rules/RULES_SHA256"
-).read_text().strip())
-print("Complete local rules configuration loaded and executed")
-print("Semgrep JSON errors and skipped paths verified: none")
-print("Scanned fixtures verified: clean.c, vulnerable.c")
-print("Fixture finding verified: raptor-insecure-api-gets vulnerable.c")
-print("Clean fixture verified: no raptor-insecure-api-gets findings")
-PY
     '
+
+python3 scripts/validate-semgrep-smoke.py "$verification_output/semgrep.json" 67108864
 
 echo "Verified offline read-only scan with read-only source and writable output"
 docker image inspect --format 'Verified {{.Id}} ({{.Architecture}})' "$IMAGE"

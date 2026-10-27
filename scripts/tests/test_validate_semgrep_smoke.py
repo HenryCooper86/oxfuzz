@@ -15,6 +15,47 @@ OUTPUT_LIMIT_BYTES = 64 * 1024 * 1024
 
 
 class SemgrepSmokeReportTests(unittest.TestCase):
+    def run_sandbox_build_with_report(self, report: dict) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            docker = root / "docker"
+            docker.write_text("""#!/usr/bin/env python3
+import json, os, pathlib, subprocess, sys
+for argument in sys.argv:
+    if argument.startswith('type=bind,src=') and argument.endswith(',dst=/work/output'):
+        output = pathlib.Path(argument.removeprefix('type=bind,src=').removesuffix(',dst=/work/output'))
+        (output / 'semgrep.json').write_text(os.environ['OXFUZZ_FIXTURE_REPORT'])
+        payload = sys.argv[-1]
+        marker = "python3 - <<'PY'\\n"
+        if marker in payload:
+            script = payload.split(marker, 1)[1].split('\\nPY', 1)[0]
+            script = script.replace('/work/output/semgrep.json', str(output / 'semgrep.json'))
+            digest = output / 'digest'
+            digest.write_text('fixture-digest')
+            script = script.replace('/opt/oxfuzz/semgrep-rules/RULES_SHA256', str(digest))
+            sys.exit(subprocess.run([sys.executable, '-c', script], check=False).returncode)
+""", encoding="utf-8")
+            docker.chmod(0o700)
+            environment = dict(os.environ)
+            environment.update({"PATH": f"{root}{os.pathsep}{environment['PATH']}",
+                                "OXFUZZ_FIXTURE_REPORT": json.dumps(report)})
+            return subprocess.run(["bash", str(REPOSITORY_ROOT / "scripts/build-sandbox.sh")],
+                                  env=environment, capture_output=True, text=True, timeout=10, check=False)
+
+    def test_sandbox_build_rejects_any_finding_in_the_clean_fixture(self) -> None:
+        report = {"errors": [], "paths": {"scanned": ["clean.c", "vulnerable.c"]},
+                  "results": [{"check_id": "raptor-insecure-api-gets", "path": "vulnerable.c"},
+                              {"check_id": "another-rule", "path": "clean.c"}]}
+        result = self.run_sandbox_build_with_report(report)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("clean.c unexpectedly produced result", result.stderr)
+
+    def test_sandbox_build_reports_semgrep_errors_without_shell_quote_corruption(self) -> None:
+        result = self.run_sandbox_build_with_report({"errors": ["fixture failure"]})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Semgrep errors", result.stderr)
+        self.assertNotIn("NameError", result.stderr)
+
     def run_validator(
         self, report_path: pathlib.Path, timeout: float = 1.0
     ) -> subprocess.CompletedProcess[str]:

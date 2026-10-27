@@ -64,6 +64,11 @@ The Semgrep Community Edition executable is a separate process licensed under
 LGPL-2.1. The `0xdea/semgrep-rules` content is MIT-licensed. Distribution
 artifacts retain both notices and upstream source/revision references.
 
+Sandbox build verification and the release smoke use the same bounded,
+symlink-safe host JSON validator. Both reject every finding in the clean fixture,
+not just the vulnerable fixture's expected rule. Tool invocation and provenance
+checks remain inside the network-disabled sandbox.
+
 ## 4. Architectural Ownership
 
 ### 4.1 `hf-core`
