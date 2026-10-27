@@ -28,6 +28,49 @@ fn storage_err(msg: impl Into<String>) -> TraceStoreError {
     }
 }
 
+fn required_column<T>(value: Option<T>, column: &str) -> Result<T, TraceStoreError> {
+    value.ok_or_else(|| storage_err(format!("decode {column}: unexpected NULL")))
+}
+
+fn decode_json<T: serde::de::DeserializeOwned>(
+    value: Option<&str>,
+    column: &str,
+) -> Result<T, TraceStoreError> {
+    serde_json::from_str(required_column(value, column)?)
+        .map_err(|error| storage_err(format!("decode {column}: {error}")))
+}
+
+fn decode_optional_uuid(
+    value: Option<&str>,
+    column: &str,
+) -> Result<Option<Uuid>, TraceStoreError> {
+    value
+        .map(Uuid::parse_str)
+        .transpose()
+        .map_err(|error| storage_err(format!("decode {column}: {error}")))
+}
+
+fn decode_counter<T: TryFrom<i64>>(value: Option<i64>, column: &str) -> Result<T, TraceStoreError> {
+    T::try_from(required_column(value, column)?)
+        .map_err(|_| storage_err(format!("decode {column}: counter out of range")))
+}
+
+fn encode_counter(value: u64, column: &str) -> Result<i64, TraceStoreError> {
+    i64::try_from(value).map_err(|_| {
+        storage_err(format!(
+            "encode {column}: counter exceeds SQLite integer range"
+        ))
+    })
+}
+
+fn finite_number(value: Option<f64>, column: &str) -> Result<f64, TraceStoreError> {
+    let value = required_column(value, column)?;
+    if !value.is_finite() {
+        return Err(storage_err(format!("{column}: non-finite number")));
+    }
+    Ok(value)
+}
+
 // ---------------------------------------------------------------------------
 // Enum <-> &str helpers
 // ---------------------------------------------------------------------------
@@ -41,13 +84,14 @@ fn trace_status_to_str(s: TraceStatus) -> &'static str {
     }
 }
 
-fn str_to_trace_status(s: &str) -> TraceStatus {
-    match s {
+fn str_to_trace_status(s: &str) -> Result<TraceStatus, TraceStoreError> {
+    Ok(match s {
+        "active" => TraceStatus::Active,
         "completed" => TraceStatus::Completed,
         "failed" => TraceStatus::Failed,
         "cancelled" => TraceStatus::Cancelled,
-        _ => TraceStatus::Active,
-    }
+        _ => return Err(storage_err("decode diag_traces.status: unknown status")),
+    })
 }
 
 fn obs_type_to_str(t: ObservationType) -> &'static str {
@@ -69,8 +113,9 @@ fn obs_type_to_str(t: ObservationType) -> &'static str {
     }
 }
 
-fn str_to_obs_type(s: &str) -> ObservationType {
-    match s {
+fn str_to_obs_type(s: &str) -> Result<ObservationType, TraceStoreError> {
+    Ok(match s {
+        "generation" => ObservationType::Generation,
         "tool_call" => ObservationType::ToolCall,
         "span" => ObservationType::Span,
         "user_input" => ObservationType::UserInput,
@@ -84,8 +129,12 @@ fn str_to_obs_type(s: &str) -> ObservationType {
         "guardrail" => ObservationType::Guardrail,
         "hook" => ObservationType::Hook,
         "cache" => ObservationType::Cache,
-        _ => ObservationType::Generation,
-    }
+        _ => {
+            return Err(storage_err(
+                "decode diag_observations.obs_type: unknown type",
+            ))
+        }
+    })
 }
 
 fn obs_status_to_str(s: ObservationStatus) -> &'static str {
@@ -96,12 +145,17 @@ fn obs_status_to_str(s: ObservationStatus) -> &'static str {
     }
 }
 
-fn str_to_obs_status(s: &str) -> ObservationStatus {
-    match s {
+fn str_to_obs_status(s: &str) -> Result<ObservationStatus, TraceStoreError> {
+    Ok(match s {
+        "running" => ObservationStatus::Running,
         "completed" => ObservationStatus::Completed,
         "failed" => ObservationStatus::Failed,
-        _ => ObservationStatus::Running,
-    }
+        _ => {
+            return Err(storage_err(
+                "decode diag_observations.status: unknown status",
+            ))
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -160,21 +214,17 @@ impl TraceRow {
                     self.completed_at
                 ))
             })?;
-        let metadata: serde_json::Value = self
-            .metadata
-            .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or(serde_json::Value::Null);
-        let status = str_to_trace_status(self.status.as_deref().unwrap_or("active"));
-        let tags: Vec<String> = self
-            .tags
-            .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
+        let metadata = decode_json(self.metadata.as_deref(), "diag_traces.metadata")?;
+        let status = str_to_trace_status(required_column(
+            self.status.as_deref(),
+            "diag_traces.status",
+        )?)?;
+        let tags = decode_json(self.tags.as_deref(), "diag_traces.tags")?;
         let replay_context: Option<serde_json::Value> = self
             .replay_context
             .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok());
+            .map(|value| decode_json(Some(value), "diag_traces.replay_context"))
+            .transpose()?;
         Ok(Trace {
             id,
             session_id,
@@ -184,15 +234,24 @@ impl TraceRow {
             status,
             started_at,
             completed_at,
-            total_input_tokens: u64::try_from(self.total_input_tokens.unwrap_or(0)).unwrap_or(0),
-            total_output_tokens: u64::try_from(self.total_output_tokens.unwrap_or(0)).unwrap_or(0),
-            total_cost_usd: self.total_cost_usd.unwrap_or(0.0),
+            total_input_tokens: decode_counter(
+                self.total_input_tokens,
+                "diag_traces.total_input_tokens",
+            )?,
+            total_output_tokens: decode_counter(
+                self.total_output_tokens,
+                "diag_traces.total_output_tokens",
+            )?,
+            total_cost_usd: finite_number(self.total_cost_usd, "diag_traces.total_cost_usd")?,
             user_input: self.user_input,
             total_duration_ms: completed_at.map(|end| {
                 u64::try_from((end - started_at).num_milliseconds().max(0)).unwrap_or(0)
             }),
-            llm_duration_ms: u64::try_from(self.llm_duration_ms.unwrap_or(0)).unwrap_or(0),
-            tool_duration_ms: u64::try_from(self.tool_duration_ms.unwrap_or(0)).unwrap_or(0),
+            llm_duration_ms: decode_counter(self.llm_duration_ms, "diag_traces.llm_duration_ms")?,
+            tool_duration_ms: decode_counter(
+                self.tool_duration_ms,
+                "diag_traces.tool_duration_ms",
+            )?,
             replay_context,
         })
     }
@@ -255,52 +314,41 @@ impl ObsRow {
                     self.completed_at
                 ))
             })?;
-        let input: serde_json::Value = self
-            .input
-            .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or(serde_json::Value::Null);
-        let output: serde_json::Value = self
-            .output
-            .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or(serde_json::Value::Null);
-        let metadata: serde_json::Value = self
-            .metadata
-            .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or(serde_json::Value::Null);
-        let path: Vec<Uuid> = self
-            .path
-            .as_deref()
-            .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
-            .map(|ids| ids.iter().filter_map(|s| Uuid::parse_str(s).ok()).collect())
-            .unwrap_or_default();
+        let input = decode_json(self.input.as_deref(), "diag_observations.input")?;
+        let output = decode_json(self.output.as_deref(), "diag_observations.output")?;
+        let metadata = decode_json(self.metadata.as_deref(), "diag_observations.metadata")?;
+        let path = decode_json(self.path.as_deref(), "diag_observations.path")?;
         Ok(Observation {
             id,
             trace_id,
-            parent_id: self
-                .parent_id
-                .as_deref()
-                .and_then(|s| Uuid::parse_str(s).ok()),
-            session_id: self
-                .session_id
-                .as_deref()
-                .and_then(|s| Uuid::parse_str(s).ok()),
-            obs_type: str_to_obs_type(self.obs_type.as_deref().unwrap_or("generation")),
+            parent_id: decode_optional_uuid(
+                self.parent_id.as_deref(),
+                "diag_observations.parent_id",
+            )?,
+            session_id: decode_optional_uuid(
+                self.session_id.as_deref(),
+                "diag_observations.session_id",
+            )?,
+            obs_type: str_to_obs_type(required_column(
+                self.obs_type.as_deref(),
+                "diag_observations.obs_type",
+            )?)?,
             name: self.name,
             input,
             output,
             model: self.model,
-            input_tokens: u64::try_from(self.input_tokens.unwrap_or(0)).unwrap_or(0),
-            output_tokens: u64::try_from(self.output_tokens.unwrap_or(0)).unwrap_or(0),
-            cost_usd: self.cost_usd.unwrap_or(0.0),
-            status: str_to_obs_status(self.status.as_deref().unwrap_or("running")),
+            input_tokens: decode_counter(self.input_tokens, "diag_observations.input_tokens")?,
+            output_tokens: decode_counter(self.output_tokens, "diag_observations.output_tokens")?,
+            cost_usd: finite_number(self.cost_usd, "diag_observations.cost_usd")?,
+            status: str_to_obs_status(required_column(
+                self.status.as_deref(),
+                "diag_observations.status",
+            )?)?,
             started_at,
             completed_at,
             metadata,
-            sequence: u32::try_from(self.sequence.unwrap_or(0)).unwrap_or(0),
-            depth: u32::try_from(self.depth.unwrap_or(0)).unwrap_or(0),
+            sequence: decode_counter(self.sequence, "diag_observations.sequence")?,
+            depth: decode_counter(self.depth, "diag_observations.depth")?,
             path,
             error_message: self.error_message,
         })
@@ -334,28 +382,41 @@ impl ScoreRow {
                 self.trace_id
             ))
         })?;
-        let observation_id = self
-            .observation_id
-            .as_deref()
-            .and_then(|s| Uuid::parse_str(s).ok());
+        let observation_id =
+            decode_optional_uuid(self.observation_id.as_deref(), "diag_scores.observation_id")?;
         let created_at: DateTime<Utc> = self.created_at.parse().map_err(|e| {
             storage_err(format!(
                 "decode diag_scores.created_at {:?}: {e}",
                 self.created_at
             ))
         })?;
-        let data_type = self.data_type.as_deref().unwrap_or("numeric");
+        let data_type = required_column(self.data_type.as_deref(), "diag_scores.data_type")?;
         let value = match data_type {
-            "boolean" => ScoreValue::Boolean(self.value.unwrap_or(0.0) != 0.0),
-            "categorical" => ScoreValue::Categorical(self.string_value.unwrap_or_default()),
-            _ => ScoreValue::Numeric(self.value.unwrap_or(0.0)),
+            "boolean" => {
+                let value = finite_number(self.value, "diag_scores.value")?;
+                let boolean = if value == 0.0 {
+                    false
+                } else if value.to_bits() == 1.0_f64.to_bits() {
+                    true
+                } else {
+                    return Err(storage_err("decode diag_scores.value: invalid boolean"));
+                };
+                ScoreValue::Boolean(boolean)
+            }
+            "categorical" => ScoreValue::Categorical(required_column(
+                self.string_value,
+                "diag_scores.string_value",
+            )?),
+            "numeric" => ScoreValue::Numeric(finite_number(self.value, "diag_scores.value")?),
+            _ => return Err(storage_err("decode diag_scores.data_type: unknown type")),
         };
         let source = match self.source.as_deref() {
             Some("llm") => ScoreSource::Llm,
             Some("human") => ScoreSource::Human,
             Some("user_feedback") => ScoreSource::UserFeedback,
             Some("external") => ScoreSource::External,
-            _ => ScoreSource::System,
+            Some("system") => ScoreSource::System,
+            _ => return Err(storage_err("decode diag_scores.source: unknown source")),
         };
         Ok(Score {
             id,
@@ -398,10 +459,12 @@ impl TraceStore for SqliteTraceStore {
         let metadata = serde_json::to_string(&trace.metadata).unwrap_or_else(|_| "null".into());
         let started_at = trace.started_at.to_rfc3339();
         let completed_at = trace.completed_at.map(|t| t.to_rfc3339());
-        let input_toks = i64::try_from(trace.total_input_tokens).unwrap_or(i64::MAX);
-        let output_toks = i64::try_from(trace.total_output_tokens).unwrap_or(i64::MAX);
-        let llm_ms = i64::try_from(trace.llm_duration_ms).unwrap_or(i64::MAX);
-        let tool_ms = i64::try_from(trace.tool_duration_ms).unwrap_or(i64::MAX);
+        let input_toks =
+            encode_counter(trace.total_input_tokens, "diag_traces.total_input_tokens")?;
+        let output_toks =
+            encode_counter(trace.total_output_tokens, "diag_traces.total_output_tokens")?;
+        let llm_ms = encode_counter(trace.llm_duration_ms, "diag_traces.llm_duration_ms")?;
+        let tool_ms = encode_counter(trace.tool_duration_ms, "diag_traces.tool_duration_ms")?;
 
         let tags = serde_json::to_string(&trace.tags).unwrap_or_else(|_| "[]".into());
         let replay_context = trace
@@ -427,7 +490,7 @@ impl TraceStore for SqliteTraceStore {
         .bind(&completed_at)
         .bind(input_toks)
         .bind(output_toks)
-        .bind(trace.total_cost_usd)
+        .bind(finite_number(Some(trace.total_cost_usd), "diag_traces.total_cost_usd")?)
         .bind(llm_ms)
         .bind(tool_ms)
         .bind(&tags)
@@ -462,10 +525,12 @@ impl TraceStore for SqliteTraceStore {
         let status = trace_status_to_str(trace.status);
         let metadata = serde_json::to_string(&trace.metadata).unwrap_or_else(|_| "null".into());
         let completed_at = trace.completed_at.map(|t| t.to_rfc3339());
-        let input_toks = i64::try_from(trace.total_input_tokens).unwrap_or(i64::MAX);
-        let output_toks = i64::try_from(trace.total_output_tokens).unwrap_or(i64::MAX);
-        let llm_ms = i64::try_from(trace.llm_duration_ms).unwrap_or(i64::MAX);
-        let tool_ms = i64::try_from(trace.tool_duration_ms).unwrap_or(i64::MAX);
+        let input_toks =
+            encode_counter(trace.total_input_tokens, "diag_traces.total_input_tokens")?;
+        let output_toks =
+            encode_counter(trace.total_output_tokens, "diag_traces.total_output_tokens")?;
+        let llm_ms = encode_counter(trace.llm_duration_ms, "diag_traces.llm_duration_ms")?;
+        let tool_ms = encode_counter(trace.tool_duration_ms, "diag_traces.tool_duration_ms")?;
 
         let tags = serde_json::to_string(&trace.tags).unwrap_or_else(|_| "[]".into());
         let replay_context = trace
@@ -485,7 +550,10 @@ impl TraceStore for SqliteTraceStore {
         .bind(&completed_at)
         .bind(input_toks)
         .bind(output_toks)
-        .bind(trace.total_cost_usd)
+        .bind(finite_number(
+            Some(trace.total_cost_usd),
+            "diag_traces.total_cost_usd",
+        )?)
         .bind(llm_ms)
         .bind(tool_ms)
         .bind(&tags)
@@ -543,8 +611,8 @@ impl TraceStore for SqliteTraceStore {
         let metadata = serde_json::to_string(&obs.metadata).unwrap_or_else(|_| "null".into());
         let started_at = obs.started_at.to_rfc3339();
         let completed_at = obs.completed_at.map(|t| t.to_rfc3339());
-        let input_toks = i64::try_from(obs.input_tokens).unwrap_or(i64::MAX);
-        let output_toks = i64::try_from(obs.output_tokens).unwrap_or(i64::MAX);
+        let input_toks = encode_counter(obs.input_tokens, "diag_observations.input_tokens")?;
+        let output_toks = encode_counter(obs.output_tokens, "diag_observations.output_tokens")?;
         let seq = i64::from(obs.sequence);
 
         let depth = i64::from(obs.depth);
@@ -570,7 +638,7 @@ impl TraceStore for SqliteTraceStore {
         .bind(&obs.model)
         .bind(input_toks)
         .bind(output_toks)
-        .bind(obs.cost_usd)
+        .bind(finite_number(Some(obs.cost_usd), "diag_observations.cost_usd")?)
         .bind(&input)
         .bind(&output)
         .bind(&metadata)
@@ -592,8 +660,8 @@ impl TraceStore for SqliteTraceStore {
         let output = serde_json::to_string(&obs.output).unwrap_or_else(|_| "null".into());
         let metadata = serde_json::to_string(&obs.metadata).unwrap_or_else(|_| "null".into());
         let completed_at = obs.completed_at.map(|t| t.to_rfc3339());
-        let input_toks = i64::try_from(obs.input_tokens).unwrap_or(i64::MAX);
-        let output_toks = i64::try_from(obs.output_tokens).unwrap_or(i64::MAX);
+        let input_toks = encode_counter(obs.input_tokens, "diag_observations.input_tokens")?;
+        let output_toks = encode_counter(obs.output_tokens, "diag_observations.output_tokens")?;
 
         let rows = sqlx::query(
             "UPDATE diag_observations SET \
@@ -608,7 +676,10 @@ impl TraceStore for SqliteTraceStore {
         .bind(&completed_at)
         .bind(input_toks)
         .bind(output_toks)
-        .bind(obs.cost_usd)
+        .bind(finite_number(
+            Some(obs.cost_usd),
+            "diag_observations.cost_usd",
+        )?)
         .bind(&obs.error_message)
         .bind(&obs.model)
         .bind(&id)
@@ -647,7 +718,11 @@ impl TraceStore for SqliteTraceStore {
 
         // Decompose ScoreValue enum into flat DB columns.
         let (value_f64, data_type, string_value): (f64, &str, Option<String>) = match &score.value {
-            ScoreValue::Numeric(v) => (*v, "numeric", None),
+            ScoreValue::Numeric(v) => (
+                finite_number(Some(*v), "diag_scores.value")?,
+                "numeric",
+                None,
+            ),
             ScoreValue::Boolean(b) => (if *b { 1.0 } else { 0.0 }, "boolean", None),
             ScoreValue::Categorical(s) => (0.0, "categorical", Some(s.clone())),
         };
@@ -853,6 +928,263 @@ mod tests {
             .expect("connect");
         let traces = SqliteTraceStore::new(store.pool().clone());
         (store, traces, dir)
+    }
+
+    #[tokio::test]
+    async fn corrupt_trace_payloads_fail_instead_of_becoming_empty_defaults() {
+        let (store, traces, _dir) = test_store().await;
+        let trace = Trace::new(Uuid::new_v4(), "durable trace");
+        traces.insert_trace(trace.clone()).await.unwrap();
+        for (column, value) in [
+            ("metadata", "{"),
+            ("tags", "[42]"),
+            ("replay_context", "{"),
+            ("status", "unrecognized"),
+        ] {
+            let original: Option<String> =
+                sqlx::query_scalar(&format!("SELECT {column} FROM diag_traces WHERE id = ?"))
+                    .bind(trace.id.to_string())
+                    .fetch_one(store.pool())
+                    .await
+                    .unwrap();
+            sqlx::query(&format!("UPDATE diag_traces SET {column} = ? WHERE id = ?"))
+                .bind(value)
+                .bind(trace.id.to_string())
+                .execute(store.pool())
+                .await
+                .unwrap();
+            let result = traces.get_trace(trace.id).await;
+            assert!(result.is_err(), "{column}: {result:?}");
+            sqlx::query(&format!("UPDATE diag_traces SET {column} = ? WHERE id = ?"))
+                .bind(original)
+                .bind(trace.id.to_string())
+                .execute(store.pool())
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn corrupt_observation_payloads_and_links_fail_the_read() {
+        let (store, traces, _dir) = test_store().await;
+        let trace = Trace::new(Uuid::new_v4(), "durable trace");
+        traces.insert_trace(trace.clone()).await.unwrap();
+        let observation = Observation::new(trace.id, ObservationType::Generation, "model response");
+        traces
+            .insert_observation(observation.clone())
+            .await
+            .unwrap();
+        for (column, value) in [
+            ("input", "{"),
+            ("output", "{"),
+            ("metadata", "{"),
+            ("path", "[\"not-a-uuid\"]"),
+            ("parent_id", "not-a-uuid"),
+            ("session_id", "not-a-uuid"),
+            ("status", "unrecognized"),
+            ("obs_type", "unrecognized"),
+        ] {
+            let original: Option<String> = sqlx::query_scalar(&format!(
+                "SELECT {column} FROM diag_observations WHERE id = ?"
+            ))
+            .bind(observation.id.to_string())
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+            sqlx::query(&format!(
+                "UPDATE diag_observations SET {column} = ? WHERE id = ?"
+            ))
+            .bind(value)
+            .bind(observation.id.to_string())
+            .execute(store.pool())
+            .await
+            .unwrap();
+            let result = traces.get_observations(trace.id).await;
+            assert!(result.is_err(), "{column}: {result:?}");
+            sqlx::query(&format!(
+                "UPDATE diag_observations SET {column} = ? WHERE id = ?"
+            ))
+            .bind(original)
+            .bind(observation.id.to_string())
+            .execute(store.pool())
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn corrupt_rating_discriminants_fail_instead_of_changing_meaning() {
+        let (store, traces, _dir) = test_store().await;
+        let trace = Trace::new(Uuid::new_v4(), "durable trace");
+        traces.insert_trace(trace.clone()).await.unwrap();
+        let rating = Score::numeric(trace.id, "quality", 1.0, ScoreSource::Human);
+        traces.insert_score(rating.clone()).await.unwrap();
+        for (column, value) in [("data_type", "unrecognized"), ("source", "unrecognized")] {
+            let original: String =
+                sqlx::query_scalar(&format!("SELECT {column} FROM diag_scores WHERE id = ?"))
+                    .bind(rating.id.to_string())
+                    .fetch_one(store.pool())
+                    .await
+                    .unwrap();
+            sqlx::query(&format!("UPDATE diag_scores SET {column} = ? WHERE id = ?"))
+                .bind(value)
+                .bind(rating.id.to_string())
+                .execute(store.pool())
+                .await
+                .unwrap();
+            let result = traces.get_scores(trace.id).await;
+            assert!(result.is_err(), "{column}: {result:?}");
+            sqlx::query(&format!("UPDATE diag_scores SET {column} = ? WHERE id = ?"))
+                .bind(original)
+                .bind(rating.id.to_string())
+                .execute(store.pool())
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_numeric_evidence_is_not_silently_reset() {
+        let (store, traces, _dir) = test_store().await;
+        let trace = Trace::new(Uuid::new_v4(), "numeric evidence");
+        traces.insert_trace(trace.clone()).await.unwrap();
+        let observation = Observation::new(trace.id, ObservationType::Generation, "generation");
+        traces
+            .insert_observation(observation.clone())
+            .await
+            .unwrap();
+        for (table, column, value, id) in [
+            ("diag_traces", "total_input_tokens", -1, trace.id),
+            ("diag_traces", "total_output_tokens", -1, trace.id),
+            ("diag_traces", "llm_duration_ms", -1, trace.id),
+            ("diag_traces", "tool_duration_ms", -1, trace.id),
+            ("diag_observations", "input_tokens", -1, observation.id),
+            ("diag_observations", "output_tokens", -1, observation.id),
+            ("diag_observations", "sequence", -1, observation.id),
+            (
+                "diag_observations",
+                "depth",
+                i64::from(u32::MAX) + 1,
+                observation.id,
+            ),
+        ] {
+            sqlx::query(&format!("UPDATE {table} SET {column} = ? WHERE id = ?"))
+                .bind(value)
+                .bind(id.to_string())
+                .execute(store.pool())
+                .await
+                .unwrap();
+            let failed = if table == "diag_traces" {
+                traces.get_trace(trace.id).await.is_err()
+            } else {
+                traces.get_observations(trace.id).await.is_err()
+            };
+            assert!(failed, "{table}.{column} must retain its decoding error");
+            sqlx::query(&format!("UPDATE {table} SET {column} = 0 WHERE id = ?"))
+                .bind(id.to_string())
+                .execute(store.pool())
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_score_payloads_fail_instead_of_becoming_other_values() {
+        let (store, traces, _dir) = test_store().await;
+        let trace = Trace::new(Uuid::new_v4(), "numeric evidence");
+        traces.insert_trace(trace.clone()).await.unwrap();
+        let rating = Score::numeric(trace.id, "quality", 1.0, ScoreSource::Human);
+        traces.insert_score(rating.clone()).await.unwrap();
+        for (kind, value) in [
+            ("boolean", 2.0),
+            ("numeric", f64::INFINITY),
+            ("categorical", 0.0),
+        ] {
+            sqlx::query("UPDATE diag_scores SET data_type = ?, value = ? WHERE id = ?")
+                .bind(kind)
+                .bind(value)
+                .bind(rating.id.to_string())
+                .execute(store.pool())
+                .await
+                .unwrap();
+            assert!(
+                traces.get_scores(trace.id).await.is_err(),
+                "{kind}: {value}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn diagnostic_writes_reject_counters_that_cannot_be_stored_exactly() {
+        let (_store, traces, _dir) = test_store().await;
+        let mut trace = Trace::new(Uuid::new_v4(), "numeric evidence");
+        trace.total_input_tokens = u64::MAX;
+        assert!(traces.insert_trace(trace.clone()).await.is_err());
+        trace.total_input_tokens = 0;
+        traces.insert_trace(trace.clone()).await.unwrap();
+        trace.tool_duration_ms = u64::MAX;
+        assert!(traces.update_trace(trace.clone()).await.is_err());
+        assert_eq!(
+            traces.get_trace(trace.id).await.unwrap().tool_duration_ms,
+            0
+        );
+        let mut observation = Observation::new(trace.id, ObservationType::Generation, "generation");
+        observation.output_tokens = u64::MAX;
+        assert!(traces.insert_observation(observation).await.is_err());
+        assert!(traces.get_observations(trace.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn nonfinite_diagnostic_costs_fail_reads_and_writes() {
+        let (store, traces, _dir) = test_store().await;
+        let trace = Trace::new(Uuid::new_v4(), "cost evidence");
+        traces.insert_trace(trace.clone()).await.unwrap();
+        let observation = Observation::new(trace.id, ObservationType::Generation, "generation");
+        traces
+            .insert_observation(observation.clone())
+            .await
+            .unwrap();
+        for (table, column, id) in [
+            ("diag_traces", "total_cost_usd", trace.id),
+            ("diag_observations", "cost_usd", observation.id),
+        ] {
+            sqlx::query(&format!("UPDATE {table} SET {column} = ? WHERE id = ?"))
+                .bind(f64::INFINITY)
+                .bind(id.to_string())
+                .execute(store.pool())
+                .await
+                .unwrap();
+            let failed = if table == "diag_traces" {
+                traces.get_trace(trace.id).await.is_err()
+            } else {
+                traces.get_observations(trace.id).await.is_err()
+            };
+            assert!(failed, "{table}.{column}");
+            sqlx::query(&format!("UPDATE {table} SET {column} = 0.0 WHERE id = ?"))
+                .bind(id.to_string())
+                .execute(store.pool())
+                .await
+                .unwrap();
+        }
+        let mut invalid_trace = Trace::new(Uuid::new_v4(), "invalid cost");
+        invalid_trace.total_cost_usd = f64::INFINITY;
+        assert!(traces.insert_trace(invalid_trace).await.is_err());
+        let mut invalid_observation =
+            Observation::new(trace.id, ObservationType::Generation, "invalid cost");
+        invalid_observation.cost_usd = f64::INFINITY;
+        assert!(traces
+            .insert_observation(invalid_observation)
+            .await
+            .is_err());
+        assert!(traces
+            .insert_score(Score::numeric(
+                trace.id,
+                "quality",
+                f64::INFINITY,
+                ScoreSource::Human
+            ))
+            .await
+            .is_err());
     }
 
     #[tokio::test]

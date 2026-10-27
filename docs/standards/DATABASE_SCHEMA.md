@@ -1364,6 +1364,13 @@ An unconfigured optional store may produce an explicitly documented empty or
 unavailable view. Once a store is configured, a SQL, pool, or deserialization
 failure is never converted into a successful empty collection.
 
+Diagnostics reads reject malformed JSON payloads, unknown status/type/source
+values, and invalid optional UUID links. An absent optional field remains absent;
+a present corrupt field never becomes a default or a shortened observation path.
+Stored counters must fit their Rust representation, numeric evidence must be
+finite, and boolean scores must be encoded as zero or one. Writes reject counters
+that exceed SQLite's signed integer range instead of silently clamping them.
+
 Service APIs with a fallible presentation boundary return
 `ClassifiedError::Storage`. Composite views abort instead of combining defaults
 with partial database state. CLI, REST, and Tauri adapters translate that error
