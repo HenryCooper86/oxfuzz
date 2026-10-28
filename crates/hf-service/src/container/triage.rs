@@ -16,7 +16,9 @@ use super::crash_inputs::{
     collect_legacy_crash_inputs, deterministic_crash_id, is_regular_file, stage_crash_inputs,
 };
 use super::harness_workspace::{container_input_path, harness_binary_name};
-use super::project_identity::{canonical_project_root, stored_project_matches};
+use super::project_identity::{
+    canonical_project_root, project_lookup_identity, stored_project_matches,
+};
 use super::staging::{run_binary_path, run_output_dir, run_source_path};
 use super::workspace::workspace_dir;
 use super::{run_has_crash_evidence, LlmProviderBridge, RegressionResult, ServiceContainer};
@@ -873,35 +875,32 @@ impl ServiceContainer {
     /// for every crash (no fabricated opinion), it is bounded to a fixed number
     /// of model calls per pass, and it never reclassifies, files, or closes a
     /// crash -- the verdict only informs a human reviewer (Engineering Protocol 2.12).
-    /// Verify a single crash on demand (L2 increment 4c): a thin wrapper over
-    /// [`Self::verify_crashes`] so a presentation layer can offer a per-crash
-    /// "verify" action without running the model on every crash in a triage scan.
-    /// `None` when no provider is configured or the reply is malformed.
-    pub async fn verify_crash(
-        &self,
-        target: &str,
-        crash: &hf_core::crash::Crash,
-    ) -> Option<crate::verification::CrashVerdict> {
-        self.verify_crashes(target, std::slice::from_ref(crash))
-            .await
-            .into_iter()
-            .next()
-            .flatten()
-    }
-
+    /// Each prompt is retained in `crash_verify_drafts` before dispatch and its
+    /// raw reply recorded once answered, so the model-visible input stays
+    /// reconstructable from persisted state (Engineering Protocol 2.13). A
+    /// crash the store does not know, or a prompt that cannot be retained,
+    /// gets no verdict and no dispatch; without a store the whole pass yields
+    /// `None` verdicts, like bug-report drafting.
     pub async fn verify_crashes(
         &self,
         target: &str,
+        project_root: &Path,
         crashes: &[hf_core::crash::Crash],
     ) -> Vec<Option<crate::verification::CrashVerdict>> {
-        use hf_core::provider::{ChatRequest, LlmProvider as _};
-        use hf_core::types::Message;
-
         // Bound the model calls per triage pass so a crash flood cannot fan out
         // into an unbounded LLM spend; extra crashes get no verdict.
         const MAX_CRASH_VERIFICATIONS: usize = 20;
 
         let Some(pool) = self.provider_pool() else {
+            return vec![None; crashes.len()];
+        };
+        // Without a store the model-visible prompt cannot be retained, so no
+        // verification happens (Engineering Protocol 2.13).
+        let Some(store) = self.store.as_deref() else {
+            return vec![None; crashes.len()];
+        };
+        // An uncanonicalizable root cannot key the durable drafts.
+        let Ok(root) = canonical_project_root(project_root) else {
             return vec![None; crashes.len()];
         };
         let provider = LlmProviderBridge::new(pool)
@@ -933,17 +932,80 @@ impl ServiceContainer {
                 &stack,
                 crash.minimized,
             );
-            let req = ChatRequest::from_messages(vec![Message::user(prompt)]);
-            let verdict = match provider.chat_completion(&req).await {
-                Ok(resp) => crate::verification::parse_crash_verdict(resp.text()),
-                Err(error) => {
-                    tracing::warn!("crash verification for a '{target}' crash failed: {error}");
-                    None
-                }
+            let record = hf_storage::CrashVerifyDraftRecord {
+                id: Uuid::new_v4(),
+                crash_id: crash.id,
+                run_id: crash.run_id,
+                project_root: root.to_string_lossy().into_owned(),
+                prompt,
+                response: None,
+                created_at: Utc::now(),
+                completed_at: None,
             };
-            verdicts.push(verdict);
+            verdicts.push(verify_crash_with_retention(store, &provider, record, target).await);
         }
         verdicts
+    }
+
+    /// Verify a single crash on demand (L2 increment 4c) by its persisted id:
+    /// load the crash from the store -- never client-supplied JSON -- then run
+    /// the same retained verification path as a triage pass. The crash must
+    /// belong to `run_id` and that run to `project_root`, so a stale or
+    /// foreign id gets no verdict instead of a verdict about another
+    /// project's crash. `None` when no provider is configured, the reply
+    /// holds no verdict, or the exchange cannot be retained.
+    pub async fn verify_crash_by_id(
+        &self,
+        project_root: &Path,
+        crash_id: Uuid,
+        run_id: Uuid,
+        target: &str,
+    ) -> Option<crate::verification::CrashVerdict> {
+        // Without a store there is no persisted crash to load and nothing can
+        // be retained, so there is no verdict (Engineering Protocol 2.13).
+        let store = self.store.as_deref()?;
+        let crash = match store.get_crash(crash_id).await {
+            Ok(Some(crash)) => crash,
+            // An unknown crash id means there is nothing to verify; advisory
+            // absence, not an error to surface.
+            Ok(None) => {
+                tracing::warn!(crash = %crash_id, "verification requested for an unknown crash");
+                return None;
+            }
+            // A storage failure leaves the persisted evidence unreadable; no
+            // verdict is fabricated from the failure.
+            Err(error) => {
+                tracing::warn!(crash = %crash_id, %error, "crash lookup failed; no verdict");
+                return None;
+            }
+        };
+        let run = match store.get_run(run_id).await {
+            Ok(Some(run)) => run,
+            Ok(None) => {
+                tracing::warn!(run = %run_id, "verification requested for an unknown run");
+                return None;
+            }
+            Err(error) => {
+                tracing::warn!(run = %run_id, %error, "run lookup failed; no verdict");
+                return None;
+            }
+        };
+        let requested = project_lookup_identity(project_root);
+        if crash.run_id != run_id
+            || !stored_project_matches(Path::new(&run.project_root), &requested)
+        {
+            tracing::warn!(
+                crash = %crash_id,
+                run = %run_id,
+                "verification id mismatch; no verdict"
+            );
+            return None;
+        }
+        self.verify_crashes(target, project_root, std::slice::from_ref(&crash))
+            .await
+            .into_iter()
+            .next()
+            .flatten()
     }
 
     /// Regression check: replay stored crash inputs against the current harness
@@ -1110,6 +1172,63 @@ impl ServiceContainer {
     ) -> Option<hf_coverage::CoverageSummary> {
         let json = self.coverage_export_json_cached(project, target).await?;
         hf_coverage::parse_llvm_cov_summary(&json)
+    }
+}
+
+/// Retain one crash-verification prompt, dispatch it, and record the raw
+/// reply. `None` when the exchange cannot be retained, the provider fails, or
+/// the reply holds no verdict: advisory only, never fabricated.
+async fn verify_crash_with_retention(
+    store: &hf_storage::Store,
+    provider: &LlmProviderBridge,
+    record: hf_storage::CrashVerifyDraftRecord,
+    target: &str,
+) -> Option<crate::verification::CrashVerdict> {
+    use hf_core::provider::{ChatRequest, LlmProvider as _};
+    use hf_core::types::Message;
+
+    if record.prompt.len() > hf_storage::MAX_CRASH_VERIFY_DRAFT_BYTES {
+        tracing::warn!(
+            crash = %record.crash_id,
+            bytes = record.prompt.len(),
+            "crash-verify prompt exceeds the retained size; no verdict"
+        );
+        return None;
+    }
+    if let Err(error) = store.begin_crash_verify_draft(&record).await {
+        // A crash the store does not know fails the cascading foreign key,
+        // and any other failure is a storage fault. Either way the prompt is
+        // not reconstructable from persisted state, so the provider is never
+        // called and the crash gets no verdict (Engineering Protocol 2.13).
+        tracing::warn!(
+            crash = %record.crash_id,
+            %error,
+            "crash-verify prompt not retained; no verdict"
+        );
+        return None;
+    }
+    let request = ChatRequest::from_messages(vec![Message::user(record.prompt)]);
+    match provider.chat_completion(&request).await {
+        Ok(response) => {
+            let text = response.text();
+            if let Err(error) = store
+                .complete_crash_verify_draft(record.id, text, Utc::now())
+                .await
+            {
+                // The prompt is retained; only the raw response failed to
+                // record. The parsed verdict is still advisory output.
+                tracing::warn!(
+                    crash = %record.crash_id,
+                    %error,
+                    "crash-verify response not retained"
+                );
+            }
+            crate::verification::parse_crash_verdict(text)
+        }
+        Err(error) => {
+            tracing::warn!("crash verification for a '{target}' crash failed: {error}");
+            None
+        }
     }
 }
 

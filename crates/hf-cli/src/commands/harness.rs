@@ -599,7 +599,7 @@ pub(crate) async fn cmd_triage(project: PathBuf, target: &str, lang: &str) -> an
     println!("{} unique crash(es) after dedup.", crashes.len());
     // Advisory per-crash LLM verdict (best-effort: None when no provider is
     // configured; the verdict never reclassifies a crash, only informs review).
-    let verdicts = container.verify_crashes(target, &crashes).await;
+    let verdicts = container.verify_crashes(target, &project, &crashes).await;
     let reports: Vec<serde_json::Value> = crashes
         .iter()
         .zip(verdicts)

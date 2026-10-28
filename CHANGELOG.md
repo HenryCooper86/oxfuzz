@@ -14,12 +14,18 @@ Versions match the release commits that bump `Cargo.toml`.
 - The Patch-to-Proof panel offers the reviewed bug report's suggested fix as
   a one-click starting patch for the draft editor; the operator still reviews
   and can edit it before creating, approving, or running a verification.
-
 - LLM dictionary drafts are targeted and durable: the prompt carries the
   target's own definition and the static dictionary's existing tokens, and
   each prompt and response is retained (migration 0047,
   `dictionary_llm_drafts`). Repeated runs on unchanged sources reuse the
   retained tokens without a model call.
+
+- Crash verification is durable and evidence-based: each verification prompt
+  is retained before dispatch and completed with the provider's reply
+  (migration 0048, `crash_verify_drafts`), and the web/Tauri/desktop verify
+  action identifies the persisted crash by project, run, and crash id. The
+  REST `POST /crash/verify` request no longer accepts a client-supplied
+  crash body.
 
 ## 0.8.1 - 2026-10-25
 

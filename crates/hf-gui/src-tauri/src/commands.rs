@@ -640,14 +640,20 @@ pub async fn triage(
 
 /// On-demand LLM verdict for one crash (L2 4c). Verifying is opt-in per crash so
 /// a "Scan for Crashes" pass is not blocked on a model call for every crash; the
-/// operator asks for a verdict on the specific crash they care about.
+/// operator asks for a verdict on the specific crash they care about. The crash
+/// is resolved from persisted state by id, never from a client-supplied body.
 #[tauri::command]
 pub async fn verify_crash(
     state: tauri::State<'_, crate::state::AppState>,
+    project: String,
     target: String,
-    crash: hf_service::Crash,
+    run_id: uuid::Uuid,
+    crash_id: uuid::Uuid,
 ) -> Result<serde_json::Value, String> {
-    let verdict = state.container.verify_crash(&target, &crash).await;
+    let verdict = state
+        .container
+        .verify_crash_by_id(std::path::Path::new(&project), crash_id, run_id, &target)
+        .await;
     serde_json::to_value(verdict).map_err(|e| e.to_string())
 }
 

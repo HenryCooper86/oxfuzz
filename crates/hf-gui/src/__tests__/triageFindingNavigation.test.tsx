@@ -353,6 +353,14 @@ describe("retained finding navigation", () => {
     await act(async () => verify?.click());
     await flush();
     expect(container.textContent).toContain("distinctive retained verdict reason");
+
+    const verifyCall = invoke.mock.calls.find(([command]) => command === "verify_crash");
+    expect(verifyCall?.[1]).toEqual({
+      project: PROJECT_A,
+      target: "parse_packet",
+      runId: verifiable.crash.run_id,
+      crashId: verifiable.crash.id,
+    });
     expect(container.textContent).toContain("triage.confidence");
     expect(container.textContent).toContain("triage.reproduces");
   });

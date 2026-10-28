@@ -286,6 +286,29 @@ describe("transport", () => {
     }
   });
 
+  it("maps crash verification to the id-based verify route", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      return new Response(JSON.stringify(null), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    try {
+      const transport = createHttpTransport();
+      await transport.invoke("verify_crash", { project: "/tmp/project", target: "src/parser.c::parse", runId: "run-id", crashId: "crash-id" });
+
+      expect(calls[0].url).toBe("http://localhost:8081/crash/verify");
+      expect(JSON.parse(String(calls[0].init.body))).toEqual({
+        project: "/tmp/project",
+        target: "src/parser.c::parse",
+        run_id: "run-id",
+        crash_id: "crash-id",
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("maps advanced corpus commands to their exact service routes", async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     const originalFetch = globalThis.fetch;

@@ -409,7 +409,7 @@ impl ServiceContainer {
                 // genuine target bug vs a harness/setup artifact. Best-effort -- it
                 // is `None` when no provider is configured -- and never reclassifies
                 // a crash; it only informs the orchestrator's review.
-                let verdicts = self.verify_crashes(target, &crashes).await;
+                let verdicts = self.verify_crashes(target, project, &crashes).await;
                 let items: Vec<Value> = crashes
                     .iter()
                     .zip(verdicts)

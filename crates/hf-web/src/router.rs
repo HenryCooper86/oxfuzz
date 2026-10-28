@@ -3035,20 +3035,25 @@ async fn triage(
 struct VerifyCrashRequest {
     project: String,
     target: String,
-    crash: hf_service::Crash,
+    run_id: uuid::Uuid,
+    crash_id: uuid::Uuid,
 }
 
-/// On-demand LLM verdict for one crash (L2 4c): the caller passes a crash it
-/// already holds from a triage scan, so verifying is opt-in per crash rather than
-/// blocking the whole scan on a model call.
+/// On-demand LLM verdict for one crash (L2 4c): the caller names the
+/// persisted crash by id, so verifying is opt-in per crash without blocking a
+/// whole scan on model calls, and the prompt is rendered from retained
+/// evidence -- never a client-supplied crash body (Engineering Protocol 2.13).
 async fn verify_crash(
     State(state): State<AppState>,
     Json(req): Json<VerifyCrashRequest>,
 ) -> ApiResult<serde_json::Value> {
-    // Require an approved project for auth parity with triage, even though the
-    // verdict is computed from the passed crash and the provider pool.
-    let _project = approved_project(&state, std::path::Path::new(&req.project))?;
-    let verdict = state.container.verify_crash(&req.target, &req.crash).await;
+    // Require an approved project for auth parity with triage; the service
+    // resolves the crash from the store and rejects foreign or stale ids.
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
+    let verdict = state
+        .container
+        .verify_crash_by_id(&project, req.crash_id, req.run_id, &req.target)
+        .await;
     Ok(Json(public_value(verdict)?))
 }
 
@@ -5082,7 +5087,7 @@ mod request_tests {
 
     use super::{
         classified_api_error, parse_role, public_provider_value, public_value, ReportRequest,
-        SetProvidersRequest,
+        SetProvidersRequest, VerifyCrashRequest,
     };
     use serde::Serialize;
 
@@ -5103,6 +5108,25 @@ mod request_tests {
             )
             .is_err(),
             "an unsupported language is rejected, not silently rendered as English"
+        );
+    }
+
+    #[test]
+    fn verify_crash_request_takes_ids_and_rejects_a_missing_crash_id() {
+        const NIL: &str = "00000000-0000-0000-0000-000000000000";
+        let request: VerifyCrashRequest = serde_json::from_str(&format!(
+            r#"{{"project":"/p","target":"parse_header","run_id":"{NIL}","crash_id":"{NIL}"}}"#
+        ))
+        .expect("the id-based verify request deserializes");
+        assert_eq!(request.crash_id, uuid::Uuid::nil());
+        assert_eq!(request.run_id, uuid::Uuid::nil());
+
+        assert!(
+            serde_json::from_str::<VerifyCrashRequest>(&format!(
+                r#"{{"project":"/p","target":"parse_header","run_id":"{NIL}"}}"#
+            ))
+            .is_err(),
+            "a request without a crash id is rejected, not defaulted"
         );
     }
 

@@ -1358,6 +1358,7 @@ bounded deterministic history, and both cleanup operations.
 | `0045_harness_target_sources.sql` | retains the exact target-definition section rendered into each harness draft prompt |
 | `0046_crash_report_drafts.sql` | retains each bug-report drafting prompt before dispatch and its response once |
 | `0047_dictionary_llm_drafts.sql` | retains each dictionary-augmentation prompt before dispatch and its response once |
+| `0048_crash_verify_drafts.sql` | retains each crash-verification prompt before dispatch and its response once |
 
 ## 7. Read failure contract
 
@@ -1642,3 +1643,31 @@ row, once.
 | `completed_at` | `TEXT` | Response time; NULL exactly when `response` is NULL |
 
 Index: `idx_dictionary_llm_drafts_reuse(project_root, target, static_dict_sha256, created_at DESC, id DESC)`.
+
+## Crash verification drafts (0048)
+
+### `crash_verify_drafts`
+
+Migration 0048 retains each crash-verification request before provider
+dispatch and the model's response once it arrives. The prompt carries the
+triaged crash classification evidence, so the exact text is kept rather than
+rebuilt. A row whose prompt cannot be written is never dispatched; without a
+store the verification pass yields no verdicts, and a crash unknown to the
+store gets neither a row nor a verdict. `crash_id` references `crashes(id)`
+with cascading deletion; crash upserts update in place, so only deleting the
+crash removes its drafts. Project deletion and `clear_knowledge` also delete
+these rows. The only permitted update sets `response` and `completed_at` on a
+pending row, once.
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | Immutable draft UUID |
+| `crash_id` | `TEXT NOT NULL` | Crash foreign key; cascading deletion |
+| `run_id` | `TEXT NOT NULL` | Run that found the crash |
+| `project_root` | `TEXT NOT NULL` | Canonical project root |
+| `prompt` | `TEXT NOT NULL` | Exact provider prompt, at most 64 KiB |
+| `response` | `TEXT` | Provider response, at most 64 KiB; NULL while pending |
+| `created_at` | `TEXT NOT NULL` | UTC capture time, RFC 3339 with nanoseconds |
+| `completed_at` | `TEXT` | Response time; NULL exactly when `response` is NULL |
+
+Index: `idx_crash_verify_drafts_crash(crash_id, created_at DESC, id DESC)`.
