@@ -60,9 +60,11 @@ function shortDigest(digest: string): string {
 export function PatchToProofPanel({
   findingId,
   runId,
+  suggestedFix,
 }: {
   findingId: string;
   runId: string;
+  suggestedFix?: string | null;
 }) {
   const { t } = useI18n();
   const [patch, setPatch] = useState("");
@@ -159,6 +161,10 @@ export function PatchToProofPanel({
 
   const patchTooLarge = new TextEncoder().encode(patch).length > MAX_PATCH_BYTES;
 
+  // The report's fix is offered verbatim for operator review; the editor, not
+  // the prop, remains the source the draft is created from.
+  const usableSuggestedFix = suggestedFix && suggestedFix.trim().length > 0 ? suggestedFix : null;
+
   return (
     <section
       className="rounded-md border border-border"
@@ -175,9 +181,16 @@ export function PatchToProofPanel({
 
       {!operation && (
         <div className="mt-3 flex flex-col gap-2">
-          <label className="text-xs text-text-secondary" htmlFor="patch-to-proof-diff">
-            {t("patchToProof.patchLabel")}
-          </label>
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="text-xs text-text-secondary" htmlFor="patch-to-proof-diff">
+              {t("patchToProof.patchLabel")}
+            </label>
+            {usableSuggestedFix && (
+              <Button variant="ghost" size="sm" className="ml-auto" onClick={() => setPatch(usableSuggestedFix)}>
+                {t("patchToProof.useSuggestedFix")}
+              </Button>
+            )}
+          </div>
           <Textarea
             id="patch-to-proof-diff"
             mono

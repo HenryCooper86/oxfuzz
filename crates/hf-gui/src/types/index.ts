@@ -280,7 +280,7 @@ export interface Crash {
   kind: string;
   summary: string;
   minimized: boolean;
-  bug_report: { title: string; summary: string; repro_steps: string; stack: string; severity_guess: string } | null;
+  bug_report: { title: string; summary: string; repro_steps: string; stack: string; severity_guess: string; suggested_fix?: string | null } | null;
   casr: CasrReport | null;
   origin: "target" | "harness" | "runtime" | "unknown";
 }

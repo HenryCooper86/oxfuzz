@@ -1313,6 +1313,7 @@ export const [enExtra, zhExtra] = dictionaries({
   "patchToProof.status.running": ["Running","运行中"],
   "patchToProof.status.verified": ["Verified","已验证"],
   "patchToProof.title": ["Patch to Proof","补丁验证"],
+  "patchToProof.useSuggestedFix": ["Use suggested fix","使用建议的修复"],
   "pathActions.copyPath": ["Copy path","复制路径"],
   "pathActions.openAria": ["Open path","打开路径"],
   "pathActions.openFailed": ["Could not open path","无法打开路径"],

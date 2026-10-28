@@ -104,3 +104,65 @@ it("reviews exact HTTP operation, separately approves and starts, polls retained
   expect(requests).toHaveLength(terminalReads);
   expect(starts()).toHaveLength(1);
 });
+
+it("offers the report's suggested fix, fills the editor on demand and carries it into the draft", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  localStorage.clear();
+  localStorage.setItem("hf_locale", "en");
+  const suggestedFix = "--- a/src/parser.c\n+++ b/src/parser.c\n@@ -1 +1 @@\n-return data[1];\n+return size > 1 ? data[1] : 0;\n";
+  const view: RemediationOperationView = {
+    operation_id: operation, run_id: run, finding_id: finding, status: "draft", current_stage: "review",
+    binding: { finding_id: finding, run_id: run, source_revision_sha256: digest, patch_sha256: digest, patch: suggestedFix,
+      reproducer_sha256: digest, harness_sha256: digest, original_binary_sha256: digest, sandbox_image_sha256: digest,
+      evidence_manifest_sha256: digest, regression_corpus_sha256: digest, verification_spec_sha256: digest,
+      verification_spec: { schema_version: 1, engine: "libfuzzer", replay_timeout_secs: 30, max_regression_cases: 10,
+        follow_up_fuzz_seconds: 300, max_mem_mb: 512, max_cpus: 1, seed: 7 } },
+    verification: null, failure_code: null, failure_message: null,
+  };
+  const requests: { path: string; method: string; body: Record<string, unknown> | null }[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (input, init: RequestInit = {}) => {
+    const path = new URL(String(input)).pathname;
+    const method = init.method ?? "GET";
+    const body = init.body ? JSON.parse(String(init.body)) : null;
+    requests.push({ path, method, body });
+    return new Response(JSON.stringify(path === "/remediation/operations" ? { operation_id: operation } : view));
+  }));
+  mocks.transport = createHttpTransport();
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  cleanup = async () => { await act(async () => root.unmount()); host.remove(); };
+  const button = (label: string) => {
+    const result = [...host.querySelectorAll("button")].find(item => item.textContent === label);
+    expect(result, host.textContent ?? "").toBeTruthy();
+    return result!;
+  };
+  await act(async () => root.render(<I18nProvider><PatchToProofPanel findingId={finding} runId={run} suggestedFix={suggestedFix} /></I18nProvider>));
+  const editor = host.querySelector("textarea")!;
+  // The fix is offered, never imposed: the editor stays empty until the operator opts in.
+  expect(editor.value).toBe("");
+  await act(async () => button("Use suggested fix").click());
+  expect(editor.value).toBe(suggestedFix);
+  await act(async () => button("Create draft").click());
+  expect(requests[0]).toEqual({ path: "/remediation/operations", method: "POST", body: {
+    run_id: run, finding_id: finding, patch: suggestedFix, follow_up_fuzz_seconds: 300,
+    pricing: { compute_usd_per_hour: 0, model_cost_usd: 0 },
+  } });
+});
+
+it("renders no suggested-fix control when the report carries no usable fix", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  localStorage.clear();
+  localStorage.setItem("hf_locale", "en");
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  cleanup = async () => { await act(async () => root.unmount()); host.remove(); };
+  const useSuggestedFix = () => [...host.querySelectorAll("button")].find(item => item.textContent === "Use suggested fix");
+  await act(async () => root.render(<I18nProvider><PatchToProofPanel findingId={finding} runId={run} /></I18nProvider>));
+  expect(useSuggestedFix()).toBeUndefined();
+  await act(async () => root.render(<I18nProvider><PatchToProofPanel findingId={finding} runId={run} suggestedFix={null} /></I18nProvider>));
+  expect(useSuggestedFix()).toBeUndefined();
+  await act(async () => root.render(<I18nProvider><PatchToProofPanel findingId={finding} runId={run} suggestedFix="   " /></I18nProvider>));
+  expect(useSuggestedFix()).toBeUndefined();
+});

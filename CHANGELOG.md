@@ -9,6 +9,12 @@ Versions match the release commits that bump `Cargo.toml`.
 
 ## Unreleased
 
+### Added
+
+- The Patch-to-Proof panel offers the reviewed bug report's suggested fix as
+  a one-click starting patch for the draft editor; the operator still reviews
+  and can edit it before creating, approving, or running a verification.
+
 ## 0.8.1 - 2026-10-25
 
 The v0.8.0 tag was never published: its Windows tests failed on the

@@ -293,7 +293,7 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
     const request = ++actionRequest.current;
     setVerdicts((current) => ({ ...current, [item.crash.id]: "loading" }));
     try {
-      const verdict = await getTransport().invoke<CrashVerdict | null>("verify_crash", { project: activeProject || ".", target: item.target_symbol, crash: item.crash });
+      const verdict = await getTransport().invoke<CrashVerdict | null>("verify_crash", { project: activeProject || ".", target: item.target_symbol, runId: item.crash.run_id, crashId: item.crash.id });
       if (request === actionRequest.current && mounted.current) setVerdicts((current) => ({ ...current, [item.crash.id]: verdict ?? "none" }));
     } catch {
       if (request === actionRequest.current && mounted.current) setVerdicts((current) => ({ ...current, [item.crash.id]: "none" }));
@@ -374,7 +374,7 @@ function CrashDetail({ item, verdict, onVerify, actionBusy }: { item: FindingRev
     <div className="text-xs text-text-muted font-mono">{item.target_symbol} · {crash.run_id}</div>
     {crash.summary && <p className="text-sm text-text-secondary">{crash.summary}</p>}
     <FindingProofCard proof={item.proof} />
-    <PatchToProofPanel key={crash.id} findingId={crash.id} runId={crash.run_id} />
+    <PatchToProofPanel key={crash.id} findingId={crash.id} runId={crash.run_id} suggestedFix={crash.bug_report?.suggested_fix ?? null} />
     <div className="border-t border-border pt-3">
       {verdict === undefined && <Button size="sm" variant="ghost" onClick={onVerify} disabled={actionBusy || !item.latest_scoped_actions_allowed} title={item.latest_scoped_action_reason ?? undefined}>{t("triage.verifyCrash")}</Button>}
       {verdict === "loading" && <span className="text-xs text-text-muted">{t("triage.verifying")}</span>}
