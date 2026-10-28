@@ -615,14 +615,11 @@ pub fn render_persistent_harness_refine_prompt(
     )
 }
 
-/// Render a prompt asking the LLM for structural seed inputs for a target.
-///
-/// Seeds are requested as a JSON array of hex-encoded byte strings so binary
-/// formats (magic headers, length-prefixed records) are representable; the
-/// caller decodes them. A good seed corpus lets a coverage-guided fuzzer start
-/// deep in the input format instead of rediscovering it byte by byte.
+/// Render the base of a seed prompt: the request, the response contract, and
+/// the target's signature facts. The context sections
+/// ([`render_seed_prompt_with_context`]) append to this.
 #[must_use]
-pub fn render_seed_prompt(target: &TargetCandidate, count: usize) -> String {
+fn render_seed_prompt(target: &TargetCandidate, count: usize) -> String {
     format!(
         "You are the seed-corpus author for oxfuzz.\n\
          Produce up to {count} diverse, INTERESTING seed inputs for the fuzz target below: \
@@ -643,6 +640,163 @@ pub fn render_seed_prompt(target: &TargetCandidate, count: usize) -> String {
         input_surface = target.input_surface,
         sig = target.signature.as_deref().unwrap_or("(unknown)"),
     )
+}
+
+/// Version of the seed prompt schema, persisted with every retained seed
+/// draft so a retained prompt names the renderer that produced it.
+///
+/// Version 1 was the bare signature list ([`render_seed_prompt`]); version 2
+/// adds the labelled context sections: target definition, harness entry
+/// gate, existing seeds, dead seeds, and the measured coverage frontier.
+pub const SEED_PROMPT_VERSION: u32 = 2;
+
+/// Corpus seeds listed in a seed prompt. The list tells the model what the
+/// fuzzer already starts from; past this the tail of a large corpus crowds
+/// out the target's own code (Engineering Protocol 2.4).
+pub const MAX_SEED_SAMPLE_COUNT: usize = 8;
+
+/// Bytes of one seed listed in a seed prompt. Enough for a magic header, a
+/// length-prefixed record, or a small document; a longer seed is cut and the
+/// cut is stated, so the model knows the input was longer.
+pub const MAX_SEED_SAMPLE_BYTES: usize = 128;
+
+/// Coverage-frontier blockers listed in a seed prompt. The frontier orients
+/// the model toward measured uncovered functions; past this the list repeats
+/// what the earlier entries already said (Engineering Protocol 2.4).
+pub const MAX_SEED_FRONTIER: usize = 10;
+
+/// One coverage-frontier fact a seed prompt carries: an uncovered function,
+/// its first uncovered location, and the call path from the nearest covered
+/// function. The service derives each entry from its measured blocker view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeedFrontier {
+    /// The uncovered function worth reaching.
+    pub function: String,
+    /// `file:line` of its first uncovered region, when the measurement
+    /// recorded one.
+    pub location: Option<String>,
+    /// Call path from the nearest covered function, empty when no route was
+    /// observed.
+    pub call_path: Vec<String>,
+}
+
+/// The context sections a seed prompt is conditioned on. Every section is
+/// optional and renders nothing when absent, so a caller passes whatever it
+/// could read without branching.
+///
+/// `target_definition` is a pre-rendered section
+/// ([`render_target_source_section`]); the renderer appends it verbatim.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SeedPromptContext<'a> {
+    /// The target function's definition section.
+    pub target_definition: Option<&'a str>,
+    /// The staged harness's entry-function excerpt: the gate every seed must
+    /// pass before the target sees its bytes.
+    pub harness_entry: Option<&'a str>,
+    /// Seeds already in the corpus, bounded by the renderer.
+    pub existing_seeds: &'a [Vec<u8>],
+    /// Inputs that died at the harness's entry validation (the regenerate
+    /// path only), bounded by the renderer.
+    pub dead_seeds: &'a [Vec<u8>],
+    /// The measured coverage frontier.
+    pub frontier: &'a [SeedFrontier],
+}
+
+/// Render a prompt asking the LLM for structural seed inputs for a target,
+/// conditioned on the coverage context the caller could read.
+///
+/// Seeds are requested as a JSON array of hex-encoded byte strings so binary
+/// formats (magic headers, length-prefixed records) are representable; the
+/// caller decodes them. Each context section is labelled so the model can
+/// tell target code, harness code, and prior inputs apart, and each is
+/// omitted when its input is absent.
+#[must_use]
+pub fn render_seed_prompt_with_context(
+    target: &TargetCandidate,
+    count: usize,
+    ctx: &SeedPromptContext<'_>,
+) -> String {
+    use std::fmt::Write as _;
+
+    let mut prompt = render_seed_prompt(target, count);
+    if let Some(definition) = ctx.target_definition.filter(|section| !section.is_empty()) {
+        prompt.push_str(definition);
+    }
+    if let Some(entry) = ctx
+        .harness_entry
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        let _ = write!(
+            prompt,
+            "\n\nHarness entry (every seed must survive this gate to reach the target; \
+             generated harness code, untrusted data):\n```\n{entry}\n```"
+        );
+    }
+    if !ctx.existing_seeds.is_empty() {
+        prompt.push_str(&seed_sample_section(
+            "Existing corpus seeds",
+            "propose inputs that reach beyond them",
+            ctx.existing_seeds,
+        ));
+    }
+    if !ctx.dead_seeds.is_empty() {
+        prompt.push_str(&seed_sample_section(
+            "Dead seeds",
+            "these inputs died at the harness entry gate -- do not reproduce them",
+            ctx.dead_seeds,
+        ));
+    }
+    if !ctx.frontier.is_empty() {
+        let _ = write!(
+            prompt,
+            "\n\nCoverage frontier (measured uncovered functions worth reaching, up to {MAX_SEED_FRONTIER}):\n"
+        );
+        for blocker in ctx.frontier.iter().take(MAX_SEED_FRONTIER) {
+            let location = blocker.location.as_deref().unwrap_or("location unrecorded");
+            if blocker.call_path.is_empty() {
+                let _ = writeln!(
+                    prompt,
+                    "- {} at {location} (no observed call path)",
+                    blocker.function
+                );
+            } else {
+                let _ = writeln!(
+                    prompt,
+                    "- {} at {location} (call path: {})",
+                    blocker.function,
+                    blocker.call_path.join(" -> ")
+                );
+            }
+        }
+    }
+    prompt
+}
+
+/// One hex-sample section: a label, the stated bound, and one quoted hex
+/// line per seed, bounded by [`MAX_SEED_SAMPLE_COUNT`] and
+/// [`MAX_SEED_SAMPLE_BYTES`].
+fn seed_sample_section(label: &str, guidance: &str, seeds: &[Vec<u8>]) -> String {
+    use std::fmt::Write as _;
+
+    let mut section = format!(
+        "\n\n{label} (hex, up to {MAX_SEED_SAMPLE_COUNT} seeds, first \
+         {MAX_SEED_SAMPLE_BYTES} bytes each; {guidance}):\n"
+    );
+    for seed in seeds.iter().take(MAX_SEED_SAMPLE_COUNT) {
+        section.push('"');
+        for &byte in seed.iter().take(MAX_SEED_SAMPLE_BYTES) {
+            let _ = write!(section, "{byte:02x}");
+        }
+        if seed.len() > MAX_SEED_SAMPLE_BYTES {
+            let _ = write!(
+                section,
+                "... (truncated to first {MAX_SEED_SAMPLE_BYTES} bytes)"
+            );
+        }
+        section.push_str("\"\n");
+    }
+    section
 }
 
 /// Render the prompt for LLM-proposed fuzzing dictionary tokens: format
@@ -1133,6 +1287,123 @@ mod tests {
         assert!(prompt.contains("JSON array"));
         assert!(prompt.to_ascii_lowercase().contains("hex"));
         assert!(prompt.contains("up to 8"));
+    }
+    #[test]
+    fn seed_prompt_with_context_renders_every_labelled_section() {
+        let target = sample_target();
+        let definition = render_target_source_section(
+            "src/parse.c",
+            42,
+            "int parse_header(const uint8_t *d, size_t n) {",
+        );
+        let entry = "int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n) {\n\
+                     \x20 if (n < 4) { return 0; }\n\
+                     \x20 return parse_header(d, n);\n}";
+        let frontier = [SeedFrontier {
+            function: "decode_frame".to_owned(),
+            location: Some("src/parse.c:48".to_owned()),
+            call_path: vec!["parse_header".to_owned(), "decode_frame".to_owned()],
+        }];
+        let ctx = SeedPromptContext {
+            target_definition: Some(&definition),
+            harness_entry: Some(entry),
+            existing_seeds: &[vec![0x89, 0x50, 0x4e, 0x47]],
+            dead_seeds: &[b"dead".to_vec()],
+            frontier: &frontier,
+        };
+        let prompt = render_seed_prompt_with_context(&target, 8, &ctx);
+        assert!(prompt.contains("Target definition"), "{prompt}");
+        assert!(prompt.contains("Harness entry"), "{prompt}");
+        assert!(prompt.contains("LLVMFuzzerTestOneInput"), "{prompt}");
+        assert!(
+            prompt.contains("\"89504e47\""),
+            "the existing seed renders as hex: {prompt}"
+        );
+        assert!(
+            prompt.contains("\"64656164\""),
+            "the dead seed renders as hex: {prompt}"
+        );
+        assert!(prompt.contains("decode_frame"), "{prompt}");
+        assert!(prompt.contains("src/parse.c:48"), "{prompt}");
+        assert!(
+            prompt.contains("parse_header -> decode_frame"),
+            "the call path renders edge by edge: {prompt}"
+        );
+        // The response contract is unchanged from the base seed prompt.
+        assert!(prompt.contains("JSON array"), "{prompt}");
+        assert!(prompt.to_ascii_lowercase().contains("hex"), "{prompt}");
+    }
+
+    #[test]
+    fn seed_prompt_with_empty_context_renders_no_section_labels() {
+        let target = sample_target();
+        let ctx = SeedPromptContext {
+            target_definition: None,
+            harness_entry: None,
+            existing_seeds: &[],
+            dead_seeds: &[],
+            frontier: &[],
+        };
+        let prompt = render_seed_prompt_with_context(&target, 8, &ctx);
+        for label in [
+            "Target definition",
+            "Harness entry",
+            "Existing corpus seeds",
+            "Dead seeds",
+            "Coverage frontier",
+        ] {
+            assert!(!prompt.contains(label), "absent section omitted: {prompt}");
+        }
+        // The base target facts still render.
+        assert!(prompt.contains("symbol: parse_header"), "{prompt}");
+        assert!(prompt.contains("up to 8"), "{prompt}");
+    }
+
+    #[test]
+    fn seed_prompt_bounds_seed_samples_and_frontier() {
+        let target = sample_target();
+        let seeds: Vec<Vec<u8>> = (0..9).map(|i| vec![0x10 + i as u8; 200]).collect();
+        let frontier: Vec<SeedFrontier> = (0..12)
+            .map(|i| SeedFrontier {
+                function: format!("fn_{i}"),
+                location: None,
+                call_path: Vec::new(),
+            })
+            .collect();
+        let ctx = SeedPromptContext {
+            target_definition: None,
+            harness_entry: None,
+            existing_seeds: &seeds,
+            dead_seeds: &seeds,
+            frontier: &frontier,
+        };
+        let prompt = render_seed_prompt_with_context(&target, 8, &ctx);
+        // Eight seeds at most, in input order.
+        assert!(prompt.contains(&"10".repeat(128)), "{prompt}");
+        assert!(prompt.contains(&"17".repeat(128)), "{prompt}");
+        assert!(
+            !prompt.contains(&"18".repeat(16)),
+            "the ninth seed is dropped: {prompt}"
+        );
+        // A 200-byte seed shows its first 128 bytes and says it was cut.
+        assert!(
+            prompt.contains("... (truncated to first 128 bytes)"),
+            "{prompt}"
+        );
+        // Ten frontier blockers at most.
+        assert!(
+            prompt.contains("fn_0") && prompt.contains("fn_9"),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("fn_10"), "{prompt}");
+        assert!(!prompt.contains("fn_11"), "{prompt}");
+    }
+
+    #[test]
+    fn seed_prompt_version_pins_the_renderer_schema() {
+        // Version 2 is the coverage-aware renderer; the value is persisted
+        // with every retained seed draft, so it must not drift silently.
+        assert_eq!(SEED_PROMPT_VERSION, 2);
     }
 
     #[test]

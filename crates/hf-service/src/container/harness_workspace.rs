@@ -326,6 +326,38 @@ pub(super) fn read_current_harness_source(workspace: &Path) -> Option<String> {
     None
 }
 
+/// Entry-symbol markers that bound a harness excerpt: the C/C++ entry point
+/// every libFuzzer/AFL++/honggfuzz harness defines, the cargo-fuzz macro a
+/// Rust harness uses, and the AFL++ persistent-mode loop.
+const HARNESS_ENTRY_MARKERS: [&str; 3] = ["LLVMFuzzerTestOneInput", "fuzz_target!", "__AFL_LOOP"];
+
+/// Harness lines a seed prompt carries. The entry function is the part a
+/// seed must survive; the bound keeps a whole oversized harness out of the
+/// prompt (Engineering Protocol 2.4).
+const MAX_HARNESS_ENTRY_EXCERPT_LINES: usize = 80;
+
+/// The staged harness source bounded to its entry function: the lines from
+/// the first one naming an entry symbol through
+/// [`MAX_HARNESS_ENTRY_EXCERPT_LINES`] more. Falls back to the first bounded
+/// lines when no marker is found, so a harness whose entry point is named
+/// differently still contributes its head. `None` when no staged source
+/// exists yet.
+pub(super) fn harness_entry_excerpt(workspace: &Path) -> Option<String> {
+    let source = read_current_harness_source(workspace)?;
+    let lines: Vec<&str> = source.lines().collect();
+    let start = lines
+        .iter()
+        .position(|line| {
+            HARNESS_ENTRY_MARKERS
+                .iter()
+                .any(|marker| line.contains(marker))
+        })
+        .unwrap_or(0);
+    let end = (start + MAX_HARNESS_ENTRY_EXCERPT_LINES).min(lines.len());
+    let excerpt = lines[start..end].join("\n");
+    (!excerpt.trim().is_empty()).then_some(excerpt)
+}
+
 /// Read the persisted id of the harness revision that produced the active
 /// binary. Older workspaces predate this marker and are resolved by source.
 pub(super) fn read_current_harness_id(workspace: &Path) -> Option<Uuid> {
@@ -903,7 +935,7 @@ mod sanitize_target_tests {
 
 #[cfg(test)]
 mod harness_source_tests {
-    use super::{read_current_harness_source, write_current_harness_source};
+    use super::{harness_entry_excerpt, read_current_harness_source, write_current_harness_source};
 
     #[test]
     fn canonical_harness_source_wins_over_language_specific_build_inputs() {
@@ -915,6 +947,48 @@ mod harness_source_tests {
             read_current_harness_source(workspace.path()).as_deref(),
             Some("active Rust source")
         );
+    }
+    #[test]
+    fn the_entry_excerpt_starts_at_the_entry_marker_line() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(
+            workspace.path().join("harness.c"),
+            "#include <stdint.h>\n#include <stddef.h>\n\
+             int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n) {\n\
+             \x20 if (n < 4) { return 0; }\n\
+             \x20 return parse_entry(d, n);\n}\n",
+        )
+        .unwrap();
+        let excerpt = harness_entry_excerpt(workspace.path()).unwrap();
+        assert!(
+            excerpt.starts_with("int LLVMFuzzerTestOneInput"),
+            "the excerpt is bounded to the entry function: {excerpt}"
+        );
+        assert!(!excerpt.contains("#include"), "{excerpt}");
+        assert!(excerpt.contains("return parse_entry(d, n);"), "{excerpt}");
+    }
+
+    #[test]
+    fn the_entry_excerpt_falls_back_to_the_first_bounded_lines() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut body = String::new();
+        for line in 1..=100 {
+            body.push_str("line ");
+            body.push_str(&line.to_string());
+            body.push('\n');
+        }
+        std::fs::write(workspace.path().join("harness.cc"), &body).unwrap();
+        let excerpt = harness_entry_excerpt(workspace.path()).unwrap();
+        let shown = excerpt.lines().count();
+        assert!(shown <= 80, "{shown} lines shown");
+        assert!(excerpt.starts_with("line 1"), "{excerpt}");
+        assert!(!excerpt.contains("line 81"), "{excerpt}");
+    }
+
+    #[test]
+    fn the_entry_excerpt_is_absent_without_a_staged_source() {
+        let workspace = tempfile::tempdir().unwrap();
+        assert!(harness_entry_excerpt(workspace.path()).is_none());
     }
 }
 

@@ -11,8 +11,11 @@ fn isolate_workspace() {
     common::install_managed_workspace("oxfuzz_seedgen_it");
 }
 
-/// A pool that returns a JSON array of hex-encoded seeds for every completion.
-struct HexSeedPool;
+/// A pool that returns a JSON array of hex-encoded seeds for every completion
+/// and counts the dispatches.
+struct HexSeedPool {
+    calls: std::sync::atomic::AtomicUsize,
+}
 
 #[async_trait::async_trait]
 impl hf_core::provider::ProviderPool for HexSeedPool {
@@ -21,6 +24,8 @@ impl hf_core::provider::ProviderPool for HexSeedPool {
         _request: &hf_core::provider::ChatRequest,
         _route: &hf_core::provider::RouteRequest,
     ) -> Result<hf_core::provider::ChatResponse, hf_core::provider::ProviderError> {
+        use std::sync::atomic::Ordering;
+        self.calls.fetch_add(1, Ordering::SeqCst);
         // "89504e47" = PNG magic, "7b7d" = "{}".
         Ok(hf_test_utils::fixtures::make_chat_response(
             "[\"89504e47\", \"7b7d\"]",
@@ -70,10 +75,20 @@ fn write_sample_project() -> tempfile::TempDir {
 async fn generate_seeds_llm_writes_decoded_seeds() {
     isolate_workspace();
     let project = write_sample_project();
+    // The seed prompt must be retained before dispatch (Engineering
+    // Protocol 2.13), so a store is part of the fixture.
+    let store = Arc::new(
+        hf_storage::Store::connect(project.path().join("seeds.db"))
+            .await
+            .unwrap(),
+    );
     let container = ServiceContainer::new(
         Arc::new(hf_runtime::StubRuntime),
-        Some(Arc::new(HexSeedPool)),
-    );
+        Some(Arc::new(HexSeedPool {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        })),
+    )
+    .with_store(store);
 
     let entries = container
         .generate_seeds_llm(project.path(), "parse_entry", TargetLanguage::C, 8)
@@ -105,13 +120,51 @@ async fn generate_seeds_llm_falls_back_to_heuristics_without_provider() {
 }
 
 #[tokio::test]
+async fn generate_seeds_llm_dispatches_nothing_without_a_store() {
+    isolate_workspace();
+    let project = write_sample_project();
+    // A configured provider but no store: the model-visible prompt cannot be
+    // retained, so nothing is dispatched and the heuristic seeds stand in
+    // (Engineering Protocol 2.13).
+    let pool = Arc::new(HexSeedPool {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let container = ServiceContainer::new(
+        Arc::new(hf_runtime::StubRuntime),
+        Some(Arc::clone(&pool) as Arc<dyn hf_core::provider::ProviderPool>),
+    );
+
+    let entries = container
+        .generate_seeds_llm(project.path(), "parse_entry", TargetLanguage::C, 8)
+        .await
+        .expect("seed generation should succeed");
+    assert!(
+        !entries.is_empty(),
+        "the heuristic fallback still seeds a corpus"
+    );
+    assert_eq!(
+        pool.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "an unretainable prompt is never dispatched"
+    );
+}
+
+#[tokio::test]
 async fn generate_seeds_llm_reports_only_the_seeds_it_wrote() {
     isolate_workspace();
     let project = write_sample_project();
+    let store = Arc::new(
+        hf_storage::Store::connect(project.path().join("seeds.db"))
+            .await
+            .unwrap(),
+    );
     let container = ServiceContainer::new(
         Arc::new(hf_runtime::StubRuntime),
-        Some(Arc::new(HexSeedPool)),
-    );
+        Some(Arc::new(HexSeedPool {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        })),
+    )
+    .with_store(store);
     // An input the fuzzer earned before this call: part of the persisted
     // inventory, never something this seeding "generated".
     let corpus = hf_service::workspace_dir(project.path(), "parse_entry").join("corpus");

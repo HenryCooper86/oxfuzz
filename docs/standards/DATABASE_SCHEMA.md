@@ -1359,6 +1359,7 @@ bounded deterministic history, and both cleanup operations.
 | `0046_crash_report_drafts.sql` | retains each bug-report drafting prompt before dispatch and its response once |
 | `0047_dictionary_llm_drafts.sql` | retains each dictionary-augmentation prompt before dispatch and its response once |
 | `0048_crash_verify_drafts.sql` | retains each crash-verification prompt before dispatch and its response once |
+| `0049_seed_llm_drafts.sql` | retains each seed-drafting prompt before dispatch and its response once |
 
 ## 7. Read failure contract
 
@@ -1671,3 +1672,35 @@ pending row, once.
 | `completed_at` | `TEXT` | Response time; NULL exactly when `response` is NULL |
 
 Index: `idx_crash_verify_drafts_crash(crash_id, created_at DESC, id DESC)`.
+
+## Seed LLM drafts (0049)
+
+### `seed_llm_drafts`
+
+Migration 0049 retains each seed-drafting request before provider dispatch
+and the model's response once it arrives. The prompt names the target's own
+definition, the harness entry gate, the corpus seeds that already exist, the
+dead seeds being replaced, and the measured coverage frontier, so the exact
+text is kept rather than rebuilt. A row whose prompt cannot be written is
+never dispatched: first-time seeding falls back to the heuristic seeds and
+survival-driven regeneration reports zero replacements. `purpose` separates
+the two paths, and `prompt_version` names the renderer
+(`hf_prompt::SEED_PROMPT_VERSION`). There is no crash or run foreign key,
+because seeding happens outside run records; project deletion and
+`clear_knowledge` delete these rows. The only permitted update sets
+`response` and `completed_at` on a pending row, once.
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | Immutable draft UUID |
+| `project_root` | `TEXT NOT NULL` | Canonical project root |
+| `target` | `TEXT NOT NULL` | Target selector being seeded |
+| `purpose` | `TEXT NOT NULL` | Seed path: `initial` or `regenerate` |
+| `prompt_version` | `INTEGER NOT NULL` | `hf_prompt::SEED_PROMPT_VERSION` |
+| `prompt` | `TEXT NOT NULL` | Exact provider prompt, at most 64 KiB |
+| `response` | `TEXT` | Provider response, at most 64 KiB; NULL while pending |
+| `created_at` | `TEXT NOT NULL` | UTC capture time, RFC 3339 with nanoseconds |
+| `completed_at` | `TEXT` | Response time; NULL exactly when `response` is NULL |
+
+Index: `idx_seed_llm_drafts_project(project_root, target, created_at DESC, id DESC)`.
+

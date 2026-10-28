@@ -27,6 +27,13 @@ Versions match the release commits that bump `Cargo.toml`.
   REST `POST /crash/verify` request no longer accepts a client-supplied
   crash body.
 
+- LLM seed drafting is coverage-aware and retained: seed prompts now carry
+  the target's definition, the harness entry gate its seeds must pass, a
+  sample of existing seeds, the seeds that died at entry (on regeneration),
+  and, when a coverage measurement exists, the uncovered frontier worth
+  attacking. Each prompt and response is retained (migration 0049,
+  `seed_llm_drafts`).
+
 ## 0.8.1 - 2026-10-25
 
 The v0.8.0 tag was never published: its Windows tests failed on the

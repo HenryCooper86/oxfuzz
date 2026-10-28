@@ -12,7 +12,7 @@ use hf_core::target::{TargetCandidate, TargetLanguage};
 use hf_core::types::Message;
 use hf_prompt::{
     render_harness_prompt_with_examples, render_harness_refine_prompt,
-    render_harness_repair_prompt, render_seed_prompt, RelatedContext,
+    render_harness_repair_prompt, RelatedContext,
 };
 
 /// The canonical persistent-mode skeleton a draft prompt embeds, with
@@ -177,33 +177,12 @@ pub async fn refine(
     })
 }
 
-/// Generate structural seed inputs for a target using the LLM.
-///
-/// Returns the decoded seed byte strings (at most `count`). A good seed corpus
-/// lets a coverage-guided fuzzer start deep in the input format rather than
-/// rediscovering it byte by byte. The caller writes the seeds to disk and may
-/// fall back to heuristic seeds when this returns an empty vec.
-///
-/// # Errors
-/// Returns `ClassifiedError` if the LLM call fails. A response that parses to
-/// no seeds is returned as an empty vec (not an error) so the caller can fall
-/// back gracefully.
-pub async fn generate_seeds(
-    target: &TargetCandidate,
-    count: usize,
-    llm: Box<dyn LlmProvider>,
-) -> Result<Vec<Vec<u8>>, ClassifiedError> {
-    let prompt = render_seed_prompt(target, count);
-    let req = ChatRequest::from_messages(vec![Message::user(prompt)]);
-    let resp = llm.chat_completion(&req).await?;
-    Ok(parse_seed_array(resp.text(), count))
-}
-
-/// Parse an LLM seed response into raw seed byte strings. The model is asked for
-/// a JSON array of hex strings; each element is hex-decoded, falling back to the
-/// element's UTF-8 bytes when it is not valid hex. At most `max` non-empty seeds
-/// are returned.
-fn parse_seed_array(text: &str, max: usize) -> Vec<Vec<u8>> {
+/// Parse an LLM seed response into raw seed byte strings. The model is asked
+/// for a JSON array of hex strings; each element is hex-decoded, falling back
+/// to the element's UTF-8 bytes when it is not valid hex. At most `max`
+/// non-empty seeds are returned. This is the crate's parsing seam: the
+/// service renders the prompt, dispatches it, and hands the raw reply here.
+pub fn parse_seed_array(text: &str, max: usize) -> Vec<Vec<u8>> {
     let Some(start) = text.find('[') else {
         return Vec::new();
     };
@@ -2522,12 +2501,11 @@ mod tests {
         assert_eq!(draft.rationale, "refine");
     }
 
-    #[tokio::test]
-    async fn generate_seeds_decodes_hex_array() {
-        let target = sample_target();
+    #[test]
+    fn parse_seed_array_decodes_a_hex_array_from_prose() {
+        // A reply padded with prose still yields the hex entries:
         // "89504e47" = PNG magic; "7b7d" = "{}".
-        let llm = MockProvider::fixed("Sure: [\"89504e47\", \"7b7d\"]");
-        let seeds = generate_seeds(&target, 8, Box::new(llm)).await.unwrap();
+        let seeds = parse_seed_array("Sure: [\"89504e47\", \"7b7d\"]", 8);
         assert_eq!(seeds.len(), 2);
         assert_eq!(seeds[0], vec![0x89, 0x50, 0x4e, 0x47]);
         assert_eq!(seeds[1], b"{}".to_vec());

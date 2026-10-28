@@ -16,13 +16,15 @@ use hf_storage::{HarnessAiReviewRecord, RunKind, RunRecord, RunStatus, Store};
 use uuid::Uuid;
 
 use super::coverage_cache::frontier_refine_lines;
+#[cfg(feature = "coverage-blockers")]
+use super::coverage_cache::{coverage_signature, export_cache, parse_covered_functions};
 use super::crash_inputs::is_regular_file;
 use super::guards::{ensure_run_journal_durable, PersistedRunGuard};
 #[cfg(test)]
 use super::harness_workspace::read_current_harness_id;
 use super::harness_workspace::{
-    copy_project_sources, generate_target_seeds, harness_binary_name, read_current_harness_source,
-    write_current_harness_id, write_current_harness_source,
+    copy_project_sources, generate_target_seeds, harness_binary_name, harness_entry_excerpt,
+    read_current_harness_source, write_current_harness_id, write_current_harness_source,
 };
 use super::output_budget::{
     output_budget_status, OutputBudget, MAX_RUN_OUTPUT_BYTES, MAX_RUN_OUTPUT_ENTRIES,
@@ -35,6 +37,7 @@ use super::staging::{
     captured_run_context_digests, qualification_evidence, resolve_run_sandbox_image,
     retain_run_context, sha256_file, stage_run_artifacts, verify_run_artifacts,
 };
+use super::target_source::read_target_definition;
 use super::workspace::{
     prepare_configured_workspace_root, workspace_dir, workspace_relative_record,
 };
@@ -2496,11 +2499,257 @@ impl ServiceContainer {
             })
             .collect()
     }
+}
 
+// ---------------------------------------------------------------------------
+// Coverage-aware seed prompting
+// ---------------------------------------------------------------------------
+
+/// The owned context sections both seed paths condition their prompt on.
+/// Each section is optional: the prompt renders without it when its input is
+/// absent.
+struct SeedPromptSections {
+    /// The target's own definition, rendered by
+    /// [`hf_prompt::render_target_source_section`].
+    target_definition: Option<String>,
+    /// The staged harness's entry-function excerpt.
+    harness_entry: Option<String>,
+    /// A bounded sample of the corpus as it existed before this pass wrote
+    /// or removed anything.
+    existing_seeds: Vec<Vec<u8>>,
+    /// The dead seeds' bytes (the regenerate path only).
+    dead_seeds: Vec<Vec<u8>>,
+    /// The measured coverage frontier.
+    frontier: Vec<hf_prompt::SeedFrontier>,
+}
+
+impl SeedPromptSections {
+    /// Render the seed prompt for `target` from the collected sections.
+    fn render(&self, target: &TargetCandidate, count: usize) -> String {
+        let context = hf_prompt::SeedPromptContext {
+            target_definition: self.target_definition.as_deref(),
+            harness_entry: self.harness_entry.as_deref(),
+            existing_seeds: &self.existing_seeds,
+            dead_seeds: &self.dead_seeds,
+            frontier: &self.frontier,
+        };
+        hf_prompt::render_seed_prompt_with_context(target, count, &context)
+    }
+}
+
+/// The first [`hf_prompt::MAX_SEED_SAMPLE_BYTES`] bytes of one seed file.
+/// `None` when the entry cannot be read (a concurrent removal, a
+/// subdirectory): the sample skips it rather than failing the prompt.
+fn read_seed_prefix(path: &Path) -> Option<Vec<u8>> {
+    use std::io::Read as _;
+    let limit = u64::try_from(hf_prompt::MAX_SEED_SAMPLE_BYTES).ok()?;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(limit)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (!bytes.is_empty()).then_some(bytes)
+}
+
+/// A bounded sample of the corpus files in `corpus_dir`, name-sorted so one
+/// corpus always produces one prompt. An absent or unreadable directory
+/// yields an empty sample: the section is context, not evidence.
+fn sample_corpus_seeds(corpus_dir: &Path) -> Vec<Vec<u8>> {
+    let mut paths: Vec<PathBuf> = match std::fs::read_dir(corpus_dir) {
+        Ok(entries) => entries
+            .filter_map(|entry| {
+                let path = entry.ok()?.path();
+                path.is_file().then_some(path)
+            })
+            .collect(),
+        Err(_) => return Vec::new(),
+    };
+    paths.sort();
+    paths
+        .iter()
+        .take(hf_prompt::MAX_SEED_SAMPLE_COUNT)
+        .filter_map(|path| read_seed_prefix(path))
+        .collect()
+}
+
+/// The dead seeds' own bytes, read by name before removal: the exact inputs
+/// that died at the harness's entry gate are what the model must not
+/// reproduce.
+fn sample_named_seeds(corpus_dir: &Path, names: &[String]) -> Vec<Vec<u8>> {
+    names
+        .iter()
+        .take(hf_prompt::MAX_SEED_SAMPLE_COUNT)
+        .filter_map(|name| read_seed_prefix(&corpus_dir.join(name)))
+        .collect()
+}
+
+impl ServiceContainer {
+    /// Collect the context sections both seed paths condition their prompt
+    /// on. Everything here is optional context: a section whose input cannot
+    /// be read is absent, never an error. The frontier is resolved by the
+    /// caller, where the feature decides whether a measurement can be read.
+    fn seed_prompt_sections(
+        project: &Path,
+        candidate: &TargetCandidate,
+        workspace: &Path,
+        existing_seeds: Vec<Vec<u8>>,
+        dead_seeds: Vec<Vec<u8>>,
+        frontier: Vec<hf_prompt::SeedFrontier>,
+    ) -> SeedPromptSections {
+        // An uncanonicalizable root or an unreadable definition renders the
+        // prompt without the section rather than failing the pass.
+        let target_definition = canonical_project_root(project)
+            .ok()
+            .and_then(|root| {
+                read_target_definition(&root, candidate).map(|definition| {
+                    hf_prompt::render_target_source_section(
+                        &definition.relative_file,
+                        candidate.location.line,
+                        &definition.excerpt,
+                    )
+                })
+            })
+            .filter(|section| !section.is_empty());
+        SeedPromptSections {
+            target_definition,
+            harness_entry: harness_entry_excerpt(workspace),
+            existing_seeds,
+            dead_seeds,
+            frontier,
+        }
+    }
+
+    /// The measured coverage frontier for a seed prompt, when a cached
+    /// measurement backs the view. A missing measurement is NOT computed
+    /// here: seeding must not dispatch the ~180s coverage pipeline (or any
+    /// sandbox command) on its own path, so the frontier appears only when
+    /// an earlier coverage read already measured this corpus-plus-harness
+    /// signature. An absent or stale cache entry, or a discovery failure,
+    /// yields an empty frontier: a blocker list derived from none would be
+    /// fabrication.
+    #[cfg(feature = "coverage-blockers")]
+    async fn measured_seed_frontier(
+        &self,
+        project: &Path,
+        target: &str,
+        lang: TargetLanguage,
+    ) -> Vec<hf_prompt::SeedFrontier> {
+        let workspace = workspace_dir(project, target);
+        if !workspace.join("harness.c").exists() {
+            return Vec::new();
+        }
+        // The cache key and signature mirror `coverage_export_json_cached`
+        // (container/triage.rs); the peek below deliberately skips its
+        // compute-on-miss half.
+        let cache_key = format!("{}::{target}", project.display());
+        let signature = coverage_signature(&workspace);
+        let json = export_cache().lock().ok().and_then(|map| {
+            map.get(&cache_key)
+                .filter(|(cached, _)| *cached == signature)
+                .map(|(_, json)| json.clone())
+        });
+        let Some(json) = json else {
+            return Vec::new();
+        };
+        // A discovery failure leaves no call graph to rank blockers with;
+        // the prompt renders without the section.
+        let Ok(inventory) = self.discover(project, lang).await else {
+            return Vec::new();
+        };
+        crate::coverage_blockers::explore_blockers(
+            &parse_covered_functions(&json),
+            &hf_coverage::parse_llvm_cov_uncovered(&json),
+            &inventory.call_graph,
+        )
+        .into_iter()
+        .map(|blocker| hf_prompt::SeedFrontier {
+            function: blocker.function,
+            location: blocker.location,
+            call_path: blocker.path,
+        })
+        .collect()
+    }
+
+    /// Retain one seed prompt, dispatch it, and record the raw reply once.
+    ///
+    /// Retention failures (no store, an uncanonicalizable root, a prompt over
+    /// the retained cap, a storage failure) and provider failures all return
+    /// an empty vec: the initial path then falls back to the heuristic seeds
+    /// and the regenerate path reports zero replacements, while an
+    /// unretained prompt is never dispatched (Engineering Protocol 2.13).
+    async fn dispatch_seed_prompt(
+        &self,
+        pool: Arc<dyn hf_core::provider::ProviderPool>,
+        purpose: hf_storage::SeedDraftPurpose,
+        project: &Path,
+        target: &str,
+        prompt: String,
+        count: usize,
+        label: &'static str,
+    ) -> Vec<Vec<u8>> {
+        // Without a store the model-visible prompt cannot be retained, so no
+        // provider dispatch happens (Engineering Protocol 2.13).
+        let Some(store) = self.store() else {
+            return Vec::new();
+        };
+        if prompt.len() > hf_storage::MAX_SEED_LLM_DRAFT_BYTES {
+            tracing::warn!("seed prompt for '{target}' exceeds the retained size; no dispatch");
+            return Vec::new();
+        }
+        // An uncanonicalizable root cannot key the durable draft.
+        let Ok(root) = canonical_project_root(project) else {
+            tracing::warn!("seed prompt for '{target}' has no canonical project root; no dispatch");
+            return Vec::new();
+        };
+        let record = hf_storage::SeedLlmDraftRecord {
+            id: Uuid::new_v4(),
+            project_root: root.to_string_lossy().into_owned(),
+            target: target.to_owned(),
+            purpose,
+            prompt_version: hf_prompt::SEED_PROMPT_VERSION,
+            prompt,
+            response: None,
+            created_at: Utc::now(),
+            completed_at: None,
+        };
+        if let Err(error) = store.begin_seed_llm_draft(&record).await {
+            // Storage failure: an unretained prompt is never dispatched; the
+            // caller's fallback (heuristic seeds, zero replacements) applies.
+            tracing::warn!("seed prompt for '{target}' not retained; no dispatch: {error}");
+            return Vec::new();
+        }
+        let provider =
+            LlmProviderBridge::new(pool).with_diagnostics(Arc::clone(&self.diagnostics), label);
+        let request = ChatRequest::from_messages(vec![Message::user(record.prompt)]);
+        let response = match provider.chat_completion(&request).await {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!("LLM seed generation for '{target}' failed: {error}");
+                return Vec::new();
+            }
+        };
+        let text = response.text().to_owned();
+        if let Err(error) = store
+            .complete_seed_llm_draft(record.id, &text, Utc::now())
+            .await
+        {
+            // The prompt is retained; only the raw response is missing. The
+            // parsed seeds are still used below.
+            tracing::warn!("seed response for '{target}' not retained: {error}");
+        }
+        hf_harness::parse_seed_array(&text, count)
+    }
+}
+
+impl ServiceContainer {
     /// Generate a seed corpus for a target using the LLM (structural, format-
     /// aware seeds), falling back to the heuristic seeds when no provider is
-    /// configured or the model returns nothing usable. Seeds are written into
-    /// the target's corpus directory and deduplicated by content hash.
+    /// configured, the model returns nothing usable, or the prompt cannot be
+    /// retained: the prompt is retained in `seed_llm_drafts` before dispatch
+    /// and its response completed once (Engineering Protocol 2.13), so an
+    /// unretained prompt is never dispatched. Seeds are written into the
+    /// target's corpus directory and deduplicated by content hash.
     ///
     /// # Errors
     /// Returns `ClassifiedError` if the corpus directory or a seed file cannot
@@ -2554,12 +2803,33 @@ impl ServiceContainer {
                         self.verify_harness_build_inputs(project, harness, true)
                             .await?;
                     }
-                    let provider = LlmProviderBridge::new(pool)
-                        .with_diagnostics(Arc::clone(&self.diagnostics), "seed_gen");
-                    match hf_harness::generate_seeds(candidate, count, Box::new(provider)).await {
-                        Ok(seeds) => datas = seeds,
-                        Err(e) => tracing::warn!("LLM seed generation for '{target}' failed: {e}"),
-                    }
+                    // The corpus sample is read before this pass writes a
+                    // single seed, so the prompt names the corpus as it is.
+                    let existing = sample_corpus_seeds(&corpus_dir);
+                    #[cfg(feature = "coverage-blockers")]
+                    let frontier = self.measured_seed_frontier(project, target, lang).await;
+                    #[cfg(not(feature = "coverage-blockers"))]
+                    let frontier = Vec::new();
+                    let sections = Self::seed_prompt_sections(
+                        project,
+                        candidate,
+                        &workspace,
+                        existing,
+                        Vec::new(),
+                        frontier,
+                    );
+                    let prompt = sections.render(candidate, count);
+                    datas = self
+                        .dispatch_seed_prompt(
+                            pool,
+                            hf_storage::SeedDraftPurpose::Initial,
+                            project,
+                            target,
+                            prompt,
+                            count,
+                            "seed_gen",
+                        )
+                        .await;
                 }
             }
         }
@@ -2701,6 +2971,12 @@ impl ServiceContainer {
             "regenerate_dead_seeds",
         )
         .await?;
+        // The prompt context is captured before the dead seeds are removed:
+        // their bytes are the exact inputs that died at the entry gate and
+        // must not be reproduced, and the existing-seed sample must name the
+        // corpus as it was measured.
+        let existing_sample = sample_corpus_seeds(&corpus_dir);
+        let dead_bytes = sample_named_seeds(&corpus_dir, &dead_generated);
         hf_corpus::remove(&corpus_dir, &dead_generated)?;
 
         // One namespace per pass: a later pass must never overwrite a prior
@@ -2710,34 +2986,58 @@ impl ServiceContainer {
         let pass = &pass_id[..8];
         let mut replacements: Vec<(Vec<u8>, String)> = Vec::new();
         if let Some(pool) = self.provider_pool() {
-            if let Ok(inv) = self.discover(project, lang).await {
-                if let Ok(Some(candidate)) = select_target_candidate(&inv.candidates, target) {
-                    self.verify_corpus_build_inputs(
+            let candidate = match self.discover(project, lang).await {
+                Ok(inv) => match select_target_candidate(&inv.candidates, target) {
+                    Ok(found) => found.cloned(),
+                    // An ambiguous target selector leaves no candidate to
+                    // condition the prompt on; zero replacements are
+                    // requested rather than prompting blind.
+                    Err(_) => None,
+                },
+                // A discovery failure means no candidate either; the pass
+                // reports zero replacements instead of guessing.
+                Err(_) => None,
+            };
+            if let Some(candidate) = candidate {
+                self.verify_corpus_build_inputs(
+                    project,
+                    target,
+                    EngineKind::AflPlusPlus,
+                    "regenerate_dead_seeds",
+                )
+                .await?;
+                #[cfg(feature = "coverage-blockers")]
+                let frontier = self.measured_seed_frontier(project, target, lang).await;
+                #[cfg(not(feature = "coverage-blockers"))]
+                let frontier = Vec::new();
+                let sections = Self::seed_prompt_sections(
+                    project,
+                    &candidate,
+                    &workspace,
+                    existing_sample,
+                    dead_bytes,
+                    frontier,
+                );
+                let prompt = sections.render(&candidate, requested);
+                let seeds = self
+                    .dispatch_seed_prompt(
+                        pool,
+                        hf_storage::SeedDraftPurpose::Regenerate,
                         project,
                         target,
-                        EngineKind::AflPlusPlus,
-                        "regenerate_dead_seeds",
+                        prompt,
+                        requested,
+                        "seed_regen",
                     )
-                    .await?;
-                    let provider = LlmProviderBridge::new(pool)
-                        .with_diagnostics(Arc::clone(&self.diagnostics), "seed_regen");
-                    match hf_harness::generate_seeds(candidate, requested, Box::new(provider)).await
-                    {
-                        Ok(seeds) => {
-                            let mut seen = std::collections::HashSet::new();
-                            for (i, data) in seeds.into_iter().enumerate() {
-                                use sha2::Digest as _;
-                                let sha = format!("{:x}", sha2::Sha256::digest(&data));
-                                if !seen.insert(sha) {
-                                    continue;
-                                }
-                                replacements.push((data, format!("regen_{pass}_{i}")));
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("LLM seed regeneration for '{target}' failed: {e}");
-                        }
+                    .await;
+                let mut seen = std::collections::HashSet::new();
+                for (i, data) in seeds.into_iter().enumerate() {
+                    use sha2::Digest as _;
+                    let sha = format!("{:x}", sha2::Sha256::digest(&data));
+                    if !seen.insert(sha) {
+                        continue;
                     }
+                    replacements.push((data, format!("regen_{pass}_{i}")));
                 }
             }
         }
@@ -4362,5 +4662,104 @@ mod exact_qualification_tests {
             .await
             .unwrap();
         assert_eq!(promoted.status, HarnessStatus::Promoted);
+    }
+}
+
+#[cfg(test)]
+mod seed_dispatch_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use hf_core::provider::{
+        ChatRequest, ChatResponse, ChatStreamResponse, ProviderError, ProviderPool, ProviderStatus,
+        RouteRequest,
+    };
+
+    use super::ServiceContainer;
+
+    /// A pool that counts the completions dispatched to it.
+    struct CountingPool {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderPool for CountingPool {
+        async fn chat_completion(
+            &self,
+            _request: &ChatRequest,
+            _route: &RouteRequest,
+        ) -> Result<ChatResponse, ProviderError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(hf_test_utils::fixtures::make_chat_response(
+                r#"["89504e47"]"#,
+            ))
+        }
+
+        async fn chat_completion_stream(
+            &self,
+            _request: &ChatRequest,
+            _route: &RouteRequest,
+        ) -> Result<ChatStreamResponse, ProviderError> {
+            Err(ProviderError::Other {
+                message: "streaming is not used by the seed dispatch tests".to_owned(),
+            })
+        }
+
+        fn report_error(&self, _provider_id: &hf_core::types::ProviderId, _error: &ProviderError) {}
+
+        async fn provider_statuses(&self) -> Vec<ProviderStatus> {
+            Vec::new()
+        }
+
+        async fn freeze(&self, _provider_id: &hf_core::types::ProviderId, _reason: String) {}
+
+        async fn thaw(
+            &self,
+            _provider_id: &hf_core::types::ProviderId,
+        ) -> Result<(), ProviderError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_seed_prompt_retention_failure_dispatches_nothing() {
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        let store = Arc::new(
+            hf_storage::Store::connect(directory.path().join("seed.db"))
+                .await
+                .unwrap(),
+        );
+        let pool = Arc::new(CountingPool {
+            calls: AtomicUsize::new(0),
+        });
+        let container = ServiceContainer::new(
+            Arc::new(hf_runtime::StubRuntime),
+            Some(Arc::clone(&pool) as Arc<dyn ProviderPool>),
+        )
+        .with_store(Arc::clone(&store));
+        // Closing the pool makes the retention insert fail: the storage
+        // failure both seed paths must survive without dispatching.
+        store.pool().close().await;
+
+        let seeds = container
+            .dispatch_seed_prompt(
+                Arc::clone(&pool) as Arc<dyn ProviderPool>,
+                hf_storage::SeedDraftPurpose::Initial,
+                &project,
+                "parse_entry",
+                "You are the seed-corpus author for oxfuzz.".to_owned(),
+                8,
+                "seed_gen",
+            )
+            .await;
+
+        assert!(seeds.is_empty(), "a retention failure yields no seeds");
+        assert_eq!(
+            pool.calls.load(Ordering::SeqCst),
+            0,
+            "an unretained prompt is never dispatched"
+        );
     }
 }

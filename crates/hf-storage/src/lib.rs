@@ -18,6 +18,8 @@ mod crash_verify_drafts;
 pub use crash_verify_drafts::{CrashVerifyDraftRecord, MAX_CRASH_VERIFY_DRAFT_BYTES};
 mod dictionary_llm_drafts;
 pub use dictionary_llm_drafts::{DictionaryLlmDraftRecord, MAX_DICTIONARY_LLM_DRAFT_BYTES};
+mod seed_llm_drafts;
+pub use seed_llm_drafts::{SeedDraftPurpose, SeedLlmDraftRecord, MAX_SEED_LLM_DRAFT_BYTES};
 mod harness_target_sources;
 pub use harness_target_sources::{HarnessTargetSourceRecord, MAX_TARGET_SOURCE_SECTION_BYTES};
 mod run_function_coverage;
