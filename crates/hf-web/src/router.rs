@@ -5109,7 +5109,7 @@ mod request_tests {
 
     use super::{
         classified_api_error, parse_role, public_provider_value, public_value, ReportRequest,
-        SetProvidersRequest, VerifyCrashRequest,
+        RunStartRequest, SetProvidersRequest, TriageRequest, VerifyCrashRequest,
     };
     use serde::Serialize;
 
@@ -5149,6 +5149,44 @@ mod request_tests {
             ))
             .is_err(),
             "a request without a crash id is rejected, not defaulted"
+        );
+    }
+
+    #[test]
+    fn ai_field_defaults_to_auto_and_rejects_unknown_policies() {
+        const NIL: &str = "00000000-0000-0000-0000-000000000000";
+        // Omitting `ai` keeps every affected request on `auto`.
+        let verify: VerifyCrashRequest = serde_json::from_str(&format!(
+            r#"{{"project":"/p","target":"parse_header","run_id":"{NIL}","crash_id":"{NIL}"}}"#
+        ))
+        .expect("verify request without ai defaults");
+        assert_eq!(verify.ai, hf_service::AiPolicy::Auto);
+        let triage: TriageRequest =
+            serde_json::from_str(r#"{"project":"/p","target":"parse_header"}"#)
+                .expect("triage request without ai defaults");
+        assert_eq!(triage.ai, hf_service::AiPolicy::Auto);
+        let report: ReportRequest =
+            serde_json::from_str(r#"{"project":"/p","target":"parse_header"}"#)
+                .expect("report request without ai defaults");
+        assert_eq!(report.ai, hf_service::AiPolicy::Auto);
+        let run: RunStartRequest = serde_json::from_str(
+            r#"{"project":"/p","target":"parse_header","engine":"libfuzzer","duration_secs":1}"#,
+        )
+        .expect("run-start request without ai defaults");
+        assert_eq!(run.ai, hf_service::AiPolicy::Auto);
+
+        // An explicit policy is honored and an unknown one is rejected.
+        let explicit: VerifyCrashRequest = serde_json::from_str(&format!(
+            r#"{{"project":"/p","target":"parse_header","run_id":"{NIL}","crash_id":"{NIL}","ai":"off"}}"#
+        ))
+        .expect("explicit off policy deserializes");
+        assert_eq!(explicit.ai, hf_service::AiPolicy::Off);
+        assert!(
+            serde_json::from_str::<VerifyCrashRequest>(&format!(
+                r#"{{"project":"/p","target":"parse_header","run_id":"{NIL}","crash_id":"{NIL}","ai":"bogus"}}"#
+            ))
+            .is_err(),
+            "an unknown ai policy is rejected, not coerced"
         );
     }
 

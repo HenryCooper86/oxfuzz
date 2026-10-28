@@ -5,6 +5,8 @@
 //! `hf-runtime` sandboxing (Engineering Protocol 2.12).
 
 #[cfg(test)]
+mod ai_policy_ipc_tests;
+#[cfg(test)]
 mod approval_ipc_tests;
 mod closeout_commands;
 mod commands;
