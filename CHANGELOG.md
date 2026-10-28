@@ -15,6 +15,12 @@ Versions match the release commits that bump `Cargo.toml`.
   a one-click starting patch for the draft editor; the operator still reviews
   and can edit it before creating, approving, or running a verification.
 
+- LLM dictionary drafts are targeted and durable: the prompt carries the
+  target's own definition and the static dictionary's existing tokens, and
+  each prompt and response is retained (migration 0047,
+  `dictionary_llm_drafts`). Repeated runs on unchanged sources reuse the
+  retained tokens without a model call.
+
 ## 0.8.1 - 2026-10-25
 
 The v0.8.0 tag was never published: its Windows tests failed on the

@@ -14,6 +14,8 @@ mod harness_behavior;
 pub use harness_behavior::HarnessBehaviorRecord;
 mod crash_report_drafts;
 pub use crash_report_drafts::{CrashReportDraftRecord, MAX_CRASH_REPORT_DRAFT_BYTES};
+mod dictionary_llm_drafts;
+pub use dictionary_llm_drafts::{DictionaryLlmDraftRecord, MAX_DICTIONARY_LLM_DRAFT_BYTES};
 mod harness_target_sources;
 pub use harness_target_sources::{HarnessTargetSourceRecord, MAX_TARGET_SOURCE_SECTION_BYTES};
 mod run_function_coverage;

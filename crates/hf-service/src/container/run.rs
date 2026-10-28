@@ -12,6 +12,7 @@ use hf_core::runtime::SandboxOptions;
 use hf_core::target::TargetLanguage;
 use hf_guardrails::{Action, Decision};
 use hf_storage::{AutoRevertEvent, RunKind, RunRecord, RunStatus, Store};
+use sha2::{Digest as _, Sha256};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -20,8 +21,7 @@ use super::guards::{
     close_run_journal, ensure_run_journal_durable, ActiveRunGuard, PersistedRunGuard,
 };
 use super::harness_workspace::{
-    build_workspace_dictionary, dict_llm_cache, harness_binary_name, harness_cmplog_binary_name,
-    read_dictionary_source_excerpt,
+    build_workspace_dictionary, harness_binary_name, harness_cmplog_binary_name,
 };
 use super::output_budget::{monitor_run_output, run_artifacts_within_budget};
 use super::policy::CurrentHarnessEvidence;
@@ -32,6 +32,7 @@ use super::staging::{
     run_sandbox_options, stage_replay_artifacts, stage_run_artifacts, verify_run_artifacts,
     verify_staged_qualification, ReplayProvenance, RunArtifacts,
 };
+use super::target_source::read_target_definition;
 use super::workspace::{
     prepare_configured_workspace_root, run_output_relative, workspace_dir,
     workspace_relative_record,
@@ -686,29 +687,31 @@ impl ServiceContainer {
         let Some(dict_path) = build_workspace_dictionary(workspace, dict_name) else {
             return Vec::new();
         };
-        // Best-effort, provider-gated, cached per source version; a failure
-        // leaves the static dictionary in place.
-        self.augment_dictionary_llm(project, target, workspace, &dict_path)
+        // Best-effort and provider-gated; a failure leaves the static
+        // dictionary in place.
+        self.augment_dictionary_llm(project, target, &dict_path)
             .await;
         hf_engine::dict::dict_run_args(engine, &format!("/work/{dict_name}"))
     }
 
     /// Merge LLM-proposed dictionary tokens into the static dictionary at
-    /// `dict_path`: format keywords / magic sequences the lexical scan may miss.
-    /// No-op without a provider or source. The LLM tokens are cached per target
-    /// by the static dictionary's hash, so a repeated run on unchanged sources
-    /// makes no LLM call; failures leave the static dictionary intact.
-    async fn augment_dictionary_llm(
-        &self,
-        project: &Path,
-        target: &str,
-        workspace: &Path,
-        dict_path: &Path,
-    ) {
+    /// `dict_path`: format keywords / magic sequences the lexical scan may
+    /// miss. The prompt names the target's own definition and the tokens the
+    /// static dictionary already contains, is retained in
+    /// `dictionary_llm_drafts` before dispatch, and its response after
+    /// (Engineering Protocol 2.13). The latest completed draft for the same
+    /// static dictionary is reused without a provider call; every failure
+    /// leaves the static dictionary intact.
+    async fn augment_dictionary_llm(&self, project: &Path, target: &str, dict_path: &Path) {
         use hf_core::provider::{ChatRequest, LlmProvider as _};
         use hf_core::types::Message;
-        use std::hash::{Hash as _, Hasher as _};
 
+        // Without a store the model-visible prompt cannot be retained, so no
+        // augmentation happens (Engineering Protocol 2.13): the static
+        // dictionary stays as extracted.
+        let Some(store) = self.store() else {
+            return;
+        };
         let Some(pool) = self.provider_pool() else {
             return;
         };
@@ -716,39 +719,85 @@ impl ServiceContainer {
             return;
         };
         let mut tokens = hf_engine::dict::parse_dict(&static_text);
-        let key = format!("{}::{target}", project.display());
-        let signature = {
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            static_text.hash(&mut hasher);
-            hasher.finish()
+        // An uncanonicalizable root cannot key the durable draft.
+        let Ok(root) = canonical_project_root(project) else {
+            return;
         };
-        let cached = dict_llm_cache()
-            .lock()
-            .ok()
-            .and_then(|map| map.get(&key).cloned())
-            .filter(|(cached_sig, _)| *cached_sig == signature);
-        let llm_tokens = if let Some((_, cached_tokens)) = cached {
-            cached_tokens
-        } else {
-            let excerpt = read_dictionary_source_excerpt(workspace, 8192);
-            if excerpt.trim().is_empty() {
+        let candidate = match self
+            .resolve_target_candidate_any_language(project, target)
+            .await
+        {
+            Ok(Some(candidate)) => candidate,
+            // An unresolvable target has no definition to show the model.
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!("dictionary target '{target}' resolution failed: {error}");
                 return;
             }
-            let prompt = hf_prompt::render_dictionary_prompt(target, &excerpt);
+        };
+        // An unreadable definition leaves the static dictionary as extracted.
+        let Some(definition) = read_target_definition(&root, &candidate) else {
+            return;
+        };
+        let project_root = root.to_string_lossy().into_owned();
+        let signature = format!("{:x}", Sha256::digest(static_text.as_bytes()));
+        let reused = match store
+            .latest_completed_dictionary_llm_draft(&project_root, target, &signature)
+            .await
+        {
+            Ok(draft) => draft,
+            Err(error) => {
+                // A failed reuse lookup degrades to a fresh dispatch; the
+                // insert below fails loudly if the store stays broken.
+                tracing::warn!("dictionary draft reuse lookup failed: {error}");
+                None
+            }
+        };
+        let llm_tokens = if let Some(response) = reused.and_then(|draft| draft.response) {
+            hf_engine::dict::parse_dict(&response)
+        } else {
+            let prompt = hf_prompt::render_dictionary_prompt(target, &definition.excerpt, &tokens);
+            if prompt.len() > hf_storage::MAX_DICTIONARY_LLM_DRAFT_BYTES {
+                tracing::warn!(
+                    "dictionary prompt for '{target}' exceeds the retained size; augmentation skipped"
+                );
+                return;
+            }
+            let record = hf_storage::DictionaryLlmDraftRecord {
+                id: Uuid::new_v4(),
+                project_root,
+                target: target.to_owned(),
+                static_dict_sha256: signature,
+                prompt,
+                response: None,
+                created_at: Utc::now(),
+                completed_at: None,
+            };
+            if let Err(error) = store.begin_dictionary_llm_draft(&record).await {
+                tracing::warn!(
+                    "dictionary prompt for '{target}' not retained; augmentation skipped: {error}"
+                );
+                return;
+            }
             let provider = LlmProviderBridge::new(pool)
                 .with_diagnostics(Arc::clone(&self.diagnostics), "dict_gen");
-            let req = ChatRequest::from_messages(vec![Message::user(prompt)]);
-            let fresh = match provider.chat_completion(&req).await {
-                Ok(resp) => hf_engine::dict::parse_dict(resp.text()),
-                Err(e) => {
-                    tracing::warn!("LLM dictionary generation for '{target}' failed: {e}");
+            let request = ChatRequest::from_messages(vec![Message::user(record.prompt.clone())]);
+            let response = match provider.chat_completion(&request).await {
+                Ok(response) => response.text().to_owned(),
+                Err(error) => {
+                    tracing::warn!("LLM dictionary generation for '{target}' failed: {error}");
                     return;
                 }
             };
-            if let Ok(mut map) = dict_llm_cache().lock() {
-                map.insert(key, (signature, fresh.clone()));
+            if let Err(error) = store
+                .complete_dictionary_llm_draft(record.id, &response, Utc::now())
+                .await
+            {
+                // The prompt is retained; only the raw response is
+                // missing. The parsed tokens still merge below.
+                tracing::warn!("dictionary response for '{target}' not retained: {error}");
             }
-            fresh
+            hf_engine::dict::parse_dict(&response)
         };
         if llm_tokens.is_empty() {
             return;
@@ -3448,6 +3497,98 @@ mod cmplog_companion_tests {
         let resolved = require_cmplog_companion("parse", &harness, workspace.path())
             .expect("the recorded companion resolves");
         assert_eq!(resolved, companion);
+    }
+}
+
+#[cfg(test)]
+mod dictionary_llm_tests {
+    use super::ServiceContainer;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// Counts dispatches and refuses each one: any provider call in these
+    /// tests is a failure, not an answer source.
+    struct RefusingPool {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl hf_core::provider::ProviderPool for RefusingPool {
+        async fn chat_completion(
+            &self,
+            _request: &hf_core::provider::ChatRequest,
+            _route: &hf_core::provider::RouteRequest,
+        ) -> Result<hf_core::provider::ChatResponse, hf_core::provider::ProviderError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(hf_core::provider::ProviderError::Other {
+                message: "no dispatch is expected here".to_owned(),
+            })
+        }
+        async fn chat_completion_stream(
+            &self,
+            _request: &hf_core::provider::ChatRequest,
+            _route: &hf_core::provider::RouteRequest,
+        ) -> Result<hf_core::provider::ChatStreamResponse, hf_core::provider::ProviderError>
+        {
+            Err(hf_core::provider::ProviderError::Other {
+                message: "streaming is unused".to_owned(),
+            })
+        }
+        fn report_error(
+            &self,
+            _provider_id: &hf_core::types::ProviderId,
+            _error: &hf_core::provider::ProviderError,
+        ) {
+        }
+        async fn provider_statuses(&self) -> Vec<hf_core::provider::ProviderStatus> {
+            Vec::new()
+        }
+        async fn freeze(&self, _provider_id: &hf_core::types::ProviderId, _reason: String) {}
+        async fn thaw(
+            &self,
+            _provider_id: &hf_core::types::ProviderId,
+        ) -> Result<(), hf_core::provider::ProviderError> {
+            Ok(())
+        }
+    }
+
+    /// Without a store the model-visible prompt cannot be retained, so no
+    /// augmentation happens: the static dictionary stays as extracted
+    /// (Engineering Protocol 2.13).
+    #[tokio::test]
+    async fn augment_without_a_store_leaves_the_static_dictionary_untouched() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("parse.c"),
+            "#include <string.h>\nint parse_entry(const unsigned char *data, size_t size) { return size < 4 || memcmp(data, \"IHDR\", 4) == 0; }\n",
+        )
+        .unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let static_dict = "\"IHDR\"\n";
+        let dict_path = workspace.path().join("fuzzer.dict");
+        std::fs::write(&dict_path, static_dict).unwrap();
+        let pool = Arc::new(RefusingPool {
+            calls: AtomicUsize::new(0),
+        });
+        let service = ServiceContainer::new(
+            Arc::new(hf_runtime::StubRuntime),
+            Some(pool.clone() as Arc<dyn hf_core::provider::ProviderPool>),
+        );
+
+        service
+            .augment_dictionary_llm(project.path(), "parse_entry", &dict_path)
+            .await;
+
+        assert_eq!(
+            pool.calls.load(Ordering::SeqCst),
+            0,
+            "no dispatch without a retained prompt"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&dict_path).unwrap(),
+            static_dict,
+            "the static dictionary is untouched"
+        );
     }
 }
 

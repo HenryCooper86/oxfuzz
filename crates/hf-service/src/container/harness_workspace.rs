@@ -182,27 +182,6 @@ pub(super) fn build_workspace_dictionary(workspace: &Path, dict_name: &str) -> O
     .ok()
 }
 
-/// A bounded excerpt of the target's non-harness C/C++ sources, for the LLM
-/// dictionary author. Capped so a large target cannot blow the prompt budget.
-pub(super) fn read_dictionary_source_excerpt(workspace: &Path, max_bytes: usize) -> String {
-    let mut excerpt = String::new();
-    let mut remaining = max_bytes.min(MAX_DICTIONARY_SOURCE_BYTES);
-    for path in dictionary_source_paths(workspace) {
-        if remaining == 0 {
-            break;
-        }
-        if let Ok((src, bytes_read)) = read_dictionary_source(workspace, &path, remaining) {
-            remaining -= bytes_read;
-            excerpt.push_str(&src);
-            if remaining > 0 {
-                excerpt.push('\n');
-                remaining -= 1;
-            }
-        }
-    }
-    excerpt
-}
-
 /// Aggregate safety ceiling for optional dictionary source inspection.
 const MAX_DICTIONARY_SOURCE_BYTES: usize = 8 * 1024 * 1024;
 
@@ -314,17 +293,6 @@ fn read_dictionary_source_bytes(
     String::from_utf8(bytes)
         .map(|source| (source, bytes_read))
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
-}
-
-/// Cache of LLM-proposed dictionary tokens, keyed by `project::target` and
-/// tagged with the static dictionary's content hash, so the LLM is queried at
-/// most once per source version.
-pub(super) type DictLlmCache =
-    std::sync::Mutex<std::collections::HashMap<String, (u64, Vec<Vec<u8>>)>>;
-
-pub(super) fn dict_llm_cache() -> &'static DictLlmCache {
-    static CACHE: std::sync::OnceLock<DictLlmCache> = std::sync::OnceLock::new();
-    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
 /// Read the current harness source from a target workspace, trying the known
@@ -1003,7 +971,7 @@ mod dictionary_source_tests {
 
 #[cfg(test)]
 mod dictionary_tests {
-    use super::{build_workspace_dictionary, read_dictionary_source_excerpt};
+    use super::build_workspace_dictionary;
 
     #[cfg(unix)]
     #[test]
@@ -1015,18 +983,6 @@ mod dictionary_tests {
         std::os::unix::fs::symlink(&secret, workspace.path().join("leak.h")).unwrap();
 
         assert!(build_workspace_dictionary(workspace.path(), "test.dict").is_none());
-        assert!(read_dictionary_source_excerpt(workspace.path(), 8192).is_empty());
-    }
-
-    #[test]
-    fn dictionary_excerpt_truncates_at_a_utf8_character() {
-        let workspace = tempfile::tempdir().unwrap();
-        std::fs::write(workspace.path().join("parse.c"), "// é中\n").unwrap();
-
-        assert_eq!(read_dictionary_source_excerpt(workspace.path(), 4), "// ");
-        assert_eq!(read_dictionary_source_excerpt(workspace.path(), 5), "// é");
-        assert_eq!(read_dictionary_source_excerpt(workspace.path(), 7), "// é");
-        assert_eq!(read_dictionary_source_excerpt(workspace.path(), 0), "");
     }
 
     #[test]

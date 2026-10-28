@@ -650,9 +650,20 @@ pub fn render_seed_prompt(target: &TargetCandidate, count: usize) -> String {
 /// that a purely lexical scan of the source might miss. The response is expected
 /// in AFL++/libFuzzer dictionary format (one `"token"` per line) so it merges
 /// directly with the statically-extracted dictionary.
+///
+/// `existing_tokens` lists the tokens the static dictionary already contains,
+/// each rendered as a dictionary line, so the model does not re-propose them.
+/// An empty slice renders no token section, so callers can pass whatever
+/// dictionary parsing returned without branching.
 #[must_use]
-pub fn render_dictionary_prompt(symbol: &str, source_excerpt: &str) -> String {
-    format!(
+pub fn render_dictionary_prompt(
+    symbol: &str,
+    source_excerpt: &str,
+    existing_tokens: &[Vec<u8>],
+) -> String {
+    use std::fmt::Write as _;
+
+    let mut prompt = format!(
         "You are the fuzzing-dictionary author for oxfuzz.\n\
          Propose dictionary tokens that help a coverage-guided fuzzer get past \
          shallow keyword/magic-value gates in the target `{symbol}` below: format \
@@ -662,11 +673,48 @@ pub fn render_dictionary_prompt(symbol: &str, source_excerpt: &str) -> String {
          ~32 bytes.\n\
          Output ONLY AFL++/libFuzzer dictionary lines, one per line, each a \
          double-quoted token with non-printable bytes escaped as \\xNN (e.g. \
-         \"IHDR\" or \"\\x89PNG\"). No prose, no code fences, no names or levels.\n\
-         \n\
-         Source excerpt:\n\
-         {source_excerpt}"
-    )
+         \"IHDR\" or \"\\x89PNG\"). No prose, no code fences, no names or levels.\n"
+    );
+    if !existing_tokens.is_empty() {
+        prompt.push_str("\nThe static dictionary already contains these tokens:\n");
+        for token in existing_tokens.iter().take(MAX_DICTIONARY_EXISTING_TOKENS) {
+            prompt.push_str(&dictionary_token_line(token));
+            prompt.push('\n');
+        }
+        prompt.push_str("Do not re-propose any token already listed above.\n");
+    }
+    // Writing to a String is infallible.
+    let _ = write!(prompt, "\nSource excerpt:\n{source_excerpt}");
+    prompt
+}
+
+/// Existing static-dictionary tokens listed in a dictionary prompt. The list
+/// exists to stop the model re-proposing them; past this many, the tail of a
+/// large dictionary crowds out the target's own code (Engineering Protocol 2.4).
+/// Each token is itself bounded by dictionary parsing.
+pub const MAX_DICTIONARY_EXISTING_TOKENS: usize = 200;
+
+/// One existing token as an AFL++/libFuzzer dictionary line, escaping with the
+/// same rules as the engine's dictionary renderer (hf-prompt does not depend
+/// on the engine crate, so the escaping is restated here).
+fn dictionary_token_line(token: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut line = String::with_capacity(token.len() + 2);
+    line.push('"');
+    for &byte in token {
+        match byte {
+            b'"' => line.push_str("\\\""),
+            b'\\' => line.push_str("\\\\"),
+            0x20..=0x7e => line.push(byte as char),
+            other => {
+                // Writing to a String is infallible.
+                let _ = write!(line, "\\x{other:02x}");
+            }
+        }
+    }
+    line.push('"');
+    line
 }
 
 /// Render the crash-verification prompt: ask the LLM to judge whether a triaged
@@ -985,8 +1033,12 @@ mod tests {
     }
 
     #[test]
-    fn dictionary_prompt_names_target_and_requests_afl_format() {
-        let prompt = render_dictionary_prompt("parse_png", "if (memcmp(p, \"\\x89PNG\", 4)) {}");
+    fn dictionary_prompt_lists_existing_tokens_and_forbids_reproposing_them() {
+        let prompt = render_dictionary_prompt(
+            "parse_png",
+            "if (memcmp(p, \"\\x89PNG\", 4)) {}",
+            &[b"IHDR".to_vec(), b"GET ".to_vec()],
+        );
         assert!(prompt.contains("parse_png"), "must name the target");
         assert!(
             prompt.contains("dictionary lines"),
@@ -995,6 +1047,36 @@ mod tests {
         assert!(
             prompt.contains("\\x89PNG"),
             "must include the source excerpt"
+        );
+        assert!(
+            prompt.contains("\"IHDR\"\n\"GET \""),
+            "must list the existing tokens as dictionary lines: {prompt}"
+        );
+        assert!(
+            prompt.contains("Do not re-propose"),
+            "must forbid re-proposing existing tokens: {prompt}"
+        );
+    }
+
+    #[test]
+    fn dictionary_prompt_bounds_the_existing_token_list_at_200_tokens() {
+        let many: Vec<Vec<u8>> = (0..300)
+            .map(|index| format!("tok{index}").into_bytes())
+            .collect();
+        let prompt = render_dictionary_prompt("parse_png", "int f(void);", &many);
+        assert!(prompt.contains("\"tok199\""), "{prompt}");
+        assert!(
+            !prompt.contains("\"tok200\""),
+            "the existing-token list is capped: {prompt}"
+        );
+    }
+
+    #[test]
+    fn dictionary_prompt_without_existing_tokens_renders_no_token_section() {
+        let prompt = render_dictionary_prompt("parse_png", "int f(void);", &[]);
+        assert!(
+            !prompt.contains("already contains"),
+            "no token list must render no section: {prompt}"
         );
     }
 

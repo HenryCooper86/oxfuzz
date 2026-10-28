@@ -1357,6 +1357,7 @@ bounded deterministic history, and both cleanup operations.
 | `0044_filed_issues.sql` | creates the issue-filing dedup ledger (`filed_issues`) |
 | `0045_harness_target_sources.sql` | retains the exact target-definition section rendered into each harness draft prompt |
 | `0046_crash_report_drafts.sql` | retains each bug-report drafting prompt before dispatch and its response once |
+| `0047_dictionary_llm_drafts.sql` | retains each dictionary-augmentation prompt before dispatch and its response once |
 
 ## 7. Read failure contract
 
@@ -1611,3 +1612,33 @@ permitted update sets `response` and `completed_at` on a pending row, once.
 | `completed_at` | `TEXT` | Response time; NULL exactly when `response` is NULL |
 
 Index: `idx_crash_report_drafts_crash(crash_id, created_at DESC, id DESC)`.
+
+## Dictionary LLM drafts (0047)
+
+### `dictionary_llm_drafts`
+
+Migration 0047 retains each dictionary-augmentation request before provider
+dispatch and the model's response once it arrives. The prompt names the
+target's own definition and the tokens the static dictionary already contains,
+so the exact text is kept rather than rebuilt. A row whose prompt cannot be
+written is never dispatched; without a store no augmentation happens and the
+static dictionary stays as extracted. The latest completed draft for a
+`(project_root, target, static_dict_sha256)` triple is reused without a
+provider call, so each static dictionary version is proposed at most once.
+There is no crash or run foreign key, because augmentation happens during
+pre-run staging; project deletion and `clear_knowledge` delete these rows.
+The only permitted update sets `response` and `completed_at` on a pending
+row, once.
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | Immutable draft UUID |
+| `project_root` | `TEXT NOT NULL` | Canonical project root |
+| `target` | `TEXT NOT NULL` | Target selector of the run being staged |
+| `static_dict_sha256` | `TEXT NOT NULL` | 64-character hex SHA-256 of the static dictionary text |
+| `prompt` | `TEXT NOT NULL` | Exact provider prompt, at most 64 KiB |
+| `response` | `TEXT` | Provider response, at most 64 KiB; NULL while pending |
+| `created_at` | `TEXT NOT NULL` | UTC capture time, RFC 3339 with nanoseconds |
+| `completed_at` | `TEXT` | Response time; NULL exactly when `response` is NULL |
+
+Index: `idx_dictionary_llm_drafts_reuse(project_root, target, static_dict_sha256, created_at DESC, id DESC)`.

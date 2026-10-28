@@ -2544,6 +2544,7 @@ impl Store {
         for table in [
             "harness_clang_contexts",
             "harness_target_sources",
+            "dictionary_llm_drafts",
             "clang_analysis_results",
             "clang_analysis_operations",
             "ai_discovery_operations",
@@ -2594,6 +2595,7 @@ impl Store {
         for table in [
             "harness_clang_contexts",
             "harness_target_sources",
+            "dictionary_llm_drafts",
             "clang_analysis_results",
             "clang_analysis_operations",
             "ai_discovery_operations",
