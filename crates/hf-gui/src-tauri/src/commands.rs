@@ -629,10 +629,15 @@ pub async fn triage(
     state: tauri::State<'_, crate::state::AppState>,
     project: String,
     target: String,
+    ai: Option<hf_service::AiPolicy>,
 ) -> Result<serde_json::Value, String> {
     let container = with_user_approval(&state.container, ExplicitAction::Triage);
     let deduped = container
-        .triage(std::path::Path::new(&project), &target)
+        .triage(
+            std::path::Path::new(&project),
+            &target,
+            ai.unwrap_or_default(),
+        )
         .await
         .map_err(|e| e.to_string())?;
     serde_json::to_value(&deduped).map_err(|e| e.to_string())
@@ -649,11 +654,19 @@ pub async fn verify_crash(
     target: String,
     run_id: uuid::Uuid,
     crash_id: uuid::Uuid,
+    ai: Option<hf_service::AiPolicy>,
 ) -> Result<serde_json::Value, String> {
     let verdict = state
         .container
-        .verify_crash_by_id(std::path::Path::new(&project), crash_id, run_id, &target)
-        .await;
+        .verify_crash_by_id(
+            std::path::Path::new(&project),
+            crash_id,
+            run_id,
+            &target,
+            ai.unwrap_or_default(),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
     serde_json::to_value(verdict).map_err(|e| e.to_string())
 }
 
@@ -2056,6 +2069,9 @@ pub async fn run_fuzzer(
                 .map_err(|e| format!("invalid seed: {e}"))?,
             &(on_progress),
             &(on_started),
+            // The desktop run button carries no per-run AI policy control;
+            // the configured provider applies (`auto`).
+            hf_service::AiPolicy::default(),
         )
         .await;
 
@@ -2210,6 +2226,9 @@ pub async fn generate_report(
             expected_run_id
                 .map(|id| uuid::Uuid::parse_str(&id).map_err(|error| error.to_string()))
                 .transpose()?,
+            // The desktop report button carries no AI policy control; the
+            // narrative composes when a provider is configured (`auto`).
+            hf_service::AiPolicy::default(),
         )
         .await
         .map_err(|e| e.to_string())

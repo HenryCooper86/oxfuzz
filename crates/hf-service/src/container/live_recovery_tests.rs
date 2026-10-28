@@ -217,6 +217,7 @@ async fn approved_campaign_survives_service_process_loss() {
             None,
             None,
             &|_| {},
+            crate::AiPolicy::Auto,
         )
         .await
         .expect("fresh service admits a distinct approved campaign");
@@ -421,6 +422,7 @@ async fn live_campaign_child() {
                     .unwrap();
                 }
             },
+            crate::AiPolicy::Auto,
         )
         .await;
     if std::env::var(LIVE_FAULT_MODE).ok().as_deref() == Some("output_budget") {

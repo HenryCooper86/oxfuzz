@@ -438,6 +438,7 @@ async fn discover_harness_run_triage_end_to_end() {
             None,
             None,
             &|_| {},
+            hf_service::AiPolicy::Auto,
         )
         .await
         .unwrap();
@@ -463,7 +464,10 @@ async fn discover_harness_run_triage_end_to_end() {
 
     // 4. Triage: the crash is ingested, classified, and attributed to the
     // exact target and run that produced it.
-    let crashes = container.triage(&project, "parse_value").await.unwrap();
+    let crashes = container
+        .triage(&project, "parse_value", hf_service::AiPolicy::Auto)
+        .await
+        .unwrap();
     assert_eq!(crashes.len(), 1);
     let crash = &crashes[0];
     assert_eq!(crash.kind, CrashKind::Asan);
@@ -540,7 +544,10 @@ async fn discover_harness_run_triage_end_to_end() {
 
     // A second triage pass over the same evidence dedups: the deterministic
     // crash id is re-derived and the row replaced, not duplicated.
-    let reprises = container.triage(&project, "parse_value").await.unwrap();
+    let reprises = container
+        .triage(&project, "parse_value", hf_service::AiPolicy::Auto)
+        .await
+        .unwrap();
     assert_eq!(reprises.len(), 1);
     let after = store.list_crashes_by_run(summary.run_id).await.unwrap();
     assert_eq!(
@@ -640,12 +647,16 @@ async fn full_pipeline_minimizes_the_crash_it_found() {
             None,
             None,
             &|_| {},
+            hf_service::AiPolicy::Auto,
         )
         .await
         .unwrap();
     assert_eq!(summary.crashes, 1);
 
-    let crashes = container.triage(&project, "parse_value").await.unwrap();
+    let crashes = container
+        .triage(&project, "parse_value", hf_service::AiPolicy::Auto)
+        .await
+        .unwrap();
     assert_eq!(crashes.len(), 1);
     let crash = &crashes[0];
 
@@ -704,7 +715,10 @@ async fn full_pipeline_minimizes_the_crash_it_found() {
     // Re-triage reuses the published artifact instead of minimizing again: the
     // deterministic crash id is re-derived, the row is replaced rather than
     // duplicated, and the sandbox is not entered a second time.
-    let reprises = container.triage(&project, "parse_value").await.unwrap();
+    let reprises = container
+        .triage(&project, "parse_value", hf_service::AiPolicy::Auto)
+        .await
+        .unwrap();
     assert_eq!(reprises.len(), 1);
     assert!(reprises[0].minimized);
     assert_eq!(reprises[0].id, crash.id);

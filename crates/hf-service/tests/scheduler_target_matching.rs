@@ -191,6 +191,7 @@ async fn fixture(name: &str) -> Fixture {
             None,
             false,
             false,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect("qualified harness generated");

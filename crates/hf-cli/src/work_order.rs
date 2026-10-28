@@ -592,6 +592,7 @@ mod tests {
                         seed: _,
                         experiment: _,
                         replay,
+                        ai: _,
                     }),
                 ) => {
                     assert_eq!(project, PathBuf::from("/tmp/project"));

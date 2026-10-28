@@ -350,6 +350,7 @@ async fn qualified_generated_harness_can_be_smoke_qualified() {
             None,
             false,
             false,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .unwrap();
@@ -390,6 +391,7 @@ async fn qualified_refinement_keeps_the_active_binary_name() {
             EngineKind::LibFuzzer,
             TargetLanguage::C,
             0,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .unwrap();

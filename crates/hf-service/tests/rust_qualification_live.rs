@@ -175,6 +175,7 @@ async fn approved_rust_workspace_completes_userspace_lifecycle() {
                     &|id| {
                         started_tx.send(id).unwrap();
                     },
+                    hf_service::AiPolicy::Auto,
                 )
                 .await
         })

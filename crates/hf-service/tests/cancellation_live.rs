@@ -114,6 +114,7 @@ async fn qualify_engine(container: Arc<ServiceContainer>, root: &Path, engine: E
                     &|id| {
                         started_tx.send(id).unwrap();
                     },
+                    hf_service::AiPolicy::Auto,
                 )
                 .await
         })

@@ -254,6 +254,7 @@ async fn harness_generate_conditions_the_draft_on_promoted_harnesses() {
             None,
             false,
             false,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect("generation should complete");
@@ -306,6 +307,7 @@ async fn harness_generate_without_promotions_drafts_without_the_section() {
             None,
             false,
             false,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect("generation should complete");

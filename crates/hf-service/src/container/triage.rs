@@ -21,7 +21,9 @@ use super::project_identity::{
 };
 use super::staging::{run_binary_path, run_output_dir, run_source_path};
 use super::workspace::workspace_dir;
-use super::{run_has_crash_evidence, LlmProviderBridge, RegressionResult, ServiceContainer};
+use super::{
+    run_has_crash_evidence, AiPolicy, LlmProviderBridge, RegressionResult, ServiceContainer,
+};
 
 impl ServiceContainer {
     async fn triage_run_record(
@@ -29,12 +31,13 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
         run: RunRecord,
+        policy: AiPolicy,
     ) -> Result<Vec<hf_core::crash::Crash>, ClassifiedError> {
         const TRIAGE_BUDGET: std::time::Duration = std::time::Duration::from_mins(5);
 
         tokio::time::timeout(
             TRIAGE_BUDGET,
-            self.triage_run_record_inner(project, target, run),
+            self.triage_run_record_inner(project, target, run, policy),
         )
         .await
         .map_err(|_| {
@@ -45,11 +48,16 @@ impl ServiceContainer {
         })?
     }
 
+    /// Triage one run's evidence. `policy` governs the LLM bug-report phase:
+    /// `Off` ingests and persists the crashes with no drafts and no dispatch,
+    /// `Require` errors the triage operation when the pool or the store that
+    /// retention needs is missing, and `Auto` drafts whenever both exist.
     async fn triage_run_record_inner(
         &self,
         project: &Path,
         target: &str,
         run: RunRecord,
+        policy: AiPolicy,
     ) -> Result<Vec<hf_core::crash::Crash>, ClassifiedError> {
         /// Cap on LLM bug-report drafts per triage pass: a run may surface many
         /// distinct bugs, and one report each would fan out into hundreds of LLM
@@ -154,39 +162,63 @@ impl ServiceContainer {
 
         // Draft an LLM bug report for each unique crash when a provider is
         // configured. Each prompt is retained before dispatch, so without a
-        // store no report is drafted (Engineering Protocol 2.13).
-        if let (Some(pool), Some(store)) = (self.provider_pool(), self.store.as_deref()) {
-            let root = canonical_project_root(project)?;
-            let targets = store
-                .list_all_targets()
-                .await
-                .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
-            let unique = deduped.len();
-            for crash in deduped.iter_mut().take(MAX_BUG_REPORT_DRAFTS) {
-                let log = logs
-                    .get(&crash.input_path)
-                    .filter(|l| !l.trim().is_empty())
-                    .cloned()
-                    .unwrap_or_else(|| crash.summary.clone());
-                let evidence = super::bug_report::BugReportInputs {
-                    root: &root,
-                    project,
-                    target,
-                    log: &log,
-                    harness_source: source_context.as_deref(),
-                    candidate: targets.iter().find(|t| t.id == crash.target_id),
-                };
-                if let Some(report) = self
-                    .draft_bug_report(store, Arc::clone(&pool), crash, &evidence)
-                    .await
-                {
-                    crash.bug_report = Some(report);
-                }
+        // store no report is drafted (Engineering Protocol 2.13). `Require`
+        // refuses the silent skip: a missing pool or store is an error for the
+        // triage operation rather than crashes that quietly carry no report.
+        // `Off` dispatches no draft even when both are present: the
+        // classification is ingested and persisted exactly as auto persists
+        // it, minus the optional reports.
+        let (pool, bug_report_store) = (self.provider_pool(), self.store.as_deref());
+        if policy == AiPolicy::Require {
+            if pool.is_none() {
+                return Err(ClassifiedError::Provider(
+                    "bug-report drafting was required but no LLM provider is configured; \
+                     set HF_PROVIDER_API_KEY"
+                        .to_owned(),
+                ));
             }
-            if unique > MAX_BUG_REPORT_DRAFTS {
-                tracing::info!(
+            if bug_report_store.is_none() {
+                return Err(ClassifiedError::Storage(
+                    "bug-report drafting was required but no persistent store is \
+                     configured to retain the prompts"
+                        .to_owned(),
+                ));
+            }
+        }
+        if policy != AiPolicy::Off {
+            if let (Some(pool), Some(store)) = (pool, bug_report_store) {
+                let root = canonical_project_root(project)?;
+                let targets = store
+                    .list_all_targets()
+                    .await
+                    .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
+                let unique = deduped.len();
+                for crash in deduped.iter_mut().take(MAX_BUG_REPORT_DRAFTS) {
+                    let log = logs
+                        .get(&crash.input_path)
+                        .filter(|l| !l.trim().is_empty())
+                        .cloned()
+                        .unwrap_or_else(|| crash.summary.clone());
+                    let evidence = super::bug_report::BugReportInputs {
+                        root: &root,
+                        project,
+                        target,
+                        log: &log,
+                        harness_source: source_context.as_deref(),
+                        candidate: targets.iter().find(|t| t.id == crash.target_id),
+                    };
+                    if let Some(report) = self
+                        .draft_bug_report(store, Arc::clone(&pool), crash, &evidence)
+                        .await
+                    {
+                        crash.bug_report = Some(report);
+                    }
+                }
+                if unique > MAX_BUG_REPORT_DRAFTS {
+                    tracing::info!(
                     "capped bug-report drafting at {MAX_BUG_REPORT_DRAFTS} of {unique} unique crashes"
                 );
+                }
             }
         }
 
@@ -736,12 +768,16 @@ impl ServiceContainer {
 
     /// Ingest and deduplicate crash artifacts from the output directory.
     ///
+    /// `policy` governs the LLM bug-report phase (see
+    /// [`Self::triage_run_record`]'s semantics).
+    ///
     /// # Errors
     /// Returns `ClassifiedError` if the output directory cannot be read.
     pub async fn triage(
         &self,
         project: &Path,
         target: &str,
+        policy: AiPolicy,
     ) -> Result<Vec<hf_core::crash::Crash>, ClassifiedError> {
         let run = match self.latest_run_record(project, Some(target)).await? {
             Some(run) => run,
@@ -757,10 +793,13 @@ impl ServiceContainer {
                 Utc::now(),
             ),
         };
-        self.triage_run_record(project, target, run).await
+        self.triage_run_record(project, target, run, policy).await
     }
 
     /// Triage the evidence owned by one exact persisted run.
+    ///
+    /// `policy` governs the LLM bug-report phase (see
+    /// [`Self::triage_run_record`]'s semantics).
     ///
     /// # Errors
     /// Returns `ClassifiedError` if the run is missing, belongs to another
@@ -770,6 +809,7 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
         run_id: Uuid,
+        policy: AiPolicy,
     ) -> Result<Vec<hf_core::crash::Crash>, ClassifiedError> {
         let project_root = canonical_project_root(project)?;
         let project = project_root.as_path();
@@ -806,7 +846,7 @@ impl ServiceContainer {
                 "run {run_id} does not own terminal evidence for target '{target}'"
             )));
         }
-        self.triage_run_record(project, target, run).await
+        self.triage_run_record(project, target, run, policy).await
     }
 
     /// Triage a syzkaller campaign's retained kernel evidence.
@@ -881,27 +921,59 @@ impl ServiceContainer {
     /// crash the store does not know, or a prompt that cannot be retained,
     /// gets no verdict and no dispatch; without a store the whole pass yields
     /// `None` verdicts, like bug-report drafting.
+    ///
+    /// `policy`: `Off` returns all-`None` verdicts without a dispatch or a
+    /// retained row; `Require` turns a missing provider, a missing store, or a
+    /// failed model call into an `Err`; `Auto` keeps the advisory behavior.
+    ///
+    /// # Errors
+    /// Returns a `ClassifiedError` only under [`AiPolicy::Require`].
     pub async fn verify_crashes(
         &self,
         target: &str,
         project_root: &Path,
         crashes: &[hf_core::crash::Crash],
-    ) -> Vec<Option<crate::verification::CrashVerdict>> {
+        policy: AiPolicy,
+    ) -> Result<Vec<Option<crate::verification::CrashVerdict>>, ClassifiedError> {
         // Bound the model calls per triage pass so a crash flood cannot fan out
         // into an unbounded LLM spend; extra crashes get no verdict.
         const MAX_CRASH_VERIFICATIONS: usize = 20;
 
+        if policy == AiPolicy::Off {
+            return Ok(vec![None; crashes.len()]);
+        }
         let Some(pool) = self.provider_pool() else {
-            return vec![None; crashes.len()];
+            if policy == AiPolicy::Require {
+                return Err(ClassifiedError::Provider(
+                    "crash verification was required but no LLM provider is configured; \
+                     set HF_PROVIDER_API_KEY"
+                        .to_owned(),
+                ));
+            }
+            return Ok(vec![None; crashes.len()]);
         };
         // Without a store the model-visible prompt cannot be retained, so no
         // verification happens (Engineering Protocol 2.13).
         let Some(store) = self.store.as_deref() else {
-            return vec![None; crashes.len()];
+            if policy == AiPolicy::Require {
+                return Err(ClassifiedError::Storage(
+                    "crash verification was required but no persistent store is \
+                     configured to retain the prompts"
+                        .to_owned(),
+                ));
+            }
+            return Ok(vec![None; crashes.len()]);
         };
         // An uncanonicalizable root cannot key the durable drafts.
         let Ok(root) = canonical_project_root(project_root) else {
-            return vec![None; crashes.len()];
+            if policy == AiPolicy::Require {
+                return Err(ClassifiedError::Storage(
+                    "crash verification was required but the project root could not be \
+                     canonicalized to key the retained prompts"
+                        .to_owned(),
+                ));
+            }
+            return Ok(vec![None; crashes.len()]);
         };
         let provider = LlmProviderBridge::new(pool)
             .with_diagnostics(Arc::clone(&self.diagnostics), "crash_verify");
@@ -942,9 +1014,20 @@ impl ServiceContainer {
                 created_at: Utc::now(),
                 completed_at: None,
             };
-            verdicts.push(verify_crash_with_retention(store, &provider, record, target).await);
+            match verify_crash_with_retention(store, &provider, record).await {
+                Ok(verdict) => verdicts.push(verdict),
+                Err(error) if policy == AiPolicy::Require => {
+                    return Err(ClassifiedError::Provider(format!(
+                        "crash verification was required but the model call failed: {error}"
+                    )));
+                }
+                Err(error) => {
+                    tracing::warn!("crash verification for a '{target}' crash failed: {error}");
+                    verdicts.push(None);
+                }
+            }
         }
-        verdicts
+        Ok(verdicts)
     }
 
     /// Verify a single crash on demand (L2 increment 4c) by its persisted id:
@@ -952,42 +1035,60 @@ impl ServiceContainer {
     /// the same retained verification path as a triage pass. The crash must
     /// belong to `run_id` and that run to `project_root`, so a stale or
     /// foreign id gets no verdict instead of a verdict about another
-    /// project's crash. `None` when no provider is configured, the reply
-    /// holds no verdict, or the exchange cannot be retained.
+    /// project's crash. `Ok(None)` when no provider is configured, the reply
+    /// holds no verdict, or the exchange cannot be retained; `Off` returns
+    /// `Ok(None)` without a dispatch.
+    ///
+    /// # Errors
+    /// Returns a `ClassifiedError` under [`AiPolicy::Require`] for the same
+    /// silent outcomes [`Self::verify_crashes`] refuses.
     pub async fn verify_crash_by_id(
         &self,
         project_root: &Path,
         crash_id: Uuid,
         run_id: Uuid,
         target: &str,
-    ) -> Option<crate::verification::CrashVerdict> {
+        policy: AiPolicy,
+    ) -> Result<Option<crate::verification::CrashVerdict>, ClassifiedError> {
+        if policy == AiPolicy::Off {
+            return Ok(None);
+        }
         // Without a store there is no persisted crash to load and nothing can
         // be retained, so there is no verdict (Engineering Protocol 2.13).
-        let store = self.store.as_deref()?;
+        let Some(store) = self.store.as_deref() else {
+            if policy == AiPolicy::Require {
+                return Err(ClassifiedError::Storage(
+                    "crash verification was required but no persistent store is \
+                     configured to retain the prompts"
+                        .to_owned(),
+                ));
+            }
+            return Ok(None);
+        };
         let crash = match store.get_crash(crash_id).await {
             Ok(Some(crash)) => crash,
             // An unknown crash id means there is nothing to verify; advisory
             // absence, not an error to surface.
             Ok(None) => {
                 tracing::warn!(crash = %crash_id, "verification requested for an unknown crash");
-                return None;
+                return Ok(None);
             }
             // A storage failure leaves the persisted evidence unreadable; no
             // verdict is fabricated from the failure.
             Err(error) => {
                 tracing::warn!(crash = %crash_id, %error, "crash lookup failed; no verdict");
-                return None;
+                return Ok(None);
             }
         };
         let run = match store.get_run(run_id).await {
             Ok(Some(run)) => run,
             Ok(None) => {
                 tracing::warn!(run = %run_id, "verification requested for an unknown run");
-                return None;
+                return Ok(None);
             }
             Err(error) => {
                 tracing::warn!(run = %run_id, %error, "run lookup failed; no verdict");
-                return None;
+                return Ok(None);
             }
         };
         let requested = project_lookup_identity(project_root);
@@ -999,13 +1100,14 @@ impl ServiceContainer {
                 run = %run_id,
                 "verification id mismatch; no verdict"
             );
-            return None;
+            return Ok(None);
         }
-        self.verify_crashes(target, project_root, std::slice::from_ref(&crash))
-            .await
+        Ok(self
+            .verify_crashes(target, project_root, std::slice::from_ref(&crash), policy)
+            .await?
             .into_iter()
             .next()
-            .flatten()
+            .flatten())
     }
 
     /// Regression check: replay stored crash inputs against the current harness
@@ -1176,14 +1278,18 @@ impl ServiceContainer {
 }
 
 /// Retain one crash-verification prompt, dispatch it, and record the raw
-/// reply. `None` when the exchange cannot be retained, the provider fails, or
-/// the reply holds no verdict: advisory only, never fabricated.
+/// reply. `Ok(None)` when the exchange cannot be retained or the reply holds
+/// no verdict: advisory only, never fabricated. `Err` carries a provider call
+/// failure so the caller's policy can decide between a warned skip (`Auto`)
+/// and an error (`Require`).
+///
+/// # Errors
+/// Returns the provider error from the dispatch, and nothing else.
 async fn verify_crash_with_retention(
     store: &hf_storage::Store,
     provider: &LlmProviderBridge,
     record: hf_storage::CrashVerifyDraftRecord,
-    target: &str,
-) -> Option<crate::verification::CrashVerdict> {
+) -> Result<Option<crate::verification::CrashVerdict>, ClassifiedError> {
     use hf_core::provider::{ChatRequest, LlmProvider as _};
     use hf_core::types::Message;
 
@@ -1193,7 +1299,7 @@ async fn verify_crash_with_retention(
             bytes = record.prompt.len(),
             "crash-verify prompt exceeds the retained size; no verdict"
         );
-        return None;
+        return Ok(None);
     }
     if let Err(error) = store.begin_crash_verify_draft(&record).await {
         // A crash the store does not know fails the cascading foreign key,
@@ -1205,7 +1311,7 @@ async fn verify_crash_with_retention(
             %error,
             "crash-verify prompt not retained; no verdict"
         );
-        return None;
+        return Ok(None);
     }
     let request = ChatRequest::from_messages(vec![Message::user(record.prompt)]);
     match provider.chat_completion(&request).await {
@@ -1223,12 +1329,9 @@ async fn verify_crash_with_retention(
                     "crash-verify response not retained"
                 );
             }
-            crate::verification::parse_crash_verdict(text)
+            Ok(crate::verification::parse_crash_verdict(text))
         }
-        Err(error) => {
-            tracing::warn!("crash verification for a '{target}' crash failed: {error}");
-            None
-        }
+        Err(error) => Err(ClassifiedError::Provider(error.to_string())),
     }
 }
 

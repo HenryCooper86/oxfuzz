@@ -705,10 +705,12 @@ impl ServiceContainer {
             .ok_or_else(|| ClassifiedError::Validation(format!("target '{target}' not found")))
     }
 
-    /// Draft the harness source for a candidate: LLM-authored when a provider is
-    /// configured, otherwise the heuristic template. Provider errors degrade to
-    /// the heuristic draft; build-context and durable analysis-input errors stop
-    /// dispatch before any model call.
+    /// Draft the harness source for a candidate under an explicit
+    /// [`AiPolicy`]: `Off` uses the heuristic template without a provider
+    /// call, `Require` refuses to substitute the template when no provider is
+    /// configured or the call fails, and `Auto` keeps the historical
+    /// LLM-with-heuristic-fallback behavior. Build-context and durable
+    /// analysis-input errors stop dispatch before any model call.
     ///
     /// `sanitizer` is the already-resolved build sanitizer: the draft's recorded
     /// build command must match the compile that follows. `persistent` selects
@@ -721,7 +723,11 @@ impl ServiceContainer {
         engine: EngineKind,
         sanitizer: Sanitizer,
         persistent: bool,
+        policy: AiPolicy,
     ) -> Result<String, ClassifiedError> {
+        if policy == AiPolicy::Off {
+            return Ok(heuristic_draft(candidate, engine, sanitizer, persistent)?.source);
+        }
         if let Some(pool) = self.provider_pool() {
             let provider = LlmProviderBridge::new(pool)
                 .with_diagnostics(Arc::clone(&self.diagnostics), "harness_draft");
@@ -737,11 +743,22 @@ impl ServiceContainer {
             .await;
             match drafted {
                 Ok(draft) => return Ok(draft.source),
+                Err(e) if policy == AiPolicy::Require => {
+                    return Err(ClassifiedError::Provider(format!(
+                        "an AI harness was required but the model call failed: {e}"
+                    )));
+                }
                 Err(e) => tracing::warn!(
                     "LLM harness draft for '{}' failed ({e}); using heuristic draft",
                     candidate.symbol
                 ),
             }
+        } else if policy == AiPolicy::Require {
+            return Err(ClassifiedError::Provider(
+                "an AI harness was required but no LLM provider is configured; \
+                 set HF_PROVIDER_API_KEY"
+                    .to_owned(),
+            ));
         }
         Ok(heuristic_draft(candidate, engine, sanitizer, persistent)?.source)
     }
@@ -823,12 +840,16 @@ impl ServiceContainer {
     /// # Errors
     /// Returns `ClassifiedError::Harness` if the harness still fails to build
     /// after `max_repairs` attempts, or an infrastructure error from the sandbox.
-    /// One LLM repair pass over failing harness source.
+    /// One LLM repair pass over failing harness source under an explicit
+    /// [`AiPolicy`].
     ///
     /// `None` when there is no provider configured to repair with, or the
     /// repair call itself failed; either makes the current failure terminal.
-    /// Shared by the lint gate and the compiler-failure path so both feed the
-    /// model the same way.
+    /// `Off` returns `None` before any admission or dispatch (no repair
+    /// attempt happens, so the failure the caller holds stands); `Require`
+    /// turns a missing provider or a failed repair call into an `Err` instead
+    /// of the skip. Shared by the lint gate and the compiler-failure path so
+    /// both feed the model the same way.
     async fn repair_harness_source(
         &self,
         candidate: &TargetCandidate,
@@ -836,10 +857,21 @@ impl ServiceContainer {
         source: &str,
         diagnostics: &str,
         sanitizer: Sanitizer,
+        policy: AiPolicy,
     ) -> Result<Option<String>, ClassifiedError> {
+        if policy == AiPolicy::Off {
+            return Ok(None);
+        }
         self.admit_harness_build(&candidate.project_root, candidate.language)
             .await?;
         let Some(pool) = self.provider_pool() else {
+            if policy == AiPolicy::Require {
+                return Err(ClassifiedError::Provider(
+                    "a model repair was required but no LLM provider is configured; \
+                     set HF_PROVIDER_API_KEY"
+                        .to_owned(),
+                ));
+            }
             return Ok(None);
         };
         let provider = LlmProviderBridge::new(pool)
@@ -855,6 +887,9 @@ impl ServiceContainer {
         .await
         {
             Ok(draft) => Ok(Some(draft.source)),
+            Err(error) if policy == AiPolicy::Require => Err(ClassifiedError::Provider(format!(
+                "a model repair was required but the repair call failed: {error}"
+            ))),
             Err(error) => {
                 tracing::warn!("harness repair for '{}' failed: {error}", candidate.symbol);
                 Ok(None)
@@ -872,6 +907,7 @@ impl ServiceContainer {
         workspace: &Path,
         initial_source: String,
         max_repairs: usize,
+        policy: AiPolicy,
     ) -> Result<HarnessGenOutcome, ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
         let _target_revision = self
@@ -893,6 +929,7 @@ impl ServiceContainer {
             // Tournament smoke compares candidates; none runs a CmpLog
             // companion, so tournament builds skip it.
             false,
+            policy,
         )
         .await
     }
@@ -913,6 +950,7 @@ impl ServiceContainer {
         max_repairs: usize,
         sanitizer: Sanitizer,
         cmplog: bool,
+        policy: AiPolicy,
     ) -> Result<HarnessGenOutcome, ClassifiedError> {
         self.compilation_store()?;
         self.admit_harness_build(&candidate.project_root, lang)
@@ -935,7 +973,14 @@ impl ServiceContainer {
                     break;
                 }
                 match self
-                    .repair_harness_source(candidate, engine, &source, &last_diagnostics, sanitizer)
+                    .repair_harness_source(
+                        candidate,
+                        engine,
+                        &source,
+                        &last_diagnostics,
+                        sanitizer,
+                        policy,
+                    )
                     .await?
                 {
                     Some(repaired) => {
@@ -1037,6 +1082,7 @@ impl ServiceContainer {
                             &source,
                             &last_diagnostics,
                             sanitizer,
+                            policy,
                         )
                         .await?
                     {
@@ -1343,6 +1389,9 @@ impl ServiceContainer {
     /// harness (custom `main`, `__AFL_INIT` + `__AFL_LOOP`, per-iteration
     /// reset) instead of the stock driver shape.
     ///
+    /// `policy` governs both model uses of the operation -- the draft and any
+    /// compile-failure repair -- with the semantics of [`AiPolicy`].
+    ///
     /// # Errors
     /// Returns `ClassifiedError::Validation` if the target is unknown or the
     /// sanitizer is not selectable, `ClassifiedError::Harness` if the harness
@@ -1358,6 +1407,7 @@ impl ServiceContainer {
         sanitizer: Option<Sanitizer>,
         cmplog: bool,
         persistent: bool,
+        policy: AiPolicy,
     ) -> Result<HarnessGenOutcome, ClassifiedError> {
         self.compilation_store()?;
         require_fuzzing_harness_engine(engine, lang)?;
@@ -1398,7 +1448,7 @@ impl ServiceContainer {
             .await?;
 
         let source = self
-            .draft_harness_source(project, &candidate, engine, sanitizer, persistent)
+            .draft_harness_source(project, &candidate, engine, sanitizer, persistent, policy)
             .await?;
         self.compile_source_with_repair_locked(
             &candidate,
@@ -1410,6 +1460,7 @@ impl ServiceContainer {
             max_repairs,
             sanitizer,
             cmplog,
+            policy,
         )
         .await
     }
@@ -1425,7 +1476,8 @@ impl ServiceContainer {
     /// # Errors
     /// Returns `ClassifiedError::Validation` if the target is unknown or has no
     /// current harness, `ClassifiedError::Provider` if no LLM is configured, or
-    /// an error from the refine/compile steps.
+    /// an error from the refine/compile steps. Under [`AiPolicy::Off`] the
+    /// operation itself refuses: refinement has no no-model path.
     pub async fn harness_refine(
         &self,
         project: &Path,
@@ -1433,6 +1485,7 @@ impl ServiceContainer {
         engine: EngineKind,
         lang: TargetLanguage,
         max_repairs: usize,
+        policy: AiPolicy,
     ) -> Result<HarnessGenOutcome, ClassifiedError> {
         self.refine_into(
             project,
@@ -1441,6 +1494,7 @@ impl ServiceContainer {
             lang,
             max_repairs,
             RefineDestination::TargetWorkspace,
+            policy,
         )
         .await
     }
@@ -1461,6 +1515,7 @@ impl ServiceContainer {
         engine: EngineKind,
         lang: TargetLanguage,
         max_repairs: usize,
+        policy: AiPolicy,
     ) -> Result<HarnessGenOutcome, ClassifiedError> {
         self.refine_into(
             project,
@@ -1469,6 +1524,7 @@ impl ServiceContainer {
             lang,
             max_repairs,
             RefineDestination::Proposal,
+            policy,
         )
         .await
     }
@@ -1537,7 +1593,11 @@ impl ServiceContainer {
     /// Shared body of [`Self::harness_refine`] and
     /// [`Self::harness_refine_proposal`]: draft the refined source from the
     /// active revision and the uncovered frontier, then compile it into
-    /// `destination`.
+    /// `destination`. Refinement is model-only, so [`AiPolicy::Off`] is
+    /// refused here, in the operation (Engineering Protocol 2.19), before any
+    /// discovery or compile work; `Auto` and `Require` keep the model-only
+    /// behavior (a missing provider or failed call is the error it always
+    /// was), and the policy also governs the compile-failure repair loop.
     async fn refine_into(
         &self,
         project: &Path,
@@ -1546,7 +1606,15 @@ impl ServiceContainer {
         lang: TargetLanguage,
         max_repairs: usize,
         destination: RefineDestination,
+        policy: AiPolicy,
     ) -> Result<HarnessGenOutcome, ClassifiedError> {
+        if policy == AiPolicy::Off {
+            return Err(ClassifiedError::Validation(
+                "coverage-guided refinement is model-only: there is no no-model \
+                 refinement path, so an ai policy of `off` cannot run it"
+                    .to_owned(),
+            ));
+        }
         self.compilation_store()?;
         require_fuzzing_harness_engine(engine, lang)?;
         self.admit_harness_build(project, lang).await?;
@@ -1637,6 +1705,7 @@ impl ServiceContainer {
             max_repairs,
             active_sanitizer,
             active_cmplog,
+            policy,
         )
         .await
     }
@@ -1653,6 +1722,10 @@ impl ServiceContainer {
     /// each. Every other outcome, including a crash (a finding to triage) and a
     /// rejected review, returns unchanged.
     ///
+    /// `policy` governs the repair: `Off` makes no repair attempt (the smoke
+    /// outcome stands), `Require` turns a missing provider or a failed repair
+    /// call into an `Err`, and `Auto` repairs whenever a provider answers.
+    ///
     /// # Errors
     /// Returns the last smoke error when the budget is spent or the failure is
     /// not repairable, and repair or compile errors from a repair round.
@@ -1665,6 +1738,7 @@ impl ServiceContainer {
         bypass: HarnessReviewBypass,
         max_repairs: usize,
         on_repair: &(dyn Fn(usize, &str) + Send + Sync),
+        policy: AiPolicy,
     ) -> Result<super::QualifiedSmoke, ClassifiedError> {
         let mut smoke_repairs = 0usize;
         loop {
@@ -1683,6 +1757,11 @@ impl ServiceContainer {
             let Some(diagnostics) = hf_harness::repairable_smoke_failure(&error) else {
                 return Err(error);
             };
+            if policy == AiPolicy::Off {
+                // Off makes no repair attempt at all, so the smoke outcome
+                // itself is the result.
+                return Err(error);
+            }
             if smoke_repairs >= max_repairs {
                 return Err(error);
             }
@@ -1695,6 +1774,7 @@ impl ServiceContainer {
                 lang,
                 &diagnostics,
                 max_repairs,
+                policy,
             )
             .await?;
         }
@@ -1716,6 +1796,7 @@ impl ServiceContainer {
         lang: TargetLanguage,
         smoke_diagnostics: &str,
         max_repairs: usize,
+        policy: AiPolicy,
     ) -> Result<HarnessGenOutcome, ClassifiedError> {
         self.compilation_store()?;
         require_fuzzing_harness_engine(engine, lang)?;
@@ -1745,12 +1826,13 @@ impl ServiceContainer {
                 &active.source,
                 &diagnostics,
                 active.sanitizer,
+                policy,
             )
             .await?
         else {
             return Err(ClassifiedError::Harness(format!(
-                "the smoke failure of '{target}' could not be repaired (no LLM provider, or \
-                 the repair call failed): {smoke_diagnostics}"
+                "the smoke failure of '{target}' could not be repaired (no LLM provider, the \
+                 repair call failed, or the ai policy disabled repair): {smoke_diagnostics}"
             )));
         };
         self.compile_source_with_repair_locked(
@@ -1763,6 +1845,7 @@ impl ServiceContainer {
             max_repairs,
             active.sanitizer,
             active.cmplog.is_some(),
+            policy,
         )
         .await
     }
@@ -3166,8 +3249,17 @@ impl ServiceContainer {
         for _ in 1..req.candidates {
             sources.push((
                 CandidateOrigin::Llm,
-                self.draft_harness_source(project, &candidate, req.engine, sanitizer, false)
-                    .await?,
+                self.draft_harness_source(
+                    project,
+                    &candidate,
+                    req.engine,
+                    sanitizer,
+                    false,
+                    // The tournament is not one of the policy-threaded
+                    // operations: its model drafts are its own design.
+                    AiPolicy::Auto,
+                )
+                .await?,
             ));
         }
 
@@ -3187,6 +3279,7 @@ impl ServiceContainer {
                     &workspace,
                     source.clone(),
                     req.max_repairs,
+                    AiPolicy::Auto,
                 )
                 .await
             {
@@ -3268,6 +3361,7 @@ impl ServiceContainer {
                     &workspace,
                     source,
                     0,
+                    AiPolicy::Auto,
                 )
                 .await?;
             }
@@ -3395,6 +3489,7 @@ mod exact_qualification_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, OnceLock};
 
+    use crate::AiPolicy;
     use hf_core::engine::EngineKind;
     use hf_core::error::ClassifiedError;
     use hf_core::harness::{Harness, HarnessStatus};
@@ -4158,6 +4253,7 @@ mod exact_qualification_tests {
                 &workspace,
                 replacement_source.to_owned(),
                 0,
+                AiPolicy::Auto,
             )
             .await
             .unwrap();

@@ -170,6 +170,7 @@ async fn generated_harness_propagates_a_configured_store_write_failure() {
             None,
             false,
             false,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect_err("generated harness persistence is part of successful generation");

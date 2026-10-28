@@ -122,6 +122,7 @@ async fn a_refine_proposal_leaves_the_active_revision_in_place() {
             EngineKind::LibFuzzer,
             TargetLanguage::C,
             1,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect("the proposal compiles");
@@ -155,6 +156,7 @@ async fn adopting_a_proposal_compiles_its_exact_source_as_a_new_active_revision(
             EngineKind::LibFuzzer,
             TargetLanguage::C,
             1,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .unwrap();

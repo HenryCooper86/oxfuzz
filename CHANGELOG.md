@@ -34,6 +34,15 @@ Versions match the release commits that bump `Cargo.toml`.
   attacking. Each prompt and response is retained (migration 0049,
   `seed_llm_drafts`).
 
+- Six model-dispatching operations now honor an explicit AI policy
+  (`auto`/`off`/`require`) instead of deciding by "is a provider configured":
+  smoke repair, plateau refinement, the report narrative, triage bug reports,
+  crash verification, and run dictionaries. `auto` keeps today's behavior;
+  `off` never dispatches; `require` turns a silent downgrade into an error.
+  The CLI `--ai` flag now covers these commands, and the REST/Tauri requests
+  accept an optional `ai` field. The old CLI-side repair/refine flag
+  rejection moved into the service.
+
 ## 0.8.1 - 2026-10-25
 
 The v0.8.0 tag was never published: its Windows tests failed on the

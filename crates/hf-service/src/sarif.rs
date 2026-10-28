@@ -14,6 +14,7 @@ use hf_core::error::ClassifiedError;
 use hf_guardrails::Guardrails;
 
 use crate::container::ServiceContainer;
+use crate::AiPolicy;
 
 /// Input for the service-owned CI fuzzing gate.
 #[derive(Debug, Clone)]
@@ -102,10 +103,15 @@ impl ServiceContainer {
             // No seed pin either, for the same comparability reason: each
             // gate run derives its own seed.
             None,
+            // The gate's own --ai handling (provider detach / preflight)
+            // happens in the CLI; the service call stays auto.
             on_progress,
+            AiPolicy::Auto,
         )
         .await?;
-        let crashes = ci.triage(request.project, request.target).await?;
+        let crashes = ci
+            .triage(request.project, request.target, AiPolicy::Auto)
+            .await?;
         let sarif = ci.export_sarif(request.project, request.target).await?;
         let findings = crashes
             .into_iter()

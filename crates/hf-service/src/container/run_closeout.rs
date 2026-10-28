@@ -18,6 +18,7 @@ use crate::run_closeout::{
     blocked_by, closeout_ladder, decode_outcome, decode_step, pending_steps, CloseoutAvailability,
     CloseoutReport, CloseoutStep, CloseoutStepRecord, StepOutcome, RUN_CLOSEOUT_SCHEMA_VERSION,
 };
+use crate::AiPolicy;
 use crate::ClassifiedError;
 use hf_storage::{RunKind, RunStatus};
 
@@ -220,7 +221,10 @@ impl ServiceContainer {
         let project = scope.project.as_path();
         let target = scope.target.as_str();
         match step {
-            CloseoutStep::Triage => match self.triage_run(project, target, run_id).await {
+            CloseoutStep::Triage => match self
+                .triage_run(project, target, run_id, AiPolicy::Auto)
+                .await
+            {
                 Ok(crashes) => StepOutcome::Completed {
                     detail: format!("{} crash(es) attributed", crashes.len()),
                 },

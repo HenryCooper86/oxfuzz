@@ -87,7 +87,7 @@ async fn a_kernel_campaigns_crashes_are_triaged_and_persisted() {
     stage_kernel_evidence(&workspace, run.id);
 
     let crashes = container
-        .triage_run(&project, target, run.id)
+        .triage_run(&project, target, run.id, hf_service::AiPolicy::Auto)
         .await
         .expect("a kernel run triages without a harness binary");
 
@@ -111,7 +111,7 @@ async fn a_kernel_campaigns_crashes_are_triaged_and_persisted() {
 
     // Re-triage is idempotent, exactly as it is for a userspace run.
     let again = container
-        .triage_run(&project, target, run.id)
+        .triage_run(&project, target, run.id, hf_service::AiPolicy::Auto)
         .await
         .unwrap();
     assert_eq!(again.len(), 2);
@@ -151,7 +151,9 @@ async fn a_kernel_run_is_not_triaged_under_another_kernel_label() {
     let workspace = hf_service::workspace_dir(&project, "kernel-bzImage");
     stage_kernel_evidence(&workspace, run.id);
 
-    let wrong = container.triage_run(&project, "kernel-other", run.id).await;
+    let wrong = container
+        .triage_run(&project, "kernel-other", run.id, hf_service::AiPolicy::Auto)
+        .await;
     let message = wrong.expect_err("must be refused").to_string();
     assert!(
         message.contains("does not own terminal evidence"),

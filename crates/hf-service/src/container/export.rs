@@ -16,7 +16,7 @@ use super::harness_workspace::read_current_harness_source;
 use super::project_identity::retained_run_target_selector;
 use super::project_identity::{canonical_project_root, defectdojo_project_name};
 use super::workspace::workspace_dir;
-
+use super::AiPolicy;
 /// How many project translation units one reproduction bundle carries.
 ///
 /// A bundle is meant to be small enough to attach to a bug report. Past this the
@@ -438,25 +438,35 @@ impl ServiceContainer {
     /// engine names, figures -- is never translated.
     ///
     /// # Errors
-    /// Returns `ClassifiedError` only on an unexpected internal failure.
+    /// Returns `ClassifiedError` only on an unexpected internal failure, plus
+    /// a `Provider` error under [`super::AiPolicy::Require`] when no provider
+    /// is configured or the narrative composition fails (never a silent
+    /// fact-sheet downgrade).
     pub async fn generate_report(
         &self,
         project: &Path,
         target: &str,
         language: crate::report::ReportLanguage,
     ) -> Result<String, ClassifiedError> {
-        self.generate_report_for_run(project, target, language, None)
+        self.generate_report_for_run(project, target, language, None, AiPolicy::Auto)
             .await
     }
 
     /// Compose a report only if `expected_run_id` is still the target's latest
     /// retained run. An omitted identifier intentionally selects latest.
+    ///
+    /// `policy` governs the narrative composition: `Off` always returns the
+    /// deterministic fact-sheet without a provider call, `Require` refuses to
+    /// downgrade to the fact-sheet when no provider is configured or the
+    /// composition fails, and `Auto` composes when a provider is configured
+    /// and falls back to the fact-sheet on any failure.
     pub async fn generate_report_for_run(
         &self,
         project: &Path,
         target: &str,
         language: crate::report::ReportLanguage,
         expected_run_id: Option<Uuid>,
+        policy: AiPolicy,
     ) -> Result<String, ClassifiedError> {
         use crate::report::{render_markdown, ReportData};
 
@@ -511,11 +521,28 @@ impl ServiceContainer {
 
         // When a provider is configured, have the LLM compose a professional
         // narrative grounded in those facts. On any failure, fall back to the
-        // deterministic fact-sheet so a report is always produced.
-        if let Some(pool) = self.provider_pool() {
-            match self.compose_ai_report(&pool, &facts, &data, language).await {
-                Ok(report) => return Ok(report),
-                Err(e) => tracing::warn!("AI report composition failed, using fact-sheet: {e}"),
+        // deterministic fact-sheet so a report is always produced -- unless the
+        // caller demanded the model, in which case the failure surfaces
+        // instead of a silent fact-sheet downgrade.
+        if policy != AiPolicy::Off {
+            if let Some(pool) = self.provider_pool() {
+                match self.compose_ai_report(&pool, &facts, &data, language).await {
+                    Ok(report) => return Ok(report),
+                    Err(e) if policy == AiPolicy::Require => {
+                        return Err(ClassifiedError::Provider(format!(
+                            "an AI report was required but the composition failed: {e}"
+                        )));
+                    }
+                    Err(e) => {
+                        tracing::warn!("AI report composition failed, using fact-sheet: {e}");
+                    }
+                }
+            } else if policy == AiPolicy::Require {
+                return Err(ClassifiedError::Provider(
+                    "an AI report was required but no LLM provider is configured; \
+                     set HF_PROVIDER_API_KEY"
+                        .to_owned(),
+                ));
             }
         }
         Ok(facts)
@@ -561,7 +588,7 @@ impl ServiceContainer {
             ClassifiedError::Validation(format!("unknown report format: {format}"))
         })?;
         let markdown = self
-            .generate_report_for_run(project, target, language, expected_run_id)
+            .generate_report_for_run(project, target, language, expected_run_id, AiPolicy::Auto)
             .await?;
         // The title is document metadata rather than report body content, so it
         // is not written by the renderer -- but it is still prose, and follows

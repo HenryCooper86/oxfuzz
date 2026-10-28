@@ -245,6 +245,7 @@ async fn qualify(container: &ServiceContainer, project: &Path, sanitizer: Option
             sanitizer,
             false,
             false,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect("prepare harness");

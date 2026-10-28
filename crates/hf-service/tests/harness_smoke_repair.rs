@@ -167,6 +167,7 @@ async fn a_silent_smoke_run_is_repaired_and_requalified() {
             HarnessReviewBypass::NotRequested,
             2,
             &|attempt, reason: &str| attempts.lock().unwrap().push((attempt, reason.to_owned())),
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect("the repaired revision should smoke-qualify");
@@ -215,6 +216,7 @@ async fn smoke_repair_stops_at_its_budget_with_the_smoke_error() {
             HarnessReviewBypass::NotRequested,
             1,
             &|_, _: &str| {},
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect_err("a harness that never runs must not qualify");
@@ -242,6 +244,7 @@ async fn a_zero_budget_never_repairs() {
             HarnessReviewBypass::NotRequested,
             0,
             &|_, _: &str| {},
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect_err("without a repair budget the smoke failure surfaces");

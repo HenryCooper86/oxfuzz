@@ -311,6 +311,15 @@ fn install_replay_fixture(workspace_prefix: &str, enabled_engines: &[&str]) -> t
     dir
 }
 
+/// Install the replay fixture and stage its single `parser.c` source.
+fn install_replay_project() -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = install_replay_fixture("oxfuzz_run_replay_it", &["libfuzzer", "honggfuzz"]);
+    let project = dir.path().join("replay_project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("parser.c"), FIXTURE).unwrap();
+    (dir, project)
+}
+
 // These workflows change both the selected config directory and its policy.
 // A child process owns those mutations until its temporary fixtures are dropped.
 fn run_in_isolated_process(test_name: &str) -> bool {
@@ -347,10 +356,7 @@ async fn run_records_a_seed_and_replay_reexecutes_with_it() {
     if run_in_isolated_process("run_records_a_seed_and_replay_reexecutes_with_it") {
         return;
     }
-    let dir = install_replay_fixture("oxfuzz_run_replay_it", &["libfuzzer", "honggfuzz"]);
-    let project = dir.path().join("replay_project");
-    std::fs::create_dir_all(&project).unwrap();
-    std::fs::write(project.join("parser.c"), FIXTURE).unwrap();
+    let (dir, project) = install_replay_project();
 
     let store = Arc::new(
         hf_storage::Store::connect(dir.path().join("replay.db"))
@@ -371,6 +377,7 @@ async fn run_records_a_seed_and_replay_reexecutes_with_it() {
             None,
             false,
             false,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect("prepare harness");
@@ -413,6 +420,7 @@ async fn run_records_a_seed_and_replay_reexecutes_with_it() {
             None,
             None,
             &|_| {},
+            hf_service::AiPolicy::Auto,
         )
         .await
         .unwrap();
@@ -751,6 +759,7 @@ async fn guided_experiment_rejects_stale_inputs_and_attaches_its_run() {
             None,
             false,
             false,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .unwrap();
@@ -783,6 +792,7 @@ async fn guided_experiment_rejects_stale_inputs_and_attaches_its_run() {
             None,
             None,
             &|_| {},
+            hf_service::AiPolicy::Auto,
         )
         .await
         .unwrap();

@@ -443,6 +443,7 @@ async fn admitted_runtime_failure_awaits_final_health_without_replacing_the_erro
                     None,
                     None,
                     &|_| {},
+                    hf_service::AiPolicy::Auto,
                 )
                 .await
         })
@@ -622,6 +623,7 @@ async fn cancel_run_stops_an_in_flight_fuzz_run() {
                     None,
                     None,
                     &|_| {},
+                    hf_service::AiPolicy::Auto,
                 )
                 .await
         })
@@ -802,6 +804,7 @@ async fn terminal_status_write_failure_still_awaits_monitor_cleanup() {
                     None,
                     None,
                     &|_| {},
+                    hf_service::AiPolicy::Auto,
                 )
                 .await
         })
@@ -995,6 +998,7 @@ async fn a_wall_clock_killed_run_persists_the_coverage_it_measured() {
             None,
             None,
             &|_| {},
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect("a wall-clock kill is not a lost run");
@@ -1103,6 +1107,7 @@ async fn background_start_returns_a_durable_cancellable_run_id() {
             hf_core::engine::EngineKind::LibFuzzer,
             60,
             None,
+            hf_service::AiPolicy::Auto,
             Arc::new(|_, _| {}),
             status_sink,
         )
@@ -1232,6 +1237,7 @@ async fn completed_run_merges_discoveries_without_writable_live_corpus() {
             None,
             None,
             &|_| {},
+            hf_service::AiPolicy::Auto,
         )
         .await
         .unwrap();
@@ -2682,7 +2688,7 @@ async fn triage_rejects_crashes_without_a_completed_attributable_run() {
         .with_store(Arc::clone(&store));
 
     let error = container
-        .triage(&project, &target.symbol)
+        .triage(&project, &target.symbol, hf_service::AiPolicy::Auto)
         .await
         .expect_err("persistent triage must not fabricate a run identity");
     assert!(error.to_string().contains("terminal run"));
@@ -3145,6 +3151,7 @@ async fn run_persists_the_input_timeout_and_surfaces_hangs() {
             None,
             None,
             &|_| {},
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect("run completes");

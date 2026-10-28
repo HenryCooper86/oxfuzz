@@ -318,7 +318,12 @@ async fn triage_persists_verified_run_owned_minimized_artifact() {
         ServiceContainer::new(runtime.clone(), None).with_store(Arc::clone(&fixture.store));
 
     let crashes = service
-        .triage_run(&fixture.project, &fixture.target.symbol, fixture.run.id)
+        .triage_run(
+            &fixture.project,
+            &fixture.target.symbol,
+            fixture.run.id,
+            hf_service::AiPolicy::Auto,
+        )
         .await
         .unwrap();
 
@@ -379,7 +384,12 @@ async fn triage_timeout_keeps_original_crash_unminimized() {
     let service = ServiceContainer::new(runtime, None).with_store(Arc::clone(&fixture.store));
 
     let crashes = service
-        .triage_run(&fixture.project, &fixture.target.symbol, fixture.run.id)
+        .triage_run(
+            &fixture.project,
+            &fixture.target.symbol,
+            fixture.run.id,
+            hf_service::AiPolicy::Auto,
+        )
         .await
         .unwrap();
 
@@ -410,7 +420,12 @@ async fn minimization_requires_repeated_reproduction_of_the_original_failure() {
         let service = ServiceContainer::new(Arc::new(MinimizeRuntime::new(outcome)), None)
             .with_store(Arc::clone(&fixture.store));
         let crashes = service
-            .triage_run(&fixture.project, &fixture.target.symbol, fixture.run.id)
+            .triage_run(
+                &fixture.project,
+                &fixture.target.symbol,
+                fixture.run.id,
+                hf_service::AiPolicy::Auto,
+            )
             .await
             .unwrap();
         assert!(
@@ -455,7 +470,12 @@ async fn minimization_without_retained_image_keeps_original() {
     let service =
         ServiceContainer::new(runtime.clone(), None).with_store(Arc::clone(&fixture.store));
     let crashes = service
-        .triage_run(&fixture.project, &fixture.target.symbol, fixture.run.id)
+        .triage_run(
+            &fixture.project,
+            &fixture.target.symbol,
+            fixture.run.id,
+            hf_service::AiPolicy::Auto,
+        )
         .await
         .unwrap();
     assert!(!crashes[0].minimized);
@@ -482,7 +502,12 @@ async fn triage_rejects_symlinked_minimization_output_directory() {
     symlink(&outside, triage_dir.join("minimized")).unwrap();
 
     let crashes = service
-        .triage_run(&fixture.project, &fixture.target.symbol, fixture.run.id)
+        .triage_run(
+            &fixture.project,
+            &fixture.target.symbol,
+            fixture.run.id,
+            hf_service::AiPolicy::Auto,
+        )
         .await
         .unwrap();
 
@@ -502,7 +527,12 @@ async fn a_changed_original_cannot_confirm_the_old_finding() {
     )
     .with_store(Arc::clone(&fixture.store));
     let crashes = service
-        .triage_run(&fixture.project, &fixture.target.symbol, fixture.run.id)
+        .triage_run(
+            &fixture.project,
+            &fixture.target.symbol,
+            fixture.run.id,
+            hf_service::AiPolicy::Auto,
+        )
         .await
         .unwrap();
     assert!(
@@ -520,7 +550,12 @@ async fn volatile_leak_pids_and_ubsan_addresses_do_not_change_failure_identity()
         let service = ServiceContainer::new(Arc::new(MinimizeRuntime::new(outcome)), None)
             .with_store(Arc::clone(&fixture.store));
         let crashes = service
-            .triage_run(&fixture.project, &fixture.target.symbol, fixture.run.id)
+            .triage_run(
+                &fixture.project,
+                &fixture.target.symbol,
+                fixture.run.id,
+                hf_service::AiPolicy::Auto,
+            )
             .await
             .unwrap();
         assert!(
@@ -540,7 +575,12 @@ async fn distinct_ubsan_categories_do_not_confirm_each_other() {
     )
     .with_store(Arc::clone(&fixture.store));
     let crashes = service
-        .triage_run(&fixture.project, &fixture.target.symbol, fixture.run.id)
+        .triage_run(
+            &fixture.project,
+            &fixture.target.symbol,
+            fixture.run.id,
+            hf_service::AiPolicy::Auto,
+        )
         .await
         .unwrap();
     assert!(!crashes[0].minimized);

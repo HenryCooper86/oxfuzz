@@ -214,8 +214,14 @@ async fn verify_crashes_parses_the_llm_verdict_per_crash_and_retains_the_exchang
 
     let crashes = vec![fixture.crash.clone(), second.clone()];
     let verdicts = container
-        .verify_crashes("parse_header", &fixture.project, &crashes)
-        .await;
+        .verify_crashes(
+            "parse_header",
+            &fixture.project,
+            &crashes,
+            hf_service::AiPolicy::Auto,
+        )
+        .await
+        .expect("auto verification is advisory and never errors");
     assert_eq!(verdicts.len(), crashes.len(), "one verdict slot per crash");
     for verdict in verdicts {
         let verdict = verdict.expect("the LLM verdict is parsed for each crash");
@@ -247,8 +253,10 @@ async fn verify_crashes_yields_no_opinion_without_a_provider() {
             "parse_header",
             &fixture.project,
             std::slice::from_ref(&fixture.crash),
+            hf_service::AiPolicy::Auto,
         )
-        .await;
+        .await
+        .expect("auto verification is advisory and never errors");
     assert_eq!(verdicts, vec![None]);
 }
 
@@ -269,8 +277,10 @@ async fn verify_crashes_without_a_store_dispatches_nothing() {
             "parse_header",
             PathBuf::from("/nonexistent-project").as_path(),
             &[crash],
+            hf_service::AiPolicy::Auto,
         )
-        .await;
+        .await
+        .expect("auto verification is advisory and never errors");
     assert_eq!(verdicts, vec![None]);
     assert_eq!(
         pool.calls.load(Ordering::SeqCst),
@@ -296,8 +306,10 @@ async fn the_verify_prompt_is_retained_before_dispatch_and_an_unparsed_reply_is_
             "parse_header",
             &fixture.project,
             std::slice::from_ref(&fixture.crash),
+            hf_service::AiPolicy::Auto,
         )
-        .await;
+        .await
+        .expect("auto verification is advisory and never errors");
     assert_eq!(verdicts, vec![None], "an unparsable reply is no verdict");
     assert_eq!(pool.calls.load(Ordering::SeqCst), 1);
     assert!(
@@ -327,8 +339,10 @@ async fn a_crash_missing_from_the_store_gets_no_verdict_and_no_row() {
             "parse_header",
             &fixture.project,
             std::slice::from_ref(&unpersisted),
+            hf_service::AiPolicy::Auto,
         )
-        .await;
+        .await
+        .expect("auto verification is advisory and never errors");
     assert_eq!(verdicts, vec![None], "no verdict is fabricated");
     assert_eq!(
         pool.calls.load(Ordering::SeqCst),
@@ -359,8 +373,10 @@ async fn verify_crash_by_id_loads_the_persisted_crash_and_verifies_it() {
             fixture.crash.id,
             fixture.run_id,
             "parse_header",
+            hf_service::AiPolicy::Auto,
         )
         .await
+        .expect("auto verification is advisory and never errors")
         .expect("a verdict for the persisted crash");
     assert!(verdict.reproduces_deterministically && verdict.likely_target_bug);
     assert_eq!(verdict.confidence, Confidence::High);
@@ -384,9 +400,11 @@ async fn verify_crash_by_id_yields_no_verdict_for_unknown_or_mismatched_ids() {
             &fixture.project,
             Uuid::new_v4(),
             fixture.run_id,
-            "parse_header"
+            "parse_header",
+            hf_service::AiPolicy::Auto
         )
         .await
+        .expect("auto verification is advisory and never errors")
         .is_none());
     // A crash presented under another run's id.
     assert!(container
@@ -394,9 +412,11 @@ async fn verify_crash_by_id_yields_no_verdict_for_unknown_or_mismatched_ids() {
             &fixture.project,
             fixture.crash.id,
             Uuid::new_v4(),
-            "parse_header"
+            "parse_header",
+            hf_service::AiPolicy::Auto
         )
         .await
+        .expect("auto verification is advisory and never errors")
         .is_none());
     // A crash belonging to another project's run.
     let other_project = tempfile::tempdir().unwrap();
@@ -414,9 +434,11 @@ async fn verify_crash_by_id_yields_no_verdict_for_unknown_or_mismatched_ids() {
             &fixture.project,
             foreign_crash.id,
             other_run.id,
-            "parse_header"
+            "parse_header",
+            hf_service::AiPolicy::Auto
         )
         .await
+        .expect("auto verification is advisory and never errors")
         .is_none());
     assert_eq!(
         pool.calls.load(Ordering::SeqCst),

@@ -149,6 +149,7 @@ async fn imported_mutator_requires_new_approval_and_stages_exact_native_library(
             None,
             None,
             &|_| {},
+            hf_service::AiPolicy::Auto,
         )
         .await
         .unwrap_err();
@@ -193,6 +194,7 @@ async fn imported_mutator_requires_new_approval_and_stages_exact_native_library(
             None,
             None,
             &|_| {},
+            hf_service::AiPolicy::Auto,
         )
         .await
         .unwrap();
@@ -262,6 +264,7 @@ async fn imported_mutator_requires_new_approval_and_stages_exact_native_library(
             None,
             None,
             &|_| {},
+            hf_service::AiPolicy::Auto,
         )
         .await
         .unwrap_err();

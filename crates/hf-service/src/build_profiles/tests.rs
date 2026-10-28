@@ -718,6 +718,7 @@ async fn configured_harness_admission_enforces_saved_profile_without_optional_fe
             None,
             false,
             false,
+            crate::AiPolicy::Auto,
         )
         .await
         .unwrap_err();

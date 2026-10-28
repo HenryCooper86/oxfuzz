@@ -224,6 +224,7 @@ async fn latest_duplicate_symbol_actions_use_each_retained_qualified_selector() 
             &primary.target_selector,
             hf_service::ReportLanguage::En,
             Some(primary_run.id),
+            hf_service::AiPolicy::Auto,
         )
         .await
         .unwrap();
@@ -434,6 +435,7 @@ async fn selected_latest_actions_reject_a_run_that_became_historical() {
             "parse_packet",
             hf_service::ReportLanguage::En,
             Some(selected.id),
+            hf_service::AiPolicy::Auto,
         )
         .await
         .unwrap_err()
@@ -821,6 +823,7 @@ async fn queue_stops_before_older_missing_harness_but_rejects_one_before_last_ma
             &target.symbol,
             hf_service::ReportLanguage::En,
             Some(latest.id),
+            hf_service::AiPolicy::Auto,
         )
         .await
         .unwrap();
@@ -852,6 +855,7 @@ async fn queue_stops_before_older_missing_harness_but_rejects_one_before_last_ma
             &second.symbol,
             hf_service::ReportLanguage::En,
             Some(second_run.id),
+            hf_service::AiPolicy::Auto,
         )
         .await
         .unwrap_err()
@@ -897,6 +901,7 @@ async fn queue_and_report_share_failed_cancelled_selection_and_skip_active_missi
                 &target.symbol,
                 hf_service::ReportLanguage::En,
                 Some(latest.id),
+                hf_service::AiPolicy::Auto,
             )
             .await
             .unwrap();

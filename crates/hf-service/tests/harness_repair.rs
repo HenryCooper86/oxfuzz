@@ -161,6 +161,7 @@ async fn harness_generate_repairs_a_failing_compile() {
             None,
             false,
             false,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect("harness_generate should recover via repair");
@@ -199,6 +200,7 @@ async fn harness_generate_gives_up_after_max_repairs() {
             None,
             false,
             false,
+            hf_service::AiPolicy::Auto,
         )
         .await;
     assert!(err.is_err(), "should fail after exhausting repairs");
@@ -326,6 +328,7 @@ async fn new_compilation_requires_store_before_runtime_or_provider() {
             None,
             false,
             false,
+            hf_service::AiPolicy::Auto,
         )
         .await;
     assert!(generated
@@ -364,6 +367,7 @@ async fn repair_success_records_only_the_successful_attempts_fresh_database_flag
             None,
             false,
             false,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .unwrap();

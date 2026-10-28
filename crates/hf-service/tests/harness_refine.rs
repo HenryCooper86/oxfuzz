@@ -168,6 +168,7 @@ async fn harness_refine_recompiles_from_existing_harness() {
             EngineKind::LibFuzzer,
             TargetLanguage::C,
             1,
+            hf_service::AiPolicy::Auto,
         ),
     )
     .await
@@ -202,6 +203,7 @@ async fn harness_refine_errors_without_existing_harness() {
             EngineKind::LibFuzzer,
             TargetLanguage::C,
             1,
+            hf_service::AiPolicy::Auto,
         )
         .await;
     assert!(

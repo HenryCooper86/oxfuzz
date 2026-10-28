@@ -288,7 +288,12 @@ async fn casr_clustered_triage_end_to_end() {
         .with_store(Arc::clone(&fixture.store));
 
     let crashes = container
-        .triage_run(&fixture.project, &fixture.symbol, fixture.run_id)
+        .triage_run(
+            &fixture.project,
+            &fixture.symbol,
+            fixture.run_id,
+            hf_service::AiPolicy::Auto,
+        )
         .await
         .unwrap();
 
@@ -455,7 +460,12 @@ async fn legacy_triage_saturates_on_repeated_signatures() {
         ServiceContainer::new(runtime.clone(), None).with_store(Arc::clone(&fixture.store));
 
     let crashes = container
-        .triage_run(&fixture.project, &fixture.symbol, fixture.run_id)
+        .triage_run(
+            &fixture.project,
+            &fixture.symbol,
+            fixture.run_id,
+            hf_service::AiPolicy::Auto,
+        )
         .await
         .unwrap();
 
@@ -545,7 +555,12 @@ async fn triage_drafts_and_persists_bug_report_with_root_cause() {
             .with_store(Arc::clone(&fixture.store));
 
     let crashes = container
-        .triage_run(&fixture.project, &fixture.symbol, fixture.run_id)
+        .triage_run(
+            &fixture.project,
+            &fixture.symbol,
+            fixture.run_id,
+            hf_service::AiPolicy::Auto,
+        )
         .await
         .unwrap();
 

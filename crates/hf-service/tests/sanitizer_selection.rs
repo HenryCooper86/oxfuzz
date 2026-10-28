@@ -244,6 +244,7 @@ async fn qualify(container: &ServiceContainer, project: &Path, sanitizer: Option
             sanitizer,
             false,
             false,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect("prepare harness");
@@ -324,6 +325,7 @@ async fn requested_ubsan_reaches_the_build_script_and_the_run_identity() {
             None,
             None,
             &|_| {},
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect("matching sanitizer request runs");
@@ -354,6 +356,7 @@ async fn run_with_a_mismatched_sanitizer_request_fails_loud() {
             None,
             None,
             &|_| {},
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect_err("an ASan request must not run a UBSan harness");

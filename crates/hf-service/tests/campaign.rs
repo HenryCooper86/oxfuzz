@@ -130,6 +130,7 @@ async fn run_campaign_runs_full_pipeline_and_picks_a_target() {
             None,
             false,
             false,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect("prepare harness");
@@ -311,6 +312,7 @@ async fn run_campaign_observed_forwards_markers_and_stats_but_not_engine_log_lin
             None,
             false,
             false,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect("prepare harness");

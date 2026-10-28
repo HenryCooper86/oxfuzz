@@ -633,6 +633,7 @@ async fn campaign_rejects_a_binary_changed_after_promotion() {
             None,
             None,
             &|_| {},
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect_err("campaign must bind the exact promoted executable");
@@ -724,6 +725,7 @@ async fn campaign_run_rejects_an_unpromoted_active_revision() {
             None,
             None,
             &|_| {},
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect_err("a compiled-only harness must not start a campaign");

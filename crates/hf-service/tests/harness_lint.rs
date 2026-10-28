@@ -116,6 +116,7 @@ async fn a_spent_repair_budget_sends_no_repair_prompt_for_a_lint_error() {
             None,
             false,
             false,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect_err("a lint error with no repair budget fails the build");

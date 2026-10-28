@@ -188,6 +188,7 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
             cmplog,
             replay,
             experiment,
+            ai,
         }) => {
             cmd_run(
                 project,
@@ -203,6 +204,7 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
                 seed,
                 replay.as_deref(),
                 experiment,
+                ai,
             )
             .await?;
         }
@@ -257,7 +259,8 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
             project,
             target,
             lang,
-        }) => cmd_triage(project, &target, &lang).await?,
+            ai,
+        }) => cmd_triage(project, &target, &lang, ai).await?,
         Commands::Corpus(args::CorpusArgs {
             project,
             target,

@@ -212,11 +212,13 @@ pub(crate) struct HarnessArgs {
     pub(crate) lang: String,
     #[command(flatten)]
     pub(crate) draft: HarnessDraftArgs,
-    /// Which generator writes the harness: `auto` uses the model when one
-    /// is configured, `require` fails rather than substituting the
-    /// template, `off` never calls a model. An explicit `require`/`off`
-    /// does not combine with `--repair`/`--refine`: those paths always use
-    /// a configured model.
+    /// How this command may use the model, across every step that can reach
+    /// one: the draft, the compile and smoke repairs, and `--refine`'s
+    /// reshape. `off` never calls a model -- the template drafts, and repair
+    /// attempts are skipped; `require` fails rather than silently
+    /// substituting the template or skipping a repair. `off` on `--refine`
+    /// is refused by the operation itself: refinement has no model-free
+    /// path.
     #[arg(long, value_enum, default_value_t = AiOption::Auto)]
     pub(crate) ai: AiOption,
     /// Auto-repair: on a compile failure, or a smoke run in which the fuzzer
@@ -363,6 +365,20 @@ pub(crate) struct RunArgs {
     /// Review and launch the current inputs for a prepared coverage experiment.
     #[arg(long, conflicts_with_all = ["replay", "target", "engine", "duration", "cpus", "timeout_ms", "resume", "sanitizer", "cmplog", "seed", "lang"])]
     pub(crate) experiment: Option<uuid::Uuid>,
+    /// How this run may use the model. It reaches two places: the LLM seed
+    /// corpus and the run dictionary. `off` calls no model at all (heuristic
+    /// seeds, no dictionary enrichment); `require` refuses to start when no
+    /// provider is configured or all are frozen, and a failed dictionary
+    /// enrichment then fails the run instead of silently degrading it. A
+    /// replay or experiment consults no model, so the flag cannot combine
+    /// with them.
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = AiOption::Auto,
+        conflicts_with_all = ["replay", "experiment"]
+    )]
+    pub(crate) ai: AiOption,
 }
 
 /// List, inspect, and stop fuzz runs.
@@ -608,6 +624,13 @@ pub(crate) struct TriageArgs {
     /// Target language (c, cpp, rust, go, python). Defaults to c.
     #[arg(long, default_value = "c")]
     pub(crate) lang: String,
+    /// How triage may use the model. It reaches two places: the bug-report
+    /// drafts and the advisory per-crash verification verdicts. `off`
+    /// ingests and persists crashes with no model calls; `require` makes a
+    /// missing provider or a failed verdict call fail the command instead
+    /// of silently omitting verdicts.
+    #[arg(long, value_enum, default_value_t = AiOption::Auto)]
+    pub(crate) ai: AiOption,
 }
 
 /// Manage the fuzzing corpus for a target.
@@ -1297,6 +1320,7 @@ mod harness_help_tests {
 
 #[cfg(test)]
 mod ai_option_tests {
+    use clap::CommandFactory as _;
     use clap::Parser as _;
 
     use super::{AiOption, Cli, Commands};
@@ -1337,6 +1361,26 @@ mod ai_option_tests {
             panic!("expected discover");
         };
         assert_eq!(ai, AiOption::Auto);
+        let run = Cli::try_parse_from([
+            "oxfuzz",
+            "run",
+            "/p",
+            "--target",
+            "t",
+            "--engine",
+            "libfuzzer",
+        ])
+        .unwrap();
+        let Commands::Run(crate::args::RunArgs { ai, .. }) = run.command else {
+            panic!("expected run");
+        };
+        assert_eq!(ai, AiOption::Auto);
+
+        let triage = Cli::try_parse_from(["oxfuzz", "triage", "/p", "--target", "t"]).unwrap();
+        let Commands::Triage(crate::args::TriageArgs { ai, .. }) = triage.command else {
+            panic!("expected triage");
+        };
+        assert_eq!(ai, AiOption::Auto);
     }
 
     #[test]
@@ -1363,6 +1407,115 @@ mod ai_option_tests {
 
         // A value outside the three is refused rather than silently defaulted.
         assert!(Cli::try_parse_from(["oxfuzz", "campaign", "/p", "--ai", "maybe"]).is_err());
+    }
+
+    #[test]
+    fn the_three_choices_parse_on_run_and_triage() {
+        for (value, expected) in [
+            ("auto", AiOption::Auto),
+            ("require", AiOption::Require),
+            ("off", AiOption::Off),
+        ] {
+            let run = Cli::try_parse_from([
+                "oxfuzz",
+                "run",
+                "/p",
+                "--target",
+                "t",
+                "--engine",
+                "libfuzzer",
+                "--ai",
+                value,
+            ])
+            .unwrap();
+            let Commands::Run(crate::args::RunArgs { ai, .. }) = run.command else {
+                panic!("expected run");
+            };
+            assert_eq!(ai, expected, "run --ai {value}");
+
+            let triage =
+                Cli::try_parse_from(["oxfuzz", "triage", "/p", "--target", "t", "--ai", value])
+                    .unwrap();
+            let Commands::Triage(crate::args::TriageArgs { ai, .. }) = triage.command else {
+                panic!("expected triage");
+            };
+            assert_eq!(ai, expected, "triage --ai {value}");
+        }
+
+        // A value outside the three is refused rather than silently
+        // defaulted, and a policy cannot combine with `--replay`: a replay
+        // reuses the recorded dictionary and inputs, so no step consults a
+        // model the policy could govern, and silently ignoring an explicit
+        // token decision is what `--ai` exists to prevent.
+        assert!(Cli::try_parse_from([
+            "oxfuzz",
+            "run",
+            "/p",
+            "--target",
+            "t",
+            "--engine",
+            "libfuzzer",
+            "--ai",
+            "maybe",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "oxfuzz",
+            "run",
+            "/p",
+            "--replay",
+            "00000000-0000-4000-8000-000000000000",
+            "--ai",
+            "off",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn an_explicit_ai_policy_parses_alongside_repair_and_refine() {
+        // The repair/refine policy decision moved into the operations
+        // (Engineering Protocol 2.19): the parser accepts the combination
+        // and the service decides -- `--refine --ai off` fails there,
+        // naming refinement as a model-only operation.
+        let base = [
+            "oxfuzz",
+            "harness",
+            "/p",
+            "--target",
+            "t",
+            "--engine",
+            "libfuzzer",
+        ];
+        for extra in [&["--repair", "2"][..], &["--refine"][..]] {
+            for (value, expected) in [("off", AiOption::Off), ("require", AiOption::Require)] {
+                let mut argv = base.to_vec();
+                argv.extend_from_slice(extra);
+                argv.extend_from_slice(&["--ai", value]);
+                let parsed = Cli::try_parse_from(argv).unwrap();
+                let Commands::Harness(crate::args::HarnessArgs { ai, .. }) = parsed.command else {
+                    panic!("expected harness");
+                };
+                assert_eq!(ai, expected, "--ai {value} with {extra:?}");
+            }
+        }
+
+        // The flag's help must not advertise a parser-side refusal the
+        // operations now own.
+        let mut command = Cli::command();
+        let harness = command
+            .find_subcommand_mut("harness")
+            .expect("harness subcommand");
+        let ai_help = harness
+            .get_arguments()
+            .find(|arg| arg.get_id() == "ai")
+            .expect("harness --ai argument")
+            .get_help()
+            .expect("--ai help text")
+            .to_string();
+        assert!(
+            !ai_help.contains("does not combine"),
+            "the repair/refine refusal is service-owned: {ai_help}"
+        );
     }
 }
 

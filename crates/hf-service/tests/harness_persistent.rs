@@ -414,6 +414,7 @@ async fn persistent_generate_compiles_driverless_and_smoke_qualifies_and_promote
             None,
             false,
             true,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect("persistent harness generates");
@@ -512,6 +513,7 @@ async fn persistent_generate_rejects_a_non_afl_engine_before_any_work() {
             None,
             false,
             true,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .unwrap_err();
@@ -545,6 +547,7 @@ async fn persistent_generate_falls_back_to_the_heuristic_template() {
             None,
             false,
             true,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect("heuristic fallback generates");

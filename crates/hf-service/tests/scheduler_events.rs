@@ -252,7 +252,12 @@ async fn crash_found_at_triage_completion_fires_matching_event_schedule() {
         .expect("run.failed schedule created");
 
     let crashes = container
-        .triage_run(&fixture.project, &fixture.target.symbol, fixture.run.id)
+        .triage_run(
+            &fixture.project,
+            &fixture.target.symbol,
+            fixture.run.id,
+            hf_service::AiPolicy::Auto,
+        )
         .await
         .expect("triage completes");
     assert_eq!(crashes.len(), 1, "fixture triage finds the planted crash");
@@ -328,7 +333,12 @@ async fn persisted_event_schedule_loads_on_restart_and_evaluates() {
     assert_eq!(loaded.trigger, "on crash.found");
 
     let crashes = container
-        .triage_run(&fixture.project, &fixture.target.symbol, fixture.run.id)
+        .triage_run(
+            &fixture.project,
+            &fixture.target.symbol,
+            fixture.run.id,
+            hf_service::AiPolicy::Auto,
+        )
         .await
         .expect("triage completes after restart");
     assert_eq!(crashes.len(), 1);
@@ -491,6 +501,7 @@ async fn campaign_fixture(name: &str) -> CampaignFixture {
             None,
             false,
             false,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect("prepare harness");

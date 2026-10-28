@@ -236,6 +236,7 @@ async fn promote_for_engine(container: &ServiceContainer, project: &Path, engine
             None,
             false,
             false,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect("prepare harness");
@@ -313,6 +314,7 @@ async fn engines_share_one_canonical_corpus_and_absorbed_crashes() {
             None,
             None,
             &|_| {},
+            hf_service::AiPolicy::Auto,
         )
         .await
         .unwrap();
@@ -338,6 +340,7 @@ async fn engines_share_one_canonical_corpus_and_absorbed_crashes() {
             None,
             None,
             &|_| {},
+            hf_service::AiPolicy::Auto,
         )
         .await
         .unwrap();
@@ -392,6 +395,7 @@ async fn engines_share_one_canonical_corpus_and_absorbed_crashes() {
             None,
             None,
             &|_| {},
+            hf_service::AiPolicy::Auto,
         )
         .await
         .unwrap();

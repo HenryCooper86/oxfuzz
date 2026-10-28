@@ -10,7 +10,7 @@ use hf_core::target::TargetLanguage;
 use hf_core::types::{Message, SessionId, TokenUsage};
 use serde_json::Value;
 
-use crate::ServiceContainer;
+use crate::{AiPolicy, ServiceContainer};
 
 /// One executable capability shown in agent editors.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -343,7 +343,14 @@ impl ServiceContainer {
                     .unwrap_or(2)
                     .max(1);
                 let outcome = self
-                    .harness_refine(project, target, engine, language, max_repairs)
+                    .harness_refine(
+                        project,
+                        target,
+                        engine,
+                        language,
+                        max_repairs,
+                        AiPolicy::Auto,
+                    )
                     .await?;
                 Ok(serde_json::json!({
                     "refined": format!("{:?}", outcome.status),
@@ -388,10 +395,12 @@ impl ServiceContainer {
                         None,
                         None,
                         // The agent tool surface carries no per-run CmpLog
-                        // request or explicit seed.
+                        // request or explicit seed, and no ai policy request:
+                        // its tools keep the auto behavior.
                         None,
                         None,
                         &|_| {},
+                        AiPolicy::Auto,
                     )
                     .await?;
                 Ok(serde_json::json!({
@@ -403,13 +412,18 @@ impl ServiceContainer {
             }
             "triage" => {
                 let target = arg_str(args, "target")?;
-                let crashes = self.triage(project, target).await?;
+                let crashes = self.triage(project, target, AiPolicy::Auto).await?;
                 // LLM crash verifier (L2 increment 4): an advisory per-crash
                 // verdict on whether each looks like a deterministically-reproducing
                 // genuine target bug vs a harness/setup artifact. Best-effort -- it
                 // is `None` when no provider is configured -- and never reclassifies
                 // a crash; it only informs the orchestrator's review.
-                let verdicts = self.verify_crashes(target, project, &crashes).await;
+                let verdicts = self
+                    .verify_crashes(target, project, &crashes, AiPolicy::Auto)
+                    .await
+                    // Auto is the advisory policy: it never errors, so the
+                    // unwrap cannot fire and the advisory contract stays.
+                    .expect("auto verification cannot fail");
                 let items: Vec<Value> = crashes
                     .iter()
                     .zip(verdicts)

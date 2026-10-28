@@ -272,6 +272,7 @@ async fn an_explicit_seed_is_persisted_dispatched_and_kept_by_replay() {
             None,
             Some(WIDE_SEED),
             &|_| {},
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect("seeded run completes");
@@ -342,6 +343,7 @@ async fn an_omitted_seed_still_derives_a_nonzero_seed_per_run() {
                 None,
                 None,
                 &|_| {},
+                hf_service::AiPolicy::Auto,
             )
             .await
             .expect("unseeded run completes");
@@ -443,6 +445,7 @@ async fn a_libfuzzer_seed_of_zero_is_rejected_before_any_side_effect() {
             None,
             Some(0),
             &|_| {},
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect_err("seed zero must be refused for libFuzzer");

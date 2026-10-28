@@ -26,7 +26,7 @@ use hf_core::target::{TargetCandidate, TargetLanguage};
 use uuid::Uuid;
 
 use super::project_identity::select_target_candidate;
-use super::{CampaignOutcome, ServiceContainer};
+use super::{AiPolicy, CampaignOutcome, ServiceContainer};
 use crate::harness_review::HarnessReviewBypass;
 use crate::verification::VerdictLevel;
 
@@ -324,6 +324,10 @@ impl ServiceContainer {
                         request.sanitizer,
                         request.cmplog,
                         false,
+                        // The pipeline's own --ai handling happens in the CLI
+                        // (provider detach / preflight); the service calls
+                        // stay auto.
+                        AiPolicy::Auto,
                     )
                     .await
                     .map_err(|error| {
@@ -369,6 +373,7 @@ impl ServiceContainer {
                         request.review_bypass,
                         FUZZ_PIPELINE_REPAIRS,
                         &report_repair,
+                        AiPolicy::Auto,
                     )
                     .await
                 }

@@ -349,6 +349,7 @@ async fn configured_image_movement_stops_generate_before_discovery_or_provider()
             None,
             false,
             false,
+            hf_service::AiPolicy::Auto,
         )
         .await;
     assert!(result.unwrap_err().to_string().contains("Stale"));
@@ -430,6 +431,7 @@ async fn missing_store_prevents_generation_provider_and_runtime() {
             None,
             false,
             false,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .unwrap_err();
@@ -608,6 +610,7 @@ async fn changed_configured_inputs_block_shared_lifecycle_and_rebuild_restores_e
                 None,
                 None,
                 &|_| {},
+                hf_service::AiPolicy::Auto,
             )
             .await;
         assert!(direct.is_err(), "{mutation}");
@@ -791,6 +794,7 @@ async fn deleted_configured_database_reports_needs_build_before_dispatch() {
             None,
             false,
             false,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .unwrap_err();
@@ -998,6 +1002,7 @@ async fn final_direct_and_corpus_image_resolution_cannot_select_a_moved_tag() {
                     None,
                     None,
                     &|_| {},
+                    hf_service::AiPolicy::Auto,
                 )
                 .await
                 .is_err()
@@ -1147,6 +1152,7 @@ async fn image_change_after_run_reservation_is_retained_failed_before_engine_dis
                 *reserved.lock().unwrap() = Some(id);
                 f.runtime.image.store(1, Ordering::SeqCst);
             },
+            hf_service::AiPolicy::Auto,
         )
         .await;
     assert!(result

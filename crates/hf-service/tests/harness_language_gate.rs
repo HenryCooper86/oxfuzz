@@ -165,6 +165,7 @@ async fn harness_compile_generate_and_refine_refuse_go_through_the_operations() 
             None,
             false,
             false,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect_err("a discovery-only language must not be generated");
@@ -177,6 +178,7 @@ async fn harness_compile_generate_and_refine_refuse_go_through_the_operations() 
             EngineKind::LibFuzzer,
             TargetLanguage::Go,
             1,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect_err("a discovery-only language must not be refined");

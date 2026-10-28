@@ -242,6 +242,7 @@ async fn afl_project(
             None,
             false,
             false,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect("generate harness");
@@ -282,6 +283,7 @@ async fn run_end_captures_the_runs_covered_edge_set() {
             None,
             None,
             &sink,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect("run");
@@ -317,6 +319,7 @@ async fn resume_continues_the_prior_session_tree() {
             None,
             None,
             &sink,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect("first run");
@@ -333,6 +336,7 @@ async fn resume_continues_the_prior_session_tree() {
             None,
             None,
             &sink,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect("second run resumes the first");
@@ -397,6 +401,7 @@ async fn without_resume_every_run_cold_starts() {
             None,
             None,
             &sink,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect("first run");
@@ -413,6 +418,7 @@ async fn without_resume_every_run_cold_starts() {
             None,
             None,
             &sink,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect("second run");
@@ -452,6 +458,7 @@ async fn resume_on_a_non_afl_engine_fails_loud() {
             None,
             None,
             &|_: hf_service::FuzzProgress| {},
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect_err("resume is AFL++-only");
@@ -511,11 +518,12 @@ async fn a_resumed_tree_still_ingests_its_prior_crashes() {
             None,
             None,
             &sink,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect("first run");
     let triaged = container
-        .triage_run(&project, TARGET, first.run_id)
+        .triage_run(&project, TARGET, first.run_id, hf_service::AiPolicy::Auto)
         .await
         .expect("triage first run");
     assert_eq!(triaged.len(), 1, "the session's crash ingests: {triaged:?}");
@@ -538,11 +546,12 @@ async fn a_resumed_tree_still_ingests_its_prior_crashes() {
             None,
             None,
             &sink,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect("resumed run");
     let triaged = container
-        .triage_run(&project, TARGET, resumed.run_id)
+        .triage_run(&project, TARGET, resumed.run_id, hf_service::AiPolicy::Auto)
         .await
         .expect("triage resumed run");
     assert_eq!(
@@ -553,7 +562,7 @@ async fn a_resumed_tree_still_ingests_its_prior_crashes() {
 
     // Re-triaging the resumed run replaces rather than duplicates its rows.
     let again = container
-        .triage_run(&project, TARGET, resumed.run_id)
+        .triage_run(&project, TARGET, resumed.run_id, hf_service::AiPolicy::Auto)
         .await
         .expect("re-triage resumed run");
     assert_eq!(again.len(), 1, "triage is idempotent: {again:?}");

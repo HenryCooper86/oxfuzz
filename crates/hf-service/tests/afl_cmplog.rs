@@ -287,6 +287,7 @@ async fn qualify(container: &ServiceContainer, project: &Path, cmplog: bool) {
             None,
             cmplog,
             false,
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect("prepare harness");
@@ -389,6 +390,7 @@ async fn cmplog_build_compiles_a_companion_and_the_run_drives_it() {
             // CmpLog probe carries no explicit seed.
             None,
             &|_| {},
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect("cmplog run");
@@ -441,6 +443,7 @@ async fn cmplog_run_against_a_companionless_harness_fails_loud() {
             Some(true),
             None,
             &|_| {},
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect_err("a companion-less harness must not serve a --cmplog run");
@@ -485,6 +488,7 @@ async fn cmplog_request_on_a_non_afl_engine_fails_at_policy_resolution() {
             Some(true),
             None,
             &|_| {},
+            hf_service::AiPolicy::Auto,
         )
         .await
         .expect_err("libFuzzer has no CmpLog companion path");
@@ -573,6 +577,7 @@ async fn guided_experiment_stages_and_drives_the_reviewed_cmplog_companion() {
             Some(true),
             None,
             &|_| {},
+            hf_service::AiPolicy::Auto,
         )
         .await
         .unwrap();

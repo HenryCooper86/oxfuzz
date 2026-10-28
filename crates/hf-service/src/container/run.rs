@@ -40,7 +40,7 @@ use super::workspace::{
 use super::{
     auto_revert_baseline_compatible, auto_revert_decision, ensure_workspace_directory,
     merge_run_discoveries, persist_terminal_run_evidence, resolve_fuzzing_run, syz_kvm_usable,
-    syzkaller_manager_command, terminal_run_metrics, AutoRevertOutcome, CampaignOutcome,
+    syzkaller_manager_command, terminal_run_metrics, AiPolicy, AutoRevertOutcome, CampaignOutcome,
     CoverageFeedback, LlmProviderBridge, RefineProposal, RunCancelOutcome, RunControlStatus,
     RunLifecycleStatus, RunSummary, ServiceContainer, SyzkallerRunOpts, SyzkallerSummary,
     TerminalRunMetrics,
@@ -447,7 +447,7 @@ impl ServiceContainer {
         // Two corrective passes is enough for a targeted re-draft; keep it small
         // so a plateau does not turn into a long repair loop.
         match self
-            .harness_refine_proposal(project, target, engine, lang, 2)
+            .harness_refine_proposal(project, target, engine, lang, 2, AiPolicy::Auto)
             .await
         {
             Ok(outcome) => Some(RefineProposal {
@@ -673,25 +673,33 @@ impl ServiceContainer {
     }
 
     /// Build the engine dictionary flags for a run: extract the static
-    /// dictionary from the target sources, augment it with LLM-proposed tokens,
-    /// and return the engine-specific `-dict`/`-x`/`-w` args (empty when no
-    /// dictionary was built).
+    /// dictionary from the target sources, augment it with LLM-proposed tokens
+    /// under `policy`, and return the engine-specific `-dict`/`-x`/`-w` args
+    /// (empty when no dictionary was built).
+    ///
+    /// # Errors
+    /// Returns the [`AiPolicy::Require`] errors of
+    /// [`Self::augment_dictionary_llm`] so they fail run staging.
     async fn build_run_dictionary_args(
         &self,
         project: &Path,
         target: &str,
         workspace: &Path,
         engine: EngineKind,
-    ) -> Vec<String> {
+        policy: AiPolicy,
+    ) -> Result<Vec<String>, ClassifiedError> {
         let dict_name = "fuzzer.dict";
         let Some(dict_path) = build_workspace_dictionary(workspace, dict_name) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         // Best-effort and provider-gated; a failure leaves the static
-        // dictionary in place.
-        self.augment_dictionary_llm(project, target, &dict_path)
-            .await;
-        hf_engine::dict::dict_run_args(engine, &format!("/work/{dict_name}"))
+        // dictionary in place (Require makes the specified failures errors).
+        self.augment_dictionary_llm(project, target, &dict_path, policy)
+            .await?;
+        Ok(hf_engine::dict::dict_run_args(
+            engine,
+            &format!("/work/{dict_name}"),
+        ))
     }
 
     /// Merge LLM-proposed dictionary tokens into the static dictionary at
@@ -702,26 +710,74 @@ impl ServiceContainer {
     /// (Engineering Protocol 2.13). The latest completed draft for the same
     /// static dictionary is reused without a provider call; every failure
     /// leaves the static dictionary intact.
-    async fn augment_dictionary_llm(&self, project: &Path, target: &str, dict_path: &Path) {
+    ///
+    /// `policy`: `Off` skips augmentation entirely (no dispatch, no rows);
+    /// `Require` turns a missing provider, an unresolvable target, or a
+    /// retention/storage failure into an `Err` so run staging fails instead of
+    /// silently staging the static dictionary; `Auto` keeps the silent skips.
+    /// A failed model call stays a warned skip under every policy: the static
+    /// dictionary is a valid run input and the failure is not one of the
+    /// silent outcomes `Require` exists to refuse.
+    ///
+    /// # Errors
+    /// Returns a `ClassifiedError` only under [`AiPolicy::Require`].
+    async fn augment_dictionary_llm(
+        &self,
+        project: &Path,
+        target: &str,
+        dict_path: &Path,
+        policy: AiPolicy,
+    ) -> Result<(), ClassifiedError> {
         use hf_core::provider::{ChatRequest, LlmProvider as _};
         use hf_core::types::Message;
 
+        if policy == AiPolicy::Off {
+            return Ok(());
+        }
         // Without a store the model-visible prompt cannot be retained, so no
         // augmentation happens (Engineering Protocol 2.13): the static
         // dictionary stays as extracted.
         let Some(store) = self.store() else {
-            return;
+            if policy == AiPolicy::Require {
+                return Err(ClassifiedError::Storage(
+                    "dictionary augmentation was required but no persistent store is \
+                     configured to retain the prompt"
+                        .to_owned(),
+                ));
+            }
+            return Ok(());
         };
         let Some(pool) = self.provider_pool() else {
-            return;
+            if policy == AiPolicy::Require {
+                return Err(ClassifiedError::Provider(
+                    "dictionary augmentation was required but no LLM provider is \
+                     configured; set HF_PROVIDER_API_KEY"
+                        .to_owned(),
+                ));
+            }
+            return Ok(());
         };
         let Ok(static_text) = std::fs::read_to_string(dict_path) else {
-            return;
+            if policy == AiPolicy::Require {
+                return Err(ClassifiedError::Storage(format!(
+                    "dictionary augmentation was required but the staged dictionary at \
+                     '{}' could not be read",
+                    dict_path.display()
+                )));
+            }
+            return Ok(());
         };
         let mut tokens = hf_engine::dict::parse_dict(&static_text);
         // An uncanonicalizable root cannot key the durable draft.
         let Ok(root) = canonical_project_root(project) else {
-            return;
+            if policy == AiPolicy::Require {
+                return Err(ClassifiedError::Storage(
+                    "dictionary augmentation was required but the project root could not \
+                     be canonicalized to key the retained prompt"
+                        .to_owned(),
+                ));
+            }
+            return Ok(());
         };
         let candidate = match self
             .resolve_target_candidate_any_language(project, target)
@@ -729,15 +785,35 @@ impl ServiceContainer {
         {
             Ok(Some(candidate)) => candidate,
             // An unresolvable target has no definition to show the model.
-            Ok(None) => return,
+            Ok(None) => {
+                if policy == AiPolicy::Require {
+                    return Err(ClassifiedError::Validation(format!(
+                        "dictionary augmentation was required but target '{target}' could \
+                         not be resolved"
+                    )));
+                }
+                return Ok(());
+            }
             Err(error) => {
+                if policy == AiPolicy::Require {
+                    return Err(ClassifiedError::Validation(format!(
+                        "dictionary augmentation was required but target '{target}' could \
+                         not be resolved: {error}"
+                    )));
+                }
                 tracing::warn!("dictionary target '{target}' resolution failed: {error}");
-                return;
+                return Ok(());
             }
         };
         // An unreadable definition leaves the static dictionary as extracted.
         let Some(definition) = read_target_definition(&root, &candidate) else {
-            return;
+            if policy == AiPolicy::Require {
+                return Err(ClassifiedError::Validation(format!(
+                    "dictionary augmentation was required but the definition of target \
+                     '{target}' could not be read"
+                )));
+            }
+            return Ok(());
         };
         let project_root = root.to_string_lossy().into_owned();
         let signature = format!("{:x}", Sha256::digest(static_text.as_bytes()));
@@ -758,10 +834,16 @@ impl ServiceContainer {
         } else {
             let prompt = hf_prompt::render_dictionary_prompt(target, &definition.excerpt, &tokens);
             if prompt.len() > hf_storage::MAX_DICTIONARY_LLM_DRAFT_BYTES {
+                if policy == AiPolicy::Require {
+                    return Err(ClassifiedError::Storage(format!(
+                        "dictionary augmentation was required but the prompt for '{target}' \
+                         exceeds the retained size"
+                    )));
+                }
                 tracing::warn!(
                     "dictionary prompt for '{target}' exceeds the retained size; augmentation skipped"
                 );
-                return;
+                return Ok(());
             }
             let record = hf_storage::DictionaryLlmDraftRecord {
                 id: Uuid::new_v4(),
@@ -774,10 +856,16 @@ impl ServiceContainer {
                 completed_at: None,
             };
             if let Err(error) = store.begin_dictionary_llm_draft(&record).await {
+                if policy == AiPolicy::Require {
+                    return Err(ClassifiedError::Storage(format!(
+                        "dictionary augmentation was required but the prompt for '{target}' \
+                         could not be retained: {error}"
+                    )));
+                }
                 tracing::warn!(
                     "dictionary prompt for '{target}' not retained; augmentation skipped: {error}"
                 );
-                return;
+                return Ok(());
             }
             let provider = LlmProviderBridge::new(pool)
                 .with_diagnostics(Arc::clone(&self.diagnostics), "dict_gen");
@@ -786,13 +874,19 @@ impl ServiceContainer {
                 Ok(response) => response.text().to_owned(),
                 Err(error) => {
                     tracing::warn!("LLM dictionary generation for '{target}' failed: {error}");
-                    return;
+                    return Ok(());
                 }
             };
             if let Err(error) = store
                 .complete_dictionary_llm_draft(record.id, &response, Utc::now())
                 .await
             {
+                if policy == AiPolicy::Require {
+                    return Err(ClassifiedError::Storage(format!(
+                        "dictionary augmentation was required but the response for '{target}' \
+                         could not be retained: {error}"
+                    )));
+                }
                 // The prompt is retained; only the raw response is
                 // missing. The parsed tokens still merge below.
                 tracing::warn!("dictionary response for '{target}' not retained: {error}");
@@ -800,7 +894,7 @@ impl ServiceContainer {
             hf_engine::dict::parse_dict(&response)
         };
         if llm_tokens.is_empty() {
-            return;
+            return Ok(());
         }
         let mut seen: std::collections::HashSet<Vec<u8>> = tokens.iter().cloned().collect();
         let mut added = 0usize;
@@ -811,19 +905,32 @@ impl ServiceContainer {
             }
         }
         if added == 0 {
-            return;
+            return Ok(());
         }
-        if let Err(e) = std::fs::write(dict_path, hf_engine::dict::render_dict(&tokens)) {
-            tracing::warn!("failed to write augmented dictionary: {e}");
-        } else {
-            tracing::info!("merged {added} LLM-proposed dictionary token(s) for '{target}'");
+        match std::fs::write(dict_path, hf_engine::dict::render_dict(&tokens)) {
+            Ok(()) => {
+                tracing::info!("merged {added} LLM-proposed dictionary token(s) for '{target}'");
+            }
+            Err(error) => {
+                if policy == AiPolicy::Require {
+                    return Err(ClassifiedError::Storage(format!(
+                        "dictionary augmentation was required but the augmented dictionary \
+                         could not be staged: {error}"
+                    )));
+                }
+                tracing::warn!("failed to write augmented dictionary: {error}");
+            }
         }
+        Ok(())
     }
 
     /// Run a fuzzer to termination and notify event-driven schedules about the
     /// outcome: `run.completed` on success (cancellation included), `run.failed`
     /// when a started run terminates with a failure. Errors before the run
     /// becomes durable are rejections, not run failures, and emit nothing.
+    ///
+    /// `policy` governs the run's LLM dictionary augmentation (see
+    /// [`Self::augment_dictionary_llm`]).
     async fn run_fuzzer_with_started(
         &self,
         project: &Path,
@@ -832,6 +939,7 @@ impl ServiceContainer {
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
         on_started: &(dyn Fn(Uuid) + Send + Sync),
         replay: Option<ReplayProvenance>,
+        policy: AiPolicy,
     ) -> Result<RunSummary, ClassifiedError> {
         let engine = resolved.engine;
         // Capture the run id once the run is durable so a failure event can
@@ -868,6 +976,7 @@ impl ServiceContainer {
                 on_progress,
                 &tracked_started,
                 replay,
+                policy,
             )
             .await;
         match &result {
@@ -923,6 +1032,7 @@ impl ServiceContainer {
         workspace: &Path,
         corpus_dir: PathBuf,
         replay: Option<ReplayProvenance>,
+        policy: AiPolicy,
     ) -> Result<PreparedUserspaceRun, ClassifiedError> {
         verify_current_run_harness(target, &resolved, qualified)?;
         let engine = resolved.engine;
@@ -946,8 +1056,8 @@ impl ServiceContainer {
         let extra_args = if historical || guided {
             Vec::new()
         } else {
-            self.build_run_dictionary_args(project, target, workspace, engine)
-                .await
+            self.build_run_dictionary_args(project, target, workspace, engine, policy)
+                .await?
         };
         let mut config = FuzzRunConfig {
             harness_id: qualified.id,
@@ -1233,6 +1343,7 @@ impl ServiceContainer {
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
         on_started: &(dyn Fn(Uuid) + Send + Sync),
         replay: Option<ReplayProvenance>,
+        policy: AiPolicy,
     ) -> Result<RunSummary, ClassifiedError> {
         const MAX_RAW_COVERAGE_SAMPLES: usize = 10_000;
         let workspace_operation = self.acquire_workspace_operation().await?;
@@ -1296,6 +1407,7 @@ impl ServiceContainer {
                 &workspace,
                 corpus_dir.clone(),
                 replay,
+                policy,
             )
             .await?;
         let run_id = run_record.id;
@@ -1868,7 +1980,15 @@ impl ServiceContainer {
                 iteration_run.duration_secs
             )));
             let summary = self
-                .run_fuzzer_with_started(project, &target, iteration_run, &forward, &|_| {}, None)
+                .run_fuzzer_with_started(
+                    project,
+                    &target,
+                    iteration_run,
+                    &forward,
+                    &|_| {},
+                    None,
+                    AiPolicy::Auto,
+                )
                 .await?;
             termination = summary.termination;
             edges = edges.max(summary.edges);
@@ -1890,7 +2010,9 @@ impl ServiceContainer {
                 break;
             }
 
-            let triaged = self.triage_run(project, &target, summary.run_id).await?;
+            let triaged = self
+                .triage_run(project, &target, summary.run_id, AiPolicy::Auto)
+                .await?;
             crashes = triaged.len();
             // Swallowed: feeding this iteration's crash reproducers back
             // into the corpus is enrichment, not the campaign's result --
@@ -1943,7 +2065,6 @@ impl ServiceContainer {
     /// registered for cooperative cancellation. Progress and lifecycle sinks
     /// always receive that same service-owned id. A request future may be
     /// dropped after this method returns without aborting the campaign.
-    ///
     /// # Errors
     /// Returns a [`ClassifiedError`] when preflight or durable reservation
     /// fails. Errors after reservation are reflected in the persisted run and
@@ -1955,6 +2076,7 @@ impl ServiceContainer {
         engine: EngineKind,
         duration_secs: u64,
         seed: Option<u64>,
+        ai: AiPolicy,
         on_progress: Arc<dyn Fn(Uuid, FuzzProgress) + Send + Sync + 'static>,
         on_status: Arc<dyn Fn(Uuid, RunLifecycleStatus) + Send + Sync + 'static>,
     ) -> Result<Uuid, ClassifiedError> {
@@ -1973,6 +2095,7 @@ impl ServiceContainer {
                 resolved,
                 replay: None,
             },
+            ai,
             on_progress,
             on_status,
         )
@@ -1990,12 +2113,15 @@ impl ServiceContainer {
         on_status: Arc<dyn Fn(Uuid, RunLifecycleStatus) + Send + Sync + 'static>,
     ) -> Result<Uuid, ClassifiedError> {
         let launch = self.reviewed_replay(review).await?;
-        self.start_run_launch(launch, on_progress, on_status).await
+        // A replay reuses the recorded dictionary; there is nothing to augment.
+        self.start_run_launch(launch, AiPolicy::Auto, on_progress, on_status)
+            .await
     }
 
     async fn start_run_launch(
         &self,
         launch: RunLaunch,
+        ai: AiPolicy,
         on_progress: Arc<dyn Fn(Uuid, FuzzProgress) + Send + Sync + 'static>,
         on_status: Arc<dyn Fn(Uuid, RunLifecycleStatus) + Send + Sync + 'static>,
     ) -> Result<Uuid, ClassifiedError> {
@@ -2049,6 +2175,7 @@ impl ServiceContainer {
                         &progress_sink,
                         &started_sink,
                         replay,
+                        ai,
                     )
                     .await;
                 match result {
@@ -2192,7 +2319,8 @@ impl ServiceContainer {
     /// Run a fuzz campaign via `hf-engine::runner::EngineRunner`.
     ///
     /// `on_progress` is called for each parsed `FuzzProgress` event so the
-    /// caller can stream it to the UI.
+    /// caller can stream it to the UI. `policy` governs the run's LLM
+    /// dictionary augmentation (see [`Self::augment_dictionary_llm`]).
     ///
     /// # Errors
     /// Returns `ClassifiedError` if the engine is not supported or the
@@ -2210,6 +2338,7 @@ impl ServiceContainer {
         cmplog: Option<bool>,
         seed: Option<u64>,
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
+        policy: AiPolicy,
     ) -> Result<RunSummary, ClassifiedError> {
         let resolved = resolve_fuzzing_run(
             engine,
@@ -2221,12 +2350,21 @@ impl ServiceContainer {
             cmplog,
             seed,
         )?;
-        self.run_fuzzer_with_started(project, target, resolved, on_progress, &|_| {}, None)
-            .await
+        self.run_fuzzer_with_started(
+            project,
+            target,
+            resolved,
+            on_progress,
+            &|_| {},
+            None,
+            policy,
+        )
+        .await
     }
 
     /// Run a userspace campaign and expose its service-created durable id
-    /// before any progress callback is admitted.
+    /// before any progress callback is admitted. `policy` governs the run's
+    /// LLM dictionary augmentation (see [`Self::augment_dictionary_llm`]).
     ///
     /// # Errors
     /// Returns the same errors as [`Self::run_fuzzer`].
@@ -2244,6 +2382,7 @@ impl ServiceContainer {
         seed: Option<u64>,
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
         on_started: &(dyn Fn(Uuid) + Send + Sync),
+        policy: AiPolicy,
     ) -> Result<RunSummary, ClassifiedError> {
         let resolved = resolve_fuzzing_run(
             engine,
@@ -2255,8 +2394,16 @@ impl ServiceContainer {
             cmplog,
             seed,
         )?;
-        self.run_fuzzer_with_started(project, target, resolved, on_progress, on_started, None)
-            .await
+        self.run_fuzzer_with_started(
+            project,
+            target,
+            resolved,
+            on_progress,
+            on_started,
+            None,
+            policy,
+        )
+        .await
     }
 
     /// Re-execute a campaign with its verified retained execution inputs.
@@ -2283,6 +2430,8 @@ impl ServiceContainer {
             on_progress,
             &|_| {},
             launch.replay,
+            // A replay reuses the recorded dictionary; nothing is augmented.
+            AiPolicy::Auto,
         )
         .await
     }
@@ -2327,6 +2476,8 @@ impl ServiceContainer {
             on_progress,
             on_started,
             launch.replay,
+            // A replay reuses the recorded dictionary; nothing is augmented.
+            AiPolicy::Auto,
         )
         .await
     }
@@ -3502,6 +3653,7 @@ mod cmplog_companion_tests {
 
 #[cfg(test)]
 mod dictionary_llm_tests {
+    use super::AiPolicy;
     use super::ServiceContainer;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -3576,8 +3728,9 @@ mod dictionary_llm_tests {
         );
 
         service
-            .augment_dictionary_llm(project.path(), "parse_entry", &dict_path)
-            .await;
+            .augment_dictionary_llm(project.path(), "parse_entry", &dict_path, AiPolicy::Auto)
+            .await
+            .expect("auto keeps the silent skip without a store");
 
         assert_eq!(
             pool.calls.load(Ordering::SeqCst),
@@ -3588,6 +3741,128 @@ mod dictionary_llm_tests {
             std::fs::read_to_string(&dict_path).unwrap(),
             static_dict,
             "the static dictionary is untouched"
+        );
+    }
+
+    /// `Off` skips augmentation entirely: no dispatch and no retained row,
+    /// even with a pool and a store configured.
+    #[tokio::test]
+    async fn augment_with_off_never_dispatches() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("parse.c"),
+            "#include <string.h>\nint parse_entry(const unsigned char *data, size_t size) { return size < 4 || memcmp(data, \"IHDR\", 4) == 0; }\n",
+        )
+        .unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let static_dict = "\"IHDR\"\n";
+        let dict_path = workspace.path().join("fuzzer.dict");
+        std::fs::write(&dict_path, static_dict).unwrap();
+        let pool = Arc::new(RefusingPool {
+            calls: AtomicUsize::new(0),
+        });
+        let store = Arc::new(
+            hf_storage::Store::connect(workspace.path().join("policy.db"))
+                .await
+                .unwrap(),
+        );
+        let service = ServiceContainer::new(
+            Arc::new(hf_runtime::StubRuntime),
+            Some(pool.clone() as Arc<dyn hf_core::provider::ProviderPool>),
+        )
+        .with_store(store);
+
+        service
+            .augment_dictionary_llm(project.path(), "parse_entry", &dict_path, AiPolicy::Off)
+            .await
+            .expect("off is not an error");
+
+        assert_eq!(
+            pool.calls.load(Ordering::SeqCst),
+            0,
+            "off dispatches nothing"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&dict_path).unwrap(),
+            static_dict,
+            "the static dictionary is untouched"
+        );
+    }
+
+    /// `Require` without a provider is an error for run staging, not a silent
+    /// static dictionary.
+    #[tokio::test]
+    async fn augment_with_require_without_a_pool_is_an_error() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("parse.c"),
+            "#include <string.h>\nint parse_entry(const unsigned char *data, size_t size) { return size < 4 || memcmp(data, \"IHDR\", 4) == 0; }\n",
+        )
+        .unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let dict_path = workspace.path().join("fuzzer.dict");
+        std::fs::write(&dict_path, "\"IHDR\"\n").unwrap();
+        let store = Arc::new(
+            hf_storage::Store::connect(workspace.path().join("policy.db"))
+                .await
+                .unwrap(),
+        );
+        let service =
+            ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None).with_store(store);
+
+        let error = service
+            .augment_dictionary_llm(project.path(), "parse_entry", &dict_path, AiPolicy::Require)
+            .await
+            .expect_err("a required augmentation without a provider must fail loud");
+        assert!(
+            error.to_string().contains("no LLM provider"),
+            "the error names the missing model: {error}"
+        );
+    }
+
+    /// `Require` with an unresolvable target is an error for run staging.
+    #[tokio::test]
+    async fn augment_with_require_on_an_unresolvable_target_is_an_error() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("parse.c"),
+            "#include <string.h>\nint parse_entry(const unsigned char *data, size_t size) { return size < 4 || memcmp(data, \"IHDR\", 4) == 0; }\n",
+        )
+        .unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let dict_path = workspace.path().join("fuzzer.dict");
+        std::fs::write(&dict_path, "\"IHDR\"\n").unwrap();
+        let pool = Arc::new(RefusingPool {
+            calls: AtomicUsize::new(0),
+        });
+        let store = Arc::new(
+            hf_storage::Store::connect(workspace.path().join("policy.db"))
+                .await
+                .unwrap(),
+        );
+        let service = ServiceContainer::new(
+            Arc::new(hf_runtime::StubRuntime),
+            Some(pool.clone() as Arc<dyn hf_core::provider::ProviderPool>),
+        )
+        .with_store(store);
+
+        let error = service
+            .augment_dictionary_llm(
+                project.path(),
+                "no_such_target",
+                &dict_path,
+                AiPolicy::Require,
+            )
+            .await
+            .expect_err("a required augmentation of nothing must fail loud");
+        assert!(
+            error.to_string().contains("could not be resolved"),
+            "the error names the unresolvable target: {error}"
+        );
+        assert_eq!(
+            pool.calls.load(Ordering::SeqCst),
+            0,
+            "an unresolvable target is refused before dispatch"
         );
     }
 }
@@ -3654,6 +3929,7 @@ mod allocation_preparation_tests {
                 root.path(),
                 root.path().join("corpus"),
                 None,
+                crate::AiPolicy::Auto,
             ),
         )
         .await;
@@ -3726,6 +4002,7 @@ mod allocation_preparation_tests {
                     root.path(),
                     root.path().join("corpus"),
                     None,
+                    crate::AiPolicy::Auto,
                 )
                 .await;
             let Err(error) = result else {
@@ -3757,6 +4034,7 @@ mod allocation_preparation_tests {
                     root.path(),
                     root.path().join("corpus"),
                     None,
+                    crate::AiPolicy::Auto,
                 )
                 .await;
             assert!(first.is_err());
@@ -3779,6 +4057,7 @@ mod allocation_preparation_tests {
                     root.path(),
                     root.path().join("corpus"),
                     None,
+                    crate::AiPolicy::Auto,
                 )
                 .await;
             let Err(error) = second else {

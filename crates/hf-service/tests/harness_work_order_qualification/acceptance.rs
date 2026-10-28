@@ -259,6 +259,7 @@ async fn imported_source_reaches_retained_health_closeout_and_explicit_experimen
                     None,
                     &on_progress,
                     &on_started,
+                    hf_service::AiPolicy::Auto,
                 )
                 .await
                 .expect("first campaign")

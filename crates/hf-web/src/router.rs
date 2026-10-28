@@ -2399,6 +2399,10 @@ struct RunStartRequest {
     /// 2^53 through JavaScript's float numbers, so the seed travels as a
     /// string exactly like `ReplayReview.seed`.
     seed: Option<String>,
+    /// AI policy for the run's model-assisted steps (dictionary
+    /// augmentation); `auto` when omitted.
+    #[serde(default)]
+    ai: hf_service::AiPolicy,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2414,6 +2418,7 @@ enum CampaignLaunch {
         engine: EngineKind,
         duration_secs: u64,
         seed: Option<u64>,
+        ai: hf_service::AiPolicy,
     },
     Replay(hf_service::ReplayReview),
 }
@@ -2518,6 +2523,7 @@ async fn run_start(
             engine,
             duration_secs: req.duration_secs,
             seed: parse_seed(req.seed.as_deref()).map_err(map_err(StatusCode::BAD_REQUEST))?,
+            ai: req.ai,
         },
     )
     .await
@@ -2569,6 +2575,7 @@ async fn launch_campaign(
             engine,
             duration_secs,
             seed,
+            ai,
         } => {
             state
                 .container
@@ -2578,6 +2585,7 @@ async fn launch_campaign(
                     engine,
                     duration_secs,
                     seed,
+                    ai,
                     on_progress,
                     on_status,
                 )
@@ -3016,6 +3024,8 @@ async fn corpus(
 struct TriageRequest {
     project: String,
     target: String,
+    #[serde(default)]
+    ai: hf_service::AiPolicy,
 }
 
 async fn triage(
@@ -3025,7 +3035,7 @@ async fn triage(
     let project = approved_project(&state, std::path::Path::new(&req.project))?;
     let deduped = state
         .container
-        .triage(&project, &req.target)
+        .triage(&project, &req.target, req.ai)
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(deduped)?))
@@ -3037,6 +3047,8 @@ struct VerifyCrashRequest {
     target: String,
     run_id: uuid::Uuid,
     crash_id: uuid::Uuid,
+    #[serde(default)]
+    ai: hf_service::AiPolicy,
 }
 
 /// On-demand LLM verdict for one crash (L2 4c): the caller names the
@@ -3052,8 +3064,9 @@ async fn verify_crash(
     let project = approved_project(&state, std::path::Path::new(&req.project))?;
     let verdict = state
         .container
-        .verify_crash_by_id(&project, req.crash_id, req.run_id, &req.target)
-        .await;
+        .verify_crash_by_id(&project, req.crash_id, req.run_id, &req.target, req.ai)
+        .await
+        .map_err(classified_api_error)?;
     Ok(Json(public_value(verdict)?))
 }
 
@@ -3530,6 +3543,9 @@ struct ReportRequest {
     language: hf_service::ReportLanguage,
     #[serde(default)]
     expected_run_id: Option<uuid::Uuid>,
+    /// AI policy for the narrative composition; `auto` when omitted.
+    #[serde(default)]
+    ai: hf_service::AiPolicy,
 }
 
 async fn report(
@@ -3539,7 +3555,13 @@ async fn report(
     let project = approved_project(&state, std::path::Path::new(&req.project))?;
     let markdown = state
         .container
-        .generate_report_for_run(&project, &req.target, req.language, req.expected_run_id)
+        .generate_report_for_run(
+            &project,
+            &req.target,
+            req.language,
+            req.expected_run_id,
+            req.ai,
+        )
         .await
         .map_err(classified_api_error)?;
     Ok(Json(markdown))
