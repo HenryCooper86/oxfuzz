@@ -219,6 +219,38 @@ async fn grow_copies_new_inputs_from_engine_output() {
     assert!(corpus_root.join("new_input_2").exists());
 }
 
+#[test]
+fn grow_preserves_inputs_when_fallback_names_are_occupied() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    let engine_out = dir.path().join("out");
+    fs::create_dir_all(&corpus_root).unwrap();
+    fs::create_dir_all(&engine_out).unwrap();
+    let occupied = [
+        ("input", b"original".as_slice()),
+        ("input-2cf24dba", b"legacy fallback".as_slice()),
+        (
+            "hf-2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+            b"hash fallback".as_slice(),
+        ),
+    ];
+    for (name, data) in occupied {
+        fs::write(corpus_root.join(name), data).unwrap();
+    }
+    fs::write(engine_out.join("input"), b"hello").unwrap();
+
+    let grown = grow(&corpus_root, &engine_out).unwrap();
+
+    for (name, data) in occupied {
+        assert_eq!(fs::read(corpus_root.join(name)).unwrap(), data, "{name}");
+    }
+    assert_eq!(list(&corpus_root).unwrap().entries.len(), 4);
+    assert_eq!(grown.entries.len(), 4);
+    assert!(grown.entries.iter().any(|entry| {
+        fs::read(&entry.path).unwrap() == b"hello" && matches!(entry.source, CorpusSource::Fuzzer)
+    }));
+}
+
 #[tokio::test]
 async fn grow_pulls_afl_queue_and_skips_artifacts() {
     let dir = TempDir::new().unwrap();
@@ -553,6 +585,38 @@ async fn absorb_keeps_distinct_inputs_that_share_a_basename() {
         .iter()
         .any(|e| std::fs::read(&e.path).unwrap() == b"second-distinct-input");
     assert!(has_first && has_second, "neither input was overwritten");
+}
+
+#[test]
+fn absorb_preserves_inputs_when_fallback_names_are_occupied() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    fs::create_dir_all(&corpus_root).unwrap();
+    let occupied = [
+        ("crash_input", b"original".as_slice()),
+        ("crash_input-2cf24dba", b"legacy fallback".as_slice()),
+        (
+            "hf-2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+            b"hash fallback".as_slice(),
+        ),
+    ];
+    for (name, data) in occupied {
+        fs::write(corpus_root.join(name), data).unwrap();
+    }
+    let crash = dir.path().join("input");
+    fs::write(&crash, b"hello").unwrap();
+
+    let (corpus, added) = absorb(&corpus_root, &[crash]).unwrap();
+
+    for (name, data) in occupied {
+        assert_eq!(fs::read(corpus_root.join(name)).unwrap(), data, "{name}");
+    }
+    assert_eq!(added, 1);
+    assert_eq!(list(&corpus_root).unwrap().entries.len(), 4);
+    assert_eq!(corpus.entries.len(), 4);
+    assert!(corpus.entries.iter().any(|entry| {
+        fs::read(&entry.path).unwrap() == b"hello" && matches!(entry.source, CorpusSource::Fuzzer)
+    }));
 }
 
 #[tokio::test]

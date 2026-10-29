@@ -276,6 +276,7 @@ pub fn grow(corpus_root: &Path, engine_out: &Path) -> Result<Corpus, ClassifiedE
     let existing = list_with_limits(corpus_root, limits)?;
     let mut seen: HashSet<String> = existing.entries.iter().map(|e| e.sha256.clone()).collect();
     let mut entries = existing.entries;
+    let mut reserved_names = HashSet::new();
     let mut total_bytes = corpus_size(&entries, limits)?;
 
     for path in collect_candidate_inputs(engine_out, limits)? {
@@ -291,7 +292,11 @@ pub fn grow(corpus_root: &Path, engine_out: &Path) -> Result<Corpus, ClassifiedE
         }
         enforce_entry_limit(entries.len().saturating_add(1), limits)?;
         total_bytes = checked_total(total_bytes, data_len_u64(&data)?, limits)?;
-        let dest = grow_dest_path(corpus_root, &path, &hash);
+        let preferred = path
+            .file_name()
+            .map_or_else(|| OsString::from(&hash), std::ffi::OsStr::to_owned);
+        let name = unique_destination_name(corpus_root, &preferred, &hash, &mut reserved_names)?;
+        let dest = corpus_root.join(name);
         atomic_write(&dest, &data)?;
         entries.push(make_entry(&dest, &data, CorpusSource::Fuzzer));
     }
@@ -656,7 +661,7 @@ pub fn import_with_limits(
         })?;
         let preferred = OsString::from(format!("imported_{}", &hash[..16.min(hash.len())]));
         prepared.push(PreparedInput {
-            name: unique_import_name(corpus_root, &preferred, &hash, &mut reserved_names)?,
+            name: unique_destination_name(corpus_root, &preferred, &hash, &mut reserved_names)?,
             data,
             sha256: hash,
         });
@@ -682,18 +687,6 @@ pub fn import_with_limits(
         added: prepared.len(),
         added_bytes,
     })
-}
-
-fn grow_dest_path(corpus_root: &Path, src: &Path, hash: &str) -> std::path::PathBuf {
-    let name = src
-        .file_name()
-        .map_or_else(|| hash.to_owned(), |n| n.to_string_lossy().into_owned());
-    let dest = corpus_root.join(&name);
-    if dest.exists() {
-        corpus_root.join(format!("{name}-{}", &hash[..8.min(hash.len())]))
-    } else {
-        dest
-    }
 }
 
 /// Prune redundant corpus entries, deleting their files.
@@ -761,6 +754,7 @@ pub fn absorb(
     let existing = list_with_limits(corpus_root, limits)?;
     let mut seen: HashSet<String> = existing.entries.iter().map(|e| e.sha256.clone()).collect();
     let mut entries = existing.entries;
+    let mut reserved_names = HashSet::new();
     let mut total_bytes = corpus_size(&entries, limits)?;
     let mut added = 0usize;
     let mut ordered_inputs = inputs.to_vec();
@@ -776,21 +770,14 @@ pub fn absorb(
         enforce_entry_limit(entries.len().saturating_add(1), limits)?;
         total_bytes = checked_total(total_bytes, data_len_u64(&data)?, limits)?;
         // Name absorbed entries distinctly so they never collide with an
-        // existing corpus file of the same basename. Two distinct crash inputs
-        // that share a basename (e.g. `crash-abc` pulled from different run
-        // dirs) must not overwrite each other, so fall back to a content-hash
-        // suffix when the preferred name is already taken -- mirroring `grow`.
+        // existing corpus file of the same basename.
         let stem = input
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("crash");
-        let base = format!("crash_{stem}");
-        let preferred = corpus_root.join(&base);
-        let dest = if preferred.exists() {
-            corpus_root.join(format!("{base}-{}", &hash[..8.min(hash.len())]))
-        } else {
-            preferred
-        };
+        let preferred = OsString::from(format!("crash_{stem}"));
+        let name = unique_destination_name(corpus_root, &preferred, &hash, &mut reserved_names)?;
+        let dest = corpus_root.join(name);
         atomic_write(&dest, &data)?;
         entries.push(make_entry(&dest, &data, CorpusSource::Fuzzer));
         added += 1;
@@ -1117,7 +1104,7 @@ fn unique_input_name(
     }
 }
 
-fn unique_import_name(
+fn unique_destination_name(
     corpus_root: &Path,
     preferred: &std::ffi::OsStr,
     sha256: &str,
@@ -1139,7 +1126,7 @@ fn unique_import_name(
                 }
                 Err(error) => {
                     return Err(ClassifiedError::Internal(format!(
-                        "inspect corpus import destination {}: {error}",
+                        "inspect corpus destination {}: {error}",
                         corpus_root.join(&candidate).display()
                     )));
                 }
@@ -1148,7 +1135,7 @@ fn unique_import_name(
         suffix = Some(match suffix {
             None => 0,
             Some(value) => value.checked_add(1).ok_or_else(|| {
-                ClassifiedError::Validation("corpus import name suffix overflow".to_owned())
+                ClassifiedError::Validation("corpus name suffix overflow".to_owned())
             })?,
         });
     }
