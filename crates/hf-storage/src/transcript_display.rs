@@ -16,7 +16,10 @@ use tracing::instrument;
 use hf_core::session::{DisplayTranscriptStore, SessionError};
 use hf_core::types::{Message, SessionId};
 
-use crate::transcript::{count_messages_from_file, read_messages_from_file, transcript_file_stem};
+use crate::transcript::{
+    count_messages_from_file, ensure_record_separator, read_messages_from_file,
+    transcript_file_stem,
+};
 
 /// JSONL file-based display transcript store.
 ///
@@ -78,6 +81,7 @@ impl DisplayTranscriptStore for JsonlDisplayTranscriptStore {
 
         let mut file = tokio::fs::OpenOptions::new()
             .create(true)
+            .read(true)
             .append(true)
             .open(&path)
             .await
@@ -85,6 +89,11 @@ impl DisplayTranscriptStore for JsonlDisplayTranscriptStore {
                 message: format!("open display transcript file {}: {e}", path.display()),
             })?;
 
+        ensure_record_separator(&mut file).await.map_err(|error| {
+            SessionError::TranscriptError {
+                message: format!("separate display transcript tail: {error}"),
+            }
+        })?;
         file.write_all(line.as_bytes())
             .await
             .map_err(|e| SessionError::TranscriptError {
@@ -217,6 +226,44 @@ mod tests {
 
         let count = store.message_count(&session_id).await.unwrap();
         assert_eq!(count, 5);
+    }
+
+    #[tokio::test]
+    async fn append_after_unterminated_tail_preserves_the_new_message() {
+        let (dir, store) = temp_store();
+        let session_id = SessionId::new();
+        store
+            .append(&session_id, &test_message("first"))
+            .await
+            .unwrap();
+        let path = dir
+            .path()
+            .join(format!("{}.display.jsonl", session_id.as_str()));
+        let mut file = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .await
+            .unwrap();
+        file.write_all(b"{\"role\":\"user\",\"content\":")
+            .await
+            .unwrap();
+        file.sync_all().await.unwrap();
+        drop(file);
+
+        store
+            .append(&session_id, &test_message("next turn"))
+            .await
+            .unwrap();
+
+        let messages = store.read_all(&session_id).await.unwrap();
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "next turn"]
+        );
+        assert_eq!(store.message_count(&session_id).await.unwrap(), 2);
     }
 
     #[tokio::test]

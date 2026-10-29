@@ -1,10 +1,11 @@
 //! JSONL-based `TranscriptStore` implementation.
 
+use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tracing::instrument;
 
@@ -70,6 +71,7 @@ impl TranscriptStore for JsonlTranscriptStore {
 
         let mut file = tokio::fs::OpenOptions::new()
             .create(true)
+            .read(true)
             .append(true)
             .open(&path)
             .await
@@ -77,6 +79,11 @@ impl TranscriptStore for JsonlTranscriptStore {
                 message: format!("open transcript file {}: {e}", path.display()),
             })?;
 
+        ensure_record_separator(&mut file).await.map_err(|error| {
+            SessionError::TranscriptError {
+                message: format!("separate transcript tail: {error}"),
+            }
+        })?;
         file.write_all(line.as_bytes())
             .await
             .map_err(|e| SessionError::TranscriptError {
@@ -169,6 +176,22 @@ impl TranscriptStore for JsonlTranscriptStore {
     }
 }
 
+/// Separate a crash-torn final record from the next append, preserving a final
+/// complete JSON record that lost only its newline. The caller holds its write
+/// lock and opens the file for reading and appending.
+pub(crate) async fn ensure_record_separator(file: &mut tokio::fs::File) -> std::io::Result<()> {
+    if file.metadata().await?.len() == 0 {
+        return Ok(());
+    }
+    file.seek(SeekFrom::End(-1)).await?;
+    let mut last_byte = [0];
+    file.read_exact(&mut last_byte).await?;
+    if last_byte[0] != b'\n' {
+        file.write_all(b"\n").await?;
+    }
+    Ok(())
+}
+
 /// Durably publish a transcript rewrite: write the temp file, fsync it, rename
 /// over the live file, then best-effort fsync the parent directory.
 ///
@@ -258,24 +281,26 @@ async fn visit_messages_from_file(
             message: format!("open transcript {}: {e}", path.display()),
         })?;
 
-    let reader = tokio::io::BufReader::new(file);
-    let mut lines = reader.lines();
+    let mut reader = tokio::io::BufReader::new(file);
+    let mut line = Vec::new();
 
-    while let Some(line) = lines
-        .next_line()
-        .await
-        .map_err(|e| SessionError::TranscriptError {
-            message: format!("read line: {e}"),
-        })?
-    {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
+    loop {
+        line.clear();
+        let bytes_read = reader.read_until(b'\n', &mut line).await.map_err(|e| {
+            SessionError::TranscriptError {
+                message: format!("read line: {e}"),
+            }
+        })?;
+        if bytes_read == 0 {
+            break;
+        }
+        if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
         // Skip (don't fail on) an unparseable line. A crash mid-append can leave
-        // a torn final line; erroring would make the whole session permanently
-        // unloadable instead of dropping just the corrupt record.
-        match serde_json::from_str::<Message>(trimmed) {
+        // a torn JSON or UTF-8 record; decoding bytes here keeps that damage
+        // local to the record instead of making the whole session unloadable.
+        match serde_json::from_slice::<Message>(&line) {
             Ok(msg) => visit(msg),
             Err(e) => tracing::warn!(
                 path = %path.display(),
@@ -498,6 +523,95 @@ mod tests {
         // read_last is just as resilient.
         let last = store.read_last(&session_id, 5).await.unwrap();
         assert_eq!(last.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn append_after_unterminated_tail_preserves_the_new_message() {
+        for tail_is_complete in [false, true] {
+            let (dir, store) = temp_store();
+            let session_id = SessionId::new();
+            store
+                .append(&session_id, &test_message("first"))
+                .await
+                .unwrap();
+            let path = dir.path().join(format!("{}.jsonl", session_id.as_str()));
+            let tail = if tail_is_complete {
+                serde_json::to_string(&test_message("second")).unwrap()
+            } else {
+                "{\"role\":\"user\",\"content\":".to_owned()
+            };
+            let mut file = tokio::fs::OpenOptions::new()
+                .append(true)
+                .open(path)
+                .await
+                .unwrap();
+            file.write_all(tail.as_bytes()).await.unwrap();
+            file.sync_all().await.unwrap();
+            drop(file);
+
+            store
+                .append(&session_id, &test_message("next turn"))
+                .await
+                .unwrap();
+
+            let messages = store.read_all(&session_id).await.unwrap();
+            let expected = if tail_is_complete {
+                vec!["first", "second", "next turn"]
+            } else {
+                vec!["first", "next turn"]
+            };
+            assert_eq!(
+                messages
+                    .iter()
+                    .map(|message| message.content.as_str())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(
+                store.message_count(&session_id).await.unwrap(),
+                expected.len()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn torn_utf8_tail_does_not_block_transcript_recovery() {
+        let (dir, store) = temp_store();
+        let session_id = SessionId::new();
+        store
+            .append(&session_id, &test_message("first"))
+            .await
+            .unwrap();
+        let path = dir.path().join(format!("{}.jsonl", session_id.as_str()));
+        let mut file = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .await
+            .unwrap();
+        file.write_all(b"{\"content\":\"\xe4\xb8").await.unwrap();
+        file.sync_all().await.unwrap();
+        drop(file);
+
+        let messages = store.read_all(&session_id).await.unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content, "first");
+        assert_eq!(store.message_count(&session_id).await.unwrap(), 1);
+        assert_eq!(store.read_last(&session_id, 1).await.unwrap().len(), 1);
+
+        store
+            .append(&session_id, &test_message("next turn"))
+            .await
+            .unwrap();
+
+        let messages = store.read_all(&session_id).await.unwrap();
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "next turn"]
+        );
+        assert_eq!(store.message_count(&session_id).await.unwrap(), 2);
     }
 
     #[tokio::test]
