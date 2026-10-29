@@ -26,6 +26,39 @@ use super::{
 };
 
 impl ServiceContainer {
+    async fn assign_triaged_crash_ids(
+        &self,
+        run_id: Uuid,
+        crashes: &mut [hf_core::crash::Crash],
+    ) -> Result<(), ClassifiedError> {
+        let mut retained_ids = std::collections::HashMap::new();
+        if let Some(store) = self.store() {
+            for retained in store
+                .list_crashes_by_run(run_id)
+                .await
+                .map_err(|error| ClassifiedError::Storage(error.to_string()))?
+            {
+                if let Some(evidence) = retained.reproduction {
+                    retained_ids.insert(
+                        (retained.stack_signature.clone(), evidence.original_input),
+                        retained.id,
+                    );
+                }
+                retained_ids.insert((retained.stack_signature, retained.input_path), retained.id);
+            }
+        }
+        for crash in crashes {
+            // Existing identifiers may have linked review and verification records.
+            crash.id = retained_ids
+                .get(&(crash.stack_signature.clone(), crash.input_path.clone()))
+                .copied()
+                .unwrap_or_else(|| {
+                    deterministic_crash_id(run_id, &crash.stack_signature, &crash.input_path)
+                });
+        }
+        Ok(())
+    }
+
     async fn triage_run_record(
         &self,
         project: &Path,
@@ -127,9 +160,7 @@ impl ServiceContainer {
         // Give each crash a deterministic id so persisting is idempotent: a
         // second triage of the same run replaces these rows instead of adding
         // duplicates (the report lists every persisted crash for the run).
-        for crash in &mut deduped {
-            crash.id = deterministic_crash_id(run_id, &crash.stack_signature, &crash.input_path);
-        }
+        self.assign_triaged_crash_ids(run_id, &mut deduped).await?;
 
         // Persist the completed classification NOW, before the optional (and
         // slower) minimization and LLM bug-report phases. Those phases run under
@@ -876,9 +907,7 @@ impl ServiceContainer {
             );
         }
         let mut crashes = hf_crash::dedup(ingested.crashes);
-        for crash in &mut crashes {
-            crash.id = deterministic_crash_id(run_id, &crash.stack_signature, &crash.input_path);
-        }
+        self.assign_triaged_crash_ids(run_id, &mut crashes).await?;
         if let Some(store) = self.store.as_ref() {
             store
                 .upsert_crashes(&crashes)

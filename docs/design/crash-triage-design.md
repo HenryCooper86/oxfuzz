@@ -101,6 +101,12 @@ workspace; qualified Work Order runs keep the complete relative-file-qualified
 selector. Presentation code never converts every finding to qualified form or
 reconstructs this decision from the display symbol.
 
+Re-triage preserves the identifier of an existing finding with matching run,
+stack signature, and input provenance. A confirmed minimization retains the
+original input path for this lookup even when the active input is the smaller
+candidate. New identifiers include the complete input path so worker-local files
+with the same basename remain distinct.
+
 An optional remediation handoff may bind the reviewed finding, patch candidate,
 minimized reproducer, exact run evidence manifest, and a later sandbox
 verification result. A draft is explicitly unverified. The state can become

@@ -417,15 +417,11 @@ pub(super) fn casrep_input_path(
 /// A stable crash id derived from its run, stack signature, and input file, so
 /// re-triaging the same run replaces each crash row rather than inserting a new
 /// one (the `crashes` table is keyed on `id`; a fresh random UUID per triage
-/// pass would accumulate identical duplicate rows). The input filename keeps
-/// distinct crashes apart even when they share (or lack) a signature.
+/// pass would accumulate identical duplicate rows). The complete input path keeps
+/// worker-local crash files distinct even when their names and signatures match.
 pub(super) fn deterministic_crash_id(run_id: Uuid, signature: &str, input: &Path) -> Uuid {
-    let file = input
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or_default();
-    let name = format!("{run_id}|{signature}|{file}");
-    Uuid::new_v5(&Uuid::NAMESPACE_OID, name.as_bytes())
+    let signature_id = Uuid::new_v5(&run_id, signature.as_bytes());
+    Uuid::new_v5(&signature_id, input.as_os_str().as_encoded_bytes())
 }
 
 #[cfg(test)]
@@ -462,6 +458,17 @@ mod crash_id_tests {
     use super::deterministic_crash_id;
     use std::path::Path;
     use uuid::Uuid;
+
+    #[test]
+    fn worker_inputs_with_the_same_filename_have_distinct_ids() {
+        let run = Uuid::new_v4();
+        let first = Path::new("/work/out/worker-a/crashes/id:000001,sig:06");
+        let second = Path::new("/work/out/worker-b/crashes/id:000001,sig:06");
+        assert_ne!(
+            deterministic_crash_id(run, "sig", first),
+            deterministic_crash_id(run, "sig", second)
+        );
+    }
 
     #[test]
     fn same_run_signature_and_input_yield_the_same_id() {

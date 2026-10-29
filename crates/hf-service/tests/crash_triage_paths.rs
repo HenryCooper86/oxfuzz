@@ -5,7 +5,7 @@
 //!
 //! No Docker, no network, no real LLM: the sandbox is a stub runtime scripted
 //! per command (casr-*, reproduce replay, minimize) and the LLM a fixed-reply
-//! pool. These tests assert existing behavior only.
+//! pool. Regression cases also cover retained finding IDs.
 
 mod common;
 
@@ -609,4 +609,87 @@ async fn triage_drafts_and_persists_bug_report_with_root_cause() {
         .find_map(|c| c.bug_report.as_ref())
         .expect("a persisted bug report");
     assert_eq!(persisted_report.root_cause.as_deref(), Some(ROOT_CAUSE));
+}
+
+#[tokio::test]
+async fn retriage_preserves_retained_crash_identity() {
+    let fixture = triage_fixture("retained-identity", &["crash-one".to_owned()]).await;
+    let container = ServiceContainer::new(Arc::new(LegacyReplayRuntime::new(true)), None)
+        .with_store(Arc::clone(&fixture.store));
+    let mut crashes = container
+        .triage_run(
+            &fixture.project,
+            &fixture.symbol,
+            fixture.run_id,
+            hf_service::AiPolicy::Off,
+        )
+        .await
+        .unwrap();
+    let mut retained = crashes.remove(0);
+    fixture
+        .store
+        .delete_crash(&retained.id.to_string())
+        .await
+        .unwrap();
+    let legacy_name = format!("{}|{}|crash-one", fixture.run_id, retained.stack_signature);
+    retained.id = Uuid::new_v5(&Uuid::NAMESPACE_OID, legacy_name.as_bytes());
+    fixture
+        .store
+        .upsert_crashes(&[retained.clone()])
+        .await
+        .unwrap();
+
+    let retriaged = container
+        .triage_run(
+            &fixture.project,
+            &fixture.symbol,
+            fixture.run_id,
+            hf_service::AiPolicy::Off,
+        )
+        .await
+        .unwrap();
+    assert_eq!(retriaged[0].id, retained.id);
+    let original_input = retained.input_path.clone();
+    retained.input_path = original_input.with_extension("minimized");
+    retained.minimized = true;
+    retained.reproduction = Some(hf_core::crash::CrashReproduction {
+        version: 1,
+        run_id: fixture.run_id,
+        crash_id: retained.id,
+        requested_runs: 1,
+        reference_log: None,
+        original_input,
+        original_sha256: "original digest".into(),
+        candidate_input: retained.input_path.clone(),
+        candidate_sha256: "candidate digest".into(),
+        binary_sha256: "binary digest".into(),
+        image: "retained image".into(),
+        original: vec![],
+        candidate: vec![],
+        confirmed: true,
+    });
+    fixture
+        .store
+        .upsert_crashes(&[retained.clone()])
+        .await
+        .unwrap();
+    let retriaged = container
+        .triage_run(
+            &fixture.project,
+            &fixture.symbol,
+            fixture.run_id,
+            hf_service::AiPolicy::Off,
+        )
+        .await
+        .unwrap();
+    assert_eq!(retriaged[0].id, retained.id);
+    assert_eq!(
+        fixture
+            .store
+            .list_crashes_by_run(fixture.run_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
