@@ -698,6 +698,7 @@ impl LlmProvider for OpenAiProvider {
             .unwrap_or_default()
             .into_iter()
             .map(|tc| ToolCallRequest {
+                provider_metadata: None,
                 id: tc.id,
                 name: tc.function.name,
                 arguments: serde_json::from_str(&tc.function.arguments)

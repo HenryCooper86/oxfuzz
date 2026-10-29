@@ -85,6 +85,7 @@ impl ToolCallAccumulatorSet {
             .drain(..)
             .filter(|e| !e.id.is_empty() && !e.name.is_empty())
             .map(|e| ToolCallRequest {
+                provider_metadata: None,
                 id: e.id,
                 name: e.name,
                 arguments: serde_json::from_str(&e.arguments)

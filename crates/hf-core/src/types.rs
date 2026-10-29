@@ -186,6 +186,9 @@ pub struct ToolCallRequest {
     pub id: String,
     pub name: String,
     pub arguments: serde_json::Value,
+    /// Opaque provider-owned continuation state retained with this call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<serde_json::Value>,
 }
 
 // ---------------------------------------------------------------------------

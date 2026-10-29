@@ -175,6 +175,7 @@ impl GeminiProvider {
             .map(|m| GeminiContent {
                 role: None,
                 parts: vec![GeminiPart::Text {
+                    extra: serde_json::Map::new(),
                     text: m.content.clone(),
                 }],
             })
@@ -184,47 +185,91 @@ impl GeminiProvider {
     ///
     /// Consecutive messages with the same role are merged into a single content
     /// entry. This handles multiple `Role::Tool` results from parallel tool
-    /// calls, which must be sent as one `function` content with multiple parts.
-    fn build_contents(request: &ChatRequest) -> Vec<GeminiContent> {
-        let raw: Vec<GeminiContent> = request
+    /// calls, which must be sent as one `user` content with multiple parts.
+    fn build_contents(request: &ChatRequest) -> Result<Vec<GeminiContent>, ProviderError> {
+        let mut tool_names: std::collections::HashMap<&str, (&str, usize, Option<String>)> =
+            std::collections::HashMap::new();
+        let mut raw: Vec<(Option<usize>, GeminiContent)> = request
             .messages
             .iter()
             .filter(|m| m.role != hf_core::types::Role::System)
             .map(|m| {
                 let role = match m.role {
-                    hf_core::types::Role::User => "user",
+                    hf_core::types::Role::User | hf_core::types::Role::Tool => "user",
                     hf_core::types::Role::Assistant => "model",
-                    hf_core::types::Role::Tool => "function",
                     hf_core::types::Role::System => unreachable!(),
                 };
 
                 // If this is a tool result, wrap it as a function response.
                 if m.role == hf_core::types::Role::Tool {
                     if let Some(ref tool_call_id) = m.tool_call_id {
+                        let (name, order, provider_id) = tool_names
+                            .get(tool_call_id.as_str())
+                            .ok_or_else(|| ProviderError::Other {
+                                message: "Gemini tool result has no preceding assistant call"
+                                    .into(),
+                            })?;
                         let response_value = parse_tool_result_response(&m.content);
-                        return GeminiContent {
-                            role: Some(role.to_string()),
-                            parts: vec![GeminiPart::FunctionResponse {
-                                function_response: GeminiFunctionResponse {
-                                    name: tool_call_id.clone(),
-                                    response: response_value,
-                                },
-                            }],
-                        };
+                        return Ok((
+                            Some(*order),
+                            GeminiContent {
+                                role: Some(role.to_string()),
+                                parts: vec![GeminiPart::FunctionResponse {
+                                    extra: serde_json::Map::new(),
+                                    function_response: GeminiFunctionResponse {
+                                        id: provider_id.clone(),
+                                        name: String::from(*name),
+                                        response: response_value,
+                                    },
+                                }],
+                            },
+                        ));
                     }
                 }
 
-                GeminiContent {
-                    role: Some(role.to_string()),
-                    parts: vec![GeminiPart::Text {
-                        text: m.content.clone(),
-                    }],
+                if m.role == hf_core::types::Role::Assistant && !m.tool_calls.is_empty() {
+                    let parts = gemini_assistant_parts(m)?;
+                    for (order, (call, original)) in m
+                        .tool_calls
+                        .iter()
+                        .zip(gemini_part_calls(&parts))
+                        .enumerate()
+                    {
+                        tool_names.insert(
+                            call.id.as_str(),
+                            (call.name.as_str(), order, original.id.clone()),
+                        );
+                    }
+                    return Ok((
+                        None,
+                        GeminiContent {
+                            role: Some(role.to_string()),
+                            parts,
+                        },
+                    ));
                 }
+
+                Ok((
+                    None,
+                    GeminiContent {
+                        role: Some(role.to_string()),
+                        parts: vec![GeminiPart::Text {
+                            extra: serde_json::Map::new(),
+                            text: m.content.clone(),
+                        }],
+                    },
+                ))
             })
-            .collect();
+            .collect::<Result<_, ProviderError>>()?;
+
+        // Gemini matches repeated function names by position because these
+        // wire parts have no call IDs. Tool completion order can differ.
+        for results in raw.chunk_by_mut(|left, right| left.0.is_some() && right.0.is_some()) {
+            results.sort_by_key(|(order, _)| *order);
+        }
 
         let mut merged: Vec<GeminiContent> = Vec::with_capacity(raw.len());
-        for content in raw {
+        for (_, content) in raw {
             if let Some(last) = merged.last_mut() {
                 if last.role == content.role {
                     last.parts.extend(content.parts);
@@ -233,7 +278,7 @@ impl GeminiProvider {
             }
             merged.push(content);
         }
-        merged
+        Ok(merged)
     }
 
     /// Build tool declarations for Gemini format.
@@ -276,9 +321,9 @@ impl GeminiProvider {
     }
 
     /// Build the Gemini request body.
-    fn build_request_body(request: &ChatRequest) -> GeminiRequest {
+    fn build_request_body(request: &ChatRequest) -> Result<GeminiRequest, ProviderError> {
         let system_instruction = Self::extract_system_instruction(request);
-        let contents = Self::build_contents(request);
+        let contents = Self::build_contents(request)?;
         let tools = Self::build_tools(request);
 
         let generation_config = Some(GeminiGenerationConfig {
@@ -292,12 +337,12 @@ impl GeminiProvider {
             },
         });
 
-        GeminiRequest {
+        Ok(GeminiRequest {
             contents,
             system_instruction,
             tools,
             generation_config,
-        }
+        })
     }
 
     /// Parse a successful Gemini response into `ChatResponse`.
@@ -318,6 +363,9 @@ impl GeminiProvider {
         let mut next_image_index = 0;
         let content = join_gemini_text_parts(&candidate.content.parts);
         let tool_calls = collect_gemini_tool_calls(&candidate.content.parts);
+        if !tool_calls.is_empty() && candidate.finish_reason.as_deref() != Some("STOP") {
+            return Err(incomplete_gemini_calls());
+        }
         let generated_images =
             collect_gemini_generated_images(&candidate.content.parts, &mut next_image_index);
 
@@ -369,7 +417,7 @@ impl LlmProvider for GeminiProvider {
             });
         }
 
-        let body = Self::build_request_body(request);
+        let body = Self::build_request_body(request)?;
         let raw_request = serde_json::to_value(&body).ok();
 
         let mut request_builder = self.client.post(self.generate_url());
@@ -451,7 +499,7 @@ impl LlmProvider for GeminiProvider {
             });
         }
 
-        let body = Self::build_request_body(request);
+        let body = Self::build_request_body(request)?;
         let raw_request = serde_json::to_value(&body).ok();
 
         let mut request_builder = self.client.post(self.stream_url());
@@ -517,9 +565,11 @@ impl LlmProvider for GeminiProvider {
                 ),
                 0_usize, // next_image_index
                 VecDeque::<InterStreamEvent>::new(),
+                Vec::<GeminiPart>::new(),
             ),
             move |mut composite| async move {
-                let (ref mut state, ref mut next_image_index, ref mut pending) = composite;
+                let (ref mut state, ref mut next_image_index, ref mut pending, ref mut parts) =
+                    composite;
 
                 if let Some(event) = pending.pop_front() {
                     return Some((Ok(event), composite));
@@ -538,8 +588,18 @@ impl LlmProvider for GeminiProvider {
 
                         match serde_json::from_str::<GeminiResponse>(trimmed) {
                             Ok(resp) => {
-                                let mut events =
-                                    map_gemini_to_inter_events(&resp, next_image_index);
+                                let mut events = match map_gemini_to_inter_events(
+                                    &resp,
+                                    next_image_index,
+                                    parts,
+                                ) {
+                                    Ok(events) => events,
+                                    Err(error) => {
+                                        state.terminate();
+                                        parts.clear();
+                                        return Some((Err(error), composite));
+                                    }
+                                };
                                 if events.is_empty() {
                                     continue;
                                 }
@@ -548,11 +608,11 @@ impl LlmProvider for GeminiProvider {
                                 return Some((Ok(first), composite));
                             }
                             Err(e) => {
+                                state.terminate();
+                                parts.clear();
                                 return Some((
                                     Err(ProviderError::ParseError {
-                                        message: format!(
-                                            "Gemini SSE parse error: {e}, data: {trimmed}"
-                                        ),
+                                        message: format!("Gemini SSE parse error: {e}"),
                                     }),
                                     composite,
                                 ));
@@ -562,8 +622,17 @@ impl LlmProvider for GeminiProvider {
 
                     match state.read_next().await {
                         Ok(true) => {}
-                        Ok(false) => return None,
-                        Err(e) => return Some((Err(e), composite)),
+                        Ok(false) => {
+                            if gemini_part_calls(parts).next().is_some() {
+                                parts.clear();
+                                return Some((Err(incomplete_gemini_calls()), composite));
+                            }
+                            return None;
+                        }
+                        Err(e) => {
+                            parts.clear();
+                            return Some((Err(e), composite));
+                        }
                     }
                 }
             },
@@ -588,25 +657,35 @@ impl LlmProvider for GeminiProvider {
 fn map_gemini_to_inter_events(
     resp: &GeminiResponse,
     next_image_index: &mut usize,
-) -> Vec<crate::inter_stream::InterStreamEvent> {
+    retained_parts: &mut Vec<GeminiPart>,
+) -> Result<Vec<crate::inter_stream::InterStreamEvent>, ProviderError> {
     use crate::inter_stream::{ImageDelta, InterStreamEvent};
 
     let candidate = resp.candidates.first();
     let mut events = Vec::new();
 
     if let Some(candidate) = candidate {
+        retained_parts.extend(candidate.content.parts.clone());
+        if let Some(reason) = &candidate.finish_reason {
+            if reason != "STOP" && gemini_part_calls(retained_parts).next().is_some() {
+                return Err(incomplete_gemini_calls());
+            }
+        }
         if let Some(text) = join_gemini_text_parts(&candidate.content.parts) {
             if !text.is_empty() {
                 events.push(InterStreamEvent::TextDelta(text));
             }
         }
 
-        for tc in collect_gemini_tool_calls(&candidate.content.parts) {
-            events.push(InterStreamEvent::ToolCall(tc));
+        if candidate.finish_reason.is_some() {
+            for tc in collect_gemini_tool_calls(retained_parts) {
+                events.push(InterStreamEvent::ToolCall(tc));
+            }
+            retained_parts.clear();
         }
 
         for part in &candidate.content.parts {
-            if let GeminiPart::InlineData { inline_data } = part {
+            if let GeminiPart::InlineData { inline_data, .. } = part {
                 let idx = *next_image_index;
                 *next_image_index += 1;
                 events.push(InterStreamEvent::ImageDelta(ImageDelta {
@@ -637,14 +716,20 @@ fn map_gemini_to_inter_events(
         events.push(InterStreamEvent::Finished(reason));
     }
 
-    events
+    Ok(events)
+}
+
+fn incomplete_gemini_calls() -> ProviderError {
+    ProviderError::ParseError {
+        message: "Gemini native calls ended without successful completion".into(),
+    }
 }
 
 fn join_gemini_text_parts(parts: &[GeminiPart]) -> Option<String> {
     let texts: Vec<&str> = parts
         .iter()
         .filter_map(|part| match part {
-            GeminiPart::Text { text } => Some(text.as_str()),
+            GeminiPart::Text { text, .. } => Some(text.as_str()),
             GeminiPart::FunctionCall { .. }
             | GeminiPart::FunctionResponse { .. }
             | GeminiPart::InlineData { .. } => None,
@@ -659,18 +744,104 @@ fn join_gemini_text_parts(parts: &[GeminiPart]) -> Option<String> {
 }
 
 fn collect_gemini_tool_calls(parts: &[GeminiPart]) -> Vec<ToolCallRequest> {
-    parts
+    let mut calls: Vec<_> = gemini_part_calls(parts)
+        .map(|call| function_call_to_tool_call(&call.name, call.args.clone()))
+        .collect();
+    if !calls.is_empty() {
+        let ids: Vec<_> = calls.iter().map(|call| &call.id).collect();
+        let metadata = serde_json::json!({
+            "gemini": {"version":1, "parts":parts, "tool_call_ids":ids}
+        });
+        calls[0].provider_metadata = Some(metadata);
+    }
+    calls
+}
+
+fn gemini_part_calls(parts: &[GeminiPart]) -> impl Iterator<Item = &GeminiFunctionCall> {
+    parts.iter().filter_map(|part| match part {
+        GeminiPart::FunctionCall { function_call, .. } => Some(function_call),
+        _ => None,
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GeminiContinuation {
+    version: u8,
+    parts: Vec<GeminiPart>,
+    tool_call_ids: Vec<String>,
+}
+
+fn invalid_gemini_continuation() -> ProviderError {
+    ProviderError::ParseError {
+        message: "invalid or mismatched Gemini native continuation state".into(),
+    }
+}
+
+fn gemini_assistant_parts(
+    message: &hf_core::types::Message,
+) -> Result<Vec<GeminiPart>, ProviderError> {
+    let mut records = message
+        .tool_calls
         .iter()
-        .filter_map(|part| match part {
-            GeminiPart::FunctionCall { function_call } => Some(function_call_to_tool_call(
-                &function_call.name,
-                function_call.args.clone(),
-            )),
-            GeminiPart::Text { .. }
-            | GeminiPart::FunctionResponse { .. }
-            | GeminiPart::InlineData { .. } => None,
-        })
-        .collect()
+        .enumerate()
+        .filter_map(|(index, call)| {
+            call.provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gemini"))
+                .map(|record| (index, record))
+        });
+    if let Some((index, record)) = records.next() {
+        if index != 0 || records.next().is_some() {
+            return Err(invalid_gemini_continuation());
+        }
+        let continuation: GeminiContinuation =
+            serde_json::from_value(record.clone()).map_err(|_| invalid_gemini_continuation())?;
+        let originals: Vec<_> = gemini_part_calls(&continuation.parts).collect();
+        if continuation.version != 1
+            || continuation.tool_call_ids.len() != message.tool_calls.len()
+            || originals.len() != message.tool_calls.len()
+            || join_gemini_text_parts(&continuation.parts)
+                .as_deref()
+                .unwrap_or("")
+                != message.content
+        {
+            return Err(invalid_gemini_continuation());
+        }
+        for ((call, original), id) in message
+            .tool_calls
+            .iter()
+            .zip(originals)
+            .zip(&continuation.tool_call_ids)
+        {
+            if call.id != *id || call.name != original.name || call.arguments != original.args {
+                return Err(invalid_gemini_continuation());
+            }
+        }
+        return Ok(continuation.parts);
+    }
+
+    let mut parts = Vec::with_capacity(1 + message.tool_calls.len());
+    if !message.content.is_empty() {
+        parts.push(GeminiPart::Text {
+            extra: serde_json::Map::new(),
+            text: message.content.clone(),
+        });
+    }
+    parts.extend(
+        message
+            .tool_calls
+            .iter()
+            .map(|call| GeminiPart::FunctionCall {
+                extra: serde_json::Map::new(),
+                function_call: GeminiFunctionCall {
+                    id: None,
+                    name: call.name.clone(),
+                    args: call.arguments.clone(),
+                },
+            }),
+    );
+    Ok(parts)
 }
 
 fn collect_gemini_generated_images(
@@ -680,7 +851,7 @@ fn collect_gemini_generated_images(
     parts
         .iter()
         .filter_map(|part| match part {
-            GeminiPart::InlineData { inline_data } => {
+            GeminiPart::InlineData { inline_data, .. } => {
                 let image = GeneratedImage {
                     index: *next_image_index,
                     mime_type: inline_data.mime_type.clone(),
@@ -706,6 +877,7 @@ fn parse_tool_result_response(content: &str) -> serde_json::Value {
 
 fn function_call_to_tool_call(name: &str, arguments: serde_json::Value) -> ToolCallRequest {
     ToolCallRequest {
+        provider_metadata: None,
         id: format!("call_{}", &uuid::Uuid::new_v4().simple().to_string()[..24]),
         name: name.to_string(),
         arguments,
@@ -752,19 +924,27 @@ struct GeminiContent {
 enum GeminiPart {
     Text {
         text: String,
+        #[serde(flatten)]
+        extra: serde_json::Map<String, serde_json::Value>,
     },
     FunctionCall {
         #[serde(rename = "functionCall")]
         function_call: GeminiFunctionCall,
+        #[serde(flatten)]
+        extra: serde_json::Map<String, serde_json::Value>,
     },
     FunctionResponse {
         #[serde(rename = "functionResponse")]
         function_response: GeminiFunctionResponse,
+        #[serde(flatten)]
+        extra: serde_json::Map<String, serde_json::Value>,
     },
     #[serde(rename = "inlineData")]
     InlineData {
         #[serde(rename = "inlineData")]
         inline_data: GeminiInlineData,
+        #[serde(flatten)]
+        extra: serde_json::Map<String, serde_json::Value>,
     },
 }
 
@@ -777,12 +957,16 @@ struct GeminiInlineData {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct GeminiFunctionCall {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
     name: String,
     args: serde_json::Value,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct GeminiFunctionResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
     name: String,
     response: serde_json::Value,
 }
@@ -964,12 +1148,14 @@ mod tests {
             contents: vec![GeminiContent {
                 role: Some("user".into()),
                 parts: vec![GeminiPart::Text {
+                    extra: serde_json::Map::new(),
                     text: "Hello".into(),
                 }],
             }],
             system_instruction: Some(GeminiContent {
                 role: None,
                 parts: vec![GeminiPart::Text {
+                    extra: serde_json::Map::new(),
                     text: "You are a helpful assistant.".into(),
                 }],
             }),
@@ -1045,7 +1231,7 @@ mod tests {
         let candidate = &response.candidates[0];
         assert_eq!(candidate.content.parts.len(), 1);
         match &candidate.content.parts[0] {
-            GeminiPart::FunctionCall { function_call } => {
+            GeminiPart::FunctionCall { function_call, .. } => {
                 assert_eq!(function_call.name, "get_weather");
                 assert_eq!(function_call.args["location"], "San Francisco");
             }
@@ -1074,7 +1260,7 @@ mod tests {
         let candidate = &response.candidates[0];
         assert_eq!(candidate.content.parts.len(), 1);
         match &candidate.content.parts[0] {
-            GeminiPart::InlineData { inline_data } => {
+            GeminiPart::InlineData { inline_data, .. } => {
                 assert_eq!(inline_data.mime_type, "image/png");
                 assert_eq!(inline_data.data, "iVBORw0KGgo=");
             }
@@ -1103,9 +1289,11 @@ mod tests {
                     role: Some("model".into()),
                     parts: vec![
                         GeminiPart::Text {
+                            extra: serde_json::Map::new(),
                             text: "Here is the image.".into(),
                         },
                         GeminiPart::InlineData {
+                            extra: serde_json::Map::new(),
                             inline_data: GeminiInlineData {
                                 mime_type: "image/png".into(),
                                 data: "iVBORw0KGgo=".into(),
@@ -1152,6 +1340,7 @@ mod tests {
                 content: GeminiContent {
                     role: Some("model".into()),
                     parts: vec![GeminiPart::Text {
+                        extra: serde_json::Map::new(),
                         text: "hello".into(),
                     }],
                 },
@@ -1258,44 +1447,159 @@ mod tests {
         assert!(system.is_some());
 
         // Contents should not include the system message.
-        let contents = GeminiProvider::build_contents(&request);
+        let contents = GeminiProvider::build_contents(&request).unwrap();
         assert_eq!(contents.len(), 2);
         assert_eq!(contents[0].role.as_deref(), Some("user"));
         assert_eq!(contents[1].role.as_deref(), Some("model"));
     }
 
     #[test]
+    fn gemini_preserves_parallel_assistant_tool_calls_in_request_history() {
+        use hf_core::types::Message;
+
+        let mut assistant = Message::assistant("Reading both files");
+        assistant.tool_calls = vec![
+            ToolCallRequest {
+                provider_metadata: None,
+                id: "call_first".into(),
+                name: "read_file".into(),
+                arguments: serde_json::json!({ "path": "a.c" }),
+            },
+            ToolCallRequest {
+                provider_metadata: None,
+                id: "call_second".into(),
+                name: "read_file".into(),
+                arguments: serde_json::json!({ "path": "b.c" }),
+            },
+        ];
+        let request = ChatRequest::from_messages(vec![
+            Message::user("Read the files"),
+            assistant,
+            Message::tool("first file", "call_first"),
+            Message::tool("second file", "call_second"),
+        ]);
+
+        let contents = GeminiProvider::build_contents(&request).unwrap();
+        let json = serde_json::to_value(contents).unwrap();
+
+        assert_eq!(
+            json[1],
+            serde_json::json!({
+                "role": "model",
+                "parts": [
+                    { "text": "Reading both files" },
+                    { "functionCall": { "name": "read_file", "args": { "path": "a.c" } } },
+                    { "functionCall": { "name": "read_file", "args": { "path": "b.c" } } }
+                ]
+            })
+        );
+        assert_eq!(
+            json[2],
+            serde_json::json!({
+                "role": "user",
+                "parts": [
+                    { "functionResponse": { "name": "read_file", "response": { "result": "first file" } } },
+                    { "functionResponse": { "name": "read_file", "response": { "result": "second file" } } }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn gemini_returns_parallel_tool_results_in_call_order() {
+        use hf_core::types::Message;
+
+        let mut assistant = Message::assistant("");
+        assistant.tool_calls = vec![
+            ToolCallRequest {
+                provider_metadata: None,
+                id: "call_a".into(),
+                name: "read".into(),
+                arguments: serde_json::json!({ "path": "a" }),
+            },
+            ToolCallRequest {
+                provider_metadata: None,
+                id: "call_b".into(),
+                name: "read".into(),
+                arguments: serde_json::json!({ "path": "b" }),
+            },
+        ];
+        let request = ChatRequest::from_messages(vec![
+            assistant,
+            Message::tool("file b", "call_b"),
+            Message::tool("file a", "call_a"),
+        ]);
+
+        let contents = GeminiProvider::build_contents(&request).unwrap();
+        let json = serde_json::to_value(contents).unwrap();
+
+        assert_eq!(
+            json[1]["parts"][0]["functionResponse"]["response"]["result"],
+            "file a"
+        );
+        assert_eq!(
+            json[1]["parts"][1]["functionResponse"]["response"]["result"],
+            "file b"
+        );
+    }
+
+    #[tokio::test]
+    async fn gemini_rejects_orphan_tool_results_before_transport() {
+        let provider = GeminiProvider::new(
+            "gemini",
+            "test-model",
+            String::new(),
+            Some("invalid-url".into()),
+            None,
+            Vec::new(),
+            Vec::new(),
+            1,
+            4096,
+            ToolCallingMode::Native,
+        )
+        .unwrap();
+        let request = ChatRequest::from_messages(vec![hf_core::types::Message::tool(
+            "unmatched result",
+            "missing_call",
+        )]);
+
+        for error in [
+            provider.chat_completion(&request).await.err().unwrap(),
+            provider
+                .chat_completion_stream(&request)
+                .await
+                .err()
+                .unwrap(),
+        ] {
+            assert!(
+                matches!(error, ProviderError::Other { .. }),
+                "unmatched results must fail request construction: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn test_gemini_tool_result_string_is_wrapped_as_response_object() {
-        use hf_core::types::{Message, Role};
+        use hf_core::types::Message;
 
-        let request = ChatRequest {
-            messages: vec![Message {
-                message_id: String::new(),
-                role: Role::Tool,
-                content: "\"tool failed\"".into(),
-                tool_call_id: Some("call_123".into()),
-                tool_calls: vec![],
-                timestamp: hf_core::types::now(),
-                metadata: serde_json::Value::Null,
-            }],
-            model: None,
-            request_mode: RequestMode::TextChat,
-            max_tokens: None,
-            temperature: None,
-            top_p: None,
-            tools: vec![],
-            tool_calling_mode: ToolCallingMode::default(),
-            stop: vec![],
-            extra: serde_json::Value::Null,
-            thinking: None,
-            response_format: None,
-            image_generation_options: None,
-        };
+        let mut assistant = Message::assistant("");
+        assistant.tool_calls.push(ToolCallRequest {
+            provider_metadata: None,
+            id: "call_123".into(),
+            name: "read_file".into(),
+            arguments: serde_json::json!({ "path": "missing.c" }),
+        });
+        let request = ChatRequest::from_messages(vec![
+            assistant,
+            Message::tool("\"tool failed\"", "call_123"),
+        ]);
 
-        let contents = GeminiProvider::build_contents(&request);
-        match &contents[0].parts[0] {
-            GeminiPart::FunctionResponse { function_response } => {
-                assert_eq!(function_response.name, "call_123");
+        let contents = GeminiProvider::build_contents(&request).unwrap();
+        match &contents[1].parts[0] {
+            GeminiPart::FunctionResponse {
+                function_response, ..
+            } => {
+                assert_eq!(function_response.name, "read_file");
                 assert_eq!(
                     function_response.response,
                     serde_json::json!({ "result": "tool failed" })

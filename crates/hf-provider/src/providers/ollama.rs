@@ -336,6 +336,7 @@ impl LlmProvider for OllamaProvider {
             .into_iter()
             .enumerate()
             .map(|(i, tc)| ToolCallRequest {
+                provider_metadata: None,
                 id: format!("call_{i}"),
                 name: tc.function.name,
                 arguments: tc.function.arguments,
@@ -470,6 +471,7 @@ impl LlmProvider for OllamaProvider {
                                 for tc in chunk.message.tool_calls.unwrap_or_default() {
                                     pending.push_back(InterStreamEvent::ToolCall(
                                         ToolCallRequest {
+                                            provider_metadata: None,
                                             id: format!("call_{tool_index}"),
                                             name: tc.function.name,
                                             arguments: tc.function.arguments,

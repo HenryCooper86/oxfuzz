@@ -89,6 +89,43 @@ and releases its concurrency permits when the stream ends or drops. Transport,
 allocator, parsed JSON and event/container overhead are additional finite
 allocations; these byte budgets are not an RSS ceiling.
 
+## Gemini native continuation
+
+Native function-call responses retain their complete ordered assistant parts,
+including opaque `thoughtSignature` values and signed text siblings. The first
+`ToolCallRequest` carries a Gemini continuation record in its optional
+`provider_metadata`; the remaining calls do not duplicate that record. The
+version-1 record is namespaced under `gemini` and contains the original parts
+and the corresponding generated call IDs. Gemini's original wire call IDs,
+when present, are retained and echoed in the matching function response.
+It survives the ordinary serialized `Message.tool_calls` representation and is
+independent of skipped, diagnostic-only `raw_response` fields.
+
+Request reconstruction checks the retained IDs, call order, function names,
+arguments and assistant text against the message before replaying the original
+parts. Malformed or mismatched Gemini continuation records fail before HTTP
+dispatch, including duplicate or misplaced continuation records. Unsigned
+manually constructed calls remain supported. Tool responses
+use the matching function name and original call order, including repeated
+function names. No signature is synthesized and no signature-validator bypass
+is emitted.
+
+Gemini streaming accumulates bounded original parts until the model's finish
+successful `STOP` event, then publishes complete native calls through the existing tool-call
+stream adapter. Text/image deltas remain incremental. A transport error,
+resource violation, unsuccessful finish reason or premature EOF cannot flush
+unfinished native calls. Protocol parse errors end the stream immediately;
+later valid frames cannot revive pending calls.
+Each retained part keeps its own signature and extension fields; signed parts
+are never concatenated with neighboring parts.
+
+Signed-text-only continuations are outside this repair: their replay is
+recommended by Google but not required by API validation. The native-call
+record still retains text siblings whenever function calls are present.
+
+References: [Google function calling](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/tools/function-calling),
+[Google thought signatures](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/thinking/thought-signatures).
+
 ## Verification
 
 Loopback HTTP fixtures exercise real pool-built adapters and embedding clients:

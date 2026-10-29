@@ -531,6 +531,7 @@ impl LlmProvider for AnthropicProvider {
                     id, name, input, ..
                 } => {
                     tool_calls.push(ToolCallRequest {
+                        provider_metadata: None,
                         id: id.clone(),
                         name: name.clone(),
                         arguments: input.clone(),
@@ -761,6 +762,7 @@ impl LlmProvider for AnthropicProvider {
                                         .unwrap_or(serde_json::Value::String(args));
                                     return Some((
                                         Ok(InterStreamEvent::ToolCall(ToolCallRequest {
+                                            provider_metadata: None,
                                             id,
                                             name,
                                             arguments,
@@ -1484,6 +1486,7 @@ mod tests {
         use hf_core::types::{Message, Role, ToolCallRequest};
 
         let tool_call = ToolCallRequest {
+            provider_metadata: None,
             id: "call_123".into(),
             name: "ShellExec".into(),
             arguments: serde_json::json!({ "command": "uname -a" }),
@@ -1571,16 +1574,19 @@ mod tests {
         use hf_core::types::{Message, Role, ToolCallRequest};
 
         let tc1 = ToolCallRequest {
+            provider_metadata: None,
             id: "call_aaa".into(),
             name: "ReadFile".into(),
             arguments: serde_json::json!({ "path": "/tmp/a.txt" }),
         };
         let tc2 = ToolCallRequest {
+            provider_metadata: None,
             id: "call_bbb".into(),
             name: "ReadFile".into(),
             arguments: serde_json::json!({ "path": "/tmp/b.txt" }),
         };
         let tc3 = ToolCallRequest {
+            provider_metadata: None,
             id: "call_ccc".into(),
             name: "Glob".into(),
             arguments: serde_json::json!({ "pattern": "*.rs" }),

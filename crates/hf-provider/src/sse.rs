@@ -80,13 +80,17 @@ impl SseStreamState {
         }
         let result = self.receive_next().await;
         if result.is_err() {
-            self.done = true;
-            self.byte_stream = None;
-            self.pending = Bytes::new();
-            self.buffer = String::new();
-            self.bytes_remainder = Vec::new();
+            self.terminate();
         }
         result
+    }
+
+    pub(crate) fn terminate(&mut self) {
+        self.done = true;
+        self.byte_stream = None;
+        self.pending = Bytes::new();
+        self.buffer = String::new();
+        self.bytes_remainder = Vec::new();
     }
 
     async fn receive_next(&mut self) -> Result<bool, ProviderError> {

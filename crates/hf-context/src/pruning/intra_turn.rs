@@ -446,6 +446,7 @@ mod tests {
             tool_calls: tc_ids
                 .iter()
                 .map(|tc_id| ToolCallRequest {
+                    provider_metadata: None,
                     id: tc_id.to_string(),
                     name: "test_tool".to_string(),
                     arguments: serde_json::Value::Null,

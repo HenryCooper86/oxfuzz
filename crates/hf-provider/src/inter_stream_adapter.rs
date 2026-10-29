@@ -87,6 +87,7 @@ mod tests {
         use hf_core::types::ToolCallRequest;
 
         let tc = ToolCallRequest {
+            provider_metadata: None,
             id: "call_1".into(),
             name: "search".into(),
             arguments: serde_json::json!({"q": "rust"}),

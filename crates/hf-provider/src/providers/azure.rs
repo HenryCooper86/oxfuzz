@@ -702,6 +702,7 @@ impl LlmProvider for AzureOpenAiProvider {
             .unwrap_or_default()
             .into_iter()
             .map(|tc| ToolCallRequest {
+                provider_metadata: None,
                 id: tc.id,
                 name: tc.function.name,
                 arguments: serde_json::from_str(&tc.function.arguments)
@@ -1434,6 +1435,7 @@ mod tests {
                     content: String::new(),
                     tool_call_id: None,
                     tool_calls: vec![ToolCallRequest {
+                        provider_metadata: None,
                         id: "call_abc".into(),
                         name: "get_weather".into(),
                         arguments: serde_json::json!({"city": "Paris"}),
