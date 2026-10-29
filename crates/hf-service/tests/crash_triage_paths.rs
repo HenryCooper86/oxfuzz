@@ -5,7 +5,7 @@
 //!
 //! No Docker, no network, no real LLM: the sandbox is a stub runtime scripted
 //! per command (casr-*, reproduce replay, minimize) and the LLM a fixed-reply
-//! pool. Regression cases also cover retained finding IDs.
+//! pool. Regression cases also cover required drafting failures and retained IDs.
 
 mod common;
 
@@ -499,6 +499,7 @@ async fn legacy_triage_saturates_on_repeated_signatures() {
 /// and counts how many drafts it was asked for.
 struct BugReportPool {
     drafts: AtomicUsize,
+    fail: bool,
 }
 
 #[async_trait]
@@ -509,6 +510,11 @@ impl hf_core::provider::ProviderPool for BugReportPool {
         _route: &hf_core::provider::RouteRequest,
     ) -> Result<hf_core::provider::ChatResponse, hf_core::provider::ProviderError> {
         self.drafts.fetch_add(1, Ordering::SeqCst);
+        if self.fail {
+            return Err(hf_core::provider::ProviderError::Other {
+                message: "draft provider unavailable".to_owned(),
+            });
+        }
         Ok(hf_test_utils::fixtures::make_chat_response(BUG_REPORT_JSON))
     }
     async fn chat_completion_stream(
@@ -549,6 +555,7 @@ async fn triage_drafts_and_persists_bug_report_with_root_cause() {
     let fixture = triage_fixture("bug-report-drafts", &crash_files).await;
     let pool = Arc::new(BugReportPool {
         drafts: AtomicUsize::new(0),
+        fail: false,
     });
     let container =
         ServiceContainer::new(Arc::new(LegacyReplayRuntime::new(true)), Some(pool.clone()))
@@ -609,6 +616,53 @@ async fn triage_drafts_and_persists_bug_report_with_root_cause() {
         .find_map(|c| c.bug_report.as_ref())
         .expect("a persisted bug report");
     assert_eq!(persisted_report.root_cause.as_deref(), Some(ROOT_CAUSE));
+}
+
+#[tokio::test]
+async fn required_bug_report_failure_is_an_error_without_losing_classification() {
+    let fixture = triage_fixture("required-report-failure", &["crash-one".to_owned()]).await;
+    let pool = Arc::new(BugReportPool {
+        drafts: AtomicUsize::new(0),
+        fail: true,
+    });
+    let container =
+        ServiceContainer::new(Arc::new(LegacyReplayRuntime::new(true)), Some(pool.clone()))
+            .with_store(Arc::clone(&fixture.store));
+
+    let result = container
+        .triage_run(
+            &fixture.project,
+            &fixture.symbol,
+            fixture.run_id,
+            hf_service::AiPolicy::Require,
+        )
+        .await;
+    assert!(
+        matches!(result, Err(ClassifiedError::Provider(_))),
+        "{result:?}"
+    );
+    assert_eq!(pool.drafts.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fixture
+            .store
+            .list_crashes_by_run(fixture.run_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let crashes = container
+        .triage_run(
+            &fixture.project,
+            &fixture.symbol,
+            fixture.run_id,
+            hf_service::AiPolicy::Auto,
+        )
+        .await
+        .unwrap();
+    assert_eq!(crashes.len(), 1);
+    assert!(crashes[0].bug_report.is_none());
 }
 
 #[tokio::test]

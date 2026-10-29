@@ -238,11 +238,18 @@ impl ServiceContainer {
                         harness_source: source_context.as_deref(),
                         candidate: targets.iter().find(|t| t.id == crash.target_id),
                     };
-                    if let Some(report) = self
+                    match self
                         .draft_bug_report(store, Arc::clone(&pool), crash, &evidence)
                         .await
                     {
-                        crash.bug_report = Some(report);
+                        Some(report) => crash.bug_report = Some(report),
+                        None if policy == AiPolicy::Require => {
+                            return Err(ClassifiedError::Provider(format!(
+                                "bug-report drafting was required but failed for crash '{}'",
+                                crash.id
+                            )));
+                        }
+                        None => {}
                     }
                 }
                 if unique > MAX_BUG_REPORT_DRAFTS {

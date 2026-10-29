@@ -105,7 +105,8 @@ Re-triage preserves the identifier of an existing finding with matching run,
 stack signature, and input provenance. A confirmed minimization retains the
 original input path for this lookup even when the active input is the smaller
 candidate. New identifiers include the complete input path so worker-local files
-with the same basename remain distinct.
+with the same basename remain distinct. Required AI drafting failures are
+reported after preserving completed crash classifications.
 
 An optional remediation handoff may bind the reviewed finding, patch candidate,
 minimized reproducer, exact run evidence manifest, and a later sandbox
