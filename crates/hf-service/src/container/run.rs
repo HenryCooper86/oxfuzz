@@ -2320,7 +2320,7 @@ impl ServiceContainer {
     ///
     /// `on_progress` is called for each parsed `FuzzProgress` event so the
     /// caller can stream it to the UI. `policy` governs the run's LLM
-    /// dictionary augmentation (see [`Self::augment_dictionary_llm`]).
+    /// dictionary augmentation (see `augment_dictionary_llm`).
     ///
     /// # Errors
     /// Returns `ClassifiedError` if the engine is not supported or the
@@ -2364,7 +2364,7 @@ impl ServiceContainer {
 
     /// Run a userspace campaign and expose its service-created durable id
     /// before any progress callback is admitted. `policy` governs the run's
-    /// LLM dictionary augmentation (see [`Self::augment_dictionary_llm`]).
+    /// LLM dictionary augmentation (see `augment_dictionary_llm`).
     ///
     /// # Errors
     /// Returns the same errors as [`Self::run_fuzzer`].

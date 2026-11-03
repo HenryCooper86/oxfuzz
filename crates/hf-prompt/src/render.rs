@@ -645,7 +645,7 @@ fn render_seed_prompt(target: &TargetCandidate, count: usize) -> String {
 /// Version of the seed prompt schema, persisted with every retained seed
 /// draft so a retained prompt names the renderer that produced it.
 ///
-/// Version 1 was the bare signature list ([`render_seed_prompt`]); version 2
+/// Version 1 was the bare signature list (`render_seed_prompt`); version 2
 /// adds the labelled context sections: target definition, harness entry
 /// gate, existing seeds, dead seeds, and the measured coverage frontier.
 pub const SEED_PROMPT_VERSION: u32 = 2;

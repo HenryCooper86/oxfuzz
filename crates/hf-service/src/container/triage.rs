@@ -807,7 +807,7 @@ impl ServiceContainer {
     /// Ingest and deduplicate crash artifacts from the output directory.
     ///
     /// `policy` governs the LLM bug-report phase (see
-    /// [`Self::triage_run_record`]'s semantics).
+    /// `triage_run_record`'s semantics).
     ///
     /// # Errors
     /// Returns `ClassifiedError` if the output directory cannot be read.
@@ -837,7 +837,7 @@ impl ServiceContainer {
     /// Triage the evidence owned by one exact persisted run.
     ///
     /// `policy` governs the LLM bug-report phase (see
-    /// [`Self::triage_run_record`]'s semantics).
+    /// `triage_run_record`'s semantics).
     ///
     /// # Errors
     /// Returns `ClassifiedError` if the run is missing, belongs to another
