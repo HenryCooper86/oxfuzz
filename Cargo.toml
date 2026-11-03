@@ -185,3 +185,11 @@ unused_assignments = "allow"
 # Upstream include-flate 0.3.4 still requires the vulnerable Zstd 0.13 series.
 # Keep its adapter unchanged and select the repaired Zstd release locally.
 include-flate-compress = { path = "third_party/include-flate-compress" }
+
+# Build scripts and proc macros (build-override) are loaded by rustc as host
+# dylibs. Since Command Line Tools 27.0, Apple's `strip` leaves these dylibs
+# with a misaligned LINKEDIT string pool that dyld refuses to load, which
+# breaks `cargo build --release` on macOS 27. Shipped binaries are still
+# stripped by the normal release profile.
+[profile.release.build-override]
+strip = false
