@@ -5,11 +5,29 @@ lands rather than at release time: section 1 of `docs/guides/RELEASE_CHECKLIST.m
 asks the releaser to review user-facing changes, migrations, and configuration
 compatibility, and this is what that review reads from.
 
-Versions match the release commits that bump `Cargo.toml`.
+Versions match the release commits that bump `Cargo.toml`. Each version has a
+matching `v<version>` git tag, except 0.6.0 and 0.6.10: those version bumps
+were made without a tag, and their changes first appear in the tagged 0.6.1
+and 0.7.0 releases respectively.
 
 ## Unreleased
 
 ### Added
+
+- `oxfuzz discover` prints a ranked table on a terminal: best targets first,
+  relative locations, fit and AI scores, a harnessable column, and the
+  `oxfuzz fuzz` command for the top target. Piped output and the new `--json`
+  flag keep the full JSON inventory.
+- Three project-shaped examples: `examples/cmake_tlv_lib` (multi-file C with
+  CMake), `examples/cpp_config_parser` (C++17), and `examples/rust_varint`
+  (a Rust library crate), each with one documented planted bug.
+- New guides: [Fuzz your own project](docs/guides/FUZZ_YOUR_PROJECT.md) and
+  [Troubleshooting](docs/guides/TROUBLESHOOTING.md); provider, spending-limit,
+  and `oxfuzz.toml` key reference in Configuration.
+- `scripts/pull-sandbox.sh` and a manually dispatched `sandbox-image.yml`
+  workflow for publishing a prebuilt sandbox image (nothing is published until
+  a maintainer runs it).
+- Code of Conduct, support guide, and YAML issue forms.
 
 - The Patch-to-Proof panel offers the reviewed bug report's suggested fix as
   a one-click starting patch for the draft editor; the operator still reviews
@@ -67,6 +85,10 @@ prompt-path separator fixed below.
 
 ### Changed
 
+- The default provider in `providers.example.toml` now reads its key from
+  `OPENAI_API_KEY`; previously its `api_key_env` was commented out, so a fresh
+  `oxfuzz init` produced a provider that was always skipped. "No provider"
+  errors now point at `providers.toml` as well as `HF_PROVIDER_API_KEY`.
 - Coverage-plateau refine proposals compile in a separate proposal workspace;
   the promoted revision stays active, so the next campaign is no longer
   blocked by an unqualified revision.
@@ -79,6 +101,13 @@ prompt-path separator fixed below.
 
 ### Fixed
 
+- `cargo build --release` fails on macOS 27 (Command Line Tools 27.0) with
+  "mis-aligned LINKEDIT string pool" in `sqlx_macros`: the release profile no
+  longer strips build-script and proc-macro dylibs.
+- C++ discovery names in-class method definitions by the method rather than
+  their first parameter, and skips functions with internal linkage (anonymous
+  namespaces) and private or protected members, matching how C `static`
+  functions are already skipped.
 - honggfuzz harness prompts no longer ask for `HF_ITER`; C/C++ prompts state
   the engine rules (no harness `main`, return 0, per-input state reset for
   honggfuzz's persistent process).
@@ -88,6 +117,12 @@ prompt-path separator fixed below.
   budget is spent.
 - Target-definition and crash-site prompt sections name their file with `/`
   on every host, including Windows.
+
+## 0.8.0 - 2026-10-25
+
+Tagged but never published as a release: its Windows tests failed on the
+prompt-path separator fixed in 0.8.1. Every change in this tag is listed under
+0.8.1.
 
 ## 0.7.2 - 2026-10-25
 
@@ -149,6 +184,13 @@ prompt-path separator fixed below.
   of the binary. The dead `truncate_tool_result`, `hf_discovery::rank`, and
   `render_discovery_prompt` APIs were removed with it.
 
+## 0.7.1 - 2026-10-24
+
+### Fixed
+
+- Updated the desktop frontend's `undici` and `zod` dependencies for published
+  security advisories.
+
 ## 0.7.0 - 2026-10-23
 
 ### Added
@@ -194,6 +236,9 @@ prompt-path separator fixed below.
   `docs/guides/MANAGED_MUTATORS.md`.
 
 ## 0.6.10 - 2026-10-23
+
+Version bump without a git tag (commit `130ad14f`); these changes shipped in
+the tagged 0.7.0 release.
 
 ### Fixed
 
@@ -620,6 +665,9 @@ prompt-path separator fixed below.
 
 ## 0.6.0 - 2026-10-07
 
+Version bump without a git tag (commit `d35c5270`); these changes shipped in
+the tagged 0.6.1 release.
+
 ### Added
 
 - Intra-target parallel fuzzing through the run CPU allocation. An allocation
@@ -927,3 +975,71 @@ prompt-path separator fixed below.
   `HF_`, are dropped. `PATH`, `HOME`, locale, and proxy settings survive. If a
   helper on your system needed one of the dropped variables, it will no longer
   see it.
+
+## 0.2.1 - 2026-08-13
+
+### Fixed
+
+- Schedule lock contention on Windows. The retry loop recognized only
+  `WouldBlock` as contention, which is never reported on Windows, so a
+  contended lease failed on the first refusal instead of waiting out its
+  timeout, and concurrent schedule retirements could not serialize. macOS and
+  Linux were unaffected.
+
+## 0.2.0 - 2026-08-13
+
+### Removed
+
+- The fifth engine integration, retired as described in the engine removal
+  design under `docs/design/`. The supported engines are now AFL++,
+  honggfuzz, libFuzzer, and syzkaller.
+
+### Changed
+
+- Schedules, stored configuration, and run evidence that referenced the
+  retired engine are retired permanently: evidence is archived, retirement is
+  crash safe and monotonic with validated proofs, and retired schedule
+  identities cannot be restored.
+- Engine wire identifiers are canonicalized.
+
+### Fixed
+
+- The desktop app repairs or resets target selections that point at retired
+  targets, and reports retired engine configuration instead of applying it.
+- The desktop app shows the version from its package manifest; 0.1.1 and 0.1.2
+  displayed "v0.1.0". The version bump script now updates every version file.
+- Storage waits through transient SQLite contention instead of failing.
+- Corrected syzkaller workflow guidance and engine ownership documentation.
+
+## 0.1.2 - 2026-08-05
+
+### Fixed
+
+- Windows: container paths, SARIF URIs, knowledge source labels, and persisted
+  evidence directories use POSIX separators or a host-neutral form; container
+  mount targets are validated with POSIX rules; the minimized-crash artifact is
+  synced through a writable handle; and the remaining Windows test failures
+  were fixed.
+- Discovery candidate order no longer depends on the filesystem.
+- Cron parsing stays strictly five-field after the croner 3 upgrade.
+
+### Changed
+
+- Dependency updates, including croner 3, reqwest 0.13, and chardetng 1.0.
+- CI runs `check` and `test` on macOS and Windows in addition to Linux.
+
+## 0.1.1 - 2026-08-04
+
+### Fixed
+
+- The Semgrep journal compiles on non-unix targets, fixing the Windows release
+  build.
+- A file link-count conversion is portable across x86_64, aarch64, and macOS,
+  fixing clippy on x86_64 Linux.
+
+## 0.1.0 - 2026-08-04
+
+First public release: a Rust-first AI fuzzing agent with sandboxed AFL++,
+honggfuzz, libFuzzer, and syzkaller engines (plus a fifth engine retired in
+0.2.0), LLM harness generation, crash triage, corpus and coverage management, a
+desktop app, a REST API, and a CLI and terminal UI.
