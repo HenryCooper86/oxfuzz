@@ -1,0 +1,13 @@
+[package]
+name = "oxfuzz_example_varint"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "oxfuzz example target: LEB128 varint decoder with a planted shift-overflow bug"
+license = "MIT"
+
+# Standalone crate: the empty workspace table keeps it out of the oxfuzz
+# workspace at the repository root.
+[workspace]
+
+[dependencies]

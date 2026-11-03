@@ -101,3 +101,40 @@ async fn static_helpers_are_not_discovered() {
         );
     }
 }
+
+/// (directory, language, documented entry point) for the project-shaped
+/// examples: multi-file C under `CMake`, C++17, and a Rust library crate.
+const PROJECT_EXAMPLES: &[(&str, TargetLanguage, &str)] = &[
+    ("cmake_tlv_lib", TargetLanguage::C, "tlv_decode"),
+    ("cpp_config_parser", TargetLanguage::Cpp, "parse_config"),
+    ("rust_varint", TargetLanguage::Rust, "decode"),
+];
+
+#[tokio::test]
+async fn project_examples_rank_their_entry_point_first() {
+    for (dir, language, symbol) in PROJECT_EXAMPLES {
+        let root = examples_root().join(dir);
+        let inv = hf_discovery::discover(&root, *language)
+            .await
+            .unwrap_or_else(|e| panic!("discover failed for {dir}: {e}"));
+
+        let ranked = inv.ranked();
+        let top = ranked
+            .first()
+            .unwrap_or_else(|| panic!("example {dir}: no candidates discovered"));
+        assert_eq!(
+            top.symbol,
+            *symbol,
+            "example {dir}: the documented entry point must rank first; got {:?}",
+            ranked
+                .iter()
+                .map(|c| (&c.symbol, c.fit_score))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            matches!(top.kind, TargetKind::Parser | TargetKind::Function),
+            "example {dir}: `{symbol}` should be Parser or Function, got {:?}",
+            top.kind
+        );
+    }
+}
