@@ -509,8 +509,10 @@ pub fn copy_project_sources(project: &Path, workspace: &Path) {
     stage_rust_crate(project, workspace, &mut staged);
 }
 
-/// Source and header extensions staged for a C/C++ build.
-const STAGED_SOURCE_EXTENSIONS: [&str; 6] = ["c", "h", "cc", "cpp", "cxx", "hpp"];
+/// Source and header extensions staged for a C/C++ build. Headers are only
+/// copied (the compile links `.c`/`.cc`/`.cpp`/`.cxx` files), so every common
+/// C++ header suffix is staged, including the `.hh` that discovery scans.
+const STAGED_SOURCE_EXTENSIONS: [&str; 8] = ["c", "h", "cc", "cpp", "cxx", "hpp", "hh", "hxx"];
 
 /// Header suffixes accepted from the configured build directory. Generated
 /// sources are staged only when the compile database references them (see
@@ -1192,6 +1194,34 @@ mod rust_staging_tests {
 #[cfg(test)]
 mod c_staging_tests {
     use super::copy_project_sources;
+
+    #[test]
+    fn every_cpp_header_suffix_discovery_accepts_is_staged() {
+        // Discovery scans `.hh` C++ sources; a header it can see must also
+        // reach the sandbox, or `#include "x.hh"` fails at compile time.
+        let project = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join("include")).unwrap();
+        for header in [
+            "include/a.hh",
+            "include/b.hxx",
+            "include/c.hpp",
+            "include/d.h",
+        ] {
+            std::fs::write(project.path().join(header), "#pragma once\n").unwrap();
+        }
+
+        copy_project_sources(project.path(), workspace.path());
+
+        for header in [
+            "include/a.hh",
+            "include/b.hxx",
+            "include/c.hpp",
+            "include/d.h",
+        ] {
+            assert!(workspace.path().join(header).is_file(), "{header} staged");
+        }
+    }
 
     #[test]
     fn nested_c_sources_stage_at_their_relative_paths() {
