@@ -69,7 +69,7 @@ the exact promoted revision.
 | **The oxfuzz desktop app** | The friendliest way to use it | A normal macOS app window. See [Installing](#installing-the-desktop-app). |
 | **An AI provider key** | The AI writes the test code and bug reports | An API key from an LLM provider (e.g. OpenAI). You paste it into Settings. |
 | **Docker** | Runs the sandbox that keeps untrusted code isolated | Install [OrbStack](https://orbstack.dev) or Docker Desktop. The app can start it for you. |
-| **A project to test** | Something to fuzz | A folder of C or C++ source code works best today. |
+| **A project to test** | Something to fuzz | C and C++ are fully supported; Rust works through cargo-fuzz. See the [Support Matrix](SUPPORT_MATRIX.md). |
 
 You do **not** need to install fuzzing engines yourself -- they come bundled
 inside the sandbox.
@@ -101,7 +101,7 @@ it, do either of these once:
 ### Build it from source
 
 ```bash
-git clone <your-oxfuzz-gitlab-remote>
+git clone https://github.com/HenryCooper86/oxfuzz.git
 cd oxfuzz
 ./scripts/build-app.sh
 open target/release/bundle/macos/oxfuzz.app
@@ -110,7 +110,9 @@ open target/release/bundle/macos/oxfuzz.app
 This produces both the app bundle (`target/release/bundle/macos/oxfuzz.app`) and
 a shareable installer (`target/release/bundle/dmg/oxfuzz_<version>_<arch>.dmg`).
 
-The first launch builds the Docker sandbox image, which can take a few minutes.
+The first launch builds the Docker sandbox image. It is large (about 7 GB on
+disk) and compiles several fuzzing engines, so the first build can take a long
+time; later launches reuse it.
 
 ---
 

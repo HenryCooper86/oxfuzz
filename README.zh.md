@@ -48,7 +48,7 @@
 | **计划化 campaign** | 无头、预算受限的模糊测试，按间隔/cron/一次性计划运行，在项目已提升的目标间轮换。 |
 | **问题与漏洞跟踪** | 将崩溃作为 GitHub/GitLab issue 提交，或作为 finding 推送到 DefectDojo；导出 SARIF 供代码扫描。 |
 | **保留的证据** | 运行历史、策略决策、报告、崩溃复现器、语料库、覆盖率与可导出的项目证据均保留可审。 |
-| **桌面、CLI 与 Web** | 原生 macOS 应用（Tauri v2 + React），内置帮助指南；完整的 CLI/TUI；以及 REST + SSE API —— 全部构建在同一套服务核心之上。 |
+| **桌面、CLI 与 Web** | 适用于 macOS、Linux 与 Windows 的桌面应用（Tauri v2 + React），内置帮助指南；完整的 CLI/TUI；以及 REST + SSE API —— 全部构建在同一套服务核心之上。 |
 
 真实引擎运行和真实项目效果的结论需要单独验证。
 参见[手动资格验证](docs/guides/MANUAL_QUALIFICATION.md)和
@@ -61,17 +61,28 @@
 **[入门指南](docs/guides/GETTING_STARTED.md)** 会带你走完桌面应用；**[CLI 参考](docs/guides/CLI_REFERENCE.md)** 覆盖每一个子命令。简短版本：
 
 ```bash
-git clone <your-oxfuzz-remote> && cd oxfuzz
-cargo build --release                 # 二进制：target/release/oxfuzz
+git clone https://github.com/HenryCooper86/oxfuzz.git && cd oxfuzz
+cargo install --path crates/hf-cli --locked   # 将 `oxfuzz` 安装到 ~/.cargo/bin
 ./scripts/build-sandbox.sh            # 构建并验证模糊测试沙箱镜像
+                                      # （一次性；体积较大，约占 7 GB 磁盘）
 
-oxfuzz init                           # 生成 config/*.toml 并创建数据库
-# 然后至少配置一个 LLM 提供方：config/providers.toml + HF_PROVIDER_API_KEY
-# 在终端中执行会按操作逐项请求审批（y/n/always）；无人值守运行时：export HF_AUTO_APPROVE=1
+oxfuzz init                           # 写入配置文件并创建数据库；
+                                      # 会打印实际使用的配置目录
+export OPENAI_API_KEY=...             # providers.toml 中的默认提供方读取该变量；
+                                      # 其他提供方与本地模型见“配置”文档
+oxfuzz doctor                         # Docker、沙箱镜像与引擎是否就绪？
 
-oxfuzz fuzz <project>                 # 发现 -> harness -> smoke -> 提升 -> campaign，
+oxfuzz discover <project> --lang c    # 以表格列出排序后的模糊测试目标
+oxfuzz fuzz <project> --lang c        # 发现 -> harness -> smoke -> 提升 -> campaign，
                                       # 只在审批提示处暂停
 ```
+
+不想安装？`cargo build --release -p hf-cli` 会把二进制留在
+`target/release/oxfuzz`。没有可用模型？`oxfuzz fuzz <project> --ai off
+--no-llm-review` 可在不调用模型的情况下跑完整条流水线：harness 从确定性
+模板起步，资格验证依靠 lint 检查与你本人的审批，而不是模型评审。支持哪些语言与引擎见[支持矩阵](docs/guides/SUPPORT_MATRIX.md)；
+要对你自己的代码库进行模糊测试，请参阅[对你自己的项目做模糊测试](docs/guides/FUZZ_YOUR_PROJECT.md)。
+遇到问题请查看[故障排查](docs/guides/TROUBLESHOOTING.md)。
 
 逐步执行、让每个产物都处于你显式控制之下的流程如下：
 
@@ -90,7 +101,8 @@ oxfuzz run <project> --target <relative-file>::<symbol> \
 oxfuzz triage <project> --target <relative-file>::<symbol>
 ```
 
-Docker 必须已安装并正在运行，且至少配置一个 LLM 提供方。harness 编译与
+Docker 必须已安装并正在运行。harness 起草与 AI 排序需要 LLM 提供方；没有提供方时，
+请使用上面的 work-order 流程并加上 `--ai off`。harness 编译与
 模糊测试启动属于需要审批的高风险操作：在终端中 CLI 会按操作逐项询问
 （`[y]es` 仅此一次、`[n]o` 拒绝、`[a]lways` 本次会话内允许该类操作）；
 管道或 CI 等非终端环境不会提示，而是从环境变量读取授权
@@ -130,6 +142,9 @@ harness 和语料库。其他示例分别覆盖其他缺陷类别；见 **[examp
 **指南**
 
 - [安装与构建](docs/guides/INSTALL.md) —— 先决条件、CLI 与桌面构建、预构建应用，以及可选的 DefectDojo。
+- [对你自己的项目做模糊测试](docs/guides/FUZZ_YOUR_PROJECT.md) —— 将 oxfuzz 用于真实的 C、C++ 或 Rust 代码库：构建系统、头文件与 CI。
+- [支持矩阵](docs/guides/SUPPORT_MATRIX.md) —— 目前支持哪些语言、引擎与构建系统。
+- [故障排查](docs/guides/TROUBLESHOOTING.md) —— Docker、沙箱镜像、模型提供方与构建失败。
 - [桌面应用](docs/guides/DESKTOP_APP.md) —— 主界面：一次完整的 campaign、AI 助手与设置。
 - [CLI 参考](docs/guides/CLI_REFERENCE.md) —— 每个子命令、快速开始流程、可选 Semgrep 增强与汽车协议工作流。
 - [配置](docs/guides/CONFIGURATION.md) —— 配置树、提供方与环境。
@@ -144,7 +159,7 @@ harness 和语料库。其他示例分别覆盖其他缺陷类别；见 **[examp
 
 **项目**
 
-- [贡献指南](CONTRIBUTING.md) &middot; [安全策略](SECURITY.md) &middot; [愿景](VISION.md) &middot; [工程协议](docs/standards/ENGINEERING_PROTOCOL.md)
+- [贡献指南](CONTRIBUTING.md) &middot; [行为准则](CODE_OF_CONDUCT.md) &middot; [获取帮助](SUPPORT.md) &middot; [安全策略](SECURITY.md) &middot; [愿景](VISION.md) &middot; [工程协议](docs/standards/ENGINEERING_PROTOCOL.md)
 
 ---
 

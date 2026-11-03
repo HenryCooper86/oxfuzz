@@ -5,20 +5,22 @@
 Defense in depth, non-negotiable:
 
 1. **Sandboxed build & run** -- every harness build, fuzzer invocation, and
-   crash parse goes through Docker-backed `hf-runtime`; engine binaries and
+   crash replay goes through Docker-backed `hf-runtime`; engine binaries and
    generated harnesses are treated as untrusted and never execute on the host.
 2. **Middleware interception** -- `hf-guardrails` scores each action, enforces a
    permission policy, and detects agent loops.
 3. **Human-approved execution** -- generated harnesses are reviewed by an LLM
    triage step *and* a human before running. Smoke evidence and approval are
    persisted against the exact active revision; regenerating invalidates the
-   approval. Crash artifacts are parsed in the sandbox and never touch the host
-   outside the workspace.
+   approval. Crash artifacts are replayed and classified in the sandbox; their
+   JSON/text output is parsed on the host in memory-safe Rust with size caps,
+   and untrusted inputs never touch the host outside the workspace.
 
 ### Opting out of the LLM review (offline operation)
 
 The LLM triage step in point 3 is mandatory by default. An operator may
-explicitly skip it -- per invocation with `oxfuzz harness --no-llm-review`, or
+explicitly skip it -- per invocation with `oxfuzz harness --no-llm-review`
+(also accepted by `oxfuzz fuzz`), or
 deployment-wide with `harness.allow_unreviewed_smoke = true` in `oxfuzz.toml`
 -- so smoke qualification works offline or without a provider key. The bypass
 is never silent or default: each one is persisted as a marked,

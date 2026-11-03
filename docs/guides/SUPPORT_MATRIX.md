@@ -86,13 +86,16 @@ Additional operation limits:
   unavailable for syzkaller and refuses the operation on Windows. Broader
   platform availability requires secure retained-artifact reading and its own
   acceptance record.
-- Build Doctor's configured project-build support covers CMake, plain Make,
-  Meson, and Autotools (sandbox image 0.2.0 or later), and a successful build
-  publishes the build tree's generated headers and database-referenced
-  generated sources alongside the compile database, so harness compiles
-  resolve generated includes. Dependency fetching and Bazel remain
-  unsupported; it detects those conditions without claiming a configured
-  build for them.
+- Build Doctor detects CMake, Meson, Autotools, and plain Make from root
+  marker files and reports them as supported; its saved build profiles cover
+  the same four systems (sandbox image 0.2.0 or later, which installs `meson`,
+  `autoconf`/`automake`, and `bear`). The CLI and REST API accept all four
+  profile types; the desktop profile editor currently offers CMake and plain
+  Make. A successful build publishes the build tree's generated headers and
+  database-referenced generated sources alongside the compile database, so
+  harness compiles resolve generated includes. Dependency fetching and Bazel
+  remain unsupported; it detects those conditions without claiming a
+  configured build for them.
 
 For userspace C/C++/Rust, source discovery and the guarded build/smoke,
 campaign, corpus, replay, and triage operations have cross-platform code and

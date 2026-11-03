@@ -9,9 +9,10 @@ the document that matches your task.
 | Audience | Start here | Then read |
 | --- | --- | --- |
 | New users and enthusiasts | [Getting Started](guides/GETTING_STARTED.md) | [The Desktop App](guides/DESKTOP_APP.md), the [CLI Reference](guides/CLI_REFERENCE.md), and the [Safety Model](guides/SAFETY_MODEL.md) |
+| Fuzzing engineers bringing their own code | [Fuzz Your Own Project](guides/FUZZ_YOUR_PROJECT.md) | The [Support Matrix](guides/SUPPORT_MATRIX.md), the [CLI Reference](guides/CLI_REFERENCE.md), and [Troubleshooting](guides/TROUBLESHOOTING.md) |
 | Fuzzing operators | [Getting Started](guides/GETTING_STARTED.md) | [Harness Standard](standards/HARNESS_STANDARD.md), [Target Taxonomy](standards/TARGET_TAXONOMY.md), and [Engine Adapter Standard](standards/ENGINE_ADAPTER_STANDARD.md) |
 | Release managers | [Release Checklist](guides/RELEASE_CHECKLIST.md) | [Test Strategy](standards/TEST_STRATEGY.md), [Engineering Standards](standards/ENGINEERING_STANDARDS.md), and [Engineering Protocol](standards/ENGINEERING_PROTOCOL.md) |
-| Contributors | [Engineering Protocol](standards/ENGINEERING_PROTOCOL.md) | [Design Overview](design/DESIGN_OVERVIEW.md), [Test Strategy](standards/TEST_STRATEGY.md), and the design for the subsystem being changed |
+| Contributors | [Contributing](../CONTRIBUTING.md), then the [Engineering Protocol](standards/ENGINEERING_PROTOCOL.md) | [Design Overview](design/DESIGN_OVERVIEW.md), [Test Strategy](standards/TEST_STRATEGY.md), and the design for the subsystem being changed |
 | API and integration users | [Web API Security Design](design/web-api-security-design.md) | [Service Orchestration](design/service-orchestration-design.md), the [Configuration reference](guides/CONFIGURATION.md), and generated API help |
 | Automotive security users | [Automotive Protocol Fuzzing Design](design/automotive-protocol-fuzzing-design.md) | The automotive workflows in the [CLI Reference](guides/CLI_REFERENCE.md) and the [release checklist](guides/RELEASE_CHECKLIST.md) |
 
@@ -21,6 +22,11 @@ the document that matches your task.
   four-stage campaign in plain language.
 - [Install & Build](guides/INSTALL.md) covers prerequisites, the CLI and desktop
   builds, prebuilt apps, and optional DefectDojo.
+- [Fuzz Your Own Project](guides/FUZZ_YOUR_PROJECT.md) takes a real C, C++, or
+  Rust codebase from discovery to triaged crashes, including build systems,
+  headers, and CI.
+- [Troubleshooting](guides/TROUBLESHOOTING.md) maps common failures (Docker,
+  the sandbox image, providers, builds) to their causes and fixes.
 - [The Desktop App](guides/DESKTOP_APP.md) walks a campaign end to end in the
   primary UI, plus the AI Assistant and settings.
 - [CLI Reference](guides/CLI_REFERENCE.md) documents every subcommand, the
@@ -37,7 +43,8 @@ the document that matches your task.
   from live-qualified ones by operation, language, engine, and platform.
 - [Acceptance Records](acceptance/README.md) defines the evidence needed to
   substantiate a release capability claim.
-- [Continuous Integration](guides/CI.md) documents the two-host gate setup.
+- [Continuous Integration](guides/CI.md) documents the local gates and the
+  GitHub Actions workflows.
 - [Syzkaller Setup](guides/SYZKALLER_SETUP.md) covers the advanced kernel
   workflow and its stronger environment requirements.
 - [Screenshot Guide](screenshots/README.md) defines the reproducible image set,

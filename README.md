@@ -59,7 +59,7 @@ of every term.
 | **Scheduled Campaigns** | Headless, budget-bounded fuzzing on an interval/cron/once schedule, rotating through a project's promoted targets. |
 | **Issue & Vuln Tracking** | File crashes as GitHub/GitLab issues or push them to DefectDojo as findings; export SARIF for code scanning. |
 | **Retained Evidence** | Run history, policy decisions, reports, crash reproducers, corpora, coverage, and exportable project evidence remain available for review. |
-| **Desktop, CLI & Web** | A native macOS app (Tauri v2 + React) with a built-in Help guide, a full CLI/TUI, and a REST + SSE API -- all over the same service core. |
+| **Desktop, CLI & Web** | A desktop app for macOS, Linux, and Windows (Tauri v2 + React) with a built-in Help guide, a full CLI/TUI, and a REST + SSE API -- all over the same service core. |
 
 Live engine and real-project effectiveness claims require separate qualification.
 See [manual qualification](docs/guides/MANUAL_QUALIFICATION.md) and
@@ -74,18 +74,31 @@ desktop app; the **[CLI Reference](docs/guides/CLI_REFERENCE.md)** covers every
 subcommand. The short version:
 
 ```bash
-git clone <your-oxfuzz-remote> && cd oxfuzz
-cargo build --release                 # binary: target/release/oxfuzz
+git clone https://github.com/HenryCooper86/oxfuzz.git && cd oxfuzz
+cargo install --path crates/hf-cli --locked   # installs `oxfuzz` into ~/.cargo/bin
 ./scripts/build-sandbox.sh            # build and verify the fuzzing sandbox image
+                                      # (one-time; large -- about 7 GB on disk)
 
-oxfuzz init                           # scaffold config/*.toml + create the database
-# then configure at least one LLM provider: config/providers.toml + HF_PROVIDER_API_KEY
-# execution asks for approval per action on the terminal (y/n/always); for
-# unattended runs: export HF_AUTO_APPROVE=1
+oxfuzz init                           # write config files + create the database;
+                                      # prints the config directory it used
+export OPENAI_API_KEY=...             # the default provider in providers.toml reads
+                                      # this; see Configuration for others / local models
+oxfuzz doctor                         # Docker, sandbox image, and engines ready?
 
-oxfuzz fuzz <project>                 # discover -> harness -> smoke -> promote -> campaign,
+oxfuzz discover <project> --lang c    # ranked table of fuzz targets
+oxfuzz fuzz <project> --lang c        # discover -> harness -> smoke -> promote -> campaign,
                                       # pausing only at the approval prompts
 ```
+
+Prefer not to install? `cargo build --release -p hf-cli` leaves the binary at
+`target/release/oxfuzz`. No model available? `oxfuzz fuzz <project> --ai off
+--no-llm-review` runs the whole pipeline without one: harnesses start from a
+deterministic template, and qualification relies on the lint and your own
+approval instead of a model review. Which
+languages and engines are supported is listed in the
+[Support Matrix](docs/guides/SUPPORT_MATRIX.md); to point oxfuzz at your own
+codebase, follow [Fuzz your own project](docs/guides/FUZZ_YOUR_PROJECT.md).
+If something goes wrong, see [Troubleshooting](docs/guides/TROUBLESHOOTING.md).
 
 The reviewed, step-by-step flow keeps every artifact under your explicit
 control instead:
@@ -109,8 +122,9 @@ Import and qualification do not approve a harness. Promotion names the retained
 qualification attempt you reviewed; rerunning `oxfuzz harness` would generate a
 new draft rather than approve the previous source.
 
-Docker must be installed and running, and at least one LLM provider configured.
-Harness compilation and fuzzer launches are approval-gated high-risk actions:
+Docker must be installed and running. An LLM provider is needed for harness
+drafting and AI ranking; without one, use the work-order flow above with
+`--ai off`. Harness compilation and fuzzer launches are approval-gated high-risk actions:
 on a terminal the CLI asks per action (`[y]es` once, `[n]o`, or `[a]lways` for
 that action kind this session); piped or CI runs never prompt and read consent
 from the environment instead (`HF_AUTO_APPROVE=1`, or `HF_GUARDRAILS=permissive`
@@ -154,6 +168,9 @@ New here? Start with the **[Getting Started guide](docs/guides/GETTING_STARTED.m
 **Guides**
 
 - [Install & Build](docs/guides/INSTALL.md) -- prerequisites, CLI and desktop builds, prebuilt apps, and optional DefectDojo.
+- [Fuzz your own project](docs/guides/FUZZ_YOUR_PROJECT.md) -- point oxfuzz at a real C, C++, or Rust codebase: build systems, headers, and CI.
+- [Support Matrix](docs/guides/SUPPORT_MATRIX.md) -- which languages, engines, and build systems work today.
+- [Troubleshooting](docs/guides/TROUBLESHOOTING.md) -- Docker, the sandbox image, providers, and build failures.
 - [The Desktop App](docs/guides/DESKTOP_APP.md) -- the primary UI: a campaign end to end, the AI Assistant, and settings.
 - [CLI Reference](docs/guides/CLI_REFERENCE.md) -- every subcommand, the quick-start flow, optional Semgrep enrichment, and automotive workflows.
 - [Configuration](docs/guides/CONFIGURATION.md) -- the config tree, providers, and environment.
@@ -168,7 +185,7 @@ New here? Start with the **[Getting Started guide](docs/guides/GETTING_STARTED.m
 
 **Project**
 
-- [Contributing](CONTRIBUTING.md) &middot; [Security policy](SECURITY.md) &middot; [Vision](VISION.md) &middot; [Engineering protocol](docs/standards/ENGINEERING_PROTOCOL.md)
+- [Contributing](CONTRIBUTING.md) &middot; [Code of Conduct](CODE_OF_CONDUCT.md) &middot; [Getting help](SUPPORT.md) &middot; [Security policy](SECURITY.md) &middot; [Vision](VISION.md) &middot; [Engineering protocol](docs/standards/ENGINEERING_PROTOCOL.md)
 
 ---
 

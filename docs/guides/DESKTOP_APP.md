@@ -192,21 +192,33 @@ take after reviewing the winner.
 **When the harness will not build.** A failed compile usually means oxfuzz does
 not know the include directories, defines, and language standard the project's
 own build uses. The compile step then offers Build Doctor: it reads the project
-root, reports which build system it found and on what marker files, and says
-whether a compile database can be generated here. If it can, the exact commands
-are shown in full before anything happens; you approve them, and they run in the
-sandbox, not on your machine. Running the plan creates an oxfuzz-owned
-`.oxfuzz-build/` directory inside your project, which is part of what you are
-approving.
+root and reports which build systems it found and on which marker files. CMake
+(`CMakeLists.txt`), Meson (`meson.build`), Autotools (`configure.ac`,
+`configure.in`, `Makefile.am`), and plain Make (`GNUmakefile`, `makefile`,
+`Makefile`) are reported as supported; a Cargo project needs no compile
+database; Bazel is reported as not runnable in the sandbox image. Detection
+runs nothing. A build plan exists only once you save a build profile: the exact
+commands are then shown in full before anything happens; you approve them, and
+they run in the sandbox, not on your machine. Running the plan creates an
+oxfuzz-owned `.oxfuzz-build/` directory inside your project, which is part of
+what you are approving.
 
-Not every build system can be handled in the current sandbox image. Make and
-Autotools need `bear` to observe a build, and Meson and Bazel need their own
-tools; none of those are installed. In those cases Build Doctor names the
-missing tool rather than offering a plan that would fail. A run whose commands
-all succeed but produces no compile database is reported as a failure, because
-the database is the evidence, not the exit code.
+Each profile type has a fixed plan. CMake configures with
+`-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`; Meson runs `meson setup`; plain Make runs
+a forced `make -B` under `bear`; Autotools runs `autoreconf -i`, `./configure`,
+and then the same `bear`-observed `make -B`. The sandbox image (0.2.0 or later)
+installs `cmake`, `meson`, `autoconf`/`automake`/`libtool`, `make`, and `bear`.
+Diagnosis probes each required tool and every declared dependency inside the
+pinned image and names any that is missing rather than offering a plan that
+would fail. Dependency fetching is not supported. A run whose commands all
+succeed but produces no compile database is reported as a failure, because the
+database is the evidence, not the exit code.
 
-Build Doctor supports optional CMake and plain Make profiles. **Save profile**
+The desktop profile editor currently offers CMake and plain Make profiles;
+Meson and Autotools profiles are saved with `oxfuzz build profile set
+--build-system meson|autotools` (see the
+[CLI Reference](CLI_REFERENCE.md#build-profiles)) and are then diagnosed and run
+the same way. **Save profile**
 retains the normalized component, compile-database path, definitions, and
 dependencies. **Diagnose** is read-only and shows the exact proposed argv,
 immutable sandbox image, and profile SHA-256. Review those values before

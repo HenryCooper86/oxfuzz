@@ -15,15 +15,36 @@
 ### The CLI binary
 
 ```bash
-git clone <your-oxfuzz-remote>
+git clone https://github.com/HenryCooper86/oxfuzz.git
 cd oxfuzz
-cargo build --release
+cargo install --path crates/hf-cli --locked
+# Installs `oxfuzz` into ~/.cargo/bin (on PATH with a standard rustup setup).
+# Or, without installing: cargo build --release -p hf-cli
 # Binary: target/release/oxfuzz
 
 # Build and verify the versioned sandbox toolchain. Equivalent:
-# target/release/oxfuzz doctor --build-image
+# oxfuzz doctor --build-image
 ./scripts/build-sandbox.sh
 ```
+
+Build only the `hf-cli` package for the CLI. A bare `cargo build --release` at
+the workspace root also compiles the desktop shell (`crates/hf-gui/src-tauri`),
+which on Linux needs the WebKitGTK and related system packages listed in
+`scripts/ci/install-linux-deps.sh`.
+
+The sandbox image (`oxfuzz/fuzz-sandbox`) is normally built locally.
+`./scripts/pull-sandbox.sh` downloads a prebuilt copy instead when one has
+been published for your version, and otherwise tells you to build. The first
+build compiles honggfuzz, syzkaller, SymCC,
+and the Rust fuzzing tools, so expect it to take a while and to use about 7 GB
+of disk. On Apple silicon it builds a native arm64 image; set
+`OXFUZZ_SANDBOX_PLATFORM` (for example `linux/amd64`) to build another
+platform. Run `oxfuzz doctor` afterwards to confirm Docker, the image, and the
+engines are ready.
+
+Next, configure a model provider ([Configuration](CONFIGURATION.md#choosing-an-llm-provider))
+and follow [Fuzz your own project](FUZZ_YOUR_PROJECT.md). If a step fails, see
+[Troubleshooting](TROUBLESHOOTING.md).
 
 The CLI resolves its config directory in a documented order (`--config`,
 `HF_CONFIG_DIR`, the per-user config dir, then the enclosing source tree with
