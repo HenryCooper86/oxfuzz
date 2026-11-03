@@ -1060,10 +1060,17 @@ fn extract_functions(
         if has_storage_class_specifier(node, src, "static") {
             return;
         }
+        // The C++ equivalents: an anonymous namespace gives internal linkage,
+        // and a private or protected member is not callable from a harness.
+        if lang == TargetLanguage::Cpp
+            && (in_anonymous_namespace(node) || !is_public_member(node, src))
+        {
+            return;
+        }
         let Some(declarator) = node.child_by_field_name("declarator") else {
             return;
         };
-        let name_node = find_identifier(&declarator);
+        let name_node = function_name_node(declarator).or_else(|| find_identifier(&declarator));
         let Some(name_node) = name_node else {
             return;
         };
@@ -1182,6 +1189,61 @@ fn walk_nodes(node: tree_sitter::Node, f: &mut dyn FnMut(tree_sitter::Node)) {
                 break;
             }
         }
+    }
+}
+
+/// Whether a C++ definition sits inside an unnamed `namespace { ... }`.
+fn in_anonymous_namespace(node: tree_sitter::Node<'_>) -> bool {
+    let mut current = node.parent();
+    while let Some(ancestor) = current {
+        if ancestor.kind() == "namespace_definition"
+            && ancestor.child_by_field_name("name").is_none()
+        {
+            return true;
+        }
+        current = ancestor.parent();
+    }
+    false
+}
+
+/// Whether a C++ definition is reachable from outside its class: true for
+/// free functions, and for members under `public:` (or a `struct`'s default
+/// public access when no specifier precedes them).
+fn is_public_member(node: tree_sitter::Node<'_>, src: &str) -> bool {
+    let Some(body) = node
+        .parent()
+        .filter(|parent| parent.kind() == "field_declaration_list")
+    else {
+        return true;
+    };
+    let mut sibling = node.prev_sibling();
+    while let Some(previous) = sibling {
+        if previous.kind() == "access_specifier" {
+            return previous
+                .utf8_text(src.as_bytes())
+                .is_ok_and(|text| text.trim().trim_end_matches(':').trim() == "public");
+        }
+        sibling = previous.prev_sibling();
+    }
+    body.parent()
+        .is_some_and(|owner| owner.kind() == "struct_specifier")
+}
+
+/// The node naming a function, reached through the declarator's own
+/// `declarator` / `name` fields rather than by searching for the first
+/// identifier: in C++ an in-class method is named by a `field_identifier`,
+/// and a plain search would land on a parameter name instead. `None` when the
+/// chain ends somewhere unexpected; the caller then falls back to
+/// [`find_identifier`].
+fn function_name_node(node: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
+    match node.kind() {
+        "identifier" | "field_identifier" | "destructor_name" | "operator_name" => Some(node),
+        "qualified_identifier" | "template_function" => node
+            .child_by_field_name("name")
+            .and_then(function_name_node),
+        _ => node
+            .child_by_field_name("declarator")
+            .and_then(function_name_node),
     }
 }
 
@@ -1344,6 +1406,94 @@ mod tests {
         let mut out = Vec::new();
         extract_python_functions(src, Path::new("codec.py"), &mut out);
         out
+    }
+
+    fn cpp_candidates(src: &str) -> Vec<TargetCandidate> {
+        let mut parser = TsParser::new();
+        parser
+            .set_language(&tree_sitter_cpp::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(src, None).unwrap();
+        let mut out = Vec::new();
+        extract_functions(
+            &tree,
+            Path::new("parser.cpp"),
+            src,
+            TargetLanguage::Cpp,
+            &mut out,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+        );
+        out
+    }
+
+    #[test]
+    fn cpp_methods_are_named_by_their_own_name_not_a_parameter() {
+        // In-class method definitions name the method with a field_identifier;
+        // the first plain identifier underneath is a parameter, which used to
+        // become the symbol (`p`), colliding every such method into one slot.
+        let src = "struct LineParser {\n\
+                   int parse_line(const char *p, unsigned n) { return p[0] + n; }\n\
+                   };\n\
+                   int LineParser_parse_out(const char *q, unsigned n);\n\
+                   int Codec::decode(const unsigned char *data, unsigned long size) { return size; }\n\
+                   namespace cfg { int parse_config(const unsigned char *buf, unsigned long len) { return len; } }\n";
+
+        let symbols: Vec<String> = cpp_candidates(src).into_iter().map(|c| c.symbol).collect();
+
+        assert!(symbols.contains(&"parse_line".to_owned()), "{symbols:?}");
+        assert!(
+            !symbols.contains(&"p".to_owned()),
+            "a parameter is never the symbol: {symbols:?}"
+        );
+        assert!(
+            symbols.contains(&"decode".to_owned()),
+            "out-of-class method keeps its name: {symbols:?}"
+        );
+        assert!(symbols.contains(&"parse_config".to_owned()), "{symbols:?}");
+    }
+
+    #[test]
+    fn cpp_internal_linkage_and_non_public_members_are_skipped() {
+        // Like a C `static`, anything in an anonymous namespace has internal
+        // linkage, and private/protected members cannot be called from a
+        // harness translation unit. Public members and named namespaces stay.
+        let src = "namespace {\n\
+                   int hidden_parse(const char *data, unsigned long n) { return n; }\n\
+                   }\n\
+                   class Reader {\n\
+                   int private_parse(const char *data, unsigned long n) { return n; }\n\
+                   public:\n\
+                   int read_record(const char *data, unsigned long n) { return n; }\n\
+                   protected:\n\
+                   int protected_parse(const char *data, unsigned long n) { return n; }\n\
+                   };\n\
+                   struct Open {\n\
+                   int open_parse(const char *data, unsigned long n) { return n; }\n\
+                   private:\n\
+                   int closed_parse(const char *data, unsigned long n) { return n; }\n\
+                   };\n\
+                   namespace api { int api_parse(const char *data, unsigned long n) { return n; } }\n";
+
+        let symbols: Vec<String> = cpp_candidates(src).into_iter().map(|c| c.symbol).collect();
+
+        for kept in ["read_record", "open_parse", "api_parse"] {
+            assert!(
+                symbols.contains(&kept.to_owned()),
+                "{kept} kept: {symbols:?}"
+            );
+        }
+        for skipped in [
+            "hidden_parse",
+            "private_parse",
+            "protected_parse",
+            "closed_parse",
+        ] {
+            assert!(
+                !symbols.contains(&skipped.to_owned()),
+                "{skipped} skipped: {symbols:?}"
+            );
+        }
     }
 
     fn c_candidates(src: &str) -> Vec<TargetCandidate> {
