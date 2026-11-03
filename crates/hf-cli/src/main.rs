@@ -123,12 +123,14 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
             semgrep,
             #[cfg(feature = "clang-analysis")]
             clang,
+            json,
         }) => {
             #[cfg(feature = "clang-analysis")]
             if clang {
                 commands::discovery::cmd_discover_clang(project, &lang).await?;
                 return Ok(());
             }
+            let table = !json && std::io::IsTerminal::is_terminal(&std::io::stdout());
             cmd_discover(
                 project,
                 &lang,
@@ -136,6 +138,7 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
                 ai,
                 #[cfg(feature = "semgrep-enrichment")]
                 semgrep,
+                table,
             )
             .await?;
         }

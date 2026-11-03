@@ -170,3 +170,24 @@ fn fuzz_on_a_go_only_project_fails_at_discovery_naming_the_supported_set() {
         "the pipeline never reaches harness work: {err}"
     );
 }
+
+#[test]
+fn discover_json_flag_keeps_stdout_machine_readable() {
+    let fixture = Fixture::new();
+    let project = fixture.c_project();
+
+    let run = fixture
+        .oxfuzz(&[
+            "discover",
+            &project.to_string_lossy(),
+            "--lang",
+            "c",
+            "--json",
+        ])
+        .output()
+        .expect("spawn oxfuzz discover");
+
+    assert!(run.status.success(), "--json is accepted: {}", stderr(&run));
+    let inventory = inventory(&run);
+    assert_eq!(inventory["candidates"][0]["symbol"], "parse_entry");
+}

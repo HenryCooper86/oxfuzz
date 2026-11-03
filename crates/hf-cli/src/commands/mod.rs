@@ -2,6 +2,7 @@
 pub(crate) mod automotive;
 pub(crate) mod campaign;
 pub(crate) mod discovery;
+pub(crate) mod discovery_table;
 pub(crate) mod fuzz;
 pub(crate) mod harness;
 pub(crate) mod runs;

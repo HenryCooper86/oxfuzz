@@ -53,12 +53,31 @@ fn mark_candidates_harnessable(payload: &mut serde_json::Value, language: Target
     }
 }
 
+/// Render discovery output for stdout: the ranked table for a terminal,
+/// pretty JSON otherwise.
+fn render_inventory(
+    value: &serde_json::Value,
+    language: TargetLanguage,
+    table: bool,
+) -> serde_json::Result<String> {
+    if table {
+        Ok(
+            super::discovery_table::render_discovery_table(value, language)
+                .trim_end()
+                .to_owned(),
+        )
+    } else {
+        serde_json::to_string_pretty(value)
+    }
+}
+
 #[cfg(not(feature = "semgrep-enrichment"))]
 pub(crate) async fn cmd_discover(
     project: PathBuf,
     lang: &str,
     rank: bool,
     ai: AiOption,
+    table: bool,
 ) -> anyhow::Result<()> {
     let lang = parse_lang(lang)?;
     let container = crate::approval::bootstrap().await;
@@ -84,12 +103,12 @@ pub(crate) async fn cmd_discover(
             eprintln!("{note}");
         }
         mark_candidates_harnessable(&mut ranked, lang);
-        println!("{}", serde_json::to_string_pretty(&ranked)?);
+        println!("{}", render_inventory(&ranked, lang, table)?);
         return Ok(());
     }
     let mut value = serde_json::to_value(&inv)?;
     mark_candidates_harnessable(&mut value, lang);
-    println!("{}", serde_json::to_string_pretty(&value)?);
+    println!("{}", render_inventory(&value, lang, table)?);
     Ok(())
 }
 
@@ -198,10 +217,11 @@ pub(crate) async fn cmd_discover(
     rank: bool,
     ai: AiOption,
     semgrep: bool,
+    table: bool,
 ) -> anyhow::Result<()> {
     let (language, container) =
         bootstrap_discover_service(lang, crate::approval::bootstrap).await?;
-    let mut output = ConsoleDiscoverOutput;
+    let mut output = ConsoleDiscoverOutput { table };
     run_discover_command(
         &container,
         project,
@@ -353,13 +373,23 @@ impl DiscoverCommandService for ServiceContainer {
 trait DiscoverCommandOutput {
     fn stdout_line(&mut self, line: String);
     fn stderr_line(&mut self, line: String);
+    /// Whether the inventory should be rendered as a table rather than JSON.
+    fn table(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(feature = "semgrep-enrichment")]
-struct ConsoleDiscoverOutput;
+struct ConsoleDiscoverOutput {
+    table: bool,
+}
 
 #[cfg(feature = "semgrep-enrichment")]
 impl DiscoverCommandOutput for ConsoleDiscoverOutput {
+    fn table(&self) -> bool {
+        self.table
+    }
+
     fn stdout_line(&mut self, line: String) {
         println!("{line}");
     }
@@ -530,15 +560,12 @@ where
         advice = Some(ranked);
     }
     if !semgrep {
-        output.stdout_line(if let Some(ranked) = advice {
-            let mut value = ranked_advice_value(&ranked)?;
-            mark_candidates_harnessable(&mut value, language);
-            serde_json::to_string_pretty(&value)?
-        } else {
-            let mut value = serde_json::to_value(&inventory)?;
-            mark_candidates_harnessable(&mut value, language);
-            serde_json::to_string_pretty(&value)?
-        });
+        let mut value = match advice {
+            Some(ranked) => ranked_advice_value(&ranked)?,
+            None => serde_json::to_value(&inventory)?,
+        };
+        mark_candidates_harnessable(&mut value, language);
+        output.stdout_line(render_inventory(&value, language, output.table())?);
         return Ok(());
     }
     if let Some(ranked) = &advice {

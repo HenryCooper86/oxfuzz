@@ -188,6 +188,10 @@ pub(crate) struct DiscoverArgs {
     #[cfg(feature = "semgrep-enrichment")]
     #[arg(long)]
     pub(crate) semgrep: bool,
+    /// Print the inventory as JSON. JSON is also the default whenever stdout
+    /// is not a terminal; on a terminal the default is a ranked table.
+    #[arg(long)]
+    pub(crate) json: bool,
 }
 
 /// Generate a harness for a target.
