@@ -756,7 +756,7 @@ impl ServiceContainer {
         } else if policy == AiPolicy::Require {
             return Err(ClassifiedError::Provider(
                 "an AI harness was required but no LLM provider is configured; \
-                 set HF_PROVIDER_API_KEY"
+                 configure one in providers.toml or set HF_PROVIDER_API_KEY"
                     .to_owned(),
             ));
         }
@@ -868,7 +868,7 @@ impl ServiceContainer {
             if policy == AiPolicy::Require {
                 return Err(ClassifiedError::Provider(
                     "a model repair was required but no LLM provider is configured; \
-                     set HF_PROVIDER_API_KEY"
+                     configure one in providers.toml or set HF_PROVIDER_API_KEY"
                         .to_owned(),
                 ));
             }
@@ -1187,7 +1187,7 @@ impl ServiceContainer {
             if policy == AiPolicy::Require {
                 return Err(ClassifiedError::Provider(
                     "an AI harness was required but no LLM provider is configured; \
-                     set HF_PROVIDER_API_KEY, or pass the heuristic generator instead"
+                     configure one in providers.toml or set HF_PROVIDER_API_KEY, or pass the heuristic generator instead"
                         .to_owned(),
                 ));
             }

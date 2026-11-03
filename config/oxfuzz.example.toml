@@ -125,15 +125,15 @@ max_live_samples = 120
 event_retention_days = 30
 morning_summary_lookback_hours = 24
 
-# Optional Scapy automotive protocol adapter. Compile-time support and this
-# runtime switch must both be enabled. The sidecar executes only in hf-runtime;
-# offline PCAP and isolated vcan are the normal modes.
 [triage]
 # Independent confirmation after native crash minimization (2..=10 attempts each).
 confirmation_runs = 3
 # Per-attempt sandbox limit; the whole triage operation remains bounded.
 replay_timeout_secs = 10
 
+# Optional Scapy automotive protocol adapter. Compile-time support and this
+# runtime switch must both be enabled. The sidecar executes only in hf-runtime;
+# offline PCAP and isolated vcan are the normal modes.
 [automotive]
 enabled = true
 sidecar_image = "oxfuzz/scapy-automotive:2.7.0"

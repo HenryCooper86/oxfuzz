@@ -540,7 +540,7 @@ impl ServiceContainer {
             } else if policy == AiPolicy::Require {
                 return Err(ClassifiedError::Provider(
                     "an AI report was required but no LLM provider is configured; \
-                     set HF_PROVIDER_API_KEY"
+                     configure one in providers.toml or set HF_PROVIDER_API_KEY"
                         .to_owned(),
                 ));
             }

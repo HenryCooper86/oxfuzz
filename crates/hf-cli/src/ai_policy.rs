@@ -38,7 +38,7 @@ pub(crate) async fn apply_ai_policy(
             let Some(pool) = container.provider_pool() else {
                 anyhow::bail!(
                     "--ai require: {what} was asked to use the model but no provider is \
-                     configured; set HF_PROVIDER_API_KEY"
+                     configured; configure one in providers.toml or set HF_PROVIDER_API_KEY"
                 );
             };
             let statuses = pool.provider_statuses().await;

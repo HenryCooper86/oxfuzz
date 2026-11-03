@@ -87,8 +87,8 @@ pub(crate) enum Commands {
     /// Manage durable harness work orders.
     #[cfg(feature = "harness-work-order")]
     WorkOrder(WorkOrderArgs),
-    /// CI gate: harness + short fuzz + triage; write SARIF and exit non-zero
-    /// if any crash is found. Intended for PR pipelines.
+    /// CI gate: short fuzz of an already promoted harness + triage; write
+    /// SARIF and exit non-zero if any crash is found. Intended for PR pipelines.
     Ci(CiArgs),
     /// Export the latest run's crashes as SARIF (`GitHub` code scanning).
     Sarif(SarifArgs),
@@ -116,7 +116,7 @@ pub(crate) enum Commands {
     /// Launch the TUI (terminal user interface).
     Tui(TuiArgs),
     /// Run one autonomous agent turn over a project (the same agent loop the
-    /// GUI and web API use). Requires an LLM provider (`HF_PROVIDER_API_KEY`).
+    /// GUI and web API use). Requires an LLM provider (see `providers.toml`).
     Agent(AgentArgs),
     /// Knowledge-base operations (see also `ingest`).
     Knowledge(KnowledgeArgs),
@@ -733,8 +733,8 @@ pub(crate) struct WorkOrderArgs {
     pub(crate) command: crate::work_order::WorkOrderCommand,
 }
 
-/// CI gate: harness + short fuzz + triage; write SARIF and exit non-zero
-/// if any crash is found. Intended for PR pipelines.
+/// CI gate: short fuzz of an already promoted harness + triage; write SARIF
+/// and exit non-zero if any crash is found. Intended for PR pipelines.
 #[derive(clap::Args)]
 pub(crate) struct CiArgs {
     /// Project root path.
@@ -899,7 +899,7 @@ pub(crate) struct TuiArgs {
 }
 
 /// Run one autonomous agent turn over a project (the same agent loop the
-/// GUI and web API use). Requires an LLM provider (`HF_PROVIDER_API_KEY`).
+/// GUI and web API use). Requires an LLM provider (see `providers.toml`).
 #[derive(clap::Args)]
 pub(crate) struct AgentArgs {
     /// The user message / instruction for the agent.

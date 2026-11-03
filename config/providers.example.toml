@@ -45,7 +45,8 @@ model = "gpt-4o"
 tags = ["reasoning", "general", "code"]
 max_concurrency = 3
 context_window = 128000
-# api_key_env = "OPENAI_API_KEY"
+# Export OPENAI_API_KEY (or point this at the variable that holds your key).
+api_key_env = "OPENAI_API_KEY"
 
 # [[providers]]
 # id = "anthropic-main"

@@ -214,7 +214,7 @@ pub(crate) async fn cmd_agent(
 ) -> anyhow::Result<()> {
     let container = crate::approval::bootstrap().await;
     if container.provider_pool().is_none() {
-        anyhow::bail!("agent requires an LLM provider; set HF_PROVIDER_API_KEY");
+        anyhow::bail!("agent requires an LLM provider; configure one in providers.toml or set HF_PROVIDER_API_KEY");
     }
     let sink = CliEventSink;
     let answer = container

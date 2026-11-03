@@ -751,7 +751,7 @@ impl ServiceContainer {
             if policy == AiPolicy::Require {
                 return Err(ClassifiedError::Provider(
                     "dictionary augmentation was required but no LLM provider is \
-                     configured; set HF_PROVIDER_API_KEY"
+                     configured; configure one in providers.toml or set HF_PROVIDER_API_KEY"
                         .to_owned(),
                 ));
             }

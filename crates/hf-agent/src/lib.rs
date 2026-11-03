@@ -320,7 +320,7 @@ impl Agent {
         sink.emit(AgentEvent::Started).await;
 
         let pool = self.backend.provider_pool().ok_or_else(|| {
-            let msg = "no LLM provider configured (set HF_PROVIDER_API_KEY)".to_owned();
+            let msg = "no LLM provider configured (configure one in providers.toml or set HF_PROVIDER_API_KEY)".to_owned();
             ClassifiedError::Provider(msg)
         })?;
 

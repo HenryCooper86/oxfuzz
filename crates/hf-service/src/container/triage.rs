@@ -204,7 +204,7 @@ impl ServiceContainer {
             if pool.is_none() {
                 return Err(ClassifiedError::Provider(
                     "bug-report drafting was required but no LLM provider is configured; \
-                     set HF_PROVIDER_API_KEY"
+                     configure one in providers.toml or set HF_PROVIDER_API_KEY"
                         .to_owned(),
                 ));
             }
@@ -982,7 +982,7 @@ impl ServiceContainer {
             if policy == AiPolicy::Require {
                 return Err(ClassifiedError::Provider(
                     "crash verification was required but no LLM provider is configured; \
-                     set HF_PROVIDER_API_KEY"
+                     configure one in providers.toml or set HF_PROVIDER_API_KEY"
                         .to_owned(),
                 ));
             }
