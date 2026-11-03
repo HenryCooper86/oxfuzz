@@ -38,4 +38,4 @@ installed in `/Applications`. Intel macOS, Linux, Windows, organization signing,
 notarization, and representative-user checks remain open.
 
 Private build and copied-bundle evidence is under
-`/Users/admin/.codex/qualification-evidence/a6-local-bundle-2026-09-27/`.
+`<evidence-dir>/a6-local-bundle-2026-09-27/`.

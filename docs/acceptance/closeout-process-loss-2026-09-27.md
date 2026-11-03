@@ -16,7 +16,7 @@ seven closeout steps. The ordinary `hf-service` library suite and required
 Rust quality gates passed before the clean-revision qualification.
 
 The private evidence file
-`/Users/admin/.codex/qualification-evidence/a3-service-live-2026-09-27/a3-closeout-7b97d7cf-de7a-4282-a588-d326d2d9d84a/recovery.json`
+`<evidence-dir>/a3-service-live-2026-09-27/a3-closeout-7b97d7cf-de7a-4282-a588-d326d2d9d84a/recovery.json`
 has SHA-256 `096407cafa67b9d051a4f92907b3710c337224a619ae0140b092ec1f5832f0b9`.
 The earlier red run completed closeout before a pause could occur. A later
 probe exposed missing synthetic workspace files; those were added to match the

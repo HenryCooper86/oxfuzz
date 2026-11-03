@@ -56,7 +56,7 @@ entry; the exact replay-binary LLVM counters were.
 ## Evidence and review
 
 The private evidence root is
-`/Users/admin/.codex/qualification-evidence/a2-cycle-10-bigmodel-coding-candidate/`.
+`<evidence-dir>/a2-cycle-10-bigmodel-coding-candidate/`.
 Its `manifest.json` SHA-256 is
 `5850002ac943dc32939f4f98ba5614a0293959c6578fd08024457b008a2425c9`.
 Each `cycle-NNNNN` contains a process log, SQLite database, retained run inputs,

@@ -26,7 +26,7 @@ All six ignored live isolation/recovery tests passed. The [earlier isolation
 record](isolation-2026-09-27.md) describes the network, mount, cgroup, and
 timeout probes. A final Docker inventory found no `hf-run-` containers. The
 private raw test log is
-`/Users/admin/.codex/qualification-evidence/a3-owned-recovery-2026-09-27/process.log`,
+`<evidence-dir>/a3-owned-recovery-2026-09-27/process.log`,
 SHA-256 `a06300b460f2967a26338648f9a23c1876217d33c3aa7ca13861586860dd5022`.
 
 This probe does not kill the full service after a durable run admission. It

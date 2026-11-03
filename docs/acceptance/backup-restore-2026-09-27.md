@@ -17,7 +17,7 @@ approval rows, 9 non-null run evidence links, and 386 hashed files**. The
 restored database passed `PRAGMA integrity_check`; every run evidence link
 resolved to its owning directory, including empty output directories. The
 archive and restored copy each occupied about 38 MiB. The archive manifest at
-`/Users/admin/.codex/qualification-evidence/a3-backup-restore-2026-09-27/archive-v4/manifest.json`
+`<evidence-dir>/a3-backup-restore-2026-09-27/archive-v4/manifest.json`
 has SHA-256 `f2b9b500f1cd73059914b47b4253eea85fdc5198243201f9c854a732ee95af4c`.
 
 The unit suite also commits through an active source WAL writer during online

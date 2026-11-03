@@ -23,7 +23,7 @@ absent from Docker's all-state inventory. The final host inventory showed no
 `hf-run-` containers.
 
 The private clean-run evidence file
-`/Users/admin/.codex/qualification-evidence/a3-service-live-2026-09-27/a3-output-01eccd0c-f0e8-4a68-9b40-abc02ce0438c/recovery.json`
+`<evidence-dir>/a3-service-live-2026-09-27/a3-output-01eccd0c-f0e8-4a68-9b40-abc02ce0438c/recovery.json`
 has SHA-256 `33b15c19d4f4e4fb3c1af7318c6146ff8db759b6459f25e7b95efc0963c787c8`.
 The injected file was written by the test controller inside the disposable
 workspace, rather than by the fuzzer or an exhausted filesystem. This result

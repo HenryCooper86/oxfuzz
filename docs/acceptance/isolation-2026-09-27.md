@@ -23,7 +23,7 @@ The [live tests](../../crates/hf-runtime/tests/live_isolation.rs) observed:
 | Wall-clock timeout and cleanup | Runtime returned `TimedOut`; no newly created `hf-run-` container remained after the call or in a final Docker inventory |
 
 The private raw log is
-`/Users/admin/.codex/qualification-evidence/a3-isolation-2026-09-27/process.log`,
+`<evidence-dir>/a3-isolation-2026-09-27/process.log`,
 SHA-256 `5351edd5b79f145e16ac6650f9a631a4b2ff6aaa499997149417427487a8c92c`.
 Both tests passed with no failures. This probe used a local Docker daemon and
 does not establish identical behavior on Linux or Windows. The [A3 recovery

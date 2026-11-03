@@ -54,7 +54,7 @@ versioned LLVM collection, and bounded honggfuzz scratch space. It is not the
 ten-cycle candidate run.
 
 Each attempt's full manifest and logs remain under the private local
-`/Users/admin/.codex/qualification-evidence/` directory, in the correspondingly
+`<evidence-dir>/` directory, in the correspondingly
 named `a2-*` directories. The runner's cleanup flag is conservative; separate
 `docker ps -a` checks found no `hf-run-` containers after the attempts. Exclude
 the eight failed trials from the success sample. The subsequent clean candidate

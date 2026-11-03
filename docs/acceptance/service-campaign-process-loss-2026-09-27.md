@@ -24,7 +24,7 @@ libFuzzer campaign. The ownership registry and Docker inventory were empty at
 the end. The final host inventory also showed no `hf-run-` containers.
 
 The private clean-run evidence is under
-`/Users/admin/.codex/qualification-evidence/a3-service-live-2026-09-27/`.
+`<evidence-dir>/a3-service-live-2026-09-27/`.
 `clean-test.log` has SHA-256
 `8c714be633a2bbf4162a287f2ec9cff7cefd12b7af7acf1285299e362f19bc78`;
 the clean run reported one passing test in 91.66 seconds. Its

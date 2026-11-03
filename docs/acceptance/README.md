@@ -20,7 +20,9 @@ Record absolute artifact locations in a private inventory where necessary, but
 share content hashes and sanitized links in the release summary. Never copy API
 keys, credentials, raw private source, or customer crash payloads into public
 records. A record without a tested revision, exact runtime identity, and
-inspectable result is incomplete.
+inspectable result is incomplete. The records here write such private
+locations as `<evidence-dir>/...`, meaning the operator's local
+qualification-evidence directory; its contents are not published.
 
 Use [Capability Acceptance](../guides/CAPABILITY_ACCEPTANCE.md) for the
 scenario checklist and [Support Matrix](../guides/SUPPORT_MATRIX.md) for the

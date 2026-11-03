@@ -25,7 +25,7 @@ approval for execution, then build and run only through `hf-runtime`.
 
 A private curated snapshot now contains exactly the two listed C/header files
 for each project at
-`/Users/admin/.codex/qualification-evidence/b1-curated-c-sources-2026-09-27/`.
+`<evidence-dir>/b1-curated-c-sources-2026-09-27/`.
 Its `manifest.json` SHA-256 is
 `1e8c8820f5abcd4276e90c80c46361dcb216a4d2a37eeabb29ad727210a9d782`.
 Each copied file was byte-compared with `git show HEAD:<path>` at its pinned

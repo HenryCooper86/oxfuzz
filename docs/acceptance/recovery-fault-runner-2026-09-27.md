@@ -10,7 +10,7 @@ The [runner](../../scripts/qualify_recovery.py) had SHA-256
 Its [fake-worker suite](../../scripts/tests/test_qualify_recovery.py) had
 SHA-256 `8f2b8b8ece7e4051304ff52beab4d7988c2c58729af25a764336c5b9fd23290e`.
 `script-tests` passed 137 Python and 18 Node tests. The private
-`/Users/admin/.codex/qualification-evidence/a3-fault-runner-2026-09-27/manifest.json`
+`<evidence-dir>/a3-fault-runner-2026-09-27/manifest.json`
 has SHA-256 `61e2f4e37aa3e56876e829d09982649fc3d1f224a7dfa922fa89603ee68f40eb`.
 
 | Scenario | Result | What it establishes |
