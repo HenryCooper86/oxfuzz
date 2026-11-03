@@ -1,0 +1,37 @@
+name: Question
+description: Ask how to use oxfuzz or how something works.
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        GitHub Discussions is not enabled for this repository yet, so questions
+        go here. Before asking, check
+        [Getting Started](https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/GETTING_STARTED.md),
+        the [CLI reference](https://github.com/HenryCooper86/oxfuzz/blob/main/docs/guides/CLI_REFERENCE.md),
+        and existing issues. See
+        [SUPPORT.md](https://github.com/HenryCooper86/oxfuzz/blob/main/SUPPORT.md)
+        for more.
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What are you trying to do, and what is unclear?
+    validations:
+      required: true
+
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you have tried
+      description: Commands you ran, documentation you read, and what happened.
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        If relevant: output of `oxfuzz --version`, OS and architecture, Docker
+        runtime, engine, and target language. Do not paste API keys.
+      render: text

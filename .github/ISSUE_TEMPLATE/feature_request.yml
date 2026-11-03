@@ -1,0 +1,55 @@
+name: Feature request
+description: Propose a capability or improvement.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: |
+        The concrete problem or limitation this would address. What are you
+        trying to do that oxfuzz does not currently let you do well?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: |
+        What you would like to happen. If it touches a specific area
+        (discovery, harness, engine, crash triage, corpus, coverage, agent,
+        guardrails, desktop app), say which.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you weighed, including workarounds, and why they fall short.
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety
+      description: |
+        oxfuzz runs untrusted code. Generated harnesses, engines, and crash
+        inputs run only in the Docker sandbox, after human approval.
+      options:
+        - label: This proposal keeps sandboxing, guardrails, and human approval in place, or explains below why it needs to change them.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Links to designs, prior art in other fuzzers, or references.
+
+  - type: dropdown
+    id: contribute
+    attributes:
+      label: Would you like to work on this?
+      options:
+        - "No"
+        - Yes, with some guidance
+        - Yes, I have a design in mind

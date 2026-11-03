@@ -1,0 +1,176 @@
+name: Bug report
+description: Something oxfuzz does that it should not, or fails to do.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Security-sensitive findings do not belong
+        here: report them privately as described in
+        [SECURITY.md](https://github.com/HenryCooper86/oxfuzz/blob/main/SECURITY.md).
+
+        Redact API keys, tokens, private target source, and crash inputs from
+        everything you paste below.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: A clear description of the incorrect behavior.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: What should have happened instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The exact commands, or the steps you took in the desktop app.
+      placeholder: |
+        1. oxfuzz discover ./my-project --lang c
+        2. oxfuzz harness ./my-project --target parse_header --engine afl++
+        3. ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where it happened
+      multiple: true
+      options:
+        - CLI
+        - Terminal UI (oxfuzz tui)
+        - Desktop app
+        - REST API (oxfuzz serve) or browser mode
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: oxfuzz version
+      description: Output of `oxfuzz --version`. If you built from source, add the commit (`git rev-parse --short HEAD`).
+      placeholder: oxfuzz 0.8.1
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system and architecture
+      placeholder: macOS 15.4 arm64 / Ubuntu 24.04 x86_64 / Windows 11 x86_64
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: Install method
+      options:
+        - Built from source
+        - Desktop app (release installer)
+        - Other (describe below)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: docker-runtime
+    attributes:
+      label: Docker runtime
+      options:
+        - Docker Desktop
+        - OrbStack
+        - Docker Engine on Linux
+        - Podman
+        - None or not running
+        - Other (describe below)
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: oxfuzz doctor output
+      description: Output of `oxfuzz doctor`. Redact any paths you consider private.
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: sandbox-image
+    attributes:
+      label: Sandbox image
+      description: Output of `docker images oxfuzz/fuzz-sandbox` (repository, tag, and image ID).
+      placeholder: oxfuzz/fuzz-sandbox 0.2.1 abc123def456
+
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Engine
+      options:
+        - Not engine related
+        - AFL++
+        - honggfuzz
+        - libFuzzer
+        - syzkaller
+    validations:
+      required: true
+
+  - type: dropdown
+    id: language
+    attributes:
+      label: Target language
+      options:
+        - Not target related
+        - C
+        - C++
+        - Rust
+        - Go
+        - Python
+        - Linux kernel
+        - Automotive protocol
+    validations:
+      required: true
+
+  - type: dropdown
+    id: provider
+    attributes:
+      label: LLM provider type
+      description: The `provider_type` from your provider config. Never paste a key.
+      multiple: true
+      options:
+        - None configured
+        - openai
+        - anthropic
+        - gemini
+        - ollama
+        - azure
+        - openrouter
+        - custom
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        Relevant output. Re-run the failing command with `RUST_LOG=debug` for
+        more detail, for example `RUST_LOG=debug oxfuzz run ...`. Remove API
+        keys, tokens, and private target material before pasting.
+      render: text
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Anything else that helps, such as whether this worked in an earlier version.

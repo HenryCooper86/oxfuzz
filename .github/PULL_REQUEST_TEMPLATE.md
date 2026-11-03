@@ -1,55 +1,31 @@
-<!--
-GitHub twin of .gitlab/merge_request_templates/Default.md. Keep the two aligned:
-the checklist tracks the mandatory repository engineering and safety protocol.
-Read docs/standards/ENGINEERING_PROTOCOL.md before opening this PR.
--->
+## What and why
 
-## Summary
+What does this change do, and what problem does it solve? Link the issue if
+there is one (for example `Fixes #123`).
 
-Describe the user-visible outcome and the problem this pull request solves.
+## How it was tested
 
-## Changes
-
-- Describe the implementation changes here.
-
-## Architecture and safety
-
-- [ ] Business logic remains in `hf-service`; presentation layers remain thin.
-- [ ] Generated harnesses, fuzzing engines, and crash parsing remain inside
-      `hf-runtime`.
-- [ ] Human promotion is still bound to the exact harness revision.
-- [ ] Network, resource, workspace, and automotive policy boundaries are not
-      weakened.
-- [ ] Any design or public contract change includes the owning documentation.
-- [ ] Not applicable; this change does not affect architecture or safety.
-
-Explain any checked safety-sensitive change and link the relevant design:
-
-## Verification
-
-List the exact commands and results used to verify this change.
+The commands you ran and what they showed. Note anything you could not test
+locally, such as Docker-backed or live-provider paths.
 
 ```text
 
 ```
 
-- [ ] Tests were added before production code where behavior changed.
-- [ ] Applicable Rust gates passed in the order required by [Engineering Protocol](../docs/standards/ENGINEERING_PROTOCOL.md)
-      (`scripts/tests/gates.sh` runs them; CI runs the same gates).
-- [ ] Applicable frontend tests, production build, bundle budget, and lint
-      passed.
-- [ ] No generated harness or fuzzer was executed on the host.
+## Checklist
 
-## Documentation and release impact
-
-- [ ] README, guides, in-app Help, and screenshots are current or not affected.
-- [ ] Configuration, migrations, compatibility, and known limitations are
-      documented or not affected.
-- [ ] Release artifacts are not included in the commit.
-- [ ] Secrets, runtime databases, corpora, crash artifacts, and private target
-      material are not included.
-
-## Reviewer notes
-
-Call out the highest-risk files, unresolved tradeoffs, and the best place to
-start the review.
+- [ ] `cargo fmt --all` and
+      `cargo clippy -p <crate> --all-targets -- -D warnings` pass for the
+      crates I touched.
+- [ ] Tests cover the change, and `cargo test -p <crate>` passes for each
+      touched crate (or `npm --prefix crates/hf-gui test` for frontend changes).
+- [ ] Business logic is in `hf-service`; CLI, REST, and desktop code only wire
+      it up.
+- [ ] Safety: generated harnesses, engines, and crash inputs still run only
+      inside the `hf-runtime` sandbox, and this does not weaken human approval,
+      guardrails, network blocking, or resource limits. If it touches any of
+      these, I explained how above.
+- [ ] Documentation is updated if user-visible behavior changed, with an entry
+      under `Unreleased` in `CHANGELOG.md`.
+- [ ] No secrets, API keys, runtime databases, corpora, crash artifacts, or
+      private target material are included.
