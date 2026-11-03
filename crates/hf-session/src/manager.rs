@@ -1542,4 +1542,149 @@ mod tests {
             1
         );
     }
+
+    async fn main_session(mgr: &SessionManager) -> SessionNode {
+        mgr.create_session(CreateSessionOptions {
+            parent_id: None,
+            session_type: SessionType::Main,
+            agent_id: None,
+            title: None,
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_reload_config_replaces_the_live_config() {
+        let mgr = setup().await;
+        let mut config = mgr.config();
+        config.max_depth += 7;
+        let expected = config.max_depth;
+
+        mgr.reload_config(config);
+
+        assert_eq!(mgr.config().max_depth, expected);
+        let debug = format!("{:?}", *mgr);
+        assert!(debug.starts_with("SessionManager"), "{debug}");
+        assert!(debug.contains(&format!("max_depth: {expected}")), "{debug}");
+    }
+
+    #[tokio::test]
+    async fn test_tree_queries_follow_branches() {
+        let mgr = setup().await;
+        let main = main_session(&mgr).await;
+        let branch = mgr.branch(&main.id, Some("child".into())).await.unwrap();
+
+        let children = mgr.children(&main.id).await.unwrap();
+        assert_eq!(
+            children.iter().map(|n| &n.id).collect::<Vec<_>>(),
+            [&branch.id]
+        );
+        let ancestors = mgr.ancestors(&branch.id).await.unwrap();
+        assert!(ancestors.iter().any(|n| n.id == main.id), "{ancestors:?}");
+
+        let branches = mgr
+            .list_sessions(&SessionFilter {
+                session_type: Some(SessionType::Branch),
+                ..SessionFilter::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(branches.len(), 1);
+        assert_eq!(branches[0].id, branch.id);
+    }
+
+    #[tokio::test]
+    async fn test_title_updates_round_trip() {
+        let mgr = setup().await;
+        let session = main_session(&mgr).await;
+
+        mgr.update_title(&session.id, "generated".into())
+            .await
+            .unwrap();
+        mgr.set_manual_title(&session.id, Some("edited".into()))
+            .await
+            .unwrap();
+        let titled = mgr.get_session(&session.id).await.unwrap();
+        assert_eq!(titled.title.as_deref(), Some("generated"));
+        assert_eq!(titled.manual_title.as_deref(), Some("edited"));
+
+        mgr.set_manual_title(&session.id, None).await.unwrap();
+        let reverted = mgr.get_session(&session.id).await.unwrap();
+        assert_eq!(reverted.manual_title, None);
+    }
+
+    #[tokio::test]
+    async fn test_context_reset_index_and_custom_prompt_round_trip() {
+        let mgr = setup().await;
+        let session = main_session(&mgr).await;
+
+        assert_eq!(
+            mgr.get_context_reset_index(&session.id).await.unwrap(),
+            None
+        );
+        mgr.set_context_reset_index(&session.id, Some(3))
+            .await
+            .unwrap();
+        assert_eq!(
+            mgr.get_context_reset_index(&session.id).await.unwrap(),
+            Some(3)
+        );
+        mgr.set_context_reset_index(&session.id, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            mgr.get_context_reset_index(&session.id).await.unwrap(),
+            None
+        );
+
+        assert_eq!(
+            mgr.get_custom_system_prompt(&session.id).await.unwrap(),
+            None
+        );
+        mgr.set_custom_system_prompt(&session.id, Some("be terse".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            mgr.get_custom_system_prompt(&session.id)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("be terse")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_counts_and_store_accessors_see_appended_messages() {
+        let mgr = setup().await;
+        let session = main_session(&mgr).await;
+        mgr.append_message(&session.id, &test_msg("one"))
+            .await
+            .unwrap();
+        mgr.append_message(&session.id, &test_msg("two"))
+            .await
+            .unwrap();
+
+        let snapshot = mgr.snapshot_transcripts(&session.id).await.unwrap();
+        assert_eq!(snapshot.context_count(), 2);
+
+        let last = mgr.read_last_messages(&session.id, 1).await.unwrap();
+        assert_eq!(last.len(), 1);
+        assert_eq!(last[0].content, "two");
+        assert_eq!(
+            mgr.transcript_store()
+                .message_count(&session.id)
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            mgr.display_transcript_store()
+                .read_all(&session.id)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
 }
