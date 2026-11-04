@@ -59,7 +59,7 @@ body:
     attributes:
       label: oxfuzz version
       description: Output of `oxfuzz --version`. If you built from source, add the commit (`git rev-parse --short HEAD`).
-      placeholder: oxfuzz 0.9.0
+      placeholder: oxfuzz 0.9.1
     validations:
       required: true
 

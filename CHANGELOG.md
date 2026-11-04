@@ -12,6 +12,20 @@ and 0.7.0 releases respectively.
 
 ## Unreleased
 
+## 0.9.1 - 2026-11-04
+
+The v0.9.0 tag was never published: its installed-app acceptance walkthrough
+found the first-harness failure fixed below.
+
+### Fixed
+
+- On a fresh install, the first harness build or smoke test failed with
+  "workspace root is non-empty and has no ownership manifest". Taking a
+  target's revision lease created the target directory before the workspace
+  root had its ownership manifest. The root is now claimed first. Earlier
+  releases hid this because the Semgrep startup path claimed the root, and
+  Semgrep is off by default since 0.9.0.
+
 ## 0.9.0 - 2026-11-04
 
 ### Added
