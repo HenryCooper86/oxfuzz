@@ -1,4 +1,5 @@
 import { ModelBudgetPanel } from "../components/ModelBudgetPanel";
+import { IssueDraft } from "../components/IssueDraft";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
@@ -8,7 +9,6 @@ import {
   ChevronRight,
   Clipboard,
   Copy,
-  ExternalLink,
   FileCode,
   FileText,
   FolderOpen,
@@ -29,7 +29,7 @@ import { FindingProofCard } from "../components/FindingProofCard";
 import { Button, EmptyState, Input, LoadingState, Select, Textarea, ViewHeader } from "../components/ui";
 import { useToast } from "../components/ui/toastContext";
 import { useConfirm } from "../providers/confirm";
-import { getTransport, onDataChanged, emitDataChanged, openExternal, useDefectDojo, usesHttpBackend } from "../lib";
+import { getTransport, onDataChanged, emitDataChanged, useDefectDojo, usesHttpBackend } from "../lib";
 import {
   dashboardActionDestination,
   isDashboardActionInteractive,
@@ -41,7 +41,6 @@ import { useI18n, type TParams } from "../i18nContext";
 import type {
   CrashReviewItem,
   TriageDisposition,
-  CreatedIssue,
   DefectDojoStatus,
   IssueExport,
   HarnessReviewItem,
@@ -985,81 +984,6 @@ function GitLabIntegration({
         {issue ? <IssueDraft draft={issue} project={project} /> : <EmptyState icon={<GitPullRequest size={18} />} hint={t("dashboard.chooseCrashPreview")} />}
       </div>
     </div>
-  );
-}
-
-function IssueDraft({ draft, project }: { draft: IssueExport; project: string }) {
-  const { toast } = useToast();
-  const { t } = useI18n();
-  const [copied, setCopied] = useState(false);
-  const [filing, setFiling] = useState(false);
-  const providerLabel = draft.provider === "github" ? "GitHub" : "GitLab";
-
-  async function copyBody() {
-    await copyText(`${draft.title}\n\n${draft.description}`);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1600);
-  }
-
-  // File the issue directly via the provider API, then open the created issue.
-  async function fileIssue() {
-    setFiling(true);
-    try {
-      const created = await getTransport().invoke<CreatedIssue>("file_issue", {
-        project,
-        crashId: draft.crash_id,
-      });
-      toast({ title: t("dashboard.filedIssue", { provider: providerLabel }), description: created.url, variant: "success" });
-      if (created.url) void openExternal(created.url);
-    } catch (e) {
-      toast({ title: t("dashboard.couldNotFileIssue", { provider: providerLabel }), description: String(e), variant: "error" });
-    } finally {
-      setFiling(false);
-    }
-  }
-
-  return (
-    <section className="surface-card" style={{ padding: "var(--space-md)" }}>
-      <SectionHeader icon={<GitPullRequest size={15} />} title={t("dashboard.issueDraft")} />
-      <div className="mt-3 flex flex-col gap-2">
-        <div className="text-sm font-medium">{draft.title}</div>
-        {draft.project_web_url && (
-          <div className="text-xs text-text-muted truncate">
-            {providerLabel} · <span className="font-mono">{draft.project_web_url.replace(/^https?:\/\//, "")}</span>
-          </div>
-        )}
-        <div className="flex flex-wrap gap-1">
-          {draft.labels.map((label) => (
-            <span key={label} className="text-xs px-2 py-0.5 rounded-sm" style={{ background: "var(--surface-active)", color: "var(--text-secondary)" }}>{label}</span>
-          ))}
-        </div>
-        <Textarea value={draft.description} readOnly rows={12} />
-        <div className="flex items-center gap-2 flex-wrap">
-          <Button variant="outline" size="sm" onClick={() => void copyBody()}>
-            <Clipboard size={13} />
-            {copied ? t("common.copied") : t("common.copy")}
-          </Button>
-          {draft.can_file && (
-            <Button variant="primary" size="sm" onClick={() => void fileIssue()} loading={filing}>
-              {!filing && <GitPullRequest size={13} />}
-              {t("dashboard.fileIssue", { provider: providerLabel })}
-            </Button>
-          )}
-          {draft.issue_url && (
-            <Button variant={draft.can_file ? "outline" : "primary"} size="sm" onClick={() => void openExternal(draft.issue_url ?? "")}>
-              <ExternalLink size={13} />
-              {t("common.openInBrowser")}
-            </Button>
-          )}
-        </div>
-        {!draft.issue_url && (
-          <InlineNotice
-            tone="warn"
-            text={t("dashboard.noIssueTracker")}
-          />
-        )}
-      </div>
-    </section>
   );
 }
 

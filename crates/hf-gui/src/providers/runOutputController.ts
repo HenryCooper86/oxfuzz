@@ -1,6 +1,6 @@
 import { RunHealthPages } from "./runHealthPages";
 import { onProjectDeleted } from "./projectDeletion";
-import type { Transport, RunOwner } from "../lib/transport";
+import type { Transport, RunOwner, CoverageSample } from "../lib/transport";
 import type { ToastContextValue } from "../components/ui/toastContext";
 import type { RunOutputValue } from "./runOutput";
 import {
@@ -427,6 +427,7 @@ export class RunOutputController {
                   edges: count(value.edges),
                   rawCrashSignals: run.stats.rawCrashSignals,
                 },
+                coverageSeries: coverageSeries(value.coverage_series),
               },
         );
       })
@@ -596,4 +597,16 @@ export class RunOutputController {
     this.launch("replay_run", { runId: review.run_id, project: review.project, review }, review.engine);
   runSyzkaller: RunOutputValue["runSyzkaller"] = (opts) =>
     this.launch("run_syzkaller", { opts }, "syzkaller");
+}
+
+/** The live chart keeps at most this many of the newest service samples. */
+const COVERAGE_SERIES_CAP = 600;
+
+/** Validated service coverage samples; malformed entries are dropped. */
+function coverageSeries(value: unknown): CoverageSample[] {
+  if (!Array.isArray(value)) return [];
+  const samples = value.filter((sample): sample is CoverageSample =>
+    record(sample)
+    && [sample.t, sample.edges, sample.execs].every((n) => typeof n === "number" && Number.isFinite(n) && n >= 0));
+  return samples.slice(-COVERAGE_SERIES_CAP).map(({ t, edges, execs }) => ({ t, edges, execs }));
 }

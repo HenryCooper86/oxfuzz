@@ -3834,6 +3834,43 @@ fn filename_stem_or(s: &str, fallback: &str) -> String {
     }
 }
 
+/// Default file name for a SARIF export of one target's latest run.
+fn sarif_file_name(target: &str) -> String {
+    format!("oxfuzz_{}.sarif", sanitize_filename(target))
+}
+
+/// Save the latest run's crashes for a target as a SARIF 2.1.0 file through a
+/// native save dialog. Returns the saved path, or `None` when cancelled.
+#[tauri::command]
+pub async fn export_sarif(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    target: String,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let document = state
+        .container
+        .export_sarif(std::path::Path::new(&project), &target)
+        .await
+        .map_err(|e| e.to_string())?;
+    let Some(path) = app
+        .dialog()
+        .file()
+        .set_file_name(sarif_file_name(&target))
+        .add_filter("SARIF", &["sarif", "json"])
+        .blocking_save_file()
+    else {
+        return Ok(None);
+    };
+    let path = path
+        .into_path()
+        .map_err(|e| format!("invalid save path: {e}"))?;
+    std::fs::write(&path, document).map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(Some(path.display().to_string()))
+}
+
 fn sanitize_filename(s: &str) -> String {
     s.chars()
         .map(|c| {
@@ -5358,5 +5395,22 @@ mod approval_prompt_tests {
         assert_eq!(payload["reason"], "agent wants to build");
         assert_eq!(payload["risk"], "critical");
         assert_eq!(payload["timeout_secs"], 300);
+    }
+}
+
+#[cfg(test)]
+mod sarif_export_tests {
+    use super::sarif_file_name;
+
+    #[test]
+    fn sarif_file_name_is_a_safe_sarif_file_for_the_target() {
+        assert_eq!(sarif_file_name("parse_number"), "oxfuzz_parse_number.sarif");
+        assert!(!sarif_file_name("src/parser.c::parse").contains('/'));
+        assert_eq!(
+            std::path::Path::new(&sarif_file_name("src/parser.c::parse"))
+                .extension()
+                .and_then(std::ffi::OsStr::to_str),
+            Some("sarif")
+        );
     }
 }

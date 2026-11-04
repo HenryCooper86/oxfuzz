@@ -128,6 +128,14 @@ and 0.7.0 releases respectively.
 - Durations in Run, Automation, Settings > Fuzzing, and fix verification are
   entered as a number plus seconds, minutes, or hours, and summaries read
   "1 min" or "2 h" instead of raw seconds. Stored values are still seconds.
+- Triage groups the same crash (same target and stack signature) across runs
+  into one row marked "Seen N times in M runs", expandable to each occurrence.
+- Run shows coverage over time while a run streams, from the service
+  telemetry's coverage series, using the same chart as Run History.
+- Triage offers "Export SARIF" (latest run of the target; desktop saves
+  through a dialog via the new `export_sarif` command, the browser downloads
+  from `POST /sarif`) and "Draft issue" on an open finding, using the issue
+  draft card shared with the Dashboard.
 
 ## 0.8.1 - 2026-10-25
 

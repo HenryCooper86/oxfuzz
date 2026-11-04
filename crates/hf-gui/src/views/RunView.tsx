@@ -12,6 +12,7 @@ import { RunOutcomeNotice } from "../components/RunEvidenceSummary";
 import { RunCompletionActions } from "../components/StageHandoff";
 import { ActiveProjectBar } from "../components/ActiveProjectBar";
 import { DurationInput } from "../components/ui/DurationInput";
+import { CoverageCurve } from "../components/CoverageCurve";
 import { formatDuration } from "../lib/duration";
 import { Play, Activity, AlertTriangle, FolderOpen, Square, RotateCw, RotateCcw } from "lucide-react";
 import type { HarnessReviewItem, ViewType } from "../types";
@@ -47,7 +48,7 @@ export function RunView({
   } = useTarget();
   // Run output (log/stats/summary/running) lives in a shared, always-mounted
   // context, so a run keeps streaming and is preserved when you navigate away.
-  const { log, stats: liveStats, summary, running, cancelling, lastEngine, selectedRun, requestState, requestError, healthState, healthEvents = [], loadOlderHealthEvents, runFuzzer, runSyzkaller, cancelRun } = useRunOutput();
+  const { log, stats: liveStats, coverageSeries = [], summary, running, cancelling, lastEngine, selectedRun, requestState, requestError, healthState, healthEvents = [], loadOlderHealthEvents, runFuzzer, runSyzkaller, cancelRun } = useRunOutput();
   const { settings: fuzzingSettings, loaded: fuzzingPolicyLoaded, error: fuzzingPolicyError } = useFuzzingSettings();
   // One project for the whole app: the active project (changed through
   // ActiveProjectBar), embedded or not.
@@ -396,6 +397,11 @@ export function RunView({
           <StatCard icon={<Play size={16} />} label={t("run.execsPeak")} value={liveStats.peakExecs} color="var(--accent)" />
         </div>
       )}
+
+      {/* Coverage over time from service telemetry, live while the run streams. */}
+      {coverageSeries.length >= 2 && <section className="surface-card" style={{ padding: "var(--space-md)", animation: "slideInUp 0.2s ease" }}>
+        <CoverageCurve samples={coverageSeries} />
+      </section>}
 
       {summary && (
         <div

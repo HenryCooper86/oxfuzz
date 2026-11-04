@@ -1,5 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Bug, ChevronRight, Download, FileText, Share2 } from "lucide-react";
+import { groupFindings } from "../lib/findingGroups";
+import { IssueDraft } from "../components/IssueDraft";
+import { Bug, ChevronDown, ChevronRight, Download, FileText, Share2 } from "lucide-react";
 import { Button, Input, SeverityBadge, ViewHeader } from "../components/ui";
 import { FindingProofCard } from "../components/FindingProofCard";
 import { PatchToProofPanel } from "../components/PatchToProofPanel";
@@ -10,7 +12,7 @@ import { useFindingSelection } from "../providers/findingSelection";
 import { usePipeline } from "../providers/pipeline";
 import { useProject } from "../providers/project";
 import { useRunOutput } from "../providers/runOutput";
-import type { ViewType, RunHistoryItem, Crash, CrashVerdict, FindingReviewFilter, FindingReviewItem, TriageDisposition } from "../types";
+import type { ViewType, RunHistoryItem, Crash, CrashVerdict, FindingReviewFilter, FindingReviewItem, TriageDisposition, IssueExport } from "../types";
 
 const ReportPreview = lazy(() =>
   import("../components/ReportPreview").then((module) => ({ default: module.ReportPreview })),
@@ -180,6 +182,10 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
       .some((value) => value.toLowerCase().includes(needle)));
   }, [queue, search]);
 
+  // The same crash seen again (same target and stack signature) is one row.
+  const findingGroups = useMemo(() => groupFindings(visibleQueue), [visibleQueue]);
+  const [expandedGroups, setExpandedGroups] = useState<ReadonlySet<string>>(() => new Set());
+
   const triage = useCallback(async () => {
     const request = ++scanRequest.current;
     const selectedGeneration = selectionGeneration.current;
@@ -257,6 +263,28 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
     }
   }, [actionTarget, activeFinding, activeProject, latestActionsAllowed, locale, reportMd, t]);
 
+  // SARIF for code-scanning dashboards: the latest run's crashes for the target.
+  // Desktop saves through a native dialog; the browser downloads the document.
+  const exportSarif = useCallback(async () => {
+    if (!actionTarget || !latestActionsAllowed) return;
+    try {
+      if (isTauriEnvironment()) {
+        const saved = await getTransport().invoke<string | null>("export_sarif", { project: activeProject || ".", target: actionTarget });
+        if (saved && mounted.current) setMessage(t("triage.sarifSaved", { path: saved }));
+      } else {
+        const document = await getTransport().invoke<string>("sarif_document", { project: activeProject || ".", target: actionTarget });
+        const url = URL.createObjectURL(new Blob([document], { type: "application/sarif+json" }));
+        const anchor = window.document.createElement("a");
+        anchor.href = url;
+        anchor.download = `oxfuzz_${actionTarget.replace(/[^a-zA-Z0-9_-]/g, "_")}.sarif`;
+        anchor.click();
+        URL.revokeObjectURL(url);
+      }
+    } catch (error) {
+      if (mounted.current) setMessage(t("triage.exportFailed", { error: String(error) }));
+    }
+  }, [actionTarget, activeProject, latestActionsAllowed, t]);
+
   const exportRepro = useCallback(async () => {
     if (!activeFinding?.latest_scoped_actions_allowed || !isTauriEnvironment()) return;
     const request = ++actionRequest.current;
@@ -308,6 +336,9 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
           <Button variant="outline" size="sm" onClick={() => void composeReport()} disabled={actionsBusy || !actionTarget || !latestActionsAllowed} loading={reporting} title={disabledReason ?? t("triage.composeReportTooltip")}>
             {!reporting && <FileText size={14} />}{t(reporting ? "triage.composing" : "triage.composeReport")}
           </Button>
+          <Button variant="outline" size="sm" onClick={() => void exportSarif()} disabled={actionsBusy || !actionTarget || !latestActionsAllowed} title={disabledReason ?? t("triage.exportSarifTooltip")}>
+            <Download size={14} />{t("triage.exportSarif")}
+          </Button>
           {activeFinding && <Button variant="outline" size="sm" onClick={() => void pushToDefectDojo()} disabled={actionsBusy || !latestActionsAllowed} loading={pushing} title={disabledReason ?? t("triage.pushTooltip")}>
             {!pushing && <Share2 size={14} />}{t(pushing ? "triage.pushing" : "triage.pushToDefectDojo")}
           </Button>}
@@ -344,15 +375,28 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
       </> : <><p>{t("gui.noFindingsHint")}</p><Button onClick={() => { setSearch(""); setDispositionFilter("all"); setOriginFilter(""); setSeverityFilter(""); setRunFilter(""); setTargetFilter(""); }}>{t("gui.clearFilters")}</Button></>}</div>}
       {(visibleQueue.length > 0 || selection || detailLoading || detailError) && <div className="flex gap-3" style={{ animation: "slideInUp 0.2s ease" }}>
         <div className="flex flex-col gap-1 flex-1">
-          {visibleQueue.map((item) => <button key={item.crash.id} onClick={() => selectFinding(item.crash.id, item.crash.run_id)} className={`surface-card flex items-center gap-2 text-left ${selection?.findingId === item.crash.id ? "border-[var(--border-focus)]" : ""}`} style={{ padding: "var(--space-sm) var(--space-md)" }}>
-            <Bug size={14} style={{ color: "var(--error)" }} />
-            <span className="flex flex-col min-w-0 flex-1">
-              <span className="text-xs font-mono truncate">{item.target_symbol} · {shortId(item.crash.id)}</span>
-              <span className="text-xs text-text-secondary truncate">{item.crash.summary || item.crash.kind}</span>
-              <span className="text-xs text-text-muted font-mono">{shortId(item.crash.run_id)} · {item.proof.casr_exploitability.determination}</span>
-            </span>
-            <span className="text-xs text-text-muted">{t(`triage.disposition.${item.disposition.disposition}`)}</span><ChevronRight size={14} className="text-text-muted" />
-          </button>)}
+          {findingGroups.map((group) => {
+            const others = group.members.slice(1);
+            const open = expandedGroups.has(group.key);
+            const row = (item: FindingReviewItem, compact: boolean) => <button key={item.crash.id} onClick={() => selectFinding(item.crash.id, item.crash.run_id)} className={`surface-card flex items-center gap-2 text-left ${selection?.findingId === item.crash.id ? "border-[var(--border-focus)]" : ""}`} style={{ padding: compact ? "var(--space-xs) var(--space-md)" : "var(--space-sm) var(--space-md)", marginInlineStart: compact ? 24 : 0 }}>
+              <Bug size={14} style={{ color: "var(--error)" }} />
+              <span className="flex flex-col min-w-0 flex-1">
+                <span className="text-xs font-mono truncate">{item.target_symbol} · {shortId(item.crash.id)}</span>
+                {!compact && <span className="text-xs text-text-secondary truncate">{item.crash.summary || item.crash.kind}</span>}
+                <span className="text-xs text-text-muted font-mono">{shortId(item.crash.run_id)} · {item.proof.casr_exploitability.determination}</span>
+              </span>
+              <span className="text-xs text-text-muted">{t(`triage.disposition.${item.disposition.disposition}`)}</span><ChevronRight size={14} className="text-text-muted" />
+            </button>;
+            return <div key={group.key} className="flex flex-col gap-1">
+              {row(group.representative, false)}
+              {others.length > 0 && <button type="button" className="self-start text-xs text-text-secondary px-2" aria-expanded={open} aria-label={t("triage.showOccurrences")} onClick={() => setExpandedGroups((current) => {
+                const next = new Set(current);
+                if (next.has(group.key)) next.delete(group.key); else next.add(group.key);
+                return next;
+              })}>{open ? <ChevronDown size={12} className="inline" /> : <ChevronRight size={12} className="inline" />} {t("triage.occurrences", { n: group.members.length, runs: group.runCount })}</button>}
+              {open && others.map((item) => row(item, true))}
+            </div>;
+          })}
         </div>
         <div className="surface-card flex-1" style={{ padding: "var(--space-md)" }}>
           {detailLoading && <div role="status" className="text-xs text-text-muted">{t("triage.loadingFinding")}</div>}
@@ -371,6 +415,21 @@ function CrashDetail({ item, verdict, onVerify, actionBusy }: { item: FindingRev
   const { crash } = item;
   // Fix verification is a deliberate next step, not part of reading a crash.
   const [verifyingFix, setVerifyingFix] = useState(false);
+  // An issue draft is built on request; nothing is filed until the user chooses to.
+  const [issue, setIssue] = useState<IssueExport | null>(null);
+  const [issueError, setIssueError] = useState<string | null>(null);
+  const [draftingIssue, setDraftingIssue] = useState(false);
+  async function draftIssue() {
+    setDraftingIssue(true);
+    setIssueError(null);
+    try {
+      setIssue(await getTransport().invoke<IssueExport>("issue_export", { project: item.project_root, crashId: crash.id }));
+    } catch (e) {
+      setIssueError(String(e));
+    } finally {
+      setDraftingIssue(false);
+    }
+  }
   // Order: what broke (plain summary, kind, where), how to confirm it, then the
   // fix workflow and the full evidence record for anyone who needs it.
   return <div className="flex flex-col gap-3">
@@ -405,9 +464,14 @@ function CrashDetail({ item, verdict, onVerify, actionBusy }: { item: FindingRev
         </ul>}
       </div>}
     </div>
-    <div className="border-t border-border pt-3">
-      {verifyingFix ? <PatchToProofPanel key={crash.id} findingId={crash.id} runId={crash.run_id} suggestedFix={crash.bug_report?.suggested_fix ?? null} />
-        : <Button size="sm" variant="outline" onClick={() => setVerifyingFix(true)}>{t("triage.verifyFix")}</Button>}
+    <div className="border-t border-border pt-3 flex flex-col gap-2">
+      <div className="flex flex-wrap gap-2">
+        {!verifyingFix && <Button size="sm" variant="outline" onClick={() => setVerifyingFix(true)}>{t("triage.verifyFix")}</Button>}
+        {!issue && <Button size="sm" variant="outline" onClick={() => void draftIssue()} loading={draftingIssue}>{t("triage.draftIssue")}</Button>}
+      </div>
+      {issueError && <p role="alert" className="text-xs m-0" style={{ color: "var(--error)" }}>{t("dashboard.gitlabExportFailed", { error: issueError })}</p>}
+      {issue && <IssueDraft draft={issue} project={item.project_root} />}
+      {verifyingFix && <PatchToProofPanel key={crash.id} findingId={crash.id} runId={crash.run_id} suggestedFix={crash.bug_report?.suggested_fix ?? null} />}
     </div>
     <details className="border-t border-border pt-3 text-xs">
       <summary className="cursor-pointer text-text-secondary">{t("triage.evidenceDetails")}</summary>

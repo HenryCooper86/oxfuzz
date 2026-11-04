@@ -360,6 +360,8 @@ Run History's interrupted category.
 - **Run Fuzzer** (or **Launch Campaign** for Syzkaller). Set the **engine**,
   **duration** (a number plus seconds, minutes, or hours), and target symbol.
 - **Stop** a run in progress.
+- Watch **coverage over time** while the run streams (the same chart Run
+  History shows afterwards).
 - If coverage stalls, the screen may offer **Regenerate harness** (jumps to
   Harness).
 
@@ -396,6 +398,11 @@ and compose a report.
 - **Compose Report** -- generates a Markdown report and saves it as a draft.
 - **Push to DefectDojo** -- appears when crashes exist and DefectDojo is
   configured.
+- **Export SARIF** -- saves the latest run's crashes for the target as SARIF
+  2.1.0 for GitHub code scanning and other security dashboards.
+- **Draft issue** (on an open finding) -- builds a GitHub or GitLab issue draft
+  to copy, open in the browser, or file directly when an issue tracker is
+  configured.
 - Export Markdown or HTML. Desktop also offers PDF/DOCX when the required converter is available.
 
 **Gotchas:** triage needs a run to have happened. Review the retained findings,
@@ -405,7 +412,9 @@ workdir -- so the button is disabled with an explanation.
 
 **What it shows:** a crash list (kind, severity badge, filename) and a detail
 panel that starts with the plain-language bug summary, then the crash location
-and stack, then the AI verification. **Verify a fix** opens the Patch to Proof
+and stack, then the AI verification. The same crash seen again (same target and
+stack signature) is one row marked "Seen N times in M runs"; expand it to open
+any occurrence. **Verify a fix** opens the Patch to Proof
 form; **Evidence details** holds the full finding proof record.
 
 **Reading a finding:** *Kind* is the error class (e.g. "Asan" = a memory bug

@@ -196,6 +196,76 @@ describe("retained finding navigation", () => {
     container.remove();
   });
 
+  it("shows repeated crashes as one group with their occurrence and run counts", async () => {
+    const repeat = (id: string, run: string) => ({ ...finding(id, run, PROJECT_A, `/evidence/${id}`), crash: { ...finding(id, run, PROJECT_A, `/evidence/${id}`).crash, stack_signature: "shared-signature" } });
+    invoke.mockImplementation((command: string) => {
+      if (command === "finding_review_queue") return Promise.resolve([repeat("first-hit", "run-1"), newer, repeat("second-hit", "run-1"), repeat("third-hit", "run-2")]);
+      if (command === "finding_review") return Promise.resolve(older);
+      throw new Error(`unexpected command ${command}`);
+    });
+    const translate = (key: string, params?: Record<string, string | number>) => params ? `${key}:${Object.values(params).join("/")}` : key;
+    await act(async () => root.render(<Providers translate={translate}><TriageView /></Providers>));
+    await flush();
+    const rows = [...container.querySelectorAll("button")].filter((button) => button.textContent?.startsWith("parse_packet ·"));
+    expect(rows).toHaveLength(2);
+    expect(container.textContent).toContain("triage.occurrences:3/2");
+    expect(container.textContent).not.toContain("third-hi");
+    const toggle = container.querySelector<HTMLButtonElement>('[aria-label="triage.showOccurrences"]');
+    expect(toggle).not.toBeNull();
+    await act(async () => toggle!.click());
+    expect(container.textContent).toContain("third-hi");
+  });
+
+  it("drafts a GitHub or GitLab issue for the open finding", async () => {
+    invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "finding_review_queue") return Promise.resolve([newer, older]);
+      if (command === "finding_review") return Promise.resolve(older);
+      if (command === "issue_export") return Promise.resolve({ crash_id: args?.crashId, provider: "gitlab", title: "Heap overflow in parse_legacy_frame", description: "body", labels: ["fuzzing"], project_web_url: null, issue_url: null, can_file: false });
+      throw new Error(`unexpected command ${command}`);
+    });
+    await act(async () => root.render(<Providers><TriageView /></Providers>));
+    await flush();
+    const draft = [...container.querySelectorAll("button")].find((button) => button.textContent === "triage.draftIssue");
+    expect(draft).toBeTruthy();
+    await act(async () => draft!.click());
+    await flush();
+    expect(invoke).toHaveBeenCalledWith("issue_export", { project: PROJECT_A, crashId: older.crash.id });
+    expect(container.textContent).toContain("Heap overflow in parse_legacy_frame");
+  });
+
+  it.each([false, true])("exports the latest run as SARIF (desktop %s)", async (desktop) => {
+    environment.tauri = desktop;
+    localStorage.clear();
+    const downloads: string[] = [];
+    const createObjectURL = vi.fn(() => "blob:sarif");
+    Object.assign(URL, { createObjectURL, revokeObjectURL: vi.fn() });
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) { downloads.push(this.download); });
+    invoke.mockImplementation((command: string) => {
+      if (command === "finding_review_queue") return Promise.resolve([newer, older]);
+      if (command === "sarif_document") return Promise.resolve("{\"version\":\"2.1.0\"}");
+      if (command === "export_sarif") return Promise.resolve("/exports/latest_target.sarif");
+      if (command === "report_formats") return Promise.resolve(["md"]);
+      throw new Error(`unexpected command ${command}`);
+    });
+    try {
+      await act(async () => root.render(<Providers><TriageView /></Providers>));
+      await flush();
+      const button = [...container.querySelectorAll("button")].find((item) => item.textContent === "triage.exportSarif");
+      expect(button).toBeTruthy();
+      await act(async () => button!.click());
+      await flush();
+      if (desktop) {
+        expect(invoke).toHaveBeenCalledWith("export_sarif", { project: PROJECT_A, target: "latest_target" });
+        expect(container.textContent).toContain("triage.sarifSaved");
+      } else {
+        expect(invoke).toHaveBeenCalledWith("sarif_document", { project: PROJECT_A, target: "latest_target" });
+        expect(downloads).toEqual(["oxfuzz_latest_target.sarif"]);
+      }
+    } finally {
+      click.mockRestore();
+    }
+  });
+
   it("requests all dispositions for the exact run opened from history", async () => {
     localStorage.clear();
     await act(async () => root.render(<Providers><TriageView initialRunId="older-run" /></Providers>));

@@ -10,10 +10,10 @@ function dictionaryDigest(dictionary: Record<string, string>) {
 // Captured before deduplicating the shipped translation table. Changing user-facing
 // text intentionally requires reviewing and updating these characterization values.
 it("preserves every shipped English and Chinese key and value", () => {
-  expect(Object.keys(enExtra)).toHaveLength(2001);
-  expect(Object.keys(zhExtra)).toHaveLength(1999);
-  expect(dictionaryDigest(enExtra)).toBe("769ad12b5ec0d0c285e590431a26df68a0e4bb6648f7aa9541000a4e79dee9f6");
-  expect(dictionaryDigest(zhExtra)).toBe("abc0948fca019f03d53358277dbe2bcda7c4b1d1369acf6d8eae9fca405aad89");
+  expect(Object.keys(enExtra)).toHaveLength(2007);
+  expect(Object.keys(zhExtra)).toHaveLength(2005);
+  expect(dictionaryDigest(enExtra)).toBe("bc82b38e3692eb8af9ebcfa623d9e9c0b51d211349a2d3d0d918634ce611c24b");
+  expect(dictionaryDigest(zhExtra)).toBe("7a5d5acebdf9de95cf151c218deb43825bbb13e9d793585e1b1d278ab56557ab");
 });
 it("preserves deliberate missing Chinese entries and existing locale fallback", () => {
   expect(Object.keys(enExtra).filter(key => !(key in zhExtra)).sort()).toEqual(["triage.downloadRepro", "triage.reproSaved"]);

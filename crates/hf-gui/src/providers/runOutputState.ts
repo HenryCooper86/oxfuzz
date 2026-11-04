@@ -1,3 +1,4 @@
+import type { CoverageSample } from "../lib/transport";
 import type { RunOwner } from "../lib/transport";
 import { count, parseOwner, parseSummary, rate, record, timestamp } from "./runOutputValidation";
 import { EMPTY_RUN_STATS, type RunStats, type RunSummary } from "./runOutput";
@@ -30,6 +31,8 @@ export interface RunData {
   lastEngine: string;
   status: string | null;
   observedAt: string | null;
+  /** Service coverage samples for the live chart; in memory only, not persisted. */
+  coverageSeries: CoverageSample[];
 }
 export type PersistedRun = Pick<
   RunData,
@@ -59,6 +62,7 @@ export function emptyRun(): RunData {
     lastEngine: "",
     status: null,
     observedAt: null,
+    coverageSeries: [],
   };
 }
 function parsePersisted(value: unknown, id?: string): RunData | null {

@@ -220,6 +220,23 @@ describe("RunOutputProvider", () => {
     expect(window.localStorage.getItem("hf_run_summary_v1")).toBeNull();
   });
 
+  it("exposes the service coverage series for a live chart and drops malformed samples", async () => {
+    const id = "00000000-0000-4000-8000-000000000001";
+    invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "run_owner") return Promise.resolve({ run_id: id, project_root: "/project", target: "parse", engine: "libfuzzer", kind: "Campaign", status: "Running", started_at: "2026-09-07T01:00:00Z" });
+      if (command === "campaign_telemetry") return Promise.resolve(telemetry(String(args?.runId), {
+        edges: 30,
+        coverage_series: [{ t: 0, edges: 0, execs: 0 }, { t: 5, edges: 12, execs: 400 }, { t: "bad", edges: 1, execs: 1 }, { t: 10, edges: 30, execs: 900 }],
+      }));
+      if (command === "campaign_health_events") return Promise.resolve({ events: [], next_cursor: null });
+      return Promise.resolve([]);
+    });
+    await mount();
+    await emit("run:progress", { run_id: id, type: "ExecsPerSec", data: 90 });
+    await act(async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); });
+    expect(payload().coverageSeries).toEqual([{ t: 0, edges: 0, execs: 0 }, { t: 5, edges: 12, execs: 400 }, { t: 10, edges: 30, execs: 900 }]);
+  });
+
   it("routes interleaved run progress by durable owner and displays service telemetry without a browser average", async () => {
     const ownerA = deferred<Record<string, unknown>>();
     const ownerB = deferred<Record<string, unknown>>();

@@ -34,6 +34,7 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
         rawCrashSignals: null,
       },
       summary: selected?.summary ?? null,
+      coverageSeries: selected?.coverageSeries ?? [],
       selectedRun: selected?.owner ?? null,
       requestState: state.requestState,
       requestError: state.requestError,

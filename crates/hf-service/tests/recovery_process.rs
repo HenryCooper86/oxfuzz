@@ -144,9 +144,14 @@ fn recovery_process_child() {
         assert!(journal.durability_error().is_none());
         run.id
     });
-    let mut marker = File::create(root.join("admitted")).unwrap();
+    // Publish the marker atomically: the parent polls for its existence and
+    // kills this process at once, so it must never observe a created but
+    // still empty file.
+    let staging = root.join("admitted.tmp");
+    let mut marker = File::create(&staging).unwrap();
     write!(marker, "{run_id}").unwrap();
     marker.sync_all().unwrap();
+    fs::rename(&staging, root.join("admitted")).unwrap();
     loop {
         std::thread::sleep(Duration::from_secs(1));
     }

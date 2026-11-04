@@ -34,6 +34,8 @@ export interface RunOutputValue {
   healthState?: { loading: boolean; error: string | null; hasOlder: boolean };
   log: string[];
   stats: RunStats;
+  /** Coverage over time for the selected run, from service telemetry. */
+  coverageSeries?: import("../lib/transport").CoverageSample[];
   summary: RunSummary | null;
   running: boolean;
   cancelling: boolean;

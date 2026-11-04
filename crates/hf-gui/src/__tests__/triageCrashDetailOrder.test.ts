@@ -17,6 +17,6 @@ it("leads the crash detail with the plain-language bug summary and the stack", (
 
 it("keeps proof evidence collapsed and opens fix verification on request", () => {
   expect(detail).toMatch(/<details[^>]*>\s*<summary[^>]*>\{t\("triage\.evidenceDetails"\)\}<\/summary>\s*<FindingProofCard/);
-  expect(detail).toMatch(/\{verifyingFix \? <PatchToProofPanel/);
+  expect(detail).toMatch(/\{verifyingFix (\?|&&) <PatchToProofPanel/);
   expect(detail).toContain('t("triage.verifyFix")');
 });
