@@ -1,13 +1,14 @@
 import { useState } from "react";
-import { Copy, Check, FolderSearch, ExternalLink } from "lucide-react";
+import { Copy, Check, FolderSearch } from "lucide-react";
 import { getTransport, isTauriEnvironment } from "../lib";
 import { useToast } from "./ui/toastContext";
 import { IconButton } from "./ui/IconButton";
 import { useI18n } from "../i18nContext";
 
-// A compact row of actions for a filesystem path: copy, reveal in the OS file
-// manager, and open with the default app. Reveal/open are desktop-only (they
-// need OS integration); copy always works. Core triage ergonomics.
+// A compact row of actions for a filesystem path: copy, and reveal in the OS
+// file manager (desktop only). There is deliberately no "open with default app":
+// these paths are crash reproducers and corpus inputs, which are untrusted fuzz
+// output and must not be handed to a host application outside the sandbox.
 export function PathActions({ path, size = 13 }: { path: string; size?: number }) {
   const { toast } = useToast();
   const { t } = useI18n();
@@ -24,11 +25,11 @@ export function PathActions({ path, size = 13 }: { path: string; size?: number }
     }
   }
 
-  async function invokePath(cmd: "reveal_path" | "open_path", failLabel: string) {
+  async function reveal() {
     try {
-      await getTransport().invoke(cmd, { path });
+      await getTransport().invoke("reveal_path", { path });
     } catch (e) {
-      toast({ title: failLabel, description: String(e), variant: "error" });
+      toast({ title: t("pathActions.revealFailed"), description: String(e), variant: "error" });
     }
   }
 
@@ -38,24 +39,14 @@ export function PathActions({ path, size = 13 }: { path: string; size?: number }
         {copied ? <Check size={size} /> : <Copy size={size} />}
       </IconButton>
       {tauri && (
-        <>
-          <IconButton
-            size={26}
-            onClick={() => void invokePath("reveal_path", t("pathActions.revealFailed"))}
-            title={t("pathActions.revealTitle")}
-            aria-label={t("pathActions.revealAria")}
-          >
-            <FolderSearch size={size} />
-          </IconButton>
-          <IconButton
-            size={26}
-            onClick={() => void invokePath("open_path", t("pathActions.openFailed"))}
-            title={t("pathActions.openTitle")}
-            aria-label={t("pathActions.openAria")}
-          >
-            <ExternalLink size={size} />
-          </IconButton>
-        </>
+        <IconButton
+          size={26}
+          onClick={() => void reveal()}
+          title={t("pathActions.revealTitle")}
+          aria-label={t("pathActions.revealAria")}
+        >
+          <FolderSearch size={size} />
+        </IconButton>
       )}
     </span>
   );

@@ -9,6 +9,7 @@ import { useTarget } from "../providers/target";
 import { Button, Input, Select, ViewHeader } from "../components/ui";
 import { SandboxBanner } from "../components/SandboxBanner";
 import { RunOutcomeNotice } from "../components/RunEvidenceSummary";
+import { RunCompletionActions } from "../components/StageHandoff";
 import { Play, Activity, AlertTriangle, FolderOpen, Square, RotateCw, RotateCcw } from "lucide-react";
 import type { HarnessReviewItem, ViewType } from "../types";
 import { useFuzzingSettings } from "../hooks/useFuzzingSettings";
@@ -438,7 +439,7 @@ export function RunView({
 
       {summary && !running && <section className="surface-card p-3 flex flex-col gap-2">
         <RunOutcomeNotice crashes={summary.crashes} />
-        {onNavigate && <Button className="self-start" onClick={() => onNavigate("runs")}>{t("nav.runs")}</Button>}
+        {onNavigate && <RunCompletionActions crashes={summary.crashes} onNavigate={onNavigate} />}
       </section>}
 
       {summary && !running && summary.stagnation && (

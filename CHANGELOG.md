@@ -61,6 +61,31 @@ and 0.7.0 releases respectively.
   accept an optional `ai` field. The old CLI-side repair/refine flag
   rejection moved into the service.
 
+### Changed (desktop app)
+
+- The sidebar shows every screen in always-visible sections; the collapsed
+  "More tools" group is gone.
+- Agent approval requests appear over whichever screen is open, not only in
+  Chat. The prompt shows the action, reason, risk tier, and a countdown to the
+  automatic denial; concurrent requests queue, and Deny is the default.
+- Crash reproducers and corpus inputs can no longer be opened with the
+  operating system's default application (the `open_path` desktop command is
+  removed). Copy path and Reveal remain.
+- The all-project data wipe moved from the Knowledge page to Settings >
+  Storage as "Delete all fuzzing records", behind a confirmation, and failures
+  are reported. Clear Workspace uses the same confirmation dialog.
+- The Reports DefectDojo push appears only when DefectDojo is configured,
+  states that it sends the latest finished run's triaged crashes for the
+  report's project and target, and asks before sending.
+- Stage handoffs: a ready harness offers "Continue to Run", a finished run with
+  crashes offers "Review findings", and the Fuzzing Workflow forwards links to
+  other screens instead of ignoring them.
+- Discover offers "Stop AI assessment", which cancels the assessment on the
+  service; scan results stay available.
+- Automation offers "Authorize scheduled runs" (confirmed) and "Withdraw
+  authorization". The desktop app previously had no way to authorize scheduled
+  work after a restart.
+
 ## 0.8.1 - 2026-10-25
 
 The v0.8.0 tag was never published: its Windows tests failed on the

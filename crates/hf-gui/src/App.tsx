@@ -22,6 +22,7 @@ import { ReportsView } from "./views/ReportsView";
 import { ChangesView } from "./views/ChangesView";
 import { DefectDojoView } from "./views/DefectDojoView";
 import { CommandPalette } from "./components/CommandPalette";
+import { ApprovalPrompt } from "./components/ApprovalPrompt";
 import { LoadingState } from "./components/ui/Loading";
 import { DiscoveryProvider } from "./providers/DiscoveryContext";
 import { ProjectProvider } from "./providers/ProjectContext";
@@ -174,6 +175,7 @@ function AppInner() {
   return (
     <TooltipProvider>
         <CampaignCrashToaster />
+        <ApprovalPrompt />
         <div className="app-root flex h-full w-full bg-surface-primary text-text-primary">
         {activeView === "settings" ? (
           <ErrorBoundary recoveryAction={{ label: t("settings.back"), onClick: () => setActiveView(settingsReturnView) }}>
@@ -243,7 +245,7 @@ function AppInner() {
                 )}
                 {activeView === "harness" && (
                   <ViewCanvas>
-                    <HarnessView />
+                    <HarnessView onNavigate={navigate} />
                   </ViewCanvas>
                 )}
                 {activeView === "run" && (

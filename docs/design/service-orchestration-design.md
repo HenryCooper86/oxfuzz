@@ -811,9 +811,10 @@ startup/validation on Unix; ordinary subprocess tests also run on Windows.
 
 ### GUI navigation and next-step presentation
 
-The primary sidebar emphasizes the connected workflow and retained results.
-Specialist stage pages and administration remain available under More tools;
-navigating directly to a specialist page exposes its selected navigation item.
+The sidebar lists every view in flat, always-visible sections; no navigation
+is hidden behind a collapsible group. The workflow and retained results lead,
+followed by the stage pages, results tools, AI system pages, automotive, and
+configured integrations.
 The workflow offers a next-step navigation action from its existing progress
 context. That context is a navigation hint, not service readiness or approval.
 Opening a step never starts an operation, and all execution checks remain in

@@ -26,16 +26,31 @@ export function ReportsView({ onNavigate }: { onNavigate?: (view: import("../typ
   const [filter, setFilter] = useState("");
   const [pushingId, setPushingId] = useState<string | null>(null);
   const pushInFlight = useRef(false);
+  // The push is offered only when DefectDojo is configured; an unknown state
+  // (request failed) hides it rather than offering an action that cannot work.
+  const [defectDojoConfigured, setDefectDojoConfigured] = useState(false);
   // One draft deletion at a time: a queued duplicate would re-delete work that
   // already succeeded and surface that second failure as an error.
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const deleteInFlight = useRef(false);
 
-  // Push the crashes behind a report (its project's latest triaged run) to
-  // DefectDojo as findings. Configure the instance in Settings > Integrations.
+  // Push to DefectDojo. The service publishes the triaged crashes of the latest
+  // finished run for the report's project and target (a saved report does not
+  // record its run), so the confirmation names that scope before anything is sent.
+  // Configure the instance in Settings > Integrations.
   const pushReport = useCallback(async (r: ReportDraft) => {
     if (pushInFlight.current) return;
     pushInFlight.current = true;
+    const scope = r.target ? `${r.project} · ${r.target}` : r.project;
+    const ok = await confirm({
+      title: t("reports.pushConfirmTitle"),
+      message: t("reports.pushConfirmMessage", { scope }),
+      confirmLabel: t("reports.pushConfirm"),
+    });
+    if (!ok) {
+      pushInFlight.current = false;
+      return;
+    }
     setNotice(null);
     setPushingId(r.id);
     try {
@@ -52,7 +67,18 @@ export function ReportsView({ onNavigate }: { onNavigate?: (view: import("../typ
       pushInFlight.current = false;
       setPushingId(null);
     }
-  }, [t]);
+  }, [confirm, t]);
+
+  useEffect(() => {
+    let alive = true;
+    getTransport()
+      .invoke<boolean>("defectdojo_configured")
+      .then((configured) => { if (alive) setDefectDojoConfigured(configured === true); })
+      .catch(() => {
+        // Unknown configuration: keep the push hidden.
+      });
+    return () => { alive = false; };
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -199,16 +225,18 @@ export function ReportsView({ onNavigate }: { onNavigate?: (view: import("../typ
                 <Eye size={13} />
                 {t("common.open")}
               </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => void pushReport(r)}
-                disabled={pushingId !== null}
-                title={t("reports.pushTitle")}
-              >
-                <Share2 size={13} />
-                {pushingId === r.id ? t("reports.pushing") : "DefectDojo"}
-              </Button>
+              {defectDojoConfigured && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void pushReport(r)}
+                  disabled={pushingId !== null}
+                  title={t("reports.pushTitle")}
+                >
+                  <Share2 size={13} />
+                  {pushingId === r.id ? t("reports.pushing") : "DefectDojo"}
+                </Button>
+              )}
               <IconButton
                 danger
                 disabled={deletingId !== null}

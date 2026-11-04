@@ -226,3 +226,47 @@ it("does not reattach an old pending operation while a new scan starts", async (
     await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); mocks.invoke.mockReset();
   }
 });
+
+it("stops an in-progress AI assessment on the service, keeping the scan", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  let cancelled = false;
+  mocks.invoke.mockImplementation(async (command: string) => {
+    if (command === "ranked_discovery_start") return "op-1";
+    if (command === "ranked_discovery_cancel") { cancelled = true; return true; }
+    if (command === "ranked_discovery_status") return cancelled
+      ? { operation_id: "op-1", state: "cancelled", revision: 1, assessed_count: 0, total_count: 2, reason_code: null }
+      : { operation_id: "op-1", state: "ranking", revision: 1, assessed_count: 0, total_count: 2, reason_code: null };
+    if (command === "ranked_discovery_result") return {
+      operation_id: "op-1", revision: 1, project_root: "/sample", language: "C",
+      scanned_at: "2026-09-26T00:00:00Z", inventory: scan, assessments: [],
+      assessed_count: 0, total_count: 2, ranking_source: "pending", reason_code: null,
+    };
+    return false;
+  });
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  try {
+    await act(async () => root.render(<I18nProvider><DiscoveryProvider><DiscoverView embedded onNavigate={vi.fn()} /></DiscoveryProvider></I18nProvider>));
+    await act(async () => {
+      [...host.querySelectorAll("button")].find(button => button.textContent === "Discover")!.click();
+      await new Promise(resolve => setTimeout(resolve, 30));
+    });
+    expect(host.textContent).toContain("Assessing with AI");
+    const stop = [...host.querySelectorAll("button")].find(button => button.textContent === "Stop AI assessment");
+    expect(stop).toBeTruthy();
+    await act(async () => {
+      stop!.click();
+      await new Promise(resolve => setTimeout(resolve, 300));
+    });
+    expect(mocks.invoke).toHaveBeenCalledWith("ranked_discovery_cancel", { operationId: "op-1" });
+    expect(host.textContent).toContain("Assessment cancelled. Scan results remain available.");
+    expect(host.textContent).toContain("src/a.c");
+    expect([...host.querySelectorAll("button")].some(button => button.textContent === "Stop AI assessment")).toBe(false);
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    vi.unstubAllGlobals();
+    mocks.invoke.mockReset();
+  }
+});

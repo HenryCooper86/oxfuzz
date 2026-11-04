@@ -25,11 +25,12 @@ it never grants execution approval. Optional integrations and detailed settings
 stay in Settings. With no project selected, the Dashboard presents one action
 to open the project workflow.
 
-The sidebar keeps the Dashboard, guided workflow, Triage, Run History,
-Reports, Projects, and AI Assistant visible. Expand **More tools** to reach
-Discover, Harness, Run, Corpus, Artifacts, Changes, Policy Audit, Agents,
-Skills, Knowledge, Automation, Automotive, and configured DefectDojo.
-Opening a specialist page expands its navigation group. Help and Settings
+The sidebar shows every screen in always-visible sections. **Workspace**
+holds the Dashboard, guided workflow, Triage, Run History, Reports, Projects,
+and AI Assistant. **Pipeline** holds Discover, Harness, Run, and Corpus.
+**Results** holds Artifacts, Change Review, and Policy Audit. **AI System**
+holds Agents, Skills, Knowledge, and Automation. **Vehicle Security** holds Automotive,
+and **Integrations** holds DefectDojo once it is configured. Help and Settings
 remain available at the bottom. The workflow's **Next** button opens the
 current stage; starting work still requires that stage's action and approvals.
 

@@ -741,22 +741,39 @@ struct GuiApprovalGate {
     pending: std::sync::Arc<crate::state::PendingApprovals>,
 }
 
+/// The `chat:permission_request` event body. The app-wide approval prompt shows
+/// the action (its label includes the arguments), the reason, the risk tier, and
+/// a countdown to the automatic denial.
+fn permission_request_payload(
+    id: uuid::Uuid,
+    action: &Action,
+    reason: &str,
+    timeout: std::time::Duration,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": id.to_string(),
+        "action": action.label(),
+        "reason": reason,
+        "risk": action.risk().as_str(),
+        "timeout_secs": timeout.as_secs(),
+    })
+}
+
 #[async_trait::async_trait]
 impl ApprovalGate for GuiApprovalGate {
     async fn request_approval(&self, action: &Action, reason: &str) -> bool {
         use tauri::Emitter;
         /// Deny an approval the user never answers so the agent turn cannot hang
-        /// indefinitely (the only prompt listener lives in the Chat view).
+        /// indefinitely. The prompt is mounted app-wide, so it is visible from
+        /// every view, but the user may still be away from the window.
         const APPROVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(5);
         let id = uuid::Uuid::new_v4();
         let rx = self.pending.register(id).await;
+        // A failed emit leaves no prompt on screen; the request is then denied
+        // by the timeout below, which is the safe outcome.
         let _ = self.app.emit(
             "chat:permission_request",
-            serde_json::json!({
-                "id": id.to_string(),
-                "action": action.label(),
-                "reason": reason,
-            }),
+            permission_request_payload(id, action, reason, APPROVAL_TIMEOUT),
         );
         self.pending.await_decision(id, rx, APPROVAL_TIMEOUT).await
     }
@@ -1397,6 +1414,28 @@ pub fn schedule_runtime(
     state: tauri::State<'_, crate::state::AppState>,
 ) -> hf_service::scheduler::CampaignSchedulerStatus {
     state.scheduler.runtime_status()
+}
+
+/// Scheduled-run authorization, as `{ "armed": bool }` (the same body the REST
+/// API returns).
+fn arming_body(armed: bool) -> serde_json::Value {
+    serde_json::json!({ "armed": armed })
+}
+
+/// Authorize scheduled runs, releasing work held since this process started.
+/// The scheduler starts disarmed on every launch; this is the operator's
+/// explicit decision, which the GUI confirms before calling.
+#[tauri::command]
+pub fn schedule_arm(state: tauri::State<'_, crate::state::AppState>) -> serde_json::Value {
+    state.scheduler.arm();
+    arming_body(state.scheduler.is_armed())
+}
+
+/// Withdraw scheduled-run authorization. Campaigns already running continue.
+#[tauri::command]
+pub fn schedule_disarm(state: tauri::State<'_, crate::state::AppState>) -> serde_json::Value {
+    state.scheduler.disarm();
+    arming_body(state.scheduler.is_armed())
 }
 
 /// Both scheduler concurrency caps and their effective fuzz-run ceiling.
@@ -2240,15 +2279,6 @@ pub fn reveal_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
     app.opener()
         .reveal_item_in_dir(&path)
-        .map_err(|e| e.to_string())
-}
-
-/// Open a file or directory with the OS default handler (e.g. `$EDITOR`).
-#[tauri::command]
-pub fn open_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
-    use tauri_plugin_opener::OpenerExt;
-    app.opener()
-        .open_path(path, None::<&str>)
         .map_err(|e| e.to_string())
 }
 
@@ -5291,4 +5321,42 @@ pub async fn run_harness_behavior(
         .harness_behavior(uuid::Uuid::parse_str(&run_id).map_err(|error| error.to_string())?)
         .await
         .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod scheduler_arming_tests {
+    use super::arming_body;
+
+    #[test]
+    fn arming_reply_matches_the_rest_body() {
+        assert_eq!(arming_body(true), serde_json::json!({ "armed": true }));
+        assert_eq!(arming_body(false), serde_json::json!({ "armed": false }));
+    }
+}
+
+#[cfg(test)]
+mod approval_prompt_tests {
+    use hf_service::Action;
+
+    use super::permission_request_payload;
+
+    #[test]
+    fn approval_request_carries_the_risk_tier_and_the_auto_deny_deadline() {
+        let id = uuid::Uuid::nil();
+        let action = Action::ShellExec {
+            command: "make fuzz".to_owned(),
+        };
+        let payload = permission_request_payload(
+            id,
+            &action,
+            "agent wants to build",
+            std::time::Duration::from_mins(5),
+        );
+
+        assert_eq!(payload["id"], id.to_string());
+        assert_eq!(payload["action"], "shell: make fuzz");
+        assert_eq!(payload["reason"], "agent wants to build");
+        assert_eq!(payload["risk"], "critical");
+        assert_eq!(payload["timeout_secs"], 300);
+    }
 }

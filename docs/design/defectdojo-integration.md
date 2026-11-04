@@ -87,7 +87,7 @@ output.
 | CLI | `hf-cli`: `defectdojo <project> [--target T] [--test]` | |
 | Web | `hf-web`: `POST /defectdojo/push`, `GET /defectdojo/test`, `GET /defectdojo/configured`, `GET /defectdojo/status`, `POST /defectdojo/start`, `POST /defectdojo/stop` | |
 | Tauri | `commands.rs`: `push_to_defectdojo`, `defectdojo_test_connection`, `defectdojo_configured`, `defectdojo_status`/`_start`/`_stop`, `autostart_defectdojo` (from `setup()`) | |
-| GUI | Settings > Integrations panel (URL/token + Test connection); "Push to DefectDojo" in Triage and Reports; DefectDojo row in Dashboard > Health; the embedded view gates on `Ready` and offers Start | |
+| GUI | Settings > Integrations panel (URL/token + Test connection); "Push to DefectDojo" in Triage and Reports; DefectDojo row in Dashboard > Health; the embedded view gates on `Ready` and offers Start | The Reports push is shown only when `defectdojo_configured` is true and asks for confirmation first. A saved report does not record its run, so the push publishes the latest finished run for the report's project and target; the confirmation states that scope. Binding a report to its run is open work. |
 
 ### Settings transport
 

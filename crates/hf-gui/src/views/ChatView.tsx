@@ -66,13 +66,6 @@ async function loadCanonicalHistory(sessionId: string): Promise<ChatMessage[]> {
   return toCanonicalChatMessages(turns);
 }
 
-// A pending guardrail approval request (mirrors the backend payload).
-interface PermissionRequest {
-  id: string;
-  action: string;
-  reason: string;
-}
-
 interface CheckpointView {
   checkpoint_id: string;
   turn_number: number;
@@ -113,7 +106,6 @@ export function ChatView() {
   const [models, setModels] = useState<string[]>([]);
   const [model, setModel] = useState<string>("");
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [permission, setPermission] = useState<PermissionRequest | null>(null);
   const [agents, setAgents] = useState<CallableAgent[]>([]);
   const [agentId, setAgentId] = useState<string>(() => localStorage.getItem(ACTIVE_AGENT_KEY) || "orchestrator");
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -131,34 +123,6 @@ export function ChatView() {
   useEffect(() => {
     localStorage.setItem(CHAT_MODE_KEY, mode);
   }, [mode]);
-
-  // Listen for guardrail approval requests from the agent (high-risk actions
-  // like running a fuzzer) and surface an approve/deny prompt.
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    getTransport()
-      .listen<PermissionRequest>("chat:permission_request", (ev) => setPermission(ev.payload))
-      .then((u) => {
-        unlisten = u;
-      });
-    return () => {
-      if (unlisten) unlisten();
-    };
-  }, []);
-
-  async function answerPermission(approved: boolean) {
-    const req = permission;
-    if (!req) return;
-    setPermission(null);
-    try {
-      await getTransport().invoke("chat_answer_permission", { id: req.id, approved });
-    } catch (e) {
-      // Web mode has no chat_answer_permission endpoint; every other chat call
-      // is guarded the same way. Surface it rather than throwing an unhandled
-      // rejection.
-      toast({ title: t("chat.permissionDecisionFailed"), description: String(e), variant: "error" });
-    }
-  }
 
   // Resolve the per-project chat session and load its history. Keyed on the
   // active project so switching projects swaps to that project's own
@@ -647,27 +611,6 @@ export function ChatView() {
           </div>
         )}
       </div>
-
-      {/* Guardrail approval prompt (HITL) */}
-      {permission && (
-        <div
-          className="flex items-center justify-between gap-3 mx-4 mb-2 px-3 py-2 rounded-md border"
-          style={{ borderColor: "var(--accent)", background: "var(--surface-secondary)" }}
-        >
-          <div className="text-sm">
-            <span style={{ color: "var(--accent)" }}>{t("chat.approvalRequired")}</span> {permission.action}
-            <span className="text-text-secondary"> — {permission.reason}</span>
-          </div>
-          <div className="flex gap-2 shrink-0">
-            <Button variant="outline" size="sm" onClick={() => answerPermission(false)}>
-              {t("chat.deny")}
-            </Button>
-            <Button variant="primary" size="sm" onClick={() => answerPermission(true)}>
-              {t("common.approve")}
-            </Button>
-          </div>
-        </div>
-      )}
 
       {/* Composer */}
       <div style={{ padding: "var(--space-sm) var(--space-md) var(--space-md)" }}>

@@ -4,7 +4,7 @@ import { SchedulerRuntimeStatus, type CampaignSchedulerStatus } from "../compone
 import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useState, type ReactNode } from "react";
 import { Button, IconButton, EmptyState, Input, LoadingState, Select, SeverityBadge, Textarea, ViewHeader } from "../components/ui";
 import { Puzzle, BookOpen, Zap, Target, FileCode, Activity, Bug, Crosshair, Play, Loader2, Plus, Trash2, RotateCw, RotateCcw, Copy, Square, Bot, Shield, Database, Pencil, Save, X, Search, FilePlus, FolderOpen, Layers } from "lucide-react";
-import { getTransport, pickFile, pickFolder, emitDataChanged } from "../lib";
+import { getTransport, pickFile, pickFolder } from "../lib";
 import { isTauriEnvironment } from "../lib/transport";
 import { useI18n } from "../i18nContext";
 import { useConfirm } from "../providers/confirm";
@@ -1073,10 +1073,8 @@ export function KnowledgeView() {
 
 function DesktopKnowledgeView() {
   const { t } = useI18n();
-  const confirm = useConfirm();
   const [data, setData] = useState<KnowledgeSummary | null>(null);
   const [loading, setLoading] = useState(true);
-  const [clearing, setClearing] = useState(false);
 
   const load = () => {
     setLoading(true);
@@ -1085,32 +1083,6 @@ function DesktopKnowledgeView() {
       .then(setData)
       .catch(() => setData(null))
       .finally(() => setLoading(false));
-  };
-
-  const clear = async () => {
-    const total =
-      (data?.targets.length ?? 0) + (data?.runs.length ?? 0) + (data?.crashes.length ?? 0);
-    if (
-      !(await confirm({
-        title: t("knowledge.clearTitle"),
-        message: t("knowledge.clearMessage", { total }),
-        danger: true,
-        confirmLabel: t("common.clear"),
-      }))
-    ) {
-      return;
-    }
-    setClearing(true);
-    try {
-      await getTransport().invoke("clear_knowledge");
-      load();
-      // Other views (Workbench counts, corpus) reflect this wipe -- tell them.
-      emitDataChanged();
-    } catch {
-      /* surfaced by the empty state on reload */
-    } finally {
-      setClearing(false);
-    }
   };
 
   // Initial load (no synchronous setState in the effect body).
@@ -1139,16 +1111,6 @@ function DesktopKnowledgeView() {
           >
             {loading ? <Loader2 size={13} className="animate-spin" /> : <RotateCw size={13} />}
             {t("common.refresh")}
-          </button>
-          <button
-            onClick={() => void clear()}
-            disabled={clearing || !!empty || !data?.db_configured}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-solid bg-surface-primary transition-colors disabled:opacity-45 disabled:cursor-not-allowed"
-            style={{ borderColor: "var(--border)", color: "var(--error)" }}
-            title={t("knowledge.clearBtnTitle")}
-          >
-            {clearing ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
-            {t("common.clear")}
           </button>
         </div>
       </div>
@@ -1304,11 +1266,31 @@ export function AutomationView() {
     useState<CampaignConcurrencyLimits | null>(null);
   const [concurrencyLimitsLoaded, setConcurrencyLimitsLoaded] = useState(false);
   const [runtimeStatus, setRuntimeStatus] = useState<CampaignSchedulerStatus | null>(null);
+  const [arming, setArming] = useState(false);
 
   const projects = useMemo(() => {
     const all = [project, activeProject, ...recentProjects].filter(Boolean);
     return [...new Set(all)];
   }, [project, activeProject, recentProjects]);
+
+  // Grant or withdraw scheduled-run authorization. Granting asks first because
+  // it releases work held since startup; withdrawing is the safe direction.
+  const changeArming = async (armed: boolean) => {
+    if (armed && !(await confirm({
+      title: t("automation.runtime.armConfirmTitle"),
+      message: t("automation.runtime.armConfirmMessage"),
+      confirmLabel: t("automation.runtime.arm"),
+    }))) return;
+    setArming(true);
+    try {
+      const result = await getTransport().invoke<{ armed: boolean }>(armed ? "schedule_arm" : "schedule_disarm");
+      setRuntimeStatus((current) => (current ? { ...current, armed: result.armed } : current));
+    } catch (e) {
+      setError(`${t("automation.runtime.armFailed")}: ${String(e)}`);
+    } finally {
+      setArming(false);
+    }
+  };
 
   const automationRefresh = useMemo(
     () => createLatestRefresh({
@@ -1632,7 +1614,7 @@ export function AutomationView() {
         />
       )}
 
-      <SchedulerRuntimeStatus status={runtimeStatus} />
+      <SchedulerRuntimeStatus status={runtimeStatus} onArm={(armed) => void changeArming(armed)} busy={arming} />
       {project ? <CampaignAllocation key={project} project={project} /> : null}
 
       <ScheduleRecoveryPanel

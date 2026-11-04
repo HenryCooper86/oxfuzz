@@ -5,7 +5,7 @@ import { useProject } from "../providers/project";
 import { usePipeline } from "../providers/pipeline";
 import { useDiscoveryInventory } from "../providers/discovery";
 import { useTarget } from "../providers/target";
-import type { TargetInventory, HarnessReviewItem } from "../types";
+import type { TargetInventory, HarnessReviewItem, ViewType } from "../types";
 import { Button, Input, Select, ViewHeader, EmptyState } from "../components/ui";
 import { SandboxBanner } from "../components/SandboxBanner";
 const BuildDoctorPanel = lazy(() => import("../components/BuildDoctorPanel").then((module) => ({ default: module.BuildDoctorPanel })));
@@ -17,8 +17,9 @@ import { HarnessTournamentPanel } from "../components/HarnessTournamentPanel";
 import { OracleStudioPanel } from "../components/OracleStudioPanel";
 import {
   Crosshair, FolderOpen, Loader2, FileCode, Terminal, Database,
-  CheckCircle2, XCircle, ArrowRight, Sparkles, Archive, GitCompare, AlertTriangle,
+  CheckCircle2, XCircle, Sparkles, Archive, GitCompare, AlertTriangle,
 } from "lucide-react";
+import { HarnessReadyCard } from "../components/StageHandoff";
 import { lineDiff } from "../lib/diff";
 import { useFuzzingSettings } from "../hooks/useFuzzingSettings";
 import { enabledEngineOptions, fuzzingActionsEnabled } from "../lib/fuzzingSettings";
@@ -90,8 +91,10 @@ type StepStatus = "idle" | "loading" | "done" | "error";
 export function HarnessView({
   embedded = false,
   stepPrefix,
+  onNavigate,
 }: {
   embedded?: boolean;
+  onNavigate?: (view: ViewType) => void;
   // When embedded in the Fuzzing Workflow, the outer stage owns the top-level
   // numbering (harness is step 2), so these internal steps render as sub-steps
   // ("2.1"..."2.5") instead of a competing 1-5 that collides with the outer 3/4.
@@ -921,19 +924,7 @@ export function HarnessView({
 
           {/* Step 6: Ready to fuzz */}
           {promotionStatus === "done" && seedStatus === "done" && (
-            <div
-              className="surface-card flex items-center gap-3"
-              style={{ padding: "var(--space-md)", animation: "slideInUp 0.2s ease" }}
-            >
-              <CheckCircle2 size={20} style={{ color: "var(--success)" }} />
-              <div className="flex-1">
-                <span className="text-sm font-medium text-text-primary">{t("harness.readyToFuzz")}</span>
-                <p className="text-xs text-text-secondary mt-0.5">
-                  {t("harness.readyToFuzzHint", { target: selectedTarget, engine })}
-                </p>
-              </div>
-              <ArrowRight size={16} className="text-text-muted" />
-            </div>
+            <HarnessReadyCard target={selectedTarget} engine={engine} onNavigate={onNavigate} />
           )}
         </div>
       )}

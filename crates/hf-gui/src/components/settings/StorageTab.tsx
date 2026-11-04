@@ -6,6 +6,7 @@ import { getTransport, emitDataChanged } from "../../lib";
 import { isTauriEnvironment } from "../../lib/transport";
 import { useI18n } from "../../i18nContext";
 import { useToast } from "../ui/toastContext";
+import { useConfirm } from "../../providers/confirm";
 import { Button, Input } from "../ui";
 import { SettingsGroup, SettingsItem } from "../ui/SettingsGroup";
 
@@ -28,9 +29,10 @@ function DesktopStorageTab() {
   // The fuzz workspace location is resolved by the service (persistent, under
   // the per-user data dir, overridable via HF_WORKSPACE_DIR), not a config
   // field -- so show the real resolved path rather than a dead editable input.
+  const confirm = useConfirm();
   const [workspacePath, setWorkspacePath] = useState("");
-  const [confirmClear, setConfirmClear] = useState(false);
   const [clearing, setClearing] = useState(false);
+  const [deletingRecords, setDeletingRecords] = useState(false);
 
   useEffect(() => {
     getTransport()
@@ -42,10 +44,13 @@ function DesktopStorageTab() {
   }, []);
 
   async function clearWorkspace() {
-    if (!confirmClear) {
-      setConfirmClear(true);
-      return;
-    }
+    const ok = await confirm({
+      title: t("settings.storage.clearWorkspace"),
+      message: t("settings.storage.clearWorkspaceConfirm"),
+      danger: true,
+      confirmLabel: t("settings.storage.clearWorkspace"),
+    });
+    if (!ok) return;
     setClearing(true);
     try {
       await getTransport().invoke("clear_workspace");
@@ -56,7 +61,28 @@ function DesktopStorageTab() {
       toast({ title: t("settings.storage.clearFailed"), description: String(e), variant: "error" });
     } finally {
       setClearing(false);
-      setConfirmClear(false);
+    }
+  }
+
+  // Every project's persisted fuzzing records. Per-project deletion lives in
+  // Projects; this is the single all-project wipe in the app.
+  async function deleteAllRecords() {
+    const ok = await confirm({
+      title: t("settings.storage.deleteRecords"),
+      message: t("settings.storage.deleteRecordsConfirm"),
+      danger: true,
+      confirmLabel: t("common.delete"),
+    });
+    if (!ok) return;
+    setDeletingRecords(true);
+    try {
+      await getTransport().invoke("clear_knowledge");
+      emitDataChanged();
+      toast({ title: t("settings.storage.recordsDeleted"), variant: "success" });
+    } catch (e) {
+      toast({ title: t("settings.storage.deleteRecordsFailed"), description: String(e), variant: "error" });
+    } finally {
+      setDeletingRecords(false);
     }
   }
 
@@ -90,15 +116,18 @@ function DesktopStorageTab() {
             </span>
           </div>
           <div className="shrink-0">
-            <Button variant="danger" onClick={clearWorkspace} disabled={clearing}>
-              {clearing
-                ? t("settings.storage.clearing")
-                : confirmClear
-                  ? t("settings.storage.clickAgain")
-                  : t("settings.storage.clearWorkspace")}
+            <Button variant="danger" onClick={() => void clearWorkspace()} disabled={clearing}>
+              {clearing ? t("settings.storage.clearing") : t("settings.storage.clearWorkspace")}
             </Button>
           </div>
         </div>
+      </SettingsGroup>
+      <SettingsGroup title={t("settings.storage.records")}>
+        <SettingsItem title={t("settings.storage.deleteRecords")} description={t("settings.storage.deleteRecordsHint")}>
+          <Button variant="danger" onClick={() => void deleteAllRecords()} disabled={deletingRecords}>
+            {deletingRecords ? t("settings.storage.clearing") : t("settings.storage.deleteRecords")}
+          </Button>
+        </SettingsItem>
       </SettingsGroup>
     </div>
   );

@@ -181,7 +181,6 @@ export function Sidebar({ activeView, onNavigate, onNewTarget, onSelectTarget }:
   const { target } = useTarget();
   const { t } = useI18n();
   const { configured: defectDojoOn } = useDefectDojo();
-  const specialist = TOOL_GROUPS.some(group => group.items.some(item => item.view === activeView)) || activeView === "defectdojo";
 
   return (
     <nav
@@ -241,19 +240,14 @@ export function Sidebar({ activeView, onNavigate, onNewTarget, onSelectTarget }:
 
         <SectionLabel>{t("sidebar.workspace")}</SectionLabel>
         {PRIMARY_ITEMS.map(item => <NavButton key={item.view} item={item} active={activeView === item.view} onNavigate={onNavigate} />)}
-        <details key={specialist ? activeView : "primary"} open={specialist} className="mt-3">
-          <summary className="cursor-pointer rounded-md px-2 py-2 text-sm text-text-secondary">
-            {t("sidebar.moreTools")}{specialist ? ` · ${t(`nav.${activeView}`)}` : ""}
-          </summary>
-          {TOOL_GROUPS.map(group => <div key={group.label}>
-            <SectionLabel>{t(group.label)}</SectionLabel>
-            {group.items.map(item => <NavButton key={item.view} item={item} active={activeView === item.view} onNavigate={onNavigate} />)}
-          </div>)}
-          {defectDojoOn && <>
-            <SectionLabel>{t("sidebar.integrations")}</SectionLabel>
-            <DefectDojoButton active={activeView === "defectdojo"} onOpen={() => onNavigate("defectdojo")} />
-          </>}
-        </details>
+        {TOOL_GROUPS.map(group => <div key={group.label}>
+          <SectionLabel>{t(group.label)}</SectionLabel>
+          {group.items.map(item => <NavButton key={item.view} item={item} active={activeView === item.view} onNavigate={onNavigate} />)}
+        </div>)}
+        {defectDojoOn && <>
+          <SectionLabel>{t("sidebar.integrations")}</SectionLabel>
+          <DefectDojoButton active={activeView === "defectdojo"} onOpen={() => onNavigate("defectdojo")} />
+        </>}
       </div>
 
       {/* Footer: help and settings pinned at the bottom (Apple-style nav), then

@@ -8,6 +8,7 @@ import { StorageTab } from "../components/settings/StorageTab";
 import { I18nProvider } from "../i18n";
 import { ProjectContext } from "../providers/project";
 import { ConfirmContext } from "../providers/confirm";
+import { ToastContext } from "../components/ui/toastContext";
 
 const invoke = vi.hoisted(() => vi.fn());
 vi.mock("../lib", () => ({ getTransport: () => ({ invoke }), pickFile: vi.fn(), pickFolder: vi.fn(), emitDataChanged: vi.fn() }));
@@ -17,6 +18,8 @@ vi.mock("../lib", () => ({ getTransport: () => ({ invoke }), pickFile: vi.fn(), 
 let indexed: boolean;
 let cleared: boolean;
 let workspaceCleared: boolean;
+let clearKnowledgeFails: boolean;
+const toast = vi.fn();
 let container: HTMLDivElement;
 let root: Root;
 
@@ -26,6 +29,8 @@ beforeEach(() => {
   indexed = false;
   cleared = false;
   workspaceCleared = false;
+  clearKnowledgeFails = false;
+  toast.mockReset();
   invoke.mockReset();
   invoke.mockImplementation(async (command, args) => {
     if (command === "knowledge_stats") return {
@@ -47,7 +52,7 @@ beforeEach(() => {
     if (command === "knowledge_summary") return {
       db_configured: true, targets: cleared ? [] : [{ symbol: "retained_parser", kind: "Function", fit_score: 0.8, project: "/sample", location: "parser.c:1" }], runs: [], crashes: [],
     };
-    if (command === "clear_knowledge") { cleared = true; return null; }
+    if (command === "clear_knowledge") { if (clearKnowledgeFails) throw new Error("database locked"); cleared = true; return null; }
     if (command === "app_paths") return { config_dir: "/config", data_dir: "/data", workspace_dir: "/workspace" };
     if (command === "clear_workspace") { workspaceCleared = true; return null; }
     throw new Error(`Unexpected command: ${command}`);
@@ -64,11 +69,13 @@ afterEach(async () => {
   Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
 });
 
-async function mount(view: ReactNode, locale = "en") {
+async function mount(view: ReactNode, locale = "en", confirmed = true) {
   localStorage.setItem("hf_locale", locale);
   await act(async () => root.render(<I18nProvider>
     <ProjectContext.Provider value={{ activeProject: "/sample", recentProjects: ["/sample"], setActiveProject: () => undefined, addRecent: () => undefined, removeRecent: () => undefined, deleteProjectData: async () => undefined }}>
-      <ConfirmContext.Provider value={async () => true}>{view}</ConfirmContext.Provider>
+      <ToastContext.Provider value={{ toast }}>
+        <ConfirmContext.Provider value={async () => confirmed}>{view}</ConfirmContext.Provider>
+      </ToastContext.Provider>
     </ProjectContext.Provider>
   </I18nProvider>));
 }
@@ -113,22 +120,40 @@ describe("browser storage capabilities", () => {
     expect(invoke.mock.calls.some(([command]) => command === "app_paths" || command === "clear_workspace")).toBe(false);
   });
 
-  it("preserves desktop summary and explicitly confirmed global knowledge cleanup", async () => {
+  it("shows the desktop summary without an all-project wipe on the Knowledge page", async () => {
     Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} });
     await mount(<KnowledgeView />);
     expect(container.textContent).toContain("retained_parser");
-    await click("Clear");
-    expect(container.textContent).not.toContain("retained_parser");
-    expect(container.textContent).toContain("Nothing learned yet");
+    expect([...container.querySelectorAll("button")].some(button => button.textContent === "Clear")).toBe(false);
   });
 
-  it("preserves desktop workspace location and two-step cleanup", async () => {
+  it("asks before clearing the desktop workspace", async () => {
     Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} });
-    await mount(<StorageTab />);
+    await mount(<StorageTab />, "en", false);
     expect(container.querySelector("input")?.value).toBe("/workspace");
     await click("Clear Workspace");
     expect(workspaceCleared).toBe(false);
-    await click("Click again to confirm");
+    await mount(<StorageTab />, "en", true);
+    await click("Clear Workspace");
     expect(workspaceCleared).toBe(true);
+  });
+
+  it("deletes every project's fuzzing records only from Storage, after confirmation", async () => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} });
+    await mount(<StorageTab />, "en", false);
+    await click("Delete all fuzzing records");
+    expect(cleared).toBe(false);
+    await mount(<StorageTab />, "en", true);
+    await click("Delete all fuzzing records");
+    expect(cleared).toBe(true);
+    expect(toast).toHaveBeenCalledWith(expect.objectContaining({ variant: "success" }));
+  });
+
+  it("reports a failed record deletion instead of hiding it", async () => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} });
+    clearKnowledgeFails = true;
+    await mount(<StorageTab />);
+    await click("Delete all fuzzing records");
+    expect(toast).toHaveBeenCalledWith(expect.objectContaining({ variant: "error", description: expect.stringContaining("database locked") }));
   });
 });

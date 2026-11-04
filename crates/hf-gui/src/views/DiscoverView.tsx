@@ -152,6 +152,21 @@ export function DiscoverView({ embedded = false, onNavigate }: { embedded?: bool
     }
   }, [loading, pollRanking, rankingStatus, snapshot?.ranked?.ranking_source, snapshot?.ranked?.revision, snapshot?.rankedOperationId]);
 
+  // Stop the AI assessment on the service, not just the local polling. The
+  // poll keeps running and reports the operation's "cancelled" state; the
+  // heuristic scan already shown stays available.
+  const [stoppingRanking, setStoppingRanking] = useState(false);
+  const stopRanking = useCallback(async (operationId: string) => {
+    setStoppingRanking(true);
+    try {
+      await getTransport().invoke("ranked_discovery_cancel", { operationId });
+    } catch (cause) {
+      if (mountedRef.current) setError(String(cause));
+    } finally {
+      if (mountedRef.current) setStoppingRanking(false);
+    }
+  }, []);
+
   const browse = useCallback(async () => {
     setScanning(true);
     try {
@@ -533,6 +548,11 @@ export function DiscoverView({ embedded = false, onNavigate }: { embedded?: bool
         <div className="rounded-md px-3 py-2 text-sm text-text-secondary flex flex-wrap items-center justify-between gap-2"
           style={{ background: "var(--surface-active)" }} role="status" aria-live="polite">
           <span>{rankingMessage()}</span>
+          {rankingBusy && !loading && rankingStatus?.operation_id && (
+            <Button variant="outline" size="sm" disabled={stoppingRanking} onClick={() => void stopRanking(rankingStatus.operation_id)}>
+              {t("discover.stopAssessment")}
+            </Button>
+          )}
           {rankedResult?.reason_code === "no_provider" && onNavigate && (
             <Button variant="outline" size="sm" onClick={() => onNavigate("settings")}>{t("discover.settingsLink")}</Button>
           )}

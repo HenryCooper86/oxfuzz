@@ -57,6 +57,7 @@ function translate(key: string, params?: Record<string, string | number>) {
   // The real dictionary renders the offered formats inside this description;
   // echo the params so the assertion observes actual rendered output.
   if (key === "gui.reportDescription" && params) return `Report formats: ${params.formats}`;
+  if (key === "reports.pushConfirmMessage" && params) return `${key}: ${params.scope}`;
   if (!params) return key;
   return Object.entries(params).reduce(
     (text, [name, value]) => text.replace(`{${name}}`, String(value)),
@@ -108,6 +109,7 @@ describe("ReportsView interactions", () => {
     mocks.invoke.mockImplementation((command: string) => {
       if (command === "list_report_drafts") return Promise.resolve([draft]);
       if (command === "report_formats") return Promise.resolve(["md", "pdf"]);
+      if (command === "defectdojo_configured") return Promise.resolve(false);
       throw new Error(`unexpected ${command}`);
     });
 
@@ -127,6 +129,7 @@ describe("ReportsView interactions", () => {
     mocks.invoke.mockImplementation((command: string) => {
       if (command === "list_report_drafts") return Promise.resolve([draft]);
       if (command === "report_formats") return Promise.resolve(["md", "html"]);
+      if (command === "defectdojo_configured") return Promise.resolve(false);
       throw new Error(`unexpected ${command}`);
     });
 
@@ -143,6 +146,7 @@ describe("ReportsView interactions", () => {
     mocks.invoke.mockImplementation((command: string) => {
       if (command === "list_report_drafts") return Promise.resolve(deletes === 0 ? [draft] : []);
       if (command === "report_formats") return Promise.resolve(["md", "html"]);
+      if (command === "defectdojo_configured") return Promise.resolve(false);
       if (command === "delete_report_draft") {
         deletes += 1;
         // A second delete of the same draft reaches the service after the row
@@ -188,6 +192,7 @@ describe("ReportsView interactions", () => {
         { ...draft, project: "<redacted-path>" },
         { ...draft, id: "draft-2", title: "Other findings", project: "<redacted-path>" },
       ]);
+      if (command === "defectdojo_configured") return Promise.resolve(true);
       if (command === "push_report_to_defectdojo") {
         attempts += 1;
         return attempts === 1 ? publication.promise : Promise.reject(new Error("duplicate publication"));
@@ -207,5 +212,43 @@ describe("ReportsView interactions", () => {
     await act(async () => publication.resolve({ findings_pushed: 2, reimported: false, url: null }));
     expect(container.textContent).toContain("reports.pushed");
     expect(buttons.every((button) => !button.disabled)).toBe(true);
+  });
+
+  it("hides the DefectDojo push when DefectDojo is not configured", async () => {
+    mocks.invoke.mockImplementation((command: string) => {
+      if (command === "list_report_drafts") return Promise.resolve([draft]);
+      if (command === "defectdojo_configured") return Promise.resolve(false);
+      return Promise.resolve(["md"]);
+    });
+    await act(async () => root.render(<StrictMode><Providers><ReportsView /></Providers></StrictMode>));
+    await flush();
+    expect(container.textContent).toContain("Parser findings");
+    expect([...container.querySelectorAll("button")].some((button) => button.textContent === "DefectDojo")).toBe(false);
+  });
+
+  it("states what will be sent and asks before pushing", async () => {
+    const confirm = vi.fn<ConfirmFn>(async () => false);
+    mocks.invoke.mockImplementation((command: string) => {
+      if (command === "list_report_drafts") return Promise.resolve([draft]);
+      if (command === "defectdojo_configured") return Promise.resolve(true);
+      if (command === "push_report_to_defectdojo") return Promise.resolve({ findings_pushed: 1, reimported: false, url: null });
+      return Promise.resolve(["md"]);
+    });
+    await act(async () => root.render(<StrictMode><Providers confirm={confirm}><ReportsView /></Providers></StrictMode>));
+    await flush();
+    const push = [...container.querySelectorAll("button")].find((button) => button.textContent === "DefectDojo")!;
+    await act(async () => push.click());
+    expect(confirm).toHaveBeenCalledTimes(1);
+    const message = confirm.mock.calls[0][0].message ?? "";
+    expect(message).toContain("reports.pushConfirmMessage");
+    expect(message).toContain("/workspace/project");
+    expect(message).toContain("src/parser.c::parse");
+    // Cancelled: nothing is published.
+    expect(mocks.invoke).not.toHaveBeenCalledWith("push_report_to_defectdojo", expect.anything());
+
+    confirm.mockResolvedValue(true);
+    await act(async () => push.click());
+    await flush();
+    expect(mocks.invoke).toHaveBeenCalledWith("push_report_to_defectdojo", { reportId: "draft-1" });
   });
 });

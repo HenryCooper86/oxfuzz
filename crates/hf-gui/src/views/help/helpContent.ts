@@ -169,9 +169,9 @@ loop, not a final step.
   ("discover targets and fuzz the riskiest one") and it drives the tools for
   you, asking approval at the gates.
 
-The **Next** button opens the current stage without starting work. Expand
-**More tools** in the sidebar for dedicated stage screens if you prefer to work them
-one at a time.
+The **Next** button opens the current stage without starting work. The
+sidebar's **Pipeline** section has a dedicated screen for each stage if you
+prefer to work them one at a time.
 `;
 
 // --------------------------------------------------------------------------
@@ -221,8 +221,10 @@ tool calls, with per-project history.
 - **Choose an agent** (default "orchestrator") and a **model**.
 - **Undo last turn**, **Clear history**, **roll back to a turn**, and create
   **branches** of a conversation.
-- **Approve / Deny** guardrail prompts inline when the agent hits an approval
-  gate.
+- **Approve / Deny** guardrail prompts when the agent hits an approval gate.
+  The prompt appears over whichever screen you are on, shows the action, its
+  reason, and its risk tier, and is denied automatically if unanswered for
+  five minutes. Deny is the default choice and Escape selects it.
 
 **Sending:** if "Send on Enter" is on (Settings), Enter sends and Shift+Enter is
 a newline; if off, **Cmd/Ctrl+Enter** sends.
@@ -265,7 +267,9 @@ most promising candidates with AI.
 - Review the three AI factors: bug potential, reachable code, and harness
   feasibility. **Scan only** identifies candidates without an AI assessment.
 - If no AI provider is set up, use **AI Settings**. If assessment fails, use
-  **Retry AI assessment** to assess the retained scan again.
+  **Retry AI assessment** to assess the retained scan again. **Stop AI
+  assessment** cancels a running assessment on the service; the scan results
+  stay available.
 - Choose **Use this target and continue** to pass the chosen function to Harness.
 - Expand a candidate to see its **call tree**. Expanding fetches per-function
   coverage -- meaningful only after at least one run.
@@ -488,7 +492,10 @@ const SCREEN_REPORTS = `
 **Purpose:** the home for every composed report across projects and targets.
 
 **What you can do:** filter reports, **Open** one to preview and export it
-(Markdown / HTML; desktop also offers supported PDF / DOCX exports), **push** it to DefectDojo, or delete it.
+(Markdown / HTML; desktop also offers supported PDF / DOCX exports), or delete
+it. When DefectDojo is configured, **DefectDojo** pushes the triaged crashes of
+the latest finished run for the report's project and target (not the report's
+text); a confirmation names that scope before anything is sent.
 
 **Where they come from:** choose **Compose Report** in Triage after reviewing
 findings, or compose a report in the Workbench. Reports lists saved drafts.
@@ -590,7 +597,9 @@ full-text (BM25) search over your project's code and documents.
 - **Index project** to make it searchable, then **Search**.
 - **Add document** to ingest a PDF, Office file, or HTML page (converted to
   text).
-- **Clear** the knowledge base.
+
+Deleting every project's records lives in **Settings > Storage**; delete one
+project's data from **Projects**.
 
 **Preconditions:** search and ingest need an active project, and search is
 disabled until the project has been indexed. A configured database
@@ -611,6 +620,12 @@ resume, or delete campaigns, and set the max number that run concurrently. An
 \`event\` campaign fires when the service emits the chosen event:
 \`crash.found\` (triage classified new crashes), \`run.completed\`, or
 \`run.failed\` (a started fuzz run terminated).
+
+**Authorizing scheduled runs:** the scheduler starts unauthorized every time
+the app starts, so work restored from before a restart is held. Choose
+**Authorize scheduled runs** (it asks first) to release it, or **Withdraw
+authorization** to hold new work again; campaigns already running continue.
+The app never authorizes on its own.
 
 **Preconditions (important):** only targets with a **promoted (approved)
 harness** are schedulable. If a project has none, the form explains this and the
@@ -707,8 +722,10 @@ One **Save Changes** button persists the active editable section.
 - **Automotive** -- configure the separately sandboxed sidecar, protocols,
   modes, limits, and explicit physical-bench allowlists when that feature is
   available.
-- **Storage** -- the service-resolved workspace path and a confirmed
-  **Clear Workspace** operation.
+- **Storage** -- the service-resolved workspace path, a confirmed
+  **Clear Workspace** operation (on-disk files only), and a confirmed
+  **Delete all fuzzing records** operation (database records for every
+  project). Both are desktop-only.
 - **Integrations** -- DefectDojo connection and **Test connection**.
 - **Issue Tracker** -- GitHub/GitLab repo and token for filing issues, with
   **Test connection**.

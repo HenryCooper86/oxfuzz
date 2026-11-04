@@ -47,6 +47,8 @@ const CORE_STAGES: CoreStage[] = [
 ];
 
 type SectionId = CoreStageId | "corpus";
+const SECTION_IDS: readonly SectionId[] = ["discover", "harness", "run", "triage", "corpus"];
+const isSection = (view: ViewType): view is SectionId => (SECTION_IDS as readonly string[]).includes(view);
 
 export function WorkflowView({ onNavigate }: { onNavigate?: (view: ViewType) => void } = {}) {
   const { t } = useI18n();
@@ -75,6 +77,20 @@ export function WorkflowView({ onNavigate }: { onNavigate?: (view: ViewType) => 
   async function chooseProject() {
     const path = await pickFolder();
     if (path) setActiveProject(path);
+  }
+
+  // Navigation requested by an embedded stage. A stage this workflow contains is
+  // expanded in place, "workflow" re-opens the current stage, and any other view
+  // (Run History, Settings, ...) leaves the workflow through the app navigation.
+  function navigateFromStage(view: ViewType) {
+    if (view !== "workflow" && !isSection(view)) {
+      onNavigate?.(view);
+      return;
+    }
+    if (gated) return;
+    const section = view === "workflow" ? activeStage : view;
+    setExpanded(section);
+    sectionRefs.current[section]?.querySelector("button")?.focus();
   }
 
   const stageDone = (id: CoreStageId): boolean => coreById[id]?.done ?? false;
@@ -179,18 +195,7 @@ export function WorkflowView({ onNavigate }: { onNavigate?: (view: ViewType) => 
                   <Component
                     embedded
                     stepPrefix={String(n)}
-                    onNavigate={(view) => {
-                      if (view === "settings") {
-                        onNavigate?.(view);
-                        return;
-                      }
-                      // Stay in the workflow: expand the requested stage's
-                      // section (its ViewType id matches the section id).
-                      if (!gated) {
-                        setExpanded(view as SectionId);
-                        sectionRefs.current[view as SectionId]?.querySelector("button")?.focus();
-                      }
-                    }}
+                    onNavigate={navigateFromStage}
                   />
                 </div>
               </div>
@@ -230,7 +235,7 @@ export function WorkflowView({ onNavigate }: { onNavigate?: (view: ViewType) => 
         {!gated && expanded === "corpus" && (
           <div style={{ padding: "0 14px 16px", borderTop: "1px solid var(--border)" }}>
             <div style={{ paddingTop: "14px" }}>
-              <Suspense fallback={<div role="status">{t("common.loading")}</div>}><CorpusView embedded onNavigate={(view) => { if (!gated) setExpanded(view as SectionId); }} /></Suspense>
+              <Suspense fallback={<div role="status">{t("common.loading")}</div>}><CorpusView embedded onNavigate={navigateFromStage} /></Suspense>
             </div>
           </div>
         )}

@@ -293,7 +293,11 @@ still alive. Startup, stopped loops, missing scheduler, and disarmed execution
 are displayed separately. The recovery producer is finite and its normal
 completion does not mark the runtime failed. Failure directs the operator to
 inspect service logs and restart the service; the UI never silently rearms or
-restarts work. This reports loop liveness, not successful dispatch or quiescence
+restarts work. While the runtime is running, Automation offers an explicit
+**Authorize scheduled runs** action (confirmed before it is sent) and
+**Withdraw authorization**. The desktop shell calls the scheduler's `arm` and
+`disarm` through `schedule_arm` / `schedule_disarm`; the browser build uses
+`POST` / `DELETE /schedule/arm`. Both reply `{ "armed": bool }`. This reports loop liveness, not successful dispatch or quiescence
 of campaigns during shutdown.
 
 ## Event cascade budget
