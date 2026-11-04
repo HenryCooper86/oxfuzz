@@ -23,7 +23,7 @@ it.each(["retained", "current"] as const)("requires an explicit %s review and la
     expect(host.textContent).toContain(review.seed); expect(host.textContent).toContain(review.target);
     expect(mocks.invoke).toHaveBeenCalledWith("replay_review", { runId: "original", inputs });
     if (inputs === "retained") expect(host.textContent).toContain(review.input_manifest_sha256);
-    expect(host.textContent).toContain(inputs === "retained" ? "retained inputs" : "current promoted harness");
+    expect(host.textContent).toContain(inputs === "retained" ? "retained inputs" : "current approved harness");
     expect(mocks.replayRun).not.toHaveBeenCalled();
     await act(async () => button(startLabel).click());
     expect(mocks.replayRun).toHaveBeenCalledWith(review);

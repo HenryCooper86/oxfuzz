@@ -30,6 +30,9 @@ export function DefectDojoView({ onBack }: { onBack: () => void }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const rafRef = useRef<number | null>(null);
   const [status, setStatus] = useState<DefectDojoStatus | null>(null);
+  // A failed status read is shown with Retry; otherwise the view would say
+  // "Checking" forever.
+  const [statusError, setStatusError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
 
   const ready = status?.state === "ready";
@@ -39,8 +42,8 @@ export function DefectDojoView({ onBack }: { onBack: () => void }) {
     () =>
       getTransport()
         .invoke<DefectDojoStatus>("defectdojo_status")
-        .then(setStatus)
-        .catch(() => {}),
+        .then((next) => { setStatus(next); setStatusError(null); })
+        .catch((e) => setStatusError(String(e))),
     [],
   );
 
@@ -169,8 +172,13 @@ export function DefectDojoView({ onBack }: { onBack: () => void }) {
               <div className="text-sm text-text-secondary text-center" style={{ maxWidth: "460px" }}>
                 {booting
                   ? t("defectdojo.starting")
-                  : (status?.message ?? t("defectdojo.checking"))}
+                  : statusError
+                    ? `${t("defectdojo.statusFailed")}: ${statusError}`
+                    : (status?.message ?? t("defectdojo.checking"))}
               </div>
+              {statusError && !booting && (
+                <Button variant="outline" size="sm" onClick={() => void refresh()}>{t("common.retry")}</Button>
+              )}
               {status?.url && (
                 <div className="text-xs font-mono text-text-muted">{status.url}</div>
               )}

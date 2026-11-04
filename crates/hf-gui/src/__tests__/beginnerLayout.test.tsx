@@ -14,7 +14,7 @@ it("groups build configuration in optional advanced tools after the beginner exp
   const host = document.createElement("div"); const root = createRoot(host);
   try {
     await act(async () => root.render(<I18nProvider><HarnessView /></I18nProvider>));
-    expect(host.textContent).toContain("A harness is a small test driver");
+    expect(host.textContent).toContain("A harness is a small program");
     const details = [...host.querySelectorAll("details")].find(d => d.querySelector("summary")?.textContent === "Advanced tools (optional)");
     expect(details?.textContent).toContain("Build diagnosis fixture");
   } finally { await act(async () => root.unmount()); vi.unstubAllGlobals(); }

@@ -289,3 +289,21 @@ it("shows the app's active project instead of a page-local path when opened on i
     mocks.invoke.mockReset();
   }
 });
+
+it("says '1 candidate found' for a single candidate", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const single = { project_root: "/sample", candidates: [first], call_graph: {} };
+  mocks.invoke.mockImplementation(async (command: string, args?: { operationId?: string }) => {
+    if (command === "ranked_discovery_start") return "one-1";
+    if (command === "ranked_discovery_status") return { operation_id: args?.operationId, state: "completed", revision: 2 };
+    if (command === "ranked_discovery_result") return { operation_id: args?.operationId, revision: 2, inventory: single, assessments: [], assessed_count: 0, total_count: 1, ranking_source: "heuristic", reason_code: "no_provider" };
+    return false;
+  });
+  const host = document.createElement("div"); document.body.append(host); const root = createRoot(host);
+  try {
+    await act(async () => root.render(<I18nProvider><DiscoveryProvider><DiscoverView embedded onNavigate={vi.fn()} /></DiscoveryProvider></I18nProvider>));
+    await act(async () => [...host.querySelectorAll("button")].find(button => button.textContent === "Discover")!.click());
+    expect(host.textContent).toContain("1 candidate found");
+    expect(host.textContent).not.toContain("1 candidates found");
+  } finally { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); mocks.invoke.mockReset(); }
+});

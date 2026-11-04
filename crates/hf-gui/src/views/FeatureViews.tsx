@@ -2,7 +2,7 @@ import { CampaignAllocation } from "../components/CampaignAllocation";
 import { KnowledgeIndexDetails, type KnowledgeIndexDetailsStatus } from "../components/KnowledgeIndexDetails";
 import { SchedulerRuntimeStatus, type CampaignSchedulerStatus } from "../components/SchedulerRuntimeStatus";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useState, type ReactNode } from "react";
-import { Button, IconButton, EmptyState, Input, LoadingState, Select, SeverityBadge, Textarea, ViewHeader } from "../components/ui";
+import { Button, IconButton, EmptyState, ErrorState, Input, LoadingState, Select, SeverityBadge, Textarea, ViewHeader } from "../components/ui";
 import { Puzzle, BookOpen, Zap, Target, FileCode, Activity, Bug, Crosshair, Play, Loader2, Plus, Trash2, RotateCw, RotateCcw, Copy, Square, Bot, Shield, Database, Pencil, Save, X, Search, FilePlus, FolderOpen, Layers } from "lucide-react";
 import { getTransport, pickFile, pickFolder } from "../lib";
 import { isTauriEnvironment } from "../lib/transport";
@@ -221,11 +221,16 @@ export function AgentsView() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const reload = () => getTransport().invoke<AgentDefinition[]>("list_agents").then(setAgents).catch(() => {});
+  // A failed list load is shown as an error, never as "no agents".
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const reload = () => getTransport().invoke<AgentDefinition[]>("list_agents")
+    .then((d) => { setAgents(d); setLoadError(null); })
+    .catch((e) => setLoadError(String(e)));
   useEffect(() => {
     let cancelled = false;
+    // Header details are optional context; the agent list below reports its own failure.
     getTransport().invoke<AgentInfo>("agent_info").then((d) => !cancelled && setInfo(d)).catch(() => {});
-    getTransport().invoke<AgentDefinition[]>("list_agents").then((d) => !cancelled && setAgents(d)).catch(() => {});
+    getTransport().invoke<AgentDefinition[]>("list_agents").then((d) => !cancelled && setAgents(d)).catch((e) => !cancelled && setLoadError(String(e)));
     getTransport().invoke<{ name: string; description: string }[]>("agent_tools").then((d) => !cancelled && setTools(d)).catch(() => {});
     getTransport().invoke<SkillDefinition[]>("list_skills").then((d) => !cancelled && setSkills(d)).catch(() => {});
     return () => {
@@ -368,7 +373,10 @@ export function AgentsView() {
         />
       ) : (
         <div className="flex flex-col gap-2">
-          {agents.length === 0 && (
+          {loadError && (
+            <ErrorState title={t("agents.loadFailed")} message={loadError} action={<Button variant="outline" size="sm" onClick={() => void reload()}>{t("common.retry")}</Button>} />
+          )}
+          {!loadError && agents.length === 0 && (
             <EmptyState icon={<Bot size={20} />} hint={t("agents.empty")} />
           )}
           {agents.map((a) => (
@@ -636,7 +644,11 @@ export function SkillsView() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const reload = () => getTransport().invoke<SkillDefinition[]>("list_skills").then(setSkills).catch(() => {});
+  // A failed list load is shown as an error, never as "no skills".
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const reload = () => getTransport().invoke<SkillDefinition[]>("list_skills")
+    .then((d) => { setSkills(d); setLoadError(null); })
+    .catch((e) => setLoadError(String(e)));
   useEffect(() => {
     let cancelled = false;
     getTransport()
@@ -647,7 +659,12 @@ export function SkillsView() {
           setLoaded(true);
         }
       })
-      .catch(() => !cancelled && setLoaded(true));
+      .catch((e) => {
+        if (!cancelled) {
+          setLoadError(String(e));
+          setLoaded(true);
+        }
+      });
     return () => {
       cancelled = true;
     };
@@ -762,7 +779,10 @@ export function SkillsView() {
       ) : (
         <div className="flex flex-col gap-2">
           {!loaded && <LoadingState label={t("skills.loading")} />}
-          {loaded && skills.length === 0 && (
+          {loaded && loadError && (
+            <ErrorState title={t("skills.loadFailed")} message={loadError} action={<Button variant="outline" size="sm" onClick={() => void reload()}>{t("common.retry")}</Button>} />
+          )}
+          {loaded && !loadError && skills.length === 0 && (
             <EmptyState icon={<Puzzle size={20} />} hint={t("skills.empty")} />
           )}
           {skills.map((s) => (
@@ -1075,13 +1095,15 @@ function DesktopKnowledgeView() {
   const { t } = useI18n();
   const [data, setData] = useState<KnowledgeSummary | null>(null);
   const [loading, setLoading] = useState(true);
+  // A failed read is shown as an error, never as "nothing learned yet".
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const load = () => {
     setLoading(true);
     getTransport()
       .invoke<KnowledgeSummary>("knowledge_summary")
-      .then(setData)
-      .catch(() => setData(null))
+      .then((d) => { setData(d); setLoadError(null); })
+      .catch((e) => { setData(null); setLoadError(String(e)); })
       .finally(() => setLoading(false));
   };
 
@@ -1091,7 +1113,9 @@ function DesktopKnowledgeView() {
     getTransport()
       .invoke<KnowledgeSummary>("knowledge_summary")
       .then((d) => !cancelled && setData(d))
-      .catch(() => !cancelled && setData(null))
+      .catch((e) => {
+        if (!cancelled) { setData(null); setLoadError(String(e)); }
+      })
       .finally(() => !cancelled && setLoading(false));
     return () => {
       cancelled = true;
@@ -1116,6 +1140,10 @@ function DesktopKnowledgeView() {
       </div>
 
       <KnowledgeBaseSearch />
+
+      {loadError && (
+        <ErrorState title={t("knowledge.loadFailed")} message={loadError} action={<Button variant="outline" size="sm" onClick={load}>{t("common.retry")}</Button>} />
+      )}
 
       {data && !data.db_configured && (
         <EmptyState icon={<BookOpen size={20} />} hint={t("knowledge.emptyNoDb")} />

@@ -71,7 +71,7 @@ it("carries the promoted exact selector through real Harness, Run, Corpus and re
   const flush = async () => { await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); }); };
   const click = async (label: string) => { const button = [...host.querySelectorAll("button")].find(item => item.textContent === label); expect(button, host.textContent ?? "").toBeTruthy(); await act(async () => button!.click()); await flush(); };
   await act(async () => mount()); await flush();
-  await click("Promote selected attempt");
+  await click("Approve selected attempt");
   expect(host.querySelector('[data-testid="selected-target"]')!.textContent).toBe(selector);
   // Discovery began for the old bare selection; its late reply must preserve the promoted identity.
   await act(async () => finishDiscovery!()); await flush();

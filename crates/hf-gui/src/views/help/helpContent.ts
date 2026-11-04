@@ -38,7 +38,7 @@ const WELCOME = `
 # Welcome to oxfuzz
 
 **oxfuzz is an AI-assisted fuzzing workbench.** You point it at a codebase
-and it ranks candidate targets, drafts and qualifies test harnesses, runs real
+and it ranks candidate targets, drafts and smoke-tests harnesses, runs real
 fuzzing engines inside a mandatory sandbox, and retains evidence for the bugs
 it finds. Human approval is bound to the exact harness revision allowed to
 enter a full campaign.
@@ -59,10 +59,10 @@ depth so nothing dangerous happens without you:
 - **Sandboxed execution.** Every harness build and fuzz run happens inside a
   Docker sandbox, never directly on your machine.
 - **Human-in-the-loop (HITL) gates.** Generated harness source is reviewed by an
-  LLM triage step *and* by you before it is promoted for full campaigns.
+  LLM triage step *and* by you before you approve it for full fuzz runs.
 - **No generated host execution.** Generated harnesses and fuzzing engines
-  never execute on the host. Approval authorizes the exact promoted revision
-  for a bounded sandboxed campaign; it never weakens isolation.
+  never execute on the host. Approval authorizes the exact approved revision
+  for a time-limited sandboxed run; it never weakens isolation.
 
 ## Who it is for
 
@@ -93,7 +93,7 @@ covered in the project README.
 
 | You need | Why |
 | --- | --- |
-| **An AI connection** | The AI writes test drivers and drafts bug reports. Hosted providers need an API key; local Ollama does not. |
+| **An AI connection** | The AI writes harnesses and drafts bug reports. Hosted providers need an API key; local Ollama does not. |
 | **Docker** | Runs the sandbox that isolates untrusted code. Install OrbStack or Docker Desktop; the app can start Docker for you. |
 | **A project to test** | A folder of C or C++ source works best today. |
 
@@ -115,7 +115,7 @@ inside the sandbox image.
    **Check again** refreshes its status. Continue becomes available when the
    service reports the runtime ready.
 3. **Start a project** -- click **Open project workflow**, then choose a folder.
-   The workflow guides you through targets, test drivers, campaigns and findings.
+   The workflow guides you through targets, harnesses, fuzz runs and findings.
 
 **Set up later** lets you explore without marking setup complete. The reminder
 survives restarts; use **Finish setup** to return. Completing setup does not
@@ -321,12 +321,12 @@ a harness was already built earlier, this screen hydrates it and shows an
 download its JSON, and paste a human or external-tool submission. External
 provenance requires a tool name and can include a model, response ID, and repair
 parent. Source is limited to 64 KiB of UTF-8. Import is read-only with respect
-to execution. **Qualify in sandbox** is a separate action; all attempt results
+to execution. **Smoke-test in sandbox** is a separate action; all attempt results
 and failures stay visible for deterministic ranking.
 Ranking compares attempts for the selected immutable submission. The selected
 attempt shows its independent review, digests, lint, and smoke result before
-you explicitly promote an exact smoke-passed attempt. Keep the retained
-submission ID and retained attempt ID: promotion names the attempt ID, not a
+you explicitly approve an exact attempt that passed its smoke test. Keep the
+retained submission ID and retained attempt ID: approval names the attempt ID, not a
 fresh draft. For duplicate file-local symbols, the service-returned
 file-qualified target selector identifies the reviewed target; the displayed
 symbol alone is insufficient.
@@ -360,7 +360,7 @@ Run History's interrupted category.
   Harness).
 
 **Preconditions (important):** a normal run needs a target whose harness is
-both **built** (a real on-disk check) **and approved** (promoted for the matching
+both **built** (a real on-disk check) **and approved** (for the matching
 engine). The target label tells you which: "(approved)", "(approval required)",
 or "(not built)". Warnings link straight to the Harness screen to fix it. A
 Syzkaller kernel campaign instead needs a project plus kernel artifacts (bzImage,
@@ -436,7 +436,7 @@ the selected target. The inventory reports the current input and byte totals.
 
 **Gotchas:** the corpus is scoped to the selected target's workspace. With no
 target it prompts you to pick one in Harness. Engine-backed actions require the
-exact promoted, smoke-qualified harness revision and run only in the sandbox.
+exact approved harness revision that passed its smoke test, and run only in the sandbox.
 The screen reports why an action is unavailable. Opening or refreshing this
 screen checks retained state only; it does not discover targets or run engines.
 
@@ -448,7 +448,7 @@ the existing controls. Preparation, navigation, history reads, and attachment
 do not run a provider, harness, or fuzzer. Choose **Review replay** for a seeded
 baseline, inspect the retained seed and duration and current resource limits,
 then choose **Start reviewed replay**. It uses the original project and current
-promoted harness and corpus. Track or stop the new campaign in Run. Keep every
+approved harness and corpus. Track or stop the new campaign in Run. Keep every
 other compared setting unchanged. Ordinary Run chooses a new
 seed. A legacy baseline without a retained seed needs a new seeded baseline.
 After a later terminal run exists, refresh and explicitly attach it; the
@@ -540,7 +540,7 @@ crashes, duration).
 conditions (same target, engine, duration, resources, sanitizer, corpus, and
 environment).
 
-Expand a run to read its retained **seven-step Run closeout** ladder. Opening a row never
+Expand a run to read its retained **eight-step Run closeout** ladder. Opening a row never
 starts analysis. **Analyze / Resume** is explicit and is available only for a
 terminal harness-backed campaign. Retryable failures and blocked dependencies
 remain pending. Runs without exact retained scope explain why the action is
@@ -617,7 +617,7 @@ const SCREEN_AUTOMATION = `
 project's targets on an interval, a cron schedule, once, or when a fuzzing event
 occurs.
 
-**What you can do:** choose a project folder, pick a scope (all promoted targets
+**What you can do:** choose a project folder, pick a scope (all approved targets
 or a single target), a trigger (interval / cron / once / event), a per-run
 duration, and a budget (max runs or minutes), then **Schedule** it. Pause,
 resume, or delete campaigns, and set the max number that run concurrently. An
@@ -631,8 +631,8 @@ the app starts, so work restored from before a restart is held. Choose
 authorization** to hold new work again; campaigns already running continue.
 The app never authorizes on its own.
 
-**Preconditions (important):** only targets with a **promoted (approved)
-harness** are schedulable. If a project has none, the form explains this and the
+**Preconditions (important):** only targets with an **approved harness** are
+schedulable. If a project has none, the form explains this and the
 **Schedule** button stays disabled. Give the campaign an absolute project folder
 -- it owns its path independently of the project you have open. Intervals must be
 at least 10 seconds; cron needs five fields; "once" needs an RFC3339 timestamp.
@@ -791,7 +791,7 @@ Common messages and what they mean.
 
 ## Automation
 
-- **"This project has no promoted harness yet"** -- promote a harness first;
+- **"This project has no approved harness yet"** -- approve a harness first;
   only approved targets are schedulable.
 - **"Interval must be ... >= 10", "Cron must have 5 fields", "Once must be an
   RFC3339 timestamp"** -- fix the trigger value.
@@ -860,8 +860,9 @@ const REF_GLOSSARY = `
   crashes that are really the same bug.
 - **Sandbox** -- the isolated Docker environment where untrusted code is built
   and run so it cannot harm your machine.
-- **Promote / Approve** -- the human step that marks a smoke-tested harness as
-  trusted for full campaigns.
+- **Approve** -- the human step that marks a smoke-tested harness as trusted
+  for full fuzz runs. The CLI and API call this \`promote\` and the status
+  \`Promoted\`.
 - **Smoke test** -- a short fuzz run that confirms a fresh harness actually
   exercises the target before a full campaign.
 - **HITL (human-in-the-loop)** -- the principle that a person approves the
@@ -894,7 +895,7 @@ export const HELP_SECTIONS: HelpSection[] = [
   { id: "agents", group: "library", title: "Agents", keywords: "roles tools skills system prompt autonomy custom built-in", body: SCREEN_AGENTS },
   { id: "skills", group: "library", title: "Skills", keywords: "playbooks domain built-in custom root.md", body: SCREEN_SKILLS },
   { id: "knowledge", group: "library", title: "Knowledge", keywords: "bm25 search index ingest documents pdf learned", body: SCREEN_KNOWLEDGE },
-  { id: "automation", group: "library", title: "Automation", keywords: "schedule campaign cron interval headless promoted concurrency budget", body: SCREEN_AUTOMATION },
+  { id: "automation", group: "library", title: "Automation", keywords: "schedule campaign cron interval headless approved promoted concurrency budget", body: SCREEN_AUTOMATION },
   { id: "automotive", group: "library", title: "Automotive", keywords: "can uds pcap offline vcan replay sidecar physical bench policy evidence ai campaign report export state", body: SCREEN_AUTOMOTIVE },
   { id: "defectdojo", group: "library", title: "DefectDojo", keywords: "vulnerability management findings embed push integration", body: SCREEN_DEFECTDOJO },
 

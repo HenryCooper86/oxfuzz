@@ -561,7 +561,7 @@ function MorningHealth({ summary, loading, error, t, onSelect }: { onSelect: (id
   const groups: Array<[string, string[]]> = [["runs.healthFailed", summary.failed], ["runs.healthStalled", summary.stalled], ["runs.healthInterrupted", summary.interrupted], ["runs.healthUnprocessed", summary.unprocessed]];
   return <section className="surface-card flex flex-col gap-2" style={{ padding: "var(--space-md)" }} aria-label={t("runs.healthTitle")}>
     <span className="text-sm font-semibold">{t("runs.healthTitle")}</span>
-    {groups.map(([label, ids]) => <div key={label} className="text-xs"><span className="text-text-muted">{t(label)}: </span>{ids.length === 0 ? t("runs.healthMeasuredZero") : ids.map((id) => <a key={`${label}:${id}`} href={`#run-${id}`} className="mr-1" onClick={() => onSelect(id)}>{id}</a>)}</div>)}
+    {groups.map(([label, ids]) => <div key={label} className="text-xs"><span className="text-text-muted">{t(label)}: </span>{ids.length === 0 ? t("runs.healthMeasuredZero") : ids.map((id) => <a key={`${label}:${id}`} href={`#run-${id}`} className="mr-1 font-mono" title={id} onClick={() => onSelect(id)}>{id.slice(0, 8)}</a>)}</div>)}
   </section>;
 }
 

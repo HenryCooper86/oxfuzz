@@ -28,7 +28,7 @@ it("attaches source against the exact active revision and asks the parent to ref
   await mount(); await submit();
   expect(mocks.invoke).toHaveBeenCalledWith("attach_managed_mutator", { project: "/project", target: "parse", engine: "afl++", expectedHarnessId: revision, source: "size_t afl_custom_fuzz(void);" });
   expect(imported).toHaveBeenCalledTimes(1);
-  expect(host.textContent).toContain("needs smoke qualification and human approval");
+  expect(host.textContent).toContain("needs a new smoke test and human approval");
 });
 it("ignores an attachment response after its selected harness panel is removed", async () => {
   let resolve: (value: unknown) => void = () => {};

@@ -531,7 +531,7 @@ export function DiscoverView({ embedded = false, onNavigate }: { embedded?: bool
       {inventory && !loading && (
         <div className="flex flex-col gap-2" style={{ animation: "slideInUp 0.2s ease" }}>
           <div className="text-xs text-text-secondary flex flex-wrap gap-2 items-center">
-            <span>{t("discover.candidatesFound", {
+            <span>{t(semgrepPresentation.candidates.length === 1 ? "discover.candidateFound" : "discover.candidatesFound", {
               n: semgrepPresentation.candidates.length,
             })}</span>
           </div>

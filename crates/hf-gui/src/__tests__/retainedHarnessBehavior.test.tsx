@@ -40,7 +40,7 @@ it("shows malformed or mismatched evidence as an error", async () => {
   const { host } = await mount(); expect(host.querySelector('[role="alert"]')).not.toBeNull(); expect(host.textContent).not.toContain("retained observation");
 });
 it("shows absent run linkage and unavailable measurements explicitly", async () => {
-  const { host, render } = await mount(null); expect(host.textContent).toContain("No retained qualification run"); expect(mock.invoke).not.toHaveBeenCalled();
+  const { host, render } = await mount(null); expect(host.textContent).toContain("No smoke-test run"); expect(mock.invoke).not.toHaveBeenCalled();
   mock.invoke.mockImplementation(async command => command === "run_owner" ? owner("run-a") : report(null, "Legacy run has no behavioral record", "unavailable"));
   await render("run-a"); expect(host.textContent).toContain("Legacy run has no behavioral record"); expect(host.textContent).toContain("Unavailable");
 });

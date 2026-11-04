@@ -98,6 +98,19 @@ and 0.7.0 releases respectively.
   API.
 - The Progress panel opens by default only on pipeline screens, "Reset
   progress" asks first, and the Info panel no longer repeats the stage plan.
+- Consistent wording in English and Chinese: the human gate is "approve"
+  (the CLI and API still say `promote` and `Promoted`), the bounded sandbox
+  check is a "smoke test", and "harness" replaces "test driver". A test keeps
+  the retired words out of UI text.
+- Plain-language rewrites of internal jargon, including the campaign
+  allocation note, scheduler limits ("Runs at once", "Scheduler limit"),
+  closeout step names, change-review run fields, and "Runs needing attention"
+  (was "Morning campaign health", with short run IDs). Help now says the run
+  closeout has eight steps, matching the app.
+- Agents, Skills, Knowledge, and DefectDojo show a load failure with Retry
+  instead of an empty list or an endless "Checking".
+- "1 candidate found" instead of "1 candidates found"; the setup wizard's step
+  heading no longer looks like a text field when focused.
 
 ## 0.8.1 - 2026-10-25
 

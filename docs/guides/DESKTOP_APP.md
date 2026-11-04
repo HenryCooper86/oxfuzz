@@ -61,11 +61,11 @@ separate action after assessment finishes.
 
 ![Discover -- ranked Target Inventory](../screenshots/discover.png)
 
-**2. Generate, qualify, and promote a harness.** Pick a target and the agent
-drafts a harness, compiles it in the sandbox, runs bounded smoke qualification,
-and prepares a seed corpus. You then review and explicitly promote that exact
-revision before any full campaign can start. Regeneration invalidates the prior
-promotion.
+**2. Generate, smoke-test, and approve a harness.** Pick a target and the agent
+drafts a harness, compiles it in the sandbox, runs a time-limited smoke test,
+and prepares a seed corpus. You then review and explicitly approve that exact
+revision before any full fuzz run can start. Regeneration invalidates the prior
+approval. (The CLI and API call approval `promote`.)
 
 The app has one active project. Discover, Harness, and Run show it at the top
 with a **Change** action (the same picker the Fuzzing Workflow and sidebar use),
@@ -83,8 +83,8 @@ returned source as either a human or named external-tool submission. Source is
 limited to 64 KiB of UTF-8, and an external submission requires a tool name;
 model and response ID are optional. Repair parent, lint results, provenance, and
 source digest stay in history. Importing does not compile or approve anything.
-**Qualify in sandbox** is a separate action. Ranking compares retained attempts
-for the selected immutable submission, and **Promote selected attempt** approves
+**Smoke-test in sandbox** is a separate action. Ranking compares retained attempts
+for the selected immutable submission, and **Approve selected attempt** approves
 only the exact smoke-passed attempt you selected after its independent review
 evidence is available. The selected row retains its submission and attempt IDs.
 When duplicate file-local symbols exist, the service-returned
@@ -250,7 +250,7 @@ review, and that result can be exported or handed off to DefectDojo.
 ![Triage -- deduplicated sanitizer crash and exploitability classification](../screenshots/triage.png)
 
 **Close out a terminal campaign.** Expand a row in **Run History** to read its
-retained seven-step closeout state. Opening the row is read-only. **Analyze /
+retained eight-step closeout state. Opening the row is read-only. **Analyze /
 Resume** is available only for terminal harness-backed campaign runs and runs
 the pending steps after an explicit click. Failed and dependency-blocked steps
 remain retryable; successful and legitimate skipped steps remain retained.
@@ -259,8 +259,9 @@ unavailable. Historical source coverage and blocker evidence are shown as
 unavailable because current workspace files cannot establish what an old run
 covered. The trust report likewise uses exact retained harness approval and
 finding review evidence and never runs coverage or calls a model while reading.
-The seven steps are triage, minimize, corpus absorb, coverage, blockers,
-disposition, and trust report.
+The eight steps are triage, minimize, add new inputs to the corpus, coverage,
+blockers, record covered code edges, disposition, and summarize what the
+evidence shows (the trust report).
 
 **Prove a fix, do not assert one.** The selected finding carries a Patch to
 Proof panel. Paste a candidate unified diff and a bounded follow-up fuzzing
@@ -409,7 +410,7 @@ sequence that followed, because the starting state was never established.
 Everything above is also available conversationally. The **AI Assistant** uses
 the same service tools for discovery, harnessing, running, and triage. It can
 recommend and prepare work, but it cannot turn a draft into an approved full
-campaign by itself. Guardrails, sandbox policy, and the human promotion record
+campaign by itself. Guardrails, sandbox policy, and the human approval record
 remain authoritative.
 
 ### Settings
@@ -417,7 +418,7 @@ remain authoritative.
 The Settings panel is the single source of truth for operator configuration:
 LLM providers, enabled fuzzing engines, run defaults, sandboxed campaign limits,
 storage cleanup, and external integrations. Mandatory sandboxing, blocked
-fuzzer networking, and human promotion before full campaigns are displayed as
+fuzzer networking, and human approval before full fuzz runs are displayed as
 enforced guarantees rather than switches.
 
 **Save Changes** persists the values present when you clicked it. If you edit

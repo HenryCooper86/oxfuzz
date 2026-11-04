@@ -43,7 +43,7 @@ describe("in-app documentation", () => {
     const chineseWelcome = HELP_SECTIONS_ZH.find((section) => section.id === "welcome");
 
     expect(englishWelcome?.body).toContain("never execute on the host");
-    expect(englishWelcome?.body).toContain("exact promoted revision");
+    expect(englishWelcome?.body).toContain("exact approved revision");
     expect(englishWelcome?.body).not.toContain("host without your explicit approval");
     expect(chineseWelcome?.body).toContain("绝不会在主机上执行");
   });
@@ -54,13 +54,13 @@ describe("in-app documentation", () => {
 
     expect(englishCorpus?.body).toContain("approved root");
     expect(englishCorpus?.body).toContain("byte-identical");
-    expect(englishCorpus?.body).toContain("exact promoted");
+    expect(englishCorpus?.body).toContain("exact approved");
     expect(englishCorpus?.body).toContain("empty input");
     expect(englishCorpus?.body).toContain("byte deduplication");
     expect(englishCorpus?.body).toContain("Unknown");
     expect(chineseCorpus?.body).toContain("批准根目录");
     expect(chineseCorpus?.body).toContain("字节相同");
-    expect(chineseCorpus?.body).toContain("准确的已提升");
+    expect(chineseCorpus?.body).toContain("准确的已批准");
     expect(chineseCorpus?.body).toContain("空输入");
     expect(chineseCorpus?.body).toContain("字节去重");
     expect(chineseCorpus?.body).toContain("未知");
@@ -86,9 +86,9 @@ describe("in-app documentation", () => {
     expect(chineseRun?.body).toContain("全程平均值");
     expect(chineseRun?.body).toContain("只读");
 
-    expect(englishRuns?.body).toContain("seven-step");
+    expect(englishRuns?.body).toContain("eight-step");
     expect(englishRuns?.body).toContain("Analyze / Resume");
-    expect(chineseRuns?.body).toContain("七个步骤");
+    expect(chineseRuns?.body).toContain("八个步骤");
     expect(chineseRuns?.body).toContain("分析 / 继续");
 
     expect(englishCorpus?.body).toContain("Start reviewed replay");

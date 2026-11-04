@@ -113,7 +113,7 @@ describe("expert workflow panels", () => {
     expect(host.textContent).toContain("Completed: triaged");
     expect(host.textContent).toContain("Skipped: nothing to minimize");
     expect(host.textContent).toContain("Failed: retained disk failure");
-    expect(host.textContent).toContain("Blocked: Blocked by Corpus absorb");
+    expect(host.textContent).toContain("Blocked: Waits for the step \"Add new inputs to the corpus\"");
     expect(host.textContent).toContain("Pending: Pending");
     expect(host.textContent).toContain("Analyze may triage crashes in the sandbox");
   });
@@ -154,15 +154,15 @@ describe("expert workflow panels", () => {
     await flush();
     expect(invoke.mock.calls.some(([command]) => command === "work_order_qualify")).toBe(false);
     expect(invoke.mock.calls.some(([command]) => command === "work_order_promote")).toBe(false);
-    await act(async () => button("Qualify in sandbox").click());
+    await act(async () => button("Smoke-test in sandbox").click());
     await flush();
     expect(host.textContent).toContain("retained smoke failure");
-    expect(button("Promote selected attempt").disabled).toBe(true);
-    await act(async () => button("Qualify in sandbox").click());
+    expect(button("Approve selected attempt").disabled).toBe(true);
+    await act(async () => button("Smoke-test in sandbox").click());
     await flush();
     await act(async () => button("Rank this submission's attempts").click());
     await flush();
-    await act(async () => button("Promote selected attempt").click());
+    await act(async () => button("Approve selected attempt").click());
     await flush();
 
     expect(invoke.mock.calls).toContainEqual(["work_order_promote", { attemptId: "attempt-passed" }]);
@@ -233,7 +233,7 @@ describe("expert workflow panels", () => {
     expect(host.textContent).toContain("exact source");
     expect(host.textContent).toContain("retained lint message");
     expect(host.textContent).toContain("exact independent review");
-    await act(async () => button("Promote selected attempt").click());
+    await act(async () => button("Approve selected attempt").click());
     await render(<WorkOrderPanel project="/b" target="beta" language="c" engine="libfuzzer" onPromoted={onPromoted} />);
     await act(async () => resolvePromotion({ id: "harness-a" }));
     expect(onPromoted).not.toHaveBeenCalled();
@@ -272,12 +272,12 @@ describe("expert workflow panels", () => {
     await render(<WorkOrderPanel project="/project" target="parse" language="c" engine="libfuzzer" />);
     await flush();
     await flush();
-    expect(button("Qualify in sandbox").disabled).toBe(true);
+    expect(button("Smoke-test in sandbox").disabled).toBe(true);
     terminal = true;
     await act(async () => button("Refresh attempts").click());
     await flush();
     expect(host.textContent).toContain("retained terminal failure");
-    expect(button("Qualify in sandbox").disabled).toBe(false);
+    expect(button("Smoke-test in sandbox").disabled).toBe(false);
   });
 
   it("does not let an older retained-attempt read erase a new qualification", async () => {
@@ -293,7 +293,7 @@ describe("expert workflow panels", () => {
     });
     await render(<WorkOrderPanel project="/project" target="parse" language="c" engine="libfuzzer" />);
     await flush();
-    await act(async () => button("Qualify in sandbox").click());
+    await act(async () => button("Smoke-test in sandbox").click());
     await flush();
     expect(host.textContent).toContain("new retained result");
     await act(async () => resolveOldRead([]));
@@ -347,12 +347,12 @@ describe("expert workflow panels", () => {
     expect(host.textContent).toContain("Exact independent review evidence is unavailable.");
     expect(host.textContent).not.toContain("Loading exact review evidence");
     expect(button("Retry").disabled).toBe(false);
-    expect(button("Promote selected attempt").disabled).toBe(true);
+    expect(button("Approve selected attempt").disabled).toBe(true);
     reviewAvailable = true;
     await act(async () => button("Retry").click());
     await flush();
     expect(host.textContent).toContain("review loaded after retry");
-    expect(button("Promote selected attempt").disabled).toBe(false);
+    expect(button("Approve selected attempt").disabled).toBe(false);
   });
 
   it("keeps new export and import results when older scoped reads finish later", async () => {

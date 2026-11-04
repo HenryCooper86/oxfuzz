@@ -18,7 +18,8 @@ export function SetupWizard({ onComplete }: { onComplete: (outcome: SetupOutcome
       <ol aria-label={t("setup.steps")} className="m-0 p-0 list-none flex flex-wrap gap-3 text-sm">
         {steps.map((name, index) => <li key={name} aria-current={index === step ? "step" : undefined} className={index === step ? "font-semibold text-text-primary" : "text-text-secondary"}>{index + 1}. {t(`setup.${name}`)}</li>)}
       </ol>
-      <h2 ref={heading} tabIndex={-1} className="m-0 text-base font-semibold">{t(`setup.${steps[step]}`)}</h2>
+      {/* Focus moves here so screen readers announce each step; it is not a control, so it shows no focus ring. */}
+      <h2 ref={heading} tabIndex={-1} className="m-0 text-base font-semibold" style={{ outline: "none" }}>{t(`setup.${steps[step]}`)}</h2>
       {step === 0 && <ProviderSetup onContinue={() => setStep(1)} />}
       {step === 1 && <SandboxSetup onContinue={() => setStep(2)} />}
       {step === 2 && <div className="flex flex-col gap-4">
