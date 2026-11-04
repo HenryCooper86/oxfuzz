@@ -1717,3 +1717,13 @@ async fn schedule_mutations_without_scheduler_are_unavailable() {
         .unwrap();
     assert_eq!(concurrency.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
+
+#[tokio::test]
+async fn fuzz_prepare_rejects_an_unknown_engine_before_any_work() {
+    let (status, json) = post_json(
+        "/fuzz/prepare",
+        serde_json::json!({ "project": "/tmp", "engine": "not-an-engine" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+}

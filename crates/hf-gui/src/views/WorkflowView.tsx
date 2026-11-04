@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, Check, Minus, Crosshair, FileCode, Play, Bug, Database } from "lucide-react";
 import { useProject } from "../providers/project";
 import { usePipeline } from "../providers/pipeline";
@@ -10,6 +10,7 @@ import { TriageView } from "./TriageView";
 const CorpusView = lazy(() => import("./CorpusView").then(module => ({ default: module.CorpusView })));
 import { ViewHeader, Button } from "../components/ui";
 import { ActiveProjectBar } from "../components/ActiveProjectBar";
+import { OneClickFuzz, type HarnessScope, type OneClickApi } from "../components/OneClickFuzz";
 import { useI18n } from "../i18nContext";
 
 // A unified, connected fuzzing flow: choose a project, then Discover -> Harness
@@ -33,6 +34,8 @@ interface CoreStage {
     embedded?: boolean;
     onNavigate?: (view: ViewType) => void;
     stepPrefix?: string;
+    // Reported by the Harness stage when a person approves a harness.
+    onApproved?: (scope: HarnessScope) => void;
   }>;
 }
 
@@ -88,6 +91,14 @@ export function WorkflowView({ onNavigate }: { onNavigate?: (view: ViewType) => 
     sectionRefs.current[section]?.querySelector("button")?.focus();
   }
 
+  // One-click fuzzing opens stages as it advances and hears about approvals.
+  const oneClickApi = useRef<OneClickApi | null>(null);
+  const setOneClickApi = useCallback((api: OneClickApi | null) => { oneClickApi.current = api; }, []);
+  const openSection = useCallback((section: SectionId) => {
+    setExpanded(section);
+    sectionRefs.current[section]?.querySelector("button")?.focus();
+  }, []);
+
   const stageDone = (id: CoreStageId): boolean => coreById[id]?.done ?? false;
 
   return (
@@ -99,6 +110,7 @@ export function WorkflowView({ onNavigate }: { onNavigate?: (view: ViewType) => 
 
       {/* Project gate -- everything below runs in the chosen project's workspace. */}
       <ActiveProjectBar />
+      {!gated && <OneClickFuzz onOpen={openSection} apiRef={setOneClickApi} />}
 
       {/* Core linear stages */}
       {!gated && <Button variant="primary" className="self-start" onClick={() => {
@@ -153,6 +165,7 @@ export function WorkflowView({ onNavigate }: { onNavigate?: (view: ViewType) => 
                     embedded
                     stepPrefix={String(n)}
                     onNavigate={navigateFromStage}
+                    onApproved={(scope) => oneClickApi.current?.approved(scope)}
                   />
                 </div>
               </div>

@@ -63,6 +63,12 @@ separate action after assessment finishes.
 
 ![Discover -- ranked Target Inventory](../screenshots/discover.png)
 
+**One click: Fuzz this project.** At the top of the Fuzzing Workflow, this
+action finds the most promising target, builds and smoke-tests a harness in the
+sandbox, and stops at step 2 for you to review and approve it. Approving starts
+one run with the default duration. An already-approved harness gets a **Start
+run** button instead. The steps below are what it automates.
+
 **2. Generate, smoke-test, and approve a harness.** Pick a target and the agent
 drafts a harness, compiles it in the sandbox, runs a time-limited smoke test,
 and prepares a seed corpus. You then review and explicitly approve that exact

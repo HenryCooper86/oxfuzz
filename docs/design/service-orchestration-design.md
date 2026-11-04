@@ -909,3 +909,33 @@ file and leaves the previously published draft intact.
 Report-storage I/O failures return only their error category to callers.
 Underlying OS and temporary-file details, which can contain private paths,
 remain in diagnostic tracing rather than HTTP responses.
+
+### One-click project fuzzing in the GUI
+
+The GUI's **Fuzz this project** action uses `ServiceContainer::fuzz_prepare`,
+the first stages of the `oxfuzz fuzz` pipeline: discover and pick a target
+(explicit or top-ranked), reuse the target's approved harness or draft and
+compile one with the repair loop, and smoke-test it behind the pre-execution
+review. It stops before the approval stage and returns the target, engine,
+language, harness revision, and whether an approved revision was reused.
+`fuzz_onboard` composes `fuzz_prepare`, approval, and the campaign, so the
+CLI and GUI share one implementation of the preparation stages.
+
+The click carries one explicit consent, `RunHarness`, which covers the
+sandboxed smoke test and its repair re-runs (as the Harness step's own button
+does). It never approves the harness or starts a campaign. After preparation
+the GUI opens the Harness step's approval with the source and smoke evidence
+on screen; approval is the existing explicit `PromoteHarness` action. Only
+after that approval, and only for the target the action prepared, does the GUI
+start one fuzz run with the configured default duration through the existing
+`RunFuzzer` action. When the target already had an approved revision, nothing
+is built or smoke-tested and the GUI offers an explicit "Start run" action
+instead of starting one. The desktop shell emits `fuzz:stage` events
+(`discover`, `harness`, `smoke`) while preparing; the browser build calls
+`POST /fuzz/prepare` and shows a generic progress line. Stage boundaries are reported to the GUI so it can show
+which stage is running; a failure names its stage and leaves completed stages
+retained.
+
+Rejected alternative: running the whole CLI pipeline and approving through the
+app-wide approval prompt. That prompt shows only the action label, so the
+person would approve a harness without its source in view.

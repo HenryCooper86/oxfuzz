@@ -448,6 +448,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .route("/harness/mutator/status", post(managed_mutator_status))
         .route("/harness/mutator/attach", post(attach_managed_mutator))
         .route("/harness/smoke", post(harness_smoke))
+        .route("/fuzz/prepare", post(fuzz_prepare))
         .route("/harness/promote", post(harness_promote))
         .route("/harness/promote-with-findings", post(harness_promote_with_findings))
         .route("/coverage/functions", post(coverage_functions))
@@ -2205,6 +2206,43 @@ struct HarnessQualificationRequest {
     target: String,
     engine: String,
     lang: Option<String>,
+}
+
+/// One-click project fuzzing, first half (the GUI's "Fuzz this project"):
+/// discover and pick a target, then reuse its approved harness or build and
+/// smoke-test one. Never approves the harness or starts a campaign.
+#[derive(Debug, Deserialize)]
+struct FuzzPrepareBody {
+    project: PathBuf,
+    engine: String,
+    target: Option<String>,
+}
+
+async fn fuzz_prepare(
+    State(state): State<AppState>,
+    Json(req): Json<FuzzPrepareBody>,
+) -> ApiResult<hf_service::FuzzPrepared> {
+    let engine = parse_engine(&req.engine).map_err(map_err(StatusCode::BAD_REQUEST))?;
+    let project = approved_project(&state, &req.project)?;
+    let prepared = state
+        .container
+        .fuzz_prepare(
+            hf_service::FuzzPrepareRequest {
+                project: &project,
+                target: req.target.as_deref(),
+                engine,
+                lang: None,
+                review_bypass: hf_service::HarnessReviewBypass::NotRequested,
+                fresh: false,
+                sanitizer: None,
+                cmplog: false,
+            },
+            &|_| {},
+            &|_| {},
+        )
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(prepared))
 }
 
 async fn harness_smoke(

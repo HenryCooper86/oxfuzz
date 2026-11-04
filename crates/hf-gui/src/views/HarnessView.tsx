@@ -94,9 +94,12 @@ export function HarnessView({
   embedded = false,
   stepPrefix,
   onNavigate,
+  onApproved,
 }: {
   embedded?: boolean;
   onNavigate?: (view: ViewType) => void;
+  /** Called after a person approves the selected harness (one-click fuzzing listens). */
+  onApproved?: (scope: { project: string; target: string; engine: string }) => void;
   // When embedded in the Fuzzing Workflow, the outer stage owns the top-level
   // numbering (harness is step 2), so these internal steps render as sub-steps
   // ("2.1"..."2.5") instead of a competing 1-5 that collides with the outer 3/4.
@@ -437,7 +440,10 @@ export function HarnessView({
       if (!isCurrentDraft(generation)) return false;
       setPromotionResult(result);
       const promoted = result.status === "Promoted";
-      if (promoted) markDone("approve", project);
+      if (promoted) {
+        markDone("approve", project);
+        onApproved?.({ project, target: selectedTarget, engine });
+      }
       setPromotionStatus(promoted ? "done" : "error");
       setCompiled(promoted);
       return promoted;
@@ -462,7 +468,10 @@ export function HarnessView({
       if (!isCurrentDraft(generation)) return false;
       setPromotionResult(result);
       const promoted = result.status === "Promoted";
-      if (promoted) markDone("approve", project);
+      if (promoted) {
+        markDone("approve", project);
+        onApproved?.({ project, target: selectedTarget, engine });
+      }
       setPromotionStatus(promoted ? "done" : "error");
       setCompiled(promoted);
       return promoted;

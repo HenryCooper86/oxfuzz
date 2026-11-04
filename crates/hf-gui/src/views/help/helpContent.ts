@@ -172,6 +172,14 @@ loop, not a final step.
   ("discover targets and fuzz the riskiest one") and it drives the tools for
   you, asking approval at the gates.
 
+**Fuzz this project** (at the top of the Fuzzing Workflow) does the preparation
+in one click: it finds the most promising target, builds and smoke-tests a
+harness in the sandbox, then stops and opens step 2 so you can review the
+source and evidence. When you approve that harness, one run with your default
+duration starts. If the target already has an approved harness, it offers a
+**Start run** button instead. The click never approves a harness or starts a
+run by itself.
+
 The **Next** button opens the current stage without starting work. The
 sidebar's **Pipeline** section has a dedicated screen for each stage if you
 prefer to work them one at a time.

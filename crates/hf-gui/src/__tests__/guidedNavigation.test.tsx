@@ -11,7 +11,12 @@ vi.mock("../providers/project", () => ({ useProject: () => project }));
 vi.mock("../providers/target", () => ({ useTarget: () => ({ target: "parse" }) }));
 vi.mock("../lib", () => ({ useDefectDojo: () => ({ configured: true }), pickFolder: vi.fn() }));
 vi.mock("../views/DiscoverView", () => ({ DiscoverView: ({ onNavigate }: { onNavigate: (view: "settings") => void }) => <button onClick={() => onNavigate("settings")}>Open AI Settings</button> }));
-vi.mock("../views/HarnessView", () => ({ HarnessView: () => <p>Harness content</p> }));
+vi.mock("../views/HarnessView", () => ({ HarnessView: ({ onApproved }: { onApproved?: (scope: { project: string; target: string; engine: string }) => void }) => <>
+  <p>Harness content</p>
+  <button onClick={() => onApproved?.({ project: "/fixture", target: "parse", engine: "libfuzzer" })}>Approve mock</button>
+</> }));
+const oneClick = vi.hoisted(() => ({ approved: vi.fn() }));
+vi.mock("../components/OneClickFuzz", () => ({ OneClickFuzz: ({ apiRef }: { apiRef?: (api: { approved: typeof oneClick.approved }) => void }) => { apiRef?.({ approved: oneClick.approved }); return <p>One click</p>; } }));
 vi.mock("../views/RunView", () => ({ RunView: ({ onNavigate }: { onNavigate: (view: string) => void }) => <>
   <p>Run content</p>
   <button onClick={() => onNavigate("runs")}>Open Run History</button>
@@ -86,5 +91,20 @@ it("forwards non-stage destinations from an embedded stage and expands stage des
     await click("Open Triage");
     expect(navigate).not.toHaveBeenCalledWith("triage");
     expect(host.textContent).toContain("Findings content");
+  } finally { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); }
+});
+
+it("offers one-click fuzzing and forwards harness approvals to it", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true); Element.prototype.scrollIntoView = vi.fn();
+  const host = document.createElement("div"); document.body.append(host); const root = createRoot(host);
+  function Fixture() {
+    const progress = usePipeline();
+    return <PipelineContext.Provider value={{ ...progress, coreStages: progress.coreStages.map(stage => ({ ...stage, done: stage.id === "discover", current: stage.id === "harness" })) }}><WorkflowView /></PipelineContext.Provider>;
+  }
+  try {
+    await act(async () => root.render(<I18nProvider><Fixture /></I18nProvider>));
+    expect(host.textContent).toContain("One click");
+    await act(async () => [...host.querySelectorAll("button")].find(button => button.textContent === "Approve mock")!.click());
+    expect(oneClick.approved).toHaveBeenCalledWith({ project: "/fixture", target: "parse", engine: "libfuzzer" });
   } finally { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); }
 });

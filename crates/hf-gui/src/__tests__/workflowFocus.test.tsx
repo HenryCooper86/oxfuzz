@@ -11,6 +11,7 @@ vi.mock("../views/DiscoverView", () => ({ DiscoverView: ({ onNavigate }: { onNav
 vi.mock("../views/HarnessView", () => ({ HarnessView: () => <p>Harness content</p> }));
 vi.mock("../views/RunView", () => ({ RunView: () => null }));
 vi.mock("../views/TriageView", () => ({ TriageView: () => null }));
+vi.mock("../components/OneClickFuzz", () => ({ OneClickFuzz: () => null }));
 it("moves keyboard focus to the destination stage after an explicit handoff", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.stubGlobal("HTMLElement", HTMLElement);

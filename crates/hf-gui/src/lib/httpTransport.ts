@@ -195,6 +195,7 @@ const COMMAND_MAP: Record<string, CommandEndpoint> = {
   file_issue: { method: "POST", path: "/issues/file" },
   issue_tracker_configured: { method: "GET", path: "/issues/configured" },
   sarif_document: { method: "POST", path: "/sarif" },
+  fuzz_prepare: { method: "POST", path: "/fuzz/prepare" },
   issue_tracker_test_connection: { method: "GET", path: "/issues/test" },
   push_to_defectdojo: { method: "POST", path: "/defectdojo/push" },
   defectdojo_test_connection: { method: "GET", path: "/defectdojo/test" },

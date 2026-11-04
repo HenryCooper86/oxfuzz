@@ -91,6 +91,78 @@ pub struct FuzzRequest<'a> {
     pub seed: Option<u64>,
 }
 
+/// Request for [`ServiceContainer::fuzz_prepare`]: the preparation stages of
+/// the onboarding pipeline, without approval or a campaign.
+pub struct FuzzPrepareRequest<'a> {
+    /// Project root path.
+    pub project: &'a Path,
+    /// Target symbol (or `file::symbol`); `None` auto-picks by fit score.
+    pub target: Option<&'a str>,
+    /// Fuzzing engine the harness is built for.
+    pub engine: EngineKind,
+    /// Target language; `None` auto-detects from discovery.
+    pub lang: Option<TargetLanguage>,
+    /// Opt-out of the independent LLM pre-execution review.
+    pub review_bypass: HarnessReviewBypass,
+    /// Draft a fresh harness even when an approved one exists.
+    pub fresh: bool,
+    /// Sanitizer for a freshly built harness; `None` applies the configured default.
+    pub sanitizer: Option<hf_core::target::Sanitizer>,
+    /// Build the AFL++ `CmpLog` companion.
+    pub cmplog: bool,
+}
+
+/// What [`ServiceContainer::fuzz_prepare`] produced: a target with either an
+/// already-approved harness or a freshly smoke-tested one awaiting approval.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FuzzPrepared {
+    /// The selected target symbol.
+    pub target: String,
+    /// The target's language.
+    pub lang: TargetLanguage,
+    /// The engine the harness is built for.
+    pub engine: EngineKind,
+    /// `true` when an approved harness was reused; nothing was built or run.
+    pub harness_reused: bool,
+    /// Compile repairs used (0 when reused).
+    pub repairs_used: usize,
+    /// Smoke repairs used (0 when reused).
+    pub smoke_repairs: usize,
+}
+
+/// Inputs to the shared preparation stages.
+struct StageInputs<'a> {
+    prepared_harness: Option<&'a PreparedHarnessSource>,
+    project: &'a Path,
+    target: Option<&'a str>,
+    engine: EngineKind,
+    lang: Option<TargetLanguage>,
+    review_bypass: HarnessReviewBypass,
+    fresh: bool,
+    sanitizer: Option<hf_core::target::Sanitizer>,
+    cmplog: bool,
+}
+
+/// The harness the preparation stages ended with.
+enum StagedHarness {
+    /// An approved revision reused as is; no build or smoke ran.
+    Reused(Harness),
+    /// A revision built (or supplied) and smoke-tested, awaiting approval.
+    Qualified {
+        exact_harness_id: Option<Uuid>,
+        smoke: crate::verification::SmokeOutcome,
+        repairs_used: usize,
+        smoke_repairs: usize,
+    },
+}
+
+/// Result of the shared preparation stages.
+struct PreparedStages {
+    target: String,
+    lang: TargetLanguage,
+    harness: StagedHarness,
+}
+
 /// A stage boundary of the onboarding pipeline, reported through the stage
 /// sink so the operator watches the pipeline advance. Carries the facts the
 /// stage acts on (target, engine, reuse); rendering belongs to the
@@ -242,195 +314,64 @@ impl ServiceContainer {
             request.seed,
         )?;
 
-        // Stage 1: discover targets and pick one (explicit or top-ranked).
-        on_stage(FuzzStage::Discover { lang: request.lang });
-        let (mut target, lang) = self
-            .fuzz_pick_target(project, request.target, request.lang, engine)
-            .await
-            .map_err(|error| {
-                stage_failure(
-                    "discover",
-                    &error,
-                    "pass --lang to force a language scan or --target to name a function; \
-                     `oxfuzz discover` lists what the scanners see",
-                )
-            })?;
+        let PreparedStages {
+            target,
+            lang,
+            harness: staged,
+        } = self
+            .prepare_stages(
+                StageInputs {
+                    prepared_harness: request.prepared_harness.as_ref(),
+                    project,
+                    target: request.target,
+                    engine,
+                    lang: request.lang,
+                    review_bypass: request.review_bypass,
+                    fresh: request.fresh,
+                    sanitizer: request.sanitizer,
+                    cmplog: request.cmplog,
+                },
+                on_stage,
+                on_progress,
+            )
+            .await?;
 
-        if let (Some(_), Some(selector)) = (&request.prepared_harness, request.target) {
-            target = selector.to_owned();
-        }
-
-        // Stage 2: reuse the promoted revision for (target, engine) when one is
-        // active, unless the operator asked for a fresh draft. A requested
-        // sanitizer the active revision was not built with forces a fresh
-        // draft: reusing it would silently fuzz a different build than asked.
-        // The same rule covers CmpLog: a CmpLog campaign needs the recorded
-        // companion, so a companion-less revision is rebuilt with one.
-        let reused = if request.fresh || request.prepared_harness.is_some() {
-            None
-        } else {
-            self.reusable_promoted_harness(project, &target, engine, lang)
-                .await
-                .map_err(|error| {
-                    stage_failure(
-                        "harness",
-                        &error,
-                        "the retained harness state could not be read; re-run with --fresh to re-draft",
-                    )
-                })?
-                .filter(|harness| {
-                    request
-                        .sanitizer
-                        .is_none_or(|requested| requested == harness.sanitizer)
-                })
-                .filter(|harness| !request.cmplog || harness.cmplog.is_some())
-        };
-
-        let (harness, repairs_used, smoke_repairs, harness_reused) = if let Some(harness) = reused {
-            on_stage(FuzzStage::Harness {
-                target: target.clone(),
-                engine,
-                reused: true,
-            });
-            (harness, 0, 0, true)
-        } else {
-            let (repairs_used, exact_harness_id) = if let Some(source) = &request.prepared_harness {
-                on_stage(FuzzStage::PreparedHarness {
+        let (harness, repairs_used, smoke_repairs, harness_reused) = match staged {
+            StagedHarness::Reused(harness) => (harness, 0, 0, true),
+            StagedHarness::Qualified {
+                exact_harness_id,
+                smoke,
+                repairs_used,
+                smoke_repairs,
+            } => {
+                // Stage 4: the human promotion gate. A denial stops here.
+                on_stage(FuzzStage::Promote {
                     target: target.clone(),
                     engine,
-                    source_sha256: source.sha256.clone(),
                 });
-                let compiled = self.harness_compile(source.source.clone(), project, engine, &target, lang, request.sanitizer, request.cmplog).await
-                    .map_err(|error| stage_failure("harness", &error, "supplied source is never repaired; fix and review a new source/hash before retrying"))?;
-                if compiled.status != HarnessStatus::Compiled {
-                    return Err(ClassifiedError::Harness(
-                        "supplied harness failed to compile; no repair was attempted".into(),
-                    ));
-                }
-                (0, Some(compiled.harness_id))
-            } else {
-                on_stage(FuzzStage::Harness {
-                    target: target.clone(),
-                    engine,
-                    reused: false,
-                });
-                let generated = self
-                    .harness_generate(
-                        project,
-                        &target,
-                        engine,
-                        lang,
-                        FUZZ_PIPELINE_REPAIRS,
-                        request.sanitizer,
-                        request.cmplog,
-                        false,
-                        // The pipeline's own --ai handling happens in the CLI
-                        // (provider detach / preflight); the service calls
-                        // stay auto.
-                        AiPolicy::Auto,
-                    )
-                    .await
-                    .map_err(|error| {
-                        stage_failure(
-                            "harness",
-                            &error,
-                            "for a compile failure, --ai require makes a missing model an explicit \
-                         error and the work-order flow authors the harness manually; for a \
-                         sandbox error, `oxfuzz doctor` checks the sandbox image",
+                let promoted = match (exact_harness_id, request.prepared_harness.as_ref()) {
+                    (Some(id), Some(source)) => {
+                        let binary = smoke.summary.binary_sha256.as_deref().ok_or_else(|| {
+                            ClassifiedError::Validation(
+                                "supplied harness smoke has no binary digest".into(),
+                            )
+                        })?;
+                        self.harness_promote_exact(
+                            project,
+                            &target,
+                            engine,
+                            id,
+                            &source.sha256,
+                            binary,
                         )
-                    })?;
-                (generated.repairs_used, None)
-            };
-
-            // Stage 3: smoke qualification behind the pre-execution review.
-            on_stage(FuzzStage::Smoke {
-                target: target.clone(),
-                engine,
-            });
-            // A supplied source is never repaired; a generated one is repaired
-            // from its smoke output within the pipeline's repair budget, and
-            // each repaired revision is reviewed and approved again.
-            let report_repair = |attempt: usize, diagnostics: &str| {
-                on_progress(FuzzProgress::LogLine(format!(
-                    "smoke repair {attempt}/{FUZZ_PIPELINE_REPAIRS} for '{target}': {}",
-                    diagnostics.lines().next().unwrap_or_default()
-                )));
-            };
-            let qualified = match exact_harness_id {
-                Some(id) => self
-                    .harness_smoke_exact(project, &target, engine, lang, id, request.review_bypass)
-                    .await
-                    .map(|smoke| super::QualifiedSmoke {
-                        smoke,
-                        smoke_repairs: 0,
-                    }),
-                None => {
-                    self.harness_smoke_with_repair(
-                        project,
-                        &target,
-                        engine,
-                        lang,
-                        request.review_bypass,
-                        FUZZ_PIPELINE_REPAIRS,
-                        &report_repair,
-                        AiPolicy::Auto,
-                    )
-                    .await
-                }
-            }
-            .map_err(|error| {
-                stage_failure(
-                    "smoke",
-                    &error,
-                    "fix the harness and re-run; without a provider the review gate needs \
-                         the explicit --no-llm-review opt-in",
-                )
-            })?;
-            let smoke_repairs = qualified.smoke_repairs;
-            let smoke = qualified.smoke;
-            if smoke.summary.crashes > 0 {
-                return Err(ClassifiedError::Validation(format!(
-                    "fuzz smoke stopped: the qualification run of '{target}' found {} \
-                     crash(es), so the revision cannot be promoted as crash-free. This is \
-                     likely a real finding: review it with `oxfuzz triage`; approving a \
-                     crash-bearing revision is a separate, explicit human decision.",
-                    smoke.summary.crashes
-                )));
-            }
-            match smoke.verdict.level {
-                VerdictLevel::Pass => {}
-                VerdictLevel::Suspect => on_progress(FuzzProgress::LogLine(format!(
-                    "smoke verdict SUSPECT for '{target}' (verify at the promotion prompt): {}",
-                    smoke.verdict.reasons.join("; ")
-                ))),
-                VerdictLevel::Fail => {
-                    return Err(ClassifiedError::Validation(format!(
-                        "fuzz smoke failed for '{target}': {}; fix the harness and re-run",
-                        smoke.verdict.reasons.join("; ")
-                    )));
-                }
-            }
-
-            // Stage 4: the human promotion gate. A denial stops here.
-            on_stage(FuzzStage::Promote {
-                target: target.clone(),
-                engine,
-            });
-            let promoted = match (exact_harness_id, request.prepared_harness.as_ref()) {
-                (Some(id), Some(source)) => {
-                    let binary = smoke.summary.binary_sha256.as_deref().ok_or_else(|| {
-                        ClassifiedError::Validation(
-                            "supplied harness smoke has no binary digest".into(),
-                        )
-                    })?;
-                    self.harness_promote_exact(project, &target, engine, id, &source.sha256, binary)
                         .await
                         .map_err(ClassifiedError::from)
+                    }
+                    _ => self.harness_promote(project, &target, engine).await,
                 }
-                _ => self.harness_promote(project, &target, engine).await,
+                .map_err(|error| promote_failure(&target, &error))?;
+                (promoted, repairs_used, smoke_repairs, false)
             }
-            .map_err(|error| promote_failure(&target, &error))?;
-            (promoted, repairs_used, smoke_repairs, false)
         };
 
         // Stage 5: the bounded campaign over the promoted revision. The campaign
@@ -483,6 +424,257 @@ impl ServiceContainer {
             repairs_used,
             smoke_repairs,
             campaign,
+        })
+    }
+
+    /// Run the onboarding pipeline's preparation stages only: discover and
+    /// pick a target, then reuse its approved harness or draft, compile, and
+    /// smoke-test one. Stops before approval: it never approves a harness or
+    /// starts a campaign. The GUI's one-click action calls this, then shows
+    /// the harness for a person to approve.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` when discovery finds no usable target, the
+    /// harness fails to compile after repairs, or the smoke test fails or finds
+    /// crashes.
+    pub async fn fuzz_prepare(
+        &self,
+        request: FuzzPrepareRequest<'_>,
+        on_stage: &(dyn Fn(FuzzStage) + Send + Sync),
+        on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
+    ) -> Result<FuzzPrepared, ClassifiedError> {
+        let engine = request.engine;
+        let PreparedStages {
+            target,
+            lang,
+            harness,
+        } = self
+            .prepare_stages(
+                StageInputs {
+                    prepared_harness: None,
+                    project: request.project,
+                    target: request.target,
+                    engine,
+                    lang: request.lang,
+                    review_bypass: request.review_bypass,
+                    fresh: request.fresh,
+                    sanitizer: request.sanitizer,
+                    cmplog: request.cmplog,
+                },
+                on_stage,
+                on_progress,
+            )
+            .await?;
+        let (harness_reused, repairs_used, smoke_repairs) = match harness {
+            StagedHarness::Reused(_) => (true, 0, 0),
+            StagedHarness::Qualified {
+                repairs_used,
+                smoke_repairs,
+                ..
+            } => (false, repairs_used, smoke_repairs),
+        };
+        Ok(FuzzPrepared {
+            target,
+            lang,
+            engine,
+            harness_reused,
+            repairs_used,
+            smoke_repairs,
+        })
+    }
+
+    /// The preparation stages shared by [`Self::fuzz_onboard`] and
+    /// [`Self::fuzz_prepare`]: discover and pick a target, then reuse its
+    /// approved harness or build and smoke-test one. Never approves anything.
+    async fn prepare_stages(
+        &self,
+        inputs: StageInputs<'_>,
+        on_stage: &(dyn Fn(FuzzStage) + Send + Sync),
+        on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
+    ) -> Result<PreparedStages, ClassifiedError> {
+        let project = inputs.project;
+        let engine = inputs.engine;
+        // Stage 1: discover targets and pick one (explicit or top-ranked).
+        on_stage(FuzzStage::Discover { lang: inputs.lang });
+        let (mut target, lang) = self
+            .fuzz_pick_target(project, inputs.target, inputs.lang, engine)
+            .await
+            .map_err(|error| {
+                stage_failure(
+                    "discover",
+                    &error,
+                    "pass --lang to force a language scan or --target to name a function; \
+                     `oxfuzz discover` lists what the scanners see",
+                )
+            })?;
+
+        if let (Some(_), Some(selector)) = (&inputs.prepared_harness, inputs.target) {
+            target = selector.to_owned();
+        }
+
+        // Stage 2: reuse the promoted revision for (target, engine) when one is
+        // active, unless the operator asked for a fresh draft. A requested
+        // sanitizer the active revision was not built with forces a fresh
+        // draft: reusing it would silently fuzz a different build than asked.
+        // The same rule covers CmpLog: a CmpLog campaign needs the recorded
+        // companion, so a companion-less revision is rebuilt with one.
+        let reused = if inputs.fresh || inputs.prepared_harness.is_some() {
+            None
+        } else {
+            self.reusable_promoted_harness(project, &target, engine, lang)
+                .await
+                .map_err(|error| {
+                    stage_failure(
+                        "harness",
+                        &error,
+                        "the retained harness state could not be read; re-run with --fresh to re-draft",
+                    )
+                })?
+                .filter(|harness| {
+                    inputs
+                        .sanitizer
+                        .is_none_or(|requested| requested == harness.sanitizer)
+                })
+                .filter(|harness| !inputs.cmplog || harness.cmplog.is_some())
+        };
+
+        if let Some(harness) = reused {
+            on_stage(FuzzStage::Harness {
+                target: target.clone(),
+                engine,
+                reused: true,
+            });
+            return Ok(PreparedStages {
+                target,
+                lang,
+                harness: StagedHarness::Reused(harness),
+            });
+        }
+        let (repairs_used, exact_harness_id) = if let Some(source) = &inputs.prepared_harness {
+            on_stage(FuzzStage::PreparedHarness {
+                target: target.clone(),
+                engine,
+                source_sha256: source.sha256.clone(),
+            });
+            let compiled = self.harness_compile(source.source.clone(), project, engine, &target, lang, inputs.sanitizer, inputs.cmplog).await
+                .map_err(|error| stage_failure("harness", &error, "supplied source is never repaired; fix and review a new source/hash before retrying"))?;
+            if compiled.status != HarnessStatus::Compiled {
+                return Err(ClassifiedError::Harness(
+                    "supplied harness failed to compile; no repair was attempted".into(),
+                ));
+            }
+            (0, Some(compiled.harness_id))
+        } else {
+            on_stage(FuzzStage::Harness {
+                target: target.clone(),
+                engine,
+                reused: false,
+            });
+            let generated = self
+                .harness_generate(
+                    project,
+                    &target,
+                    engine,
+                    lang,
+                    FUZZ_PIPELINE_REPAIRS,
+                    inputs.sanitizer,
+                    inputs.cmplog,
+                    false,
+                    // The pipeline's own --ai handling happens in the CLI
+                    // (provider detach / preflight); the service calls
+                    // stay auto.
+                    AiPolicy::Auto,
+                )
+                .await
+                .map_err(|error| {
+                    stage_failure(
+                        "harness",
+                        &error,
+                        "for a compile failure, --ai require makes a missing model an explicit \
+                     error and the work-order flow authors the harness manually; for a \
+                     sandbox error, `oxfuzz doctor` checks the sandbox image",
+                    )
+                })?;
+            (generated.repairs_used, None)
+        };
+
+        // Stage 3: smoke qualification behind the pre-execution review.
+        on_stage(FuzzStage::Smoke {
+            target: target.clone(),
+            engine,
+        });
+        // A supplied source is never repaired; a generated one is repaired
+        // from its smoke output within the pipeline's repair budget, and
+        // each repaired revision is reviewed and approved again.
+        let report_repair = |attempt: usize, diagnostics: &str| {
+            on_progress(FuzzProgress::LogLine(format!(
+                "smoke repair {attempt}/{FUZZ_PIPELINE_REPAIRS} for '{target}': {}",
+                diagnostics.lines().next().unwrap_or_default()
+            )));
+        };
+        let qualified = match exact_harness_id {
+            Some(id) => self
+                .harness_smoke_exact(project, &target, engine, lang, id, inputs.review_bypass)
+                .await
+                .map(|smoke| super::QualifiedSmoke {
+                    smoke,
+                    smoke_repairs: 0,
+                }),
+            None => {
+                self.harness_smoke_with_repair(
+                    project,
+                    &target,
+                    engine,
+                    lang,
+                    inputs.review_bypass,
+                    FUZZ_PIPELINE_REPAIRS,
+                    &report_repair,
+                    AiPolicy::Auto,
+                )
+                .await
+            }
+        }
+        .map_err(|error| {
+            stage_failure(
+                "smoke",
+                &error,
+                "fix the harness and re-run; without a provider the review gate needs \
+                     the explicit --no-llm-review opt-in",
+            )
+        })?;
+        let smoke_repairs = qualified.smoke_repairs;
+        let smoke = qualified.smoke;
+        if smoke.summary.crashes > 0 {
+            return Err(ClassifiedError::Validation(format!(
+                "fuzz smoke stopped: the qualification run of '{target}' found {} \
+                 crash(es), so the revision cannot be promoted as crash-free. This is \
+                 likely a real finding: review it with `oxfuzz triage`; approving a \
+                 crash-bearing revision is a separate, explicit human decision.",
+                smoke.summary.crashes
+            )));
+        }
+        match smoke.verdict.level {
+            VerdictLevel::Pass => {}
+            VerdictLevel::Suspect => on_progress(FuzzProgress::LogLine(format!(
+                "smoke verdict SUSPECT for '{target}' (verify at the promotion prompt): {}",
+                smoke.verdict.reasons.join("; ")
+            ))),
+            VerdictLevel::Fail => {
+                return Err(ClassifiedError::Validation(format!(
+                    "fuzz smoke failed for '{target}': {}; fix the harness and re-run",
+                    smoke.verdict.reasons.join("; ")
+                )));
+            }
+        }
+        Ok(PreparedStages {
+            target,
+            lang,
+            harness: StagedHarness::Qualified {
+                exact_harness_id,
+                smoke,
+                repairs_used,
+                smoke_repairs,
+            },
         })
     }
 

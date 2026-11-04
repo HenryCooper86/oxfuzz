@@ -81,8 +81,8 @@ mod workspace_file;
 #[cfg(feature = "native-analysis")]
 pub use discovery::AnalyzedInventory;
 pub use fuzz::{
-    FuzzOutcome, FuzzRequest, FuzzStage, PreparedHarnessSource, FUZZ_PIPELINE_REPAIRS,
-    LLM_SEED_COUNT, MAX_PREPARED_HARNESS_SOURCE_BYTES,
+    FuzzOutcome, FuzzPrepareRequest, FuzzPrepared, FuzzRequest, FuzzStage, PreparedHarnessSource,
+    FUZZ_PIPELINE_REPAIRS, LLM_SEED_COUNT, MAX_PREPARED_HARNESS_SOURCE_BYTES,
 };
 pub use guards::AgentTurnGuard;
 pub use harness_workspace::{

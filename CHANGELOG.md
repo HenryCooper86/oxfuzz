@@ -136,6 +136,13 @@ and 0.7.0 releases respectively.
   through a dialog via the new `export_sarif` command, the browser downloads
   from `POST /sarif`) and "Draft issue" on an open finding, using the issue
   draft card shared with the Dashboard.
+- One-click "Fuzz this project" in the Fuzzing Workflow: finds the most
+  promising target, builds and smoke-tests a harness, then stops for you to
+  review and approve it; approving starts one run with the default duration.
+  The click carries only the smoke-test consent. Backed by the new
+  `ServiceContainer::fuzz_prepare` (the first stages of `oxfuzz fuzz`, which
+  now composes it), the desktop `fuzz_prepare` command, and
+  `POST /fuzz/prepare`.
 
 ## 0.8.1 - 2026-10-25
 

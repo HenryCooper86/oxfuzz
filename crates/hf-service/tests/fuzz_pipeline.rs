@@ -1130,3 +1130,157 @@ async fn fuzz_repairs_a_harness_whose_smoke_run_never_reaches_it() {
         lines.lock().unwrap()
     );
 }
+
+/// Grants only the sandboxed smoke run (and anything below an approval
+/// prompt), and records every approval asked for: the GUI's one-click action
+/// carries exactly this consent.
+#[derive(Clone, Default)]
+struct SmokeOnlyConsent {
+    asked: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl hf_guardrails::ApprovalGate for SmokeOnlyConsent {
+    async fn request_approval(&self, action: &hf_service::Action, _reason: &str) -> bool {
+        self.asked
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(action.label());
+        matches!(action, hf_service::Action::RunHarness)
+    }
+}
+
+fn prepare_request(project: &std::path::Path) -> hf_service::FuzzPrepareRequest<'_> {
+    hf_service::FuzzPrepareRequest {
+        project,
+        target: None,
+        engine: EngineKind::LibFuzzer,
+        lang: None,
+        review_bypass: hf_service::HarnessReviewBypass::NotRequested,
+        fresh: false,
+        sanitizer: None,
+        cmplog: false,
+    }
+}
+
+#[tokio::test]
+async fn fuzz_prepare_stops_before_approval_and_never_asks_for_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let _workspace_root = common::install_managed_workspace("oxfuzz_fuzz_prepare_it");
+    let project = c_project(&dir);
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("fuzz.db"))
+            .await
+            .unwrap(),
+    );
+    let consent = SmokeOnlyConsent::default();
+    let container = pipeline_container(&store).with_guardrails(hf_guardrails::Guardrails::new(
+        hf_guardrails::GuardrailPolicy::default(),
+        Arc::new(consent.clone()),
+    ));
+    let log = StageLog::default();
+
+    let prepared = container
+        .fuzz_prepare(prepare_request(&project), &log.sink(), &noop_progress())
+        .await
+        .expect("preparation completes with a smoke-tested harness");
+
+    assert_eq!(prepared.target, "parse_entry");
+    assert_eq!(prepared.lang, TargetLanguage::C);
+    assert_eq!(prepared.engine, EngineKind::LibFuzzer);
+    assert!(!prepared.harness_reused);
+    assert_eq!(
+        log.stages(),
+        vec![
+            FuzzStage::Discover { lang: None },
+            FuzzStage::Harness {
+                target: "parse_entry".to_owned(),
+                engine: EngineKind::LibFuzzer,
+                reused: false,
+            },
+            FuzzStage::Smoke {
+                target: "parse_entry".to_owned(),
+                engine: EngineKind::LibFuzzer,
+            },
+        ]
+    );
+    let asked = consent
+        .asked
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert!(
+        !asked
+            .iter()
+            .any(|label| label.contains("promote") || label.starts_with("run libfuzzer")),
+        "preparation never asks to approve the harness or start a campaign: {asked:?}"
+    );
+
+    // Nothing was approved, so a campaign still refuses to run.
+    let refused = container
+        .run_campaign(
+            &project,
+            None,
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+            1,
+            None,
+            None,
+            None,
+            None,
+            None,
+            1,
+        )
+        .await;
+    assert!(refused.is_err(), "preparation must not approve the harness");
+}
+
+#[tokio::test]
+async fn fuzz_prepare_reuses_an_approved_harness_without_smoke() {
+    let dir = tempfile::tempdir().unwrap();
+    let _workspace_root = common::install_managed_workspace("oxfuzz_fuzz_prepare_reuse_it");
+    let project = c_project(&dir);
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("fuzz.db"))
+            .await
+            .unwrap(),
+    );
+    let container = pipeline_container(&store);
+    container
+        .fuzz_onboard(
+            FuzzRequest {
+                prepared_harness: None,
+                project: &project,
+                target: None,
+                engine: EngineKind::LibFuzzer,
+                lang: None,
+                duration_secs: 1,
+                iterations: 1,
+                timeout_ms: None,
+                resume: None,
+                review_bypass: hf_service::HarnessReviewBypass::NotRequested,
+                fresh: false,
+                sanitizer: None,
+                cmplog: false,
+                seed: None,
+            },
+            &noop_stage(),
+            &noop_progress(),
+        )
+        .await
+        .expect("the first pipeline approves a harness");
+
+    let log = StageLog::default();
+    let prepared = container
+        .fuzz_prepare(prepare_request(&project), &log.sink(), &noop_progress())
+        .await
+        .expect("preparation reuses the approved harness");
+    assert!(prepared.harness_reused);
+    assert!(
+        !log.stages()
+            .iter()
+            .any(|stage| matches!(stage, FuzzStage::Smoke { .. })),
+        "a reused approved harness is not smoke-tested again: {:?}",
+        log.stages()
+    );
+}
