@@ -12,6 +12,8 @@ and 0.7.0 releases respectively.
 
 ## Unreleased
 
+## 0.9.0 - 2026-11-04
+
 ### Added
 
 - `oxfuzz discover` prints a ranked table on a terminal: best targets first,
