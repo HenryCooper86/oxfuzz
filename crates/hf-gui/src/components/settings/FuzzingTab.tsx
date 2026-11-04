@@ -1,3 +1,4 @@
+import { DurationInput } from "../ui/DurationInput";
 import { ModelBudgetSettings } from "./ModelBudgetSettings";
 import { Badge, Input, Select, Switch } from "../ui";
 import { SettingsGroup, SettingsItem } from "../ui/SettingsGroup";
@@ -117,17 +118,13 @@ export function FuzzingTab({ value, onChange }: FuzzingTabProps) {
           />
         </SettingsItem>
         <SettingsItem title={t("settings.fuzzing.defaultDuration")}>
-          <Input
-            mono
-            type="number"
-            min={1}
-            max={settings.sandbox.max_duration_secs}
-            value={settings.default_duration_secs}
-            onChange={(event) => update({
-              ...settings,
-              default_duration_secs: Math.max(1, Number(event.target.value) || 1),
-            })}
-            className="w-28"
+          <DurationInput
+            ariaLabel={t("settings.fuzzing.defaultDuration")}
+            seconds={String(settings.default_duration_secs)}
+            onChange={(value) => {
+              const seconds = Number(value);
+              if (Number.isSafeInteger(seconds) && seconds >= 1) update({ ...settings, default_duration_secs: seconds });
+            }}
           />
         </SettingsItem>
       </SettingsGroup>
@@ -166,16 +163,13 @@ export function FuzzingTab({ value, onChange }: FuzzingTabProps) {
           title={t("settings.fuzzing.maxDuration")}
           description={t("settings.fuzzing.maxDurationDesc")}
         >
-          <Input
-            mono
-            type="number"
-            min={1}
-            max={604800}
-            value={settings.sandbox.max_duration_secs}
-            onChange={(event) => updateSandbox({
-              max_duration_secs: Math.max(1, Number(event.target.value) || 1),
-            })}
-            className="w-28"
+          <DurationInput
+            ariaLabel={t("settings.fuzzing.maxDuration")}
+            seconds={String(settings.sandbox.max_duration_secs)}
+            onChange={(value) => {
+              const seconds = Number(value);
+              if (Number.isSafeInteger(seconds) && seconds >= 1 && seconds <= 604800) updateSandbox({ max_duration_secs: seconds });
+            }}
           />
         </SettingsItem>
       </SettingsGroup>

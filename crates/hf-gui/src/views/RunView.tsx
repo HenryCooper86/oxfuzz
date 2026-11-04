@@ -11,6 +11,8 @@ import { SandboxBanner } from "../components/SandboxBanner";
 import { RunOutcomeNotice } from "../components/RunEvidenceSummary";
 import { RunCompletionActions } from "../components/StageHandoff";
 import { ActiveProjectBar } from "../components/ActiveProjectBar";
+import { DurationInput } from "../components/ui/DurationInput";
+import { formatDuration } from "../lib/duration";
 import { Play, Activity, AlertTriangle, FolderOpen, Square, RotateCw, RotateCcw } from "lucide-react";
 import type { HarnessReviewItem, ViewType } from "../types";
 import { useFuzzingSettings } from "../hooks/useFuzzingSettings";
@@ -254,15 +256,12 @@ export function RunView({
         </div>
         <div className="flex flex-col gap-1">
           <Label>{t("run.duration")}</Label>
-          <Input
-            type="number"
-            aria-label={t("run.duration")}
-            aria-invalid={!validDuration && fuzzingPolicyLoaded}
-            aria-describedby={!validDuration ? "run-duration-error" : undefined}
-            min={1}
-            max={fuzzingSettings?.sandbox.max_duration_secs}
-            value={duration}
-            onChange={(e) => setDurationOverride(e.target.value)}
+          <DurationInput
+            ariaLabel={t("run.duration")}
+            invalid={!validDuration && fuzzingPolicyLoaded}
+            describedBy={!validDuration ? "run-duration-error" : undefined}
+            seconds={duration}
+            onChange={setDurationOverride}
           />
         </div>
       </div>
@@ -299,11 +298,11 @@ export function RunView({
         </div>
       )}
 
-      {!validDuration && fuzzingSettings && <p id="run-duration-error" role="alert" className="text-sm text-error">{t("run.invalidDuration", { max: fuzzingSettings.sandbox.max_duration_secs })}</p>}
+      {!validDuration && fuzzingSettings && <p id="run-duration-error" role="alert" className="text-sm text-error">{t("run.invalidDuration", { max: formatDuration(fuzzingSettings.sandbox.max_duration_secs) })}</p>}
       {fuzzingSettings && project && <section className="surface-card p-3 text-sm" aria-label={t("run.approvalTitle")}>
         <p className="font-semibold">{t("run.approvalTitle")}</p>
         <p className="break-all">{project} · {isSyz ? t("run.kernelArtifacts") : target} · {engine}</p>
-        <p>{validDuration ? `${durationSeconds}s` : t("run.invalidBudget")} · {fuzzingSettings.sandbox.max_mem_mb} MiB · {fuzzingSettings.sandbox.max_cpus} CPU</p>
+        <p>{validDuration ? formatDuration(durationSeconds) : t("run.invalidBudget")} · {fuzzingSettings.sandbox.max_mem_mb} MiB · {fuzzingSettings.sandbox.max_cpus} CPU</p>
         <p>{t(isSyz ? "run.approvalKernel" : "run.approvalDetail")}</p>
       </section>}
       <div className="flex items-center gap-2">

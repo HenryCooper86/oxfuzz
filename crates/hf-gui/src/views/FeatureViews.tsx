@@ -3,6 +3,7 @@ import { KnowledgeIndexDetails, type KnowledgeIndexDetailsStatus } from "../comp
 import { SchedulerRuntimeStatus, type CampaignSchedulerStatus } from "../components/SchedulerRuntimeStatus";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useState, type ReactNode } from "react";
 import { Button, IconButton, EmptyState, ErrorState, Input, LoadingState, Select, SeverityBadge, Textarea, ViewHeader } from "../components/ui";
+import { DurationInput } from "../components/ui/DurationInput";
 import { Puzzle, BookOpen, Zap, Target, FileCode, Activity, Bug, Crosshair, Play, Loader2, Plus, Trash2, RotateCw, RotateCcw, Copy, Square, Bot, Shield, Database, Pencil, Save, X, Search, FilePlus, FolderOpen, Layers } from "lucide-react";
 import { getTransport, pickFile, pickFolder } from "../lib";
 import { isTauriEnvironment } from "../lib/transport";
@@ -1729,16 +1730,20 @@ export function AutomationView() {
               { value: "once", label: t("automation.triggerOnce") },
             ]}
           />
-          <Input mono value={triggerValue} onChange={(e) => setTriggerValue(e.target.value)} placeholder={placeholder}
-            className="flex-1 min-w-[180px]" />
-          <label className="text-xs text-text-muted flex items-center gap-1">
-            {t("automation.runLabel")}
-            <Input mono type="number" min={1} max={fuzzingSettings?.sandbox.max_duration_secs} value={duration}
-              disabled={!fuzzingSettings}
-              onChange={(e) => setDurationOverride(Math.max(1, Number(e.target.value) || fuzzingSettings?.default_duration_secs || 1))}
-              className="w-16" />
-            s
-          </label>
+          {triggerKind === "interval"
+            ? <DurationInput ariaLabel={t("automation.triggerInterval")} seconds={triggerValue} onChange={setTriggerValue} />
+            : <Input mono value={triggerValue} onChange={(e) => setTriggerValue(e.target.value)} placeholder={placeholder}
+              className="flex-1 min-w-[180px]" />}
+          <span className="text-xs text-text-muted">{t("automation.runLabel")}</span>
+          <DurationInput
+            ariaLabel={t("automation.runLabel")}
+            seconds={String(duration)}
+            disabled={!fuzzingSettings}
+            onChange={(value) => {
+              const seconds = Number(value);
+              if (Number.isSafeInteger(seconds) && seconds >= 1) setDurationOverride(seconds);
+            }}
+          />
         </div>
 
         {/* Budget (optional): stop after N runs or M minutes of fuzzing. */}

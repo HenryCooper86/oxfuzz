@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import { HarnessReadyCard } from "../components/StageHandoff";
 import { lineDiff } from "../lib/diff";
+import { harnessTargetOptions } from "../lib/targetScore";
 import { useFuzzingSettings } from "../hooks/useFuzzingSettings";
 import { enabledEngineOptions, fuzzingActionsEnabled } from "../lib/fuzzingSettings";
 import { FuzzingPolicyNotice } from "../components/FuzzingPolicyNotice";
@@ -576,9 +577,12 @@ export function HarnessView({
               {existing.source_preview}
             </pre>
           )}
-          <div className="mt-2">
-            <HarnessApprovalEvidence item={existing} />
-          </div>
+          {/* Before approval the Approve step shows this evidence; show it here only once approved. */}
+          {promotionStatus === "done" && (
+            <div className="mt-2">
+              <HarnessApprovalEvidence item={existing} />
+            </div>
+          )}
           <p className="text-xs text-text-muted mt-2">
             {t("harness.generatedPreviously")}
           </p>
@@ -607,14 +611,14 @@ export function HarnessView({
                 setExternalPromotion(null);
                 setCompiled(false);
               }}
-              options={[...inventory.candidates]
-                .sort((a, b) => b.fit_score - a.fit_score)
-                .map((c) => {
-                  const qualified = candidateTargetSelector(c);
-                  const duplicate = inventory.candidates.filter(candidate => candidate.symbol === c.symbol).length > 1;
-                  const value = selectedTarget === qualified || duplicate ? qualified : c.symbol;
-                  return { value, label: `${value} (${t("harness.fit")}: ${c.fit_score.toFixed(2)})` };
-                })}
+              options={harnessTargetOptions(
+                inventory.candidates,
+                selectedTarget,
+                discovery?.ranked?.assessments ?? [],
+                new Map(discovery?.semgrep?.inventory.overlay_state === "current"
+                  ? discovery.semgrep.inventory.candidates.map((candidate) => [candidate.id, candidate.effective_score] as const)
+                  : []),
+              )}
             />
           </div>
           <div className="flex flex-wrap gap-3 items-end">
@@ -823,12 +827,42 @@ export function HarnessView({
             )}
           </Step>
 
-          {/* Step 4: Human approval. When smoke surfaced a crash the clean
+          {/* Step 4: Generate Seeds (part of Build & Smoke-Test) */}
+          <Step
+            number={4}
+            prefix={stepPrefix}
+            title={t("harness.stepSeedsTitle")}
+            errorText={seedError}
+            icon={<Database size={16} />}
+            status={seedStatus}
+            actionLabel={t("harness.generateSeeds")}
+            actionClick={generateSeeds}
+            disabled={selectionBlocked || !fuzzingSettings}
+          >
+            {seeds && (
+              <div className="mt-2">
+                <div className="text-xs text-text-secondary mb-1">{t("harness.seedsGenerated", { n: seeds.length, target: selectedTarget })}</div>
+                <div className="flex flex-wrap gap-1">
+                  {seeds.map((s, i) => (
+                    <span
+                      key={i}
+                      className="text-xs px-2 py-1 rounded-sm"
+                      style={{ background: "var(--surface-code)", border: "1px solid var(--border)", fontFamily: "var(--font-mono)" }}
+                    >
+                      {s.name} <span className="text-text-muted">({s.size}b)</span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </Step>
+
+          {/* Step 5: Human approval, the last step and the only one a person must decide. When smoke surfaced a crash the clean
               "Approve for Campaigns" path is gated -- but the actionable path is
               to approve WITH the known finding. Make that the primary (enabled)
               button so the step doesn't read as "stuck" behind a disabled one. */}
           <Step
-            number={4}
+            number={5}
             prefix={stepPrefix}
             title={t("harness.stepApproveTitle")}
             icon={<CheckCircle2 size={16} />}
@@ -868,36 +902,6 @@ export function HarnessView({
                 <span style={{ color: promotionResult.status === "Promoted" ? "var(--success)" : "var(--error)" }}>
                   {promotionResult.message}
                 </span>
-              </div>
-            )}
-          </Step>
-
-          {/* Step 5: Generate Seeds */}
-          <Step
-            number={5}
-            prefix={stepPrefix}
-            title={t("harness.stepSeedsTitle")}
-            errorText={seedError}
-            icon={<Database size={16} />}
-            status={seedStatus}
-            actionLabel={t("harness.generateSeeds")}
-            actionClick={generateSeeds}
-            disabled={selectionBlocked || !fuzzingSettings}
-          >
-            {seeds && (
-              <div className="mt-2">
-                <div className="text-xs text-text-secondary mb-1">{t("harness.seedsGenerated", { n: seeds.length, target: selectedTarget })}</div>
-                <div className="flex flex-wrap gap-1">
-                  {seeds.map((s, i) => (
-                    <span
-                      key={i}
-                      className="text-xs px-2 py-1 rounded-sm"
-                      style={{ background: "var(--surface-code)", border: "1px solid var(--border)", fontFamily: "var(--font-mono)" }}
-                    >
-                      {s.name} <span className="text-text-muted">({s.size}b)</span>
-                    </span>
-                  ))}
-                </div>
               </div>
             )}
           </Step>
@@ -991,7 +995,7 @@ function Step({
   return (
     <div
       className="surface-card"
-      style={{ padding: "var(--space-md)", opacity: disabled ? 0.6 : 1 }}
+      style={{ padding: "var(--space-md)" }}
     >
       <div className="flex items-center gap-3">
         <div

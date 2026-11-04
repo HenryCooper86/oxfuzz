@@ -51,8 +51,10 @@ instead of being hidden behind a generic status.
 **Discover**. A scan-ranked Target Inventory appears first. When AI is
 configured, oxfuzz assesses promising targets automatically and updates the
 same list once. The first assessed target is marked **Recommended first**;
-each assessed card shows bug potential, reachable code, harness feasibility,
-an advisory score, and an explanation beside the unchanged scan score.
+each card shows one score out of 100 and its source (AI assessment, or the code
+scan when unassessed) with a one-line explanation; **Why this score** holds the
+scan numbers and the AI's bug potential, reachable code, and harness
+feasibility ratings.
 Unassessed targets say **Scan only** and keep their scan order. If no provider
 is configured, **AI Settings** opens setup. If assessment fails, **Retry AI
 assessment** uses the retained scan without rescanning. You choose the target

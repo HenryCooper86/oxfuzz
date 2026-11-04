@@ -268,8 +268,11 @@ most promising candidates with AI.
 - Pick the **language** and click **Discover**. Scan results appear first; AI
   updates the ranking when assessment finishes. Discover is disabled until a
   project is set.
-- Review the three AI factors: bug potential, reachable code, and harness
-  feasibility. **Scan only** identifies candidates without an AI assessment.
+- Each card shows one **score out of 100** and what it came from: the AI
+  assessment when there is one, otherwise the code scan (with Semgrep when
+  enriched). **Why this score** lists the scan numbers and the three AI factors:
+  bug potential, reachable code, and harness feasibility. **Scan only** marks
+  candidates without an AI assessment.
 - If no AI provider is set up, use **AI Settings**. If assessment fails, use
   **Retry AI assessment** to assess the retained scan again. **Stop AI
   assessment** cancels a running assessment on the service; the scan results
@@ -279,9 +282,10 @@ most promising candidates with AI.
   coverage -- meaningful only after at least one run.
 
 **What it shows:** "N candidates found", initially sorted by scan score. AI
-recommendations show an advisory score and an explanation alongside the
-original scan score; unassessed candidates keep scan order. Each candidate also
-lists its symbol, kind, \`file:line\`, complexity, and reachability.
+recommendations show the AI's score and a one-line explanation; unassessed
+candidates keep scan order. Each candidate also lists its symbol, kind, and
+\`file:line\`; complexity and reachability are under **Why this score**. The
+Harness target list shows the same score.
 **Semgrep enrichment** is a separate optional action after AI assessment.
 
 **Note:** discovery today covers C and C++ (tree-sitter) plus a lexical Rust
@@ -300,15 +304,15 @@ smoke-test it in the sandbox, then explicitly **approve** it for campaigns.
 2. **Compile** -- build it in the sandbox. Marks done only when it compiles.
 3. **Run Smoke Test** -- a short fuzz run to confirm the harness actually
    exercises the target.
-4. **Approve** -- **Approve for Campaigns** after a clean smoke test, or
+4. **Generate Seeds** -- create a starter corpus.
+5. **Approve** -- **Approve for Campaigns** after a clean smoke test, or
    **Approve with Known Findings** if the smoke test itself crashed. This is the
    human gate: approval binds that exact source + engine + target.
-5. **Generate Seeds** -- create a starter corpus.
 
-**Build & Smoke-Test** (the primary button) runs steps 1-3 and seeds in one go,
-but deliberately stops before approval so a human always reviews.
+**Build & Smoke-Test** (the primary button) runs steps 1-4 in one go, then
+stops at step 5 so a person always makes the approval decision.
 
-**Selectors:** Target (sorted by fit), Engine (libFuzzer / AFL++ / honggfuzz
+**Selectors:** Target (sorted by the same score Discover shows), Engine (libFuzzer / AFL++ / honggfuzz
 for generated function harnesses; Rust uses libFuzzer), and Language (C / C++ /
 Rust). syzkaller is for kernel targets rather than generated function harnesses.
 
@@ -354,7 +358,7 @@ Run History's interrupted category.
 **What you can do:**
 
 - **Run Fuzzer** (or **Launch Campaign** for Syzkaller). Set the **engine**,
-  **duration** (seconds), and target symbol.
+  **duration** (a number plus seconds, minutes, or hours), and target symbol.
 - **Stop** a run in progress.
 - If coverage stalls, the screen may offer **Regenerate harness** (jumps to
   Harness).
@@ -400,7 +404,9 @@ Syzkaller kernel runs are excluded here -- their crashes live in the Syzkaller
 workdir -- so the button is disabled with an explanation.
 
 **What it shows:** a crash list (kind, severity badge, filename) and a detail
-panel with the CASR analysis, stack signature, and the drafted bug report.
+panel that starts with the plain-language bug summary, then the crash location
+and stack, then the AI verification. **Verify a fix** opens the Patch to Proof
+form; **Evidence details** holds the full finding proof record.
 
 **Reading a finding:** *Kind* is the error class (e.g. "Asan" = a memory bug
 caught by AddressSanitizer). *Severity* rates danger -- "Exploitable" means an

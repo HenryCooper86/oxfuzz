@@ -81,8 +81,10 @@ it("carries the promoted exact selector through real Harness, Run, Corpus and re
   const start = [...host.querySelectorAll("button")].find(item => item.textContent?.includes("Run Fuzzer"));
   expect(start, host.textContent ?? "").toBeTruthy(); expect(start!.disabled).toBe(false);
   expect(host.textContent).toContain("Starting this campaign");
+  // The 60 s default is shown as 1 minute; amounts below are in minutes.
   const durationInput = host.querySelector<HTMLInputElement>('input[type="number"]')!;
-  for (const invalid of ["", "0", "1.5", "999999999"]) {
+  expect(durationInput.value).toBe("1");
+  for (const invalid of ["", "0", "0.001", "999999999"]) {
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(durationInput, invalid);
       durationInput.dispatchEvent(new Event("input", { bubbles: true }));
@@ -91,7 +93,7 @@ it("carries the promoted exact selector through real Harness, Run, Corpus and re
     expect(invoke.mock.calls.filter(([command]) => command === "run_fuzzer")).toHaveLength(0);
   }
   await act(async () => {
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(durationInput, "60");
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(durationInput, "1");
     durationInput.dispatchEvent(new Event("input", { bubbles: true }));
   });
   expect(start!.disabled).toBe(false);

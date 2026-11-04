@@ -136,3 +136,14 @@ fn target_source_section_is_bounded() {
 fn an_empty_target_source_renders_nothing() {
     assert!(hf_prompt::render_target_source_section("a.c", 1, "  \n").is_empty());
 }
+
+#[test]
+fn ai_prompt_explains_that_callee_count_is_not_reachability() {
+    // A self-contained parser calls no other project function. Without this
+    // explanation a model read a zero count as "no reachable code".
+    let prompt = render_ai_ranking_prompt(&[sample_candidate("parse_number", 0.87)]).unwrap();
+    assert!(prompt.contains("\"project_callees\":0"));
+    assert!(!prompt.contains("reachable_count"));
+    assert!(prompt.contains("project_callees is how many other project functions the target calls"));
+    assert!(prompt.contains("a self-contained function with zero callees can still rate high"));
+}

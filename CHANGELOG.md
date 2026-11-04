@@ -111,6 +111,23 @@ and 0.7.0 releases respectively.
   instead of an empty list or an endless "Checking".
 - "1 candidate found" instead of "1 candidates found"; the setup wizard's step
   heading no longer looks like a text field when focused.
+- One score per target: each Discover card shows a single score out of 100
+  labelled with its source (AI assessment, code scan with Semgrep, or code
+  scan), with the scan numbers and AI factor ratings under "Why this score".
+  The Harness target list shows the same score.
+- The AI target-ranking prompt sends `project_callees` (was
+  `reachable_count`) and explains it, so a self-contained parser is no longer
+  rated as having no reachable code.
+- Triage crash detail leads with the bug summary, crash location, and stack;
+  fix verification opens from "Verify a fix…" and the proof record sits under
+  "Evidence details".
+- Harness steps are ordered Generate, Compile, Smoke test, Seeds, Approve, so
+  Build & Smoke-Test covers every step before the human decision. Approval
+  evidence appears once, finished steps are no longer dimmed, and the two
+  smoke-crash messages agree.
+- Durations in Run, Automation, Settings > Fuzzing, and fix verification are
+  entered as a number plus seconds, minutes, or hours, and summaries read
+  "1 min" or "2 h" instead of raw seconds. Stored values are still seconds.
 
 ## 0.8.1 - 2026-10-25
 

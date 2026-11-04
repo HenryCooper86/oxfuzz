@@ -31,7 +31,7 @@ import { useI18n } from "../i18nContext";
 import { Crosshair, Search, Loader2, ChevronRight, ChevronDown } from "lucide-react";
 import { shouldLoadCoverage } from "../lib/discoverCoverage";
 import { waitForRankedDiscovery } from "../lib/rankedDiscovery";
-import { TargetAssessmentPanel } from "../components/discovery/TargetAssessmentPanel";
+import { AssessmentFactors, TargetAssessmentPanel, TargetScore } from "../components/discovery/TargetAssessmentPanel";
 import type { RankedDiscoveryStatus, TargetAssessment } from "../types";
 
 export function DiscoverView({ embedded = false, onNavigate }: { embedded?: boolean; onNavigate?: (view: ViewType) => void }) {
@@ -669,7 +669,13 @@ function CandidateCard({
           <div className="text-xs text-text-secondary mt-1">{c.rationale}</div>
         )}
       </div>
-      <div className="flex flex-col items-end gap-1 shrink-0">
+      <TargetScore fitScore={c.fit_score} assessment={assessment} semgrepEffective={semgrepScores?.effective_score} color={fitColor} />
+    </div>
+    <TargetAssessmentPanel assessment={assessment} recommended={recommended} />
+    <details className="px-3 pb-3 text-xs">
+      <summary className="cursor-pointer text-text-secondary">{t("discover.whyThisScore")}</summary>
+      <div className="flex flex-col gap-2 mt-2">
+        <div className="flex flex-wrap items-center gap-2">
         {semgrepScores ? (
           <>
             <span className="text-xs font-mono text-text-secondary">
@@ -711,9 +717,10 @@ function CandidateCard({
             {t("discover.reachesBadge", { n: reaches, acc: c.accumulated_complexity ?? c.complexity })}
           </span>
         )}
+        </div>
+        {assessment && <AssessmentFactors assessment={assessment} />}
       </div>
-    </div>
-    <TargetAssessmentPanel assessment={assessment} recommended={recommended} />
+    </details>
     {onSelect && <div className="px-3 pb-3"><Button variant="primary" size="sm" onClick={onSelect}>{t("gui.useTarget")}</Button></div>}
     {treeOpen && hasTree && (
       <div style={{ padding: "0 var(--space-md) var(--space-md) calc(var(--space-md) + 22px)", borderTop: "1px solid var(--border)" }}>

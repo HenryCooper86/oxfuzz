@@ -78,8 +78,11 @@ the newer operation's cards.
 ## Assessment and ordering
 
 The model receives only persisted scan metadata: target ID, relative file,
-symbol, language, kind, signature, input surface, complexity, reachable count,
-accumulated complexity, and heuristic score. No source excerpt or vulnerability
+symbol, language, kind, signature, input surface, complexity, project callee
+count (`project_callees`), accumulated complexity, and heuristic score. The prompt
+explains that the callee count is the number of other project functions the
+target calls, and that reachable code includes the target's own body, so a
+self-contained function is not rated unreachable for having no callees. No source excerpt or vulnerability
 claim is introduced. The prompt states that these are estimates and asks for
 three factor ratings from 0 to 4, with one short explanation tied to the
 supplied metadata. `reachable code` may be `unknown` when lexical scanning

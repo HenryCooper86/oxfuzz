@@ -1,3 +1,4 @@
+import { DurationInput } from "./ui/DurationInput";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ShieldQuestion } from "lucide-react";
 import { Badge, Button, Textarea } from "./ui";
@@ -200,17 +201,16 @@ export function PatchToProofPanel({
             onChange={(event) => setPatch(event.target.value)}
           />
           <div className="flex flex-wrap items-center gap-2">
-            <label className="text-xs text-text-secondary" htmlFor="patch-to-proof-followup">
+            <span className="text-xs text-text-secondary">
               {t("patchToProof.followUpLabel")}
-            </label>
-            <input
-              id="patch-to-proof-followup"
-              type="number"
-              min={1}
-              max={3600}
-              value={followUpSeconds}
-              onChange={(event) => setFollowUpSeconds(Number(event.target.value))}
-              className="w-24 px-2 py-1 text-11px border border-solid border-[var(--border)] rounded-[var(--radius-md)] bg-[var(--surface-primary)] text-text-primary outline-none"
+            </span>
+            <DurationInput
+              ariaLabel={t("patchToProof.followUpLabel")}
+              seconds={String(followUpSeconds)}
+              onChange={(value) => {
+                const seconds = Number(value);
+                if (Number.isSafeInteger(seconds) && seconds >= 1 && seconds <= 3600) setFollowUpSeconds(seconds);
+              }}
             />
             <Button
               variant="outline"

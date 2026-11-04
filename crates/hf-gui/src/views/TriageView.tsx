@@ -369,12 +369,27 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
 function CrashDetail({ item, verdict, onVerify, actionBusy }: { item: FindingReviewItem; verdict: CrashVerdict | "loading" | "none" | undefined; onVerify: () => void; actionBusy: boolean }) {
   const { t } = useI18n();
   const { crash } = item;
+  // Fix verification is a deliberate next step, not part of reading a crash.
+  const [verifyingFix, setVerifyingFix] = useState(false);
+  // Order: what broke (plain summary, kind, where), how to confirm it, then the
+  // fix workflow and the full evidence record for anyone who needs it.
   return <div className="flex flex-col gap-3">
     <div className="flex items-center gap-2"><span className="text-xs px-2 py-1 rounded-sm font-medium" style={{ background: "var(--error-subtle)", color: "var(--error)" }}>{crash.kind}</span>{crash.casr && <SeverityBadge severity={crash.casr.severity} title={crash.casr.severity_short || crash.casr.severity} />}<span className="text-xs text-text-muted font-mono truncate min-w-0 flex-1" title={crash.input_path}>{crash.input_path.split("/").pop()}</span><PathActions path={crash.input_path} /></div>
+    {crash.bug_report ? <div><p className="text-sm font-medium text-accent m-0">{crash.bug_report.title}</p><p className="text-xs text-text-secondary">{crash.bug_report.summary}</p></div>
+      : crash.summary && <p className="text-sm text-text-secondary">{crash.summary}</p>}
     <div className="text-xs text-text-muted font-mono">{item.target_symbol} · {crash.run_id}</div>
-    {crash.summary && <p className="text-sm text-text-secondary">{crash.summary}</p>}
-    <FindingProofCard proof={item.proof} />
-    <PatchToProofPanel key={crash.id} findingId={crash.id} runId={crash.run_id} suggestedFix={crash.bug_report?.suggested_fix ?? null} />
+    {crash.casr && <div className="border-t border-border pt-3">
+      <div className="flex flex-wrap items-center gap-2 mb-2">
+        <SeverityBadge severity={crash.casr.severity} title={crash.casr.severity_short || crash.casr.severity} />
+        {crash.casr.severity_short && <span className="text-xs text-text-secondary font-mono">{crash.casr.severity_short}</span>}
+        {crash.casr.crashline && <span className="text-xs text-text-muted font-mono">@ {crash.casr.crashline}</span>}
+        {crash.casr.cluster != null && <span className="text-xs text-text-muted">{t("triage.cluster", { n: crash.casr.cluster })}</span>}
+      </div>
+      {crash.casr.stack.length > 0 && <code className="text-xs text-text-secondary block font-mono p-2 rounded-md whitespace-pre-wrap" style={{ background: "var(--surface-code)" }}>
+        {crash.casr.stack.slice(0, 8).join("\n")}
+      </code>}
+    </div>}
+    {crash.stack_signature && <code className="text-xs text-text-secondary block font-mono p-2 rounded-md" style={{ background: "var(--surface-code)" }}>{crash.stack_signature}</code>}
     <div className="border-t border-border pt-3">
       {verdict === undefined && <Button size="sm" variant="ghost" onClick={onVerify} disabled={actionBusy || !item.latest_scoped_actions_allowed} title={item.latest_scoped_action_reason ?? undefined}>{t("triage.verifyCrash")}</Button>}
       {verdict === "loading" && <span className="text-xs text-text-muted">{t("triage.verifying")}</span>}
@@ -390,18 +405,13 @@ function CrashDetail({ item, verdict, onVerify, actionBusy }: { item: FindingRev
         </ul>}
       </div>}
     </div>
-    {crash.casr && <div className="border-t border-border pt-3">
-      <div className="flex flex-wrap items-center gap-2 mb-2">
-        <SeverityBadge severity={crash.casr.severity} title={crash.casr.severity_short || crash.casr.severity} />
-        {crash.casr.severity_short && <span className="text-xs text-text-secondary font-mono">{crash.casr.severity_short}</span>}
-        {crash.casr.crashline && <span className="text-xs text-text-muted font-mono">@ {crash.casr.crashline}</span>}
-        {crash.casr.cluster != null && <span className="text-xs text-text-muted">{t("triage.cluster", { n: crash.casr.cluster })}</span>}
-      </div>
-      {crash.casr.stack.length > 0 && <code className="text-xs text-text-secondary block font-mono p-2 rounded-md whitespace-pre-wrap" style={{ background: "var(--surface-code)" }}>
-        {crash.casr.stack.slice(0, 8).join("\n")}
-      </code>}
-    </div>}
-    {crash.stack_signature && <code className="text-xs text-text-secondary block font-mono p-2 rounded-md" style={{ background: "var(--surface-code)" }}>{crash.stack_signature}</code>}
-    {crash.bug_report && <div className="border-t border-border pt-3"><div className="text-xs text-text-muted uppercase">{t("triage.draftBugReport")}</div><p className="text-sm font-medium text-accent">{crash.bug_report.title}</p><p className="text-xs text-text-secondary">{crash.bug_report.summary}</p></div>}
+    <div className="border-t border-border pt-3">
+      {verifyingFix ? <PatchToProofPanel key={crash.id} findingId={crash.id} runId={crash.run_id} suggestedFix={crash.bug_report?.suggested_fix ?? null} />
+        : <Button size="sm" variant="outline" onClick={() => setVerifyingFix(true)}>{t("triage.verifyFix")}</Button>}
+    </div>
+    <details className="border-t border-border pt-3 text-xs">
+      <summary className="cursor-pointer text-text-secondary">{t("triage.evidenceDetails")}</summary>
+      <FindingProofCard proof={item.proof} />
+    </details>
   </div>;
 }

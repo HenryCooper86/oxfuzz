@@ -5,7 +5,7 @@ export const CORE_STAGES = [
   {
     id: "harness",
     label: "Generate harness",
-    steps: ["harness", "compile", "smoke", "approve", "seeds"],
+    steps: ["harness", "compile", "smoke", "seeds", "approve"],
   },
   { id: "run", label: "Run fuzzer", steps: ["run"] },
   { id: "triage", label: "Triage crashes", steps: ["triage"] },
