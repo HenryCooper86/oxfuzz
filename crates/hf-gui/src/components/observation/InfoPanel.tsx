@@ -1,12 +1,13 @@
-// Info panel -- shows campaign artifacts, the plan, and the iteration loop.
+// Info panel -- shows campaign artifacts and the iteration loop. The stage
+// plan lives in the Progress panel.
 //
 // Everything here is driven from real in-app state: artifact counts (compiled
 // harness, corpus, crash inputs) come from the `artifact_summary` command for
-// the active project/target; the plan and loop status from the shared pipeline
+// the active project/target; the loop status from the shared pipeline
 // progress, the selected target/engine, and the live RunOutput context.
 
 import { useEffect, useState } from "react";
-import { FileCode, ListChecks, Repeat, Crosshair as TargetIcon } from "lucide-react";
+import { FileCode, Repeat, Crosshair as TargetIcon } from "lucide-react";
 import { getTransport } from "../../lib";
 import { useI18n } from "../../i18nContext";
 import { usePipeline } from "../../providers/pipeline";
@@ -29,12 +30,6 @@ export function InfoPanel() {
   const { selectedRun, lastTarget, lastEngine } = useRunOutput();
   const running = activeStatus(selectedRun?.status ?? null);
   const [artifacts, setArtifacts] = useState<ArtifactSummary | null>(null);
-
-  const planSteps = coreStages.map((s) => ({
-    label: s.label,
-    done: s.done,
-    skipped: s.skipped,
-  }));
 
   const currentLabel = coreStages.find((s) => s.current)?.label ?? t("info.allStagesComplete");
   const activeTarget = lastTarget || target;
@@ -99,33 +94,6 @@ export function InfoPanel() {
               {t("info.pickProject")}
             </div>
           )}
-        </div>
-
-        {/* Campaign Plan */}
-        <div>
-          <div className="text-xs text-text-muted uppercase mb-1 flex items-center gap-1" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>
-            <ListChecks size={11} /> {t("info.campaignPlan")}
-          </div>
-          {planSteps.map((s, i) => (
-            <div key={i} className="flex items-center gap-2 py-1 text-xs">
-              <div
-                className="flex items-center justify-center rounded-full shrink-0"
-                style={{
-                  width: "16px", height: "16px",
-                  fontSize: "10px", fontWeight: 600,
-                  background: s.done ? "rgba(111,207,151,0.15)" : "var(--surface-active)",
-                  border: `1px solid ${s.done ? "var(--success)" : "var(--border)"}`,
-                  color: s.done ? "var(--success)" : "var(--text-muted)",
-                }}
-              >
-                {i + 1}
-              </div>
-              <span style={{ color: s.done ? "var(--text-primary)" : "var(--text-muted)", textDecoration: s.done && !s.skipped ? "line-through" : "none" }}>
-                {s.label}
-              </span>
-              {s.skipped && <span className="text-text-muted" style={{ fontSize: "10px" }}>{t("info.skipped")}</span>}
-            </div>
-          ))}
         </div>
 
         {/* Iteration Loop */}

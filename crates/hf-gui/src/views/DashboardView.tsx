@@ -128,7 +128,7 @@ function emptyDashboard(project: string | null, target: string | null): Workbenc
       blockers: ["No fuzzing targets discovered."],
       blocker_items: [{ code: "no_targets", count: 0 }],
     },
-    next_actions: ["Run target discovery on an internal project."],
+    next_actions: ["Run target discovery on this project."],
     next_action_items: [{ code: "run_discovery", count: 0 }],
   };
 }
@@ -406,7 +406,7 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
     onNavigate?.("triage");
   }
 
-  if (!activeProject) return <div className="flex flex-col gap-4"><ModelBudgetPanel /><section className="surface-card flex flex-col items-start gap-4 p-6">
+  if (!activeProject) return <div className="flex flex-col gap-4"><section className="surface-card flex flex-col items-start gap-4 p-6">
     <FolderOpen size={28} className="text-text-secondary" aria-hidden="true" />
     <ViewHeader title={t("setup.emptyTitle")} description={t("setup.emptyHint")} />
     <Button variant="primary" onClick={() => onNavigate?.("workflow")} disabled={!onNavigate}>{t("setup.openWorkflow")}</Button>
@@ -491,8 +491,6 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
         ))}
       </div>
 
-      {tab === "overview" && <ModelBudgetPanel />}
-
       {notice && <InlineNotice tone="ok" text={notice} />}
       {error && <InlineNotice tone="error" text={error} />}
 
@@ -503,7 +501,6 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
           {tab === "overview" && (
             <OverviewTab
               dashboard={dashboard}
-              onReport={() => void generateActiveReport()}
               onExport={exportCrash}
               onOpenCrash={openCrash}
               onNavigate={onNavigate}
@@ -549,7 +546,12 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
               onExport={exportCrash}
             />
           )}
-          {tab === "health" && <HealthPanel status={system} dashboard={dashboard} />}
+          {tab === "health" && (
+            <>
+              <ModelBudgetPanel />
+              <HealthPanel status={system} dashboard={dashboard} />
+            </>
+          )}
         </>
       )}
     </div>
@@ -565,20 +567,18 @@ function workbenchTabs(
     { id: "reports", label: t("dashboard.tabReports"), icon: <FileText size={14} /> },
     { id: "repro", label: t("dashboard.tabRepro"), icon: <Play size={14} /> },
     { id: "team", label: t("dashboard.tabReview"), icon: <Users size={14} />, count: dashboard.harness_reviews.length + dashboard.crash_reviews.length },
-    { id: "gitlab", label: "GitLab", icon: <GitPullRequest size={14} /> },
+    { id: "gitlab", label: t("dashboard.tabIssues"), icon: <GitPullRequest size={14} /> },
     { id: "health", label: t("dashboard.tabHealth"), icon: <Server size={14} /> },
   ];
 }
 
 function OverviewTab({
   dashboard,
-  onReport,
   onExport,
   onOpenCrash,
   onNavigate,
 }: {
   dashboard: WorkbenchDashboard;
-  onReport: () => void;
   onExport: (crash: CrashReviewItem) => void;
   onOpenCrash: (crash: CrashReviewItem) => void;
   onNavigate?: (view: ViewType) => void;
@@ -588,7 +588,6 @@ function OverviewTab({
       <NextActions
         actions={dashboard.next_actions}
         items={dashboard.next_action_items}
-        onReport={onReport}
         onNavigate={onNavigate}
       />
       <div className="dashboard-supporting-band">
@@ -1246,12 +1245,10 @@ function Metric({ icon, label, value, detail, accent }: { icon: React.ReactNode;
 function NextActions({
   actions,
   items,
-  onReport,
   onNavigate,
 }: {
   actions: string[];
   items: ReadinessNote[];
-  onReport: () => void;
   onNavigate?: (view: ViewType) => void;
 }) {
   const { t } = useI18n();
@@ -1267,10 +1264,6 @@ function NextActions({
     <section className="surface-card" style={{ padding: "var(--space-md)" }}>
       <div className="flex items-center justify-between gap-3">
         <SectionHeader icon={<CheckCircle2 size={15} />} title={t("dashboard.attention")} />
-        <Button variant="outline" size="sm" onClick={onReport}>
-          <FileText size={13} />
-          {t("dashboard.draftReport")}
-        </Button>
       </div>
       <div className="flex flex-col gap-2 mt-3">
         {entries.map((entry) => {

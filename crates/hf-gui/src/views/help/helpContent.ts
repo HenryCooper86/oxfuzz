@@ -134,7 +134,10 @@ const PIPELINE_OVERVIEW = `
 
 oxfuzz follows one connected flow. The **Progress** panel (top-right
 **Progress** toggle) and the **Fuzzing Workflow** screen both track it, and it is
-saved per project, so switching projects keeps each one's progress.
+saved per project, so switching projects keeps each one's progress. The panel
+opens by default on the pipeline screens (Workflow, Discover, Harness, Run,
+Triage, Corpus) on wide windows; elsewhere its toggle opens it. **Reset
+progress** asks first and clears only the checklist.
 
 ## The four core stages
 
@@ -196,10 +199,11 @@ project at a time; with no project selected it prompts you to choose one.
   Markdown.
 - **Repro** -- builds an exact \`oxfuzz regress\` command per crash to copy.
 - **Review** -- queues of reports, harnesses, and crashes awaiting a human.
-- **GitLab / GitHub** -- turn a crash into an issue draft, then **Copy** it or
+- **Issues** -- turn a crash into a GitHub or GitLab issue draft, then **Copy** it or
   **File** it directly through the provider API (needs a repo + token in
   Settings -> Issue Tracker).
-- **Health** -- engine readiness and DefectDojo status.
+- **Health** -- the model budget and its retained usage, engine readiness,
+  and DefectDojo status.
 
 **Preconditions:** **Draft report** needs both an active project and a target.
 Issue export needs a project so the Git remote can be resolved.

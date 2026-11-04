@@ -22,8 +22,9 @@ users ask their server administrator to prepare it and use **Check again**.
 **Set up later** retains an unfinished-setup reminder across restarts.
 **Finish setup** returns to the wizard. Completion opens the guided workflow;
 it never grants execution approval. Optional integrations and detailed settings
-stay in Settings. With no project selected, the Dashboard presents one action
-to open the project workflow.
+stay in Settings. Later launches open on the Fuzzing Workflow when a project
+is already open, and on the Dashboard otherwise; with no project selected, the
+Dashboard presents one action to open the project workflow.
 
 The sidebar shows every screen in always-visible sections. **Workspace**
 holds the Dashboard, guided workflow, Triage, Run History, Reports, Projects,
@@ -66,12 +67,12 @@ and prepares a seed corpus. You then review and explicitly promote that exact
 revision before any full campaign can start. Regeneration invalidates the prior
 promotion.
 
-Standalone Harness progress belongs to the project shown in its path field.
-Choosing a folder, starting qualification, or loading a matching retained harness
-registers that project without switching another project's target selection.
-Removing it from recents discards its cached progress; a late retained-harness
-reply does not restore the removed entry. An explicit new action can register it
-again.
+The app has one active project. Discover, Harness, and Run show it at the top
+with a **Change** action (the same picker the Fuzzing Workflow and sidebar use),
+so no page works on a different project than the rest of the app. Harness
+progress belongs to the active project. Removing a project from recents
+discards its cached progress; a late retained-harness reply does not restore
+the removed entry. An explicit new action can register it again.
 
 ![Harness -- promoted revision and five-step sandbox qualification flow](../screenshots/harness.png)
 

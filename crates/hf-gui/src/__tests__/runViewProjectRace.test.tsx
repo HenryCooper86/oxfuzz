@@ -61,7 +61,7 @@ function seedStorage(active: string, recents: string[]) {
   localStorage.setItem("hf_recent_projects", JSON.stringify(recents));
   localStorage.setItem(
     "hf_target_selection_v1",
-    JSON.stringify({ [active]: { target: "parse", engine: "libfuzzer", lang: "c", compiled: false } }),
+    JSON.stringify(Object.fromEntries([active, ...recents].map((project) => [project, { target: "parse", engine: "libfuzzer", lang: "c", compiled: false }]))),
   );
 }
 
@@ -114,6 +114,7 @@ it("records progress on the project the run launched for, not the previously act
                 <ToastProvider>
                   <RunOutputProvider>
                     <RunView />
+                    <SwitchProject to="/new" />
                   </RunOutputProvider>
                 </ToastProvider>
               </RunStatusProvider>
@@ -125,12 +126,12 @@ it("records progress on the project the run launched for, not the previously act
   });
   await flush();
 
-  const projectInput = host.querySelector<HTMLInputElement>('input[placeholder="/path/to/project"]');
-  expect(projectInput, host.textContent ?? "").toBeTruthy();
-  await act(async () => {
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(projectInput, "/new");
-    projectInput!.dispatchEvent(new Event("input", { bubbles: true }));
-  });
+  // A page has no project path of its own; the active project is switched
+  // through the shared picker, which this helper stands in for.
+  expect(host.querySelector('input[placeholder="/path/to/project"]')).toBeNull();
+  const switcher = [...host.querySelectorAll("button")].find((item) => item.textContent === "switch-project");
+  expect(switcher, host.textContent ?? "").toBeTruthy();
+  await act(async () => switcher!.click());
   await flush();
 
   const start = [...host.querySelectorAll("button")].find((item) => item.textContent?.includes("Run Fuzzer"));

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { getTransport, pickFolder } from "../lib";
+import { getTransport } from "../lib";
 import {
   buildSemgrepPresentation,
   canApplySemgrepResult,
@@ -25,9 +25,10 @@ import type {
   SemgrepTargetCandidate,
   TargetCandidate,
 } from "../types";
-import { Button, Input, Select, ViewHeader } from "../components/ui";
+import { Button, Select, ViewHeader } from "../components/ui";
+import { ActiveProjectBar } from "../components/ActiveProjectBar";
 import { useI18n } from "../i18nContext";
-import { Crosshair, Search, Loader2, FolderOpen, ChevronRight, ChevronDown } from "lucide-react";
+import { Crosshair, Search, Loader2, ChevronRight, ChevronDown } from "lucide-react";
 import { shouldLoadCoverage } from "../lib/discoverCoverage";
 import { waitForRankedDiscovery } from "../lib/rankedDiscovery";
 import { TargetAssessmentPanel } from "../components/discovery/TargetAssessmentPanel";
@@ -40,17 +41,15 @@ export function DiscoverView({ embedded = false, onNavigate }: { embedded?: bool
   // Language lives in the shared TargetContext so the C/C++ choice made here
   // flows through to Harness generation (which reads it from the same context).
   const { lang, setLang, setTarget, selectionRepair, storageError } = useTarget();
-  // When embedded in the unified workflow, the project is fixed by the
-  // workflow's project gate; standalone, this view has its own picker.
-  const [localProject, setLocalProject] = useState(activeProject);
-  const project = embedded ? activeProject : localProject;
+  // One project for the whole app: the active project (changed through
+  // ActiveProjectBar), embedded or not.
+  const project = activeProject;
   const { snapshot, save } = useDiscoveryInventory(project, lang);
   const inventory = snapshot?.inventory ?? null;
   const rankedResult = snapshot?.ranked ?? null;
   const [discoveryContext, setDiscoveryContext] =
     useState<SemgrepContext | null>(snapshot ? { project, lang } : null);
   const [loading, setLoading] = useState(false);
-  const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rankingStatus, setRankingStatus] = useState<RankedDiscoveryStatus | null>(null);
   const [semgrepInventory, setSemgrepInventory] =
@@ -164,16 +163,6 @@ export function DiscoverView({ embedded = false, onNavigate }: { embedded?: bool
       if (mountedRef.current) setError(String(cause));
     } finally {
       if (mountedRef.current) setStoppingRanking(false);
-    }
-  }, []);
-
-  const browse = useCallback(async () => {
-    setScanning(true);
-    try {
-      const path = await pickFolder();
-      if (path) setLocalProject(path);
-    } finally {
-      setScanning(false);
     }
   }, []);
 
@@ -418,26 +407,16 @@ export function DiscoverView({ embedded = false, onNavigate }: { embedded?: bool
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       {!embedded && (
-        <ViewHeader
-          title={t("discover.title")}
-          description={t("discover.description")}
-        />
+        <>
+          <ViewHeader
+            title={t("discover.title")}
+            description={t("discover.description")}
+          />
+          <ActiveProjectBar />
+        </>
       )}
 
       <div className="flex gap-2">
-        {!embedded && (
-          <Input
-            mono
-            type="text"
-            aria-label={t("workflow.chooseProjectHint")}
-            placeholder="/path/to/project"
-            value={project}
-            onChange={(e) => setLocalProject(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && discover()}
-            disabled={loading || semgrepLoading}
-            className="flex-1"
-          />
-        )}
         <Select
           ariaLabel={t("harness.language")}
           value={lang}
@@ -450,19 +429,6 @@ export function DiscoverView({ embedded = false, onNavigate }: { embedded?: bool
             { value: "python", label: "Python" },
           ]}
         />
-        {!embedded && (
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={browse}
-            loading={scanning}
-            disabled={loading || semgrepLoading}
-            title={t("discover.browseFolder")}
-            aria-label={t("discover.browseFolder")}
-          >
-            {!scanning && <FolderOpen size={14} />}
-          </Button>
-        )}
         <Button
           variant="primary"
           onClick={discover}

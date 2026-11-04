@@ -22,6 +22,7 @@ describe("dashboard action destinations", () => {
     expect(dashboardActionDestination("run_discovery")).toBe("discover");
     expect(dashboardActionDestination("review_harnesses")).toBe("harness");
     expect(dashboardActionDestination("triage_crashes")).toBe("triage");
+    expect(dashboardActionDestination("generate_harness")).toBe("harness");
     expect(dashboardActionDestination("smoke_campaign")).toBe("run");
     expect(dashboardActionDestination("select_project")).toBe("projects");
     expect(dashboardActionDestination("init_persistence")).toBe("settings");

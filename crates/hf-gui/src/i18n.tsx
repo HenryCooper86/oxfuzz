@@ -110,6 +110,8 @@ const en: Dict = {
   // Progress panel
   "progress.title": "Progress",
   "progress.reset": "Reset progress",
+  "progress.resetConfirmTitle": "Reset progress?",
+  "progress.resetConfirmMessage": "Clears this project's workflow checklist. Harnesses, runs, crashes, and corpus are kept.",
   "progress.expandDetails": "Expand progress details",
   "progress.expandCompleteDetails": "Expand progress details — all stages complete",
   "stage.discover": "Discover targets",
@@ -289,6 +291,8 @@ const zh: Dict = {
   // Progress panel
   "progress.title": "进度",
   "progress.reset": "重置进度",
+  "progress.resetConfirmTitle": "重置进度？",
+  "progress.resetConfirmMessage": "这只会清除此项目的工作流清单。测试桩、运行、崩溃和语料库都会保留。",
   "progress.expandDetails": "展开进度详情",
   "progress.expandCompleteDetails": "展开进度详情——所有阶段均已完成",
   "stage.discover": "发现目标",
@@ -412,7 +416,8 @@ const zh: Dict = {
   "readiness.blocker.harnesses_need_review": "{n} 个生成的测试桩需要人工批准。",
   "readiness.blocker.no_runs": "尚无模糊测试活动历史。",
   "readiness.blocker.crashes_need_triage": "{n} 个崩溃仍需分类。",
-  "readiness.action.run_discovery": "在内部项目上运行目标发现。",
+  "readiness.action.run_discovery": "在此项目上运行目标发现。",
+  "readiness.action.generate_harness": "为排名最高的目标生成测试桩。",
   "readiness.action.review_harnesses": "在完整模糊测试前审查 {n} 个生成的测试桩。",
   "readiness.action.triage_crashes": "分类最近一次运行中的 {n} 个崩溃。",
   "readiness.action.smoke_campaign": "为排名最高的目标安排一次简短的冒烟活动。",

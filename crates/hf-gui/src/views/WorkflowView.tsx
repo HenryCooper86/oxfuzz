@@ -1,6 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Check, Minus, Crosshair, FileCode, Play, Bug, Database, FolderOpen } from "lucide-react";
-import { pickFolder } from "../lib";
+import { ChevronDown, ChevronRight, Check, Minus, Crosshair, FileCode, Play, Bug, Database } from "lucide-react";
 import { useProject } from "../providers/project";
 import { usePipeline } from "../providers/pipeline";
 import type { ViewType } from "../types";
@@ -10,6 +9,7 @@ import { RunView } from "./RunView";
 import { TriageView } from "./TriageView";
 const CorpusView = lazy(() => import("./CorpusView").then(module => ({ default: module.CorpusView })));
 import { ViewHeader, Button } from "../components/ui";
+import { ActiveProjectBar } from "../components/ActiveProjectBar";
 import { useI18n } from "../i18nContext";
 
 // A unified, connected fuzzing flow: choose a project, then Discover -> Harness
@@ -52,7 +52,7 @@ const isSection = (view: ViewType): view is SectionId => (SECTION_IDS as readonl
 
 export function WorkflowView({ onNavigate }: { onNavigate?: (view: ViewType) => void } = {}) {
   const { t } = useI18n();
-  const { activeProject, recentProjects, setActiveProject } = useProject();
+  const { activeProject } = useProject();
   // Single source of truth for stage state: the pipeline's rolled-up core
   // stages, so the Workflow and the Progress panel always agree.
   const { coreStages } = usePipeline();
@@ -74,11 +74,6 @@ export function WorkflowView({ onNavigate }: { onNavigate?: (view: ViewType) => 
     }
   }, [expanded]);
 
-  async function chooseProject() {
-    const path = await pickFolder();
-    if (path) setActiveProject(path);
-  }
-
   // Navigation requested by an embedded stage. A stage this workflow contains is
   // expanded in place, "workflow" re-opens the current stage, and any other view
   // (Run History, Settings, ...) leaves the workflow through the app navigation.
@@ -95,8 +90,6 @@ export function WorkflowView({ onNavigate }: { onNavigate?: (view: ViewType) => 
 
   const stageDone = (id: CoreStageId): boolean => coreById[id]?.done ?? false;
 
-  const projectName = activeProject ? activeProject.split("/").filter(Boolean).pop() : null;
-
   return (
     <div className="flex flex-col gap-3" style={{ animation: "fadeIn 0.2s ease" }}>
       <ViewHeader
@@ -105,43 +98,7 @@ export function WorkflowView({ onNavigate }: { onNavigate?: (view: ViewType) => 
       />
 
       {/* Project gate -- everything below runs in the chosen project's workspace. */}
-      <section className="surface-card" style={{ padding: "12px 14px", borderLeft: `3px solid ${activeProject ? "var(--success)" : "var(--accent)"}` }}>
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-3 min-w-0">
-            <FolderOpen size={16} style={{ color: activeProject ? "var(--success)" : "var(--accent)" }} />
-            <div className="flex flex-col min-w-0">
-              <span className="text-sm font-medium">{projectName ?? t("workflow.noProjectSelected")}</span>
-              <span className="text-xs text-text-muted truncate" style={{ fontFamily: activeProject ? "var(--font-mono)" : undefined }}>
-                {activeProject || t("workflow.chooseProjectHint")}
-              </span>
-            </div>
-          </div>
-          <Button
-            variant={activeProject ? "outline" : "primary"}
-            size="sm"
-            onClick={chooseProject}
-            className="shrink-0"
-          >
-            <FolderOpen size={13} />
-            {activeProject ? t("workflow.change") : t("workflow.chooseFolder")}
-          </Button>
-        </div>
-        {gated && recentProjects.length > 0 && (
-          <div className="mt-3 flex flex-col gap-1">
-            <span className="text-xs text-text-muted">{t("workflow.recentProjects")}</span>
-            {recentProjects.slice(0, 5).map((p) => (
-              <button
-                key={p}
-                onClick={() => setActiveProject(p)}
-                className="text-left text-xs px-2 py-1.5 rounded-md text-text-secondary hover:bg-surface-hover hover:text-text-primary truncate"
-                style={{ fontFamily: "var(--font-mono)" }}
-              >
-                {p}
-              </button>
-            ))}
-          </div>
-        )}
-      </section>
+      <ActiveProjectBar />
 
       {/* Core linear stages */}
       {!gated && <Button variant="primary" className="self-start" onClick={() => {

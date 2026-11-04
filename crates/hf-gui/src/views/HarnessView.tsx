@@ -1,12 +1,13 @@
 import { useState, useEffect, useRef, useCallback, lazy, Suspense } from "react";
 import { useI18n } from "../i18nContext";
-import { getTransport, pickFolder } from "../lib";
+import { getTransport } from "../lib";
 import { useProject } from "../providers/project";
 import { usePipeline } from "../providers/pipeline";
 import { useDiscoveryInventory } from "../providers/discovery";
 import { useTarget } from "../providers/target";
 import type { TargetInventory, HarnessReviewItem, ViewType } from "../types";
-import { Button, Input, Select, ViewHeader, EmptyState } from "../components/ui";
+import { Button, Select, ViewHeader, EmptyState } from "../components/ui";
+import { ActiveProjectBar } from "../components/ActiveProjectBar";
 import { SandboxBanner } from "../components/SandboxBanner";
 const BuildDoctorPanel = lazy(() => import("../components/BuildDoctorPanel").then((module) => ({ default: module.BuildDoctorPanel })));
 import { HarnessBehaviorEvidence, type HarnessBehaviorReport } from "../components/HarnessBehaviorEvidence";
@@ -16,7 +17,7 @@ import { HarnessApprovalEvidence } from "../components/HarnessApprovalEvidence";
 import { HarnessTournamentPanel } from "../components/HarnessTournamentPanel";
 import { OracleStudioPanel } from "../components/OracleStudioPanel";
 import {
-  Crosshair, FolderOpen, Loader2, FileCode, Terminal, Database,
+  Crosshair, Loader2, FileCode, Terminal, Database,
   CheckCircle2, XCircle, Sparkles, Archive, GitCompare, AlertTriangle,
 } from "lucide-react";
 import { HarnessReadyCard } from "../components/StageHandoff";
@@ -129,9 +130,9 @@ export function HarnessView({
       ? selectedEngine
       : (engineOptions.find((option) => option.value === fuzzingSettings?.default_engine)
         ?? engineOptions[0])?.value ?? selectedEngine;
-  // Embedded in the workflow, the project comes from the workflow's gate.
-  const [localProject, setLocalProject] = useState(activeProject);
-  const project = embedded ? activeProject : localProject;
+  // One project for the whole app: the active project (changed through
+  // ActiveProjectBar), embedded or not.
+  const project = activeProject;
   const [buildAdmission, setBuildAdmission] = useState<{ project: string; blocked: boolean } | null>(null);
   const onBuildAdmission = useCallback((owner: string, blocked: boolean) => setBuildAdmission({ project: owner, blocked }), []);
   const buildBlocked = buildAdmission?.project === project ? buildAdmission.blocked : Boolean(project);
@@ -210,14 +211,6 @@ export function HarnessView({
 
   function isCurrentDraft(generation: number) {
     return isCurrentScope() && draftGeneration.current === generation;
-  }
-
-  async function browse() {
-    const path = await pickFolder();
-    if (path) {
-      setLocalProject(path);
-      addRecent(path);
-    }
   }
 
   const { snapshot: discovery, save: saveDiscovery } = useDiscoveryInventory(project, lang);
@@ -545,20 +538,7 @@ export function HarnessView({
             description={t("harness.description")}
           />
 
-          {/* Project selection */}
-          <div className="flex gap-2">
-            <Input
-              mono
-              type="text"
-              placeholder="/path/to/project"
-              value={project}
-              onChange={(e) => setLocalProject(e.target.value)}
-              className="flex-1"
-            />
-            <Button variant="outline" size="sm" onClick={browse}>
-              <FolderOpen size={14} />
-            </Button>
-          </div>
+          <ActiveProjectBar />
         </>
       )}
 

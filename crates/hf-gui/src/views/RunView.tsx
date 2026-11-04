@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useI18n } from "../i18nContext";
-import { pickFolder, pickFile, getTransport } from "../lib";
+import { pickFile, getTransport } from "../lib";
 import { useProject } from "../providers/project";
 import { usePipeline } from "../providers/pipeline";
 import { usePrefs } from "../providers/prefs";
@@ -10,6 +10,7 @@ import { Button, Input, Select, ViewHeader } from "../components/ui";
 import { SandboxBanner } from "../components/SandboxBanner";
 import { RunOutcomeNotice } from "../components/RunEvidenceSummary";
 import { RunCompletionActions } from "../components/StageHandoff";
+import { ActiveProjectBar } from "../components/ActiveProjectBar";
 import { Play, Activity, AlertTriangle, FolderOpen, Square, RotateCw, RotateCcw } from "lucide-react";
 import type { HarnessReviewItem, ViewType } from "../types";
 import { useFuzzingSettings } from "../hooks/useFuzzingSettings";
@@ -46,9 +47,9 @@ export function RunView({
   // context, so a run keeps streaming and is preserved when you navigate away.
   const { log, stats: liveStats, summary, running, cancelling, lastEngine, selectedRun, requestState, requestError, healthState, healthEvents = [], loadOlderHealthEvents, runFuzzer, runSyzkaller, cancelRun } = useRunOutput();
   const { settings: fuzzingSettings, loaded: fuzzingPolicyLoaded, error: fuzzingPolicyError } = useFuzzingSettings();
-  // Embedded in the workflow, the project comes from the workflow's gate.
-  const [localProject, setLocalProject] = useState(activeProject);
-  const project = embedded ? activeProject : localProject;
+  // One project for the whole app: the active project (changed through
+  // ActiveProjectBar), embedded or not.
+  const project = activeProject;
   const [durationOverride, setDurationOverride] = useState<string | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
   const engineOptions = fuzzingSettings
@@ -144,14 +145,6 @@ export function RunView({
     };
   }, [project, target, engine, isSyz, selectionBlocked, summary]);
 
-  async function browse() {
-    const path = await pickFolder();
-    if (path) {
-      setLocalProject(path);
-      setActiveProject(path); // persist immediately so it survives navigation
-    }
-  }
-
   async function run() {
     if (selectionBlocked || !validDuration) return;
     const policy = fuzzingSettings;
@@ -190,10 +183,13 @@ export function RunView({
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       {!embedded && (
-        <ViewHeader
-          title={t("title.run")}
-          description={isSyz ? t("run.descSyz") : t("run.descStd")}
-        />
+        <>
+          <ViewHeader
+            title={t("title.run")}
+            description={isSyz ? t("run.descSyz") : t("run.descStd")}
+          />
+          <ActiveProjectBar />
+        </>
       )}
 
       {!isSyz && <SandboxBanner />}
@@ -219,30 +215,6 @@ export function RunView({
       )}
 
       <div className="grid grid-cols-2 gap-3">
-        {!embedded && (
-          <div className="flex flex-col gap-1">
-            <Label>{t("run.project")}</Label>
-            <div className="flex gap-1">
-              <Input
-                mono
-                type="text"
-                aria-label={t("run.project")}
-                placeholder="/path/to/project"
-                value={project}
-                onChange={(e) => setLocalProject(e.target.value)}
-                className="flex-1"
-              />
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={browse}
-                title={t("run.browseFolder")}
-              >
-                <FolderOpen size={14} />
-              </Button>
-            </div>
-          </div>
-        )}
         {!isSyz && (
           <div className="flex flex-col gap-1">
             <Label>

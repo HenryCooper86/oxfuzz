@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Check, ChevronDown, ChevronRight, Minus, RotateCcw } from "lucide-react";
 import { usePipeline } from "../providers/pipeline";
 import { useI18n } from "../i18nContext";
+import { useConfirm } from "../providers/confirm";
 import {
   getInitialProgressPanelOpen,
   getProgressPercentage,
@@ -12,6 +13,12 @@ import {
 export function ProgressPanel() {
   const { coreStages, reset } = usePipeline();
   const { t } = useI18n();
+  const confirm = useConfirm();
+  // Resetting clears this project's checklist only; ask so a stray click does
+  // not lose the record of finished stages.
+  const confirmReset = async () => {
+    if (await confirm({ title: t("progress.resetConfirmTitle"), message: t("progress.resetConfirmMessage"), confirmLabel: t("progress.reset") })) reset();
+  };
   const total = coreStages.length;
   const doneCount = coreStages.filter((c) => c.done).length;
   const complete = total > 0 && doneCount === total;
@@ -100,7 +107,7 @@ export function ProgressPanel() {
 
         {doneCount > 0 && (
           <button
-            onClick={reset}
+            onClick={() => void confirmReset()}
             className="flex items-center gap-1.5 mt-3 text-xs transition-colors duration-150"
             style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", padding: "2px" }}
             onMouseEnter={(e) => (e.currentTarget.style.color = "var(--text-secondary)")}

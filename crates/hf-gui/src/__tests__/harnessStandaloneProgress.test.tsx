@@ -10,16 +10,26 @@ import { RunOutputProvider } from "../providers/RunOutputContext";
 import { RunStatusProvider } from "../providers/RunStatusContext";
 import { ToastProvider } from "../components/ui/Toast";
 import { useProject } from "../providers/project";
+import { useTarget } from "../providers/target";
 import { HarnessView } from "../views/HarnessView";
+
+function SwitchProject({ to }: { to: string }) {
+  const { setActiveProject } = useProject();
+  return <button onClick={() => setActiveProject(to)}>switch-project</button>;
+}
+
+function SelectTarget({ symbol }: { symbol: string }) {
+  const { setTarget } = useTarget();
+  return <button onClick={() => setTarget(symbol)}>select-target</button>;
+}
 
 function RemoveProject({ path }: { path: string }) {
   const { removeRecent } = useProject();
   return <button onClick={() => removeRecent(path)}>remove-project</button>;
 }
 
-// When the standalone Harness view operates on a project path that is not yet
-// a recent project, its hydration/qualification progress must still persist
-// instead of being pruned away.
+// When the Harness view opens a project that was not yet a recent project, its
+// hydration/qualification progress must still persist instead of being pruned.
 const invoke = vi.hoisted(() => vi.fn());
 vi.mock("../lib", async () => ({ ...await vi.importActual("../lib"), getTransport: () => ({ invoke, listen: async () => () => {} }) }));
 
@@ -72,7 +82,7 @@ function readProgress(): Record<string, { completed: string[]; skipped: string[]
   >;
 }
 
-it("keeps hydration progress for a newly typed standalone project", async () => {
+it("keeps hydration progress for a newly opened project", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   localStorage.clear();
   localStorage.setItem("hf_locale", "en");
@@ -80,7 +90,10 @@ it("keeps hydration progress for a newly typed standalone project", async () => 
   localStorage.setItem("hf_recent_projects", JSON.stringify(["/old"]));
   localStorage.setItem(
     "hf_target_selection_v1",
-    JSON.stringify({ "/old": { target: "parse", engine: "libfuzzer", lang: "c", compiled: false } }),
+    JSON.stringify({
+      "/old": { target: "parse", engine: "libfuzzer", lang: "c", compiled: false },
+      "/new": { target: "parse", engine: "libfuzzer", lang: "c", compiled: false },
+    }),
   );
 
   invoke.mockReset();
@@ -128,6 +141,8 @@ it("keeps hydration progress for a newly typed standalone project", async () => 
                 <ToastProvider>
                   <RunOutputProvider>
                     <HarnessView />
+                    <SwitchProject to="/new" />
+                    <SelectTarget symbol="parse" />
                   </RunOutputProvider>
                 </ToastProvider>
               </RunStatusProvider>
@@ -139,12 +154,16 @@ it("keeps hydration progress for a newly typed standalone project", async () => 
   });
   await flush();
 
-  const projectInput = host.querySelector<HTMLInputElement>('input[placeholder="/path/to/project"]');
-  expect(projectInput, host.textContent ?? "").toBeTruthy();
-  await act(async () => {
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(projectInput, "/new");
-    projectInput!.dispatchEvent(new Event("input", { bubbles: true }));
-  });
+  // A page has no project path of its own; the active project is switched
+  // through the shared picker, which this helper stands in for.
+  expect(host.querySelector('input[placeholder="/path/to/project"]')).toBeNull();
+  const switcher = [...host.querySelectorAll("button")].find((item) => item.textContent === "switch-project");
+  expect(switcher, host.textContent ?? "").toBeTruthy();
+  await act(async () => switcher!.click());
+  await flush();
+  // A newly opened project starts without a target; choosing one hydrates the
+  // harness already retained for it.
+  await act(async () => [...host.querySelectorAll("button")].find((item) => item.textContent === "select-target")!.click());
   await flush();
 
   const progress = readProgress();
@@ -161,7 +180,10 @@ it("does not re-register a project removed while hydration is pending", async ()
   localStorage.setItem("hf_recent_projects", JSON.stringify(["/new", "/old"]));
   localStorage.setItem(
     "hf_target_selection_v1",
-    JSON.stringify({ "/old": { target: "parse", engine: "libfuzzer", lang: "c", compiled: false } }),
+    JSON.stringify({
+      "/old": { target: "parse", engine: "libfuzzer", lang: "c", compiled: false },
+      "/new": { target: "parse", engine: "libfuzzer", lang: "c", compiled: false },
+    }),
   );
 
   let resolveNew!: () => void;
@@ -210,6 +232,7 @@ it("does not re-register a project removed while hydration is pending", async ()
                 <ToastProvider>
                   <RunOutputProvider>
                     <HarnessView />
+                    <SwitchProject to="/new" />
                     <RemoveProject path="/new" />
                   </RunOutputProvider>
                 </ToastProvider>
@@ -222,12 +245,12 @@ it("does not re-register a project removed while hydration is pending", async ()
   });
   await flush();
 
-  const projectInput = host.querySelector<HTMLInputElement>('input[placeholder="/path/to/project"]');
-  expect(projectInput, host.textContent ?? "").toBeTruthy();
-  await act(async () => {
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(projectInput, "/new");
-    projectInput!.dispatchEvent(new Event("input", { bubbles: true }));
-  });
+  // A page has no project path of its own; the active project is switched
+  // through the shared picker, which this helper stands in for.
+  expect(host.querySelector('input[placeholder="/path/to/project"]')).toBeNull();
+  const switcher = [...host.querySelectorAll("button")].find((item) => item.textContent === "switch-project");
+  expect(switcher, host.textContent ?? "").toBeTruthy();
+  await act(async () => switcher!.click());
   await flush();
 
   const remover = [...host.querySelectorAll("button")].find((item) => item.textContent === "remove-project");

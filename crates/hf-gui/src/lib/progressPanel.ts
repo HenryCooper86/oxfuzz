@@ -1,3 +1,5 @@
+import type { ViewType } from "../types";
+
 export function getProgressPercentage(doneCount: number, total: number): number {
   return total === 0 ? 0 : Math.round((doneCount / total) * 100);
 }
@@ -18,4 +20,11 @@ export function getProgressPanelOpenAfterCompletionChange(
   if (!wasComplete && isComplete) return false;
   if (wasComplete && !isComplete) return true;
   return open;
+}
+
+const PIPELINE_VIEWS: ReadonlySet<ViewType> = new Set<ViewType>(["workflow", "discover", "harness", "run", "triage", "corpus"]);
+
+/** The Progress panel belongs to the pipeline screens; elsewhere it is opt-in. */
+export function progressPanelScope(view: ViewType): "pipeline" | "other" {
+  return PIPELINE_VIEWS.has(view) ? "pipeline" : "other";
 }

@@ -270,3 +270,22 @@ it("stops an in-progress AI assessment on the service, keeping the scan", async 
     mocks.invoke.mockReset();
   }
 });
+
+it("shows the app's active project instead of a page-local path when opened on its own", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  mocks.invoke.mockImplementation(async () => false);
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  try {
+    await act(async () => root.render(<I18nProvider><DiscoveryProvider><DiscoverView /></DiscoveryProvider></I18nProvider>));
+    expect(host.querySelector('input[placeholder="/path/to/project"]')).toBeNull();
+    expect(host.textContent).toContain("/sample");
+    expect([...host.querySelectorAll("button")].some(button => button.textContent?.trim() === "Change")).toBe(true);
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    vi.unstubAllGlobals();
+    mocks.invoke.mockReset();
+  }
+});

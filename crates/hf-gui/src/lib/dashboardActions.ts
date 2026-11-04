@@ -5,6 +5,7 @@ export function dashboardActionDestination(actionCode: string): ViewType | null 
     case "run_discovery":
       return "discover";
     case "review_harnesses":
+    case "generate_harness":
       return "harness";
     case "triage_crashes":
       return "triage";

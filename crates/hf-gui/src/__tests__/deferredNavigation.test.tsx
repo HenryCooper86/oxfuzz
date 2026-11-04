@@ -95,3 +95,23 @@ it("remembers setup deferral and lets the user return without claiming completio
     await act(async () => root.unmount()); host.remove(); localStorage.clear(); vi.unstubAllGlobals();
   }
 });
+
+it("starts on the Fuzzing Workflow when a project is already open", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  localStorage.clear();
+  localStorage.setItem("hf_setup_completed", "true");
+  localStorage.setItem("hf_active_project", "/fixture-project");
+  localStorage.setItem("hf_recent_projects", JSON.stringify(["/fixture-project"]));
+  const host = document.createElement("div"); document.body.append(host);
+  const root = createRoot(host);
+  try {
+    await act(async () => root.render(<App />));
+    await act(async () => { await vi.waitFor(() => expect(host.textContent).toContain("workflow ready")); });
+    expect(host.textContent).not.toContain("Dashboard ready");
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    localStorage.clear();
+    vi.unstubAllGlobals();
+  }
+});

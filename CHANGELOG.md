@@ -85,6 +85,19 @@ and 0.7.0 releases respectively.
 - Automation offers "Authorize scheduled runs" (confirmed) and "Withdraw
   authorization". The desktop app previously had no way to authorize scheduled
   work after a restart.
+- One project picker: Discover, Harness, and Run show the app's active project
+  with a Change action instead of their own path fields, which could drift
+  from the project the rest of the app was using.
+- With a project already open, the app starts on the Fuzzing Workflow.
+- Dashboard: the model budget moved to the Health tab, the duplicate Draft
+  report button is gone, and the GitLab tab is now "Issues" (it handles GitHub
+  too).
+- Dashboard "Needs attention" recommends generating a harness when targets
+  exist but none has a harness, instead of a smoke campaign that could not
+  start yet. The same change applies to `next_actions` from the workbench
+  API.
+- The Progress panel opens by default only on pipeline screens, "Reset
+  progress" asks first, and the Info panel no longer repeats the stage plan.
 
 ## 0.8.1 - 2026-10-25
 

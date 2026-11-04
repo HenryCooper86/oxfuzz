@@ -940,7 +940,7 @@ fn source_preview(source: &str) -> String {
 fn next_actions(totals: &WorkbenchTotals) -> Vec<String> {
     let mut actions = Vec::new();
     if totals.targets == 0 {
-        actions.push("Run target discovery on an internal project.".to_owned());
+        actions.push("Run target discovery on this project.".to_owned());
     }
     if totals.harnesses_needing_review > 0 {
         actions.push(format!(
@@ -964,7 +964,10 @@ fn next_actions(totals: &WorkbenchTotals) -> Vec<String> {
             }
         ));
     }
-    if totals.runs == 0 && totals.targets > 0 {
+    // A campaign needs a harness, so targets without one point at generation.
+    if totals.targets > 0 && totals.harnesses == 0 {
+        actions.push("Generate a harness for the highest-ranked target.".to_owned());
+    } else if totals.runs == 0 && totals.targets > 0 {
         actions.push("Schedule a short smoke campaign for the highest-ranked target.".to_owned());
     }
     if actions.is_empty() {
@@ -995,7 +998,12 @@ fn next_action_notes(totals: &WorkbenchTotals) -> Vec<ReadinessNote> {
             count: totals.crashes_needing_triage,
         });
     }
-    if totals.runs == 0 && totals.targets > 0 {
+    if totals.targets > 0 && totals.harnesses == 0 {
+        items.push(ReadinessNote {
+            code: "generate_harness".to_owned(),
+            count: 0,
+        });
+    } else if totals.runs == 0 && totals.targets > 0 {
         items.push(ReadinessNote {
             code: "smoke_campaign".to_owned(),
             count: 0,
@@ -1672,5 +1680,69 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(result.url, canonical.url);
+    }
+}
+
+#[cfg(test)]
+mod next_action_tests {
+    use super::{next_action_notes, next_actions, WorkbenchTotals};
+
+    fn totals(targets: usize, harnesses: usize, runs: usize) -> WorkbenchTotals {
+        WorkbenchTotals {
+            projects: 1,
+            targets,
+            harnesses,
+            harnesses_needing_review: 0,
+            runs,
+            active_runs: 0,
+            crashes: 0,
+            crashes_needing_triage: 0,
+            corpus_entries: 0,
+        }
+    }
+
+    fn codes(totals: &WorkbenchTotals) -> Vec<String> {
+        next_action_notes(totals)
+            .into_iter()
+            .map(|note| note.code)
+            .collect()
+    }
+
+    #[test]
+    fn targets_without_a_harness_point_at_harness_generation_not_a_campaign() {
+        let totals = totals(3, 0, 0);
+        assert_eq!(codes(&totals), vec!["generate_harness"]);
+        assert_eq!(
+            next_actions(&totals),
+            vec!["Generate a harness for the highest-ranked target.".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_harness_without_runs_points_at_a_smoke_campaign() {
+        assert_eq!(codes(&totals(3, 1, 0)), vec!["smoke_campaign"]);
+    }
+
+    #[test]
+    fn discovery_advice_names_this_project() {
+        assert_eq!(
+            next_actions(&totals(0, 0, 0)),
+            vec!["Run target discovery on this project.".to_owned()]
+        );
+    }
+
+    #[test]
+    fn prose_and_codes_stay_parallel() {
+        for totals in [
+            totals(0, 0, 0),
+            totals(3, 0, 0),
+            totals(3, 1, 0),
+            totals(3, 1, 2),
+        ] {
+            assert_eq!(
+                next_actions(&totals).len(),
+                next_action_notes(&totals).len()
+            );
+        }
     }
 }

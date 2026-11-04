@@ -37,6 +37,7 @@ import { RunOutputProvider } from "./providers/RunOutputContext";
 import { TargetProvider } from "./providers/TargetContext";
 import { FindingSelectionProvider } from "./providers/FindingSelectionContext";
 import { ProgressPanel } from "./components/ProgressPanel";
+import { progressPanelScope } from "./lib/progressPanel";
 import { isTauriEnvironment, pickFolder } from "./lib";
 import { MessageSquare, Crosshair, Play, Bug, Database, Settings, FileCode, FileText, History, Activity, Gauge, Info, FolderOpen, Boxes, ListChecks, Bot, Puzzle, BookOpen, Zap, LayoutDashboard, ScrollText, ShieldCheck, LifeBuoy, CarFront , GitCompare} from "lucide-react";
 
@@ -103,7 +104,9 @@ function AppInner() {
   const { t } = useI18n();
   const { activeProject, setActiveProject } = useProject();
   const [findingRun, setFindingRun] = useState<{ project: string; id: string } | null>(null);
-  const [activeView, setActiveView] = useState<ViewType>("dashboard");
+  // Returning with a project open lands on the guided workflow, where the next
+  // step is; without one, the Dashboard offers its single "open project" action.
+  const [activeView, setActiveView] = useState<ViewType>(() => (activeProject ? "workflow" : "dashboard"));
   const [focusedRun, setFocusedRun] = useState<{ project: string; id: string } | null>(null);
   const [settingsReturnView, setSettingsReturnView] = useState<ViewType>("dashboard");
   // Bumping this key remounts ChatView, clearing the conversation for a new target.
@@ -139,7 +142,14 @@ function AppInner() {
   const [showDiag, setShowDiag] = useState(false);
   const [showObs, setShowObs] = useState(false);
   const [showInfo, setShowInfo] = useState(false);
-  const [showProgress, setShowProgress] = useState(() => typeof window === "undefined" || window.innerWidth >= 1100);
+  // The Progress panel belongs to the pipeline screens: open there by default
+  // on wide windows, and opt-in elsewhere. Each scope remembers its own toggle.
+  const [progressOpen, setProgressOpen] = useState(() => ({
+    pipeline: typeof window === "undefined" || window.innerWidth >= 1100,
+    other: false,
+  }));
+  const progressScope = progressPanelScope(activeView);
+  const showProgress = progressOpen[progressScope];
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [setupDone, setSetupDone] = useState(() => localStorage.getItem("hf_setup_completed") === "true" || localStorage.getItem("hf_setup_deferred") === "true");
   const [setupDeferred, setSetupDeferred] = useState(() => localStorage.getItem("hf_setup_completed") !== "true" && localStorage.getItem("hf_setup_deferred") === "true");
@@ -207,7 +217,7 @@ function AppInner() {
               onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")}
               actions={
                 <div className="flex items-center gap-1">
-                  <HeaderToggle active={showProgress} onClick={() => setShowProgress(!showProgress)} icon={<ListChecks size={16} />} label={t("header.progress")} />
+                  <HeaderToggle active={showProgress} onClick={() => setProgressOpen((open) => ({ ...open, [progressScope]: !open[progressScope] }))} icon={<ListChecks size={16} />} label={t("header.progress")} />
                   <HeaderToggle active={showDiag} onClick={() => setShowDiag(!showDiag)} icon={<Activity size={16} />} label={t("header.diagnostics")} />
                   <HeaderToggle active={showObs} onClick={() => setShowObs(!showObs)} icon={<Gauge size={16} />} label={t("header.observability")} />
                   <HeaderToggle active={showInfo} onClick={() => setShowInfo(!showInfo)} icon={<Info size={16} />} label={t("header.info")} />
