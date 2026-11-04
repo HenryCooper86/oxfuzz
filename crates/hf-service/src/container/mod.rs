@@ -1118,6 +1118,9 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
     ) -> Result<TargetRevisionLease, ClassifiedError> {
+        // Claim the root before creating anything in it: a root that gains a
+        // target directory before its ownership manifest is refused later.
+        prepare_configured_workspace_root()?;
         let workspace = workspace_dir(project, target);
         std::fs::create_dir_all(&workspace).map_err(|error| {
             ClassifiedError::Internal(format!(
@@ -3591,5 +3594,48 @@ mod terminal_metrics_tests {
         .unwrap();
 
         assert_eq!(metrics.crashes, 7, "the peak reported count is retained");
+    }
+}
+
+#[cfg(test)]
+mod target_revision_workspace_tests {
+    use super::{prepare_configured_workspace_root, ServiceContainer};
+
+    /// A fresh install has an empty workspace root. Taking the first target
+    /// revision lease must leave a root that later stages still accept: the
+    /// first harness build used to fail with "workspace root is non-empty and
+    /// has no ownership manifest" because the lease created the target
+    /// directory before the root had its manifest.
+    #[tokio::test]
+    async fn first_target_revision_leaves_a_managed_workspace_root() {
+        let _environment = ServiceContainer::workspace_environment_test_gate()
+            .lock()
+            .await;
+        let previous = std::env::var_os("HF_WORKSPACE_DIR");
+        let fresh = tempfile::tempdir().unwrap();
+        let root = fresh.path().join("workspace");
+        std::fs::create_dir(&root).unwrap();
+        std::env::set_var("HF_WORKSPACE_DIR", &root);
+        let project = tempfile::tempdir().unwrap();
+        let container = ServiceContainer::stubbed();
+
+        let outcome = async {
+            let _operation = container.acquire_workspace_operation().await?;
+            let _revision = container
+                .acquire_target_revision(project.path(), "parser.c::parse")
+                .await?;
+            prepare_configured_workspace_root()
+        }
+        .await;
+
+        match previous {
+            Some(value) => std::env::set_var("HF_WORKSPACE_DIR", value),
+            None => std::env::remove_var("HF_WORKSPACE_DIR"),
+        }
+        outcome.expect("the first harness build accepts the workspace root");
+        assert!(
+            root.join(".oxfuzz-workspace.json").is_file(),
+            "the workspace root carries its ownership manifest"
+        );
     }
 }

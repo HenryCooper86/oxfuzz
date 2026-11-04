@@ -58,6 +58,8 @@ fn project_fixture() -> (tempfile::TempDir, PathBuf) {
     WORKSPACE.get_or_init(|| {
         let workspace = tempfile::tempdir().unwrap();
         std::env::set_var("HF_WORKSPACE_DIR", workspace.path());
+        // Claim the root as the app does before anything is written into it.
+        hf_service::initialize_workspace_root().unwrap();
         workspace
     });
     let directory = tempfile::tempdir().unwrap();
