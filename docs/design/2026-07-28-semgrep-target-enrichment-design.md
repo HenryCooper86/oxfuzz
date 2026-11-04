@@ -148,9 +148,14 @@ staleness, or safety logic.
 ## 5. Feature Boundary
 
 `hf-discovery` defines the `semgrep-enrichment` feature. The corresponding
-`hf-service` feature enables it and is enabled in normal product builds.
-`--no-default-features` builds exclude the integration and its presentation
-entrypoints.
+`hf-service`, `hf-cli`, `hf-web`, and desktop shell features enable it. Since
+2026-11-04 the feature is off by default in every product crate, because its
+ranking benefit has not been measured against the baseline. Builds without it
+exclude the integration and its presentation entrypoints (`oxfuzz discover
+--semgrep` and the desktop **Enrich with Semgrep** action). Build with
+`--features semgrep-enrichment` (for the CLI,
+`cargo build -p hf-cli --features semgrep-enrichment`) to include them. CI
+still builds and tests the feature.
 
 Compile-time availability does not imply execution. No discovery, campaign,
 agent, or schedule invokes Semgrep without an explicit enrichment request.

@@ -194,7 +194,7 @@ oxfuzz health --run <run UUID>
 # Triage the crashes it found
 oxfuzz triage /path/to/project --target src/parser.c::parse_value
 
-# Explicitly run or resume the retained seven-step terminal closeout.
+# Explicitly run or resume the retained six-step terminal closeout.
 oxfuzz closeout --run <run UUID>
 ```
 
@@ -210,6 +210,12 @@ After ordinary C or C++ discovery, you can explicitly enrich the ranking:
 ```bash
 oxfuzz discover /path/to/c-project --lang c --semgrep
 ```
+
+`--semgrep` exists only in builds with the non-default `semgrep-enrichment`
+feature (`cargo build -p hf-cli --features semgrep-enrichment`); the default
+binary does not accept it. The feature is off by default because its ranking
+benefit has not been measured against the baseline. CI still builds and tests
+it.
 
 Without `--semgrep`, discovery is unchanged and Semgrep does not run. The
 enriched output is labelled **Semgrep static-analysis signals**. A signal is an
@@ -244,7 +250,9 @@ oxfuzz discover /path/to/c-project --lang c --clang
 not accept it. It runs a sandboxed Clang helper over the C/C++ build
 configuration and retains compiler-resolved function identities, typed
 declarations, and call sites as advisory context for harness drafting. It does
-not combine with `--rank`, `--ai`, or `--semgrep`. See
+not combine with `--rank`, `--ai`, or `--semgrep`. The feature stays opt-in
+because the [Clang effectiveness comparison](../acceptance/clang-effectiveness-2026-10-20.md)
+measured no aggregate coverage gain. See
 [Clang Harness Analysis](../design/clang-harness-analysis-design.md).
 
 ## Command Reference
@@ -253,12 +261,11 @@ not combine with `--rank`, `--ai`, or `--semgrep`. See
 | --- | --- |
 | `init` | Scaffold config from templates into the resolved config directory (see Quick Start) and create/migrate the database. |
 | `doctor [--engine <e> [--duration <d>] [--require-provider]] [--build-image] [--json]` | Probe Docker and bundled engines. When the sandbox image is missing, the output names how to build it (`oxfuzz doctor --build-image`, `scripts/build-sandbox.sh`, or the canonical `docker build` command; JSON carries it as `sandbox_image_remedy`). `--build-image` runs that build from the source checkout's `docker/sandbox/Dockerfile` -- the same build the desktop app runs on first launch -- then re-probes; it fails loud when Docker is unavailable or no source checkout is found. With `--engine`, enforce selected-engine availability and run policy; optionally require provider configuration. Exit non-zero on failure. |
-| `discover <project> --lang c [--rank] [--ai auto\|require\|off] [--semgrep] [--json]` | Scan a project; `--rank` requests service-owned AI assessment, and `--semgrep` explicitly adds separate C/C++ enrichment. On a terminal the result is a ranked table (best target first, with the `oxfuzz fuzz` command for the top harnessable one); when stdout is piped, or with `--json`, it is the full JSON inventory. Every candidate carries a derived `harnessable` flag; a discovery-only language (`go`, `python`) still scans and persists its inventory but marks each candidate `false` with a note naming the supported set. |
+| `discover <project> --lang c [--rank] [--ai auto\|require\|off] [--semgrep] [--json]` | Scan a project; `--rank` requests service-owned AI assessment, and `--semgrep` (only in builds with the `semgrep-enrichment` feature) explicitly adds separate C/C++ enrichment. On a terminal the result is a ranked table (best target first, with the `oxfuzz fuzz` command for the top harnessable one); when stdout is piped, or with `--json`, it is the full JSON inventory. Every candidate carries a derived `harnessable` flag; a discovery-only language (`go`, `python`) still scans and persists its inventory but marks each candidate `false` with a note naming the supported set. |
 | `harness <project> --target <sym> --engine <e> [--lang c\|cpp\|rust] [--ai auto\|require\|off] [--draft-only [--json]] [--repair N] [--refine] [--adopt <harness-id>] [--promote] [--no-llm-review] [--sanitizer address\|undefined] [--cmplog] [--persistent]` | `--lang` defaults to `c`; pass `cpp` or `rust` for those targets (`go` and `python` are discovery-only and refused). `--ai` governs the draft, compile and smoke repairs, and `--refine` (`off` drafts from the template and skips repairs; `--refine` refuses `off`); it does not affect the smoke review. Write, compile (optionally auto-repair or coverage-refine), and smoke-qualify a newly generated harness. The draft prompt carries the target's own definition and the project's promoted harnesses. `--repair N` also repairs a smoke run in which the fuzzer never reached the harness or the harness hung: the engine output goes to the model, the rewrite compiles as a new revision, and that revision is reviewed and approved again before it runs (a smoke crash is a finding and is never repaired). `--adopt <harness-id>` recompiles a stored revision of the target, such as the refine proposal a campaign prints after a coverage plateau, as the new active revision and smoke-qualifies it; it keeps that revision's sanitizer, CmpLog setup and shape, and still needs `--promote` or a later promotion. Smoke requires the independent LLM pre-execution review; with no provider configured it fails closed unless you pass `--no-llm-review` (or set `harness.allow_unreviewed_smoke = true`), which persists a marked bypass record and an audit row -- without the model review, only the lexical lint and your own promotion decision check the harness. Without `--promote`, review the output; rerunning creates another draft. `--cmplog` (AFL++ only) also builds the CmpLog companion binary; see "AFL++ CmpLog/redqueen" below. `--persistent` (AFL++ only) drafts a persistent-mode harness (custom `main`, deferred forkserver, explicit per-iteration reset); see "AFL++ persistent mode" below. Use the retained Work Order flow below when approval must name a previously reviewed source. |
 | `work-order export\|import\|list\|submissions\|qualify\|rank\|promote ...` | Manage immutable external harness packets, submissions, qualification attempts, deterministic ranking, and exact-attempt promotion. |
 | `run <project> --target <sym> --engine <e> [--lang <l>] [--duration 60m] [--cpus N] [--timeout-ms N] [--resume] [--sanitizer address\|undefined] [--cmplog] [--seed N] [--ai auto\|require\|off]` | Run a sandboxed campaign with the active promoted harness (Ctrl-C cancels cooperatively). `--lang` defaults to `c`; pass the language the harness was built for. `--ai` covers the LLM seed corpus and the run dictionary: `off` uses heuristic seeds and no dictionary enrichment, `require` refuses to start without a usable provider and fails the run if dictionary enrichment fails. A file-qualified selector is `<relative-file>::<complete-symbol>`; a retained Work Order run always uses that complete selector. `--cpus N` requests a per-run CPU allocation within the configured `fuzzing.sandbox.max_cpus` ceiling; an allocation above one runs libFuzzer fork mode (`-fork=N`) and honggfuzz `--threads N` (AFL++ runs a single instance). `--timeout-ms N` overrides the per-input timeout for this run. `--resume` (AFL++ only) continues the most recent compatible AFL++ session instead of cold-starting; see "AFL++ session resume" below. `--sanitizer` asserts the promoted harness's build sanitizer (mismatch fails before any engine starts); see "Sanitizer selection" below. `--cmplog` (AFL++ only) drives the harness's recorded CmpLog companion via `afl-fuzz -c`; see "AFL++ CmpLog/redqueen" below. `--seed N` selects the retained campaign seed; see "Campaign seeds" below. |
 | `run . --replay <run UUID>` | Replay a retained run with its recorded engine, duration, per-input timeout, and seed under current policy. The positional `.` is ignored in replay mode; the retained run resolves its original project. `--seed`, `--timeout-ms`, `--resume`, `--sanitizer`, and `--cmplog` do not combine with `--replay`: the recorded configuration replays exactly (the CmpLog companion, when the original run used one, is part of the retained inputs). |
-| `run <project> --experiment <experiment UUID>` | Launch a prepared coverage experiment: prints the replay review (the baseline's recorded engine, duration, and seed with the current harness and corpus), runs it bound to the experiment, then prints the refreshed experiment. Combines with no other run flag. See "Coverage experiments and replay" below. |
 | `runs list [--project <path>] [--active] [--limit N] [--json]` | List persisted runs, newest first: short id, target, engine, status, start, duration, crashes. |
 | `runs status <run-id-or-prefix> [--json]` | Show one run's full record plus its latest persisted live telemetry, when any was retained. |
 | `runs stop <run-id-or-prefix>` | Cooperatively cancel a run owned by this process; exits non-zero with the reason otherwise. |
@@ -268,7 +275,7 @@ not combine with `--rank`, `--ai`, or `--semgrep`. See
 | `fuzz <project> [--target <sym>] [--harness-source <file> --harness-sha256 <hex>] [--engine <e>] [--lang <l>] [--duration-secs N] [--iterations N] [--timeout-ms N] [--resume] [--sanitizer address\|undefined] [--cmplog] [--seed N] [--ai auto\|require\|off] [--no-llm-review] [--fresh] [--json]` | One-command onboarding: discover -> harness -> smoke -> promote -> campaign in a single invocation. Defaults: `--engine libfuzzer`, `--duration-secs 60`, `--iterations 3`; `--lang` omitted scans every discoverable language. `--harness-source` (with `--harness-sha256`, the expected lowercase SHA-256 of the file, and `--target`) compiles exactly that frozen UTF-8 source instead of drafting, with no repair; review, smoke, and promotion still apply. The only pause is the human promotion gate; a denial stops the pipeline before any campaign. Reuses an already-promoted harness for the same target/engine unless `--fresh` is given. `--resume` (AFL++ only) forwards to the campaign stage. `--sanitizer` selects the build sanitizer for a fresh harness and re-qualifies rather than reusing a promoted harness built with the other sanitizer. `--cmplog` (AFL++ only) builds the fresh harness with its CmpLog companion and drives it in the campaign; a promoted harness without a recorded companion is rebuilt, not reused. `--seed N` selects the campaign seed, not the smoke seed. |
 | `health --run <run UUID>` | Assess retained campaign health. This read-only command never stops, restarts, or resizes the run. |
 | `trust --run <run UUID>` | Audit which claims about a finished run its retained evidence supports. Read-only; starts no build, run, or coverage measurement. |
-| `closeout --run <run UUID>` | Explicitly run or resume the seven retained terminal closeout steps. Successful/skipped steps remain retained; failed or dependency-blocked work can be retried. |
+| `closeout --run <run UUID>` | Explicitly run or resume the six retained terminal closeout steps. Successful/skipped steps remain retained; failed or dependency-blocked work can be retried. |
 | `triage <project> --target <sym> [--lang <l>] [--ai auto\|require\|off]` | Ingest, dedup, classify (CASR), and draft reports for crashes. `--ai` covers the bug-report drafts and the advisory per-crash verification verdicts: `off` ingests and persists crashes with no model calls; `require` fails on a missing provider or a failed verdict call. `--lang` (default `c`) is validated but does not change triage, which works from the target's compiled workspace. |
 | `corpus <project> --target <sym> --op seed\|llmseed\|grow\|prune\|cprune\|afl-cmin\|survival\|regen\|minimize\|absorb\|concolic\|import\|list [--lang c] [--from <dir>]` | Manage the corpus. `prune` removes byte duplicates; `cprune`, `afl-cmin`, `survival`, `regen`, `minimize`, and optional `concolic` have the distinct execution/provider requirements below; `import` requires `--from`. `--lang` (default `c`) names the language the target was discovered under; `llmseed` and `regen` discover and resolve the target in it. |
 | `build diagnose <project> [--json]` | Read current build prerequisites and the exact available plan without building. |
@@ -679,11 +686,12 @@ VM is alive.
 
 `oxfuzz closeout --run <UUID>` operates only on a terminal, harness-backed
 campaign and resumes at unfinished work. The retained steps are triage,
-minimize, corpus absorb, coverage, blockers, edge set, disposition, and trust
-report.
+minimize, corpus absorb, edge set, disposition, and trust report. Closeout no
+longer has coverage or blockers steps: exact run-bound source coverage is not
+available at closeout, so coverage and blocker analysis stay separate
+operations on the current workspace.
 Opening Run History in the desktop app is read-only; the CLI command itself is
-the explicit execution request. Historical source coverage and blocker results
-remain unavailable when current workspace files cannot establish them.
+the explicit execution request.
 
 ### Build profiles
 
@@ -737,45 +745,20 @@ operator picks the tier. A failed or empty afl-cmin run keeps the retained
 corpus untouched. The op is spelled `afl-cmin`, not `cmin`, because `cmin` is
 already the libFuzzer `minimize` alias.
 
-### Coverage experiments and replay
-
-There is no coverage-experiment lifecycle subcommand in the current CLI. The
-desktop Corpus view, REST resources under `/coverage/experiments`, and trusted
-local native commands create, list, read, complete, or cancel retained
-experiments. These operations retain evidence and perform no discovery,
-provider call, coverage calculation, promotion, harness execution, or fuzzer
-execution.
-
-The CLI can launch a prepared experiment directly:
+### Historical replay
 
 ```bash
 # Run this with the same oxfuzz configuration/database used by the application.
-oxfuzz run <project> --experiment <experiment UUID>
+oxfuzz run . --replay <run UUID>
 ```
 
-It prints the replay review (the baseline's recorded engine, duration, and
-seed with the current harness and corpus), runs it bound to that experiment
-under current policy, and prints the refreshed experiment when the run ends.
-The experiment must still be prepared with no execution attached, and no other
-run flag combines with `--experiment`.
-
-For a prepared experiment whose baseline has a retained seed, the manual
-handoff is:
-
-```bash
-# Run this with the same oxfuzz configuration/database used by the application.
-oxfuzz run . --replay <baseline UUID>
-```
-
-Replay resolves the original project from the retained baseline, which must
-still be available. It pins the recorded seed, engine, and duration, while using
-the current promoted harness and current corpus under current policy. Keep every
-other compared setting unchanged. Ordinary `oxfuzz run` derives a new seed and
-will not produce an attachable match. A legacy baseline with a null seed cannot
-be reproduced for comparison by replay; run a new seeded baseline and prepare a
-new experiment. After the later run terminates, refresh the experiment and
-explicitly attach its run UUID. Failed/cancelled/no-op outcomes remain visible;
-an edge delta is descriptive and does not prove entry into the goal function.
+Replay resolves the original project from the retained run, which must still
+be available. It reuses the retained source, binary, starting corpus,
+dictionary, sandbox image, seed, engine, and duration under current policy, and
+records the new run as a replay of the original. Missing or changed retained
+inputs fail instead of falling back to the current harness or corpus. A legacy
+run with a null seed cannot be replayed; run a new seeded campaign instead.
+Ordinary `oxfuzz run` derives a new seed.
 
 The REST API exposes deterministic discovery and start/status/result/cancel/retry
 for progressive AI discovery, plus harness, user-space run start/status/cancel,

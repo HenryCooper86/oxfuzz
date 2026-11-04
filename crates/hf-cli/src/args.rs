@@ -308,10 +308,10 @@ pub(crate) struct RunArgs {
     pub(crate) project: PathBuf,
     /// Target symbol. Required unless `--replay` is given (the recorded
     /// run carries its target).
-    #[arg(long, required_unless_present_any = ["replay", "experiment"])]
+    #[arg(long, required_unless_present = "replay")]
     pub(crate) target: Option<String>,
     /// Fuzzing engine. Required unless `--replay` is given.
-    #[arg(long, required_unless_present_any = ["replay", "experiment"])]
+    #[arg(long, required_unless_present = "replay")]
     pub(crate) engine: Option<String>,
     /// Target language (c, cpp, rust, go, python). Defaults to c. An explicit
     /// value cannot combine with `--replay`: the recorded run carries its own
@@ -366,21 +366,17 @@ pub(crate) struct RunArgs {
     /// deterministic seed.
     #[arg(long)]
     pub(crate) replay: Option<String>,
-    /// Review and launch the current inputs for a prepared coverage experiment.
-    #[arg(long, conflicts_with_all = ["replay", "target", "engine", "duration", "cpus", "timeout_ms", "resume", "sanitizer", "cmplog", "seed", "lang"])]
-    pub(crate) experiment: Option<uuid::Uuid>,
     /// How this run may use the model. It reaches two places: the LLM seed
     /// corpus and the run dictionary. `off` calls no model at all (heuristic
     /// seeds, no dictionary enrichment); `require` refuses to start when no
     /// provider is configured or all are frozen, and a failed dictionary
     /// enrichment then fails the run instead of silently degrading it. A
-    /// replay or experiment consults no model, so the flag cannot combine
-    /// with them.
+    /// replay consults no model, so the flag cannot combine with it.
     #[arg(
         long,
         value_enum,
         default_value_t = AiOption::Auto,
-        conflicts_with_all = ["replay", "experiment"]
+        conflicts_with = "replay"
     )]
     pub(crate) ai: AiOption,
 }
@@ -2508,30 +2504,6 @@ mod seed_cli_tests {
             panic!("expected fuzz");
         };
         assert_eq!(seed, None);
-    }
-
-    #[test]
-    fn guided_experiment_uses_recorded_target_and_settings() {
-        assert!(Cli::try_parse_from([
-            "oxfuzz",
-            "run",
-            "/p",
-            "--experiment",
-            "30000000-0000-4000-8000-000000000001"
-        ])
-        .is_ok());
-        for flag in ["--seed", "--duration", "--cpus", "--engine", "--target"] {
-            assert!(Cli::try_parse_from([
-                "oxfuzz",
-                "run",
-                "/p",
-                "--experiment",
-                "30000000-0000-4000-8000-000000000001",
-                flag,
-                "7"
-            ])
-            .is_err());
-        }
     }
 
     #[test]

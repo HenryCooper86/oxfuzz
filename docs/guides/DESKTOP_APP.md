@@ -58,7 +58,8 @@ feasibility ratings.
 Unassessed targets say **Scan only** and keep their scan order. If no provider
 is configured, **AI Settings** opens setup. If assessment fails, **Retry AI
 assessment** uses the retained scan without rescanning. You choose the target
-explicitly before continuing to Harness. Semgrep enrichment remains a
+explicitly before continuing to Harness. In builds with the
+`semgrep-enrichment` feature (off by default), Semgrep enrichment remains a
 separate action after assessment finishes.
 
 ![Discover -- ranked Target Inventory](../screenshots/discover.png)
@@ -98,7 +99,7 @@ evidence is available. The selected row retains its submission and attempt IDs.
 When duplicate file-local symbols exist, the service-returned
 `relative-file::complete-symbol` selector identifies the reviewed target; the
 display symbol alone does not. Promotion carries that selector into Harness,
-Run, run history, and the Corpus experiment inventory.
+Run, and run history.
 
 **3. Run the fuzzer.** Launch an enabled engine against the promoted harness.
 The Run view shows campaign limits and retained metrics. Current rate, whole-run
@@ -258,18 +259,16 @@ review, and that result can be exported or handed off to DefectDojo.
 ![Triage -- deduplicated sanitizer crash and exploitability classification](../screenshots/triage.png)
 
 **Close out a terminal campaign.** Expand a row in **Run History** to read its
-retained eight-step closeout state. Opening the row is read-only. **Analyze /
+retained six-step closeout state. Opening the row is read-only. **Analyze /
 Resume** is available only for terminal harness-backed campaign runs and runs
 the pending steps after an explicit click. Failed and dependency-blocked steps
 remain retryable; successful and legitimate skipped steps remain retained.
 Kernel runs without a retained harness scope explain why closeout is
-unavailable. Historical source coverage and blocker evidence are shown as
-unavailable because current workspace files cannot establish what an old run
-covered. The trust report likewise uses exact retained harness approval and
+unavailable. The trust report likewise uses exact retained harness approval and
 finding review evidence and never runs coverage or calls a model while reading.
-The eight steps are triage, minimize, add new inputs to the corpus, coverage,
-blockers, record covered code edges, disposition, and summarize what the
-evidence shows (the trust report).
+The six steps are triage, minimize, add new inputs to the corpus, record
+covered code edges, disposition, and summarize what the evidence shows (the
+trust report).
 
 **Prove a fix, do not assert one.** The selected finding carries a Patch to
 Proof panel. Paste a candidate unified diff and a bounded follow-up fuzzing
@@ -338,28 +337,14 @@ reason behind it. It is advisory and starts nothing; you run the existing refine
 or corpus step yourself. If no coverage measurement exists yet, that is what it
 says, rather than showing an empty blocker list.
 
-**Retain a coverage experiment.** Choose one exact target UUID and terminal
-campaign baseline, then review a **Grow corpus** or **Refine harness** proposal,
-goal function, hypothesis, and duration before **Prepare experiment**. Prepare,
-history reads, navigation to Corpus/Harness, result attachment, and cancellation
-do not execute a provider, harness, coverage tool, or fuzzer. The prepared
-record and its experiment UUID are durable; the browser preference stores only
-which record to reopen.
-
-For a seeded baseline, choose **Review replay** and inspect the project, target,
-engine, retained seed and duration, and current memory/CPU limits. **Start reviewed
-replay** starts a new campaign using the current promoted harness and corpus.
-Run History offers the same action when a terminal campaign is expanded. Changed
-review settings are refused; reload the review before retrying. Keep the original
-project available and other compared settings unchanged. Progress and cancellation
-remain available in Run, even after leaving the review. Ordinary Run chooses a fresh seed. A legacy
-baseline with no retained seed requires a new seeded baseline and a new
-experiment. After a later terminal campaign exists, refresh and explicitly
-**Attach result** or enter a reason and **Cancel experiment**. An incompatible
-result is refused without changing the prepared record. Failed, cancelled,
-missing-edge, mixed legacy-build, and no-observed-input-change results remain
-visible and inconclusive where evidence is missing. Aggregate edge change is
-descriptive and cannot establish entry into the named goal function.
+**Replay a run.** Expand a terminal campaign in Run History and choose
+**Review replay** to inspect the project, target, engine, retained seed and
+duration, and current memory/CPU limits. **Start reviewed replay** starts a new
+campaign from the run's retained inputs. Changed review settings are refused;
+reload the review before retrying. Keep the original project available.
+Progress and cancellation remain available in Run, even after leaving the
+review. Ordinary Run chooses a fresh seed, and a legacy run with no retained
+seed cannot be replayed.
 
 Expand a run in Run History to review its exact target, requested budget,
 retained crash count, and coverage availability. Zero retained crashes does not

@@ -192,8 +192,6 @@ export function usesHttpBackend(): boolean {
 }
 
 export interface ReplayReview {
-  experiment_id?: string | null;
-  current_input_sha256?: string | null;
   run_id: string;
   project: string;
   target: string;

@@ -11,10 +11,8 @@ unreached code, shows where the fuzzer actually got to relative to each, and
 proposes one concrete next experiment.
 
 It proposes only. Refining a harness and growing a corpus already have approved
-paths, and the explorer does not add a second one. Optional durable preparation,
-manual result attachment, cancellation, and attempt history are specified in
-[Coverage Experiments](coverage-experiments-design.md). Preparation persists the
-operator-reviewed intent before navigation and starts no work.
+paths, and the explorer does not add a second one. The proposal is not
+persisted and has no lifecycle of its own.
 
 ## 2. Feature and Ownership
 
@@ -119,13 +117,9 @@ One typed proposal per target, from a fixed vocabulary:
   suggestion.
 
 The proposal carries a reason code and the function to aim at. It starts
-nothing. The engineer may copy its kind/function into a reviewed experiment,
-choose a terminal Campaign baseline (Done, Failed, or Cancelled), and write a
-hypothesis and duration budget. `coverage-experiments` is independent of
-`coverage-blockers`, so manually prepared investigations do not require an
-explorer measurement. Explorer coverage describes the mutable workspace; it
-cannot establish historical goal-function entry for an attached run. Aggregate
-edge deltas remain descriptive, with function entry explicitly unavailable.
+nothing. The engineer acts on it through the existing harness refinement or
+corpus growth paths. Explorer coverage describes the mutable workspace; it
+cannot establish historical goal-function entry for a retained run.
 
 ## 7. Rejected Alternatives
 

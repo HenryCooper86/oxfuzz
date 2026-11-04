@@ -10,7 +10,6 @@ mod ai_policy_ipc_tests;
 mod approval_ipc_tests;
 mod closeout_commands;
 mod commands;
-mod coverage_experiment_commands;
 #[cfg(test)]
 mod history_ipc_tests;
 #[cfg(feature = "ai-target-ranking")]
@@ -39,8 +38,8 @@ use commands::{
     automotive_lab_coverage, automotive_lab_plan, automotive_lab_reset, automotive_lab_simulate,
     automotive_live_monitor, automotive_mint_approval, automotive_scan_uds, build_diagnose,
     build_history, build_profile, build_profile_clear, build_profile_set, build_run,
-    campaign_advice, campaign_evidence, cancel_run, change_compare, change_impact, change_publish,
-    chat_agent, chat_answer_permission, chat_branch, chat_branches, chat_checkpoints, chat_history,
+    campaign_evidence, cancel_run, change_compare, change_impact, change_publish, chat_agent,
+    chat_answer_permission, chat_branch, chat_branches, chat_checkpoints, chat_history,
     chat_rollback, chat_rollback_to, clear_all_artifacts, clear_all_runs, clear_knowledge,
     clear_project_auto_revert_override, clear_workspace, config_toml_to_value,
     config_value_to_toml, corpus_capabilities, corpus_grow, corpus_import, corpus_list,
@@ -221,7 +220,6 @@ pub fn run() {
             allocation_status,
             allocation_propose,
             allocation_review,
-            campaign_advice,
             campaign_evidence,
             export_remediation_draft,
             automotive_lab_coverage,
@@ -235,12 +233,6 @@ pub fn run() {
             build_history,
             harness_tournament,
             coverage_blockers,
-            coverage_experiment_commands::coverage_experiment_create,
-            coverage_experiment_commands::coverage_experiment_get,
-            coverage_experiment_commands::coverage_experiment_replay_review,
-            coverage_experiment_commands::coverage_experiment_list,
-            coverage_experiment_commands::coverage_experiment_complete,
-            coverage_experiment_commands::coverage_experiment_cancel,
             oracle_scaffold,
             oracle_violation,
             build_run,

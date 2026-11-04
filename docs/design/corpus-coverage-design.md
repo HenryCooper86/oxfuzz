@@ -6,7 +6,7 @@ The bounded corpus operations, shared retained corpus, deterministic run seed
 and replay, qualified reductions, operator capability reads, and retained
 coverage reports described below are implemented. Automatic corpus/coverage
 iteration that independently proposes and executes a new campaign remains
-future work; current blocker and experiment suggestions are advisory and require
+future work; current coverage blocker suggestions are advisory and require
 explicit operator action.
 
 ## 1. Goal
@@ -156,7 +156,7 @@ the retained input manifest before staging and again before dispatch. Missing
 or changed inputs fail instead of falling back to the canonical corpus. The
 recorded settings must still be admitted by current policy without silently
 changing them. An explicit current-input rerun uses the currently promoted
-harness and corpus as a separate experiment; it does not claim to replay the
+harness and corpus as a separate run; it does not claim to replay the
 historical inputs. See `engine-integration-design.md` for retained execution
 inputs and their limits.
 
@@ -243,13 +243,6 @@ covered functions, and uncovered locations. Impossible covered/total pairs or
 aggregate counter overflow make totals unavailable. Uncovered locations require
 a valid filename index and positive representable line/column numbers; invalid
 locations are omitted rather than replaced with invented coordinates.
-
-The feature-gated coverage-per-cost advisor extends this signal across a bounded
-set of comparable completed campaigns. It uses explicit engine hourly rates,
-attributable model spend, edge deltas, corpus additions, and crash deltas to
-produce deterministic proposals. It never dispatches a run or promotes a
-harness. The complete contract and safety boundary are defined in
-`proof-carrying-campaign-intelligence.md`.
 
 ## 5. Tests
 

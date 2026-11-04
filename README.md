@@ -44,14 +44,13 @@ of every term.
 | **Operational Dashboard** | Readiness, harness-review state, recent campaigns, crash handoff, and evidence counts in one operator-focused view. |
 | **Target Discovery** | Semantic + static-analysis scan of a project producing a ranked Target Inventory (fit score, input surface, complexity, call-graph reachability). |
 | **AI Target Recommendations** | Discover shows scan results first, then automatically ranks promising targets by bug potential, reachable code, and harness feasibility; every AI score is explained and the original scan score remains visible. |
-| **Optional Semgrep Enrichment** | Explicit C/C++-only enrichment adds capped, advisory static-analysis signals from a pinned offline rules snapshot without changing normal discovery. |
+| **Optional Semgrep Enrichment** | Explicit C/C++-only enrichment adds capped, advisory static-analysis signals from a pinned offline rules snapshot without changing normal discovery. Off by default; build with `--features semgrep-enrichment`. |
 | **Harness Generation** | LLM-authored, compile-validated, smoke-fuzzed harnesses per target. |
 | **Harness Qualification Evidence** | Retained AFL++ input and persistent-sequence observations appear in Harness and History; unavailable or suspect measurements remain explicit. |
 | **Native Custom Mutators** | Import reviewed C/C++ source for upstream AFL++ or libFuzzer APIs, qualify a new harness revision, and retain artifact/image identity for replay. |
 | **Engine Integration** | AFL++, honggfuzz, libFuzzer, and syzkaller behind one `EngineAdapter` trait. |
 | **Crash Triage** | Dedup by stack signature, CASR severity/exploitability, minimize, and LLM-drafted bug reports under human review. |
 | **Corpus & Coverage** | Seed, grow, prune, and merge corpora; track coverage deltas; feed crashes back into the corpus. |
-| **Guided Coverage Experiments** | Review a baseline and changed inputs, launch through normal approval, and retain the associated campaign and comparison, including unsuccessful attempts. |
 | **AI Assistant** | A conversational control surface for the same service-owned workflow, with visible tool activity and policy-enforced human approval gates. |
 | **Multi-Provider LLM Pool** | Tag-based routing, automatic failover, provider freeze/thaw across OpenAI, Anthropic, Gemini, and OpenAI-compatible backends. |
 | **Workflow Spending Limits** | Set durable model-call, token, and USD limits in Settings; inspect usage and denials in Dashboard. Concurrent requests and retries reserve allowance before dispatch. |

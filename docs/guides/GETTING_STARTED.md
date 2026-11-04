@@ -159,8 +159,12 @@ views directly, or ask the assistant for a recommendation in plain English.
 
 #### Optional: enrich a C/C++ target ranking
 
-Normal discovery does not run Semgrep. After a successful C or C++ discovery,
-the Discover screen offers **Enrich with Semgrep**. The equivalent explicit CLI
+Semgrep enrichment is off by default because its ranking benefit has not been
+measured against the baseline. It is available only in builds with the
+`semgrep-enrichment` feature (for the CLI,
+`cargo build -p hf-cli --features semgrep-enrichment`). Normal discovery does
+not run Semgrep. In such a build, after a successful C or C++ discovery, the
+Discover screen offers **Enrich with Semgrep**. The equivalent explicit CLI
 command is:
 
 ```bash

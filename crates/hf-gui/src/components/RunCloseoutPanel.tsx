@@ -9,17 +9,21 @@ const STEPS: CloseoutStep[] = [
   "triage",
   "minimize",
   "corpus_absorb",
-  "coverage",
-  "blockers",
   "edge_set",
   "disposition",
   "trust_report",
 ];
 
+const TRUST_VERDICTS = new Set(["Trusted", "Qualified", "Unqualified", "Untrustworthy"]);
+
 function detail(report: RunCloseoutReport, step: CloseoutStep, t: (key: string, params?: Record<string, string | number>) => string): string {
   const outcome = report.steps.find((item) => item.step === step)?.outcome;
   if (!outcome) return t("runCloseout.pending");
-  if (outcome.outcome === "completed") return outcome.detail;
+  if (outcome.outcome === "completed") {
+    // The trust step records the service's verdict name; show what it means.
+    if (step === "trust_report" && TRUST_VERDICTS.has(outcome.detail)) return t(`runCloseout.trust.${outcome.detail}`);
+    return outcome.detail;
+  }
   if (outcome.outcome === "skipped") return outcome.reason;
   if (outcome.outcome === "blocked") {
     return t("runCloseout.blockedBy", { step: t(`runCloseout.step.${outcome.dependency}`) });

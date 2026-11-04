@@ -44,7 +44,6 @@ PRODUCT_FEATURES=(
   campaign-trust
   change-aware
   coverage-blockers
-  coverage-experiments
   harness-tournament
   harness-work-order
   native-analysis
@@ -113,8 +112,6 @@ gate_feature_behavior() {
   ./scripts/cargo-test-filtered.sh -p hf-service --no-default-features --lib model_budget::tests
   ./scripts/cargo-test-filtered.sh -p hf-service --no-default-features --features harness-behavior --test harness_qualification stable_sequence_is_measured_and_promotable
   ./scripts/cargo-test-filtered.sh -p hf-web --no-default-features --test build_doctor_disabled_api
-  ./scripts/cargo-test-filtered.sh -p hf-web --no-default-features --test coverage_experiments_api
-  ./scripts/cargo-test-filtered.sh -p hf-service --no-default-features --test coverage_experiments
   ./scripts/cargo-test-filtered.sh -p hf-service --no-default-features \
     --features proof-carrying --test run_replay
   ./scripts/cargo-test-filtered.sh -p hf-service --no-default-features \
@@ -123,6 +120,10 @@ gate_feature_behavior() {
   ./scripts/cargo-test-filtered.sh -p hf-service --no-default-features --features clang-analysis --lib clang_analysis
   ./scripts/cargo-test-filtered.sh -p hf-discovery --features clang-analysis --test clang_analysis
   ./scripts/cargo-test-filtered.sh -p hf-cli --no-default-features --features clang-analysis --bin oxfuzz clang_cli_tests
+  # Semgrep enrichment is off by default; its tests run with the feature on.
+  ./scripts/cargo-test-filtered.sh -p hf-discovery --features semgrep-enrichment --lib semgrep
+  ./scripts/cargo-test-filtered.sh -p hf-service --features semgrep-enrichment --lib semgrep
+  ./scripts/cargo-test-filtered.sh -p hf-web --features semgrep-enrichment --test semgrep_api
 }
 
 gate_doc() {

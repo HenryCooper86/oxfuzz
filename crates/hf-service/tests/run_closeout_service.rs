@@ -110,11 +110,6 @@ async fn seeded_run_at(container: &ServiceContainer, project: PathBuf) -> Uuid {
     run.id
 }
 
-#[derive(Default)]
-struct CountingRuntime {
-    calls: AtomicUsize,
-}
-
 struct BlockingRuntime {
     calls: AtomicUsize,
     entered: tokio::sync::Semaphore,
@@ -143,40 +138,6 @@ impl hf_core::runtime::RuntimeAdapter for BlockingRuntime {
             self.entered.add_permits(1);
             self.release.acquire().await.unwrap().forget();
         }
-        Ok(hf_core::runtime::CommandResult {
-            exit_code: 1,
-            stdout: String::new(),
-            stderr: "controlled failure".to_owned(),
-            workspace: cwd.to_path_buf(),
-            termination: hf_core::runtime::CommandTermination::Completed,
-        })
-    }
-
-    async fn write_file(
-        &self,
-        _path: &std::path::Path,
-        _content: &str,
-    ) -> Result<(), hf_core::error::ClassifiedError> {
-        Ok(())
-    }
-
-    async fn read_file(
-        &self,
-        _path: &std::path::Path,
-    ) -> Result<String, hf_core::error::ClassifiedError> {
-        Ok(String::new())
-    }
-}
-
-#[async_trait::async_trait]
-impl hf_core::runtime::RuntimeAdapter for CountingRuntime {
-    async fn run_command(
-        &self,
-        _cmd: &[String],
-        cwd: &std::path::Path,
-        _limits: &hf_core::runtime::ResourceLimits,
-    ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(hf_core::runtime::CommandResult {
             exit_code: 1,
             stdout: String::new(),
@@ -360,7 +321,7 @@ async fn retained_blocked_dependency_must_be_valid_for_its_step() {
     container
         .store()
         .unwrap()
-        .record_closeout_step(run_id, "Blockers", "blocked", "Triage")
+        .record_closeout_step(run_id, "Minimize", "blocked", "CorpusAbsorb")
         .await
         .unwrap();
 
@@ -447,45 +408,6 @@ async fn closeout_rejects_a_target_owned_by_another_project() {
 }
 
 #[tokio::test]
-async fn coverage_and_blocker_steps_do_not_read_the_current_workspace() {
-    common::install_managed_workspace("oxfuzz_closeout_audit");
-    let directory = tempfile::tempdir().unwrap();
-    let project = std::fs::canonicalize(directory.path()).unwrap();
-    let store = Arc::new(
-        Store::connect(directory.path().join("audit.db"))
-            .await
-            .unwrap(),
-    );
-    let runtime = Arc::new(CountingRuntime::default());
-    let container = ServiceContainer::new(runtime.clone(), None).with_store(store.clone());
-    let run_id = seeded_run_at(&container, project.clone()).await;
-    for (step, outcome, detail) in [
-        ("Triage", "completed", "done"),
-        ("Minimize", "skipped", "nothing to minimize"),
-        ("CorpusAbsorb", "completed", "done"),
-        ("Disposition", "completed", "done"),
-    ] {
-        store
-            .record_closeout_step(run_id, step, outcome, detail)
-            .await
-            .unwrap();
-    }
-    let workspace = hf_service::workspace_dir(&project, "parse_packet");
-    std::fs::create_dir_all(workspace.join("corpus")).unwrap();
-    std::fs::write(workspace.join("harness.c"), "int harness;").unwrap();
-
-    let report = container.close_out_run(run_id).await.unwrap();
-
-    assert_eq!(runtime.calls.load(Ordering::SeqCst), 0);
-    for step in [CloseoutStep::Coverage, CloseoutStep::Blockers] {
-        assert!(matches!(
-            report.steps.iter().find(|record| record.step == step).unwrap().outcome,
-            StepOutcome::Skipped { ref reason } if reason.contains("exact run-bound")
-        ));
-    }
-}
-
-#[tokio::test]
 async fn retrying_upstream_work_replaces_a_stale_trust_result() {
     let (container, _dir) = container().await;
     let run_id = seeded_run(&container).await;
@@ -510,72 +432,6 @@ async fn retrying_upstream_work_replaces_a_stale_trust_result() {
         trust.outcome,
         StepOutcome::Completed {
             detail: "stale trust".to_owned()
-        }
-    );
-}
-
-#[tokio::test]
-async fn legacy_workspace_evidence_is_read_as_unavailable_and_refreshed_only_on_resume() {
-    common::install_managed_workspace("oxfuzz_closeout_legacy_read");
-    let directory = tempfile::tempdir().unwrap();
-    let project = std::fs::canonicalize(directory.path()).unwrap();
-    let store = Arc::new(
-        Store::connect(directory.path().join("legacy.db"))
-            .await
-            .unwrap(),
-    );
-    let runtime = Arc::new(CountingRuntime::default());
-    let container = ServiceContainer::new(runtime.clone(), None).with_store(store.clone());
-    let run_id = seeded_run_at(&container, project).await;
-    for (step, detail) in [
-        ("Triage", "0 crash(es) attributed"),
-        ("Minimize", "nothing to minimize"),
-        ("CorpusAbsorb", "0 input(s) absorbed"),
-        ("Coverage", "91.0% of lines covered"),
-        ("Blockers", "0 blocker(s)"),
-        ("Disposition", "0 crash(es) dispositioned"),
-        ("TrustReport", "Trusted"),
-    ] {
-        store
-            .record_closeout_step(run_id, step, "completed", detail)
-            .await
-            .unwrap();
-    }
-
-    let retained = container.retained_run_closeout(run_id).await.unwrap();
-    assert_eq!(runtime.calls.load(Ordering::SeqCst), 0);
-    for step in [CloseoutStep::Coverage, CloseoutStep::Blockers] {
-        assert!(matches!(
-            retained.steps.iter().find(|record| record.step == step).unwrap().outcome,
-            StepOutcome::Skipped { ref reason } if reason.contains("exact run-bound")
-        ));
-    }
-    assert!(matches!(
-        retained
-            .steps
-            .iter()
-            .find(|record| record.step == CloseoutStep::TrustReport)
-            .unwrap()
-            .outcome,
-        StepOutcome::Blocked {
-            dependency: CloseoutStep::Coverage
-        }
-    ));
-    let durable = store.closeout_steps(run_id).await.unwrap();
-    assert!(durable.iter().any(|(step, outcome, detail)| {
-        step == "TrustReport" && outcome == "completed" && detail == "Trusted"
-    }));
-
-    let resumed = container.close_out_run(run_id).await.unwrap();
-    assert_ne!(
-        resumed
-            .steps
-            .iter()
-            .find(|record| record.step == CloseoutStep::TrustReport)
-            .unwrap()
-            .outcome,
-        StepOutcome::Completed {
-            detail: "Trusted".to_owned()
         }
     );
 }

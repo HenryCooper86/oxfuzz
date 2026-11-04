@@ -83,8 +83,6 @@ its existing approved-project policy. Smoke and promotion reuse existing APIs.
 with `exit_code`, `mutation_observed`, `trim_observed`, `log`, `log_truncated`.
 AFL++ runs retain `AFL_CUSTOM_MUTATOR_LIBRARY`, `OXFUZZ_MUTATOR_SHA256` and
 `OXFUZZ_MUTATOR_IMAGE_ID`; users do not configure those environment values.
-Experiment comparisons normalize only the verified retained run path. Artifact
-or image differences remain visible and can make an experiment incomparable.
 
 Upstream documentation: [AFL++ native custom mutators](https://aflplus.plus/docs/custom_mutators/)
 and [LLVM libFuzzer](https://llvm.org/docs/LibFuzzer.html).

@@ -86,17 +86,14 @@ describe("in-app documentation", () => {
     expect(chineseRun?.body).toContain("全程平均值");
     expect(chineseRun?.body).toContain("只读");
 
-    expect(englishRuns?.body).toContain("eight-step");
+    expect(englishRuns?.body).toContain("six-step");
     expect(englishRuns?.body).toContain("Analyze / Resume");
-    expect(chineseRuns?.body).toContain("八个步骤");
+    expect(chineseRuns?.body).toContain("六个步骤");
     expect(chineseRuns?.body).toContain("分析 / 继续");
 
-    expect(englishCorpus?.body).toContain("Start reviewed replay");
-    expect(englishCorpus?.body).toContain("current resource limits");
-    expect(englishCorpus?.body).toContain("legacy baseline");
-    expect(chineseCorpus?.body).toContain("启动已审查的重放");
-    expect(chineseCorpus?.body).toContain("当前资源限制");
-    expect(chineseCorpus?.body).toContain("旧版基线");
+    // Coverage experiments were removed; their help paragraph goes with them.
+    expect(englishCorpus?.body).not.toContain("Coverage experiments");
+    expect(chineseCorpus?.body).not.toContain("覆盖率实验");
   });
 
   it("links shipped documentation surfaces to the public GitHub project", () => {

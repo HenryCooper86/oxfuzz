@@ -91,7 +91,6 @@ const COMMAND_MAP: Record<string, CommandEndpoint> = {
   revert_harness_from_run: { method: "POST", path: "/runs/revert-harness" },
   run_harness_behavior: { method: "GET", path: "/runs/{run_id}/harness-behavior" },
   run_function_coverage: { method: "GET", path: "/runs/{run_id}/function-coverage" },
-  coverage_experiment_replay_review: { method: "GET", path: "/coverage/experiments/{id}/replay" },
   replay_review: { method: "GET", path: "/runs/{run_id}/replay" },
   replay_run: { method: "POST", path: "/runs/{run_id}/replay" },
   run_fuzzer: { method: "POST", path: "/runs/start" },
@@ -112,7 +111,6 @@ const COMMAND_MAP: Record<string, CommandEndpoint> = {
   allocation_status: { method: "POST", path: "/campaign/allocation/status" },
   allocation_propose: { method: "POST", path: "/campaign/allocation/propose" },
   allocation_review: { method: "POST", path: "/campaign/allocation/review" },
-  campaign_advice: { method: "POST", path: "/campaign/advice" },
   campaign_evidence: { method: "POST", path: "/campaign/evidence" },
   remediation_draft: { method: "POST", path: "/remediation/draft" },
   create_remediation_operation: { method: "POST", path: "/remediation/operations" },
@@ -138,11 +136,6 @@ const COMMAND_MAP: Record<string, CommandEndpoint> = {
   build_profile_clear: { method: "DELETE", path: "/build/profile" },
   build_history: { method: "GET", path: "/build/history" },
   harness_tournament: { method: "POST", path: "/harness/tournament" },
-  coverage_experiment_create: { method: "POST", path: "/coverage/experiments" },
-  coverage_experiment_get: { method: "GET", path: "/coverage/experiments/{id}" },
-  coverage_experiment_list: { method: "GET", path: "/coverage/experiments" },
-  coverage_experiment_complete: { method: "POST", path: "/coverage/experiments/{id}/complete" },
-  coverage_experiment_cancel: { method: "POST", path: "/coverage/experiments/{id}/cancel" },
   coverage_blockers: { method: "POST", path: "/coverage/blockers" },
   automotive_lab_coverage: { method: "POST", path: "/automotive/lab/coverage" },
   automotive_lab_plan: { method: "POST", path: "/automotive/lab/plan" },
@@ -611,13 +604,6 @@ export function createHttpTransport(options: HttpTransportOptions = {}): Transpo
         // present an accurate unsupported/offline state.
         throw new Error(`Unsupported command in web mode: ${command}`);
       }
-      if (command === "coverage_experiment_get" || command === "coverage_experiment_replay_review") return request<T>(endpoint, { id: args?.id, ...args?.scope as Record<string, unknown> }, options);
-      if (command === "coverage_experiment_complete" || command === "coverage_experiment_cancel") return request<T>(endpoint, { id: args?.id, ...args?.request as Record<string, unknown> }, options);
-      if (command === "coverage_experiment_list") {
-        const { before, ...rest } = args ?? {};
-        const cursor = before as { created_at: string; id: string } | null;
-        return request<T>(endpoint, { ...rest, before_created_at: cursor?.created_at, before_id: cursor?.id }, options);
-      }
       if (command === "change_impact") {
         const { base, head, ...rest } = args ?? {};
         const revisions = base != null && head != null ? { base, head } : undefined;
@@ -635,7 +621,7 @@ export function createHttpTransport(options: HttpTransportOptions = {}): Transpo
       }
       const requestArgs = command === "patch_defectdojo_config" || command === "patch_issue_tracker_config"
         ? typedPatchBody(args)
-        : command === "campaign_advice" || command === "allocation_propose"
+        : command === "allocation_propose"
           ? args?.request as Record<string, unknown> | undefined
           : args;
       return request<T>(endpoint, requestArgs, options);

@@ -81,7 +81,7 @@ Additional operation limits:
   builds; absent evidence is reported as unavailable.
 - Historical replay verifies retained inputs and uses the original seed and
   admitted execution settings. An explicit current-input rerun is a separate
-  experiment. Legacy runs without the manifest cannot be historical replays.
+  run. Legacy runs without the manifest cannot be historical replays.
 - Patch-to-Proof applies to reviewed userspace findings on Unix. It is
   unavailable for syzkaller and refuses the operation on Windows. Broader
   platform availability requires secure retained-artifact reading and its own

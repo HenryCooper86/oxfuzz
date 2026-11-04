@@ -505,8 +505,7 @@ evidence from durable run, harness-promotion, crash, coverage, corpus, sandbox,
 and diagnostics records. Missing legacy provenance is an explicit incomplete
 result; mutable active paths are never substituted for run-owned evidence.
 
-The service also adapts comparable run history into the pure `hf-coverage`
-campaign advisor and packages `hf-crash` remediation contracts. Both outputs are
+The service also packages `hf-crash` remediation contracts. The output is
 advisory until an operator uses the existing guarded workflow. A remediation
 claim becomes verified only from service-owned sandbox evidence tied to the
 exact patch and reproducer digests. See
@@ -528,9 +527,10 @@ asynchronous start, status, cancel, and result operations; start completes
 admission, inserts a durable running operation, registers cooperative
 cancellation, and returns the operation UUID without awaiting Semgrep. One
 project may have only one active Semgrep scan, and a second start fails busy.
-The `semgrep-enrichment` feature is enabled by default in normal product crates;
-`--no-default-features` excludes the integration and every Semgrep presentation
-entrypoint.
+The `semgrep-enrichment` feature is off by default in every product crate,
+because its ranking benefit has not been measured against the baseline. A build
+without the feature excludes the integration and every Semgrep presentation
+entrypoint; CI still builds and tests it with the feature enabled.
 
 The service takes the shared workspace lease before the first Semgrep database
 or journal write, transfers it into the background worker, and retains it

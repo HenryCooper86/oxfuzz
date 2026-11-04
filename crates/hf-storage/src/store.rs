@@ -46,25 +46,6 @@ pub enum StorageError {
     /// A stored identifier or model field is malformed.
     #[error("invalid stored data: {0}")]
     InvalidData(String),
-    /// A retained proposal or terminal outcome differs from a retry.
-    #[error("coverage experiment terminal_conflict: {id}")]
-    CoverageExperimentConflict { id: Uuid },
-    /// A source snapshot changed before the reserved write.
-    #[error("coverage experiment source_evidence_changed: {run_id}")]
-    CoverageExperimentSourceChanged { run_id: Uuid },
-    /// Campaign or experiment timestamps violate the required ordering.
-    #[error("coverage experiment invalid_chronology")]
-    CoverageExperimentInvalidChronology,
-    /// Missing source metadata prevents a complete campaign snapshot.
-    #[error("coverage experiment missing_setup_evidence: {field}")]
-    CoverageExperimentMissingSetup { field: &'static str },
-    /// Experiment references must be released by explicit project/knowledge cleanup.
-    #[error("run_retained_by_experiment: run {run_id}, experiment {experiment_id}, role {role:?}")]
-    RunRetainedByExperiment {
-        run_id: Uuid,
-        experiment_id: Uuid,
-        role: crate::CoverageExperimentRunRole,
-    },
     /// A requested row did not exist, so a mutation could not be applied.
     #[error("record not found: {0}")]
     NotFound(String),
@@ -2550,7 +2531,6 @@ impl Store {
             "clang_analysis_results",
             "clang_analysis_operations",
             "ai_discovery_operations",
-            "coverage_experiments",
             "harness_build_inputs",
             "harness_build_contexts",
             "build_diagnosis_runs",
@@ -2603,7 +2583,6 @@ impl Store {
             "clang_analysis_results",
             "clang_analysis_operations",
             "ai_discovery_operations",
-            "coverage_experiments",
             "harness_build_inputs",
             "harness_build_contexts",
             "build_diagnosis_runs",
@@ -2751,16 +2730,6 @@ impl Store {
     /// Returns a storage error on a database failure.
     pub async fn delete_run(&self, run_id: &str) -> Result<(), StorageError> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        if let Some(reference) =
-            crate::coverage_experiment_store::run_reference(&mut tx, run_id).await?
-        {
-            return Err(StorageError::RunRetainedByExperiment {
-                run_id: Uuid::parse_str(run_id)
-                    .map_err(|_| StorageError::InvalidData("retained run UUID".into()))?,
-                experiment_id: reference.experiment_id,
-                role: reference.role,
-            });
-        }
         sqlx::query("DELETE FROM run_closeout_steps WHERE run_id = ?1")
             .bind(run_id)
             .execute(&mut *tx)
@@ -2857,23 +2826,6 @@ impl Store {
     /// Returns a storage error on a database failure.
     pub async fn clear_all_runs(&self) -> Result<(), StorageError> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let referenced: Option<String> = sqlx::query_scalar(
-            "SELECT baseline_run_id FROM coverage_experiments ORDER BY baseline_run_id LIMIT 1",
-        )
-        .fetch_optional(&mut *tx)
-        .await?;
-        if let Some(run_id) = referenced {
-            if let Some(reference) =
-                crate::coverage_experiment_store::run_reference(&mut tx, &run_id).await?
-            {
-                return Err(StorageError::RunRetainedByExperiment {
-                    run_id: Uuid::parse_str(&run_id)
-                        .map_err(|_| StorageError::InvalidData("retained run UUID".into()))?,
-                    experiment_id: reference.experiment_id,
-                    role: reference.role,
-                });
-            }
-        }
         sqlx::query("DELETE FROM run_closeout_steps")
             .execute(&mut *tx)
             .await?;
@@ -2886,20 +2838,11 @@ impl Store {
     /// Delete the specified runs and their crash rows in one transaction.
     ///
     /// # Errors
-    /// Returns a storage error if a run is retained, missing, or deletion fails.
+    /// Returns a storage error if a run is missing or deletion fails.
     pub async fn clear_runs_by_id(&self, run_ids: &[Uuid]) -> Result<(), StorageError> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         for run_id in run_ids {
             let id = run_id.to_string();
-            if let Some(reference) =
-                crate::coverage_experiment_store::run_reference(&mut tx, &id).await?
-            {
-                return Err(StorageError::RunRetainedByExperiment {
-                    run_id: *run_id,
-                    experiment_id: reference.experiment_id,
-                    role: reference.role,
-                });
-            }
             sqlx::query("DELETE FROM run_closeout_steps WHERE run_id = ?1")
                 .bind(&id)
                 .execute(&mut *tx)

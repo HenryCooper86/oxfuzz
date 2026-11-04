@@ -105,14 +105,15 @@ class GateDispatcherTests(unittest.TestCase):
             "test -p hf-service --no-default-features --lib model_budget::tests",
             "test -p hf-service --no-default-features --features harness-behavior --test harness_qualification stable_sequence_is_measured_and_promotable",
             "test -p hf-web --no-default-features --test build_doctor_disabled_api",
-            "test -p hf-web --no-default-features --test coverage_experiments_api",
-            "test -p hf-service --no-default-features --test coverage_experiments",
             "test -p hf-service --no-default-features --features proof-carrying --test run_replay",
             "test -p hf-service --no-default-features --features patch-to-proof --test finding_review",
             "test -p hf-service --no-default-features --features clang-analysis --test clang_analysis",
             "test -p hf-service --no-default-features --features clang-analysis --lib clang_analysis",
             "test -p hf-discovery --features clang-analysis --test clang_analysis",
             "test -p hf-cli --no-default-features --features clang-analysis --bin oxfuzz clang_cli_tests",
+            "test -p hf-discovery --features semgrep-enrichment --lib semgrep",
+            "test -p hf-service --features semgrep-enrichment --lib semgrep",
+            "test -p hf-web --features semgrep-enrichment --test semgrep_api",
         ])
 
     def test_feature_behavior_gate_keeps_test_failure_status(self) -> None:
@@ -263,7 +264,6 @@ class GateDispatcherTests(unittest.TestCase):
             "campaign-trust",
             "change-aware",
             "coverage-blockers",
-            "coverage-experiments",
             "harness-tournament",
             "harness-work-order",
             "native-analysis",

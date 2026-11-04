@@ -4,12 +4,9 @@ Status: **implemented**. Owner: `hf-service`, over retained SQLite closeout reco
 
 ## 1. Goal
 
-After a run ends, eight closeout decisions should be retained: triage,
-minimization, corpus absorption, exact coverage availability, blocker evidence
-availability, edge-set capture, disposition derivation, and a trust report. The
-steps that can be bound to the run compose existing service operations.
-Coverage and blocker steps explicitly retain that evidence as unavailable until
-exact run-bound source coverage exists. The edge-set step captures the run's
+After a run ends, six closeout decisions should be retained: triage,
+minimization, corpus absorption, edge-set capture, disposition derivation, and
+a trust report. The steps compose existing service operations. The edge-set step captures the run's
 covered AFL map offsets by replaying its retained run-local corpus through
 `afl-showmap` against its staged binary; it consumes no other step's output,
 reuses a set retained at run end or on demand, and skips runs whose binaries
@@ -34,16 +31,15 @@ returns these rows without executing or resuming the chain.
 
 The retained rows let an interrupted closeout resume at the first retryable
 step without repeating successful triage, minimization, or corpus absorption.
-Reading the chain never resumes it. The current coverage and blocker steps only
-retain their exact-evidence limitation and never replay a corpus.
+Reading the chain never resumes it.
 
-Rows written before exact run-bound coverage policy existed require a
-conservative compatibility rule. A retained `Completed` outcome for coverage or
-blockers is presented as unavailable because its evidence came from mutable
-workspace state. Retained reads perform only that projection and never execute
-work. An explicit resume invalidates any terminal trust result associated with
-those legacy rows and records the exact unavailable outcomes used by current
-closeout.
+Schema 3 retired the coverage and blocker steps. They were always recorded as
+skipped: exact run-bound source coverage is not available at closeout, and
+current-workspace coverage is never attributed to an old run (run-bound
+function coverage is shown separately in Run History). Storage migration 0050
+deletes their retained rows and any trust result that was blocked by them or
+recorded after a legacy completed coverage step, so the next closeout
+recomputes that verdict on the current ladder.
 
 ## 4. Step Outcomes
 
@@ -70,18 +66,13 @@ Fixed, by data dependency:
 2. **minimize** -- reports minimization already performed during triage and is
    skipped when triage retained no crashes; it does not run a second minimizer.
 3. **corpus absorb** -- folds run inputs into the retained corpus.
-4. **coverage** -- reports unavailable until exact run-bound source coverage is
-   durably retained. Current-workspace coverage is never attributed to an old
-   run.
-5. **blockers** -- likewise reports unavailable without exact run-bound source
-   coverage and directs the operator to current-workspace analysis.
-6. **edge set** -- retains the run's covered AFL map offsets (measured by
+4. **edge set** -- retains the run's covered AFL map offsets (measured by
    replaying the run-local corpus through `afl-showmap`), reusing the set when
    one was already captured at run end or on demand. It consumes nothing, so a
    failed triage or absorb never blocks it; a run without an AFL-instrumented
    binary or with its staged corpus gone skips with the reason.
-7. **disposition** -- consumes triage output and any remediation records.
-8. **trust report** -- consumes every prior step and is therefore last.
+5. **disposition** -- consumes triage output and any remediation records.
+6. **trust report** -- consumes every prior step and is therefore last.
 
 The trust report is last on purpose: it audits the closeout that produced it,
 so a step that failed appears as an `Unavailable` gate rather than being
@@ -120,8 +111,8 @@ target leases.
 ## 6. Rejected Alternatives
 
 - **An in-memory step loop** -- section 3.
-- **Aborting the chain on the first failure** -- coverage failing should not
-  prevent disposition derivation, which does not consume it.
+- **Aborting the chain on the first failure** -- a failed corpus absorption
+  should not prevent disposition derivation, which does not consume it.
 - **Running closeout automatically at run end** -- closeout performs sandboxed
   work, and starting sandboxed work without an approval surface contradicts
   ENGINEERING_PROTOCOL.md 2.12. Closeout is offered when a run ends; it is invoked
@@ -151,8 +142,8 @@ target leases.
   trigger work.
 - Reading retained state and reading campaign trust invoke no runtime or
   provider operation.
-- Legacy coverage and blocker completions are read as unavailable, and an
-  explicit resume refreshes trust without replaying current-workspace evidence.
+- After migration 0050, no retained coverage or blocker row remains, and no
+  trust result that depended on one is shown.
 - Re-running a completed closeout is a no-op that reports the retained result.
 - An AFL++ run with staged corpus evidence records its covered edge set exactly
   once; a later pass reports the retained set without re-measuring, and a run

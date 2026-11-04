@@ -26,11 +26,13 @@ fi
 "$binary" --version
 "$binary" --help >/dev/null
 if [[ "$release_features_overridden" == false ]]; then
-  if ! "$binary" discover --help | grep -F -- "--semgrep" >/dev/null; then
-    echo "Default release CLI is missing semgrep-enrichment" >&2
+  # Semgrep enrichment is off by default until its ranking benefit is measured;
+  # a default release must not expose it. OXFUZZ_RELEASE_FEATURES opts in.
+  if "$binary" discover --help | grep -F -- "--semgrep" >/dev/null; then
+    echo "Default release CLI unexpectedly includes semgrep-enrichment" >&2
     exit 1
   fi
-  echo "Verified default release feature: semgrep-enrichment"
+  echo "Verified default release features: semgrep-enrichment is off"
 fi
 
 if [[ "${OXFUZZ_VERIFY_SEMGREP_SANDBOX:-0}" == "1" ]]; then

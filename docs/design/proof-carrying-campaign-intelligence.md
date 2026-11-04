@@ -1,19 +1,21 @@
 # Proof-Carrying Campaign Intelligence
 
-Status: **active implementation**. Owner: `hf-service`, with pure scoring in
-`hf-coverage` and remediation contracts in `hf-crash`.
+Status: **active implementation**. Owner: `hf-service`, with remediation
+contracts in `hf-crash`.
 
 ## 1. Goal
 
 Make every campaign decision and remediation handoff auditable without turning
-advice into authority. The subsystem adds three related capabilities:
+advice into authority. The subsystem adds two related capabilities:
 
 1. a canonical evidence manifest that binds a run to its approved harness,
-   sandbox, corpus context, coverage, findings, and cost inputs;
-2. a deterministic coverage-per-cost advisor that proposes the next campaign
-   action and explains the measurements behind it; and
-3. a remediation handoff contract that cannot claim verification without exact
+   sandbox, corpus context, coverage, findings, and cost inputs; and
+2. a remediation handoff contract that cannot claim verification without exact
    reproducer, patch, source, sandbox, and regression evidence.
+
+The coverage-per-cost campaign advisor (`campaign_advice`, `POST
+/campaign/advice`, and the `campaign-advisor` feature in `hf-coverage`) was
+removed on 2026-11-04. Reviewed scheduled allocations (section 4) remain.
 
 The implementation extends existing immutable run evidence, crash regression,
 reproduction-bundle, diagnostics, and human-promotion contracts. It does not
@@ -23,12 +25,11 @@ harness, start a fuzzer, or transmit automotive traffic.
 ## 2. Feature Boundary
 
 The subsystem is exposed through the `proof-carrying` feature in `hf-service`.
-That feature enables the `campaign-advisor` feature in `hf-coverage` and the
-`remediation-handoff` feature in `hf-crash`. Pure types remain dependency-light;
+That feature enables the `remediation-handoff` feature in `hf-crash`. Pure types remain dependency-light;
 all filesystem, storage, and orchestration decisions remain in `hf-service`.
 
 Presentation crates consume service-owned serializable DTOs. They may render,
-download, or request advice, but they do not recompute hashes, economics,
+or download these DTOs, but they do not recompute hashes, economics,
 verification status, or safety gates.
 
 ## 3. Canonical Evidence Manifest
@@ -80,36 +81,9 @@ write and promoted harness update are one storage transaction. Re-promoting the
 same exact revision returns its existing approval; a different revision receives
 a new record. Agents and schedules have no promotion entrypoint.
 
-## 4. Coverage-Per-Cost Advisor
+## 4. Reviewed Scheduled Allocations
 
-`hf-coverage` owns a pure deterministic advisor. Inputs are a bounded sequence
-of comparable campaign observations, enabled engines, operator-supplied
-per-engine hourly rates, and a finite budget. Each observation carries exact
-run identity, engine, duration, edge delta, crash delta, corpus additions, and
-any attributable model cost.
-
-The advisor produces one of:
-
-- continue the current campaign;
-- improve corpus or mutation inputs;
-- review a new harness revision;
-- switch to a named enabled engine; or
-- stop spending on the target.
-
-Budget exhaustion wins over optimization. Otherwise the advisor compares
-marginal edges per dollar, recent plateau windows, corpus growth, and engine
-diversity. Every result includes ordered evidence strings, measured cost,
-marginal yield, and `requires_human_approval = true` for any action that could
-lead to execution or a new harness. It has no runtime, storage, provider, or
-tool dependency and cannot perform its recommendation.
-
-Invalid, non-finite, negative, incomparable, excessive, or duplicate run inputs
-fail closed. Ties are resolved by stable engine id and run id so identical input
-always yields identical output.
-
-### 4.1 Reviewed scheduled allocations
-
-The `campaign-allocation` feature extends advice with a service-owned project
+The `campaign-allocation` feature in `hf-service` adds a service-owned project
 allocation. A proposal freezes selected file-qualified targets, engines, exact
 active promoted harness UUIDs and source digests, qualification-owned workspace
 selectors, and retained run facts. The
@@ -125,7 +99,7 @@ opportunities, conditional on a matching enabled schedule actually firing.
 The per-run sandbox fuzz-time cap is floor(total seconds / total runs); any
 remainder remains unallocated. These are requested fuzz seconds, not a bound on
 build, seed generation, triage, or total wall-clock time. This is not a dollar
-budget; the existing coverage-per-cost advisor remains available separately.
+budget.
 
 The operator approves an exact proposal UUID and SHA-256. Versioned JSON state
 under the configured workspace retains the proposal, review state and every
@@ -200,7 +174,7 @@ source edges or implies a vulnerability.
 
 ## 7. Safety and Authority
 
-- Advice and manifests are read-only.
+- Manifests and allocation proposals are read-only.
 - Draft bundles never claim a fix is verified.
 - Verification execution, when separately requested, uses `hf-runtime`, a
   pinned image, immutable inputs, no network, bounded output, and guardrails.
@@ -231,7 +205,7 @@ source edges or implies a vulnerability.
   Rust analysis, service DTOs, REST JSON, and GUI rendering.
 - Repeated UDS traffic does not increase unique-transition counts; malformed
   ISO-TP traffic cannot panic or fabricate a state.
-- Advice is deterministic, bounded, budget-aware, and side-effect free.
+- Allocation proposals are deterministic, bounded, and side-effect free.
 - Remediation cannot transition to `verified` without every required matching
   digest and successful sandbox/regression outcome.
 - Default tests use mocks and fixtures; they execute no generated harness,

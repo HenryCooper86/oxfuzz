@@ -143,6 +143,32 @@ and 0.7.0 releases respectively.
   `ServiceContainer::fuzz_prepare` (the first stages of `oxfuzz fuzz`, which
   now composes it), the desktop `fuzz_prepare` command, and
   `POST /fuzz/prepare`.
+- Run closeout has six steps. The Coverage and Blockers steps, which were
+  always recorded as skipped, are retired (closeout schema 3). Storage
+  migration 0050 deletes their retained rows and any trust result that
+  depended on them, so the next closeout recomputes that verdict. The trust
+  step now shows its verdict in plain words.
+- Triage shows one finding status (state, next step, and what is not yet
+  established) above the collapsed proof details, and the list no longer
+  repeats the raw CASR determination. The Dashboard's bug-report badge reads
+  "Bug report drafted" so it no longer collides with the "Report ready"
+  disposition.
+- Semgrep enrichment is off by default: `semgrep-enrichment` left the default
+  features of hf-service, hf-cli, hf-web, and the desktop app until its ranking
+  benefit is measured. Build with `--features semgrep-enrichment` to use it;
+  CI still builds and tests it. Clang analysis stays opt-in.
+
+### Removed
+
+- Coverage experiments: the service module, REST routes under
+  `/coverage/experiments`, desktop commands, `oxfuzz run --experiment`, the
+  Corpus panel, and the `coverage-experiments` feature. Storage migration 0051
+  drops the `coverage_experiments` and `coverage_experiment_executions` tables,
+  which deletes any retained experiment records; run deletion is no longer
+  refused for runs an experiment referenced. Historical replay is unchanged.
+- Campaign advice: `campaign_advice` (service, desktop command, and
+  `POST /campaign/advice`) and the `hf-coverage` campaign advisor. No screen
+  used it. The `proof-carrying` feature and the campaign evidence manifest stay.
 
 ## 0.8.1 - 2026-10-25
 

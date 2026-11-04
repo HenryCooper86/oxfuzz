@@ -109,8 +109,6 @@ export type CloseoutStep =
   | "triage"
   | "minimize"
   | "corpus_absorb"
-  | "coverage"
-  | "blockers"
   | "edge_set"
   | "disposition"
   | "trust_report";

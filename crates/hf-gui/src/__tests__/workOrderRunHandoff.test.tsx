@@ -61,7 +61,6 @@ it("carries the promoted exact selector through real Harness, Run, Corpus and re
     if (command === "run_history") return promoted ? [{ id: runId, target_id: targetId, target: "ns::parse", target_selector: selector, project_root: "/project", kind: "Campaign", status: "Done", requested_duration_secs: 60, started_at: "2026-09-08T01:00:00Z", ended_at: "2026-09-08T02:00:00Z" }] : [];
     if (command === "run_owner") return { run_id: runId, project_root: "/project", target: "ns::parse", engine: "libfuzzer", kind: "Campaign", status: "Done", started_at: "2026-09-08T01:00:00Z" };
     if (command === "campaign_health_events") return { events: [], next_cursor: null };
-    if (command === "coverage_experiment_list") { expect(args.target_id).toBe(targetId); return { items: [], next_cursor: null }; }
     if (command === "corpus_capabilities") return {};
     return [];
   });
@@ -102,7 +101,6 @@ it("carries the promoted exact selector through real Harness, Run, Corpus and re
   expect(host.textContent).toContain("No crash artifacts were retained");
   expect(host.textContent).toContain("does not establish that the project is safe");
   await click("Show Corpus");
-  expect(host.querySelector('[aria-label="Baseline campaign"]')).toBeTruthy();
   await click("Show Harness");
   expect(host.querySelector('[data-testid="selected-target"]')!.textContent).toBe(selector);
   expect(host.textContent).toContain("exact imported source");

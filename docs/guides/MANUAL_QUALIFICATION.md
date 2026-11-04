@@ -33,12 +33,10 @@ runtime failures produce explicit unavailable evidence.
 | Minimized crashes | Triage an approved retained finding. Inspect original and candidate replay observations; a changed or intermittent failure must keep the original input. | Crash record, replay logs and counts, original/candidate digests, executable and image. |
 | Behavioral qualification | Smoke an AFL++ harness with meaningful distinct inputs. Inspect fresh-input and persistent sequence observations in Harness. | Qualification report and per-input maps. Equal sample maps are advisory; unavailable measurements remain explicit. |
 | Model budgets | Use a small bounded test workflow and inspect Dashboard before and after a provider request and application restart. | Scope, reserved/observed usage, denied resource and terminal reason. |
-| Coverage experiments | Select a completed baseline, prepare an experiment, make the reviewed corpus/harness change, review the guided launch, and approve it. | Baseline, reviewed inputs, associated campaign, comparison, including failed or unchanged outcomes. |
 | Custom mutators | In Harness, import source for the supported upstream engine API. Rebuild, review, smoke and promote the new revision; inspect callback observations. | Imported source, native artifact/image identity, smoke observations, retained campaign and replay inputs. See [managed mutators](../design/managed-mutators-design.md). |
 
 Use ordinary Stop and restart controls to inspect recovery without deleting
-retained attempts. Cancelling an experiment record and stopping its campaign are
-distinct operations in the application.
+retained attempts.
 
 ## Measure effectiveness on real projects
 

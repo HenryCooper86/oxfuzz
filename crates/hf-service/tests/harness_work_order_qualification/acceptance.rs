@@ -1,6 +1,5 @@
 //! Complete service workflow with inert runtime artifacts and explicit operator calls.
 use super::*;
-use hf_service::coverage_experiments::*;
 use hf_service::{CloseoutStep, StepOutcome};
 use hf_storage::{RunKind, RunStatus};
 use tokio::sync::Notify;
@@ -124,25 +123,19 @@ async fn observe_active(
     (id, serde_json::to_value(events).unwrap())
 }
 
-/// A terminal closeout covers every ladder step: source coverage and blockers
-/// stay skipped (unavailable), and a libFuzzer run skips edge-set capture
-/// naming its engine — a binary without an AFL map has nothing to measure.
+/// A terminal closeout covers every ladder step, and a libFuzzer run skips
+/// edge-set capture naming its engine — a binary without an AFL map has nothing to measure.
 async fn assert_terminal_closeout(
     service: &ServiceContainer,
     run_id: Uuid,
 ) -> hf_service::CloseoutReport {
     let closeout = service.close_out_run(run_id).await.unwrap();
     assert_eq!(closeout.run_id, run_id);
-    assert_eq!(closeout.steps.len(), 8);
+    assert_eq!(closeout.steps.len(), 6);
     assert!(
         closeout.steps.iter().all(|step| step.outcome.is_terminal()),
         "{closeout:?}"
     );
-    assert!(closeout
-        .steps
-        .iter()
-        .any(|step| step.step == CloseoutStep::Coverage
-            && matches!(step.outcome, StepOutcome::Skipped { .. })));
     assert!(closeout
         .steps
         .iter()
@@ -174,7 +167,7 @@ async fn assert_qualified_review(fixture: &QualificationFixture, harness_id: Uui
 }
 
 #[tokio::test]
-async fn imported_source_reaches_retained_health_closeout_and_explicit_experiment_result() {
+async fn imported_source_reaches_retained_health_closeout_and_a_reviewed_rerun() {
     let fixture = QualificationFixture::new_for_target(
         RuntimeMode::Pass,
         ReviewMode::Approve,
@@ -281,14 +274,6 @@ async fn imported_source_reaches_retained_health_closeout_and_explicit_experimen
         serde_json::to_value(retained_history).unwrap()["target_selector"],
         "alternate.c::parse_packet"
     );
-    let baseline = fixture
-        .store
-        .coverage_experiment_run_evidence(first.run_id)
-        .await
-        .unwrap();
-    assert_eq!(baseline.target_id, fixture.target_id);
-    assert_eq!(baseline.harness_id, harness_id);
-    assert!(baseline.build_inputs.is_some());
     let calls_before_read = fixture.runtime.calls.load(Ordering::SeqCst);
     let pending = service.retained_run_closeout(first.run_id).await.unwrap();
     assert!(pending.steps.is_empty());
@@ -346,25 +331,6 @@ async fn imported_source_reaches_retained_health_closeout_and_explicit_experimen
         fixture.runtime.calls.load(Ordering::SeqCst),
         calls_before_reopen
     );
-    let prepared = reopened
-        .create_coverage_experiment(CreateCoverageExperimentRequest {
-            project: fixture.project.clone(),
-            target_id: fixture.target_id,
-            baseline_run_id: first.run_id,
-            kind: CoverageExperimentKind::GrowCorpus,
-            goal_function: "parse_packet".into(),
-            hypothesis: "A longer packet may exercise a different parser branch".into(),
-            duration_secs: 60,
-        })
-        .await
-        .unwrap();
-    assert_eq!(prepared.status, CoverageExperimentStatus::Prepared);
-    assert_eq!(prepared.baseline_run_id, first.run_id);
-    assert_eq!(
-        fixture.runtime.calls.load(Ordering::SeqCst),
-        calls_before_reopen
-    );
-    let prepared_baseline = serde_json::to_value(&prepared.baseline).unwrap();
     let seeds = fixture.project.parent().unwrap().join("new-seeds");
     std::fs::create_dir(&seeds).unwrap();
     std::fs::write(seeds.join("packet"), b"new longer parser packet").unwrap();
@@ -401,48 +367,6 @@ async fn imported_source_reaches_retained_health_closeout_and_explicit_experimen
         second_record.config.as_ref().unwrap().replay_of,
         Some(first.run_id)
     );
-    let calls_before_attach = fixture.runtime.calls.load(Ordering::SeqCst);
-    let scope = CoverageExperimentScope {
-        project: fixture.project.clone(),
-        target_id: fixture.target_id,
-    };
-    let completed = reopened
-        .complete_coverage_experiment(
-            prepared.id,
-            CompleteCoverageExperimentRequest {
-                scope: scope.clone(),
-                result_run_id: second.run_id,
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(completed.status, CoverageExperimentStatus::Completed);
-    assert_eq!(
-        serde_json::to_value(&completed.baseline).unwrap(),
-        prepared_baseline
-    );
-    let comparison = completed.result.as_ref().unwrap();
-    assert_eq!(comparison.run.run_id, second.run_id);
-    assert_eq!(comparison.run.target_id, fixture.target_id);
-    assert_eq!(comparison.run.harness_id, harness_id);
-    assert_eq!(
-        serde_json::to_value(
-            reopened_store
-                .coverage_experiment_run_evidence(first.run_id)
-                .await
-                .unwrap()
-        )
-        .unwrap(),
-        serde_json::to_value(&baseline).unwrap()
-    );
-    assert_eq!(
-        comparison.input_change,
-        CoverageExperimentInputChange::CorpusChanged
-    );
-    assert_eq!(
-        fixture.runtime.calls.load(Ordering::SeqCst),
-        calls_before_attach
-    );
     let historical = reopened
         .finding_review_for_project(&fixture.project, finding.id)
         .await
@@ -457,14 +381,5 @@ async fn imported_source_reaches_retained_health_closeout_and_explicit_experimen
         reviews_before_approval
     );
     assert_eq!(runtime.campaigns.load(Ordering::SeqCst), 2);
-    let fresh = ServiceContainer::new(runtime, None).with_store(Arc::new(
-        hf_storage::Store::connect(fixture.project.parent().unwrap().join("qualification.db"))
-            .await
-            .unwrap(),
-    ));
-    assert_eq!(
-        serde_json::to_value(fresh.coverage_experiment(prepared.id, scope).await.unwrap()).unwrap(),
-        serde_json::to_value(completed).unwrap()
-    );
-    eprintln!("acceptance_ids work_order={} submission={} attempt={} harness={} smoke={} target={} first={} finding={} experiment={} second={} health={}", fixture.packet.id, fixture.submission.id, attempt.id, harness_id, smoke_id, fixture.target_id, first.run_id, finding.id, prepared.id, second.run_id, first_observed.1);
+    eprintln!("acceptance_ids work_order={} submission={} attempt={} harness={} smoke={} target={} first={} finding={} second={} health={}", fixture.packet.id, fixture.submission.id, attempt.id, harness_id, smoke_id, fixture.target_id, first.run_id, finding.id, second.run_id, first_observed.1);
 }

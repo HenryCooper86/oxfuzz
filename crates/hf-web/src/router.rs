@@ -90,6 +90,8 @@ impl AppState {
         self
     }
 
+    /// Project approval for the work-order routes, which are its only caller.
+    #[cfg(feature = "harness-work-order")]
     pub(crate) fn approve_project(
         &self,
         requested: &std::path::Path,
@@ -493,7 +495,6 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .merge(build_doctor_routes())
         .merge(harness_tournament_routes())
         .merge(coverage_blocker_routes())
-        .merge(crate::coverage_experiment_routes::routes())
         .merge(campaign_trust_routes())
         .merge(unreached_surface_routes())
         .merge(concolic_routes())
@@ -697,7 +698,6 @@ fn automotive_routes() -> Router<AppState> {
 #[cfg(feature = "proof-carrying")]
 fn proof_carrying_routes() -> Router<AppState> {
     Router::new()
-        .route("/campaign/advice", post(campaign_advice))
         .route("/campaign/evidence", post(campaign_evidence))
         .route("/remediation/draft", post(remediation_draft))
 }
@@ -1222,20 +1222,6 @@ fn public_value<T: Serialize>(value: T) -> Result<serde_json::Value, ApiError> {
         )
     })?;
     Ok(redact_public_json(value))
-}
-
-#[cfg(feature = "proof-carrying")]
-async fn campaign_advice(
-    State(state): State<AppState>,
-    Json(request): Json<serde_json::Value>,
-) -> ApiResult<serde_json::Value> {
-    let request =
-        serde_json::from_value(request).map_err(map_err(StatusCode::UNPROCESSABLE_ENTITY))?;
-    let advice = state
-        .container
-        .campaign_advice(&request)
-        .map_err(classified_api_error)?;
-    Ok(Json(public_value(advice)?))
 }
 
 #[cfg(feature = "proof-carrying")]
@@ -3535,10 +3521,8 @@ async fn clear_all_artifacts(
 async fn delete_run(
     State(state): State<AppState>,
     Json(req): Json<RunIdRequest>,
-) -> Result<Json<bool>, (StatusCode, Json<RunHistoryErrorResponse>)> {
-    approve_run_owner(&state, &req.run_id)
-        .await
-        .map_err(|(status, Json(body))| (status, Json(RunHistoryErrorResponse::Existing(body))))?;
+) -> ApiResult<bool> {
+    approve_run_owner(&state, &req.run_id).await?;
     state
         .container
         .delete_run(&req.run_id)
@@ -3550,9 +3534,8 @@ async fn delete_run(
 async fn clear_all_runs(
     State(state): State<AppState>,
     Json(req): Json<ProjectRequest>,
-) -> Result<Json<bool>, (StatusCode, Json<RunHistoryErrorResponse>)> {
-    let project = approved_project(&state, std::path::Path::new(&req.project))
-        .map_err(|(status, Json(body))| (status, Json(RunHistoryErrorResponse::Existing(body))))?;
+) -> ApiResult<bool> {
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
     state
         .container
         .clear_project_runs(&project)
@@ -5110,35 +5093,17 @@ fn parse_engine(s: &str) -> Result<EngineKind, String> {
     s.parse()
 }
 
-#[derive(Serialize)]
-#[serde(untagged)]
-enum RunHistoryErrorResponse {
-    Retained(hf_service::coverage_experiments::CoverageExperimentError),
-    Existing(ErrorResponse),
-}
-fn run_history_api_error(
-    error: hf_service::RunHistoryError,
-) -> (StatusCode, Json<RunHistoryErrorResponse>) {
+fn run_history_api_error(error: hf_service::RunHistoryError) -> (StatusCode, Json<ErrorResponse>) {
     match error {
-        hf_service::RunHistoryError::Classified(error) => {
-            let (status, Json(body)) = classified_api_error(error);
-            (status, Json(RunHistoryErrorResponse::Existing(body)))
-        }
-        hf_service::RunHistoryError::RunRetainedByExperiment {
-            run_id,
-            experiment_id,
-            role,
-        } => {
-            let public=hf_service::coverage_experiments::CoverageExperimentError{
-                run_id:Some(run_id),experiment_id:Some(experiment_id),role:Some(role),
-                ..hf_service::coverage_experiments::CoverageExperimentError::new(hf_service::coverage_experiments::CoverageExperimentErrorCode::RunRetainedByExperiment)
-            };
-            (
-                StatusCode::CONFLICT,
-                Json(RunHistoryErrorResponse::Retained(public)),
-            )
-        }
+        hf_service::RunHistoryError::Classified(error) => classified_api_error(error),
     }
+}
+
+async fn model_budget_view() -> ApiResult<hf_service::model_budget::ModelBudgetView> {
+    hf_service::model_budget::model_budget_view()
+        .await
+        .map(Json)
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))
 }
 
 #[cfg(test)]
@@ -5338,40 +5303,4 @@ Authorization = "Bearer synthetic-header"
             assert_eq!(classified_api_error(error).0, expected);
         }
     }
-}
-
-#[cfg(test)]
-mod run_history_error_tests {
-    use super::*;
-    #[test]
-    fn retention_translation_preserves_ids_and_nonretention_status() {
-        let run_id = uuid::Uuid::new_v4();
-        let experiment_id = uuid::Uuid::new_v4();
-        let (status, Json(body)) =
-            run_history_api_error(hf_service::RunHistoryError::RunRetainedByExperiment {
-                run_id,
-                experiment_id,
-                role: hf_service::coverage_experiments::CoverageExperimentRunRole::Result,
-            });
-        assert_eq!(status, StatusCode::CONFLICT);
-        assert_eq!(
-            serde_json::to_value(body).unwrap(),
-            serde_json::json!({"code":"run_retained_by_experiment","error":"run_retained_by_experiment","run_id":run_id,"experiment_id":experiment_id,"role":"result"})
-        );
-        let (status, Json(body)) = run_history_api_error(hf_service::RunHistoryError::Classified(
-            ClassifiedError::Validation("active".into()),
-        ));
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(
-            serde_json::to_value(body).unwrap(),
-            serde_json::json!({"error":"validation error: active"})
-        );
-    }
-}
-
-async fn model_budget_view() -> ApiResult<hf_service::model_budget::ModelBudgetView> {
-    hf_service::model_budget::model_budget_view()
-        .await
-        .map(Json)
-        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))
 }

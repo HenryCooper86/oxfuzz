@@ -5,7 +5,6 @@ import { enGui } from "../i18n.gui";
 import { enResults } from "../i18n.results";
 import { enMutators } from "../i18n.mutators";
 import { enBudgets } from "../i18n.budgets";
-import { enExperiments } from "../i18n.experiments";
 
 // One word per concept in what a user reads. The human gate is "approve"; the
 // bounded sandbox check is a "smoke test"; the generated driver is a "harness".
@@ -20,7 +19,7 @@ function englishCore(): Record<string, string> {
 const ALLOWED = /^automotive\.(stateCorpus|report)\./;
 
 it("uses approve, smoke test, and harness instead of retired synonyms", () => {
-  const all = { ...englishCore(), ...enGui, ...enResults, ...enMutators, ...enBudgets, ...enExperiments, ...enExtra };
+  const all = { ...englishCore(), ...enGui, ...enResults, ...enMutators, ...enBudgets, ...enExtra };
   const offending = Object.entries(all)
     .filter(([key]) => !ALLOWED.test(key))
     .filter(([, text]) => /\bpromot|\bqualif|test driver/i.test(text))
@@ -29,7 +28,7 @@ it("uses approve, smoke test, and harness instead of retired synonyms", () => {
 });
 
 it("avoids internal jargon a user cannot act on", () => {
-  const all = { ...englishCore(), ...enGui, ...enResults, ...enMutators, ...enBudgets, ...enExperiments, ...enExtra };
+  const all = { ...englishCore(), ...enGui, ...enResults, ...enMutators, ...enBudgets, ...enExtra };
   const jargon = /\badmission\b|legacy compile context|dispatch slots|terminal campaign|morning campaign|operator fuzzing policy|issued grants|^0 measured$|^Corpus absorb$|^Edge set$|^Trust report$|^Head run id$|^Base run id$/i;
   const offending = Object.entries(all).filter(([, text]) => jargon.test(text)).map(([key, text]) => `${key}: ${text}`);
   expect(offending).toEqual([]);

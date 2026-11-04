@@ -2805,106 +2805,6 @@ pub async fn allocation_review(
         .map_err(|error| error.to_string())
 }
 
-/// Return a side-effect-free campaign proposal and its supporting evidence.
-#[cfg(feature = "proof-carrying")]
-#[tauri::command]
-pub fn campaign_advice(
-    state: tauri::State<'_, crate::state::AppState>,
-    request: serde_json::Value,
-) -> Result<serde_json::Value, String> {
-    campaign_advice_value(&state.container, request)
-}
-
-#[cfg(feature = "proof-carrying")]
-fn campaign_advice_value(
-    container: &hf_service::ServiceContainer,
-    request: serde_json::Value,
-) -> Result<serde_json::Value, String> {
-    let request = serde_json::from_value(request).map_err(|error| error.to_string())?;
-    let advice = container
-        .campaign_advice(&request)
-        .map_err(|error| error.to_string())?;
-    serde_json::to_value(advice).map_err(|error| error.to_string())
-}
-
-#[cfg(all(test, feature = "proof-carrying"))]
-mod campaign_advice_command_tests {
-    use super::campaign_advice_value;
-    use hf_service::{RETIRED_ENGINE_ID, RETIRED_ENGINE_IDS};
-
-    fn request(engine: &str) -> serde_json::Value {
-        serde_json::json!({
-            "current_engine": engine,
-            "enabled_engines": [engine],
-            "engine_rates": [{"engine": engine, "usd_per_hour": 1.0}],
-            "observations": [],
-            "budget": {
-                "max_total_cost_usd": 10.0,
-                "min_edges_per_dollar": 1.0,
-                "plateau_runs": 1
-            }
-        })
-    }
-
-    #[test]
-    fn tauri_advice_boundary_uses_canonical_ids_and_accepts_historical_names() {
-        let container = hf_service::ServiceContainer::stubbed();
-        for (historical, canonical) in [
-            ("LibFuzzer", "libfuzzer"),
-            ("AflPlusPlus", "afl++"),
-            ("Honggfuzz", "honggfuzz"),
-            ("Syzkaller", "syzkaller"),
-        ] {
-            let canonical_output = campaign_advice_value(&container, request(canonical)).unwrap();
-            assert_eq!(canonical_output["action"]["engine"], canonical);
-
-            let historical_output = campaign_advice_value(&container, request(historical)).unwrap();
-            assert_eq!(historical_output["action"]["engine"], canonical);
-        }
-    }
-
-    #[test]
-    fn tauri_advice_boundary_preserves_engine_parse_errors() {
-        let container = hf_service::ServiceContainer::stubbed();
-        let retired_values = [
-            RETIRED_ENGINE_ID.to_owned(),
-            RETIRED_ENGINE_IDS[1].to_owned(),
-            RETIRED_ENGINE_IDS[2].to_owned(),
-            format!(" {RETIRED_ENGINE_ID} "),
-        ];
-
-        for value in retired_values {
-            let error = campaign_advice_value(&container, request(&value)).unwrap_err();
-            assert_eq!(
-                error,
-                format!(
-                    "fuzzing engine '{}' has been retired; choose one of: \
-                     afl++, honggfuzz, libfuzzer, syzkaller",
-                    value.trim()
-                )
-            );
-        }
-
-        let error = campaign_advice_value(&container, request("not-an-engine")).unwrap_err();
-        assert_eq!(
-            error,
-            "unknown fuzzing engine 'not-an-engine' (expected one of: \
-             afl++, honggfuzz, libfuzzer, syzkaller)"
-        );
-    }
-}
-
-/// Explain that campaign intelligence was excluded from this build.
-#[cfg(not(feature = "proof-carrying"))]
-#[tauri::command]
-pub fn campaign_advice(
-    state: tauri::State<'_, crate::state::AppState>,
-    request: serde_json::Value,
-) -> Result<serde_json::Value, String> {
-    let _ = (state, request);
-    Err(proof_carrying_feature_unavailable())
-}
-
 /// Assemble final proof-carrying evidence for a terminal campaign.
 #[cfg(feature = "proof-carrying")]
 #[tauri::command]
@@ -4657,23 +4557,17 @@ pub fn config_value_to_toml(value: serde_json::Value) -> Result<String, String> 
     hf_service::config::json_to_toml(&value)
 }
 
-/// Existing run-history failures remain strings; retained references are structured.
+/// Run-history failures, serialized as their message string.
 #[derive(Debug, serde::Serialize)]
 #[serde(untagged)]
 pub enum NativeRunHistoryError {
-    /// Typed deletion refusal shared with REST.
-    Retained(hf_service::coverage_experiments::CoverageExperimentError),
     /// Existing native command error representation.
     Existing(String),
 }
 impl From<hf_service::RunHistoryError> for NativeRunHistoryError {
     fn from(error: hf_service::RunHistoryError) -> Self {
         match error {
-            hf_service::RunHistoryError::Classified(error)=>Self::Existing(error.to_string()),
-            hf_service::RunHistoryError::RunRetainedByExperiment{run_id,experiment_id,role}=>Self::Retained(hf_service::coverage_experiments::CoverageExperimentError{
-                run_id:Some(run_id),experiment_id:Some(experiment_id),role:Some(role),
-                ..hf_service::coverage_experiments::CoverageExperimentError::new(hf_service::coverage_experiments::CoverageExperimentErrorCode::RunRetainedByExperiment)
-            }),
+            hf_service::RunHistoryError::Classified(error) => Self::Existing(error.to_string()),
         }
     }
 }
@@ -5089,20 +4983,7 @@ mod build_operator_tests {
 #[cfg(test)]
 mod run_history_error_tests {
     #[test]
-    fn retention_is_structured_and_other_errors_keep_their_string() {
-        let run_id = uuid::Uuid::new_v4();
-        let experiment_id = uuid::Uuid::new_v4();
-        let error = super::NativeRunHistoryError::from(
-            hf_service::RunHistoryError::RunRetainedByExperiment {
-                run_id,
-                experiment_id,
-                role: hf_service::coverage_experiments::CoverageExperimentRunRole::Baseline,
-            },
-        );
-        assert_eq!(
-            serde_json::to_value(error).unwrap(),
-            serde_json::json!({"code":"run_retained_by_experiment","error":"run_retained_by_experiment","run_id":run_id,"experiment_id":experiment_id,"role":"baseline"})
-        );
+    fn run_history_errors_keep_their_string() {
         let error = super::NativeRunHistoryError::from(hf_service::RunHistoryError::Classified(
             hf_service::ClassifiedError::Validation("active".into()),
         ));
@@ -5110,234 +4991,6 @@ mod run_history_error_tests {
             serde_json::to_value(error).unwrap(),
             "validation error: active"
         );
-    }
-}
-
-#[cfg(test)]
-mod coverage_experiment_ingress_tests {
-    use std::sync::Arc;
-    #[tokio::test(flavor = "multi_thread")]
-    async fn actual_native_handlers_require_bounded_raw_requests() {
-        let directory = tempfile::tempdir().unwrap();
-        let service = hf_service::ServiceContainer::stubbed();
-        let scheduler = Arc::new(
-            hf_service::scheduler::CampaignScheduler::try_start(
-                service.clone(),
-                directory.path().join("schedules.json"),
-                None,
-            )
-            .await
-            .unwrap(),
-        );
-        let app = tauri::test::mock_builder()
-            .manage(crate::state::AppState::new(service, Arc::clone(&scheduler)))
-            .invoke_handler(tauri::generate_handler![
-                crate::coverage_experiment_commands::coverage_experiment_create,
-                crate::coverage_experiment_commands::coverage_experiment_get,
-                crate::coverage_experiment_commands::coverage_experiment_list,
-                crate::coverage_experiment_commands::coverage_experiment_complete,
-                crate::coverage_experiment_commands::coverage_experiment_cancel
-            ])
-            .build(tauri::test::mock_context(tauri::test::noop_assets()))
-            .unwrap();
-        let window = tauri::WebviewWindowBuilder::new(&app, "main", tauri::WebviewUrl::default())
-            .build()
-            .unwrap();
-        let invoke = |cmd: &str, body| {
-            tauri::test::get_ipc_response(
-                &window,
-                tauri::webview::InvokeRequest {
-                    cmd: cmd.into(),
-                    callback: tauri::ipc::CallbackFn(0),
-                    error: tauri::ipc::CallbackFn(1),
-                    url: window.url().unwrap(),
-                    body,
-                    headers: tauri::http::HeaderMap::new(),
-                    invoke_key: tauri::test::INVOKE_KEY.into(),
-                },
-            )
-            .map(|body| body.deserialize::<serde_json::Value>().unwrap())
-        };
-        for cmd in [
-            "coverage_experiment_create",
-            "coverage_experiment_get",
-            "coverage_experiment_list",
-            "coverage_experiment_complete",
-            "coverage_experiment_cancel",
-        ] {
-            for body in [
-                tauri::ipc::InvokeBody::Raw(vec![b'!'; 16_384]),
-                tauri::ipc::InvokeBody::Raw(vec![b'!'; 16_385]),
-                tauri::ipc::InvokeBody::Raw(vec![0xff]),
-                tauri::ipc::InvokeBody::Json(serde_json::json!({})),
-            ] {
-                assert_eq!(invoke(cmd, body).unwrap_err()["code"], "invalid_request");
-            }
-        }
-        let mut bytes = serde_json::json!({"project":directory.path(),"target_id":null,"limit":10,"before":null}).to_string().into_bytes();
-        bytes.resize(16_384, b' ');
-        let result = invoke(
-            "coverage_experiment_list",
-            tauri::ipc::InvokeBody::Raw(bytes.clone()),
-        )
-        .unwrap_err();
-        #[cfg(feature = "coverage-experiments")]
-        assert_eq!(result["code"], "storage_unavailable");
-        #[cfg(not(feature = "coverage-experiments"))]
-        assert_eq!(
-            result,
-            serde_json::json!({"code":"feature_unavailable","error":"coverage experiments are not included in this application build"})
-        );
-        bytes.push(b' ');
-        assert_eq!(
-            invoke(
-                "coverage_experiment_list",
-                tauri::ipc::InvokeBody::Raw(bytes)
-            )
-            .unwrap_err()["code"],
-            "invalid_request"
-        );
-        scheduler.stop().await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn actual_native_retained_scope_checks_precede_feature_absence() {
-        let (directory, service, record, result_id) =
-            hf_service::test_support::coverage_experiments::presentation_fixture().await;
-        let scheduler = Arc::new(
-            hf_service::scheduler::CampaignScheduler::try_start(
-                service.clone(),
-                directory.path().join("schedules.json"),
-                None,
-            )
-            .await
-            .unwrap(),
-        );
-        let app = tauri::test::mock_builder()
-            .manage(crate::state::AppState::new(
-                service.clone(),
-                Arc::clone(&scheduler),
-            ))
-            .invoke_handler(tauri::generate_handler![
-                crate::coverage_experiment_commands::coverage_experiment_create,
-                crate::coverage_experiment_commands::coverage_experiment_get,
-                crate::coverage_experiment_commands::coverage_experiment_list,
-                crate::coverage_experiment_commands::coverage_experiment_complete,
-                crate::coverage_experiment_commands::coverage_experiment_cancel
-            ])
-            .build(tauri::test::mock_context(tauri::test::noop_assets()))
-            .unwrap();
-        let window = tauri::WebviewWindowBuilder::new(&app, "main", tauri::WebviewUrl::default())
-            .build()
-            .unwrap();
-        let invoke = |cmd: &str, body: serde_json::Value| {
-            tauri::test::get_ipc_response(
-                &window,
-                tauri::webview::InvokeRequest {
-                    cmd: cmd.into(),
-                    callback: tauri::ipc::CallbackFn(0),
-                    error: tauri::ipc::CallbackFn(1),
-                    url: window.url().unwrap(),
-                    body: tauri::ipc::InvokeBody::Raw(body.to_string().into_bytes()),
-                    headers: tauri::http::HeaderMap::new(),
-                    invoke_key: tauri::test::INVOKE_KEY.into(),
-                },
-            )
-            .map(|body| body.deserialize::<serde_json::Value>().unwrap())
-        };
-        let scope = serde_json::json!({"project":record.project_root,"target_id":record.target_id});
-        for (command, args) in [
-            (
-                "coverage_experiment_get",
-                serde_json::json!({"id":record.id,"scope":scope}),
-            ),
-            (
-                "coverage_experiment_list",
-                serde_json::json!({"project":record.project_root,"target_id":record.target_id,"limit":10,"before":null}),
-            ),
-            (
-                "coverage_experiment_create",
-                serde_json::json!({"project":record.project_root,"target_id":record.target_id,"baseline_run_id":record.baseline_run_id,"duration_secs":60,"goal_function":"parse_value","hypothesis":"operator hypothesis","kind":"grow_corpus"}),
-            ),
-        ] {
-            let result = invoke(command, args);
-            #[cfg(feature = "coverage-experiments")]
-            assert!(result.is_ok(), "{command}: {result:?}");
-            #[cfg(not(feature = "coverage-experiments"))]
-            assert_eq!(
-                result.unwrap_err(),
-                serde_json::json!({"code":"feature_unavailable","error":"coverage experiments are not included in this application build"})
-            );
-        }
-        let other = tempfile::tempdir().unwrap();
-        for changed in [
-            serde_json::json!({"project":other.path(),"target_id":record.target_id}),
-            serde_json::json!({"project":record.project_root,"target_id":uuid::Uuid::new_v4()}),
-        ] {
-            for (command, args) in [
-                (
-                    "coverage_experiment_get",
-                    serde_json::json!({"id":record.id,"scope":changed}),
-                ),
-                (
-                    "coverage_experiment_complete",
-                    serde_json::json!({"id":record.id,"request":{"scope":changed,"result_run_id":result_id}}),
-                ),
-                (
-                    "coverage_experiment_cancel",
-                    serde_json::json!({"id":record.id,"request":{"scope":changed,"reason":"abandoned"}}),
-                ),
-            ] {
-                let error = invoke(command, args).unwrap_err();
-                assert!(
-                    error["code"] == "different_project" || error["code"] == "different_target",
-                    "{error}"
-                );
-            }
-        }
-        assert_eq!(
-            invoke(
-                "coverage_experiment_get",
-                serde_json::json!({"id":uuid::Uuid::new_v4(),"scope":scope})
-            )
-            .unwrap_err()["code"],
-            "not_found"
-        );
-        assert_eq!(
-            invoke(
-                "coverage_experiment_get",
-                serde_json::json!({"id":record.id.to_string().to_uppercase(),"scope":scope})
-            )
-            .unwrap_err()["code"],
-            "invalid_request"
-        );
-        let result = invoke(
-            "coverage_experiment_complete",
-            serde_json::json!({"id":record.id,"request":{"scope":scope,"result_run_id":result_id}}),
-        );
-        #[cfg(feature = "coverage-experiments")]
-        {
-            let value = result.unwrap();
-            assert_eq!(value["result"]["run"]["run_id"], result_id.to_string());
-            assert_eq!(value["result"]["run"]["status"], "failed");
-        }
-        #[cfg(not(feature = "coverage-experiments"))]
-        assert_eq!(result.unwrap_err()["code"], "feature_unavailable");
-        let result = invoke(
-            "coverage_experiment_cancel",
-            serde_json::json!({"id":record.id,"request":{"scope":scope,"reason":"abandoned"}}),
-        );
-        #[cfg(feature = "coverage-experiments")]
-        assert_eq!(result.unwrap_err()["code"], "terminal_conflict");
-        #[cfg(not(feature = "coverage-experiments"))]
-        assert_eq!(result.unwrap_err()["code"], "feature_unavailable");
-        #[cfg(feature = "coverage-experiments")]
-        {
-            let created = invoke("coverage_experiment_create", serde_json::json!({"project":record.project_root,"target_id":record.target_id,"baseline_run_id":record.baseline_run_id,"duration_secs":60,"goal_function":"parse_value","hypothesis":"operator hypothesis","kind":"grow_corpus"})).unwrap();
-            let cancelled = invoke("coverage_experiment_cancel", serde_json::json!({"id":created["id"],"request":{"scope":scope,"reason":"abandoned deliberately"}})).unwrap();
-            assert_eq!(cancelled["status"], "cancelled");
-            assert_eq!(cancelled["cancellation_reason"], "abandoned deliberately");
-        }
-        scheduler.stop().await;
     }
 }
 

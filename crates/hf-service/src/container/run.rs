@@ -1,5 +1,5 @@
 //! Campaign execution, replay, and cooperative cancellation.
-mod experiments;
+mod replay_settings;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -60,12 +60,6 @@ pub enum ReplayInputs {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReplayReview {
-    /// Experiment owning this reviewed execution, if any.
-    #[serde(default)]
-    pub experiment_id: Option<Uuid>,
-    /// Exact current workspace and corpus reviewed for an experiment.
-    #[serde(default)]
-    pub current_input_sha256: Option<String>,
     /// Original retained run.
     pub run_id: Uuid,
     /// Canonical owning project.
@@ -169,7 +163,6 @@ where
 }
 
 struct PreparedUserspaceRun {
-    guided_owner: Option<std::fs::File>,
     config: FuzzRunConfig,
     record: RunRecord,
     artifacts: RunArtifacts,
@@ -946,11 +939,6 @@ impl ServiceContainer {
         // name it.
         let started_run = std::sync::Arc::new(std::sync::Mutex::new(None));
         let captured = std::sync::Arc::clone(&started_run);
-        #[cfg(feature = "coverage-experiments")]
-        let experiment_id = replay
-            .as_ref()
-            .and_then(|value| value.experiment_review.as_ref())
-            .and_then(|review| review.experiment_id);
         let replay_note = replay.clone();
         let tracked_started = move |run_id: Uuid| {
             if let Ok(mut slot) = captured.lock() {
@@ -1014,12 +1002,6 @@ impl ServiceContainer {
                 }
             }
         }
-        #[cfg(feature = "coverage-experiments")]
-        if let Some(id) = experiment_id {
-            if let Err(error) = self.reconcile_coverage_experiment(id).await {
-                tracing::error!(%id, code = error.code(), "experiment terminal comparison needs reconciliation");
-            }
-        }
         result
     }
 
@@ -1050,10 +1032,7 @@ impl ServiceContainer {
         let historical = replay
             .as_ref()
             .is_some_and(|value| value.inputs == ReplayInputs::Retained);
-        let guided = replay
-            .as_ref()
-            .is_some_and(|value| value.experiment_review.is_some());
-        let extra_args = if historical || guided {
+        let extra_args = if historical {
             Vec::new()
         } else {
             self.build_run_dictionary_args(project, target, workspace, engine, policy)
@@ -1087,7 +1066,7 @@ impl ServiceContainer {
             None,
             Utc::now(),
         );
-        experiments::assign_replay_settings(store, record.id, replay.as_ref(), &mut config).await?;
+        replay_settings::assign_replay_settings(record.id, replay.as_ref(), &mut config);
         let (artifacts, sandbox_image) = if let Some(provenance) = replay
             .as_ref()
             .filter(|value| value.inputs == ReplayInputs::Retained)
@@ -1153,8 +1132,6 @@ impl ServiceContainer {
             historical,
             false,
         )?;
-        #[cfg(feature = "coverage-experiments")]
-        experiments::verify_inputs(replay.as_ref(), &artifacts, &sandbox_image, &config)?;
         let context = captured_run_context_digests(
             &artifacts.source_context_host,
             &artifacts.initial_corpus_host,
@@ -1222,8 +1199,8 @@ impl ServiceContainer {
         record.binary_rev = Some(artifacts.binary_sha256.clone());
         record.evidence_dir = Some(workspace_relative_record(&artifacts.output_relative));
         let run_id = record.id;
-        let guided_owner = experiments::acquire_owner(store, run_id, replay.as_ref())?;
-        experiments::reserve_run(store, &record, replay.as_ref())
+        store
+            .insert_run(&record)
             .await
             .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
         // The reservation references the staged tree: it is durable run
@@ -1286,7 +1263,6 @@ impl ServiceContainer {
             return Err(ClassifiedError::Storage(error.to_string()));
         }
         Ok(PreparedUserspaceRun {
-            guided_owner,
             config,
             record,
             artifacts,
@@ -1392,7 +1368,6 @@ impl ServiceContainer {
             ClassifiedError::Validation("fuzz runs require the persistent service store".to_owned())
         })?;
         let PreparedUserspaceRun {
-            guided_owner: _guided_owner,
             config: run_cfg,
             record: run_record,
             artifacts,
@@ -2484,37 +2459,6 @@ impl ServiceContainer {
 
     async fn reviewed_replay(&self, review: ReplayReview) -> Result<RunLaunch, ClassifiedError> {
         let (current, launch) = self.resolve_replay(review.run_id, review.inputs).await?;
-        #[cfg(feature = "coverage-experiments")]
-        let (mut current, mut launch) = (current, launch);
-        if let Some(id) = review.experiment_id {
-            #[cfg(feature = "coverage-experiments")]
-            {
-                let owner = self
-                    .coverage_experiment_owner(id)
-                    .await
-                    .map_err(|error| ClassifiedError::Validation(error.code().into()))?;
-                current = self
-                    .coverage_experiment_replay_review(
-                        id,
-                        crate::coverage_experiments::CoverageExperimentScope {
-                            project: current.project.clone(),
-                            target_id: owner.target_id,
-                        },
-                    )
-                    .await?;
-                experiments::configure_launch(self, review.run_id, &mut launch).await?;
-                if let Some(provenance) = &mut launch.replay {
-                    provenance.experiment_review = Some(review.clone());
-                }
-            }
-            #[cfg(not(feature = "coverage-experiments"))]
-            {
-                let _ = id;
-                return Err(ClassifiedError::Validation(
-                    crate::coverage_experiments::COVERAGE_EXPERIMENT_UNAVAILABLE.into(),
-                ));
-            }
-        }
         if current != review {
             return Err(ClassifiedError::Validation(
                 "Replay settings changed. Review the replay again before starting.".to_owned(),
@@ -2639,8 +2583,6 @@ impl ServiceContainer {
             ClassifiedError::Validation("immutable replay requires a recorded seed".to_owned())
         })?;
         let review = ReplayReview {
-            experiment_id: None,
-            current_input_sha256: None,
             run_id,
             project: project.clone(),
             target: target.clone(),
@@ -2659,7 +2601,6 @@ impl ServiceContainer {
                 target,
                 resolved,
                 replay: Some(ReplayProvenance {
-                    experiment_review: None,
                     original_run_id: run_id,
                     seed,
                     input_manifest_sha256,

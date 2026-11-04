@@ -99,9 +99,11 @@ Normalized findings are advisory static-analysis signals, not confirmed
 vulnerabilities or fuzzing crashes.
 
 `hf-discovery` defines the `semgrep-enrichment` feature, and the corresponding
-`hf-service` feature enables it. Normal product crates enable the feature by
-default. Building with `--no-default-features` excludes the integration and its
-presentation entrypoints. Compile-time availability never starts a scan.
+`hf-service` feature enables it. The feature is off by default in every
+product crate because its ranking benefit has not been measured against the
+baseline; build with `--features semgrep-enrichment` to include it. Builds
+without it exclude the integration and its presentation entrypoints.
+Compile-time availability never starts a scan.
 
 Normalization accepts at most 50,000 findings. A rule identifier is limited to
 512 bytes, and a message is limited to 4,096 bytes. Any limit breach rejects

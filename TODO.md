@@ -11,7 +11,7 @@ qualification from implementation.
 - [x] Qualify retained-input replay and campaign function profiles on real engines.
   Implementation retains source, binary, initial corpus, dictionary, settings,
   and image identity; historical replay rejects missing or changed inputs.
-  An explicit current-input rerun supports corpus experiments. C/C++ LLVM
+  An explicit current-input rerun is also available. C/C++ LLVM
   function profiles are opt-in, persisted against the run binary/image, and
   readable in history; [ten normal C-fixture cycles](docs/acceptance/userspace-2026-09-27.md)
   passed on libFuzzer, AFL++, and honggfuzz. Broader real-project usefulness is

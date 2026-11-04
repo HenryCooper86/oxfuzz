@@ -40,8 +40,10 @@ has its own identities and is not projected back into the name-keyed graph.
 
 ## 3. Product Behavior
 
-The optional `clang-analysis` Cargo feature is initially off by default and
-forwarded by `hf-cli`, `hf-web`, and Tauri to `hf-service`. Service forwards it
+The optional `clang-analysis` Cargo feature is off by default and
+forwarded by `hf-cli`, `hf-web`, and Tauri to `hf-service`. It stays opt-in
+because the [Clang effectiveness comparison](../acceptance/clang-effectiveness-2026-10-20.md)
+measured no aggregate coverage gain. Service forwards it
 to `hf-discovery` and enables `build-context`. Storage and inert `hf-core` types
 remain available in feature-disabled builds so cleanup and history still work.
 

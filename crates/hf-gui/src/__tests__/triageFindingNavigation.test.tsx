@@ -266,6 +266,18 @@ describe("retained finding navigation", () => {
     }
   });
 
+  it("shows one finding status: state, next step, and what is not established", async () => {
+    await act(async () => root.render(<Providers><TriageView /></Providers>));
+    await flush();
+    const status = container.querySelector('[data-testid="finding-status"]');
+    expect(status?.textContent).toContain("triage.disposition.reachability_unproven");
+    expect(status?.textContent).toContain("show reachability");
+    expect(status?.textContent).toContain("not shown exploitable");
+    // The list row no longer repeats the raw CASR determination.
+    const rows = [...container.querySelectorAll("button")].filter((button) => button.textContent?.startsWith("parse_packet ·"));
+    expect(rows.every((row) => !row.textContent?.includes("· unavailable"))).toBe(true);
+  });
+
   it("requests all dispositions for the exact run opened from history", async () => {
     localStorage.clear();
     await act(async () => root.render(<Providers><TriageView initialRunId="older-run" /></Providers>));

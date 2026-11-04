@@ -190,7 +190,6 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
             sanitizer,
             cmplog,
             replay,
-            experiment,
             ai,
         }) => {
             cmd_run(
@@ -206,7 +205,6 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
                 cmplog,
                 seed,
                 replay.as_deref(),
-                experiment,
                 ai,
             )
             .await?;

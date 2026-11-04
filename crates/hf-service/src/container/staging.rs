@@ -51,7 +51,6 @@ pub(super) struct RunArtifacts {
 #[derive(Clone)]
 pub(super) struct ReplayProvenance {
     pub(super) original_run_id: Uuid,
-    pub(super) experiment_review: Option<super::run::ReplayReview>,
     pub(super) seed: u64,
     pub(super) input_manifest_sha256: Option<String>,
     pub(super) inputs: super::run::ReplayInputs,

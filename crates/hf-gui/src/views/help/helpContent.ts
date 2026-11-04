@@ -294,7 +294,10 @@ recommendations show the AI's score and a one-line explanation; unassessed
 candidates keep scan order. Each candidate also lists its symbol, kind, and
 \`file:line\`; complexity and reachability are under **Why this score**. The
 Harness target list shows the same score.
-**Semgrep enrichment** is a separate optional action after AI assessment.
+**Semgrep enrichment** is a separate optional action after AI assessment. It
+is off by default and appears only in builds made with the
+\`semgrep-enrichment\` feature, because its ranking benefit has not been
+measured yet.
 
 **Note:** discovery today covers C and C++ (tree-sitter) plus a lexical Rust
 scan. Harness generation additionally supports Rust via cargo-fuzz.
@@ -465,19 +468,6 @@ screen checks retained state only; it does not discover targets or run engines.
 
 **What it shows:** a table of File, SHA256 (truncated), Source, and Size.
 
-**Coverage experiments:** prepare a reviewed “Grow corpus” or “Refine harness”
-proposal against one retained terminal campaign, then perform the work through
-the existing controls. Preparation, navigation, history reads, and attachment
-do not run a provider, harness, or fuzzer. Choose **Review replay** for a seeded
-baseline, inspect the retained seed and duration and current resource limits,
-then choose **Start reviewed replay**. It uses the original project and current
-approved harness and corpus. Track or stop the new campaign in Run. Keep every
-other compared setting unchanged. Ordinary Run chooses a new
-seed. A legacy baseline without a retained seed needs a new seeded baseline.
-After a later terminal run exists, refresh and explicitly attach it; the
-service rejects incomparable setup and leaves the prepared record unchanged.
-You may instead cancel with a retained reason. Edge deltas are descriptive and
-do not prove that the named goal function was entered.
 `;
 
 // --------------------------------------------------------------------------
@@ -563,12 +553,12 @@ crashes, duration).
 conditions (same target, engine, duration, resources, sanitizer, corpus, and
 environment).
 
-Expand a run to read its retained **eight-step Run closeout** ladder. Opening a row never
+Expand a run to read its retained **six-step Run closeout** ladder. Opening a row never
 starts analysis. **Analyze / Resume** is explicit and is available only for a
 terminal harness-backed campaign. Retryable failures and blocked dependencies
 remain pending. Runs without exact retained scope explain why the action is
-unavailable. Historical source coverage and blocker evidence remain unavailable
-instead of reading today's workspace, and trust reads never call a provider.
+unavailable. Trust reads never call a provider, and the trust step shows its
+verdict in plain words.
 Analyze may sandbox triage and absorb retained crash inputs into the corpus.
 `;
 

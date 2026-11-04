@@ -50,8 +50,6 @@ fn the_ladder_is_ordered_by_data_dependency() {
             CloseoutStep::Triage,
             CloseoutStep::Minimize,
             CloseoutStep::CorpusAbsorb,
-            CloseoutStep::Coverage,
-            CloseoutStep::Blockers,
             CloseoutStep::EdgeSet,
             CloseoutStep::Disposition,
             CloseoutStep::TrustReport,
@@ -63,24 +61,22 @@ fn the_ladder_is_ordered_by_data_dependency() {
 fn edge_set_capture_consumes_nothing_so_a_failed_step_never_blocks_it() {
     let done = [
         failed(CloseoutStep::Triage),
-        failed(CloseoutStep::Coverage),
+        failed(CloseoutStep::Minimize),
         failed(CloseoutStep::CorpusAbsorb),
     ];
 
     assert_eq!(
         blocked_by(CloseoutStep::EdgeSet, &done),
         None,
-        "capture measures the run's own retained corpus, independent of triage and coverage"
+        "capture measures the run's own retained corpus, independent of triage"
     );
 }
 
 #[test]
-fn coverage_follows_corpus_absorption_because_it_measures_against_it() {
+fn the_trust_report_is_the_last_step() {
     let ladder = closeout_ladder();
     let position = |step: CloseoutStep| ladder.iter().position(|s| *s == step).unwrap();
 
-    assert!(position(CloseoutStep::CorpusAbsorb) < position(CloseoutStep::Coverage));
-    assert!(position(CloseoutStep::Coverage) < position(CloseoutStep::Blockers));
     assert_eq!(
         position(CloseoutStep::TrustReport),
         ladder.len() - 1,
@@ -99,13 +95,11 @@ fn an_interrupted_closeout_resumes_at_the_first_non_terminal_step() {
         completed(CloseoutStep::Triage),
         skipped(CloseoutStep::Minimize),
         completed(CloseoutStep::CorpusAbsorb),
-        completed(CloseoutStep::Coverage),
     ];
 
     assert_eq!(
         pending_steps(&done),
         vec![
-            CloseoutStep::Blockers,
             CloseoutStep::EdgeSet,
             CloseoutStep::Disposition,
             CloseoutStep::TrustReport,
@@ -170,20 +164,17 @@ fn a_fully_terminal_closeout_has_nothing_pending() {
 
 #[test]
 fn a_failure_blocks_only_the_steps_that_consume_its_output() {
-    let done = [
-        completed(CloseoutStep::Triage),
-        failed(CloseoutStep::Coverage),
-    ];
+    let done = [failed(CloseoutStep::Triage)];
 
     assert_eq!(
-        blocked_by(CloseoutStep::Blockers, &done),
-        Some(CloseoutStep::Coverage),
-        "blockers read the coverage measurement"
+        blocked_by(CloseoutStep::Minimize, &done),
+        Some(CloseoutStep::Triage),
+        "minimization reads the triaged crashes"
     );
     assert_eq!(
-        blocked_by(CloseoutStep::Disposition, &done),
+        blocked_by(CloseoutStep::EdgeSet, &done),
         None,
-        "disposition does not consume coverage, so it still runs"
+        "edge-set capture does not consume triage, so it still runs"
     );
 }
 
@@ -191,7 +182,7 @@ fn a_failure_blocks_only_the_steps_that_consume_its_output() {
 fn the_trust_report_runs_even_when_earlier_steps_failed() {
     let done = [
         failed(CloseoutStep::Triage),
-        failed(CloseoutStep::Coverage),
+        failed(CloseoutStep::Minimize),
         failed(CloseoutStep::CorpusAbsorb),
     ];
 
@@ -205,18 +196,16 @@ fn the_trust_report_runs_even_when_earlier_steps_failed() {
 #[test]
 fn a_step_whose_dependency_never_ran_is_not_reported_as_blocked() {
     // Nothing has run yet: the chain is about to start, not obstructed.
-    assert_eq!(blocked_by(CloseoutStep::Blockers, &[]), None);
+    assert_eq!(blocked_by(CloseoutStep::Disposition, &[]), None);
 }
 
 #[test]
 fn blocked_dependency_propagates_to_its_consumers() {
-    let recorded = [
-        failed(CloseoutStep::Triage),
-        blocked(CloseoutStep::CorpusAbsorb, CloseoutStep::Triage),
-    ];
+    // A blocked dependency obstructs its consumers just as a failed one does.
+    let recorded = [blocked(CloseoutStep::Triage, CloseoutStep::Triage)];
 
     assert_eq!(
-        blocked_by(CloseoutStep::Coverage, &recorded),
-        Some(CloseoutStep::CorpusAbsorb)
+        blocked_by(CloseoutStep::Disposition, &recorded),
+        Some(CloseoutStep::Triage)
     );
 }

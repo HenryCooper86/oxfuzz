@@ -442,12 +442,11 @@ impl ServiceContainer {
             .into());
         }
         self.ensure_run_is_not_qualification(store, id).await?;
-        ensure_run_not_retained_by_experiment(store, id).await?;
         let evidence_root = self.run_evidence_root_locked(store, &run).await?;
         store
             .delete_run(run_id)
             .await
-            .map_err(crate::RunHistoryError::deleting)?;
+            .map_err(|error| crate::RunHistoryError::deleting(&error))?;
         if let Some(root) = evidence_root {
             std::fs::remove_dir_all(&root).map_err(|error| {
                 ClassifiedError::Internal(format!(
@@ -491,7 +490,7 @@ impl ServiceContainer {
         store
             .clear_runs_by_id(&run_ids)
             .await
-            .map_err(crate::RunHistoryError::clearing)?;
+            .map_err(|error| crate::RunHistoryError::clearing(&error))?;
         remove_run_evidence_roots(evidence_roots)?;
         Ok(())
     }
@@ -509,7 +508,7 @@ impl ServiceContainer {
         store
             .clear_all_runs()
             .await
-            .map_err(crate::RunHistoryError::clearing)?;
+            .map_err(|error| crate::RunHistoryError::clearing(&error))?;
         remove_run_evidence_roots(evidence_roots)?;
         Ok(())
     }
@@ -530,7 +529,6 @@ impl ServiceContainer {
         let mut evidence_roots = Vec::new();
         for run in runs {
             self.ensure_run_is_not_qualification(store, run.id).await?;
-            ensure_run_not_retained_by_experiment(store, run.id).await?;
             if let Some(root) = self.run_evidence_root_locked(store, run).await? {
                 evidence_roots.push(root);
             }
@@ -885,20 +883,6 @@ impl ServiceContainer {
             "evidence": evidence,
         }))
     }
-}
-
-async fn ensure_run_not_retained_by_experiment(
-    store: &Store,
-    run_id: Uuid,
-) -> Result<(), crate::RunHistoryError> {
-    if let Some(reference) = store.coverage_experiment_run_reference(run_id).await? {
-        return Err(crate::RunHistoryError::RunRetainedByExperiment {
-            run_id,
-            experiment_id: reference.experiment_id,
-            role: reference.role,
-        });
-    }
-    Ok(())
 }
 
 async fn delete_corpus_entry_record(

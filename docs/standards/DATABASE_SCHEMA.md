@@ -1,8 +1,7 @@
 # Database Schema
 
-Status: **implemented through migration 0033**. Coverage experiment storage and
-run-reference protection are implemented; service policy and presentation remain
-planned. Scope: `hf-storage` and `hf-diagnostics`.
+Status: **implemented through migration 0051**. Scope: `hf-storage` and
+`hf-diagnostics`.
 
 ## 1. Storage and migration ownership
 
@@ -468,13 +467,19 @@ Indexes:
 `idx_remediation_finding(finding_id, created_at DESC)` and
 `idx_remediation_status(status, updated_at)`.
 
-### `coverage_experiments`
+### `coverage_experiments` (retired)
 
-Implemented migration **0033_coverage_experiments.sql**, following delivered 0031
-and 0032. [Coverage Experiments](../design/coverage-experiments-design.md) owns
-service eligibility, comparison, APIs, and presentation. This table, its Store
-module, and run-reference protection are unconditional, including builds with
-`coverage-experiments` disabled. It records no execution or provider operation.
+**Retired.** Migration **0051_drop_coverage_experiments.sql** drops this table
+and `coverage_experiment_executions`, together with any retained experiment
+records, their indexes, and their triggers. The coverage experiment feature was
+removed on 2026-11-04. Run deletion is no longer checked against experiment
+references. The rest of this section records the table as it existed between
+migrations 0033 and 0051.
+
+Created by migration **0033_coverage_experiments.sql**, following delivered 0031
+and 0032. This table, its Store module, and run-reference protection were
+unconditional, including builds with `coverage-experiments` disabled. It
+recorded no execution or provider operation.
 
 | column | SQLite declaration | exact meaning / limits |
 | --- | --- | --- |
@@ -730,7 +735,7 @@ as manual. Single-entry deletion is keyed by both target and hash.
 
 Per-run outcomes for the post-run closeout chain, so an interrupted closeout
 resumes at the first step that never reached a terminal outcome instead of
-repeating the corpus replay that coverage measurement performs.
+repeating terminal work.
 
 Deliberately not held in the run WAL: that journal is compacted on open to the
 still-open run events, so notes against a finished run would not survive a
@@ -739,7 +744,7 @@ restart, and a finished run is exactly what closeout operates on.
 | column | SQLite declaration | notes |
 | --- | --- | --- |
 | `run_id` | `TEXT NOT NULL` | the run being closed out |
-| `step` | `TEXT NOT NULL` | Triage/Minimize/CorpusAbsorb/Coverage/Blockers/EdgeSet/Disposition/TrustReport |
+| `step` | `TEXT NOT NULL` | Triage/Minimize/CorpusAbsorb/EdgeSet/Disposition/TrustReport |
 | `outcome` | `TEXT NOT NULL` | `completed`, `skipped`, or `failed` |
 | `detail` | `TEXT NOT NULL DEFAULT ''` | what it produced, why it was skipped, or what went wrong |
 | `recorded_at` | `TEXT NOT NULL` | RFC3339 write time |
@@ -748,6 +753,11 @@ Primary key: `(run_id, step)`, so a retried step replaces its earlier outcome.
 Index: `idx_run_closeout_steps_run(run_id)`. `completed` and `skipped` are
 terminal; a `failed` step is retried by a later closeout, which is what
 separates "there was nothing to do" from "it broke".
+
+Migration 0050 retired the `Coverage` and `Blockers` steps. It deletes their
+rows, and it deletes `TrustReport` rows that were blocked by either step or
+that belong to a run with a completed `Coverage` step, so the next closeout
+recomputes the trust verdict from the current six steps.
 
 ### `retired_engine_records`
 
@@ -1343,7 +1353,7 @@ bounded deterministic history, and both cleanup operations.
 | `0030_campaign_health.sql` | creates monotonic run telemetry and immutable version 2 campaign-health event evidence with run-scoped deduplication |
 | `0031_build_profiles.sql` | creates optional project build profiles, strict retained diagnosis evidence, and immutable harness build inputs |
 | `0032_harness_build_contexts.sql` | retains immutable configured BuildContext provider inputs |
-| `0033_coverage_experiments.sql` | immutable coverage-experiment proposal/evidence, prepared-to-terminal CAS, RESTRICT baseline/result run references |
+| `0033_coverage_experiments.sql` | immutable coverage-experiment proposal/evidence, prepared-to-terminal CAS, RESTRICT baseline/result run references (retired by 0051) |
 | `0034_run_function_coverage.sql` | retains per-function coverage evidence for a run |
 | `0035_ai_target_ranking.sql` | creates progressive discovery operations and durable AI prompt batches |
 | `0036_ai_rank_resolved_model.sql` | records the resolved provider model for each AI batch |
@@ -1352,7 +1362,7 @@ bounded deterministic history, and both cleanup operations.
 | `0039_clang_analysis.sql` | retains Clang operation lifecycle, immutable semantic results, and exact provider context |
 | `0040_harness_clang_context_v2.sql` | widens the harness context renderer version check to accept compact advanced rendering (version 2) |
 | `0041_model_budgets.sql` | retains durable model-budget scopes and per-attempt reservations with terminal outcomes |
-| `0042_guided_coverage_experiments.sql` | retains guided coverage-experiment definitions, reviewed inputs, and execution links |
+| `0042_guided_coverage_experiments.sql` | retains guided coverage-experiment definitions, reviewed inputs, and execution links (retired by 0051) |
 | `0043_harness_behavior.sql` | retains AFL++ behavioral qualification evidence (fresh-input and persistent-sequence maps) |
 | `0044_filed_issues.sql` | creates the issue-filing dedup ledger (`filed_issues`) |
 | `0045_harness_target_sources.sql` | retains the exact target-definition section rendered into each harness draft prompt |
@@ -1360,6 +1370,8 @@ bounded deterministic history, and both cleanup operations.
 | `0047_dictionary_llm_drafts.sql` | retains each dictionary-augmentation prompt before dispatch and its response once |
 | `0048_crash_verify_drafts.sql` | retains each crash-verification prompt before dispatch and its response once |
 | `0049_seed_llm_drafts.sql` | retains each seed-drafting prompt before dispatch and its response once |
+| `0050_retire_closeout_coverage_steps.sql` | deletes `run_closeout_steps` rows for the retired `Coverage` and `Blockers` steps, and `TrustReport` rows that depended on them |
+| `0051_drop_coverage_experiments.sql` | drops `coverage_experiment_executions` and `coverage_experiments`, deleting retained experiment records |
 
 ## 7. Read failure contract
 
@@ -1520,7 +1532,11 @@ charges; only reported completed usage can return unused allowance.
 | `state` | `TEXT NOT NULL` | `reserved`, `settled`, or `overrun` |
 | `created_at` | `TEXT NOT NULL` | UTC reservation timestamp |
 
-## Guided coverage experiment executions (0042)
+## Guided coverage experiment executions (0042, retired)
+
+**Retired.** Migration 0051 drops this table together with `coverage_experiments`.
+The description below records the table as it existed between migrations 0042
+and 0051.
 
 `coverage_experiment_executions` stores `experiment_id` (primary key and
 `coverage_experiments` foreign key with cascading deletion), `run_id` (unique,
@@ -1532,7 +1548,7 @@ cancellation leaves this association intact. Existing run-reference checks treat
 the associated run as a result reference even before comparison. Scoped service
 reads reconcile terminal campaigns after restart and expose comparison refusals.
 
-### `coverage_experiment_executions`
+### `coverage_experiment_executions` (retired)
 
 | Column | Type | Meaning |
 | --- | --- | --- |

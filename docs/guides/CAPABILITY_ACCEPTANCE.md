@@ -45,7 +45,6 @@ physical interfaces, and approved test destinations for external publication.
 | Corpus import, sharing, deduplication | Large real corpora and cross-engine compatibility with measured retention. |
 | Corpus survival and reduction | Quality and cost versus native reduction. |
 | Coverage tracking and unreached surface | Exact source/function coverage per run and build; do not use edge counts as function-entry evidence. |
-| Coverage experiments | Useful experiments on real targets and selected-function entry evidence. |
 | Dictionaries and seed generation | Branch reach gained per model dollar versus static-only seeds/dictionaries. |
 | Concolic enrichment | Real solver output and incremental coverage on representative comparison barriers. |
 | Oracle Studio | Actual qualification and known property violations per kind, including state reset and false-positive controls. |

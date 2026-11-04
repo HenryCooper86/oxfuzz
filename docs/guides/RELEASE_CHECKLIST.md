@@ -87,8 +87,10 @@ contains:
   result in `vulnerable.c`, and no result from any rule in `clean.c`.
 
 The ordinary source-only `./scripts/build-release.sh` neither downloads nor
-runs Semgrep. Its default feature set must expose `discover --semgrep`;
-`OXFUZZ_RELEASE_FEATURES` is an intentional exact feature-set override. CVE
+runs Semgrep. Its default feature set must not expose `discover --semgrep`
+(Semgrep enrichment is off by default); `OXFUZZ_RELEASE_FEATURES` is an
+intentional exact feature-set override, for example to include
+`semgrep-enrichment`. CVE
 Binary Tool remains outside the release scope.
 
 For an intentional Semgrep or rules upgrade, update the reviewed pins and

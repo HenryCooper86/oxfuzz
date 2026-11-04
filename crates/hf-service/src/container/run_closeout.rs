@@ -4,9 +4,9 @@
 //! `crate::run_closeout`. This runs the chain, composing service operations
 //! that already exist and implementing none of their logic.
 //!
-//! Each step's terminal outcome is written before the next begins. Coverage
-//! and blocker rows written by older versions are projected to unavailable
-//! because they were derived from mutable workspace state.
+//! Each step's terminal outcome is written before the next begins. Rows for
+//! the retired Coverage and Blockers steps are removed by storage migration
+//! 0050, together with trust results that depended on them.
 
 use std::path::PathBuf;
 
@@ -50,7 +50,6 @@ impl ServiceContainer {
         let _closeout_lease = super::acquire_run_closeout_lease(run_id)?;
 
         let mut recorded = self.recorded_steps(run_id).await?;
-        project_legacy_workspace_evidence(&mut recorded, true);
         let initial_pending = pending_steps(&recorded);
         if let Some(changed_step) = initial_pending
             .iter()
@@ -104,8 +103,7 @@ impl ServiceContainer {
         &self,
         run_id: Uuid,
     ) -> Result<CloseoutReport, ClassifiedError> {
-        let mut recorded = self.recorded_steps(run_id).await?;
-        project_legacy_workspace_evidence(&mut recorded, false);
+        let recorded = self.recorded_steps(run_id).await?;
         let availability = match self.run_scope(run_id).await {
             Ok(_) => CloseoutAvailability::Available,
             Err(ClassifiedError::Validation(reason)) => {
@@ -246,12 +244,6 @@ impl ServiceContainer {
                     },
                 }
             }
-            CloseoutStep::Coverage => StepOutcome::Skipped {
-                reason: "exact run-bound source coverage is unavailable; use current-workspace coverage analysis separately".to_owned(),
-            },
-            CloseoutStep::Blockers => StepOutcome::Skipped {
-                reason: "exact run-bound coverage blockers are unavailable; use current-workspace blocker analysis separately".to_owned(),
-            },
             CloseoutStep::EdgeSet => self.closeout_edge_set(run_id, &scope.target).await,
             CloseoutStep::Disposition => self.closeout_disposition(project, run_id).await,
             CloseoutStep::TrustReport => match self.campaign_trust_report(run_id).await {
@@ -342,48 +334,6 @@ fn replace_recorded(
 ) {
     recorded.retain(|(recorded_step, _)| *recorded_step != step);
     recorded.push((step, outcome));
-}
-
-fn project_legacy_workspace_evidence(recorded: &mut Vec<(CloseoutStep, StepOutcome)>, retry: bool) {
-    let mut projected_legacy = false;
-    for (step, reason) in [
-        (
-            CloseoutStep::Coverage,
-            "exact run-bound source coverage is unavailable; use current-workspace coverage analysis separately",
-        ),
-        (
-            CloseoutStep::Blockers,
-            "exact run-bound coverage blockers are unavailable; use current-workspace blocker analysis separately",
-        ),
-    ] {
-        let legacy_completed = recorded
-            .iter()
-            .rev()
-            .find(|(recorded_step, _)| *recorded_step == step)
-            .is_some_and(|(_, outcome)| matches!(outcome, StepOutcome::Completed { .. }));
-        if legacy_completed {
-            projected_legacy = true;
-            let outcome = if retry {
-                StepOutcome::Failed {
-                    error: reason.to_owned(),
-                }
-            } else {
-                StepOutcome::Skipped {
-                    reason: reason.to_owned(),
-                }
-            };
-            replace_recorded(recorded, step, outcome);
-        }
-    }
-    if projected_legacy && !retry {
-        replace_recorded(
-            recorded,
-            CloseoutStep::TrustReport,
-            StepOutcome::Blocked {
-                dependency: CloseoutStep::Coverage,
-            },
-        );
-    }
 }
 
 fn report_from_recorded(

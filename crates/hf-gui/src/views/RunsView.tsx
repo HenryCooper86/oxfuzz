@@ -129,7 +129,7 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus, onReviewFindings 
       setSelected((s) => s.filter((id) => id !== r.id));
       emitDataChanged();
     } catch (e) {
-      toast({ title: t("runs.deleteFailed"), description: formatRunHistoryError(e, t), variant: "error" });
+      toast({ title: t("runs.deleteFailed"), description: formatRunHistoryError(e), variant: "error" });
     } finally {
       destructiveInFlight.current = false;
       setDeletingRunId(null);
@@ -160,7 +160,7 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus, onReviewFindings 
       emitDataChanged();
       toast({ title: t("runs.historyCleared"), variant: "success" });
     } catch (e) {
-      toast({ title: t("runs.clearFailed"), description: formatRunHistoryError(e, t), variant: "error" });
+      toast({ title: t("runs.clearFailed"), description: formatRunHistoryError(e), variant: "error" });
     } finally {
       destructiveInFlight.current = false;
       setClearingRuns(false);

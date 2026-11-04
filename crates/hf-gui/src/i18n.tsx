@@ -11,7 +11,6 @@ import { enGui, zhGui } from "./i18n.gui";
 import { enResults, zhResults } from "./i18n.results";
 import { enMutators, zhMutators } from "./i18n.mutators";
 import { enBudgets, zhBudgets } from "./i18n.budgets";
-import { enExperiments, zhExperiments } from "./i18n.experiments";
 import { enExtra, zhExtra } from "./i18n.extra";
 import {
   I18nContext,
@@ -41,7 +40,6 @@ const en: Dict = {
   "harness.behavior.unavailable": "Unavailable",
   ...enMutators,
   ...enBudgets,
-  ...enExperiments,
   ...enResults,
   // Sidebar navigation
   "nav.dashboard": "Dashboard",
@@ -222,7 +220,6 @@ const zh: Dict = {
   "harness.behavior.unavailable": "不可用",
   ...zhMutators,
   ...zhBudgets,
-  ...zhExperiments,
   ...zhResults,
   // Sidebar navigation
   "nav.dashboard": "仪表盘",

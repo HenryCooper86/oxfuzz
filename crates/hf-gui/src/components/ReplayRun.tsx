@@ -8,11 +8,11 @@ import { useI18n } from "../i18nContext";
 import type { ReplayReview } from "../lib/transport";
 import { Button } from "./ui";
 
-type ReplayProps = { experiment?: { id: string; scope: { project: string; target_id: string } }; onFinished?: () => void; runId: string; inputs?: ReplayReview["inputs"]; onNavigate?: (view: ViewType) => void };
+type ReplayProps = { onFinished?: () => void; runId: string; inputs?: ReplayReview["inputs"]; onNavigate?: (view: ViewType) => void };
 export function ReplayRun(props: ReplayProps) {
-  return <ScopedReplay key={`${props.runId}:${props.inputs ?? "retained"}:${props.experiment?.id ?? ""}`} {...props} />;
+  return <ScopedReplay key={`${props.runId}:${props.inputs ?? "retained"}`} {...props} />;
 }
-function ScopedReplay({ runId, inputs = "retained", onNavigate, experiment, onFinished }: ReplayProps) {
+function ScopedReplay({ runId, inputs = "retained", onNavigate, onFinished }: ReplayProps) {
   const { t } = useI18n();
   const output = useRunOutput();
   const { setActiveProject } = useProject();
@@ -34,10 +34,8 @@ function ScopedReplay({ runId, inputs = "retained", onNavigate, experiment, onFi
         emitDataChanged();
         if (active.current) setFinished(true);
       } else {
-        const value = experiment
-          ? await getTransport().invoke<ReplayReview>("coverage_experiment_replay_review", experiment)
-          : await getTransport().invoke<ReplayReview>("replay_review", { runId, inputs });
-        if (value.run_id !== runId || value.inputs !== inputs || (experiment && value.experiment_id !== experiment.id)) throw new Error(t("replay.wrongRun"));
+        const value = await getTransport().invoke<ReplayReview>("replay_review", { runId, inputs });
+        if (value.run_id !== runId || value.inputs !== inputs) throw new Error(t("replay.wrongRun"));
         if (active.current) { setReview(value); setReplayProject(value.project); }
       }
     } catch (error) {
@@ -53,9 +51,8 @@ function ScopedReplay({ runId, inputs = "retained", onNavigate, experiment, onFi
     {review ? <section className="surface-card p-3 flex flex-col gap-2" aria-label={t(inputs === "current" ? "replay.rerunReview" : "replay.review")}>
       <p className="text-xs break-all">{review.project} · {review.target}</p>
       <p>{review.engine} · {review.duration_secs}s · {review.max_mem_mb} MiB · {review.max_cpus} CPU</p>
-      <p className="text-xs break-all">{t("experiments.seed")}: {review.seed}</p>
+      <p className="text-xs break-all">{t("replay.seed")}: {review.seed}</p>
       <p className="text-xs break-all">{t("replay.original")}: {review.run_id}</p>
-      {review.current_input_sha256 && <p className="text-xs break-all">{t("replay.inputs")}: {review.current_input_sha256}</p>}
       {review.input_manifest_sha256 && <p className="text-xs break-all">{t("replay.inputs")}: {review.input_manifest_sha256}</p>}
       <p className="text-sm">{t(inputs === "current" ? "replay.currentLimits" : "replay.limits")}</p>
       <div className="flex gap-2 flex-wrap">

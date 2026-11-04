@@ -383,7 +383,7 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
               <span className="flex flex-col min-w-0 flex-1">
                 <span className="text-xs font-mono truncate">{item.target_symbol} · {shortId(item.crash.id)}</span>
                 {!compact && <span className="text-xs text-text-secondary truncate">{item.crash.summary || item.crash.kind}</span>}
-                <span className="text-xs text-text-muted font-mono">{shortId(item.crash.run_id)} · {item.proof.casr_exploitability.determination}</span>
+                <span className="text-xs text-text-muted font-mono">{shortId(item.crash.run_id)}</span>
               </span>
               <span className="text-xs text-text-muted">{t(`triage.disposition.${item.disposition.disposition}`)}</span><ChevronRight size={14} className="text-text-muted" />
             </button>;
@@ -437,6 +437,12 @@ function CrashDetail({ item, verdict, onVerify, actionBusy }: { item: FindingRev
     {crash.bug_report ? <div><p className="text-sm font-medium text-accent m-0">{crash.bug_report.title}</p><p className="text-xs text-text-secondary">{crash.bug_report.summary}</p></div>
       : crash.summary && <p className="text-sm text-text-secondary">{crash.summary}</p>}
     <div className="text-xs text-text-muted font-mono">{item.target_symbol} · {crash.run_id}</div>
+    {/* One finding status: where it stands, what to do next, what it does not show yet. */}
+    <div data-testid="finding-status" className="rounded-md text-xs flex flex-col gap-0.5" style={{ padding: "var(--space-sm)", background: "var(--surface-secondary)" }}>
+      <span className="font-medium text-text-primary">{t(`triage.disposition.${item.disposition.disposition}`)}</span>
+      {item.disposition.action_detail && <span className="text-text-secondary">{t("triage.nextStep")}: {item.disposition.action_detail}</span>}
+      {item.disposition.claim_limit && <span className="text-text-muted">{item.disposition.claim_limit}</span>}
+    </div>
     {crash.casr && <div className="border-t border-border pt-3">
       <div className="flex flex-wrap items-center gap-2 mb-2">
         <SeverityBadge severity={crash.casr.severity} title={crash.casr.severity_short || crash.casr.severity} />

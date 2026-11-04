@@ -24,8 +24,6 @@ pub mod build_profiles;
 pub mod campaign_allocation;
 #[cfg(feature = "campaign-health")]
 pub mod campaign_health;
-#[cfg(feature = "proof-carrying")]
-pub mod campaign_intelligence;
 pub mod campaign_state;
 #[cfg(feature = "campaign-trust")]
 pub mod campaign_trust;
@@ -42,7 +40,6 @@ pub mod config;
 pub mod container;
 #[cfg(feature = "coverage-blockers")]
 pub mod coverage_blockers;
-pub mod coverage_experiments;
 mod crash_minimization;
 pub mod defectdojo;
 pub mod defectdojo_lifecycle;
@@ -80,9 +77,6 @@ pub mod repro;
 pub mod run_closeout;
 mod run_history_error;
 pub use run_history_error::RunHistoryError;
-#[cfg(any(feature = "test-support", all(test, feature = "coverage-experiments")))]
-#[path = "test_support/retained_campaign.rs"]
-pub(crate) mod retained_campaign_fixture;
 pub mod run_comparison;
 pub mod sarif;
 mod schedule_retirement;

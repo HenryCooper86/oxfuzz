@@ -221,21 +221,6 @@ async fn imported_mutator_requires_new_approval_and_stages_exact_native_library(
     assert_ne!(replay.run_id, run.run_id);
     let replay_record = store.get_run(replay.run_id).await.unwrap().unwrap();
     assert_eq!(replay_record.config.unwrap().replay_of, Some(run.run_id));
-    #[cfg(feature = "coverage-experiments")]
-    {
-        let baseline = store
-            .coverage_experiment_run_evidence(run.run_id)
-            .await
-            .unwrap();
-        let repeated = store
-            .coverage_experiment_run_evidence(replay.run_id)
-            .await
-            .unwrap();
-        assert_eq!(
-            baseline.engine_env, repeated.engine_env,
-            "identical retained plugins compare by artifact/image, not run allocation path"
-        );
-    }
     let approved = service.replay_review(run.run_id).await.unwrap();
     let before_tamper = runtime.calls.lock().unwrap().len();
     std::fs::write(

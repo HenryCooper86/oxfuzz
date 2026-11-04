@@ -374,50 +374,6 @@ async fn qualify_harness(
     Ok(())
 }
 
-#[cfg(feature = "coverage-experiments")]
-async fn run_guided_experiment(
-    project: PathBuf,
-    id: uuid::Uuid,
-) -> anyhow::Result<hf_service::RunSummary> {
-    {
-        let container = std::sync::Arc::new(crate::approval::bootstrap().await);
-        let owner = container.coverage_experiment_owner(id).await?;
-        let review = container
-            .coverage_experiment_replay_review(
-                id,
-                hf_service::coverage_experiments::CoverageExperimentScope {
-                    project,
-                    target_id: owner.target_id,
-                },
-            )
-            .await?;
-        println!("{}", serde_json::to_string_pretty(&review)?);
-        let mut handle = {
-            let container = container.clone();
-            tokio::spawn(async move {
-                container
-                    .replay_run_reviewed(review, &crate::commands::status::printing_sink(), &|_| {})
-                    .await
-            })
-        };
-        let summary = tokio::select! {
-            result = &mut handle => result?,
-            _ = tokio::signal::ctrl_c() => { container.cancel_all_runs(); handle.await? }
-        }?;
-        let view = container
-            .coverage_experiment(
-                id,
-                hf_service::coverage_experiments::CoverageExperimentScope {
-                    project: owner.project_root,
-                    target_id: owner.target_id,
-                },
-            )
-            .await?;
-        println!("{}", serde_json::to_string_pretty(&view)?);
-        Ok(summary)
-    }
-}
-
 pub(crate) async fn cmd_run(
     project: PathBuf,
     target: Option<&str>,
@@ -431,22 +387,11 @@ pub(crate) async fn cmd_run(
     cmplog: bool,
     seed: Option<u64>,
     replay: Option<&str>,
-    experiment: Option<uuid::Uuid>,
     ai: AiOption,
 ) -> anyhow::Result<()> {
     let on_progress = crate::commands::status::printing_sink();
 
-    let summary = if let Some(id) = experiment {
-        #[cfg(feature = "coverage-experiments")]
-        {
-            run_guided_experiment(project, id).await?
-        }
-        #[cfg(not(feature = "coverage-experiments"))]
-        {
-            let _ = id;
-            anyhow::bail!(hf_service::coverage_experiments::COVERAGE_EXPERIMENT_UNAVAILABLE);
-        }
-    } else if let Some(run_id) = replay {
+    let summary = if let Some(run_id) = replay {
         // Replay pins the recorded engine/duration/seed; target/engine/duration
         // flags are intentionally not required in this mode.
         let run_id = uuid::Uuid::parse_str(run_id)
@@ -496,9 +441,8 @@ pub(crate) async fn cmd_run(
         let duration_secs = resolved.duration_secs;
         // The flag governs the two model sites of a live run -- the LLM seeds
         // and the dictionary augmentation inside the run -- with the same
-        // whole-flow treatment `campaign`/`fuzz` give it. A replay or
-        // experiment consults no model, and the parser refuses the flag
-        // there.
+        // whole-flow treatment `campaign`/`fuzz` give it. A replay consults
+        // no model, and the parser refuses the flag there.
         let container = std::sync::Arc::new(
             apply_ai_policy(crate::approval::bootstrap().await, ai, "this run").await?,
         );

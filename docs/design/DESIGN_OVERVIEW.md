@@ -44,7 +44,7 @@ all under human-in-the-loop supervision.
 | Finding proof view | hf-service | `FindingProofCard`, `CrashReviewItem` | finding-proof-card-design.md |
 | Corpus management | hf-corpus + hf-service | bounded corpus I/O plus service-owned inventory, import outcome, and engine-operation availability | corpus-coverage-design.md |
 | Coverage tracking | hf-coverage | `CoverageReport` | corpus-coverage-design.md |
-| Campaign evidence and advice | hf-service + hf-coverage | versioned evidence/advice DTOs, reviewed project allocation quotas and durable admission | proof-carrying-campaign-intelligence.md |
+| Campaign evidence | hf-service + hf-coverage | versioned evidence DTOs, reviewed project allocation quotas and durable admission | proof-carrying-campaign-intelligence.md |
 | Sandbox / runtime | hf-runtime | `RuntimeAdapter` | runtime-design.md |
 | Tool registry | hf-tools + hf-core + hf-agent + hf-service | `Tool`, `ToolRegistry`, resolved Grep allowances | ../standards/TOOL_CALL_PROTOCOL.md + [grep-resources.md](grep-resources.md) |
 | Skill evolution | hf-skills | `SkillRegistry` | (none; built-in skills ship in `crates/hf-skills/src/builtins/`) |
@@ -60,7 +60,6 @@ all under human-in-the-loop supervision.
 | Build diagnosis and optional profiles | hf-service + hf-storage | `ProjectBuildDiagnosis`, `SaveBuildProfileRequest`, reviewed CMake/Make plan and retained output | build-doctor-design.md |
 | Harness build inputs | hf-service + hf-storage | immutable per-attempt input capture, atomic harness/input persistence, shared executor checks | harness-generation-design.md + ../standards/DATABASE_SCHEMA.md |
 | Coverage blockers | hf-service | ranked uncovered blockers, advisory next experiment | coverage-blocker-design.md |
-| Coverage experiments | hf-service + hf-storage | immutable reviewed proposal, bounded evidence, reviewed budgeted replay, automatic comparison, CAS lifecycle, retained run references | [coverage-experiments-design.md](coverage-experiments-design.md) |
 | Non-crash oracles | hf-service | typed oracle specification, scaffold, violation | oracle-studio-design.md |
 | Crash disposition | hf-service | ordered disposition, next action, claim ceiling | triage-disposition-design.md |
 | Campaign trust | hf-service | per-run claim gates and overall determination | campaign-trust-report-design.md |
@@ -140,21 +139,10 @@ contexts;
 `clear_knowledge` preserves profiles as configuration and clears their operation
 evidence, while explicit project deletion clears all build record families.
 
-The implemented `coverage-experiments` feature records a reviewed investigation against a retained
-terminal campaign. Existing corpus/harness modification and human promotion lead
-into a reviewed current-input replay with the baseline seed and budget. The
-executor rechecks exact inputs and reserves one associated run atomically before
-sandbox dispatch. Terminal results are compared automatically; scoped reads
-reconcile interrupted completion. Record cancellation does not cancel execution,
-and both controls are explicit in the GUI. Manual attachment remains available
-for unassociated historical proposals. Failed, cancelled, unchanged and
-incomparable outcomes remain inspectable. Aggregate edges never prove function
-entry. The feature is standalone and forwarded by CLI/web/Tauri; storage
-migrations 0033 and 0042 and run retention are unconditional. REST uses configured
-roots and ID-owner authorization; native IPC validates selected project/target
-scope. Explicit project/knowledge cleanup removes experiments before referenced
-runs. See
-[Coverage Experiments](coverage-experiments-design.md).
+Coverage experiments were removed on 2026-11-04. Migration 0051 drops the
+`coverage_experiments` and `coverage_experiment_executions` tables together with
+any retained experiment records, and run deletion is no longer checked against
+experiment references. Historical replay of a retained run remains available.
 
 Automotive protocol support follows the same split. Product crates enable the
 feature by default so the workspace is always present, while a

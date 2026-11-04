@@ -97,14 +97,14 @@ describe("expert workflow panels", () => {
     await render(<RunCloseoutPanel runId="run-labels" runKind="Campaign" runStatus="Failed" />);
     expect(host.textContent).toContain("Loading retained closeout...");
     const report = {
-      schema_version: 2,
+      schema_version: 3,
       run_id: "run-labels",
       availability: { status: "available" },
       steps: [
         { step: "triage", outcome: { outcome: "completed", detail: "triaged" } },
         { step: "minimize", outcome: { outcome: "skipped", reason: "nothing to minimize" } },
         { step: "corpus_absorb", outcome: { outcome: "failed", error: "retained disk failure" } },
-        { step: "coverage", outcome: { outcome: "blocked", dependency: "corpus_absorb" } },
+        { step: "disposition", outcome: { outcome: "blocked", dependency: "triage" } },
       ],
       resumed_at: "corpus_absorb",
     };
@@ -113,7 +113,7 @@ describe("expert workflow panels", () => {
     expect(host.textContent).toContain("Completed: triaged");
     expect(host.textContent).toContain("Skipped: nothing to minimize");
     expect(host.textContent).toContain("Failed: retained disk failure");
-    expect(host.textContent).toContain("Blocked: Waits for the step \"Add new inputs to the corpus\"");
+    expect(host.textContent).toContain("Blocked: Waits for the step \"Triage\"");
     expect(host.textContent).toContain("Pending: Pending");
     expect(host.textContent).toContain("Analyze may triage crashes in the sandbox");
   });

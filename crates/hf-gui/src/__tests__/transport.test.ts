@@ -989,18 +989,6 @@ describe("transport", () => {
 
     try {
       const transport = createHttpTransport();
-      const adviceRequest = {
-        current_engine: "LibFuzzer",
-        enabled_engines: ["LibFuzzer"],
-        engine_rates: [{ engine: "LibFuzzer", usd_per_hour: 1 }],
-        observations: [],
-        budget: {
-          max_total_cost_usd: 10,
-          min_edges_per_dollar: 1,
-          plateau_runs: 2,
-        },
-      };
-      await transport.invoke("campaign_advice", { request: adviceRequest });
       await transport.invoke("campaign_evidence", {
         runId: "run-1",
         computeUsdPerHour: 2,
@@ -1015,12 +1003,10 @@ describe("transport", () => {
       });
 
       expect(calls.map((call) => call.url)).toEqual([
-        "http://localhost:8081/campaign/advice",
         "http://localhost:8081/campaign/evidence",
         "http://localhost:8081/remediation/draft",
       ]);
-      expect(JSON.parse(String(calls[0].init.body))).toEqual(adviceRequest);
-      expect(JSON.parse(String(calls[1].init.body))).toEqual({
+      expect(JSON.parse(String(calls[0].init.body))).toEqual({
         run_id: "run-1",
         compute_usd_per_hour: 2,
         model_cost_usd: 0.5,

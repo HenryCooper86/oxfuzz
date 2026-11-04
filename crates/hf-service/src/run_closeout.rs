@@ -1,8 +1,9 @@
 //! Service-owned run closeout ladder.
 //!
-//! After a run ends, eight things should happen: triage, minimization, corpus
-//! absorption, coverage measurement, blocker exploration, edge-set capture,
-//! disposition derivation, and a trust report. Each already exists and each is
+//! After a run ends, six things should happen: triage, minimization, corpus
+//! absorption, edge-set capture, disposition derivation, and a trust report.
+//! (Coverage and blocker steps were retired in schema 3: exact run-bound source
+//! coverage is not available at closeout, so they were always skipped.) Each already exists and each is
 //! invoked separately, so a finished run sits half-analyzed until someone
 //! remembers the next command.
 //!
@@ -14,7 +15,7 @@
 use serde::Serialize;
 
 /// Current serialized Run Closeout schema.
-pub const RUN_CLOSEOUT_SCHEMA_VERSION: u32 = 2;
+pub const RUN_CLOSEOUT_SCHEMA_VERSION: u32 = 3;
 
 /// One step of the closeout chain.
 ///
@@ -28,10 +29,6 @@ pub enum CloseoutStep {
     Minimize,
     /// Fold run inputs into the retained corpus.
     CorpusAbsorb,
-    /// Measure coverage against the absorbed corpus.
-    Coverage,
-    /// Rank uncovered blockers from that measurement.
-    Blockers,
     /// Capture the run's covered edge set from its retained corpus.
     EdgeSet,
     /// Derive a disposition for each retained crash.
@@ -128,8 +125,6 @@ pub fn closeout_ladder() -> Vec<CloseoutStep> {
         CloseoutStep::Triage,
         CloseoutStep::Minimize,
         CloseoutStep::CorpusAbsorb,
-        CloseoutStep::Coverage,
-        CloseoutStep::Blockers,
         CloseoutStep::EdgeSet,
         CloseoutStep::Disposition,
         CloseoutStep::TrustReport,
@@ -149,8 +144,6 @@ pub fn consumes(step: CloseoutStep) -> &'static [CloseoutStep] {
         CloseoutStep::Minimize | CloseoutStep::CorpusAbsorb | CloseoutStep::Disposition => {
             &[CloseoutStep::Triage]
         }
-        CloseoutStep::Coverage => &[CloseoutStep::CorpusAbsorb],
-        CloseoutStep::Blockers => &[CloseoutStep::Coverage],
     }
 }
 
