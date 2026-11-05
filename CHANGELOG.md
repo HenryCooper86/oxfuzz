@@ -12,6 +12,8 @@ and 0.7.0 releases respectively.
 
 ## Unreleased
 
+## 0.9.2 - 2026-11-05
+
 ### Added
 
 - "Fuzz this project" shows each preparation step with its elapsed time
