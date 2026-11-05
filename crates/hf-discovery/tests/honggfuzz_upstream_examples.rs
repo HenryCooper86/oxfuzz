@@ -51,21 +51,50 @@ async fn discovery_finds_each_upstream_entry_point() {
 }
 
 #[tokio::test]
-async fn reference_harnesses_expose_the_libfuzzer_entry_point() {
-    // The reference harnesses are the upstream human-written baselines. Each
-    // one defines `LLVMFuzzerTestOneInput`, which honggfuzz's libhfuzz drives
-    // in persistent mode.
+async fn reference_harness_entry_points_are_not_offered_as_targets() {
+    // The reference harnesses are the upstream human-written baselines; each
+    // defines `LLVMFuzzerTestOneInput`. That callback is the entry of a harness
+    // the project already ships, not code under test: a generated harness for
+    // it would define the same symbol, and the harness build leaves shipped
+    // harness files out of the link. Discovery therefore does not offer it.
     let root = upstream_root().join("reference_harnesses");
+    let harnesses = count_harness_sources(&root);
+    assert!(
+        harnesses >= 7,
+        "fixture: one LLVMFuzzerTestOneInput per reference harness, got {harnesses}"
+    );
+
     let inv = hf_discovery::discover(&root, TargetLanguage::C)
         .await
         .expect("discover should succeed over the reference harnesses");
-    let entry_points = inv
+    let entry_points: Vec<&str> = inv
         .candidates
         .iter()
-        .filter(|c| c.symbol == "LLVMFuzzerTestOneInput")
-        .count();
+        .map(|c| c.symbol.as_str())
+        .filter(|symbol| symbol.starts_with("LLVMFuzzer"))
+        .collect();
     assert!(
-        entry_points >= 7,
-        "expected one LLVMFuzzerTestOneInput per reference harness, got {entry_points}"
+        entry_points.is_empty(),
+        "harness callbacks are not targets: {entry_points:?}"
     );
+}
+
+/// C sources under `dir` (recursively) that define a libFuzzer entry point.
+fn count_harness_sources(dir: &std::path::Path) -> usize {
+    std::fs::read_dir(dir)
+        .expect("reference harnesses are vendored")
+        .flatten()
+        .map(|entry| {
+            let path = entry.path();
+            if path.is_dir() {
+                count_harness_sources(&path)
+            } else {
+                usize::from(
+                    path.extension().is_some_and(|ext| ext == "c")
+                        && std::fs::read_to_string(&path)
+                            .is_ok_and(|source| source.contains("LLVMFuzzerTestOneInput")),
+                )
+            }
+        })
+        .sum()
 }

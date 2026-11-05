@@ -191,6 +191,10 @@ pub enum SseEvent {
         owner: hf_service::RunOwnerView,
         event: Box<hf_service::HealthEvent>,
     },
+    /// `fuzz:stage` -- a "Fuzz this project" preparation stage or harness step.
+    FuzzStage(hf_service::FuzzStageView),
+    /// `fuzz:log` -- one build or repair output line of a preparation.
+    FuzzLog { line: String },
     /// `stream:lagged` -- this subscriber fell behind the bounded channel.
     StreamLagged { dropped: u64 },
 }
@@ -202,6 +206,8 @@ impl SseEvent {
             SseEvent::RunStatus { .. } => "run:status",
             #[cfg(feature = "campaign-health")]
             SseEvent::CampaignHealth { .. } => "campaign:health",
+            SseEvent::FuzzStage(_) => "fuzz:stage",
+            SseEvent::FuzzLog { .. } => "fuzz:log",
             SseEvent::StreamLagged { .. } => "stream:lagged",
         }
     }
@@ -2223,8 +2229,19 @@ async fn fuzz_prepare(
                 sanitizer: None,
                 cmplog: false,
             },
-            &|_| {},
-            &|_| {},
+            &|stage| {
+                // Swallowed: a stage event over the size limit is dropped; the
+                // response carries the authoritative result.
+                let _ = state
+                    .publish_event(SseEvent::FuzzStage(hf_service::FuzzStageView::from(&stage)));
+            },
+            &|progress| {
+                if let hf_service::FuzzProgress::LogLine(line) = progress {
+                    // Swallowed: an oversized build line is dropped from the
+                    // live log only.
+                    let _ = state.publish_event(SseEvent::FuzzLog { line });
+                }
+            },
         )
         .await
         .map_err(classified_api_error)?;

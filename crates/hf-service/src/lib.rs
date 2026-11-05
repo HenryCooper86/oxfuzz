@@ -183,13 +183,13 @@ pub use container::{
     runtime_from_env, workspace_dir, workspace_root, AgentInstanceSnapshot, AgentPoolSnapshot,
     ArtifactSummary, CompileOutcome, CorpusCapabilities, CorpusCapability, CorpusImportOutcome,
     CorpusInventory, CoverageSample, EffectiveAutoRevert, FuzzOutcome, FuzzPrepareRequest,
-    FuzzPrepared, FuzzRequest, FuzzStage, MemorySnapshot, MinimizeOutcome, PreparedHarnessSource,
-    ProviderSnapshot, QualifiedSmoke, RegressionResult, ReplayInputs, ReplayReview,
-    RunCancelOutcome, RunControlStatus, RunDetailView, RunFunctionCoverage, RunHistoryItem,
-    RunLifecycleStatus, RunOwnerView, RunSummary, RunTelemetryView, SchedulableTarget, SeedEntry,
-    SeedRegenerationOutcome, SeedSurvivalReport, ServiceContainer, SystemSnapshot,
-    SyzkallerRunOpts, SyzkallerSummary, FUZZ_PIPELINE_REPAIRS, LLM_SEED_COUNT,
-    MAX_PREPARED_HARNESS_SOURCE_BYTES,
+    FuzzPrepared, FuzzRequest, FuzzStage, FuzzStageView, HarnessBuildObserver, HarnessStep,
+    MemorySnapshot, MinimizeOutcome, PreparedHarnessSource, ProviderSnapshot, QualifiedSmoke,
+    RegressionResult, ReplayInputs, ReplayReview, RunCancelOutcome, RunControlStatus,
+    RunDetailView, RunFunctionCoverage, RunHistoryItem, RunLifecycleStatus, RunOwnerView,
+    RunSummary, RunTelemetryView, SchedulableTarget, SeedEntry, SeedRegenerationOutcome,
+    SeedSurvivalReport, ServiceContainer, SystemSnapshot, SyzkallerRunOpts, SyzkallerSummary,
+    FUZZ_PIPELINE_REPAIRS, LLM_SEED_COUNT, MAX_PREPARED_HARNESS_SOURCE_BYTES,
 };
 #[cfg(feature = "run-closeout")]
 pub use container::{CoverageDiffReport, RunEdgeSetCapture};

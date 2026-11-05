@@ -3734,20 +3734,6 @@ fn filename_stem_or(s: &str, fallback: &str) -> String {
     }
 }
 
-/// The `fuzz:stage` event body for one preparation stage boundary.
-fn fuzz_stage_payload(stage: &hf_service::FuzzStage) -> serde_json::Value {
-    use hf_service::FuzzStage;
-    let (name, target, reused) = match stage {
-        FuzzStage::Discover { .. } => ("discover", None, false),
-        FuzzStage::PreparedHarness { target, .. } => ("harness", Some(target), false),
-        FuzzStage::Harness { target, reused, .. } => ("harness", Some(target), *reused),
-        FuzzStage::Smoke { target, .. } => ("smoke", Some(target), false),
-        FuzzStage::Promote { target, .. } => ("approve", Some(target), false),
-        FuzzStage::Campaign { target, .. } => ("campaign", Some(target), false),
-    };
-    serde_json::json!({ "stage": name, "target": target, "reused": reused })
-}
-
 /// One-click project fuzzing, first half: discover and pick a target, then
 /// reuse its approved harness or build and smoke-test one. The click carries
 /// only the smoke-test consent (as the Harness step's own button does); the
@@ -3764,10 +3750,16 @@ pub async fn fuzz_prepare(
     let engine_kind = parse_engine(&engine)?;
     let container = with_user_approval(&state.container, ExplicitAction::RunHarness);
     let on_stage = |stage: hf_service::FuzzStage| {
-        // The stage display is advisory; the command's result is authoritative.
-        let _ = app.emit("fuzz:stage", fuzz_stage_payload(&stage));
+        // Swallowed: the stage display is advisory; the command's result is
+        // authoritative.
+        let _ = app.emit("fuzz:stage", hf_service::FuzzStageView::from(&stage));
     };
-    let on_progress = |_: FuzzProgress| {};
+    let on_progress = |progress: FuzzProgress| {
+        if let FuzzProgress::LogLine(line) = progress {
+            // Swallowed: the build log is advisory, like the stage display.
+            let _ = app.emit("fuzz:log", serde_json::json!({ "line": line }));
+        }
+    };
     container
         .fuzz_prepare(
             hf_service::FuzzPrepareRequest {
@@ -5117,36 +5109,6 @@ mod sarif_export_tests {
                 .extension()
                 .and_then(std::ffi::OsStr::to_str),
             Some("sarif")
-        );
-    }
-}
-
-#[cfg(test)]
-mod fuzz_prepare_tests {
-    use hf_service::{EngineKind, FuzzStage};
-
-    use super::fuzz_stage_payload;
-
-    #[test]
-    fn stage_events_name_the_stage_and_its_target() {
-        assert_eq!(
-            fuzz_stage_payload(&FuzzStage::Discover { lang: None }),
-            serde_json::json!({ "stage": "discover", "target": null, "reused": false })
-        );
-        assert_eq!(
-            fuzz_stage_payload(&FuzzStage::Harness {
-                target: "parse".to_owned(),
-                engine: EngineKind::LibFuzzer,
-                reused: true,
-            }),
-            serde_json::json!({ "stage": "harness", "target": "parse", "reused": true })
-        );
-        assert_eq!(
-            fuzz_stage_payload(&FuzzStage::Smoke {
-                target: "parse".to_owned(),
-                engine: EngineKind::LibFuzzer,
-            }),
-            serde_json::json!({ "stage": "smoke", "target": "parse", "reused": false })
         );
     }
 }

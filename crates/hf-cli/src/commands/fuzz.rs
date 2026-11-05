@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use hf_service::{FuzzOutcome, FuzzRequest, FuzzStage};
+use hf_service::{FuzzOutcome, FuzzRequest, FuzzStage, HarnessStep};
 
 use crate::ai_policy::apply_ai_policy;
 use crate::args::AiOption;
@@ -51,6 +51,7 @@ fn render_stage(project: &Path, stage: &FuzzStage) -> String {
                 )
             }
         }
+        FuzzStage::HarnessStep { target, step } => render_harness_step(target, *step),
         FuzzStage::Smoke { target, .. } => {
             format!("--- [3/5] smoke: qualifying '{target}' ---")
         }
@@ -66,6 +67,22 @@ fn render_stage(project: &Path, stage: &FuzzStage) -> String {
             "--- [5/5] campaign: {iterations} iteration(s) x {duration_secs}s on '{target}' ({}) ---",
             engine.as_str()
         ),
+    }
+}
+
+/// Render one step inside the harness stage as an indented line.
+fn render_harness_step(target: &str, step: HarnessStep) -> String {
+    match step {
+        HarnessStep::Drafting => format!("    harness: drafting '{target}' with the model"),
+        HarnessStep::Compiling { attempt } => {
+            format!("    harness: compile attempt {attempt} in the sandbox")
+        }
+        HarnessStep::CompileFailed { attempt } => {
+            format!("    harness: compile attempt {attempt} failed")
+        }
+        HarnessStep::Repairing { repair, max } => {
+            format!("    harness: repair {repair} of {max} from the diagnostics")
+        }
     }
 }
 
@@ -208,8 +225,8 @@ pub(crate) async fn cmd_fuzz(args: crate::args::FuzzArgs) -> anyhow::Result<()> 
 
 #[cfg(test)]
 mod tests {
-    use hf_service::FuzzStage;
     use hf_service::{EngineKind, TargetLanguage};
+    use hf_service::{FuzzStage, HarnessStep};
 
     use super::render_stage;
 
@@ -271,5 +288,35 @@ mod tests {
         );
         assert!(campaign.contains("60s"), "{campaign}");
         assert!(campaign.contains("afl++"), "{campaign}");
+    }
+
+    #[test]
+    fn harness_steps_render_as_indented_progress_lines() {
+        let project = std::path::Path::new("/proj");
+        let step = |step| {
+            render_stage(
+                project,
+                &FuzzStage::HarnessStep {
+                    target: "parse_entry".to_owned(),
+                    step,
+                },
+            )
+        };
+        assert_eq!(
+            step(HarnessStep::Drafting),
+            "    harness: drafting 'parse_entry' with the model"
+        );
+        assert_eq!(
+            step(HarnessStep::Compiling { attempt: 2 }),
+            "    harness: compile attempt 2 in the sandbox"
+        );
+        assert_eq!(
+            step(HarnessStep::CompileFailed { attempt: 2 }),
+            "    harness: compile attempt 2 failed"
+        );
+        assert_eq!(
+            step(HarnessStep::Repairing { repair: 1, max: 2 }),
+            "    harness: repair 1 of 2 from the diagnostics"
+        );
     }
 }

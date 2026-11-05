@@ -310,16 +310,24 @@ impl ServiceContainer {
         // The staged target sources (e.g. everything `copy_project_sources`
         // laid out under `src/`) must be on the link line, or the build fails
         // on every undefined reference the harness declares `extern` and
-        // never defines itself. `list_c_files` is the same recursive,
+        // never defines itself. `ProjectLinkInputs` is the same recursive,
         // symlink-refusing, shell-quoting walk the ordinary harness compile
-        // uses (Engineering Protocol 2.18): the driver and harness are excluded here,
-        // where the ordinary compile excludes only the harness.
-        let extra_sources =
-            hf_harness::list_c_files(workspace, "/work", &["harness.c", "symcc_driver.c"]);
+        // uses (Engineering Protocol 2.18), including its handling of project
+        // units that define `main` or ship their own fuzz harness: the driver
+        // and harness are excluded here, where the ordinary compile excludes
+        // only the harness.
+        let project = hf_harness::project_sources::ProjectLinkInputs::collect(
+            workspace,
+            &["harness.c", "symcc_driver.c"],
+        );
         let build = vec![
             "sh".to_owned(),
             "-c".to_owned(),
-            format!("symcc -O1 harness.c symcc_driver.c {extra_sources} -o concolic_target"),
+            format!(
+                "{precompile}symcc -O1 harness.c symcc_driver.c {link_args} -o concolic_target",
+                precompile = project.precompile_script("symcc -O1", "/work"),
+                link_args = project.link_args("/work"),
+            ),
         ];
         let build_limits = hf_core::runtime::ResourceLimits {
             max_mem_mb: 4096,

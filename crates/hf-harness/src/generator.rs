@@ -7,7 +7,9 @@ use hf_core::engine::EngineKind;
 use hf_core::error::ClassifiedError;
 use hf_core::harness::{BuildCommand, Harness, HarnessDraft, HarnessStatus, SmokeRunSummary};
 use hf_core::provider::{ChatRequest, LlmProvider};
-use hf_core::runtime::RuntimeAdapter;
+use hf_core::runtime::{LineSink, RuntimeAdapter};
+
+use crate::project_sources::{sh_quote, ProjectLinkInputs};
 use hf_core::target::{TargetCandidate, TargetLanguage};
 use hf_core::types::Message;
 use hf_prompt::{
@@ -366,10 +368,36 @@ pub async fn compile_with_options(
 /// # Errors
 /// Returns source staging or runtime errors; compiler failures retain diagnostics.
 pub async fn try_compile_with_options(
+    harness: Harness,
+    rt: &dyn RuntimeAdapter,
+    workspace: &Path,
+    options: &hf_core::runtime::SandboxOptions,
+) -> Result<CompileResult, ClassifiedError> {
+    try_compile_inner(harness, rt, workspace, options, None).await
+}
+
+/// [`try_compile_with_options`], delivering each line the harness compiler
+/// prints to `on_line` as it arrives, for live build progress. The `CmpLog`
+/// companion and managed-mutator builds that follow are not streamed.
+///
+/// # Errors
+/// As [`try_compile_with_options`].
+pub async fn try_compile_with_options_streaming(
+    harness: Harness,
+    rt: &dyn RuntimeAdapter,
+    workspace: &Path,
+    options: &hf_core::runtime::SandboxOptions,
+    on_line: &LineSink<'_>,
+) -> Result<CompileResult, ClassifiedError> {
+    try_compile_inner(harness, rt, workspace, options, Some(on_line)).await
+}
+
+async fn try_compile_inner(
     mut harness: Harness,
     rt: &dyn RuntimeAdapter,
     workspace: &Path,
     options: &hf_core::runtime::SandboxOptions,
+    on_line: Option<&LineSink<'_>>,
 ) -> Result<CompileResult, ClassifiedError> {
     crate::managed_mutator::validate_build(&harness, options)?;
     // The companion record is constructed only for AFL++ C/C++ harnesses; the
@@ -460,7 +488,7 @@ pub async fn try_compile_with_options(
         container_ws,
         source_name,
         &output_name,
-        &list_c_files(workspace, container_ws, &[source_name]),
+        &ProjectLinkInputs::collect(workspace, &[source_name]),
     );
     let cmd = vec!["bash".to_owned(), "-c".to_owned(), script];
     let limits = hf_core::runtime::ResourceLimits {
@@ -470,10 +498,27 @@ pub async fn try_compile_with_options(
         env: std::collections::HashMap::new(),
         ptrace: false,
     };
-    let result = rt
-        .run_command_opts(&cmd, workspace, &limits, options)
-        .await?
-        .require_completed("harness compile")?;
+    let result = match on_line {
+        Some(on_line) => {
+            // Nothing cancels a harness compile; the token only satisfies the
+            // streaming call.
+            let never_cancelled = tokio_util::sync::CancellationToken::new();
+            rt.run_command_streaming_opts(
+                &cmd,
+                workspace,
+                &limits,
+                options,
+                &never_cancelled,
+                on_line,
+            )
+            .await?
+        }
+        None => {
+            rt.run_command_opts(&cmd, workspace, &limits, options)
+                .await?
+        }
+    }
+    .require_completed("harness compile")?;
     if result.exit_code != 0 {
         return Ok(CompileResult::Failed(CompileFailure {
             exit_code: result.exit_code,
@@ -535,7 +580,7 @@ async fn compile_cmplog_companion(
         container_ws,
         source_name,
         &output_name,
-        &list_c_files(workspace, container_ws, &[source_name]),
+        &ProjectLinkInputs::collect(workspace, &[source_name]),
     );
     let cmd = vec!["bash".to_owned(), "-c".to_owned(), script];
     let limits = hf_core::runtime::ResourceLimits {
@@ -1449,104 +1494,6 @@ fn source_filename(lang: TargetLanguage) -> &'static str {
     lang.harness_filename()
 }
 
-/// List all C/C++ source files in the workspace (excluding the harness source
-/// itself) as container-internal paths, so multi-file targets link correctly.
-/// Workspace directories that never hold project source.
-///
-/// `corpus` and `out` hold attacker-controlled bytes, which may carry a source
-/// file's name; compiling one would build the fuzzer's own input. `fuzz` is the
-/// generated cargo-fuzz scaffold.
-// `runs` holds retained per-run evidence including `input/source-context`
-// copies of the project sources; compiling those alongside the staged sources
-// duplicates every target symbol after the first campaign.
-const NON_SOURCE_DIRS: [&str; 4] = ["corpus", "out", "fuzz", "runs"];
-
-/// Cap on extra translation units handed to one compile. A project past this is
-/// not something a single-command harness build links.
-const MAX_EXTRA_SOURCES: usize = 5_000;
-
-/// List the staged C/C++ translation units, excluding `excluded_names`, as
-/// container-internal paths so a multi-file target links.
-///
-/// Recursive because `copy_project_sources` preserves the project's directory
-/// layout: listing only the workspace root would leave every nested translation
-/// unit out of the link, which surfaces as an undefined-symbol error naming the
-/// very function the harness was written for. Symlinks are not followed, and
-/// the walk is bounded and sorted so one project always produces one command.
-///
-/// `excluded_names` holds bare filenames to leave out of the listing -- the
-/// harness source itself for an ordinary compile, and additionally a staged
-/// driver for a build (such as the concolic pass's `SymCC` build) that compiles
-/// more than one non-project file alongside the target's sources.
-pub fn list_c_files(workspace: &Path, container_ws: &str, excluded_names: &[&str]) -> String {
-    let mut relative = Vec::new();
-    collect_source_files(workspace, workspace, excluded_names, &mut relative);
-    relative.sort();
-    relative.truncate(MAX_EXTRA_SOURCES);
-    relative
-        .iter()
-        .map(|path| {
-            // The path comes from the project under test and is interpolated
-            // into a `bash -c` script, so it is shell-quoted. The `/work`
-            // prefix is a literal we control.
-            format!("{container_ws}/{}", sh_quote(path))
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// Collect workspace-relative source paths beneath `directory`.
-fn collect_source_files(
-    root: &Path,
-    directory: &Path,
-    excluded_names: &[&str],
-    found: &mut Vec<String>,
-) {
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if found.len() >= MAX_EXTRA_SOURCES {
-            return;
-        }
-        let path = entry.path();
-        let Ok(kind) = entry.file_type() else {
-            continue;
-        };
-        if kind.is_symlink() {
-            continue;
-        }
-        if kind.is_dir() {
-            let name = entry.file_name();
-            if NON_SOURCE_DIRS
-                .iter()
-                .any(|skipped| std::ffi::OsStr::new(skipped) == name)
-            {
-                continue;
-            }
-            collect_source_files(root, &path, excluded_names, found);
-            continue;
-        }
-        if !kind.is_file()
-            || excluded_names
-                .iter()
-                .any(|&excluded| entry.file_name() == excluded)
-        {
-            continue;
-        }
-        let is_source = path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| matches!(extension, "c" | "cc" | "cpp" | "cxx"));
-        if !is_source {
-            continue;
-        }
-        if let Ok(rel) = path.strip_prefix(root) {
-            found.push(hf_core::runtime::posix_relative(rel));
-        }
-    }
-}
-
 /// Build the `bash -c` script that compiles a harness inside the sandbox.
 ///
 /// `extra_flags` comes from the project's compile database and is therefore
@@ -1565,7 +1512,7 @@ fn compile_script(
     container_ws: &str,
     source_name: &str,
     output_name: &str,
-    extra_sources: &str,
+    project: &ProjectLinkInputs,
 ) -> String {
     let quoted_flags = extra_flags
         .iter()
@@ -1574,30 +1521,16 @@ fn compile_script(
         .join(" ");
     let source_q = sh_quote(source_name);
     let output_q = sh_quote(output_name);
+    let compile_prefix = format!(
+        "{compiler} {args} {quoted_flags} -I{container_ws}",
+        args = args.join(" ")
+    );
     format!(
-        "{compiler} {args} {quoted_flags} -I{container_ws} {container_ws}/{source_q} \
-         {extra_sources} -o /tmp/{output_q} && cp /tmp/{output_q} {container_ws}/{output_q} \
-         && chmod +x {container_ws}/{output_q}",
-        args = args.join(" "),
+        "{precompile}{compile_prefix} {container_ws}/{source_q} {link_args} -o /tmp/{output_q} \
+         && cp /tmp/{output_q} {container_ws}/{output_q} && chmod +x {container_ws}/{output_q}",
+        precompile = project.precompile_script(&compile_prefix, container_ws),
+        link_args = project.link_args(container_ws),
     )
-}
-
-/// Single-quote a string for safe interpolation into a POSIX shell command.
-///
-/// Wraps the value in single quotes (which suppress every shell metacharacter)
-/// and renders any embedded single quote as the standard `'\''` sequence.
-fn sh_quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
-    for ch in s.chars() {
-        if ch == '\'' {
-            out.push_str("'\\''");
-        } else {
-            out.push(ch);
-        }
-    }
-    out.push('\'');
-    out
 }
 
 /// Explicit context sections for an analysis-conditioned draft.
@@ -1728,7 +1661,7 @@ mod tests {
             "/work",
             "harness.c",
             "fuzz_p",
-            "",
+            &ProjectLinkInputs::default(),
         );
         let flags_at = script.find("-I/work/include").unwrap();
         let source_at = script.find("/work/'harness.c'").unwrap();
@@ -1750,11 +1683,42 @@ mod tests {
             "/work",
             "harness.c",
             "fuzz_p",
-            "",
+            &ProjectLinkInputs::default(),
         );
         assert!(
             script.contains("'-DEVIL=$(touch /tmp/pwned)'"),
             "flag not quoted: {script}"
+        );
+    }
+
+    #[test]
+    fn compile_script_links_a_project_main_under_a_renamed_symbol() {
+        // A project unit that defines `main` would collide with the engine
+        // driver's `main`; it is compiled first, alone, with the same compiler,
+        // arguments, and flags, and only its object enters the link.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cli.c"), "int main(void){return 0;}").unwrap();
+        std::fs::write(dir.path().join("lib.c"), "int parse(int x){return x;}").unwrap();
+        let project = ProjectLinkInputs::collect(dir.path(), &["harness.c"]);
+
+        let script = compile_script(
+            "clang",
+            &["-fsanitize=fuzzer".to_owned()],
+            &["-DA=1".to_owned()],
+            "/work",
+            "harness.c",
+            "fuzz_p",
+            &project,
+        );
+
+        assert!(
+            script.starts_with(
+                "clang -fsanitize=fuzzer '-DA=1' -I/work -Dmain=oxfuzz_project_main_0 \
+                 -c /work/'cli.c' -o /tmp/oxfuzz_project_main_0.o && \
+                 clang -fsanitize=fuzzer '-DA=1' -I/work /work/'harness.c' /work/'lib.c' \
+                 /tmp/oxfuzz_project_main_0.o -o /tmp/'fuzz_p'"
+            ),
+            "{script}"
         );
     }
 
@@ -1768,7 +1732,7 @@ mod tests {
             "/work",
             "harness.c",
             "fuzz_p",
-            "",
+            &ProjectLinkInputs::default(),
         );
         assert!(
             script.contains("clang -g  -I/work /work/'harness.c'"),
@@ -3329,136 +3293,6 @@ Iterations : 12345
         assert_eq!(sh_quote("a'b"), "'a'\\''b'");
         // Shell metacharacters are inert inside single quotes.
         assert_eq!(sh_quote("a; rm -rf /"), "'a; rm -rf /'");
-    }
-
-    #[test]
-    fn nested_sources_are_listed_at_their_relative_paths() {
-        // `copy_project_sources` stages a project's layout, so the compiler
-        // must be handed the nested translation units too; listing only the
-        // workspace root leaves every one of them out of the link.
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("src/parser")).unwrap();
-        std::fs::write(
-            dir.path().join("src/parser/dns.c"),
-            "int p(void){return 0;}",
-        )
-        .unwrap();
-        std::fs::write(dir.path().join("top.c"), "int t(void){return 0;}").unwrap();
-
-        let listed = list_c_files(dir.path(), "/work", &["harness.c"]);
-
-        assert!(listed.contains("/work/'src/parser/dns.c'"), "{listed}");
-        assert!(listed.contains("/work/'top.c'"), "{listed}");
-    }
-
-    #[test]
-    fn corpus_and_run_output_are_never_compiled() {
-        // A corpus input is attacker-controlled bytes that may be named like a
-        // source file. Compiling one would build the fuzzer's own input.
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("corpus")).unwrap();
-        std::fs::create_dir_all(dir.path().join("out")).unwrap();
-        std::fs::write(
-            dir.path().join("corpus/seed.c"),
-            "int evil(void){return 0;}",
-        )
-        .unwrap();
-        std::fs::write(dir.path().join("out/crash.c"), "int evil2(void){return 0;}").unwrap();
-        std::fs::write(dir.path().join("real.c"), "int r(void){return 0;}").unwrap();
-
-        let listed = list_c_files(dir.path(), "/work", &["harness.c"]);
-
-        assert!(listed.contains("/work/'real.c'"), "{listed}");
-        assert!(!listed.contains("seed.c"), "corpus compiled: {listed}");
-        assert!(!listed.contains("crash.c"), "run output compiled: {listed}");
-    }
-
-    #[test]
-    fn the_harness_source_is_never_listed_as_an_extra_source() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("harness.c"), "int main(void){return 0;}").unwrap();
-        std::fs::write(dir.path().join("real.c"), "int r(void){return 0;}").unwrap();
-
-        let listed = list_c_files(dir.path(), "/work", &["harness.c"]);
-
-        assert!(!listed.contains("harness.c"), "{listed}");
-        assert!(listed.contains("/work/'real.c'"), "{listed}");
-    }
-
-    #[test]
-    fn every_given_excluded_name_is_left_out() {
-        // The concolic build excludes two staged non-project files (the
-        // harness and a driver) rather than one, so the exclusion set must
-        // support more than a single name.
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("harness.c"), "int main(void){return 0;}").unwrap();
-        std::fs::write(
-            dir.path().join("symcc_driver.c"),
-            "int main(void){return 0;}",
-        )
-        .unwrap();
-        std::fs::write(dir.path().join("real.c"), "int r(void){return 0;}").unwrap();
-
-        let listed = list_c_files(dir.path(), "/work", &["harness.c", "symcc_driver.c"]);
-
-        assert!(!listed.contains("harness.c"), "{listed}");
-        assert!(!listed.contains("symcc_driver.c"), "{listed}");
-        assert!(listed.contains("/work/'real.c'"), "{listed}");
-    }
-
-    #[test]
-    fn listed_sources_exclude_retained_run_source_context() {
-        // After any campaign, the workspace holds runs/<id>/input/source-context
-        // copies of the project sources; compiling them alongside the staged
-        // sources duplicates every target symbol.
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("parse.c"), "int parse(void){return 0;}").unwrap();
-        let retained = dir
-            .path()
-            .join("runs/00000000-0000-0000-0000-000000000000/input/source-context");
-        std::fs::create_dir_all(&retained).unwrap();
-        std::fs::write(retained.join("parse.c"), "int parse(void){return 0;}").unwrap();
-
-        let listed = list_c_files(dir.path(), "/work", &["harness.c"]);
-
-        assert_eq!(listed, "/work/'parse.c'", "{listed}");
-    }
-
-    #[test]
-    fn listed_sources_are_deterministically_ordered() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("b")).unwrap();
-        std::fs::write(dir.path().join("b/two.c"), "int two(void){return 0;}").unwrap();
-        std::fs::write(dir.path().join("a.c"), "int a(void){return 0;}").unwrap();
-
-        let first = list_c_files(dir.path(), "/work", &["harness.c"]);
-        assert_eq!(first, list_c_files(dir.path(), "/work", &["harness.c"]));
-        assert!(
-            first.find("a.c").unwrap() < first.find("two.c").unwrap(),
-            "{first}"
-        );
-    }
-
-    #[test]
-    fn list_c_files_quotes_malicious_filenames() {
-        let dir = tempfile::tempdir().unwrap();
-        // A source file whose name carries a shell-injection payload.
-        let evil = "evil; touch pwned.c";
-        std::fs::write(dir.path().join(evil), "int x;").unwrap();
-        std::fs::write(dir.path().join("plain.c"), "int y;").unwrap();
-
-        let listed = list_c_files(dir.path(), "/work", &["harness.c"]);
-
-        // The dangerous name is single-quoted so the `;` cannot break the shell.
-        assert!(
-            listed.contains("/work/'evil; touch pwned.c'"),
-            "payload not quoted: {listed}"
-        );
-        // A normal file is also quoted (uniform, still injection-safe).
-        assert!(
-            listed.contains("/work/'plain.c'"),
-            "missing plain: {listed}"
-        );
     }
 
     fn smoke_command_config(

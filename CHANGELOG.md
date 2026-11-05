@@ -12,6 +12,26 @@ and 0.7.0 releases respectively.
 
 ## Unreleased
 
+### Added
+
+- "Fuzz this project" shows each preparation step with its elapsed time
+  (finding the target, drafting the harness, every compile attempt, every
+  repair, the smoke test) and a collapsible live build log with the compiler
+  output, which opens on failure. The browser build receives the same events
+  over SSE, and `oxfuzz fuzz` prints the same steps.
+
+### Fixed
+
+- A C/C++ project with a file that defines `main()` (a command-line tool next
+  to its library code, for example) failed every harness build with
+  "multiple definition of `main`", and the model repairs could not fix it.
+  Such files are now compiled with `main` renamed. Files that are fuzz
+  harnesses the project already ships are left out of the link.
+- Discovery no longer offers `main` or `LLVMFuzzer*` callbacks as C/C++
+  targets. A project that only contains fuzz harnesses (such as honggfuzz's
+  `examples/glibc`) now stops at discovery with a message naming them,
+  instead of failing later with linker errors.
+
 ## 0.9.1 - 2026-11-04
 
 The v0.9.0 tag was never published: its installed-app acceptance walkthrough

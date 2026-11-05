@@ -930,11 +930,16 @@ after that approval, and only for the target the action prepared, does the GUI
 start one fuzz run with the configured default duration through the existing
 `RunFuzzer` action. When the target already had an approved revision, nothing
 is built or smoke-tested and the GUI offers an explicit "Start run" action
-instead of starting one. The desktop shell emits `fuzz:stage` events
-(`discover`, `harness`, `smoke`) while preparing; the browser build calls
-`POST /fuzz/prepare` and shows a generic progress line. Stage boundaries are reported to the GUI so it can show
-which stage is running; a failure names its stage and leaves completed stages
-retained.
+instead of starting one. While preparing, both the desktop shell and
+`POST /fuzz/prepare` (over SSE) emit `fuzz:stage` events, serialized from
+`FuzzStageView` in `hf-service` so the two carry one payload: stage boundaries
+(`discover`, `harness`, `smoke`) and, inside the harness stage, steps
+(`FuzzStage::HarnessStep`: drafting, each compile attempt, a failed attempt, and
+each repair). The harness compiler's output streams line by line as `fuzz:log`
+events (`FuzzProgress::LogLine`). The panel lists the steps with their elapsed
+time and keeps the last 400 log lines in a collapsible build log, which opens on
+failure. A failure names its stage and leaves completed stages retained. The
+CLI pipeline prints the same steps and output lines.
 
 Rejected alternative: running the whole CLI pipeline and approving through the
 app-wide approval prompt. That prompt shows only the action label, so the

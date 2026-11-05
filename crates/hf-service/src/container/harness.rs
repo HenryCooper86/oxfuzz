@@ -330,6 +330,51 @@ async fn project_build_context(
     }
 }
 
+/// A step inside the harness stage, reported while a harness is drafted,
+/// compiled, and repaired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum HarnessStep {
+    /// The model is drafting the first source.
+    Drafting,
+    /// Compile attempt `attempt` (1-based) is running: the lint check, then
+    /// the sandboxed build.
+    Compiling { attempt: usize },
+    /// Compile attempt `attempt` failed; its diagnostics were reported as
+    /// output lines.
+    CompileFailed { attempt: usize },
+    /// The model is rewriting the source from the diagnostics: repair
+    /// `repair` of at most `max`.
+    Repairing { repair: usize, max: usize },
+}
+
+/// Where a harness build reports its steps and compiler output.
+#[derive(Clone, Copy)]
+pub struct HarnessBuildObserver<'a> {
+    /// Receives each [`HarnessStep`].
+    pub on_step: &'a (dyn Fn(HarnessStep) + Send + Sync),
+    /// Receives each compiler output line as it is printed. `None` builds
+    /// without streaming.
+    pub on_line: Option<&'a hf_core::runtime::LineSink<'a>>,
+}
+
+fn ignore_step(_: HarnessStep) {}
+
+impl HarnessBuildObserver<'_> {
+    /// Reports nothing.
+    pub const SILENT: HarnessBuildObserver<'static> = HarnessBuildObserver {
+        on_step: &ignore_step,
+        on_line: None,
+    };
+
+    /// Report each line of `text` as an output line.
+    fn report_lines(&self, text: &str) {
+        if let Some(on_line) = self.on_line {
+            text.lines().for_each(on_line);
+        }
+    }
+}
+
 impl ServiceContainer {
     async fn harness_review_locked_detailed(
         &self,
@@ -930,6 +975,7 @@ impl ServiceContainer {
             // companion, so tournament builds skip it.
             false,
             policy,
+            HarnessBuildObserver::SILENT,
         )
         .await
     }
@@ -951,6 +997,7 @@ impl ServiceContainer {
         sanitizer: Sanitizer,
         cmplog: bool,
         policy: AiPolicy,
+        observer: HarnessBuildObserver<'_>,
     ) -> Result<HarnessGenOutcome, ClassifiedError> {
         self.compilation_store()?;
         self.admit_harness_build(&candidate.project_root, lang)
@@ -960,6 +1007,8 @@ impl ServiceContainer {
         let mut last_diagnostics = String::new();
 
         loop {
+            let attempt = repairs_used + 1;
+            (observer.on_step)(HarnessStep::Compiling { attempt });
             let lint = hf_harness::lint_harness_source(&source, lang);
             if hf_harness::has_blocking_finding(&lint) {
                 // A lint error is a build failure the compiler would have
@@ -967,11 +1016,17 @@ impl ServiceContainer {
                 // container round-trip that would have produced a clean build
                 // of an unusable harness.
                 last_diagnostics = hf_harness::render_findings(&lint);
+                observer.report_lines(&last_diagnostics);
+                (observer.on_step)(HarnessStep::CompileFailed { attempt });
                 // Check the budget before the provider call: a repair that
                 // would be discarded is a model call for nothing.
                 if repairs_used >= max_repairs {
                     break;
                 }
+                (observer.on_step)(HarnessStep::Repairing {
+                    repair: repairs_used + 1,
+                    max: max_repairs,
+                });
                 match self
                     .repair_harness_source(
                         candidate,
@@ -1032,14 +1087,28 @@ impl ServiceContainer {
                 image: Some(captured.record.sandbox_image_id.clone()),
                 ..Default::default()
             };
-            match hf_harness::try_compile_with_options(
-                harness,
-                self.runtime.as_ref(),
-                workspace,
-                &options,
-            )
-            .await?
-            {
+            let compiled = match observer.on_line {
+                Some(on_line) => {
+                    hf_harness::try_compile_with_options_streaming(
+                        harness,
+                        self.runtime.as_ref(),
+                        workspace,
+                        &options,
+                        on_line,
+                    )
+                    .await?
+                }
+                None => {
+                    hf_harness::try_compile_with_options(
+                        harness,
+                        self.runtime.as_ref(),
+                        workspace,
+                        &options,
+                    )
+                    .await?
+                }
+            };
+            match compiled {
                 hf_harness::CompileResult::Ok(compiled) => {
                     self.compilation_store()?
                         .upsert_harness_with_build_inputs(&compiled, &captured.record)
@@ -1072,9 +1141,14 @@ impl ServiceContainer {
                 }
                 hf_harness::CompileResult::Failed(failure) => {
                     last_diagnostics = failure.diagnostics();
+                    (observer.on_step)(HarnessStep::CompileFailed { attempt });
                     if repairs_used >= max_repairs {
                         break;
                     }
+                    (observer.on_step)(HarnessStep::Repairing {
+                        repair: repairs_used + 1,
+                        max: max_repairs,
+                    });
                     match self
                         .repair_harness_source(
                             candidate,
@@ -1409,6 +1483,37 @@ impl ServiceContainer {
         persistent: bool,
         policy: AiPolicy,
     ) -> Result<HarnessGenOutcome, ClassifiedError> {
+        self.harness_generate_observed(
+            project,
+            target,
+            engine,
+            lang,
+            max_repairs,
+            sanitizer,
+            cmplog,
+            persistent,
+            policy,
+            HarnessBuildObserver::SILENT,
+        )
+        .await
+    }
+
+    /// [`harness_generate`](Self::harness_generate), reporting each step
+    /// (drafting, every compile attempt, failures, repairs) and the compiler's
+    /// output lines to `observer` as they happen.
+    pub async fn harness_generate_observed(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+        lang: TargetLanguage,
+        max_repairs: usize,
+        sanitizer: Option<Sanitizer>,
+        cmplog: bool,
+        persistent: bool,
+        policy: AiPolicy,
+        observer: HarnessBuildObserver<'_>,
+    ) -> Result<HarnessGenOutcome, ClassifiedError> {
         self.compilation_store()?;
         require_fuzzing_harness_engine(engine, lang)?;
         self.admit_harness_build(project, lang).await?;
@@ -1447,6 +1552,7 @@ impl ServiceContainer {
         self.stage_generated_build_inputs_for_project(project, &workspace)
             .await?;
 
+        (observer.on_step)(HarnessStep::Drafting);
         let source = self
             .draft_harness_source(project, &candidate, engine, sanitizer, persistent, policy)
             .await?;
@@ -1461,6 +1567,7 @@ impl ServiceContainer {
             sanitizer,
             cmplog,
             policy,
+            observer,
         )
         .await
     }
@@ -1706,6 +1813,7 @@ impl ServiceContainer {
             active_sanitizer,
             active_cmplog,
             policy,
+            HarnessBuildObserver::SILENT,
         )
         .await
     }
@@ -1846,6 +1954,7 @@ impl ServiceContainer {
             active.sanitizer,
             active.cmplog.is_some(),
             policy,
+            HarnessBuildObserver::SILENT,
         )
         .await
     }

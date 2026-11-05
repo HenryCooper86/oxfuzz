@@ -1098,6 +1098,13 @@ fn extract_functions(
         edges.extend(extract_calls(node, src));
         edges.sort();
         edges.dedup();
+        // `main` is the program entry point: a harness cannot call it and the
+        // engine driver defines its own. `LLVMFuzzer*` functions are the
+        // callbacks of a fuzz harness the project already ships. Both stay in
+        // the call graph above.
+        if symbol == "main" || symbol.starts_with("LLVMFuzzer") {
+            return;
+        }
         // Capture only the function prototype (declarator), not the whole
         // definition body -- otherwise the signature spans many lines and
         // downstream consumers (e.g. harness generation) leak body code.
@@ -1494,6 +1501,55 @@ mod tests {
                 "{skipped} skipped: {symbols:?}"
             );
         }
+    }
+
+    #[test]
+    fn c_and_cpp_main_is_not_a_candidate() {
+        // `main` is the program entry point: a harness cannot call it, and the
+        // engine driver defines its own. It still feeds the call graph.
+        let src = "int main(int argc, char **argv) { return parse_input(argv[1], argc); }\n\
+                   int parse_input(const char *data, int n) { return data[0] + n; }\n";
+
+        for symbols in [
+            c_candidates(src)
+                .into_iter()
+                .map(|c| c.symbol)
+                .collect::<Vec<_>>(),
+            cpp_candidates(src)
+                .into_iter()
+                .map(|c| c.symbol)
+                .collect::<Vec<_>>(),
+        ] {
+            assert_eq!(symbols, vec!["parse_input".to_owned()]);
+        }
+
+        // A project's own fuzz harness defines the libFuzzer callbacks; they
+        // are entry points of that harness, not code under test.
+        let harness = "int LLVMFuzzerTestOneInput(const unsigned char *d, unsigned long n) { return parse_input((const char *)d, n); }\n\
+                       int LLVMFuzzerInitialize(int *argc, char ***argv) { return 0; }\n";
+        assert!(c_candidates(harness).is_empty());
+
+        let mut parser = TsParser::new();
+        parser
+            .set_language(&tree_sitter_c::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(src, None).unwrap();
+        let mut calls = HashMap::new();
+        extract_functions(
+            &tree,
+            Path::new("main.c"),
+            src,
+            TargetLanguage::C,
+            &mut Vec::new(),
+            &mut calls,
+            &mut HashMap::new(),
+        );
+        assert!(
+            calls
+                .get("main")
+                .is_some_and(|callees| callees.contains(&"parse_input".to_owned())),
+            "main still records its callees: {calls:?}"
+        );
     }
 
     fn c_candidates(src: &str) -> Vec<TargetCandidate> {

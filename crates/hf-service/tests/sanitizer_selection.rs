@@ -124,8 +124,19 @@ impl RuntimeAdapter for RecordingRuntime {
         _cancel: &tokio_util::sync::CancellationToken,
         on_line: &LineSink<'_>,
     ) -> Result<CommandResult, ClassifiedError> {
+        // As in the Docker runtime, a streamed command behaves like the
+        // non-streamed one: a harness compile (streamed for build progress)
+        // takes the compile path and replays its output.
+        if cmd.iter().any(|argument| argument.contains(" -o ")) {
+            let result = self.run_command_opts(cmd, cwd, limits, opts).await?;
+            result
+                .stdout
+                .lines()
+                .chain(result.stderr.lines())
+                .for_each(on_line);
+            return Ok(result);
+        }
         self.commands.lock().unwrap().push(cmd.to_vec());
-        let _ = (limits, opts);
         on_line("#1 pulse cov: 42 ft: 84 exec/s: 256");
         on_line("DONE cov: 42 ft: 84 corp: 3/24b exec/s: 256");
         Ok(completed(0, "", cwd))

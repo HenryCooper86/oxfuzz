@@ -65,7 +65,16 @@ pub struct Harness {
    selected sanitizer + engine link flags, plus the step 0 flags. Project
    sources are staged preserving the complete project directory layout, so
    `<project>/include` resolves at `/work/include` and safe sibling includes
-   remain usable for nested components. Before each direct or repair attempt,
+   remain usable for nested components. Every staged C/C++ translation unit
+   is linked, with two exceptions (`hf_harness::project_sources`): a unit
+   that defines `main` is compiled alone first with
+   `-Dmain=oxfuzz_project_main_<n>` and its object is linked, so it cannot
+   collide with the engine driver's `main` while its other symbols stay
+   available; a unit that is itself a fuzz harness (it defines
+   `LLVMFuzzerTestOneInput`, or uses `HF_ITER`, `__AFL_LOOP`, or
+   `__AFL_FUZZ_INIT`) is left out. Discovery does not offer `main` or
+   `LLVMFuzzer*` callbacks as targets, and a project whose only units are fuzz
+   harnesses fails at discovery with a message naming them. Before each direct or repair attempt,
    capture the exact build inputs and dispatch the captured immutable image
    as specified below. Successful compilation creates a new harness revision
    and atomically persists its input record before publishing the active marker.

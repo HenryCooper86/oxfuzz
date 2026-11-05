@@ -10,6 +10,7 @@ import { I18nProvider } from "../i18n";
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
   stage: undefined as undefined | ((payload: unknown) => void),
+  log: undefined as undefined | ((payload: unknown) => void),
   runFuzzer: vi.fn(async () => 0),
   setTarget: vi.fn(), setEngine: vi.fn(), setLang: vi.fn(), markDone: vi.fn(),
 }));
@@ -18,7 +19,11 @@ vi.mock("../lib", () => ({
     invoke: mocks.invoke,
     listen: async (event: string, handler: (e: { payload: unknown }) => void) => {
       if (event === "fuzz:stage") mocks.stage = payload => handler({ payload });
-      return () => { mocks.stage = undefined; };
+      if (event === "fuzz:log") mocks.log = payload => handler({ payload });
+      return () => {
+        if (event === "fuzz:stage") mocks.stage = undefined;
+        if (event === "fuzz:log") mocks.log = undefined;
+      };
     },
   }),
 }));
@@ -38,7 +43,7 @@ beforeEach(async () => {
   host = document.createElement("div"); document.body.append(host); root = createRoot(host);
   await act(async () => root.render(<I18nProvider><OneClickFuzz onOpen={open} apiRef={(value) => { api = value; }} /></I18nProvider>));
 });
-afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
+afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 it("prepares, stops at approval, and starts one run only after that harness is approved", async () => {
   let finish!: (value: unknown) => void;
@@ -47,7 +52,7 @@ it("prepares, stops at approval, and starts one run only after that harness is a
   await act(async () => button("Fuzz this project")!.click());
   expect(mocks.invoke).toHaveBeenCalledWith("fuzz_prepare", { project: "/proj", engine: "libfuzzer" });
   await act(async () => mocks.stage!({ stage: "smoke", target: "parse_number", reused: false }));
-  expect(host.textContent).toContain("Smoke-testing the harness for parse_number");
+  expect(host.textContent).toContain("Smoke-test the harness in the sandbox");
   await act(async () => finish({ target: "parse_number", lang: "C", engine: "libfuzzer", harness_reused: false, repairs_used: 0, smoke_repairs: 0 }));
   await flush();
   expect(mocks.setTarget).toHaveBeenCalledWith("parse_number");
@@ -85,4 +90,53 @@ it("shows a preparation failure", async () => {
   await flush();
   expect(host.textContent).toContain("hollow pass");
   expect(button("Fuzz this project")).toBeTruthy();
+});
+
+const step = (target: string, value: Record<string, unknown>) => ({ stage: "harness", target, reused: false, step: value });
+const rows = () => [...host.querySelectorAll("[data-step-status]")].map(row => `${row.getAttribute("data-step-status")}: ${row.textContent}`);
+
+it("lists each preparation step with its time and streams the build log", async () => {
+  let now = 0;
+  vi.spyOn(Date, "now").mockImplementation(() => now);
+  mocks.invoke.mockImplementation(() => new Promise(() => {}));
+  await act(async () => button("Fuzz this project")!.click());
+  await act(async () => mocks.stage!({ stage: "discover", target: null, reused: false }));
+  now = 2_000;
+  await act(async () => mocks.stage!({ stage: "harness", target: "parse_number", reused: false }));
+  await act(async () => mocks.stage!(step("parse_number", { kind: "drafting" })));
+  now = 30_000;
+  await act(async () => mocks.stage!(step("parse_number", { kind: "compiling", attempt: 1 })));
+  await act(async () => mocks.log!({ line: "harness.c:4:1: error: unknown type name 'uint8_t'" }));
+  now = 35_000;
+  await act(async () => mocks.stage!(step("parse_number", { kind: "compile_failed", attempt: 1 })));
+  await act(async () => mocks.stage!(step("parse_number", { kind: "repairing", repair: 1, max: 2 })));
+  now = 95_000;
+  await act(async () => mocks.stage!(step("parse_number", { kind: "compiling", attempt: 2 })));
+
+  expect(rows()).toEqual([
+    "done: Find the most promising target2s",
+    "done: Draft a harness for parse_number with the model28s",
+    "failed: Compile attempt 15s",
+    "done: Repair 1 of 2 from the compiler output1m 00s",
+    "running: Compile attempt 20s",
+  ]);
+  const log = host.querySelector("details");
+  expect(log?.open).toBe(false);
+  expect(log?.textContent).toContain("Build log (1 line)");
+  expect(log?.textContent).toContain("unknown type name 'uint8_t'");
+});
+
+it("keeps the steps and opens the build log when preparation fails", async () => {
+  let fail!: (error: unknown) => void;
+  mocks.invoke.mockImplementation(() => new Promise((_, reject) => { fail = reject; }));
+  await act(async () => button("Fuzz this project")!.click());
+  await act(async () => mocks.stage!(step("main", { kind: "compiling", attempt: 1 })));
+  await act(async () => mocks.log!({ line: "multiple definition of `main'" }));
+  await act(async () => fail(new Error("harness for 'main' failed to build")));
+  await flush();
+
+  expect(rows()).toEqual(["failed: Compile attempt 10s"]);
+  expect(host.querySelector("details")?.open).toBe(true);
+  expect(host.textContent).toContain("multiple definition of `main'");
+  expect(host.textContent).toContain("failed to build");
 });

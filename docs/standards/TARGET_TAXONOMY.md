@@ -10,7 +10,7 @@ pub enum TargetLanguage { C, Cpp, Rust, Go, Python }
 
 | Language | Scanner | Candidate rule |
 | --- | --- | --- |
-| C/C++ | Tree-sitter (`hf-discovery`) | Non-static function definitions with at least one parameter. |
+| C/C++ | Tree-sitter (`hf-discovery`) | Non-static function definitions with at least one parameter; `main` and `LLVMFuzzer*` callbacks excluded (they still contribute call edges). |
 | Rust | dependency-free lexical | `pub fn` (incl. `async`/`unsafe`/`const`) with at least one parameter; `main` and `test_*` excluded. |
 | Go | dependency-free lexical | Exported (capitalized) package-level functions and methods with at least one parameter; `main`, `init`, and `Test*`/`Benchmark*` excluded, as are `_test.go` files and `vendor/`. Methods are named `Receiver.Method`. |
 | Python | dependency-free lexical | Top-level `def` and direct class methods (incl. `async` and decorated definitions) with at least one parameter besides `self`/`cls`; underscore-privates, dunders, `test_*`, and closures nested in another `def` excluded. Methods are named `Class.method`. |

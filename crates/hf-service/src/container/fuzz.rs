@@ -25,6 +25,7 @@ use hf_core::harness::{Harness, HarnessStatus};
 use hf_core::target::{TargetCandidate, TargetLanguage};
 use uuid::Uuid;
 
+use super::harness::{HarnessBuildObserver, HarnessStep};
 use super::project_identity::select_target_candidate;
 use super::{AiPolicy, CampaignOutcome, ServiceContainer};
 use crate::harness_review::HarnessReviewBypass;
@@ -192,6 +193,15 @@ pub enum FuzzStage {
         /// compile, or repair runs.
         reused: bool,
     },
+    /// A step inside the harness stage (drafting, a compile attempt, a
+    /// failure, a repair). Reported between `Harness` and `Smoke` when a
+    /// harness is drafted; a reused or supplied harness reports none.
+    HarnessStep {
+        /// The selected target symbol.
+        target: String,
+        /// What the harness stage is doing now.
+        step: HarnessStep,
+    },
     /// Smoke-qualifying the compiled harness (after the pre-execution review).
     Smoke {
         /// The selected target symbol.
@@ -219,6 +229,44 @@ pub enum FuzzStage {
     },
 }
 
+/// The presentation payload for one [`FuzzStage`], shared by the desktop
+/// `fuzz:stage` event and the web SSE event of the same name.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct FuzzStageView {
+    /// `discover`, `harness`, `smoke`, `approve`, or `campaign`. A
+    /// [`FuzzStage::HarnessStep`] is a `harness` stage carrying `step`.
+    pub stage: &'static str,
+    /// The selected target, once one is picked.
+    pub target: Option<String>,
+    /// `true` when an approved harness was reused.
+    pub reused: bool,
+    /// The step inside the harness stage, when this event reports one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step: Option<HarnessStep>,
+}
+
+impl From<&FuzzStage> for FuzzStageView {
+    fn from(stage: &FuzzStage) -> Self {
+        let (name, target, reused, step) = match stage {
+            FuzzStage::Discover { .. } => ("discover", None, false, None),
+            FuzzStage::PreparedHarness { target, .. } => ("harness", Some(target), false, None),
+            FuzzStage::Harness { target, reused, .. } => ("harness", Some(target), *reused, None),
+            FuzzStage::HarnessStep { target, step } => {
+                ("harness", Some(target), false, Some(*step))
+            }
+            FuzzStage::Smoke { target, .. } => ("smoke", Some(target), false, None),
+            FuzzStage::Promote { target, .. } => ("approve", Some(target), false, None),
+            FuzzStage::Campaign { target, .. } => ("campaign", Some(target), false, None),
+        };
+        Self {
+            stage: name,
+            target: target.cloned(),
+            reused,
+            step,
+        }
+    }
+}
+
 /// What a completed pipeline produced: the promoted harness revision and the
 /// campaign outcome over it.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -243,6 +291,37 @@ pub struct FuzzOutcome {
     pub smoke_repairs: usize,
     /// The campaign outcome (iterations, coverage, crashes, termination).
     pub campaign: CampaignOutcome,
+}
+
+/// Shipped harness files named in the "no targets" message.
+const MAX_NAMED_FUZZ_ENTRIES: usize = 3;
+
+/// Why discovery found nothing. A project whose C/C++ units are fuzz harnesses
+/// (honggfuzz's examples, for instance) has no library code of its own, and
+/// saying so beats a later linker failure.
+fn no_targets_message(project: &Path) -> String {
+    let inputs = hf_harness::project_sources::ProjectLinkInputs::collect(project, &[]);
+    let entries = inputs.fuzz_entries();
+    if entries.is_empty() {
+        return "no fuzzable targets discovered in the project".to_owned();
+    }
+    let named = entries
+        .iter()
+        .take(MAX_NAMED_FUZZ_ENTRIES)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let more = entries.len().saturating_sub(MAX_NAMED_FUZZ_ENTRIES);
+    let named = if more > 0 {
+        format!("{named} and {more} more")
+    } else {
+        named
+    };
+    format!(
+        "no fuzzable targets discovered in the project: it is already a fuzz harness ({named}) \
+         rather than library code. Build that harness with its own instructions, or open the \
+         library it tests as the project"
+    )
 }
 
 /// Wrap a stage failure with the stage name and a remediation hint, so a
@@ -570,8 +649,15 @@ impl ServiceContainer {
                 engine,
                 reused: false,
             });
+            let on_step = |step: HarnessStep| {
+                on_stage(FuzzStage::HarnessStep {
+                    target: target.clone(),
+                    step,
+                });
+            };
+            let on_line = |line: &str| on_progress(FuzzProgress::LogLine(line.to_owned()));
             let generated = self
-                .harness_generate(
+                .harness_generate_observed(
                     project,
                     &target,
                     engine,
@@ -584,6 +670,10 @@ impl ServiceContainer {
                     // (provider detach / preflight); the service calls
                     // stay auto.
                     AiPolicy::Auto,
+                    HarnessBuildObserver {
+                        on_step: &on_step,
+                        on_line: Some(&on_line),
+                    },
                 )
                 .await
                 .map_err(|error| {
@@ -739,9 +829,7 @@ impl ServiceContainer {
         });
         let Some(best) = drivable.first() else {
             if candidates.is_empty() {
-                return Err(ClassifiedError::Validation(
-                    "no fuzzable targets discovered in the project".to_owned(),
-                ));
+                return Err(ClassifiedError::Validation(no_targets_message(project)));
             }
             if !candidates
                 .iter()
@@ -824,5 +912,62 @@ impl ServiceContainer {
             // Infrastructure failures still propagate.
             Err(error) => Err(error),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use hf_core::engine::EngineKind;
+
+    use super::{FuzzStage, FuzzStageView, HarnessStep};
+
+    fn view(stage: &FuzzStage) -> serde_json::Value {
+        serde_json::to_value(FuzzStageView::from(stage)).unwrap()
+    }
+
+    #[test]
+    fn stage_views_name_the_stage_and_its_target() {
+        assert_eq!(
+            view(&FuzzStage::Discover { lang: None }),
+            serde_json::json!({ "stage": "discover", "target": null, "reused": false })
+        );
+        assert_eq!(
+            view(&FuzzStage::Harness {
+                target: "parse".to_owned(),
+                engine: EngineKind::LibFuzzer,
+                reused: true,
+            }),
+            serde_json::json!({ "stage": "harness", "target": "parse", "reused": true })
+        );
+        assert_eq!(
+            view(&FuzzStage::Smoke {
+                target: "parse".to_owned(),
+                engine: EngineKind::LibFuzzer,
+            }),
+            serde_json::json!({ "stage": "smoke", "target": "parse", "reused": false })
+        );
+    }
+
+    #[test]
+    fn harness_steps_are_harness_stage_views_carrying_the_step() {
+        assert_eq!(
+            view(&FuzzStage::HarnessStep {
+                target: "parse".to_owned(),
+                step: HarnessStep::Repairing { repair: 1, max: 2 },
+            }),
+            serde_json::json!({
+                "stage": "harness",
+                "target": "parse",
+                "reused": false,
+                "step": { "kind": "repairing", "repair": 1, "max": 2 },
+            })
+        );
+        assert_eq!(
+            view(&FuzzStage::HarnessStep {
+                target: "parse".to_owned(),
+                step: HarnessStep::Compiling { attempt: 2 },
+            })["step"],
+            serde_json::json!({ "kind": "compiling", "attempt": 2 })
+        );
     }
 }

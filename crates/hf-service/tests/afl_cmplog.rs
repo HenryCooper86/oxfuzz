@@ -161,10 +161,22 @@ impl RuntimeAdapter for RecordingRuntime {
         cmd: &[String],
         cwd: &Path,
         limits: &ResourceLimits,
-        _opts: &SandboxOptions,
+        opts: &SandboxOptions,
         _cancel: &tokio_util::sync::CancellationToken,
         on_line: &LineSink<'_>,
     ) -> Result<CommandResult, ClassifiedError> {
+        // As in the Docker runtime, a streamed command behaves like the
+        // non-streamed one: a harness compile (streamed for build progress)
+        // takes the compile path and replays its output.
+        if cmd.first().is_some_and(|part| part == "bash") {
+            let result = self.run_command_opts(cmd, cwd, limits, opts).await?;
+            result
+                .stdout
+                .lines()
+                .chain(result.stderr.lines())
+                .for_each(on_line);
+            return Ok(result);
+        }
         self.commands
             .lock()
             .unwrap()

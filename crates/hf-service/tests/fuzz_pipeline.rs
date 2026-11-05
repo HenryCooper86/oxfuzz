@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use hf_core::engine::EngineKind;
 use hf_core::target::TargetLanguage;
-use hf_service::{FuzzRequest, FuzzStage, ServiceContainer};
+use hf_service::{FuzzRequest, FuzzStage, HarnessStep, ServiceContainer};
 
 /// A runtime that writes files for real and reports every command as a clean
 /// success with smoke activity. Every `run_command` also (re)writes the
@@ -143,7 +143,15 @@ impl StageLog {
         }
     }
 
+    /// Stage boundaries, in order; harness steps are left out.
     fn stages(&self) -> Vec<FuzzStage> {
+        self.events()
+            .into_iter()
+            .filter(|stage| !matches!(stage, FuzzStage::HarnessStep { .. }))
+            .collect()
+    }
+
+    fn events(&self) -> Vec<FuzzStage> {
         self.stages
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -620,6 +628,53 @@ async fn fuzz_fails_loud_when_discovery_finds_no_candidates() {
         log.stages(),
         vec![FuzzStage::Discover { lang: None }],
         "the pipeline stopped at discovery: no later stage was announced"
+    );
+}
+
+#[tokio::test]
+async fn fuzz_explains_a_project_that_is_itself_a_fuzz_harness() {
+    // The shape of honggfuzz's examples/glibc: one persistent-mode harness
+    // whose only externally visible function is `main`, plus static helpers.
+    let dir = tempfile::tempdir().unwrap();
+    let _workspace_root = common::install_managed_workspace("oxfuzz_fuzz_harness_only_it");
+    let project = dir.path().join("glibc");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("resolver.c"),
+        "#include <libhfuzz/libhfuzz.h>\n\
+         static void unsh(void) { linuxEnterNs(0); }\n\
+         int main(int argc, char *argv[]) {\n\
+           unsh();\n\
+           for (;;) { const char *buf; size_t len; HF_ITER((const uint8_t **)&buf, &len); }\n\
+         }\n",
+    )
+    .unwrap();
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("fuzz.db"))
+            .await
+            .unwrap(),
+    );
+    let container = pipeline_container(&store);
+    let log = StageLog::default();
+
+    let error = container
+        .fuzz_prepare(prepare_request(&project), &log.sink(), &noop_progress())
+        .await
+        .expect_err("a project that is only a fuzz harness has no target to draft for");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("no fuzzable targets"),
+        "the cause is named: {message}"
+    );
+    assert!(
+        message.contains("resolver.c") && message.contains("already a fuzz harness"),
+        "the shipped harness is named: {message}"
+    );
+    assert_eq!(
+        log.stages(),
+        vec![FuzzStage::Discover { lang: None }],
+        "no harness was drafted for `main`"
     );
 }
 
@@ -1148,6 +1203,215 @@ impl hf_guardrails::ApprovalGate for SmokeOnlyConsent {
             .push(action.label());
         matches!(action, hf_service::Action::RunHarness)
     }
+}
+
+/// What a preparation reported, stage events and progress lines interleaved.
+#[derive(Debug, Clone, PartialEq)]
+enum Reported {
+    Stage(FuzzStage),
+    Line(String),
+}
+
+#[derive(Clone, Default)]
+struct ReportLog {
+    events: Arc<Mutex<Vec<Reported>>>,
+}
+
+impl ReportLog {
+    fn stage_sink(&self) -> impl Fn(FuzzStage) + Send + Sync {
+        let events = Arc::clone(&self.events);
+        move |stage| {
+            events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(Reported::Stage(stage));
+        }
+    }
+
+    fn progress_sink(&self) -> impl Fn(hf_service::FuzzProgress) + Send + Sync {
+        let events = Arc::clone(&self.events);
+        move |progress| {
+            if let hf_service::FuzzProgress::LogLine(line) = progress {
+                events
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(Reported::Line(line));
+            }
+        }
+    }
+
+    fn events(&self) -> Vec<Reported> {
+        self.events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn steps(&self) -> Vec<HarnessStep> {
+        self.events()
+            .into_iter()
+            .filter_map(|event| match event {
+                Reported::Stage(FuzzStage::HarnessStep { step, .. }) => Some(step),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn position(&self, wanted: &Reported) -> usize {
+        self.events()
+            .iter()
+            .position(|event| event == wanted)
+            .unwrap_or_else(|| panic!("{wanted:?} was not reported: {:?}", self.events()))
+    }
+}
+
+#[tokio::test]
+async fn fuzz_prepare_reports_harness_steps_and_streams_compiler_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let _workspace_root = common::install_managed_workspace("oxfuzz_fuzz_prepare_steps_it");
+    let project = c_project(&dir);
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("fuzz.db"))
+            .await
+            .unwrap(),
+    );
+    let container = pipeline_container(&store);
+    let log = ReportLog::default();
+
+    container
+        .fuzz_prepare(
+            prepare_request(&project),
+            &log.stage_sink(),
+            &log.progress_sink(),
+        )
+        .await
+        .expect("preparation completes");
+
+    assert_eq!(
+        log.steps(),
+        vec![HarnessStep::Drafting, HarnessStep::Compiling { attempt: 1 }],
+        "the harness stage reports drafting and each compile attempt"
+    );
+    let compiling = log.position(&Reported::Stage(FuzzStage::HarnessStep {
+        target: "parse_entry".to_owned(),
+        step: HarnessStep::Compiling { attempt: 1 },
+    }));
+    let output = log.position(&Reported::Line("DONE exec/s: 64".to_owned()));
+    let smoke = log.position(&Reported::Stage(FuzzStage::Smoke {
+        target: "parse_entry".to_owned(),
+        engine: EngineKind::LibFuzzer,
+    }));
+    assert!(
+        compiling < output && output < smoke,
+        "compiler output streams during the compile attempt: {:?}",
+        log.events()
+    );
+}
+
+/// Like [`PipelineRuntime`], but the first harness compile fails with a
+/// compiler diagnostic, so the repair loop runs once.
+#[derive(Default)]
+struct FailFirstCompileRuntime {
+    compiles: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl hf_core::runtime::RuntimeAdapter for FailFirstCompileRuntime {
+    async fn resolve_image_reference(
+        &self,
+        image: &str,
+    ) -> Result<Option<hf_core::runtime::ImmutableImageReference>, hf_core::error::ClassifiedError>
+    {
+        PipelineRuntime.resolve_image_reference(image).await
+    }
+
+    async fn run_command(
+        &self,
+        cmd: &[String],
+        cwd: &std::path::Path,
+        limits: &hf_core::runtime::ResourceLimits,
+    ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
+        let is_compile = cmd.iter().any(|arg| arg.contains("/work/'harness.c'"));
+        if is_compile
+            && self
+                .compiles
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                == 0
+        {
+            return Ok(hf_core::runtime::CommandResult {
+                exit_code: 1,
+                stdout: String::new(),
+                stderr: "harness.c:1: error: expected ';'".to_owned(),
+                workspace: cwd.to_path_buf(),
+                termination: hf_core::runtime::CommandTermination::Completed,
+            });
+        }
+        PipelineRuntime.run_command(cmd, cwd, limits).await
+    }
+
+    async fn write_file(
+        &self,
+        path: &std::path::Path,
+        content: &str,
+    ) -> Result<(), hf_core::error::ClassifiedError> {
+        PipelineRuntime.write_file(path, content).await
+    }
+
+    async fn read_file(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<String, hf_core::error::ClassifiedError> {
+        PipelineRuntime.read_file(path).await
+    }
+}
+
+#[tokio::test]
+async fn fuzz_prepare_reports_a_failed_compile_and_its_repair() {
+    let dir = tempfile::tempdir().unwrap();
+    let _workspace_root = common::install_managed_workspace("oxfuzz_fuzz_prepare_repair_it");
+    let project = c_project(&dir);
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("fuzz.db"))
+            .await
+            .unwrap(),
+    );
+    let container = ServiceContainer::new(
+        Arc::new(FailFirstCompileRuntime::default()),
+        Some(Arc::new(CodeBlockPool)),
+    )
+    .with_store(Arc::clone(&store));
+    let log = ReportLog::default();
+
+    container
+        .fuzz_prepare(
+            prepare_request(&project),
+            &log.stage_sink(),
+            &log.progress_sink(),
+        )
+        .await
+        .expect("the repaired harness compiles");
+
+    assert_eq!(
+        log.steps(),
+        vec![
+            HarnessStep::Drafting,
+            HarnessStep::Compiling { attempt: 1 },
+            HarnessStep::CompileFailed { attempt: 1 },
+            HarnessStep::Repairing {
+                repair: 1,
+                max: hf_service::FUZZ_PIPELINE_REPAIRS,
+            },
+            HarnessStep::Compiling { attempt: 2 },
+        ]
+    );
+    let failed = log.position(&Reported::Stage(FuzzStage::HarnessStep {
+        target: "parse_entry".to_owned(),
+        step: HarnessStep::CompileFailed { attempt: 1 },
+    }));
+    let diagnostic = log.position(&Reported::Line(
+        "harness.c:1: error: expected ';'".to_owned(),
+    ));
+    assert!(diagnostic < failed, "{:?}", log.events());
 }
 
 fn prepare_request(project: &std::path::Path) -> hf_service::FuzzPrepareRequest<'_> {
