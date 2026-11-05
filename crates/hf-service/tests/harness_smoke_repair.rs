@@ -4,9 +4,9 @@
 
 mod common;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use hf_core::engine::EngineKind;
 use hf_core::error::ClassifiedError;
@@ -101,6 +101,33 @@ fn revision(index: usize, _prompt: &str) -> String {
     )
 }
 
+/// Point `HF_CONFIG_DIR` at one config directory for the whole test process.
+///
+/// The variable is process-global and the tests run in parallel, so a
+/// per-test directory would be deleted by whichever test finishes first while
+/// another test is still reading its config.
+fn install_config() {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    let dir = DIR.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!(
+            "oxfuzz-smoke-repair-config-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("oxfuzz.toml"),
+            "[fuzzing]\ncollect_function_coverage = true\n\
+             enabled_engines = [\"libfuzzer\", \"afl++\", \"honggfuzz\", \"syzkaller\"]\n\
+             default_engine = \"libfuzzer\"\ndefault_duration_secs = 60\n\
+             [fuzzing.sandbox]\nmax_mem_mb = 2048\nmax_cpus = 1\nmax_duration_secs = 600\n",
+        )
+        .unwrap();
+        dir
+    });
+    std::env::set_var("HF_CONFIG_DIR", dir);
+}
+
 async fn fixture(
     silent_smokes: usize,
 ) -> (
@@ -110,17 +137,8 @@ async fn fixture(
     ServiceContainer,
 ) {
     common::install_managed_workspace("oxfuzz_smoke_repair_it");
+    install_config();
     let project = tempfile::tempdir().unwrap();
-    let config = project.path().join("config");
-    std::env::set_var("HF_CONFIG_DIR", &config);
-    hf_service::config::write_config(
-        "oxfuzz",
-        "[fuzzing]\ncollect_function_coverage = true\n\
-         enabled_engines = [\"libfuzzer\", \"afl++\", \"honggfuzz\", \"syzkaller\"]\n\
-         default_engine = \"libfuzzer\"\ndefault_duration_secs = 60\n\
-         [fuzzing.sandbox]\nmax_mem_mb = 2048\nmax_cpus = 1\nmax_duration_secs = 600\n",
-    )
-    .unwrap();
     std::fs::write(
         project.path().join("parse.c"),
         "#include <stddef.h>\nint parse_entry(const unsigned char *data, size_t size) { return size && data[0]; }\n",
