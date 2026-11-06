@@ -303,7 +303,7 @@ easiest start. Fields (`crates/hf-agent/src/definition.rs`):
 | `system_prompt` | yes | Role prompt; oxfuzz wraps it with its fixed safety rules |
 | `allowed_tools` | no | Subset of `discover`, `harness`, `refine`, `run`, `triage`, `corpus`, `delegate` |
 | `skills` | no | Skill names injected into context |
-| `model_tags` | no | Provider routing tags |
+| `model_tags` | no | Preferred provider tags: providers carrying all of them are chosen when any exist; otherwise any available provider serves |
 | `temperature` | no | 0 to 2 |
 | `max_iterations` | no (12) | 1 to 50 |
 | `autonomy` | no (`assist`) | `manual`, `assist`, `auto` |

@@ -21,6 +21,14 @@ and 0.7.0 releases respectively.
   such a target failed with "undefined reference". A folder made only of fuzz
   harnesses now reports that it is already a fuzz harness; open the library it
   tests as the project instead. Run discovery again to refresh the target list.
+- The AI Assistant failed every message with "no provider available matching
+  tags" when the configured provider was not tagged `general`, `reasoning`, and
+  `code` (each agent required its own tags), even though harness drafting used
+  the same provider. AI report narratives fell back to the fact sheet for the
+  same reason, and the automotive report required a `security` tag the setup
+  wizard never writes. Agent and report tags are now preferences: a provider
+  carrying them is chosen when one exists, otherwise any available provider
+  answers.
 
 ## 0.9.2 - 2026-11-05
 

@@ -32,6 +32,11 @@ struct ScriptedPool {
     last_temperature: Mutex<Option<f64>>,
     /// Complete requests in call order, for provider-protocol assertions.
     requests: Mutex<Vec<ChatRequest>>,
+    /// Routes in call order.
+    routes: Mutex<Vec<RouteRequest>>,
+    /// Tags of the pool's single provider. When set, a route that requires a
+    /// tag the provider lacks fails as the real router does.
+    provider_tags: Option<Vec<String>>,
 }
 
 impl ScriptedPool {
@@ -40,6 +45,15 @@ impl ScriptedPool {
             replies: Mutex::new(replies.into_iter().map(str::to_owned).collect()),
             last_temperature: Mutex::new(None),
             requests: Mutex::new(Vec::new()),
+            routes: Mutex::new(Vec::new()),
+            provider_tags: None,
+        }
+    }
+
+    fn with_provider_tags(replies: Vec<&str>, tags: &[&str]) -> Self {
+        Self {
+            provider_tags: Some(tags.iter().map(|&tag| tag.to_owned()).collect()),
+            ..Self::new(replies)
         }
     }
 }
@@ -49,8 +63,16 @@ impl ProviderPool for ScriptedPool {
     async fn chat_completion(
         &self,
         request: &ChatRequest,
-        _route: &RouteRequest,
+        route: &RouteRequest,
     ) -> Result<ChatResponse, ProviderError> {
+        self.routes.lock().await.push(route.clone());
+        if let Some(tags) = &self.provider_tags {
+            if !route.required_tags.iter().all(|tag| tags.contains(tag)) {
+                return Err(ProviderError::NoProviderAvailable {
+                    tags: route.required_tags.clone(),
+                });
+            }
+        }
         *self.last_temperature.lock().await = request.temperature;
         self.requests.lock().await.push(request.clone());
         let content = self
@@ -243,6 +265,34 @@ async fn agent_turn_records_diagnostics_cost() {
     assert_eq!(usage.len(), 1, "the turn's LLM call must be recorded");
     assert_eq!(usage[0].input_tokens, 12);
     assert_eq!(usage[0].output_tokens, 8);
+}
+
+#[tokio::test]
+async fn every_builtin_agent_runs_on_a_provider_without_its_preferred_tags() {
+    // Provider tags are free text in Settings. A deployment whose only
+    // provider is tagged `general` must still reach every agent; the agent's
+    // tags pick among providers when several match, they do not exclude all.
+    for definition in hf_agent::AgentRegistry::builtin().list() {
+        let pool = Arc::new(ScriptedPool::with_provider_tags(
+            vec![r#"{"final":"ok"}"#],
+            &["general"],
+        ));
+        let captured = Arc::clone(&pool);
+        let provider: Arc<dyn ProviderPool> = pool;
+        let id = definition.id.clone();
+        let preferred: Vec<String> = definition.model_tags.clone();
+        let agent = Agent::with_definition(TestBackend::new(Some(provider)), None, definition);
+
+        let reply = agent.run_turn(vec![], "hi", &CollectingSink::new()).await;
+        assert!(reply.is_ok(), "agent {id}: {reply:?}");
+
+        let routes = captured.routes.lock().await;
+        let route = routes.first().expect("one provider call");
+        assert!(route.required_tags.is_empty(), "agent {id}: {route:?}");
+        if !preferred.is_empty() {
+            assert_eq!(route.preferred_tags, preferred, "agent {id}");
+        }
+    }
 }
 
 #[tokio::test]

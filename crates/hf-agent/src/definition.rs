@@ -114,7 +114,9 @@ pub struct AgentDefinition {
     /// Skill names whose playbooks are injected into this agent's context.
     #[serde(default)]
     pub skills: Vec<String>,
-    /// Provider-routing tags. Empty falls back to the default route.
+    /// Preferred provider-routing tags: providers carrying all of them are
+    /// chosen when any exist, otherwise any eligible provider serves. Empty
+    /// uses the default preference.
     #[serde(default)]
     pub model_tags: Vec<String>,
     /// Sampling temperature passed to the provider (if set).

@@ -88,8 +88,16 @@ pub trait AgentBackend: Send + Sync {
     }
 }
 
-/// Default routing tags when an agent specifies none.
+/// Default preferred routing tags when an agent specifies none.
 const ROUTE_TAGS: &[&str] = &["general", "reasoning", "code"];
+
+/// The route for an agent call: providers carrying all of `tags` are preferred,
+/// and any eligible provider serves when none does. Tags are free text in
+/// provider settings, so requiring them would leave every agent unusable on a
+/// deployment whose providers are tagged differently.
+fn preferring(tags: &[&str]) -> RouteRequest {
+    RouteRequest::preferring_tags(tags.iter().map(|&tag| tag.to_owned()).collect())
+}
 
 /// One decoded step of the model's plan.
 #[derive(Debug, Deserialize)]
@@ -160,7 +168,7 @@ impl hf_context::CompactionLlm for PoolCompactionLlm {
         let req = ChatRequest::from_messages(vec![Message::user(prompt.to_owned())]);
         let resp = self
             .pool
-            .chat_completion(&req, &RouteRequest::with_tags(ROUTE_TAGS))
+            .chat_completion(&req, &preferring(ROUTE_TAGS))
             .await
             .map_err(|e| e.to_string())?;
         // Record the summarization spend so long-session compaction shows up in
@@ -340,12 +348,12 @@ impl Agent {
         // window truncation.
         self.maybe_compact(&mut messages).await;
 
-        // Route to the providers this agent prefers, falling back to the
-        // default tag set when the agent specifies none.
-        let route: Vec<&str> = if self.definition.model_tags.is_empty() {
-            ROUTE_TAGS.to_vec()
+        // Prefer the providers this agent's tags name, or the default tag set
+        // when it names none.
+        let route = if self.definition.model_tags.is_empty() {
+            preferring(ROUTE_TAGS)
         } else {
-            self.definition.route_tags()
+            preferring(&self.definition.route_tags())
         };
 
         // Runaway-loop detection. `max_iterations` below is the hard backstop;
@@ -393,9 +401,7 @@ impl Agent {
             // Apply the agent's configured sampling temperature (previously set
             // in the definition but never plumbed into the request).
             req.temperature = self.definition.temperature;
-            let resp = pool
-                .chat_completion(&req, &RouteRequest::with_tags(&route))
-                .await?;
+            let resp = pool.chat_completion(&req, &route).await?;
             // Record the turn's token usage/cost as a diagnostic so interactive
             // agent spend shows up in the cost summary, like rank/harness/triage
             // (which route through LlmProviderBridge::with_diagnostics).

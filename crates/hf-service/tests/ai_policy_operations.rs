@@ -627,6 +627,40 @@ async fn report_with_require_and_no_pool_is_an_error() {
     );
 }
 
+/// The report prefers a `reasoning`/`code`/`general` model but composes on
+/// the only configured provider when it is tagged otherwise (the mock carries
+/// `test`), through the real provider pool's routing.
+#[tokio::test]
+async fn report_with_require_composes_on_a_provider_without_the_report_tags() {
+    common::install_managed_workspace("oxfuzz_ai_policy_ops_it");
+    let project = report_project();
+    let provider = Arc::new(hf_test_utils::mock_provider::MockProvider::fixed(
+        "a narrative no fact-sheet would contain",
+    ));
+    let pool = hf_provider::ProviderPoolImpl::from_providers(
+        vec![Arc::clone(&provider) as Arc<dyn hf_core::provider::LlmProvider>],
+        &hf_provider::ProviderPoolConfig::default(),
+    );
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), Some(Arc::new(pool)));
+
+    let markdown = container
+        .generate_report_for_run(
+            project.path(),
+            "parse_entry",
+            hf_service::ReportLanguage::En,
+            None,
+            AiPolicy::Require,
+        )
+        .await
+        .expect("the provider composes the narrative");
+
+    assert_eq!(provider.call_count(), 1, "the provider was reached");
+    assert!(
+        markdown.contains("a narrative no fact-sheet would contain"),
+        "the narrative answered: {markdown}"
+    );
+}
+
 /// `Require` surfaces a failed composition instead of downgrading to the
 /// fact-sheet.
 #[tokio::test]

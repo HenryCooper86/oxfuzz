@@ -1357,6 +1357,18 @@ fn mock_pool() -> Arc<dyn hf_core::provider::ProviderPool> {
     ))
 }
 
+/// Provider tags are free text in Settings. Chat prefers a
+/// `general`/`reasoning`/`code` model but must not refuse the only configured
+/// provider because it is tagged otherwise (the mock carries `test`).
+#[tokio::test]
+async fn chat_send_answers_from_a_provider_without_the_chat_tags() {
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), Some(mock_pool()));
+
+    let reply = container.chat_send("hello").await.unwrap();
+
+    assert_eq!(reply, "ok");
+}
+
 #[tokio::test]
 async fn thaw_provider_requires_a_configured_pool() {
     let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);

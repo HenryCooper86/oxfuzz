@@ -275,7 +275,11 @@ impl ServiceContainer {
         let resp = pool
             .chat_completion(
                 &req,
-                &RouteRequest::with_tags(&["general", "reasoning", "code"]),
+                &RouteRequest::preferring_tags(vec![
+                    "general".to_owned(),
+                    "reasoning".to_owned(),
+                    "code".to_owned(),
+                ]),
             )
             .await?;
         self.diagnostics

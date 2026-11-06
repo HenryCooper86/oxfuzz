@@ -697,7 +697,11 @@ impl ServiceContainer {
         let response = pool
             .chat_completion(
                 &ChatRequest::from_messages(messages),
-                &RouteRequest::with_tags(&["reasoning", "security", "general"]),
+                &RouteRequest::preferring_tags(vec![
+                    "reasoning".to_owned(),
+                    "security".to_owned(),
+                    "general".to_owned(),
+                ]),
             )
             .await?;
         self.diagnostics()
@@ -3453,6 +3457,7 @@ mod tests {
     struct ReportPool {
         content: String,
         captured: Mutex<Vec<hf_core::types::Message>>,
+        routes: Mutex<Vec<RouteRequest>>,
     }
 
     impl ReportPool {
@@ -3460,6 +3465,7 @@ mod tests {
             Self {
                 content: content.into(),
                 captured: Mutex::new(Vec::new()),
+                routes: Mutex::new(Vec::new()),
             }
         }
 
@@ -3480,9 +3486,10 @@ mod tests {
         async fn chat_completion(
             &self,
             request: &ChatRequest,
-            _route: &RouteRequest,
+            route: &RouteRequest,
         ) -> Result<ChatResponse, ProviderError> {
             self.captured.lock().unwrap().clone_from(&request.messages);
+            self.routes.lock().unwrap().push(route.clone());
             Ok(ChatResponse {
                 id: "automotive-report-test".to_owned(),
                 model: "grounded-test-model".to_owned(),
@@ -3797,7 +3804,8 @@ mod tests {
              evidence\nNo virtual replay is retained.\n\n### Recommended next actions\nReview the \
              captured states before deterministic mutation [OP:{operation_id}]."
         );
-        let service = service.with_provider_pool(Arc::new(ReportPool::new(interpretation)));
+        let pool = Arc::new(ReportPool::new(interpretation));
+        let service = service.with_provider_pool(Arc::clone(&pool) as Arc<dyn ProviderPool>);
 
         let report = service
             .generate_automotive_report_with_settings(
@@ -3818,6 +3826,13 @@ mod tests {
         assert!(report
             .markdown
             .contains("Retained evidence and service validation"));
+        // The `security` tag the report prefers is one the setup wizard never
+        // writes; requiring it would leave every deployment on the fallback.
+        let routes = pool.routes.lock().unwrap();
+        assert!(
+            routes.iter().all(|route| route.required_tags.is_empty()),
+            "the report route prefers tags, it does not require them: {routes:?}"
+        );
     }
 
     #[tokio::test]
