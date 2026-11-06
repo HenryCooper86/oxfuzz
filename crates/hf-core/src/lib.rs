@@ -26,6 +26,7 @@
 pub mod agent;
 pub mod armed;
 pub mod build;
+pub mod c_unit;
 pub mod checkpoint;
 pub mod clang_analysis;
 pub mod corpus;

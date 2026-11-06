@@ -9,6 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
+use hf_core::c_unit::{classify_unit, UnitRole};
 use hf_core::error::ClassifiedError;
 use hf_core::target::{
     InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetInventory, TargetKind,
@@ -1050,6 +1051,10 @@ fn extract_functions(
     complexity_map: &mut std::collections::HashMap<String, u32>,
 ) {
     let root = tree.root_node();
+    // A unit that is itself a fuzz harness is left out of the harness link
+    // (`hf_core::c_unit`), so nothing it defines can be called from a
+    // generated harness. Its functions still feed the call graph.
+    let shipped_harness = classify_unit(src) == UnitRole::FuzzEntry;
 
     let mut f = |node: tree_sitter::Node| {
         if node.kind() != "function_definition" {
@@ -1102,7 +1107,7 @@ fn extract_functions(
         // engine driver defines its own. `LLVMFuzzer*` functions are the
         // callbacks of a fuzz harness the project already ships. Both stay in
         // the call graph above.
-        if symbol == "main" || symbol.starts_with("LLVMFuzzer") {
+        if shipped_harness || symbol == "main" || symbol.starts_with("LLVMFuzzer") {
             return;
         }
         // Capture only the function prototype (declarator), not the whole
@@ -1501,6 +1506,55 @@ mod tests {
                 "{skipped} skipped: {symbols:?}"
             );
         }
+    }
+
+    #[test]
+    fn functions_of_a_shipped_fuzz_harness_are_not_candidates() {
+        // A unit that is itself a fuzz harness is left out of the harness
+        // link, so a helper it defines has no linked definition: offering it
+        // ends in "undefined reference". Its call edges still count.
+        let libfuzzer = "unsigned int psk_callback(void *ssl, const char *hint) { return hint[0]; }\n\
+                         int LLVMFuzzerTestOneInput(const unsigned char *d, unsigned long n) { return psk_callback(0, (const char *)d); }\n";
+        let persistent = "int parse_record(const char *data, int n) { return data[0] + n; }\n\
+                          int run(int argc, char **argv) { while (HF_ITER(0, 0)) { parse_record(argv[0], argc); } return 0; }\n";
+        for (unit, caller, callee) in [
+            (libfuzzer, "LLVMFuzzerTestOneInput", "psk_callback"),
+            (persistent, "run", "parse_record"),
+        ] {
+            assert!(c_candidates(unit).is_empty(), "{unit}");
+            assert!(cpp_candidates(unit).is_empty(), "{unit}");
+
+            let mut parser = TsParser::new();
+            parser
+                .set_language(&tree_sitter_c::LANGUAGE.into())
+                .unwrap();
+            let tree = parser.parse(unit, None).unwrap();
+            let mut calls = HashMap::new();
+            extract_functions(
+                &tree,
+                Path::new("client.c"),
+                unit,
+                TargetLanguage::C,
+                &mut Vec::new(),
+                &mut calls,
+                &mut HashMap::new(),
+            );
+            assert!(
+                calls
+                    .get(caller)
+                    .is_some_and(|callees| callees.contains(&callee.to_owned())),
+                "{caller} still records {callee}: {calls:?}"
+            );
+        }
+
+        // Library code that only mentions the callback is still a target.
+        let library = "int LLVMFuzzerTestOneInput(const unsigned char *d, unsigned long n);\n\
+                       int parse_record(const char *data, int n) { return data[0] + n; }\n";
+        let symbols: Vec<String> = c_candidates(library)
+            .into_iter()
+            .map(|c| c.symbol)
+            .collect();
+        assert_eq!(symbols, vec!["parse_record".to_owned()]);
     }
 
     #[test]

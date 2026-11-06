@@ -51,12 +51,13 @@ async fn discovery_finds_each_upstream_entry_point() {
 }
 
 #[tokio::test]
-async fn reference_harness_entry_points_are_not_offered_as_targets() {
+async fn nothing_defined_in_a_reference_harness_is_offered_as_a_target() {
     // The reference harnesses are the upstream human-written baselines; each
-    // defines `LLVMFuzzerTestOneInput`. That callback is the entry of a harness
-    // the project already ships, not code under test: a generated harness for
-    // it would define the same symbol, and the harness build leaves shipped
-    // harness files out of the link. Discovery therefore does not offer it.
+    // defines `LLVMFuzzerTestOneInput`. The harness build leaves shipped
+    // harness files out of the link, so neither their callbacks nor the
+    // helpers they define (`psk_callback` in upstream `openssl/client.c`) have
+    // a linked definition a generated harness could call. Discovery therefore
+    // offers nothing from them.
     let root = upstream_root().join("reference_harnesses");
     let harnesses = count_harness_sources(&root);
     assert!(
@@ -67,15 +68,14 @@ async fn reference_harness_entry_points_are_not_offered_as_targets() {
     let inv = hf_discovery::discover(&root, TargetLanguage::C)
         .await
         .expect("discover should succeed over the reference harnesses");
-    let entry_points: Vec<&str> = inv
+    let offered: Vec<String> = inv
         .candidates
         .iter()
-        .map(|c| c.symbol.as_str())
-        .filter(|symbol| symbol.starts_with("LLVMFuzzer"))
+        .map(|c| format!("{}::{}", c.relative_file(), c.symbol))
         .collect();
     assert!(
-        entry_points.is_empty(),
-        "harness callbacks are not targets: {entry_points:?}"
+        offered.is_empty(),
+        "shipped harness code is not a target: {offered:?}"
     );
 }
 

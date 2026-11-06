@@ -12,6 +12,16 @@ and 0.7.0 releases respectively.
 
 ## Unreleased
 
+### Fixed
+
+- Discovery no longer offers functions defined inside a fuzz harness the
+  project already ships (a file with `LLVMFuzzerTestOneInput`, `HF_ITER`, or
+  `__AFL_LOOP`), such as `psk_callback` in honggfuzz's `examples/openssl/client.c`.
+  The harness build leaves those files out of the link, so every harness for
+  such a target failed with "undefined reference". A folder made only of fuzz
+  harnesses now reports that it is already a fuzz harness; open the library it
+  tests as the project instead. Run discovery again to refresh the target list.
+
 ## 0.9.2 - 2026-11-05
 
 ### Added
