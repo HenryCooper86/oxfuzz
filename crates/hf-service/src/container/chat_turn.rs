@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use hf_core::error::ClassifiedError;
 use hf_core::provider::{
@@ -32,22 +33,65 @@ pub enum ChatCancelOutcome {
     /// repeated cancel of a turn that is still winding down is also accepted.
     Accepted,
     /// No turn with that id is running: it never started, already finished,
-    /// or has already committed its answer.
+    /// or has already committed its answer. A turn that has not registered
+    /// yet is refused when it does, so an early cancel still stops it.
     NotRunning,
 }
 
+/// How long a cancel for a turn that has not registered yet is remembered.
+/// Covers the request prelude between the client sending the turn and the
+/// turn registering; long enough for that, short enough that a cancel for a
+/// finished turn is forgotten before its id could plausibly be reused.
+const EARLY_CANCEL_TTL: Duration = Duration::from_secs(30);
+
+/// Upper bound on remembered early cancels; the oldest is evicted first.
+const EARLY_CANCEL_CAPACITY: usize = 64;
+
+#[derive(Default)]
+struct RegistryState {
+    turns: HashMap<Uuid, CancellationToken>,
+    /// Cancels that arrived before their turn registered, with arrival time.
+    early_cancels: HashMap<Uuid, Instant>,
+}
+
+impl RegistryState {
+    fn expire_early_cancels(&mut self, now: Instant) {
+        self.early_cancels
+            .retain(|_, at| now.saturating_duration_since(*at) < EARLY_CANCEL_TTL);
+    }
+
+    fn remember_early_cancel(&mut self, id: Uuid, now: Instant) {
+        self.expire_early_cancels(now);
+        if self.early_cancels.len() >= EARLY_CANCEL_CAPACITY
+            && !self.early_cancels.contains_key(&id)
+        {
+            let oldest = self
+                .early_cancels
+                .iter()
+                .min_by_key(|(_, at)| **at)
+                .map(|(id, _)| *id);
+            if let Some(oldest) = oldest {
+                self.early_cancels.remove(&oldest);
+            }
+        }
+        self.early_cancels.insert(id, now);
+    }
+}
+
 /// Cancellation tokens of running chat turns, keyed by the caller-chosen turn
-/// id. Shared by every clone of a container.
+/// id. Shared by every clone of a container. A cancel for an id that has not
+/// registered yet is remembered briefly (bounded) and refuses that id at
+/// registration, so a Stop pressed during the request prelude still lands.
 #[derive(Clone, Default)]
 pub(crate) struct ChatTurnRegistry {
-    turns: Arc<std::sync::Mutex<HashMap<Uuid, CancellationToken>>>,
+    state: Arc<std::sync::Mutex<RegistryState>>,
 }
 
 impl ChatTurnRegistry {
-    fn turns(&self) -> std::sync::MutexGuard<'_, HashMap<Uuid, CancellationToken>> {
+    fn state(&self) -> std::sync::MutexGuard<'_, RegistryState> {
         // Entries are inserted and removed whole, so a poisoned map is still
         // consistent.
-        self.turns
+        self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -56,16 +100,25 @@ impl ChatTurnRegistry {
     ///
     /// # Errors
     /// Rejects an id that names a turn that is still running, so one cancel can
-    /// never reach two turns.
+    /// never reach two turns, and an id cancelled before it registered
+    /// ([`ClassifiedError::Cancelled`]).
     pub(crate) fn register(&self, id: Uuid) -> Result<ChatTurnRegistration, ClassifiedError> {
-        let mut turns = self.turns();
-        if turns.contains_key(&id) {
+        self.register_at(id, Instant::now())
+    }
+
+    fn register_at(&self, id: Uuid, now: Instant) -> Result<ChatTurnRegistration, ClassifiedError> {
+        let mut state = self.state();
+        state.expire_early_cancels(now);
+        if state.early_cancels.remove(&id).is_some() {
+            return Err(ClassifiedError::Cancelled);
+        }
+        if state.turns.contains_key(&id) {
             return Err(ClassifiedError::Validation(format!(
                 "chat turn {id} is already running"
             )));
         }
         let cancel = CancellationToken::new();
-        turns.insert(id, cancel.clone());
+        state.turns.insert(id, cancel.clone());
         Ok(ChatTurnRegistration {
             registry: self.clone(),
             id,
@@ -75,13 +128,19 @@ impl ChatTurnRegistry {
     }
 
     pub(crate) fn cancel(&self, id: Uuid) -> ChatCancelOutcome {
-        match self.turns().get(&id) {
-            Some(cancel) => {
-                cancel.cancel();
-                ChatCancelOutcome::Accepted
-            }
-            None => ChatCancelOutcome::NotRunning,
+        self.cancel_at(id, Instant::now())
+    }
+
+    fn cancel_at(&self, id: Uuid, now: Instant) -> ChatCancelOutcome {
+        let mut state = self.state();
+        if let Some(cancel) = state.turns.get(&id) {
+            cancel.cancel();
+            return ChatCancelOutcome::Accepted;
         }
+        // Not registered: it may still be in its request prelude. Remember the
+        // cancel so the turn is refused when it registers.
+        state.remember_early_cancel(id, now);
+        ChatCancelOutcome::NotRunning
     }
 }
 
@@ -103,8 +162,8 @@ impl ChatTurnRegistration {
     /// first. The check and the removal happen under the registry lock that
     /// [`ChatTurnRegistry::cancel`] takes, so the two cannot interleave.
     pub(crate) fn commit(&mut self) -> bool {
-        let mut turns = self.registry.turns();
-        turns.remove(&self.id);
+        let mut state = self.registry.state();
+        state.turns.remove(&self.id);
         self.committed = true;
         !self.cancel.is_cancelled()
     }
@@ -113,7 +172,7 @@ impl ChatTurnRegistration {
 impl Drop for ChatTurnRegistration {
     fn drop(&mut self) {
         if !self.committed {
-            self.registry.turns().remove(&self.id);
+            self.registry.state().turns.remove(&self.id);
         }
     }
 }
@@ -308,13 +367,51 @@ mod tests {
     }
 
     #[test]
+    fn an_early_cancel_refuses_the_turn_at_registration() {
+        let registry = ChatTurnRegistry::default();
+        let id = Uuid::new_v4();
+
+        assert_eq!(registry.cancel(id), ChatCancelOutcome::NotRunning);
+        assert!(matches!(
+            registry.register(id),
+            Err(ClassifiedError::Cancelled)
+        ));
+        // Consumed: the id is usable afterwards.
+        assert!(registry.register(id).is_ok());
+    }
+
+    #[test]
+    fn an_early_cancel_expires_and_is_bounded() {
+        let registry = ChatTurnRegistry::default();
+        let start = Instant::now();
+        let stale = Uuid::new_v4();
+        registry.cancel_at(stale, start);
+        let later = start + EARLY_CANCEL_TTL + Duration::from_secs(1);
+        assert!(registry.register_at(stale, later).is_ok(), "expired");
+
+        let first = Uuid::new_v4();
+        registry.cancel_at(first, start);
+        for i in 0..EARLY_CANCEL_CAPACITY {
+            registry.cancel_at(Uuid::new_v4(), start + Duration::from_millis(1 + i as u64));
+        }
+        assert_eq!(registry.state().early_cancels.len(), EARLY_CANCEL_CAPACITY);
+        assert!(
+            registry.register_at(first, start).is_ok(),
+            "the oldest was evicted"
+        );
+    }
+
+    #[test]
     fn a_dropped_registration_frees_its_id() {
         let registry = ChatTurnRegistry::default();
         let id = Uuid::new_v4();
         drop(registry.register(id).unwrap());
 
-        assert_eq!(registry.cancel(id), ChatCancelOutcome::NotRunning);
         assert!(registry.register(id).is_ok());
+        assert_eq!(
+            registry.cancel(Uuid::new_v4()),
+            ChatCancelOutcome::NotRunning
+        );
     }
 
     #[test]
