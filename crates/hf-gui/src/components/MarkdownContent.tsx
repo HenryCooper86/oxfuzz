@@ -55,6 +55,9 @@ const components: Components = {
       {children}
     </code>
   ),
+  // Cells wrap only between words: the container's overflow-wrap:anywhere
+  // would let a table column shrink to one character. A table wider than the
+  // message scrolls sideways in its wrapper instead.
   table: ({ children }) => (
     <div style={{ overflowX: "auto", margin: "0 0 0.5em" }}>
       <table style={{ borderCollapse: "collapse", fontSize: "0.95em" }}>{children}</table>
@@ -68,12 +71,15 @@ const components: Components = {
         textAlign: "left",
         background: "var(--surface-active)",
         fontWeight: 600,
+        overflowWrap: "normal",
       }}
     >
       {children}
     </th>
   ),
-  td: ({ children }) => <td style={{ border: "1px solid var(--border)", padding: "4px 8px" }}>{children}</td>,
+  td: ({ children }) => (
+    <td style={{ border: "1px solid var(--border)", padding: "4px 8px", overflowWrap: "normal" }}>{children}</td>
+  ),
 };
 
 /** Safe Markdown (GFM) rendering for assistant messages. */
