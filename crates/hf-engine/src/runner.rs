@@ -101,7 +101,18 @@ pub struct RunResult {
 ///   copied into this run's staging instead of refusing the existing tree.
 ///   A hand-set `AFL_AUTORESUME` in `cfg.env` is rejected as a second source
 ///   of resume truth, in both resume states.
-fn run_env(
+/// - AFL++ discards a seed that crashes the target and, when every seed
+///   crashes, aborts ("We need at least one valid input seed that does not
+///   crash!") with nothing saved. `AFL_CRASHING_SEEDS_AS_NEW_CRASH=1` (AFL++
+///   4.09c) saves such a seed as a crash instead, so it is triaged as a finding.
+///   An explicit value in `cfg.env` is kept.
+///
+/// This is the one definition of an engine run's environment: the harness
+/// smoke qualification uses it too, so smoke and campaign runs agree.
+///
+/// # Errors
+/// Returns `ClassifiedError::Validation` for a hand-set `AFL_AUTORESUME`.
+pub fn run_env(
     engine: EngineKind,
     cfg: &FuzzRunConfig,
 ) -> Result<std::collections::HashMap<String, String>, ClassifiedError> {
@@ -127,6 +138,8 @@ fn run_env(
         if cfg.resume {
             env.insert("AFL_AUTORESUME".to_owned(), "1".to_owned());
         }
+        env.entry("AFL_CRASHING_SEEDS_AS_NEW_CRASH".to_owned())
+            .or_insert_with(|| "1".to_owned());
     }
     Ok(env)
 }

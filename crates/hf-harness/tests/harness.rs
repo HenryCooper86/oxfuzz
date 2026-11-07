@@ -478,6 +478,62 @@ async fn smoke_fuzz_uses_one_resolved_config_for_command_runtime_and_summary() {
 }
 
 #[tokio::test]
+async fn afl_smoke_runs_with_the_campaign_run_environment() {
+    // Smoke qualifies the campaign's argv and must also qualify its
+    // environment: without AFL_CRASHING_SEEDS_AS_NEW_CRASH a smoke seed that
+    // crashes the target makes AFL++ abort with nothing saved, which reads as
+    // "no fuzzer activity" instead of a finding.
+    let rt = SmokePolicyRuntime::default();
+    let harness = Harness {
+        id: Uuid::new_v4(),
+        target_id: Uuid::new_v4(),
+        engine: EngineKind::AflPlusPlus,
+        source: String::new(),
+        language: TargetLanguage::C,
+        build_cmd: BuildCommand {
+            compiler: "afl-clang-fast".to_owned(),
+            args: vec![],
+            output: PathBuf::from("fuzz"),
+            extra_flags: Vec::new(),
+        },
+        sanitizer: Sanitizer::Address,
+        status: HarnessStatus::Compiled,
+        smoke_run: None,
+        custom_mutator: None,
+        cmplog: None,
+    };
+    let mut cfg = smoke_config(&harness);
+    cfg.env
+        .push(("AFL_SKIP_CPUFREQ".to_owned(), "1".to_owned()));
+    let workspace = tempfile::tempdir().expect("temp workspace");
+
+    smoke_fuzz_in_paths_with_config_and_sandbox_image(
+        harness,
+        &rt,
+        workspace.path(),
+        Path::new("runs/smoke/corpus"),
+        Path::new("runs/smoke/out"),
+        &cfg,
+        None,
+    )
+    .await
+    .expect("smoke runs");
+
+    let env = rt.limits.lock().unwrap().clone().unwrap().env;
+    assert_eq!(
+        env,
+        hf_engine::runner::run_env(EngineKind::AflPlusPlus, &cfg).unwrap(),
+        "smoke and campaign environments must agree"
+    );
+    assert_eq!(
+        env.get("AFL_CRASHING_SEEDS_AS_NEW_CRASH")
+            .map(String::as_str),
+        Some("1")
+    );
+    assert_eq!(env.get("AFL_SKIP_CPUFREQ").map(String::as_str), Some("1"));
+}
+
+#[tokio::test]
 async fn honggfuzz_smoke_bounds_feedback_shared_memory() {
     let rt = SmokePolicyRuntime::default();
     let harness = Harness {

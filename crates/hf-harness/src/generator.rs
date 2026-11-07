@@ -782,6 +782,42 @@ pub const SMOKE_WALL_CLOCK_EXPIRED: &str = "smoke fuzz: sandbox wall-clock limit
 /// example libhfuzz's "Define `LLVMFuzzerTestOneInput`" or a non-zero return.
 const SMOKE_FAILURE_OUTPUT_CHARS: usize = 2000;
 
+/// The engine output a no-activity smoke error carries: terminal escape codes
+/// removed and the END kept, because engines print their abort reason last
+/// (AFL++ ends a long colored banner with "PROGRAM ABORT : ..."). A cut
+/// excerpt starts with "...".
+fn smoke_failure_excerpt(output: &str) -> String {
+    let mut plain = String::with_capacity(output.len());
+    let mut chars = output.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            plain.push(c);
+            continue;
+        }
+        // CSI sequences (ESC [ params final-byte) carry colors; any other
+        // escape is dropped with the one character that follows it.
+        if chars.next_if_eq(&'[').is_some() {
+            for byte in chars.by_ref() {
+                if ('@'..='~').contains(&byte) {
+                    break;
+                }
+            }
+        } else {
+            chars.next();
+        }
+    }
+    let plain = plain.trim();
+    let count = plain.chars().count();
+    if count <= SMOKE_FAILURE_OUTPUT_CHARS {
+        return plain.to_owned();
+    }
+    let tail: String = plain
+        .chars()
+        .skip(count - SMOKE_FAILURE_OUTPUT_CHARS)
+        .collect();
+    format!("...{tail}")
+}
+
 /// The diagnostics of a smoke failure that a harness rewrite can address, or
 /// `None` for every other error.
 ///
@@ -914,7 +950,10 @@ pub async fn smoke_fuzz_in_paths_with_config_and_sandbox_image(
         max_mem_mb: config.max_mem_mb,
         max_cpus: config.max_cpus,
         max_duration_secs: smoke_sandbox_duration(duration_secs),
-        env: config.env.iter().cloned().collect(),
+        // The campaign's environment for the instance smoke actually runs, so
+        // engine defaults (crashing AFL++ seeds kept as crashes, ...) apply
+        // to qualification exactly as they will to the campaign.
+        env: hf_engine::runner::run_env(harness.engine, &smoke_instance_config(config))?,
         ptrace: false,
     };
     let honggfuzz = harness.engine == EngineKind::Honggfuzz;
@@ -992,10 +1031,7 @@ pub async fn smoke_fuzz_in_paths_with_config_and_sandbox_image(
     if !ran && harness.custom_mutator.is_none() {
         return Err(ClassifiedError::Harness(format!(
             "{SMOKE_NO_ACTIVITY}; output: {}",
-            combined
-                .chars()
-                .take(SMOKE_FAILURE_OUTPUT_CHARS)
-                .collect::<String>()
+            smoke_failure_excerpt(&combined)
         )));
     }
     let passed = crashes == 0 && ran && mutator_exercised;
@@ -1076,8 +1112,7 @@ fn smoke_command(
     out: &str,
     config: &hf_core::engine::FuzzRunConfig,
 ) -> Result<Vec<String>, ClassifiedError> {
-    let mut single_instance = config.clone();
-    single_instance.max_cpus = 1;
+    let single_instance = smoke_instance_config(config);
     match engine {
         EngineKind::LibFuzzer => {
             hf_engine::libfuzzer::build_run_args(&single_instance, binary, corpus, out)
@@ -1097,6 +1132,17 @@ fn smoke_command(
             hf_engine::go_native::build_run_args(&single_instance, binary, corpus, out)
         }
     }
+}
+
+/// The configuration of the one engine instance smoke runs: the campaign's
+/// config with the CPU allocation pinned to a single instance. Both the smoke
+/// argv and its environment derive from it.
+fn smoke_instance_config(
+    config: &hf_core::engine::FuzzRunConfig,
+) -> hf_core::engine::FuzzRunConfig {
+    let mut single_instance = config.clone();
+    single_instance.max_cpus = 1;
+    single_instance
 }
 
 /// Wall-clock budget for the smoke sandbox: the fuzzer's own self-limit plus
@@ -1616,6 +1662,32 @@ mod tests {
             &hf_core::runtime::SandboxOptions::default(),
         )
         .await
+    }
+
+    #[test]
+    fn a_smoke_failure_excerpt_keeps_the_end_without_terminal_codes() {
+        // AFL++ prints a long colored banner and its abort reason last; a
+        // head-first cut dropped the reason and kept the escape codes.
+        let banner = "\u{1b}[1;92m[+] \u{1b}[0mbanner line\n".repeat(200);
+        let output = format!(
+            "{banner}\u{1b}[1;91m[-] PROGRAM ABORT : \u{1b}[0mWe need at least one valid input seed that does not crash!"
+        );
+        let excerpt = smoke_failure_excerpt(&output);
+        assert!(
+            excerpt.ends_with("We need at least one valid input seed that does not crash!"),
+            "{excerpt}"
+        );
+        assert!(!excerpt.contains('\u{1b}'), "{excerpt}");
+        assert!(
+            excerpt.starts_with("..."),
+            "a cut excerpt says so: {excerpt}"
+        );
+        assert!(excerpt.chars().count() <= SMOKE_FAILURE_OUTPUT_CHARS + 3);
+
+        assert_eq!(
+            smoke_failure_excerpt("short \u{1b}[0moutput"),
+            "short output"
+        );
     }
 
     #[test]

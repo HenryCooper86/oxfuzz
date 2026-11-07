@@ -32,6 +32,16 @@ here as the record.
   known-findings approval directly, the approval evidence says "found N
   crash(es)" instead of "not passed", and the suggested next action names
   the crash.
+- With AFL++, a target that crashed on the smoke test's seed input (for
+  example a fixed-size buffer smaller than the seed) was reported as "no
+  fuzzer activity detected": AFL++ discards a crashing seed and stops when
+  every seed crashes, saving nothing. That error is treated as a harness
+  defect, so the AI repair loop rewrote a correct harness and the real
+  overflow was never reported. AFL++ runs (smoke and campaigns) now set
+  `AFL_CRASHING_SEEDS_AS_NEW_CRASH=1`, so such a seed is saved and triaged as
+  a crash. The smoke test now uses the same run environment as campaigns,
+  and its "no activity" error shows the end of the engine output (where the
+  reason is) without terminal color codes.
 
 ## 0.9.3 - 2026-11-07
 

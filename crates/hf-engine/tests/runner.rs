@@ -356,6 +356,45 @@ async fn afl_resume_injects_autoresume_and_rejects_a_hand_set_one() {
     assert!(!libfuzzer.contains_key("AFL_AUTORESUME"));
 }
 
+/// AFL++ discards a seed that crashes the target and, when every seed
+/// crashes, aborts without saving anything, so the crash is lost. The run
+/// environment keeps crashing seeds as findings; other engines report a
+/// crashing input on their own and never see the variable.
+#[test]
+fn afl_runs_keep_crashing_seeds_as_crashes() {
+    let afl = hf_engine::runner::run_env(
+        EngineKind::AflPlusPlus,
+        &run_config(EngineKind::AflPlusPlus, 10),
+    )
+    .unwrap();
+    assert_eq!(
+        afl.get("AFL_CRASHING_SEEDS_AS_NEW_CRASH")
+            .map(String::as_str),
+        Some("1"),
+        "{afl:?}"
+    );
+
+    // An operator's explicit value is theirs to keep.
+    let mut cfg = run_config(EngineKind::AflPlusPlus, 10);
+    cfg.env
+        .push(("AFL_CRASHING_SEEDS_AS_NEW_CRASH".to_owned(), "0".to_owned()));
+    let explicit = hf_engine::runner::run_env(EngineKind::AflPlusPlus, &cfg).unwrap();
+    assert_eq!(
+        explicit
+            .get("AFL_CRASHING_SEEDS_AS_NEW_CRASH")
+            .map(String::as_str),
+        Some("0")
+    );
+
+    for engine in [EngineKind::LibFuzzer, EngineKind::Honggfuzz] {
+        let env = hf_engine::runner::run_env(engine, &run_config(engine, 10)).unwrap();
+        assert!(
+            !env.contains_key("AFL_CRASHING_SEEDS_AS_NEW_CRASH"),
+            "{engine:?}: {env:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn runner_libfuzzer_parses_progress_and_coverage() {
     let rt = MockRuntime {
