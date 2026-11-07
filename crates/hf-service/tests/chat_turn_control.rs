@@ -582,15 +582,19 @@ async fn a_turn_queued_behind_its_session_lock_can_be_cancelled() {
         .await
         .unwrap();
     let queued_turn = spawn_turn(queued);
-    // The queued turn registers before it waits for the session lock; retry
-    // until it has.
-    tokio::time::timeout(WAIT, async {
-        while service.cancel_chat_turn(queued) != ChatCancelOutcome::Accepted {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("the queued turn must register");
+    // One cancel stops the queued turn whenever it lands: after the turn has
+    // registered (it registers before waiting for the session lock) it is
+    // accepted and wakes the waiting turn; before that, the cancel is
+    // remembered and the turn is refused at registration. Retrying until
+    // "accepted" would spin forever in the second case.
+    let outcome = service.cancel_chat_turn(queued);
+    assert!(
+        matches!(
+            outcome,
+            ChatCancelOutcome::Accepted | ChatCancelOutcome::NotRunning
+        ),
+        "{outcome:?}"
+    );
     let result = tokio::time::timeout(WAIT, queued_turn)
         .await
         .expect("a queued turn must not wait for the running one to finish")
