@@ -2408,8 +2408,12 @@ impl SchedulerManager {
         Option<tokio::sync::OwnedMutexGuard<()>>,
         Option<SerialRequest>,
     ) {
-        let mut request: Option<SerialRequest> =
-            lock.map(|lock| Box::pin(lock.lock_owned()) as SerialRequest);
+        // Unconstrained so the poll below always reaches the lock's queue: under
+        // a spent cooperative budget, tokio's acquire returns Pending before
+        // queueing, and the request would join later in task order instead.
+        let mut request: Option<SerialRequest> = lock.map(|lock| {
+            Box::pin(tokio::task::coop::unconstrained(lock.lock_owned())) as SerialRequest
+        });
         let guard = if let Some(request) = request.as_mut() {
             match std::future::poll_fn(|cx| {
                 std::task::Poll::Ready(std::future::Future::poll(request.as_mut(), cx))
@@ -6271,6 +6275,50 @@ mod tests {
             completed,
             "fallback completion was pruned before persistence"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_serial_reservation_queues_even_when_the_task_budget_is_spent() {
+        // Backfill keeps trigger order only if each reservation joins the
+        // lock's FIFO queue when it is made. Tokio's cooperative budget can
+        // make that first poll return Pending before the request is queued;
+        // the request then joins whenever its task is scheduled, out of order.
+        let lock = Arc::new(Mutex::new(()));
+        let held = Arc::clone(&lock).lock_owned().await;
+        let spare = Mutex::new(());
+        for _ in 0..10_000 {
+            if !tokio::task::coop::has_budget_remaining() {
+                break;
+            }
+            drop(spare.lock().await);
+        }
+        assert!(
+            !tokio::task::coop::has_budget_remaining(),
+            "the test must spend the budget before the first reservation"
+        );
+        let (first_guard, first) = SchedulerManager::reserve_serial(Some(Arc::clone(&lock))).await;
+        tokio::task::yield_now().await;
+        let (second_guard, second) =
+            SchedulerManager::reserve_serial(Some(Arc::clone(&lock))).await;
+        assert!(first_guard.is_none() && second_guard.is_none());
+
+        drop(held);
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        // The later reservation's task is spawned first, so an unqueued
+        // earlier reservation would lose the lock to it.
+        let second_order = Arc::clone(&order);
+        let second_task = tokio::spawn(async move {
+            let _guard = second.expect("second reservation is pending").await;
+            second_order.lock().unwrap().push("second");
+        });
+        let first_order = Arc::clone(&order);
+        let first_task = tokio::spawn(async move {
+            let _guard = first.expect("first reservation is pending").await;
+            first_order.lock().unwrap().push("first");
+        });
+        first_task.await.unwrap();
+        second_task.await.unwrap();
+        assert_eq!(*order.lock().unwrap(), ["first", "second"]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

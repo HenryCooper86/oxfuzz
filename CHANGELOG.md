@@ -18,6 +18,12 @@ here as the record.
   in. It now checks out oxfuzz at a pinned release (`OXFUZZ_REF`) into
   `.oxfuzz/`, builds there, and fuzzes your own checkout, so it can be copied
   into the project you want to fuzz.
+- A schedule with the backfill missed-run policy could run its backfilled
+  occurrences out of trigger order under load. Each occurrence reserves its
+  place in the schedule's queue before it is dispatched, but that reservation
+  could be deferred by the async runtime's fairness budget and then join the
+  queue in whatever order the worker threads ran. Reservations now always join
+  the queue when they are made.
 
 ## 0.9.3 - 2026-11-07
 
