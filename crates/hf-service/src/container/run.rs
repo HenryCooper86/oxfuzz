@@ -110,8 +110,10 @@ const AFL_STATS_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_s
 /// tree rather than stdout, and the tree is bind-mounted to the host, so the
 /// live status line cannot come from the engine's output stream. Poll the
 /// bind-mounted file every `poll_interval`; each *changed* snapshot becomes
-/// one [`FuzzProgress::Stats`] event through the same callback the engine
-/// stream uses. Poll failures (a mid-write snapshot, a not-yet-flushed file)
+/// the live events of `AflFuzzerStats::live_progress_events` (edges, exec/s,
+/// new-crash delta, then the full [`FuzzProgress::Stats`]) through the same
+/// callback the engine stream uses, so the run tiles and campaign telemetry
+/// see the same signals other engines print on stdout. Poll failures (a mid-write snapshot, a not-yet-flushed file)
 /// are logged and retried on the next tick -- they never fail the run.
 async fn poll_afl_stats_while<F, S>(
     run: F,
@@ -126,6 +128,7 @@ where
     tokio::pin!(run);
     let mut interval = tokio::time::interval(poll_interval);
     let mut last: Option<hf_engine::afl::AflFuzzerStats> = None;
+    let mut reported_crashes = 0_u64;
     loop {
         tokio::select! {
             result = &mut run => return result,
@@ -155,7 +158,10 @@ where
                 if last.as_ref() == Some(&stats) {
                     continue;
                 }
-                emit(FuzzProgress::Stats(stats.to_engine_stats()));
+                for event in stats.live_progress_events(reported_crashes) {
+                    emit(event);
+                }
+                reported_crashes = reported_crashes.max(stats.saved_crashes.unwrap_or(0));
                 last = Some(stats);
             }
         }
@@ -4101,6 +4107,65 @@ mod afl_stats_polling_tests {
         assert!(
             events.lock().unwrap().is_empty(),
             "no fuzzer_stats file means no stats events"
+        );
+    }
+
+    #[tokio::test]
+    async fn poller_drives_the_live_tile_signals_and_counts_each_crash_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path();
+        std::fs::create_dir(output.join("default")).unwrap();
+        std::fs::write(
+            output.join("default/fuzzer_stats"),
+            "execs_done : 100\nexecs_per_sec : 50\nedges_found : 4\nsaved_crashes : 1\n",
+        )
+        .unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = recorded(&events);
+        let writer = output.to_path_buf();
+        let run = async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            std::fs::write(
+                writer.join("default/fuzzer_stats"),
+                "execs_done : 300\nexecs_per_sec : 90\nedges_found : 9\nsaved_crashes : 3\n",
+            )
+            .unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Ok::<_, ClassifiedError>(())
+        };
+
+        poll_afl_stats_while(run, output, Duration::from_millis(10), &sink)
+            .await
+            .unwrap();
+
+        let events = events.lock().unwrap();
+        let edges: Vec<u64> = events
+            .iter()
+            .filter_map(|e| match e {
+                FuzzProgress::EdgesCovered(v) => Some(*v),
+                _ => None,
+            })
+            .collect();
+        let rates: Vec<f64> = events
+            .iter()
+            .filter_map(|e| match e {
+                FuzzProgress::ExecsPerSec(v) => Some(*v),
+                _ => None,
+            })
+            .collect();
+        let crashes: Vec<u32> = events
+            .iter()
+            .filter_map(|e| match e {
+                FuzzProgress::CrashesFound(v) => Some(*v),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(edges, vec![4, 9], "{events:?}");
+        assert_eq!(rates, vec![50.0, 90.0], "{events:?}");
+        assert_eq!(
+            crashes,
+            vec![1, 2],
+            "deltas sum to the saved-crash total, never double counting: {events:?}"
         );
     }
 

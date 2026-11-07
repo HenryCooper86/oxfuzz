@@ -5,7 +5,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use hf_core::engine::FuzzRunConfig;
+use hf_core::engine::{FuzzProgress, FuzzRunConfig};
 use hf_core::error::ClassifiedError;
 
 /// Maximum accepted size of one run-owned AFL++ `fuzzer_stats` snapshot.
@@ -504,6 +504,34 @@ impl AflFuzzerStats {
             start_time_epoch: self.start_time_epoch.min(next.start_time_epoch),
             stability_pct: min_optional_rate(self.stability_pct, next.stability_pct),
         }
+    }
+
+    /// The live progress events one snapshot contributes to a running campaign.
+    ///
+    /// afl-fuzz run without a terminal prints no periodic status lines, so the
+    /// stats file is the only live source. It is projected onto the same scalar
+    /// events every other engine's stdout parsing produces (`EdgesCovered`,
+    /// `ExecsPerSec`, `CrashesFound`), which the run tiles and campaign
+    /// telemetry already consume, followed by the full [`FuzzProgress::Stats`]
+    /// snapshot. `reported_crashes` is the crash total already announced for
+    /// this run: only the increase is emitted, so the deltas the presentation
+    /// layer sums equal `saved_crashes` and never double count.
+    #[must_use]
+    pub fn live_progress_events(&self, reported_crashes: u64) -> Vec<FuzzProgress> {
+        let mut events = Vec::with_capacity(4);
+        if let Some(edges) = self.edges_found {
+            events.push(FuzzProgress::EdgesCovered(edges));
+        }
+        if let Some(rate) = self.execs_per_sec.filter(|rate| rate.is_finite()) {
+            events.push(FuzzProgress::ExecsPerSec(rate));
+        }
+        if let Some(saved) = self.saved_crashes.filter(|saved| *saved > reported_crashes) {
+            events.push(FuzzProgress::CrashesFound(
+                u32::try_from(saved - reported_crashes).unwrap_or(u32::MAX),
+            ));
+        }
+        events.push(FuzzProgress::Stats(self.to_engine_stats()));
+        events
     }
 
     /// Project the snapshot onto the engine-neutral stats event.

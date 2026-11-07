@@ -303,3 +303,61 @@ fn reader_rejects_symlinked_stats_files() {
 
     assert!(read_fuzzer_stats(run_output.path()).is_err());
 }
+
+#[test]
+fn live_events_restate_edges_rate_and_new_crashes_before_the_snapshot() {
+    use hf_core::engine::FuzzProgress;
+    let stats = parse_fuzzer_stats(b"edges_found : 12\nexecs_per_sec : 840.5\nsaved_crashes : 3\n")
+        .expect("snapshot parses");
+
+    let events = stats.live_progress_events(1);
+
+    assert_eq!(events.len(), 4, "{events:?}");
+    assert!(matches!(events[0], FuzzProgress::EdgesCovered(12)));
+    assert!(matches!(events[1], FuzzProgress::ExecsPerSec(r) if (r - 840.5).abs() < 1e-9));
+    assert!(
+        matches!(events[2], FuzzProgress::CrashesFound(2)),
+        "only the crashes beyond the already-reported count are new: {events:?}"
+    );
+    assert!(matches!(events[3], FuzzProgress::Stats(_)));
+}
+
+#[test]
+fn live_events_never_re_emit_crashes_already_reported() {
+    use hf_core::engine::FuzzProgress;
+    let stats = parse_fuzzer_stats(b"edges_found : 5\nsaved_crashes : 2\n").expect("parses");
+
+    for reported in [2, 7] {
+        let events = stats.live_progress_events(reported);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, FuzzProgress::CrashesFound(_))),
+            "no crash delta expected at {reported}: {events:?}"
+        );
+    }
+}
+
+#[test]
+fn live_events_skip_metrics_the_snapshot_omits() {
+    use hf_core::engine::FuzzProgress;
+    let stats = parse_fuzzer_stats(b"execs_done : 10\n").expect("parses");
+
+    let events = stats.live_progress_events(0);
+
+    assert_eq!(events.len(), 1, "only the Stats snapshot: {events:?}");
+    assert!(matches!(events[0], FuzzProgress::Stats(_)));
+}
+
+#[test]
+fn live_events_reject_non_finite_rates() {
+    use hf_core::engine::FuzzProgress;
+    let stats = AflFuzzerStats {
+        execs_per_sec: Some(f64::NAN),
+        ..AflFuzzerStats::default()
+    };
+    assert!(!stats
+        .live_progress_events(0)
+        .iter()
+        .any(|event| matches!(event, FuzzProgress::ExecsPerSec(_))));
+}
