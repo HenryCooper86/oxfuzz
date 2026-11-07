@@ -1144,6 +1144,7 @@ export const [enExtra, zhExtra] = dictionaries({
   "harness.evidence.reviewBypassed": ["LLM review bypassed","已绕过 LLM 评审"],
   "harness.evidence.smokePassed": ["passed","通过"],
   "harness.evidence.smokeNotPassed": ["not passed","未通过"],
+  "harness.evidence.smokeCrashed": ["found {n} crash(es)","发现 {n} 个崩溃"],
   "harness.evidence.lint": ["Lint findings","Lint 检查发现"],
   "harness.evidence.noLint": ["none for this source","此源无发现"],
   "harness.existingHarnessFor": ["Existing harness for","已有测试桩，对应目标"],

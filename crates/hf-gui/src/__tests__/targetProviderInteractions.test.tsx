@@ -1162,6 +1162,29 @@ describe("HarnessView request ownership", () => {
     expect([...view.container.querySelectorAll("button")].find((button) => button.textContent === "harness.approveForCampaigns")?.disabled).toBe(true);
   });
 
+  it("offers known-findings approval for a retained crash-bearing smoke run", async () => {
+    // The smoke ran in the one-click flow and crashed; this view never ran it.
+    configureScopeTransport((command) => {
+      if (command === "harness_review_queue") return Promise.resolve([{
+        harness_id: "retained-harness", target_id: "candidate-0", target_symbol: "parse_input", target_selector: "src/parser.c::parse_input",
+        project_root: PROJECT, engine: "LibFuzzer", language: "C", status: "SmokePassed", build_output: "fuzz",
+        smoke_passed: false, smoke_crashes: 2, smoke_execs_per_sec: 0, needs_review: true,
+        next_action: "Triage the smoke crash, or approve with known findings", source_preview: "retained source",
+        ai_review: { exercises_target: true, safe_to_execute: true, reasons: [], reviewed_at: "now" },
+        source_sha256: "a".repeat(64), binary_sha256: "b".repeat(64), lint: [],
+      }]);
+      if (command === "harness_promote_with_findings") return Promise.resolve({ status: "Promoted" });
+    });
+    const view = await mountHarnessScope();
+
+    expect([...view.container.querySelectorAll("button")].some((button) => button.textContent === "harness.approveForCampaigns")).toBe(false);
+    expect(view.container.textContent).toContain("harness.approveFindingsNotice");
+    await harnessButton(view, "harness.approveWithFindings");
+
+    expect(transportInvoke).toHaveBeenCalledWith("harness_promote_with_findings", expect.objectContaining({ target: expect.anything() }));
+    expect(transportInvoke).not.toHaveBeenCalledWith("harness_promote", expect.anything());
+  });
+
   it("attributes a rejected smoke invoke to the smoke step, not the compile step", async () => {
     configureScopeTransport((command) => {
       if (command === "harness_review_queue") return Promise.resolve([{

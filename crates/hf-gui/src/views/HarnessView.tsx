@@ -516,7 +516,13 @@ export function HarnessView({
   // Approval gating: a clean smoke run (or an existing smoke-passed harness) can
   // be approved for campaigns directly; a smoke run that surfaced crashes can
   // only be approved WITH known findings.
-  const smokeCrashed = !!smokeResult && smokeResult.crashes > 0;
+  // A smoke run from this view wins; otherwise the retained one counts, so a
+  // crash found elsewhere (the one-click flow) still offers known-findings
+  // approval. The server re-checks the retained run when approving.
+  const smokeCrashes = smokeResult
+    ? smokeResult.crashes
+    : canUseExisting && existing ? existing.smoke_crashes : 0;
+  const smokeCrashed = smokeCrashes > 0;
   const cleanApprovable = Boolean(smokeResult?.passed || (!smokeResult && canUseExisting && existing?.smoke_passed));
 
   return (
@@ -898,7 +904,7 @@ export function HarnessView({
             )}
             {smokeCrashed && promotionStatus !== "done" && (
               <p className="mt-1 text-xs" style={{ color: "var(--warning)" }}>
-                {t("harness.approveFindingsNotice", { n: smokeResult?.crashes ?? 0 })}
+                {t("harness.approveFindingsNotice", { n: smokeCrashes })}
               </p>
             )}
             {promotionResult && (

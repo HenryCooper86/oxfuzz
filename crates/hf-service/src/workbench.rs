@@ -7,7 +7,7 @@
 use chrono::{DateTime, Utc};
 use hf_core::crash::Crash;
 use hf_core::error::ClassifiedError;
-use hf_core::harness::{Harness, HarnessStatus};
+use hf_core::harness::{Harness, HarnessStatus, SmokeRunSummary};
 use hf_core::target::TargetCandidate;
 use hf_storage::{
     FiledIssueClaim, FiledIssueComplete, RemediationOperationRecord, RunRecord, RunStatus, Store,
@@ -104,6 +104,10 @@ pub struct HarnessReviewItem {
     /// Retained qualification run, absent for legacy or unqualified revisions.
     pub smoke_run_id: Option<Uuid>,
     pub smoke_passed: bool,
+    /// Crashes the retained smoke run found (0 when there is none). A
+    /// crash-bearing revision can only be approved with known findings, so
+    /// the approval surface needs this even when the smoke ran elsewhere.
+    pub smoke_crashes: u32,
     pub smoke_execs_per_sec: f64,
     pub needs_review: bool,
     pub next_action: String,
@@ -812,9 +816,10 @@ fn harness_review_items(
                 build_output: h.build_cmd.output.to_string_lossy().to_string(),
                 smoke_run_id: smoke.and_then(|s| s.run_id),
                 smoke_passed: smoke.is_some_and(|s| s.passed),
+                smoke_crashes: smoke.map_or(0, |s| s.crashes),
                 smoke_execs_per_sec: smoke.map_or(0.0, |s| s.execs_per_sec),
                 needs_review,
-                next_action: next_harness_action(h.status, smoke.is_some_and(|s| s.passed)),
+                next_action: next_harness_action(h.status, smoke),
                 source_preview: source_preview(&h.source),
                 ai_review: record.and_then(ai_review_summary),
                 source_sha256,
@@ -921,9 +926,14 @@ pub(crate) fn crash_review_items(
     items
 }
 
-fn next_harness_action(status: HarnessStatus, smoke_passed: bool) -> String {
+fn next_harness_action(status: HarnessStatus, smoke: Option<&SmokeRunSummary>) -> String {
+    let smoke_crashed = smoke.is_some_and(|s| s.crashes > 0);
+    let smoke_passed = smoke.is_some_and(|s| s.passed);
     match (status, smoke_passed) {
         (HarnessStatus::Draft, _) => "Compile in sandbox".to_owned(),
+        (HarnessStatus::Compiled | HarnessStatus::SmokePassed, _) if smoke_crashed => {
+            "Triage the smoke crash, or approve with known findings".to_owned()
+        }
         (HarnessStatus::Compiled, false) => "Run smoke fuzz".to_owned(),
         (HarnessStatus::Compiled, true) | (HarnessStatus::SmokePassed, _) => {
             "Review and approve for campaign".to_owned()

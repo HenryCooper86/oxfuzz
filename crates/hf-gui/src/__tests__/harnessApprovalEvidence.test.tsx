@@ -14,7 +14,7 @@ const base: HarnessReviewItem = {
   language: "C",
   status: "SmokePassed",
   build_output: "fuzz_parse_packet",
-  smoke_passed: true,
+  smoke_passed: true, smoke_crashes: 0,
   smoke_execs_per_sec: 512.0,
   needs_review: true,
   next_action: "promote",
@@ -35,6 +35,19 @@ function withItem(overrides: Partial<HarnessReviewItem>) {
 }
 
 describe("HarnessApprovalEvidence", () => {
+  it("names the smoke crash count instead of a bare failure", () => {
+    const html = renderToStaticMarkup(
+      <I18nProvider>
+        <HarnessApprovalEvidence
+          item={withItem({ smoke_passed: false, smoke_crashes: 1, smoke_execs_per_sec: 0 })}
+        />
+      </I18nProvider>,
+    );
+
+    expect(html).toContain("found 1 crash(es)");
+    expect(html).not.toContain("not passed");
+  });
+
   it("renders the review verdict, reasons, digests, and smoke stats together", () => {
     const html = renderToStaticMarkup(
       <I18nProvider>

@@ -399,6 +399,8 @@ export interface HarnessReviewItem {
   build_output: string;
   smoke_run_id?: string | null;
   smoke_passed: boolean;
+  /** Crashes the retained smoke run found; 0 when there is none. */
+  smoke_crashes: number;
   smoke_execs_per_sec: number;
   needs_review: boolean;
   next_action: string;

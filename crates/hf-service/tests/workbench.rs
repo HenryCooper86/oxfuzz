@@ -1027,6 +1027,47 @@ async fn harness_review_items_carry_the_qualification_evidence() {
         "{:?}",
         item.lint
     );
+    assert_eq!(item.smoke_crashes, 0);
+}
+
+#[tokio::test]
+async fn harness_review_items_carry_a_retained_smoke_crash() {
+    // A smoke run that crashed elsewhere (the one-click flow) must reach the
+    // approval surface as a crash, not as an unexplained failed smoke: the
+    // only approval it allows is the known-findings one.
+    let (container, dir) = test_container().await;
+    let store = container.store().expect("store configured");
+    let project = dir.path().join("crash-proj");
+    let target = sample_target(project.to_string_lossy().as_ref());
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    let mut harness = sample_harness(target.id);
+    harness.status = HarnessStatus::SmokePassed;
+    harness.smoke_run = Some(SmokeRunSummary {
+        duration_secs: 1,
+        execs_per_sec: 0.0,
+        crashes: 1,
+        passed: false,
+        source_sha256: Some("a".repeat(64)),
+        binary_sha256: Some("b".repeat(64)),
+        run_id: Some(Uuid::new_v4()),
+    });
+    store.upsert_harness(&harness).await.unwrap();
+
+    let items = container
+        .harness_review_queue(Some(project.as_path()), Some("parse_packet"))
+        .await
+        .unwrap();
+
+    assert_eq!(items.len(), 1);
+    let item = &items[0];
+    assert!(!item.smoke_passed);
+    assert_eq!(item.smoke_crashes, 1);
+    assert_eq!(serde_json::to_value(item).unwrap()["smoke_crashes"], 1);
+    assert!(
+        item.next_action.contains("known findings"),
+        "{}",
+        item.next_action
+    );
 }
 
 #[tokio::test]

@@ -24,6 +24,14 @@ here as the record.
   could be deferred by the async runtime's fairness budget and then join the
   queue in whatever order the worker threads ran. Reservations now always join
   the queue when they are made.
+- After "Fuzz this project" stopped on a smoke-test crash, the Harness view
+  offered only a disabled "Approve for Campaigns" with no reason; re-running
+  the smoke test in that view was the only way to reach "Approve with Known
+  Findings". Harness summaries now carry the retained smoke run's crash count
+  (`smoke_crashes` in the REST and desktop payloads), so the view offers
+  known-findings approval directly, the approval evidence says "found N
+  crash(es)" instead of "not passed", and the suggested next action names
+  the crash.
 
 ## 0.9.3 - 2026-11-07
 

@@ -124,7 +124,9 @@ export function HarnessApprovalEvidence({ item }: { item: HarnessReviewItem }) {
           <span className="text-text-muted">smoke </span>
           {item.smoke_passed
             ? localized(t, "harness.evidence.smokePassed", "passed")
-            : localized(t, "harness.evidence.smokeNotPassed", "not passed")}{" "}
+            : item.smoke_crashes > 0
+              ? t("harness.evidence.smokeCrashed", { n: item.smoke_crashes })
+              : localized(t, "harness.evidence.smokeNotPassed", "not passed")}{" "}
           ({item.smoke_execs_per_sec.toFixed(0)} exec/s)
         </span>
       </div>
