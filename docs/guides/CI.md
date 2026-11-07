@@ -193,3 +193,47 @@ docker logs -f oxfuzz-gitlab-runner
 ```
 
 Then push a branch and confirm the pipeline leaves "pending" and runs.
+
+### Runner disk
+
+The Docker executor keeps each project's build directory and cache in volumes
+named `runner-<id>-cache-<hash>` and never prunes them. This workspace adds
+tens of gigabytes to them per pipeline, so the runner host's disk eventually
+fills and jobs fail with `No space left on device`. The pipeline sets
+`CARGO_INCREMENTAL=0`, which keeps the cached `target/` about 40% smaller, but
+the volumes still grow.
+
+`scripts/ci/runner-cache-gc.sh` removes the runner cache volumes that no
+container is using, and only when the root filesystem is at least 70% full
+(`RUNNER_CACHE_GC_THRESHOLD` changes that). The next pipeline rebuilds what was
+removed, more slowly. Run it on the host whose Docker daemon runs the job
+containers, daily from a systemd timer:
+
+```bash
+sudo install -m 0755 scripts/ci/runner-cache-gc.sh /usr/local/sbin/runner-cache-gc
+sudo tee /etc/systemd/system/runner-cache-gc.service >/dev/null <<'EOF'
+[Unit]
+Description=Remove idle GitLab runner cache volumes when the disk is full
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/runner-cache-gc
+EOF
+sudo tee /etc/systemd/system/runner-cache-gc.timer >/dev/null <<'EOF'
+[Unit]
+Description=Daily runner cache volume cleanup
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now runner-cache-gc.timer
+```
+
+Check what it did with `journalctl -u runner-cache-gc`.

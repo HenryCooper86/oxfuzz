@@ -15,6 +15,13 @@
 stages:
   - gate
 
+variables:
+  # Incremental data saves little in CI (dependencies are never compiled
+  # incrementally) but was about 40% of each cached target/ (36 of 94 GB on
+  # the OrbStack runner) and helped fill the runner's disk. GitHub's
+  # rust-cache action sets the same.
+  CARGO_INCREMENTAL: "0"
+
 default:
   interruptible: true
 
