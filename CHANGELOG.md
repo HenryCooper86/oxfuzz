@@ -23,7 +23,12 @@ here as the record.
   the turn started is cancelled (`chat_cancel`, `POST /chat/cancel`).
 - Browser mode: agent approval prompts now arrive over SSE and are answered
   at `POST /chat/permission`; before, the web build silently denied every
-  gated action.
+  gated action. Interactive approval needs a server with `HF_WEB_TOKEN`; an
+  open-access server (`HF_WEB_TOKEN_OPTIONAL`) keeps the environment gate
+  (denied unless `HF_AUTO_APPROVE`) and refuses `POST /chat/permission` with
+  403, so no other local process can approve. A prompt that reaches no
+  `/events` client is denied at once with a logged reason instead of waiting
+  out the five-minute approval timeout.
 
 ### Fixed
 
@@ -48,6 +53,13 @@ here as the record.
   libFuzzer still updates on its own progress lines (new coverage and
   power-of-two pulses); honggfuzz prints no live status without a terminal
   and reports at the end of the run.
+  A resumed AFL++ run counts only the crashes it finds itself, not the ones
+  carried over from the run it resumes.
+- AI Assistant: pressing Stop while a turn is still starting now stops it,
+  the Stop button no longer sticks on "Stopping...", and an early stop is
+  shown as a stop rather than an error. The project chip and folder picker
+  are locked while a turn runs, so a turn can no longer finish into another
+  project's conversation.
 
 - `.github/workflows/fuzz.yml.example` only worked inside the oxfuzz
   repository: it built oxfuzz and the sandbox image from the checkout it ran
