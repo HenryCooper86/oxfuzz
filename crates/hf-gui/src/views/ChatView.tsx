@@ -60,6 +60,16 @@ function providerLabel(info: ModelInfo, all: ModelInfo[]): string {
 interface RunningTurn {
   id: string;
   cancelled: boolean;
+  // Stop was pressed for this turn, whatever the backend answered. A cancel
+  // that arrives before the turn registers answers not_running, and the turn
+  // is then refused as cancelled: that failure is the user's Stop.
+  stopRequested: boolean;
+}
+
+// Whether a failed turn is the backend's cancellation (ClassifiedError::Cancelled).
+function isCancellation(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /\bcancelled\b/i.test(message);
 }
 const CHAT_MODE_KEY = "hf_chat_mode";
 // Maps a project path (or "" for no active project) to its persistent chat
@@ -419,7 +429,7 @@ export function ChatView() {
     setMessages((m) => [...m, msg]);
     setInput("");
     setBusy(true);
-    const turn: RunningTurn = { id: crypto.randomUUID(), cancelled: false };
+    const turn: RunningTurn = { id: crypto.randomUUID(), cancelled: false, stopRequested: false };
     turnRef.current = turn;
 
     const transport = getTransport();
@@ -469,7 +479,7 @@ export function ChatView() {
         ]);
       }
     } catch (err) {
-      if (turn.cancelled) {
+      if (turn.cancelled || (turn.stopRequested && isCancellation(err))) {
         // A stopped turn is rolled back by the backend: show the stored
         // conversation again and hand the text back for editing.
         let canonical: ChatMessage[] | null = null;
@@ -528,6 +538,7 @@ export function ChatView() {
     const turn = turnRef.current;
     if (!turn || turn.cancelled) return;
     turn.cancelled = true;
+    turn.stopRequested = true;
     setStopping(true);
     try {
       const outcome = await getTransport().invoke<string>("chat_cancel", { turnId: turn.id });

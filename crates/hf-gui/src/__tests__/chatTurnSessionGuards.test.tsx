@@ -14,6 +14,7 @@ const backend = vi.hoisted(() => {
   const state = {
     cancelOutcome: "accepted",
     resolveTurn: undefined as undefined | ((answer: string) => void),
+    rejectTurn: undefined as undefined | ((error: Error) => void),
     sessions: 0,
   };
   const turns = (text: string) => [{ role: "assistant", content: text }];
@@ -25,8 +26,9 @@ const backend = vi.hoisted(() => {
       case "list_agents": return [];
       case "list_models": return [];
       case "chat_agent":
-        return new Promise((resolve) => {
+        return new Promise((resolve, reject) => {
           state.resolveTurn = resolve;
+          state.rejectTurn = reject;
         });
       case "chat_cancel": return state.cancelOutcome;
       default: return null;
@@ -88,6 +90,24 @@ it("releases the Stop button when the backend reports the turn is not running", 
   await act(async () => byLabel("Stop")!.click());
   expect(byLabel("Stop")!.disabled).toBe(false);
   expect(host.textContent).not.toContain("Stopping");
+});
+
+it("treats a turn stopped before it registered as stopped, not as an error", async () => {
+  // Stop raced the turn's registration: cancel answers not_running, then the
+  // backend refuses the turn as cancelled. That is the user's Stop, so the
+  // view restores the text for editing instead of reporting an error.
+  backend.state.cancelOutcome = "not_running";
+  await sendMessage("early stop");
+  await act(async () => byLabel("Stop")!.click());
+  await act(async () => backend.state.rejectTurn!(new Error("cancelled")));
+  expect(host.textContent).not.toContain("I hit an error");
+  expect(composer().value).toBe("early stop");
+});
+
+it("still reports a cancelled-looking failure when Stop was not pressed", async () => {
+  await sendMessage("no stop");
+  await act(async () => backend.state.rejectTurn!(new Error("cancelled")));
+  expect(host.textContent).toContain("I hit an error");
 });
 
 it("locks the project chip and folder picker while a turn runs", async () => {
