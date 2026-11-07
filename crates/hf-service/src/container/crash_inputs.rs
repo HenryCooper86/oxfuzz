@@ -218,22 +218,18 @@ mod crash_input_boundary_tests {
         assert!(error.to_string().contains("CASR staging"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn crash_staging_counts_uncopyable_inputs_as_skipped() {
-        use std::os::unix::fs::PermissionsExt as _;
-
+        // The copy fails at the destination: a directory already holds the
+        // staged name. Permission bits on the source would not do, because
+        // root (the user CI containers run as) reads a mode-000 file.
         let root = tempfile::tempdir().unwrap();
         let out = root.path().join("out");
         let staging = root.path().join("staging");
         std::fs::create_dir_all(&out).unwrap();
         std::fs::write(out.join("crash-fine"), b"fine").unwrap();
-        std::fs::write(out.join("crash-locked"), b"locked").unwrap();
-        std::fs::set_permissions(
-            out.join("crash-locked"),
-            std::fs::Permissions::from_mode(0o000),
-        )
-        .unwrap();
+        std::fs::write(out.join("crash-blocked"), b"blocked").unwrap();
+        std::fs::create_dir_all(staging.join("crash-blocked")).unwrap();
 
         let outcome = stage_crash_inputs(EngineKind::LibFuzzer, &out, &staging).unwrap();
         assert_eq!(outcome.staged, 1);
