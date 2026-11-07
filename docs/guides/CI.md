@@ -105,9 +105,11 @@ git tag v0.1.0 && git push origin v0.1.0
 - `performance.yml` is a manually dispatched diagnostic on `main` that records
   release-profile measurements on Linux, macOS, and Windows runners. It is not
   a merge gate.
-- `fuzz.yml.example` is an opt-in per-repository fuzz-on-PR gate. Copy it to
-  `fuzz.yml`, adjust the target, engine, and duration, and set the
-  `HF_PROVIDER_API_KEY` repository secret. It needs Docker on the runner and
+- `fuzz.yml.example` is an opt-in fuzz-on-PR gate for the repository you want
+  to fuzz. Copy it to `fuzz.yml` there, adjust the target, engine, and
+  duration, and set the `HF_PROVIDER_API_KEY` repository secret. It builds
+  oxfuzz and its sandbox image from the release named by `OXFUZZ_REF` in a
+  `.oxfuzz/` checkout. It needs Docker on the runner and
   fails the check on any crash, uploading SARIF to code scanning.
 - `sandbox-image.yml` is a manually dispatched build of the fuzzing sandbox
   image on native amd64 and arm64 runners, verified with

@@ -11,6 +11,14 @@ here as the record.
 
 ## Unreleased
 
+### Fixed
+
+- `.github/workflows/fuzz.yml.example` only worked inside the oxfuzz
+  repository: it built oxfuzz and the sandbox image from the checkout it ran
+  in. It now checks out oxfuzz at a pinned release (`OXFUZZ_REF`) into
+  `.oxfuzz/`, builds there, and fuzzes your own checkout, so it can be copied
+  into the project you want to fuzz.
+
 ## 0.9.3 - 2026-11-07
 
 ### Changed

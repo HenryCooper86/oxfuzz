@@ -1,9 +1,11 @@
 # oxfuzz PR fuzz gate (example).
 #
-# Copy to `.github/workflows/fuzz.yml` and adjust TARGET/ENGINE/DURATION.
-# On each PR it: builds oxfuzz + the sandbox image, fuzzes the target for a
-# short budget, triages crashes, uploads SARIF to GitHub code scanning, and
-# FAILS the check if any crash is found.
+# Copy to `.github/workflows/fuzz.yml` in the repository you want to fuzz and
+# adjust TARGET/ENGINE/DURATION (and OXFUZZ_REF to pin a release). On each PR
+# it: checks out and builds oxfuzz and its sandbox image in `.oxfuzz/`,
+# fuzzes the target in your checkout for a short budget, triages crashes,
+# uploads SARIF to GitHub code scanning, and FAILS the check if any crash is
+# found.
 #
 # The gate runs fuzzing and triage only; it does not draft or promote a
 # harness. TARGET must already have a promoted harness, and its retained
@@ -38,21 +40,33 @@ jobs:
       TARGET: parse_image
       ENGINE: libfuzzer
       DURATION: 120s
+      # The project root inside your checkout.
       PROJECT: .
+      # The oxfuzz release to build; pin it so the gate does not change under you.
+      OXFUZZ_REF: v0.9.3
     steps:
       - uses: actions/checkout@v7
+
+      - name: Check out oxfuzz
+        uses: actions/checkout@v7
+        with:
+          repository: HenryCooper86/oxfuzz
+          ref: ${{ env.OXFUZZ_REF }}
+          path: .oxfuzz
 
       - uses: dtolnay/rust-toolchain@1.94.0
 
       - name: Build oxfuzz
+        working-directory: .oxfuzz
         run: cargo build --release -p hf-cli
 
       - name: Build the fuzzing sandbox image
+        working-directory: .oxfuzz
         run: ./scripts/build-sandbox.sh
 
       - name: Fuzz gate
         run: |
-          ./target/release/oxfuzz ci "$PROJECT" \
+          ./.oxfuzz/target/release/oxfuzz ci "$PROJECT" \
             --target "$TARGET" --engine "$ENGINE" \
             --duration "$DURATION" --sarif oxfuzz.sarif
         # `ci` exits non-zero on any crash, failing the check. SARIF is written

@@ -6,7 +6,10 @@
 # GUI package manifest and its lockfile, and the Tauri bundle config. Bumping
 # only Cargo.toml is what left the shipped 0.1.1 and 0.1.2 desktop apps
 # reporting "v0.1.0" in their own UI, so this script bumps all four and then
-# verifies they match before returning.
+# verifies they match before returning. It also moves two references that name
+# the current release: the bug-report form's version placeholder and the
+# release the example fuzz workflow builds (old tags are pruned, so a stale
+# pin would stop resolving).
 set -euo pipefail
 
 VERSION="${1:?usage: bump-version.sh <new-version>}"
@@ -33,8 +36,14 @@ sed -i.bak "s/^  \"version\": \".*\"/  \"version\": \"$VERSION\"/" \
 sed -i.bak "1,12s/^\( *\)\"version\": \".*\"/\1\"version\": \"$VERSION\"/" \
   "$GUI/package-lock.json"
 
+BUG_FORM=.github/ISSUE_TEMPLATE/bug_report.yml
+FUZZ_EXAMPLE=.github/workflows/fuzz.yml.example
+sed -i.bak "s/^      placeholder: oxfuzz [0-9][0-9.]*$/      placeholder: oxfuzz $VERSION/" "$BUG_FORM"
+sed -i.bak "s/^      OXFUZZ_REF: v[0-9][0-9.]*$/      OXFUZZ_REF: v$VERSION/" "$FUZZ_EXAMPLE"
+
 rm -f Cargo.toml.bak "$GUI/package.json.bak" \
-  "$GUI/src-tauri/tauri.conf.json.bak" "$GUI/package-lock.json.bak"
+  "$GUI/src-tauri/tauri.conf.json.bak" "$GUI/package-lock.json.bak" \
+  "$BUG_FORM.bak" "$FUZZ_EXAMPLE.bak"
 
 # Propagate the new member versions into Cargo.lock without touching deps.
 cargo update --workspace --quiet
@@ -59,5 +68,7 @@ check Cargo.toml            's/^version = "\([^"]*\)".*$/\1/p;'
 check "$GUI/package.json"   's/^  "version": "\([^"]*\)".*$/\1/p;'
 check "$GUI/src-tauri/tauri.conf.json" 's/^  "version": "\([^"]*\)".*$/\1/p;'
 check "$GUI/package-lock.json" '1,12{s/^ *"version": "\([^"]*\)".*$/\1/p;}'
+check "$BUG_FORM"           's/^      placeholder: oxfuzz \([0-9][0-9.]*\)$/\1/p;'
+check "$FUZZ_EXAMPLE"       's/^      OXFUZZ_REF: v\([0-9][0-9.]*\)$/\1/p;'
 
-echo "Bumped to $VERSION: Cargo.toml, Cargo.lock, package.json, package-lock.json, tauri.conf.json"
+echo "Bumped to $VERSION: Cargo.toml, Cargo.lock, package.json, package-lock.json, tauri.conf.json, $BUG_FORM, $FUZZ_EXAMPLE"

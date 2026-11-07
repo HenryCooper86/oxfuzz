@@ -297,8 +297,7 @@ disposable container or VM.
 `oxfuzz ci <project> --target T [--engine libfuzzer] [--duration 120s]
 [--sarif oxfuzz.sarif] [--ai off]` runs a short campaign with an
 already promoted harness, triages, writes SARIF, and exits non-zero if any
-crash is found. It does not draft or promote a harness, and its `--lang`
-flag is currently ignored. A starting template is
+crash is found. It does not draft or promote a harness. A starting template is
 [`.github/workflows/fuzz.yml.example`](../../.github/workflows/fuzz.yml.example).
 What the runner needs:
 
