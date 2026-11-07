@@ -707,6 +707,19 @@ pub fn host_arch() -> String {
 pub struct ChatTurn {
     pub role: String,
     pub content: String,
+    /// RFC 3339 time the message was persisted. Present on transcript reads;
+    /// absent on history the frontend replays to the agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+}
+
+/// Project a persisted message onto the wire shape, keeping its real time.
+fn chat_turn_from_message(message: Message) -> ChatTurn {
+    ChatTurn {
+        role: role_to_str(message.role).to_owned(),
+        content: message.content,
+        timestamp: Some(message.timestamp.to_rfc3339()),
+    }
 }
 
 fn parse_role(role: &str) -> Role {
@@ -1779,13 +1792,7 @@ pub async fn chat_history(
         .chat_history(&id)
         .await
         .map_err(|error| error.to_string())?;
-    Ok(messages
-        .into_iter()
-        .map(|m| ChatTurn {
-            role: role_to_str(m.role).to_owned(),
-            content: m.content,
-        })
-        .collect())
+    Ok(messages.into_iter().map(chat_turn_from_message).collect())
 }
 
 /// Functions covered by a fuzz run of `target`, for the call-tree overlay.
@@ -5110,5 +5117,29 @@ mod sarif_export_tests {
                 .and_then(std::ffi::OsStr::to_str),
             Some("sarif")
         );
+    }
+}
+
+#[cfg(test)]
+mod chat_turn_tests {
+    use super::{chat_turn_from_message, ChatTurn};
+    use chrono::{TimeZone, Utc};
+    use hf_service::{Message, Role};
+
+    #[test]
+    fn chat_turn_carries_the_persisted_message_time() {
+        let mut message = Message::new(Role::User, "hello");
+        message.timestamp = Utc.with_ymd_and_hms(2026, 11, 7, 6, 16, 24).unwrap();
+        let turn = chat_turn_from_message(message);
+        assert_eq!(turn.role, "user");
+        assert_eq!(turn.timestamp.as_deref(), Some("2026-11-07T06:16:24+00:00"));
+    }
+
+    #[test]
+    fn replayed_history_without_a_time_still_deserializes() {
+        let turn: ChatTurn = serde_json::from_str(r#"{"role":"user","content":"hi"}"#).unwrap();
+        assert!(turn.timestamp.is_none());
+        let json = serde_json::to_value(&turn).unwrap();
+        assert!(json.get("timestamp").is_none());
     }
 }

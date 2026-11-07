@@ -9,8 +9,12 @@ import { useProject } from "../providers/project";
 import { usePrefs } from "../providers/prefs";
 import { useI18n } from "../i18nContext";
 import { useRunOutput } from "../providers/runOutput";
+import { MarkdownContent } from "../components/MarkdownContent";
 import {
   applyMode,
+  composerLayout,
+  formatToolCall,
+  summarizeToolResult,
   normalizeAssistantContent,
   toCanonicalChatMessages,
   type CanonicalChatMessage,
@@ -102,7 +106,6 @@ export function ChatView() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
-  const [attached, setAttached] = useState<string>(activeProject);
   const [models, setModels] = useState<string[]>([]);
   const [model, setModel] = useState<string>("");
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -268,20 +271,19 @@ export function ChatView() {
   useEffect(() => {
     const ta = taRef.current;
     if (!ta) return;
-    const minPx = expanded ? 200 : 24;
-    const maxPx = expanded ? window.innerHeight * 0.5 : 160;
     ta.style.height = "auto";
-    const next = Math.min(Math.max(ta.scrollHeight, minPx), maxPx);
-    ta.style.height = `${next}px`;
-    ta.style.overflowY = ta.scrollHeight > maxPx ? "auto" : "hidden";
+    const layout = composerLayout({
+      scrollHeight: ta.scrollHeight,
+      expanded,
+      viewportHeight: window.innerHeight,
+    });
+    ta.style.height = `${layout.height}px`;
+    ta.style.overflowY = layout.scroll ? "auto" : "hidden";
   }, [input, expanded]);
 
   async function attachProjectFolder() {
     const path = await pickFolder();
-    if (path) {
-      setAttached(path);
-      setActiveProject(path);
-    }
+    if (path) setActiveProject(path);
   }
 
   // Undo the most recent turn: truncate the persisted transcript (when a
@@ -391,13 +393,11 @@ export function ChatView() {
         if (e.type === "tool_call") {
           setMessages((m) => [
             ...m,
-            { role: "system", content: t("chat.callingTool", { name: e.name, args: JSON.stringify(e.args) }), timestamp: now() },
+            { role: "system", content: t("chat.callingTool", { call: formatToolCall(e.name, e.args) }), timestamp: now() },
           ]);
         } else if (e.type === "tool_result") {
-          setMessages((m) => [
-            ...m,
-            { role: "system", content: `${e.name} -> ${e.summary}`, timestamp: now() },
-          ]);
+          const { headline, detail } = summarizeToolResult(e.name, e.summary);
+          setMessages((m) => [...m, { role: "system", content: headline, detail, timestamp: now() }]);
         }
         // "thinking" events are the model's internal reasoning -- not shown as
         // chat messages.
@@ -585,12 +585,26 @@ export function ChatView() {
                       padding: "var(--space-sm) var(--space-md)",
                     }}
                   >
-                    <p
-                      className="text-sm text-text-primary whitespace-pre-wrap"
-                      style={{ lineHeight: 1.5, overflowWrap: "anywhere" }}
-                    >
-                      {m.content}
-                    </p>
+                    {m.role === "assistant" ? (
+                      <MarkdownContent text={m.content} />
+                    ) : m.detail ? (
+                      <details className="text-xs text-text-secondary">
+                        <summary style={{ cursor: "pointer", overflowWrap: "anywhere" }}>{m.content}</summary>
+                        <pre
+                          className="mt-1 overflow-x-auto"
+                          style={{ fontFamily: "var(--font-mono)", fontSize: "11px", maxHeight: "240px", overflowY: "auto" }}
+                        >
+                          {m.detail}
+                        </pre>
+                      </details>
+                    ) : (
+                      <p
+                        className="text-sm text-text-primary whitespace-pre-wrap"
+                        style={{ lineHeight: 1.5, overflowWrap: "anywhere" }}
+                      >
+                        {m.content}
+                      </p>
+                    )}
                   </div>
                   <span className="text-xs text-text-muted" style={{ fontSize: "10px" }}>
                     {m.timestamp}
@@ -623,7 +637,7 @@ export function ChatView() {
             padding: "10px 12px 8px",
           }}
         >
-          {attached && (
+          {activeProject && (
             <div className="flex items-center gap-1.5 mb-2 self-start">
               <span
                 className="inline-flex items-center gap-1.5 text-xs rounded-md"
@@ -634,12 +648,12 @@ export function ChatView() {
                   padding: "3px 8px",
                   fontFamily: "var(--font-mono)",
                 }}
-                title={attached}
+                title={activeProject}
               >
                 <FolderPlus size={12} style={{ color: "var(--accent)" }} />
-                {attached.split("/").pop() || attached}
+                {activeProject.split("/").pop() || activeProject}
                 <button
-                  onClick={() => setAttached("")}
+                  onClick={() => setActiveProject("")}
                   className="inline-flex items-center"
                   style={{
                     background: "none",
@@ -663,7 +677,7 @@ export function ChatView() {
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}
             placeholder={mode === "plan" ? t("composer.placeholderPlan") : t("composer.placeholder")}
-            rows={1}
+            rows={3}
             className="w-full text-sm bg-transparent border-none outline-none text-text-primary resize-none"
             style={{
               fontFamily: "var(--font-sans)",

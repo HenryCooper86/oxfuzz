@@ -16,12 +16,16 @@ export type ChatRole = "user" | "assistant" | "system";
 export interface CanonicalChatTurn {
   role: string;
   content: string;
+  /** RFC 3339 time the message was persisted (absent on older backends). */
+  timestamp?: string;
 }
 
 export interface CanonicalChatMessage {
   role: ChatRole;
   content: string;
   timestamp: string;
+  /** Pretty-printed tool output, shown behind a collapsed disclosure. */
+  detail?: string;
 }
 
 export function normalizeChatRole(role: string): ChatRole {
@@ -43,16 +47,93 @@ export function normalizeAssistantContent(content: string): string {
 /** Rebuild visible state from the backend-owned display transcript. */
 export function toCanonicalChatMessages(
   turns: CanonicalChatTurn[],
-  timestamp: () => string = () => new Date().toLocaleTimeString(),
+  fallbackTimestamp: () => string = () => new Date().toLocaleTimeString(),
 ): CanonicalChatMessage[] {
   return turns.map((turn) => {
     const role = normalizeChatRole(turn.role);
     return {
       role,
       content: role === "assistant" ? normalizeAssistantContent(turn.content) : turn.content,
-      timestamp: timestamp(),
+      timestamp: persistedTime(turn.timestamp) ?? fallbackTimestamp(),
     };
   });
+}
+
+/** Local display time of a persisted RFC 3339 stamp, or null when unusable. */
+function persistedTime(stamp: string | undefined): string | null {
+  if (!stamp) return null;
+  const date = new Date(stamp);
+  return Number.isNaN(date.getTime()) ? null : date.toLocaleTimeString();
+}
+
+const COMPOSER_MIN_PX = 76;
+const COMPOSER_EXPANDED_MIN_PX = 200;
+const COMPOSER_MAX_FRACTION = 0.4;
+const COMPOSER_EXPANDED_MAX_FRACTION = 0.5;
+
+/** Height of the composer textarea: about three lines at rest, growing with
+ *  its content up to a share of the window, then scrolling internally. */
+export function composerLayout(input: {
+  scrollHeight: number;
+  expanded: boolean;
+  viewportHeight: number;
+}): { height: number; scroll: boolean } {
+  const min = input.expanded ? COMPOSER_EXPANDED_MIN_PX : COMPOSER_MIN_PX;
+  const fraction = input.expanded ? COMPOSER_EXPANDED_MAX_FRACTION : COMPOSER_MAX_FRACTION;
+  const max = Math.max(min, Math.floor(input.viewportHeight * fraction));
+  return {
+    height: Math.min(Math.max(input.scrollHeight, min), max),
+    scroll: input.scrollHeight > max,
+  };
+}
+
+const TOOL_ARG_VALUE_MAX = 40;
+const TOOL_LINE_MAX = 120;
+const TOOL_HEADLINE_MAX = 100;
+const TOOL_DETAIL_MAX = 4000;
+
+function clip(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max - 3)}...` : text;
+}
+
+function scalarText(value: unknown, max: number): string {
+  return clip(typeof value === "string" ? value : JSON.stringify(value), max);
+}
+
+/** One-line tool call label: the name plus a short argument summary. */
+export function formatToolCall(name: string, args: unknown): string {
+  if (!isRecord(args)) return name;
+  const pairs = Object.entries(args).map(([key, value]) => `${key}=${scalarText(value, TOOL_ARG_VALUE_MAX)}`);
+  return pairs.length ? clip(`${name} (${pairs.join(", ")})`, TOOL_LINE_MAX) : name;
+}
+
+function describeEntry(key: string, value: unknown): string {
+  if (Array.isArray(value)) return `${key}[${value.length}]`;
+  if (isRecord(value)) return `${key}{}`;
+  return `${key}=${scalarText(value, 24)}`;
+}
+
+/** A tool result reduced to a one-line headline plus bounded detail text. */
+export function summarizeToolResult(name: string, summary: string): { headline: string; detail: string } {
+  const text = summary.trim();
+  if (!text) return { headline: name, detail: "" };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    parsed = undefined;
+  }
+  if (isRecord(parsed)) {
+    const entries = Object.entries(parsed).map(([key, value]) => describeEntry(key, value));
+    return {
+      headline: clip(`${name}: ${entries.join(", ")}`, TOOL_HEADLINE_MAX),
+      detail: clip(JSON.stringify(parsed, null, 2), TOOL_DETAIL_MAX),
+    };
+  }
+  return {
+    headline: clip(`${name}: ${text.split("\n")[0]}`, TOOL_HEADLINE_MAX),
+    detail: clip(text, TOOL_DETAIL_MAX),
+  };
 }
 
 function extractProtocolFinal(content: string, depth = 0): string | null {

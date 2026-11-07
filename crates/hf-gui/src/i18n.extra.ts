@@ -745,7 +745,7 @@ export const [enExtra, zhExtra] = dictionaries({
   "chat.branchFromHere": ["Branch from here","从此处创建分支"],
   "chat.branchesTooltip": ["Branches (fork / switch)","分支（创建 / 切换）"],
   "chat.browseForProject": ["Browse for project…","浏览项目…"],
-  "chat.callingTool": ["Calling tool: {name}({args})","正在调用工具：{name}({args})"],
+  "chat.callingTool": ["Calling tool: {call}","正在调用工具：{call}"],
   "chat.clearHistoryMessage": ["Clear this project's chat history? This cannot be undone.","确定清空此项目的聊天记录吗？此操作无法撤销。"],
   "chat.clearHistoryTitle": ["Clear chat history","清空聊天记录"],
   "chat.clearHistoryTooltip": ["Clear this project's chat history","清空此项目的聊天记录"],
