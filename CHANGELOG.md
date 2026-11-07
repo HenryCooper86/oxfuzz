@@ -11,6 +11,8 @@ here as the record.
 
 ## Unreleased
 
+## 0.9.3 - 2026-11-07
+
 ### Changed
 
 - The CLI now prints warnings on stderr when `RUST_LOG` is unset (it printed
