@@ -361,3 +361,33 @@ fn live_events_reject_non_finite_rates() {
         .iter()
         .any(|event| matches!(event, FuzzProgress::ExecsPerSec(_))));
 }
+
+#[test]
+fn live_events_skip_the_rate_of_the_startup_snapshot() {
+    // AFL++ writes fuzzer_stats once at startup with run_time 0 and a rate of
+    // a handful of calibration execs over almost no time (8 execs reads as
+    // 8000/sec); reporting it pins a phantom peak on the run.
+    use hf_core::engine::FuzzProgress;
+    let startup = AflFuzzerStats {
+        execs_per_sec: Some(8000.0),
+        run_time_secs: Some(0),
+        edges_found: Some(4),
+        ..AflFuzzerStats::default()
+    };
+    let events = startup.live_progress_events(0);
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, FuzzProgress::ExecsPerSec(_))));
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, FuzzProgress::EdgesCovered(4))));
+
+    let running = AflFuzzerStats {
+        execs_per_sec: Some(3512.0),
+        run_time_secs: Some(20),
+        ..AflFuzzerStats::default()
+    };
+    assert!(running.live_progress_events(0).iter().any(
+        |event| matches!(event, FuzzProgress::ExecsPerSec(rate) if (*rate - 3512.0).abs() < 1e-9)
+    ));
+}

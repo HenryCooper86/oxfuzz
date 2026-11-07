@@ -395,6 +395,46 @@ fn afl_runs_keep_crashing_seeds_as_crashes() {
     }
 }
 
+/// AFL++ 4.09c rewrites `fuzzer_stats` only at startup and at exit unless
+/// `AFL_FUZZER_STATS_UPDATE_INTERVAL` is set (verified in the pinned sandbox
+/// image: without it, every mid-run read of a 20 s run saw the startup
+/// snapshot). The live run tiles are driven from that file, so AFL++ runs
+/// refresh it every second; an operator's explicit value is kept.
+#[test]
+fn afl_runs_refresh_fuzzer_stats_every_second() {
+    let afl = hf_engine::runner::run_env(
+        EngineKind::AflPlusPlus,
+        &run_config(EngineKind::AflPlusPlus, 10),
+    )
+    .unwrap();
+    assert_eq!(
+        afl.get("AFL_FUZZER_STATS_UPDATE_INTERVAL")
+            .map(String::as_str),
+        Some("1"),
+        "{afl:?}"
+    );
+
+    let mut cfg = run_config(EngineKind::AflPlusPlus, 10);
+    cfg.env.push((
+        "AFL_FUZZER_STATS_UPDATE_INTERVAL".to_owned(),
+        "5".to_owned(),
+    ));
+    let explicit = hf_engine::runner::run_env(EngineKind::AflPlusPlus, &cfg).unwrap();
+    assert_eq!(
+        explicit
+            .get("AFL_FUZZER_STATS_UPDATE_INTERVAL")
+            .map(String::as_str),
+        Some("5")
+    );
+
+    let libfuzzer = hf_engine::runner::run_env(
+        EngineKind::LibFuzzer,
+        &run_config(EngineKind::LibFuzzer, 10),
+    )
+    .unwrap();
+    assert!(!libfuzzer.contains_key("AFL_FUZZER_STATS_UPDATE_INTERVAL"));
+}
+
 #[tokio::test]
 async fn runner_libfuzzer_parses_progress_and_coverage() {
     let rt = MockRuntime {

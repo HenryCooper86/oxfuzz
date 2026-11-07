@@ -106,6 +106,10 @@ pub struct RunResult {
 ///   crash!") with nothing saved. `AFL_CRASHING_SEEDS_AS_NEW_CRASH=1` (AFL++
 ///   4.09c) saves such a seed as a crash instead, so it is triaged as a finding.
 ///   An explicit value in `cfg.env` is kept.
+/// - AFL++ 4.09c rewrites `fuzzer_stats` only at startup and at exit unless
+///   `AFL_FUZZER_STATS_UPDATE_INTERVAL` is set; the live run tiles are driven
+///   from that file, so AFL++ runs refresh it every second (`=1`). An
+///   explicit value in `cfg.env` is kept.
 ///
 /// This is the one definition of an engine run's environment: the harness
 /// smoke qualification uses it too, so smoke and campaign runs agree.
@@ -139,6 +143,8 @@ pub fn run_env(
             env.insert("AFL_AUTORESUME".to_owned(), "1".to_owned());
         }
         env.entry("AFL_CRASHING_SEEDS_AS_NEW_CRASH".to_owned())
+            .or_insert_with(|| "1".to_owned());
+        env.entry("AFL_FUZZER_STATS_UPDATE_INTERVAL".to_owned())
             .or_insert_with(|| "1".to_owned());
     }
     Ok(env)

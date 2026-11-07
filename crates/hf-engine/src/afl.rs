@@ -522,7 +522,13 @@ impl AflFuzzerStats {
         if let Some(edges) = self.edges_found {
             events.push(FuzzProgress::EdgesCovered(edges));
         }
-        if let Some(rate) = self.execs_per_sec.filter(|rate| rate.is_finite()) {
+        // The startup snapshot (run_time 0) divides a few calibration execs by
+        // almost no time; its rate is not a measurement.
+        let measured = self.run_time_secs != Some(0);
+        if let Some(rate) = self
+            .execs_per_sec
+            .filter(|rate| measured && rate.is_finite())
+        {
             events.push(FuzzProgress::ExecsPerSec(rate));
         }
         if let Some(saved) = self.saved_crashes.filter(|saved| *saved > reported_crashes) {
