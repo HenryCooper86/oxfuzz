@@ -485,7 +485,8 @@ not prove valid credentials or connectivity. A pool with no constructed provider
 (for example, all API-key variables missing or empty) fails preflight. Duration and provider flags require
 `--engine`. Ordinary `doctor` keeps its general any-engine readiness check, and
 its JSON gains `sandbox_image_remedy` (a one-line build instruction) whenever
-the sandbox image is missing.
+Docker answers and the sandbox image is missing. With Docker down the image and
+engine lines read `UNKNOWN` and the remedy is to start Docker.
 
 For normal `run`, an omitted `--duration` uses `fuzzing.default_duration_secs`.
 An omitted `--cpus` uses the configured `fuzzing.sandbox.max_cpus`

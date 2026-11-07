@@ -55,8 +55,8 @@ pub struct SystemStatus {
     pub defectdojo: StatusFlag,
     /// How to obtain the sandbox image when it is missing: the one-step CLI
     /// build plus `scripts/build-sandbox.sh` or the canonical `docker build`
-    /// command. `None` when the image is present (the field is omitted from
-    /// the JSON shape then -- additive for existing consumers).
+    /// command. `None` when the image is present or Docker is down (the image
+    /// was not probed then); the field is omitted from the JSON then.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sandbox_image_remedy: Option<String>,
 }
@@ -119,8 +119,16 @@ pub async fn system_status() -> SystemStatus {
         syzkaller,
         engine_probe_failed,
         defectdojo: crate::defectdojo_lifecycle::reachable().await.into(),
-        sandbox_image_remedy: (!sandbox_image).then(sandbox_image_remedy),
+        sandbox_image_remedy: image_build_remedy_applies(docker, sandbox_image)
+            .then(sandbox_image_remedy),
     }
+}
+
+/// Whether to name the image build: only when the daemon answered and the
+/// image is absent. With Docker down the image was never probed, and the build
+/// needs Docker anyway.
+const fn image_build_remedy_applies(docker: bool, sandbox_image: bool) -> bool {
+    docker && !sandbox_image
 }
 
 /// The engine-availability slice of [`SystemStatus`] for one probe result:
@@ -363,6 +371,23 @@ mod tests {
             let json = serde_json::to_value(view).unwrap();
             assert_eq!(json["runtime_ready"], expected);
             assert_eq!(json["status"]["defectdojo"], false);
+        }
+    }
+
+    #[test]
+    fn the_image_build_remedy_is_named_only_when_docker_answered_and_the_image_is_absent() {
+        // With the daemon down the image was never probed: telling the
+        // operator to build it would be a guess, and the build needs Docker.
+        for (docker, image, remedy) in [
+            (true, false, true),
+            (true, true, false),
+            (false, false, false),
+        ] {
+            assert_eq!(
+                super::image_build_remedy_applies(docker, image),
+                remedy,
+                "docker={docker} image={image}"
+            );
         }
     }
 

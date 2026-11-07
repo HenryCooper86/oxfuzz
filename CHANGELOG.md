@@ -14,6 +14,12 @@ and 0.7.0 releases respectively.
 
 ### Fixed
 
+- `oxfuzz doctor` with Docker down reported `MISSING  sandbox image` and told
+  you to build the image, though nothing inside Docker had been checked and
+  the image may already exist. The image and engine lines now read `UNKNOWN`,
+  one line says to start Docker, and the JSON `sandbox_image_remedy` field is
+  omitted until Docker answers.
+
 - Discovery no longer offers functions defined inside a fuzz harness the
   project already ships (a file with `LLVMFuzzerTestOneInput`, `HF_ITER`, or
   `__AFL_LOOP`), such as `psk_callback` in honggfuzz's `examples/openssl/client.c`.

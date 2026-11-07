@@ -1,7 +1,8 @@
-//! Binary-level tests for `oxfuzz doctor`: the sandbox image remedy line and
-//! the `--build-image` action's loud failure paths. No Docker daemon is
-//! required: `HF_USE_DOCKER=0` pins the sandbox off so the image is always
-//! missing and the build preflight fails before contacting a daemon.
+//! Binary-level tests for `oxfuzz doctor`: the Docker-down report and the
+//! `--build-image` action's loud failure paths. No Docker daemon is required:
+//! `HF_USE_DOCKER=0` pins the sandbox off, so nothing inside Docker is probed
+//! and the build preflight fails before contacting a daemon. The image-missing
+//! remedy text is covered by the `doctor_lines` and `system_status` unit tests.
 
 use std::process::{Command, Output};
 
@@ -28,38 +29,29 @@ fn stderr(output: &Output) -> String {
 }
 
 #[test]
-fn doctor_names_the_sandbox_image_remedy_when_the_image_is_missing() {
+fn doctor_without_docker_reports_the_image_as_unknown_and_names_docker() {
     let output = oxfuzz(&["doctor"]);
 
     assert!(!output.status.success(), "not ready: {}", stdout(&output));
     let stdout = stdout(&output);
-    assert!(stdout.contains("MISSING  sandbox image"), "{stdout}");
-    // The binary lives in the repository, so the walk-up finds the checkout and
-    // its build script.
-    assert!(
-        stdout.contains("scripts/build-sandbox.sh"),
-        "the remedy names the build script: {stdout}"
-    );
-    assert!(
-        stdout.contains("oxfuzz doctor --build-image"),
-        "the remedy names the one-step build: {stdout}"
-    );
+    assert!(stdout.contains("MISSING  Docker daemon"), "{stdout}");
+    // Nothing inside Docker was probed, so the image is not reported missing
+    // and no image build is suggested; the remedy is Docker itself.
+    assert!(stdout.contains("UNKNOWN  sandbox image"), "{stdout}");
+    assert!(!stdout.contains("--build-image"), "{stdout}");
+    assert!(stdout.contains("start Docker"), "{stdout}");
 }
 
 #[test]
-fn doctor_json_carries_the_remedy_as_an_additive_field() {
+fn doctor_json_without_docker_omits_the_image_remedy() {
     let output = oxfuzz(&["doctor", "--json"]);
 
     assert!(!output.status.success());
     let report = serde_json::from_slice::<serde_json::Value>(&output.stdout)
         .unwrap_or_else(|error| panic!("invalid JSON: {error}; {}", stderr(&output)));
-    assert_eq!(report["sandbox_image"], false);
-    let remedy = report["sandbox_image_remedy"]
-        .as_str()
-        .expect("remedy present when the image is missing");
-    assert!(remedy.contains("scripts/build-sandbox.sh"), "{remedy}");
-    // Existing fields are untouched.
     assert_eq!(report["docker"], false);
+    assert_eq!(report["sandbox_image"], false);
+    assert!(report["sandbox_image_remedy"].is_null(), "{report}");
     assert_eq!(report["defectdojo"], false);
 }
 

@@ -8,13 +8,29 @@ use crate::parse::parse_duration;
 fn doctor_lines(status: &hf_service::SystemStatus) -> Vec<String> {
     let required =
         |ready: bool, label: &str| format!("{}  {label}", if ready { "READY" } else { "MISSING" });
+    // Everything below the daemon is probed inside Docker; with the daemon
+    // down those lines are unknown, not missing.
+    let docker = status.docker.is_ready();
+    let probed = |line: String, label: &str| {
+        if docker {
+            line
+        } else {
+            format!("UNKNOWN  {label}")
+        }
+    };
     let engine = |ready: bool, label: &str| {
-        format!("{}  {label}", if ready { "READY" } else { "UNAVAILABLE" })
+        probed(
+            format!("{}  {label}", if ready { "READY" } else { "UNAVAILABLE" }),
+            label,
+        )
     };
 
     let mut lines = vec![
-        required(status.docker.is_ready(), "Docker daemon"),
-        required(status.sandbox_image.is_ready(), "sandbox image"),
+        required(docker, "Docker daemon"),
+        probed(
+            required(status.sandbox_image.is_ready(), "sandbox image"),
+            "sandbox image",
+        ),
         engine(status.libfuzzer.is_ready(), "libFuzzer"),
         engine(status.aflplusplus.is_ready(), "AFL++"),
         engine(status.honggfuzz.is_ready(), "honggfuzz"),
@@ -28,6 +44,13 @@ fn doctor_lines(status: &hf_service::SystemStatus) -> Vec<String> {
             }
         ),
     ];
+    if !docker {
+        lines.push(
+            "Docker not available: start Docker (`HF_USE_DOCKER=0` also turns it off), \
+             then run `oxfuzz doctor` again"
+                .to_owned(),
+        );
+    }
     // A failed probe must not read as "the image bundles no engine": the
     // availability flags above are unknown, and only this line says so.
     if status.engine_probe_failed.is_ready() {
@@ -602,6 +625,36 @@ mod doctor_tests {
         assert!(
             output.contains("scripts/build-sandbox.sh"),
             "the remedy reaches the human output: {output}"
+        );
+    }
+
+    #[test]
+    fn doctor_reports_the_image_and_engines_as_unknown_when_docker_is_down() {
+        // With the daemon down nothing inside Docker was probed; "MISSING"
+        // and a build instruction would send the operator to rebuild an image
+        // they may already have.
+        let status = SystemStatus {
+            docker: StatusFlag::from(false),
+            sandbox_image: StatusFlag::from(false),
+            libfuzzer: StatusFlag::from(false),
+            aflplusplus: StatusFlag::from(false),
+            honggfuzz: StatusFlag::from(false),
+            syzkaller: StatusFlag::from(false),
+            engine_probe_failed: StatusFlag::from(false),
+            defectdojo: StatusFlag::from(false),
+            sandbox_image_remedy: None,
+        };
+
+        let output = doctor_lines(&status).join("\n");
+        assert!(output.contains("MISSING  Docker daemon"), "{output}");
+        assert!(output.contains("UNKNOWN  sandbox image"), "{output}");
+        for engine in ["libFuzzer", "AFL++", "honggfuzz", "syzkaller"] {
+            assert!(output.contains(&format!("UNKNOWN  {engine}")), "{output}");
+        }
+        assert!(!output.contains("MISSING  sandbox image"), "{output}");
+        assert!(
+            output.contains("start Docker") && output.contains("run `oxfuzz doctor` again"),
+            "{output}"
         );
     }
 

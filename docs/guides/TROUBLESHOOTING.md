@@ -23,10 +23,10 @@ Symptom:
 ```text
 oxfuzz sandbox readiness
 MISSING  Docker daemon
-MISSING  sandbox image
-UNAVAILABLE  libFuzzer
+UNKNOWN  sandbox image
+UNKNOWN  libFuzzer
 ...
-sandbox image missing: build it with `oxfuzz doctor --build-image` or `scripts/build-sandbox.sh` (from <checkout>)
+Docker not available: start Docker (`HF_USE_DOCKER=0` also turns it off), then run `oxfuzz doctor` again
 Error: fuzzing is not ready: start Docker, build the sandbox image, and verify at least one engine
 ```
 
@@ -36,8 +36,7 @@ Cause: the Docker daemon (OrbStack, Docker Desktop, or the Linux `docker`
 service) is not running, or `HF_USE_DOCKER` is `0`/`false`. oxfuzz picks its
 runtime when the process starts; with no daemon it uses a stub that refuses
 every build and run rather than executing on the host. While Docker is down
-the image cannot be inspected, so the `sandbox image` line and its remedy
-also appear even if the image exists.
+the image and engines cannot be inspected, so they read `UNKNOWN`.
 
 Fix: start OrbStack or Docker Desktop (on Linux, for example
 `sudo systemctl start docker`), unset `HF_USE_DOCKER`, then run
