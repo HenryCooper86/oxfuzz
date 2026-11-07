@@ -11,7 +11,43 @@ here as the record.
 
 ## Unreleased
 
+### Added
+
+- AI Assistant: the model picker now chooses the provider that answers a
+  turn. Every model call of that turn uses it (agent steps, compaction,
+  delegated agents, harness drafting), and an unavailable selection fails
+  with its name instead of quietly using another provider. "Auto-route"
+  keeps automatic routing. The stored reply records which provider answered.
+- AI Assistant: a Stop button cancels a running turn. The turn is rolled back
+  with nothing saved, a pending approval prompt is withdrawn, and a fuzz run
+  the turn started is cancelled (`chat_cancel`, `POST /chat/cancel`).
+- Browser mode: agent approval prompts now arrive over SSE and are answered
+  at `POST /chat/permission`; before, the web build silently denied every
+  gated action.
+
 ### Fixed
+
+- AI Assistant: when DeepSeek answered in its native tool-call markup
+  (`<｜DSML｜function_calls>`) instead of the JSON step the agent asks for,
+  the markup was shown as the final answer and no tool ran, so asking it to
+  start a fuzz run did nothing. Such replies are now decoded into the tool
+  step they encode and go through the normal allow-list, approval, and
+  validation path. Malformed or oversized markup stays text, only the first
+  call of a block runs, and the model is told about any it skipped.
+- AI Assistant: replies render as Markdown (bold, code blocks, lists,
+  tables); raw HTML is never rendered and links show as text. Messages keep
+  their real sent time after a turn, undo, or reload. Removing the project
+  chip now detaches the project from the next turn. Tool calls and results
+  show a one-line summary with expandable, bounded JSON. The message box
+  starts at about three lines and grows to 40% of the window.
+- Run view: during an AFL++ campaign, edges covered, execs/sec (current,
+  mean, peak), and the crash-signal count stayed "Unknown" or frozen until
+  the run ended, because the live `fuzzer_stats` snapshot reached neither
+  the tiles nor campaign telemetry. Each snapshot (about every 2 s) now
+  drives them; crash signals are sent as deltas so nothing double counts.
+  libFuzzer still updates on its own progress lines (new coverage and
+  power-of-two pulses); honggfuzz prints no live status without a terminal
+  and reports at the end of the run.
 
 - `.github/workflows/fuzz.yml.example` only worked inside the oxfuzz
   repository: it built oxfuzz and the sandbox image from the checkout it ran
