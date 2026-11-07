@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Send, Loader2, Crosshair, FolderPlus, FolderOpen, ChevronDown, X, Bot, RotateCcw, History, GitBranch, Maximize2, Minimize2, Sparkles, ListChecks, Trash2 } from "lucide-react";
+import { Send, Square, Loader2, Crosshair, FolderPlus, FolderOpen, ChevronDown, X, Bot, RotateCcw, History, GitBranch, Maximize2, Minimize2, Sparkles, ListChecks, Trash2 } from "lucide-react";
 import { getTransport, pickFolder } from "../lib";
 import { Button, IconButton } from "../components/ui";
 import { useToast } from "../components/ui/toastContext";
@@ -38,6 +38,29 @@ interface CallableAgent {
 }
 
 const ACTIVE_AGENT_KEY = "hf_active_agent";
+// The provider id picked to answer chat turns; absent means automatic routing.
+const CHAT_PROVIDER_KEY = "hf_chat_provider";
+
+function readStoredProvider(): string {
+  try {
+    return localStorage.getItem(CHAT_PROVIDER_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+// Picker label for a provider: its model, qualified by the provider id when
+// another configured provider serves the same model.
+function providerLabel(info: ModelInfo, all: ModelInfo[]): string {
+  const shared = all.filter((other) => other.model === info.model).length > 1;
+  return shared ? `${info.model} (${info.id})` : info.model;
+}
+
+// One running turn, named by the id sent with it so Stop cancels exactly it.
+interface RunningTurn {
+  id: string;
+  cancelled: boolean;
+}
 const CHAT_MODE_KEY = "hf_chat_mode";
 // Maps a project path (or "" for no active project) to its persistent chat
 // session id, so the AI Assistant keeps a separate, resumable history per
@@ -106,8 +129,12 @@ export function ChatView() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
-  const [models, setModels] = useState<string[]>([]);
-  const [model, setModel] = useState<string>("");
+  const [models, setModels] = useState<ModelInfo[]>([]);
+  // "" selects automatic routing; any other value is a provider id that must
+  // answer the turn (the backend fails the turn rather than substitute one).
+  const [providerId, setProviderId] = useState<string>(readStoredProvider);
+  const [stopping, setStopping] = useState(false);
+  const turnRef = useRef<RunningTurn | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [agents, setAgents] = useState<CallableAgent[]>([]);
   const [agentId, setAgentId] = useState<string>(() => localStorage.getItem(ACTIVE_AGENT_KEY) || "orchestrator");
@@ -196,33 +223,35 @@ export function ChatView() {
     }
   }, [busy, activeProject, sessionId, confirm, toast, t]);
 
-  // Populate the model selector from the actually-configured provider pool
-  // (config/providers.toml). The chat uses that config, so the dropdown must
-  // reflect it -- a stale setup-wizard choice is only honored if it's still a
-  // configured model; otherwise we show the configured provider's model.
+  // Populate the provider picker from the configured provider pool
+  // (config/providers.toml). A remembered provider that is no longer
+  // configured falls back to automatic routing in the picker, never sent.
   useEffect(() => {
     let cancelled = false;
-    const chosen = (localStorage.getItem("hf_provider_model") ?? "").trim();
     getTransport()
       .invoke<ModelInfo[]>("list_models")
       .then((list) => {
         if (cancelled) return;
-        const configured = Array.from(new Set(list.map((m) => m.model).filter(Boolean)));
-        const names = configured.length ? configured : chosen ? [chosen] : [];
-        setModels(names);
-        setModel(configured.includes(chosen) ? chosen : names[0] ?? "");
+        const configured = list.filter((m) => m.id && m.model);
+        setModels(configured);
+        setProviderId((current) => (configured.some((m) => m.id === current) ? current : ""));
       })
       .catch(() => {
-        if (cancelled) return;
-        if (chosen) {
-          setModels([chosen]);
-          setModel(chosen);
-        }
+        if (!cancelled) setModels([]);
       });
     return () => {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    try {
+      if (providerId) localStorage.setItem(CHAT_PROVIDER_KEY, providerId);
+      else localStorage.removeItem(CHAT_PROVIDER_KEY);
+    } catch {
+      /* ignore quota / private-mode errors */
+    }
+  }, [providerId]);
 
   // Load the roster of user-callable agents so the chat can be routed to one.
   // Defaults to the orchestrator; falls back to the first available agent.
@@ -383,6 +412,8 @@ export function ChatView() {
     setMessages((m) => [...m, msg]);
     setInput("");
     setBusy(true);
+    const turn: RunningTurn = { id: crypto.randomUUID(), cancelled: false };
+    turnRef.current = turn;
 
     const transport = getTransport();
     let unlisten: (() => void) | undefined;
@@ -410,6 +441,8 @@ export function ChatView() {
         history,
         sessionId,
         agentId,
+        provider: providerId || null,
+        turnId: turn.id,
       });
       if (sessionId) {
         // The persisted display transcript is authoritative. Reloading also
@@ -428,6 +461,21 @@ export function ChatView() {
         ]);
       }
     } catch (err) {
+      if (turn.cancelled) {
+        // A stopped turn is rolled back by the backend: show the stored
+        // conversation again and hand the text back for editing.
+        let canonical: ChatMessage[] | null = null;
+        if (sessionId) {
+          try {
+            canonical = await loadCanonicalHistory(sessionId);
+          } catch {
+            /* fall back to dropping this turn's rows locally */
+          }
+        }
+        setMessages((current) => canonical ?? (current.includes(msg) ? current.slice(0, current.indexOf(msg)) : current));
+        setInput((current) => (current.trim() ? current : text));
+        return;
+      }
       let canonical: ChatMessage[] | null = null;
       if (sessionId) {
         try {
@@ -458,7 +506,29 @@ export function ChatView() {
       ]);
     } finally {
       if (unlisten) unlisten();
+      if (turnRef.current === turn) turnRef.current = null;
+      setStopping(false);
       setBusy(false);
+    }
+  }
+
+  // Ask the backend to cancel the running turn. The view returns to idle when
+  // the turn's request settles, after the backend has stopped it.
+  async function stop() {
+    const turn = turnRef.current;
+    if (!turn || turn.cancelled) return;
+    turn.cancelled = true;
+    setStopping(true);
+    try {
+      const outcome = await getTransport().invoke<string>("chat_cancel", { turnId: turn.id });
+      if (outcome === "not_running") {
+        // The answer was already committed; it arrives as a normal reply.
+        turn.cancelled = false;
+      }
+    } catch (error) {
+      turn.cancelled = false;
+      if (turnRef.current === turn) setStopping(false);
+      toast({ title: t("chat.stopFailed"), description: String(error), variant: "error" });
     }
   }
 
@@ -621,7 +691,7 @@ export function ChatView() {
             style={{ padding: "var(--space-sm) var(--space-md)" }}
           >
             <Loader2 size={14} className="animate-spin" />
-            <span>{t("chat.thinking")}</span>
+            <span>{stopping ? t("chat.stopping") : t("chat.thinking")}</span>
           </div>
         )}
       </div>
@@ -808,7 +878,15 @@ export function ChatView() {
                 onClick={() => setExpanded((e) => !e)}
               />
               {models.length > 0 ? (
-                <Dropdown value={model} options={models} onSelect={setModel} subtle />
+                <Dropdown
+                  value={providerId}
+                  options={[
+                    { value: "", label: t("chat.modelAuto"), title: t("chat.modelAutoHint") },
+                    ...models.map((m) => ({ value: m.id, label: providerLabel(m, models), title: m.id })),
+                  ]}
+                  onSelect={setProviderId}
+                  subtle
+                />
               ) : (
                 <span
                   className="text-xs text-text-muted"
@@ -818,23 +896,43 @@ export function ChatView() {
                   {t("chat.noProvider")}
                 </span>
               )}
-              <button
-                onClick={send}
-                disabled={busy || !hasText}
-                title={t("chat.send")}
-                aria-label={t("chat.send")}
-                className="inline-flex items-center justify-center rounded-full transition-all duration-150 outline-none disabled:opacity-55"
-                style={{
-                  width: "30px",
-                  height: "30px",
-                  background: hasText ? "var(--accent)" : "transparent",
-                  color: hasText ? "var(--accent-contrast)" : "var(--text-secondary)",
-                  border: "none",
-                  cursor: busy || !hasText ? "default" : "pointer",
-                }}
-              >
-                {busy ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} />}
-              </button>
+              {busy ? (
+                <button
+                  onClick={stop}
+                  disabled={stopping}
+                  title={stopping ? t("chat.stopping") : t("chat.stop")}
+                  aria-label={t("chat.stop")}
+                  className="inline-flex items-center justify-center rounded-full transition-all duration-150 outline-none disabled:opacity-55"
+                  style={{
+                    width: "30px",
+                    height: "30px",
+                    background: "var(--surface-active)",
+                    color: "var(--text-primary)",
+                    border: "1px solid var(--border)",
+                    cursor: stopping ? "default" : "pointer",
+                  }}
+                >
+                  {stopping ? <Loader2 size={15} className="animate-spin" /> : <Square size={13} fill="currentColor" />}
+                </button>
+              ) : (
+                <button
+                  onClick={send}
+                  disabled={!hasText}
+                  title={t("chat.send")}
+                  aria-label={t("chat.send")}
+                  className="inline-flex items-center justify-center rounded-full transition-all duration-150 outline-none disabled:opacity-55"
+                  style={{
+                    width: "30px",
+                    height: "30px",
+                    background: hasText ? "var(--accent)" : "transparent",
+                    color: hasText ? "var(--accent-contrast)" : "var(--text-secondary)",
+                    border: "none",
+                    cursor: !hasText ? "default" : "pointer",
+                  }}
+                >
+                  <Send size={15} />
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -1079,6 +1177,12 @@ function AgentDropdown({
   );
 }
 
+interface DropdownOption {
+  value: string;
+  label: string;
+  title?: string;
+}
+
 function Dropdown({
   value,
   options,
@@ -1087,7 +1191,7 @@ function Dropdown({
   subtle,
 }: {
   value: string;
-  options: string[];
+  options: DropdownOption[];
   onSelect: (value: string) => void;
   leftIcon?: React.ReactNode;
   subtle?: boolean;
@@ -1100,7 +1204,7 @@ function Dropdown({
   useEffect(() => {
     if (!open || !menuRef.current) return;
     const items = menuRef.current.querySelectorAll<HTMLButtonElement>('[role="option"]');
-    items[Math.max(0, options.indexOf(value))]?.focus();
+    items[Math.max(0, options.findIndex((opt) => opt.value === value))]?.focus();
   }, [open, value, options]);
 
   function close(returnFocus = true) {
@@ -1145,7 +1249,7 @@ function Dropdown({
         onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
       >
         {leftIcon}
-        <span>{value}</span>
+        <span>{options.find((opt) => opt.value === value)?.label ?? value}</span>
         <ChevronDown size={14} style={{ opacity: 0.7 }} />
       </button>
       {open && (
@@ -1166,28 +1270,29 @@ function Dropdown({
           >
             {options.map((opt) => (
               <button
-                key={opt}
+                key={opt.value}
                 role="option"
-                aria-selected={opt === value}
+                aria-selected={opt.value === value}
+                title={opt.title}
                 onClick={() => {
-                  onSelect(opt);
+                  onSelect(opt.value);
                   close();
                 }}
                 className="flex items-center w-full text-left transition-colors duration-150"
                 style={{
                   padding: "8px 12px",
                   fontSize: "13px",
-                  background: opt === value ? "var(--surface-active)" : "transparent",
-                  color: opt === value ? "var(--text-primary)" : "var(--text-secondary)",
+                  background: opt.value === value ? "var(--surface-active)" : "transparent",
+                  color: opt.value === value ? "var(--text-primary)" : "var(--text-secondary)",
                   border: "none",
                   cursor: "pointer",
                 }}
                 onMouseEnter={(e) => (e.currentTarget.style.background = "var(--surface-hover)")}
                 onMouseLeave={(e) =>
-                  (e.currentTarget.style.background = opt === value ? "var(--surface-active)" : "transparent")
+                  (e.currentTarget.style.background = opt.value === value ? "var(--surface-active)" : "transparent")
                 }
               >
-                {opt}
+                {opt.label}
               </button>
             ))}
           </div>

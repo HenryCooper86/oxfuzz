@@ -72,7 +72,7 @@ function NewProviderSetup({ onContinue }: { onContinue: () => void }) {
     writing.current = true; setSaving(true); setError(null);
     try {
       await getTransport().invoke("initialize_provider", { provider });
-      if (active.current) { localStorage.setItem("hf_provider_model", provider.model); onContinue(); }
+      if (active.current) onContinue();
     } catch (error) { if (active.current) setError(String(error)); }
     finally { writing.current = false; if (active.current) setSaving(false); }
   }

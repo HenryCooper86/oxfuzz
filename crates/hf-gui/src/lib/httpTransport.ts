@@ -219,6 +219,8 @@ const COMMAND_MAP: Record<string, CommandEndpoint> = {
   select_project: { method: "POST", path: "/projects/select" },
   ensure_docker: { method: "GET", path: "/system/status" },
   chat_agent: { method: "POST", path: "/chat/agent" },
+  chat_cancel: { method: "POST", path: "/chat/cancel" },
+  chat_answer_permission: { method: "POST", path: "/chat/permission" },
   agent_info: { method: "GET", path: "/agents/info" },
   agent_tools: { method: "GET", path: "/agents/tools" },
   list_agents: { method: "GET", path: "/agents" },

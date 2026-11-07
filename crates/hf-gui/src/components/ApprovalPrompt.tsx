@@ -5,14 +5,19 @@ import { useI18n } from "../i18nContext";
 import { useToast } from "./ui/toastContext";
 import { Button } from "./ui/Button";
 
-// A pending guardrail approval request (mirrors the backend payload built by
-// `permission_request_payload` in src-tauri/src/commands.rs).
+// A pending guardrail approval request (mirrors `hf_service::approval::
+// PermissionRequest`, delivered as a Tauri event or over SSE in web mode).
 interface PermissionRequest {
   id: string;
   action: string;
   reason: string;
   risk: string;
   timeout_secs: number;
+}
+
+// Mirrors `hf_service::approval::PermissionClosed`.
+interface PermissionClosed {
+  id: string;
 }
 
 interface QueuedRequest extends PermissionRequest {
@@ -47,24 +52,37 @@ export function ApprovalPrompt() {
 
   useEffect(() => {
     let active = true;
-    let unlisten: (() => void) | undefined;
-    getTransport()
+    const unlisteners: Array<() => void> = [];
+    const keep = (u: () => void) => {
+      if (active) unlisteners.push(u);
+      else u();
+    };
+    const transport = getTransport();
+    transport
       .listen<PermissionRequest>("chat:permission_request", (ev) => {
         const request = ev.payload;
         setQueue((q) => [...q, { ...request, deadline: Date.now() + request.timeout_secs * 1000 }]);
         setNow(Date.now());
       })
-      .then((u) => {
-        if (active) unlisten = u;
-        else u();
-      })
+      .then(keep)
       .catch(() => {
         // Without a subscription no prompt can appear; the backend then denies
         // every request at its deadline, which is the safe outcome.
       });
+    // The backend withdraws a request it no longer waits for (answered
+    // elsewhere, timed out, or its chat turn was stopped).
+    transport
+      .listen<PermissionClosed>("chat:permission_closed", (ev) => {
+        setQueue((q) => q.filter((r) => r.id !== ev.payload.id));
+      })
+      .then(keep)
+      .catch(() => {
+        // A withdrawn prompt then stays until its deadline; answering it is
+        // refused by the backend as no longer pending.
+      });
     return () => {
       active = false;
-      unlisten?.();
+      unlisteners.forEach((u) => u());
     };
   }, []);
 

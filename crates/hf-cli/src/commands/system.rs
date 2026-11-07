@@ -249,6 +249,8 @@ pub(crate) async fn cmd_agent(
                 history_fallback: Vec::new(),
                 message: message.to_owned(),
                 display_message: None,
+                provider: None,
+                turn_id: None,
             },
             &sink,
         )

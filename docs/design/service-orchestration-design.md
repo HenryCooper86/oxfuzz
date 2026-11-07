@@ -362,6 +362,42 @@ and are not used to calculate rollback or branch indices. A cached session id
 that no longer exists is discarded and replaced with a newly-created session
 instead of silently switching to frontend-only history.
 
+### 4.1.1 Chat Turn Control
+
+A turn may name the provider that answers it. `run_chat_turn` runs the agent on
+a container scoped to the turn whose provider pool pins every route to that
+provider id, so the agent's steps, compaction, delegated sub-agents, and the
+service tools the turn calls all go to it. A pin is enforced by the pool's
+router: an unregistered, frozen, or tag-mismatched pinned provider fails the
+call with an error naming it, and no other provider is substituted. No
+selection keeps the agent's tag-preference routing. The persisted assistant
+message records the selection and the provider and model that served the
+turn's last model call in its `metadata.provider`.
+
+A turn may carry a caller-chosen UUID; `cancel_chat_turn` cancels it. The
+cancelled turn is rolled back, not recorded: it writes no transcript rows and
+no checkpoint, which is the state the failure path already leaves, so the
+transcript never holds a question without its answer and rollback keeps
+counting whole turns. Cancel and commit are linearized under the turn
+registry lock: a cancel that lands before the turn claims its commit returns
+`Cancelled` and persists nothing; a later cancel reports `not_running` and the
+answer stands. Cancellation drops an in-flight model request, denies a pending
+approval and withdraws its prompt, and cancels a fuzz run the turn started
+through the run's own token (a child of the turn token). A tool without
+cancellation support (harness build or smoke, triage) finishes its current
+call and the loop stops at the next step. A turn waiting for its session lock
+can be cancelled; a new turn on the same session waits for the cancelled one
+to release the lock.
+
+Interactive approvals use one service-owned gate for every presentation layer
+that asks a person: requests are registered in `PendingApprovals`, announced as
+`chat:permission_request` (a Tauri event, or an SSE event in web mode), and
+answered through `chat_answer_permission` / `POST /chat/permission`. Whatever
+ends a wait -- an answer, the five-minute timeout, or cancellation -- removes
+the request and announces `chat:permission_closed`. The web routes sit behind
+the same bearer-token middleware as every other non-`/health` route. A web
+server with `HF_AUTO_APPROVE` set keeps the environment gate instead.
+
 ### 4.2 Coverage Regression Rollback
 
 Automatic harness rollback is evidence-gated. A completed campaign run may be

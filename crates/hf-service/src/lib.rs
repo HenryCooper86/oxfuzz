@@ -10,6 +10,7 @@
 
 mod advisory_lock;
 pub mod agent;
+pub mod approval;
 #[cfg(feature = "automotive-scapy")]
 pub mod automotive;
 #[cfg(feature = "automotive-lab")]
@@ -107,7 +108,8 @@ pub use verification::{
 };
 
 pub use hf_agent::{
-    AgentDefinition, AgentEvent, AgentRegistry, CollectingSink, EventSink, NullSink, TOOL_SPECS,
+    AgentDefinition, AgentEvent, AgentRegistry, Autonomy, CollectingSink, EventSink, NullSink,
+    TOOL_SPECS,
 };
 pub use hf_core::crash::Crash;
 pub use hf_core::engine::{EngineCapabilities, EngineKind, EngineStats, FuzzProgress};
@@ -181,15 +183,16 @@ pub use container::{
     build_sandbox_image, copy_project_sources, generate_target_seeds, initialize_workspace_root,
     project_workspace_dir, provider_pool_from_config, provider_pool_from_env, repo_root,
     runtime_from_env, workspace_dir, workspace_root, AgentInstanceSnapshot, AgentPoolSnapshot,
-    ArtifactSummary, CompileOutcome, CorpusCapabilities, CorpusCapability, CorpusImportOutcome,
-    CorpusInventory, CoverageSample, EffectiveAutoRevert, FuzzOutcome, FuzzPrepareRequest,
-    FuzzPrepared, FuzzRequest, FuzzStage, FuzzStageView, HarnessBuildObserver, HarnessStep,
-    MemorySnapshot, MinimizeOutcome, PreparedHarnessSource, ProviderSnapshot, QualifiedSmoke,
-    RegressionResult, ReplayInputs, ReplayReview, RunCancelOutcome, RunControlStatus,
-    RunDetailView, RunFunctionCoverage, RunHistoryItem, RunLifecycleStatus, RunOwnerView,
-    RunSummary, RunTelemetryView, SchedulableTarget, SeedEntry, SeedRegenerationOutcome,
-    SeedSurvivalReport, ServiceContainer, SystemSnapshot, SyzkallerRunOpts, SyzkallerSummary,
-    FUZZ_PIPELINE_REPAIRS, LLM_SEED_COUNT, MAX_PREPARED_HARNESS_SOURCE_BYTES,
+    ArtifactSummary, ChatCancelOutcome, CompileOutcome, CorpusCapabilities, CorpusCapability,
+    CorpusImportOutcome, CorpusInventory, CoverageSample, EffectiveAutoRevert, FuzzOutcome,
+    FuzzPrepareRequest, FuzzPrepared, FuzzRequest, FuzzStage, FuzzStageView, HarnessBuildObserver,
+    HarnessStep, MemorySnapshot, MinimizeOutcome, PreparedHarnessSource, ProviderSnapshot,
+    QualifiedSmoke, RegressionResult, ReplayInputs, ReplayReview, RunCancelOutcome,
+    RunControlStatus, RunDetailView, RunFunctionCoverage, RunHistoryItem, RunLifecycleStatus,
+    RunOwnerView, RunSummary, RunTelemetryView, SchedulableTarget, SeedEntry,
+    SeedRegenerationOutcome, SeedSurvivalReport, ServiceContainer, SystemSnapshot,
+    SyzkallerRunOpts, SyzkallerSummary, FUZZ_PIPELINE_REPAIRS, LLM_SEED_COUNT,
+    MAX_PREPARED_HARNESS_SOURCE_BYTES,
 };
 #[cfg(feature = "run-closeout")]
 pub use container::{CoverageDiffReport, RunEdgeSetCapture};

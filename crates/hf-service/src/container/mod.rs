@@ -18,8 +18,10 @@ mod campaign_health;
 #[cfg(feature = "campaign-trust")]
 mod campaign_trust;
 mod chat;
+pub(crate) mod chat_turn;
 #[cfg(feature = "ai-target-ranking")]
 pub use ai_target_ranking::{RankedDiscoveryResult, RankedDiscoveryStatus, RankedInventoryAdvice};
+pub use chat_turn::ChatCancelOutcome;
 #[cfg(feature = "clang-analysis")]
 mod clang_analysis;
 #[cfg(feature = "concolic-enrichment")]
@@ -736,6 +738,13 @@ pub struct ServiceContainer {
             std::collections::HashMap<hf_core::types::SessionId, Arc<tokio::sync::Mutex<()>>>,
         >,
     >,
+    /// Cancellation tokens of running chat turns. Shared across clones so a
+    /// cancel from any presentation layer reaches the turn.
+    pub(crate) chat_turns: chat_turn::ChatTurnRegistry,
+    /// The chat turn this container is scoped to, if any; fuzz runs started
+    /// through it stop when the turn is cancelled. `None` on every container
+    /// except the per-turn scope built by `chat_turn_scope`.
+    turn_cancel: Option<CancellationToken>,
     /// Late-bound link to the campaign scheduler, shared across clones of this
     /// container so any operation in this process (scheduled or interactive)
     /// can emit scheduler events (crash found, run terminated). Set by

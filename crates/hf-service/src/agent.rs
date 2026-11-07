@@ -7,8 +7,9 @@ use hf_agent::{Agent, AgentBackend, AgentDefinition, AgentRegistry, EventSink, R
 use hf_core::engine::EngineKind;
 use hf_core::error::ClassifiedError;
 use hf_core::target::TargetLanguage;
-use hf_core::types::{Message, SessionId, TokenUsage};
+use hf_core::types::{Message, ProviderId, SessionId, TokenUsage};
 use serde_json::Value;
+use uuid::Uuid;
 
 use crate::{AiPolicy, ServiceContainer};
 
@@ -60,6 +61,14 @@ pub struct AgentTurnRequest {
     /// User-visible text persisted in the transcript when `message` contains
     /// an internal mode instruction. Defaults to `message` when absent.
     pub display_message: Option<String>,
+    /// The provider the operator selected to answer this turn. Every model
+    /// call of the turn is pinned to it, and the turn fails naming it when it
+    /// cannot serve; no other provider is substituted. `None` keeps the
+    /// agent's tag-preference routing.
+    pub provider: Option<ProviderId>,
+    /// Caller-chosen id that [`ServiceContainer::cancel_chat_turn`] uses to
+    /// stop this turn. `None` runs a turn that only its caller can abandon.
+    pub turn_id: Option<Uuid>,
 }
 
 impl ServiceContainer {
@@ -179,14 +188,25 @@ impl ServiceContainer {
     /// and guardrails.
     ///
     /// # Errors
-    /// Returns `ClassifiedError` if transcript loading or the model call fails.
+    /// Returns `ClassifiedError` if transcript loading or the model call fails,
+    /// if the selected provider cannot serve, and
+    /// [`ClassifiedError::Cancelled`] when the turn was cancelled before its
+    /// answer was committed (nothing is persisted then).
     pub async fn run_chat_turn(
         &self,
         request: AgentTurnRequest,
         sink: &dyn EventSink,
     ) -> Result<String, ClassifiedError> {
+        let mut registration = self
+            .chat_turns
+            .register(request.turn_id.unwrap_or_else(Uuid::new_v4))?;
+        let cancel = registration.token().clone();
         let _turn_guard = match &request.session {
-            Some(id) => Some(self.chat_session_guard(id).await?),
+            Some(id) => Some(tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(ClassifiedError::Cancelled),
+                guard = self.chat_session_guard(id) => guard?,
+            }),
             _ => None,
         };
 
@@ -206,27 +226,55 @@ impl ServiceContainer {
                 .ok_or_else(|| ClassifiedError::Validation(format!("unknown agent '{id}'")))?,
             None => registry.default_agent(),
         };
-        let backend: Arc<dyn AgentBackend> = Arc::new(self.clone());
+        let turn_pool = self.turn_pool(request.provider)?;
+        let backend: Arc<dyn AgentBackend> = Arc::new(
+            self.chat_turn_scope(
+                turn_pool
+                    .clone()
+                    .map(|pool| pool as Arc<dyn hf_core::provider::ProviderPool>),
+                &cancel,
+            ),
+        );
         let grep_limits =
             crate::config::resolve_grep_limits().map_err(ClassifiedError::Validation)?;
         let agent = Agent::with_definition(backend, request.project, definition)
-            .with_grep_limits(grep_limits);
-        let answer = agent.run_turn(history, &request.message, sink).await?;
+            .with_grep_limits(grep_limits)
+            .with_cancellation(cancel);
+        let outcome = agent.run_turn(history, &request.message, sink).await;
+        if !registration.commit() {
+            return Err(ClassifiedError::Cancelled);
+        }
+        let answer = outcome?;
 
         if let Some(id) = &request.session {
             let display_message = request
                 .display_message
                 .unwrap_or_else(|| request.message.clone());
-            self.persist_chat_turn_unlocked(
-                id,
-                &[
-                    Message::user(display_message),
-                    Message::assistant(answer.clone()),
-                ],
-            )
-            .await?;
+            let mut reply = Message::assistant(answer.clone());
+            if let Some(pool) = &turn_pool {
+                reply.metadata = answered_by(pool);
+            }
+            self.persist_chat_turn_unlocked(id, &[Message::user(display_message), reply])
+                .await?;
         }
         Ok(answer)
+    }
+
+    /// The pool every model call of one turn goes through, pinned to the
+    /// operator's selection when there is one.
+    fn turn_pool(
+        &self,
+        selection: Option<ProviderId>,
+    ) -> Result<Option<Arc<crate::container::chat_turn::TurnPool>>, ClassifiedError> {
+        match (self.provider_pool(), selection) {
+            (Some(pool), selection) => Ok(Some(Arc::new(
+                crate::container::chat_turn::TurnPool::new(pool, selection),
+            ))),
+            (None, Some(selected)) => Err(ClassifiedError::Provider(format!(
+                "selected provider '{selected}' is unavailable: no LLM provider is configured"
+            ))),
+            (None, None) => Ok(None),
+        }
     }
 
     async fn dispatch_agent_tool(
@@ -537,6 +585,19 @@ impl AgentBackend for ServiceContainer {
     fn spill_root(&self) -> Option<PathBuf> {
         Some(crate::init::user_app_dir().join("spill"))
     }
+}
+
+/// The transcript record of who answered a turn: the operator's selection (if
+/// any) and the provider and model that served its last model call.
+fn answered_by(pool: &crate::container::chat_turn::TurnPool) -> Value {
+    let served = pool.served();
+    serde_json::json!({
+        "provider": {
+            "selected": pool.pin().map(ProviderId::as_str),
+            "served": served.provider.as_ref().map(ProviderId::as_str),
+            "model": served.model,
+        }
+    })
 }
 
 fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, ClassifiedError> {

@@ -1269,3 +1269,203 @@ async fn malformed_dsml_is_not_executed() {
     assert_eq!(out, truncated.trim());
     assert!(tool_calls(&sink.events().await).is_empty());
 }
+
+/// A pool that answers from a script but never returns from the call at
+/// `hang_at` (0-based), so a test can cancel a turn while a provider request is
+/// in flight.
+struct HangingPool {
+    inner: ScriptedPool,
+    hang_at: usize,
+    calls: std::sync::atomic::AtomicUsize,
+    /// Signalled when the hanging call is reached.
+    hanging: Arc<tokio::sync::Notify>,
+}
+
+impl HangingPool {
+    fn new(replies: Vec<&str>, hang_at: usize) -> Self {
+        Self {
+            inner: ScriptedPool::new(replies),
+            hang_at,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            hanging: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl ProviderPool for HangingPool {
+    async fn chat_completion(
+        &self,
+        request: &ChatRequest,
+        route: &RouteRequest,
+    ) -> Result<ChatResponse, ProviderError> {
+        let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if call == self.hang_at {
+            self.hanging.notify_one();
+            std::future::pending::<()>().await;
+        }
+        self.inner.chat_completion(request, route).await
+    }
+    async fn chat_completion_stream(
+        &self,
+        request: &ChatRequest,
+        route: &RouteRequest,
+    ) -> Result<ChatStreamResponse, ProviderError> {
+        self.inner.chat_completion_stream(request, route).await
+    }
+    fn report_error(&self, _provider_id: &hf_core::types::ProviderId, _error: &ProviderError) {}
+    async fn provider_statuses(&self) -> Vec<hf_core::provider::ProviderStatus> {
+        Vec::new()
+    }
+    async fn freeze(&self, _provider_id: &hf_core::types::ProviderId, _reason: String) {}
+    async fn thaw(&self, _provider_id: &hf_core::types::ProviderId) -> Result<(), ProviderError> {
+        Ok(())
+    }
+}
+
+/// A backend whose tool dispatch cancels the running turn, standing in for an
+/// operator pressing Stop while a tool executes.
+struct CancellingBackend {
+    inner: Arc<TestBackend>,
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+#[async_trait]
+impl AgentBackend for CancellingBackend {
+    fn provider_pool(&self) -> Option<Arc<dyn ProviderPool>> {
+        self.inner.provider_pool()
+    }
+    async fn record_usage(&self, operation: &str, model: &str, usage: &hf_core::types::TokenUsage) {
+        self.inner.record_usage(operation, model, usage).await;
+    }
+    async fn approve_tool(&self, tool: &str, agent: &str) -> bool {
+        self.inner.approve_tool(tool, agent).await
+    }
+    async fn dispatch_tool(
+        &self,
+        _project: &std::path::Path,
+        _name: &str,
+        _args: &serde_json::Value,
+    ) -> Result<String, hf_core::error::ClassifiedError> {
+        self.cancel.cancel();
+        Ok(r#"{"targets":[]}"#.to_owned())
+    }
+    async fn knowledge_search(
+        &self,
+        project: &std::path::Path,
+        query: &str,
+        limit: usize,
+    ) -> Result<serde_json::Value, hf_core::error::ClassifiedError> {
+        self.inner.knowledge_search(project, query, limit).await
+    }
+    fn skills_dir(&self) -> std::path::PathBuf {
+        self.inner.skills_dir()
+    }
+    fn agents_dir(&self) -> std::path::PathBuf {
+        self.inner.agents_dir()
+    }
+}
+
+#[tokio::test]
+async fn a_turn_cancelled_before_it_starts_never_calls_the_provider() {
+    let pool = Arc::new(ScriptedPool::new(vec![r#"{"final":"unused"}"#]));
+    let cancel = tokio_util::sync::CancellationToken::new();
+    cancel.cancel();
+    let agent = Agent::new(TestBackend::new(Some(pool.clone())), None).with_cancellation(cancel);
+
+    let error = agent
+        .run_turn(Vec::new(), "hello", &CollectingSink::new())
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, hf_core::error::ClassifiedError::Cancelled));
+    assert!(pool.requests.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn cancelling_an_in_flight_provider_request_ends_the_turn() {
+    let pool = HangingPool::new(Vec::new(), 0);
+    let hanging = Arc::clone(&pool.hanging);
+    let pool: Arc<dyn ProviderPool> = Arc::new(pool);
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let agent = Agent::new(TestBackend::new(Some(pool)), None).with_cancellation(cancel.clone());
+
+    let turn = tokio::spawn(async move {
+        agent
+            .run_turn(Vec::new(), "hello", &CollectingSink::new())
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), hanging.notified())
+        .await
+        .expect("the provider request must start");
+    cancel.cancel();
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), turn)
+        .await
+        .expect("a cancelled provider request must not hold the turn open")
+        .unwrap();
+    assert!(matches!(
+        result,
+        Err(hf_core::error::ClassifiedError::Cancelled)
+    ));
+}
+
+#[tokio::test]
+async fn cancellation_during_a_tool_stops_the_loop_at_the_next_step() {
+    let pool = Arc::new(ScriptedPool::new(vec![
+        r#"{"tool":"discover","args":{"lang":"c"}}"#,
+        r#"{"final":"must not be requested"}"#,
+    ]));
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let backend = Arc::new(CancellingBackend {
+        inner: TestBackend::new(Some(pool.clone())),
+        cancel: cancel.clone(),
+    });
+    let project = tempfile::tempdir().unwrap();
+    let agent = Agent::new(backend, Some(project.path().to_path_buf())).with_cancellation(cancel);
+
+    let error = agent
+        .run_turn(Vec::new(), "discover", &CollectingSink::new())
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, hf_core::error::ClassifiedError::Cancelled));
+    assert_eq!(
+        pool.requests.lock().await.len(),
+        1,
+        "the step after a cancelled tool must not reach the provider"
+    );
+}
+
+#[tokio::test]
+async fn a_delegated_sub_agent_observes_the_parent_turn_cancellation() {
+    // Call 0 is the orchestrator's delegate step; call 1 is the specialist's
+    // first request, which hangs until the turn is cancelled.
+    let pool = HangingPool::new(
+        vec![r#"{"tool":"delegate","args":{"agent":"target-scout","task":"scout"}}"#],
+        1,
+    );
+    let hanging = Arc::clone(&pool.hanging);
+    let pool: Arc<dyn ProviderPool> = Arc::new(pool);
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let agent = Agent::new(TestBackend::new(Some(pool)), None).with_cancellation(cancel.clone());
+
+    let turn = tokio::spawn(async move {
+        agent
+            .run_turn(Vec::new(), "delegate", &CollectingSink::new())
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), hanging.notified())
+        .await
+        .expect("the specialist's provider request must start");
+    cancel.cancel();
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), turn)
+        .await
+        .expect("the specialist must stop with its parent turn")
+        .unwrap();
+    assert!(matches!(
+        result,
+        Err(hf_core::error::ClassifiedError::Cancelled)
+    ));
+}

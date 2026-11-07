@@ -3226,6 +3226,7 @@ fn append_error_context(error: ClassifiedError, context: &str) -> ClassifiedErro
         ClassifiedError::Validation(message) => ClassifiedError::Validation(append(message)),
         ClassifiedError::Internal(message) => ClassifiedError::Internal(append(message)),
         ClassifiedError::Timeout => ClassifiedError::Timeout,
+        ClassifiedError::Cancelled => ClassifiedError::Cancelled,
     }
 }
 

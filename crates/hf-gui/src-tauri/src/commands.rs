@@ -7,8 +7,7 @@
 use std::path::PathBuf;
 
 use hf_service::{
-    Action, ApprovalGate, EngineKind, FuzzProgress, Message, Role, SessionId, SkillDefinition,
-    TargetLanguage,
+    EngineKind, FuzzProgress, Message, Role, SessionId, SkillDefinition, TargetLanguage,
 };
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
@@ -745,50 +744,30 @@ impl hf_service::EventSink for TauriEventSink {
     }
 }
 
-/// A guardrail [`ApprovalGate`] that asks the user
-/// via the GUI: it emits `chat:permission_request` and blocks until the
-/// frontend answers through `chat_answer_permission`. A dropped channel (e.g.
-/// the window closing) denies by default.
-struct GuiApprovalGate {
+/// Delivers guardrail approval prompts to the app-wide approval dialog as
+/// Tauri events. The service-owned gate waits for the answer, denies on its
+/// timeout, and withdraws the prompt when the chat turn is cancelled.
+struct TauriApprovalNotifier {
     app: tauri::AppHandle,
-    pending: std::sync::Arc<crate::state::PendingApprovals>,
 }
 
-/// The `chat:permission_request` event body. The app-wide approval prompt shows
-/// the action (its label includes the arguments), the reason, the risk tier, and
-/// a countdown to the automatic denial.
-fn permission_request_payload(
-    id: uuid::Uuid,
-    action: &Action,
-    reason: &str,
-    timeout: std::time::Duration,
-) -> serde_json::Value {
-    serde_json::json!({
-        "id": id.to_string(),
-        "action": action.label(),
-        "reason": reason,
-        "risk": action.risk().as_str(),
-        "timeout_secs": timeout.as_secs(),
-    })
-}
-
-#[async_trait::async_trait]
-impl ApprovalGate for GuiApprovalGate {
-    async fn request_approval(&self, action: &Action, reason: &str) -> bool {
+impl hf_service::approval::ApprovalNotifier for TauriApprovalNotifier {
+    fn requested(&self, request: &hf_service::approval::PermissionRequest) {
         use tauri::Emitter;
-        /// Deny an approval the user never answers so the agent turn cannot hang
-        /// indefinitely. The prompt is mounted app-wide, so it is visible from
-        /// every view, but the user may still be away from the window.
-        const APPROVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(5);
-        let id = uuid::Uuid::new_v4();
-        let rx = self.pending.register(id).await;
         // A failed emit leaves no prompt on screen; the request is then denied
-        // by the timeout below, which is the safe outcome.
-        let _ = self.app.emit(
-            "chat:permission_request",
-            permission_request_payload(id, action, reason, APPROVAL_TIMEOUT),
-        );
-        self.pending.await_decision(id, rx, APPROVAL_TIMEOUT).await
+        // by the gate's timeout, which is the safe outcome.
+        let _ = self
+            .app
+            .emit(hf_service::approval::PERMISSION_REQUEST_EVENT, request);
+    }
+
+    fn closed(&self, closed: &hf_service::approval::PermissionClosed) {
+        use tauri::Emitter;
+        // A failed emit leaves a stale prompt that the dialog drops at the
+        // request's deadline; an answer to it is refused as no longer pending.
+        let _ = self
+            .app
+            .emit(hf_service::approval::PERMISSION_CLOSED_EVENT, closed);
     }
 }
 
@@ -800,7 +779,7 @@ pub async fn chat_answer_permission(
     approved: bool,
 ) -> Result<bool, String> {
     let uid = uuid::Uuid::parse_str(&id).map_err(|e| e.to_string())?;
-    Ok(state.pending_approvals.resolve(uid, approved).await)
+    Ok(state.pending_approvals.resolve(uid, approved))
 }
 
 /// Everything `oxfuzz` has learned about your projects, read from the
@@ -1841,9 +1820,15 @@ pub async fn chat_agent(
     history: Option<Vec<ChatTurn>>,
     session_id: Option<String>,
     agent_id: Option<String>,
+    provider: Option<String>,
+    turn_id: Option<String>,
 ) -> Result<String, String> {
     let project = project.filter(|p| !p.is_empty()).map(PathBuf::from);
     let session = session_id.filter(|s| !s.is_empty()).map(SessionId);
+    let provider = provider
+        .filter(|id| !id.is_empty())
+        .map(hf_service::ProviderId::from_string);
+    let turn_id = turn_id.as_deref().map(parse_turn_id).transpose()?;
     // Frontend-supplied history, used only when no persistent session applies.
     let history_fallback: Vec<Message> = history
         .unwrap_or_default()
@@ -1853,10 +1838,10 @@ pub async fn chat_agent(
 
     // Run with an interactive guardrail gate: high-risk tool calls (e.g. run a
     // fuzzer) prompt the user via `chat:permission_request` before executing.
-    let gate = std::sync::Arc::new(GuiApprovalGate {
-        app: app.clone(),
-        pending: state.pending_approvals.clone(),
-    });
+    let gate = std::sync::Arc::new(hf_service::approval::InteractiveApprovalGate::new(
+        state.pending_approvals.clone(),
+        std::sync::Arc::new(TauriApprovalNotifier { app: app.clone() }),
+    ));
     let guardrails = state
         .container
         .guardrails()
@@ -1884,11 +1869,26 @@ pub async fn chat_agent(
                 history_fallback,
                 message,
                 display_message,
+                provider,
+                turn_id,
             },
             &sink,
         )
         .await
         .map_err(|e| e.to_string())
+}
+
+fn parse_turn_id(turn_id: &str) -> Result<uuid::Uuid, String> {
+    uuid::Uuid::parse_str(turn_id).map_err(|error| format!("invalid chat turn id: {error}"))
+}
+
+/// Stop the running chat turn the frontend named when it started it.
+#[tauri::command]
+pub async fn chat_cancel(
+    state: tauri::State<'_, crate::state::AppState>,
+    turn_id: String,
+) -> Result<hf_service::ChatCancelOutcome, String> {
+    Ok(state.container.cancel_chat_turn(parse_turn_id(&turn_id)?))
 }
 
 // ---------------------------------------------------------------------------
@@ -5073,33 +5073,6 @@ mod scheduler_arming_tests {
     fn arming_reply_matches_the_rest_body() {
         assert_eq!(arming_body(true), serde_json::json!({ "armed": true }));
         assert_eq!(arming_body(false), serde_json::json!({ "armed": false }));
-    }
-}
-
-#[cfg(test)]
-mod approval_prompt_tests {
-    use hf_service::Action;
-
-    use super::permission_request_payload;
-
-    #[test]
-    fn approval_request_carries_the_risk_tier_and_the_auto_deny_deadline() {
-        let id = uuid::Uuid::nil();
-        let action = Action::ShellExec {
-            command: "make fuzz".to_owned(),
-        };
-        let payload = permission_request_payload(
-            id,
-            &action,
-            "agent wants to build",
-            std::time::Duration::from_mins(5),
-        );
-
-        assert_eq!(payload["id"], id.to_string());
-        assert_eq!(payload["action"], "shell: make fuzz");
-        assert_eq!(payload["reason"], "agent wants to build");
-        assert_eq!(payload["risk"], "critical");
-        assert_eq!(payload["timeout_secs"], 300);
     }
 }
 

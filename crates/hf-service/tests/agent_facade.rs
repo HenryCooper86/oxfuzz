@@ -72,6 +72,8 @@ async fn run_chat_turn_is_available_through_service() {
                 history_fallback: Vec::new(),
                 message: "hello".to_owned(),
                 display_message: None,
+                provider: None,
+                turn_id: None,
             },
             &sink,
         )
@@ -105,6 +107,8 @@ async fn run_chat_turn_rejects_an_unknown_persistent_session() {
                 history_fallback: Vec::new(),
                 message: "hello".to_owned(),
                 display_message: None,
+                provider: None,
+                turn_id: None,
             },
             &sink,
         )
@@ -143,6 +147,8 @@ async fn run_chat_turn_persists_messages_and_checkpoint_before_success() {
                 history_fallback: Vec::new(),
                 message: "[Plan mode] internal instruction\n\nhello".to_owned(),
                 display_message: Some("hello".to_owned()),
+                provider: None,
+                turn_id: None,
             },
             &sink,
         )
@@ -169,6 +175,8 @@ async fn run_chat_turn_persists_messages_and_checkpoint_before_success() {
                 history_fallback: Vec::new(),
                 message: "replacement".to_owned(),
                 display_message: Some("replacement".to_owned()),
+                provider: None,
+                turn_id: None,
             },
             &CollectingSink::new(),
         )
@@ -215,6 +223,8 @@ async fn run_chat_turn_rolls_back_transcripts_when_checkpoint_save_fails() {
                 history_fallback: Vec::new(),
                 message: "do not retain this turn".to_owned(),
                 display_message: Some("do not retain this turn".to_owned()),
+                provider: None,
+                turn_id: None,
             },
             &CollectingSink::new(),
         )

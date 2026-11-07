@@ -31,6 +31,9 @@ pub enum ClassifiedError {
     Validation(String),
     #[error("timeout")]
     Timeout,
+    /// The operator cancelled the operation before it completed.
+    #[error("cancelled")]
+    Cancelled,
     #[error("internal: {0}")]
     Internal(String),
 }

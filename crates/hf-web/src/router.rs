@@ -38,6 +38,8 @@ const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 pub struct AppState {
     pub container: ServiceContainer,
     event_tx: broadcast::Sender<SseEvent>,
+    /// Approval prompts of web chat turns waiting for a browser answer.
+    pending_approvals: std::sync::Arc<hf_service::approval::PendingApprovals>,
     security: WebSecurityConfig,
     integration_configs: hf_service::config::IntegrationConfigStore,
     #[cfg(feature = "automotive-scapy")]
@@ -56,6 +58,7 @@ impl AppState {
         Self {
             container,
             event_tx,
+            pending_approvals: std::sync::Arc::default(),
             security: WebSecurityConfig::deny_all(),
             integration_configs: hf_service::config::IntegrationConfigStore::default(),
             #[cfg(feature = "automotive-scapy")]
@@ -197,6 +200,10 @@ pub enum SseEvent {
     FuzzLog { line: String },
     /// `stream:lagged` -- this subscriber fell behind the bounded channel.
     StreamLagged { dropped: u64 },
+    /// `chat:permission_request` -- a chat turn waits for an approval answer.
+    PermissionRequest(hf_service::approval::PermissionRequest),
+    /// `chat:permission_closed` -- an approval prompt is no longer pending.
+    PermissionClosed(hf_service::approval::PermissionClosed),
 }
 
 impl SseEvent {
@@ -209,6 +216,8 @@ impl SseEvent {
             SseEvent::FuzzStage(_) => "fuzz:stage",
             SseEvent::FuzzLog { .. } => "fuzz:log",
             SseEvent::StreamLagged { .. } => "stream:lagged",
+            SseEvent::PermissionRequest(_) => hf_service::approval::PERMISSION_REQUEST_EVENT,
+            SseEvent::PermissionClosed(_) => hf_service::approval::PERMISSION_CLOSED_EVENT,
         }
     }
 }
@@ -257,6 +266,8 @@ fn classified_api_error(error: impl Into<ClassifiedError>) -> ApiError {
         ClassifiedError::Provider(_) => StatusCode::BAD_GATEWAY,
         ClassifiedError::Sandbox(_) => StatusCode::SERVICE_UNAVAILABLE,
         ClassifiedError::Timeout => StatusCode::GATEWAY_TIMEOUT,
+        // The operator stopped the operation; the request did not fail.
+        ClassifiedError::Cancelled => StatusCode::CONFLICT,
         ClassifiedError::Storage(_) | ClassifiedError::Internal(_) => {
             StatusCode::INTERNAL_SERVER_ERROR
         }
@@ -562,6 +573,8 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .route("/defectdojo/stop", post(defectdojo_stop))
         .route("/chat/send", post(chat_send))
         .route("/chat/agent", post(chat_agent))
+        .route("/chat/cancel", post(chat_cancel))
+        .route("/chat/permission", post(chat_answer_permission))
         .route("/agents", get(list_agents))
         .route("/agents/info", get(agent_info))
         .route("/agents/tools", get(agent_tools))
@@ -3636,6 +3649,12 @@ struct ChatAgentRequest {
     /// Prior conversation turns, used only when no persistent session applies.
     #[serde(default)]
     history: Vec<ChatHistoryTurn>,
+    /// Provider id that must answer the turn; empty or absent keeps routing.
+    #[serde(default)]
+    provider: Option<String>,
+    /// Client-chosen id that `/chat/cancel` uses to stop the turn.
+    #[serde(default)]
+    turn_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3644,8 +3663,69 @@ struct ChatHistoryTurn {
     content: String,
 }
 
+/// Delivers approval prompts of web chat turns to browsers over SSE.
+struct SseApprovalNotifier {
+    state: AppState,
+}
+
+impl hf_service::approval::ApprovalNotifier for SseApprovalNotifier {
+    fn requested(&self, request: &hf_service::approval::PermissionRequest) {
+        if let Err(error) = self
+            .state
+            .publish_event(SseEvent::PermissionRequest(request.clone()))
+        {
+            // No prompt reaches a browser; the gate denies at its deadline.
+            tracing::warn!(%error, "approval prompt could not be published");
+        }
+    }
+
+    fn closed(&self, closed: &hf_service::approval::PermissionClosed) {
+        if let Err(error) = self
+            .state
+            .publish_event(SseEvent::PermissionClosed(closed.clone()))
+        {
+            // A browser keeps a stale prompt until its deadline; an answer to
+            // it is refused as no longer pending.
+            tracing::warn!(%error, "approval close could not be published");
+        }
+    }
+}
+
+fn parse_turn_id(turn_id: &str) -> Result<uuid::Uuid, ApiError> {
+    uuid::Uuid::parse_str(turn_id).map_err(|error| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("invalid chat turn id: {error}"),
+            }),
+        )
+    })
+}
+
+/// The container a web chat turn runs on: approvals the policy requires are
+/// asked of the browser over SSE, unless `HF_AUTO_APPROVE` already approves
+/// them for this headless server.
+fn chat_container(state: &AppState) -> ServiceContainer {
+    if hf_service::EnvApprovalGate::auto_approve_enabled() {
+        return state.container.clone();
+    }
+    let gate = hf_service::approval::InteractiveApprovalGate::new(
+        std::sync::Arc::clone(&state.pending_approvals),
+        std::sync::Arc::new(SseApprovalNotifier {
+            state: state.clone(),
+        }),
+    );
+    let guardrails = state
+        .container
+        .guardrails()
+        .clone()
+        .with_approval_gate(std::sync::Arc::new(gate));
+    state.container.clone().with_guardrails(guardrails)
+}
+
 /// Drive one autonomous agent turn over the project through the service facade.
 /// Tool-call progress is not streamed here; this is a request/response endpoint.
+/// Approval prompts are delivered over SSE and answered at `/chat/permission`.
 async fn chat_agent(
     State(state): State<AppState>,
     Json(req): Json<ChatAgentRequest>,
@@ -3653,13 +3733,17 @@ async fn chat_agent(
     let requested = req.project.filter(|path| !path.is_empty());
     let project = approved_optional_project(&state, requested.as_ref())?;
     let session = req.session_id.filter(|s| !s.is_empty()).map(SessionId);
+    let provider = req
+        .provider
+        .filter(|id| !id.is_empty())
+        .map(hf_service::ProviderId::from_string);
+    let turn_id = req.turn_id.as_deref().map(parse_turn_id).transpose()?;
     let history_fallback: Vec<Message> = req
         .history
         .into_iter()
         .map(|t| Message::new(parse_role(&t.role), t.content))
         .collect();
-    let answer = state
-        .container
+    let answer = chat_container(&state)
         .run_chat_turn(
             hf_service::AgentTurnRequest {
                 project,
@@ -3668,12 +3752,53 @@ async fn chat_agent(
                 history_fallback,
                 message: req.message,
                 display_message: req.display_message,
+                provider,
+                turn_id,
             },
             &hf_service::NullSink,
         )
         .await
         .map_err(classified_api_error)?;
     Ok(Json(answer))
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatCancelRequest {
+    turn_id: String,
+}
+
+/// Stop the running chat turn the client named when it started it.
+async fn chat_cancel(
+    State(state): State<AppState>,
+    Json(req): Json<ChatCancelRequest>,
+) -> ApiResult<hf_service::ChatCancelOutcome> {
+    Ok(Json(
+        state
+            .container
+            .cancel_chat_turn(parse_turn_id(&req.turn_id)?),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatPermissionRequest {
+    id: String,
+    approved: bool,
+}
+
+/// Answer a pending approval prompt. Returns whether a prompt was waiting.
+async fn chat_answer_permission(
+    State(state): State<AppState>,
+    Json(req): Json<ChatPermissionRequest>,
+) -> ApiResult<bool> {
+    let id = uuid::Uuid::parse_str(&req.id).map_err(|error| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("invalid approval id: {error}"),
+            }),
+        )
+    })?;
+    Ok(Json(state.pending_approvals.resolve(id, req.approved)))
 }
 
 /// Parse a transcript role string into a [`Role`],
@@ -5307,6 +5432,7 @@ Authorization = "Bearer synthetic-header"
                 StatusCode::SERVICE_UNAVAILABLE,
             ),
             (ClassifiedError::Timeout, StatusCode::GATEWAY_TIMEOUT),
+            (ClassifiedError::Cancelled, StatusCode::CONFLICT),
             (
                 ClassifiedError::Storage("database".into()),
                 StatusCode::INTERNAL_SERVER_ERROR,

@@ -37,6 +37,7 @@ use hf_tools::registry::ToolRegistryImpl;
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::OnceCell;
+use tokio_util::sync::CancellationToken;
 
 pub use definition::{AgentDefinition, AgentRole, Autonomy, CompletionRequirement, TrustTier};
 pub use event::{AgentEvent, CollectingSink, EventSink, NullSink};
@@ -173,6 +174,11 @@ pub struct Agent {
     /// backend's root. A store that cannot be created is reported once and then
     /// treated as absent, which degrades to the previous inline cap.
     spill: std::sync::OnceLock<Option<Arc<hf_spill::SpillStore>>>,
+    /// Operator cancellation for the turn. Checked before every model call and
+    /// after every tool, raced against in-flight model requests, and shared
+    /// with delegated sub-agents. Never cancelled unless a caller installs one
+    /// through [`Self::with_cancellation`].
+    cancel: CancellationToken,
 }
 
 /// Maximum delegation depth: the orchestrator (0) may spawn specialists (1);
@@ -249,6 +255,28 @@ impl Agent {
             spill: std::sync::OnceLock::new(),
             delegation_depth: 0,
             reminders: Arc::new(std::sync::Mutex::new(Vec::new())),
+            cancel: CancellationToken::new(),
+        }
+    }
+
+    /// Stop the turn when `cancel` fires.
+    ///
+    /// An in-flight model request (step or compaction) is dropped at once. A
+    /// tool dispatched through the backend is not dropped: the backend owns its
+    /// teardown, and the loop stops at the step after it returns. A cancelled
+    /// turn returns [`ClassifiedError::Cancelled`] and emits no `Complete`.
+    #[must_use]
+    pub fn with_cancellation(mut self, cancel: CancellationToken) -> Self {
+        self.cancel = cancel;
+        self
+    }
+
+    /// `Err(Cancelled)` once the operator has cancelled the turn.
+    fn ensure_not_cancelled(&self) -> Result<(), ClassifiedError> {
+        if self.cancel.is_cancelled() {
+            Err(ClassifiedError::Cancelled)
+        } else {
+            Ok(())
         }
     }
 
@@ -355,7 +383,8 @@ impl Agent {
     ///
     /// # Errors
     /// Returns `ClassifiedError` if no provider pool is configured or an LLM
-    /// call fails. Tool failures are fed back to the model rather than
+    /// call fails, and [`ClassifiedError::Cancelled`] once the turn's
+    /// cancellation fires. Tool failures are fed back to the model rather than
     /// aborting the turn.
     pub async fn run_turn(
         &self,
@@ -364,6 +393,7 @@ impl Agent {
         sink: &dyn EventSink,
     ) -> Result<String, ClassifiedError> {
         sink.emit(AgentEvent::Started).await;
+        self.ensure_not_cancelled()?;
 
         let pool = self.backend.provider_pool().ok_or_else(|| {
             let msg = "no LLM provider configured (configure one in providers.toml or set HF_PROVIDER_API_KEY)".to_owned();
@@ -384,7 +414,11 @@ impl Agent {
         // Summarize older turns into memory when the conversation is over budget,
         // so long sessions retain earlier context instead of losing it to plain
         // window truncation.
-        self.maybe_compact(&mut messages).await;
+        tokio::select! {
+            biased;
+            () = self.cancel.cancelled() => return Err(ClassifiedError::Cancelled),
+            () = self.maybe_compact(&mut messages) => {}
+        }
 
         // Prefer the providers this agent's tags name, or the default tag set
         // when it names none.
@@ -406,6 +440,7 @@ impl Agent {
         let mut completion_recoveries = 0usize;
 
         for _ in 0..self.max_iterations {
+            self.ensure_not_cancelled()?;
             // Pick up any synthetic system-reminders queued mid-turn (L5) so the
             // model call below reads them: the channel for background-task notices,
             // todo nudges, and user interjections. Injected as user turns, so they
@@ -439,7 +474,11 @@ impl Agent {
             // Apply the agent's configured sampling temperature (previously set
             // in the definition but never plumbed into the request).
             req.temperature = self.definition.temperature;
-            let resp = pool.chat_completion(&req, &route).await?;
+            let resp = tokio::select! {
+                biased;
+                () = self.cancel.cancelled() => return Err(ClassifiedError::Cancelled),
+                resp = pool.chat_completion(&req, &route) => resp?,
+            };
             // Record the turn's token usage/cost as a diagnostic so interactive
             // agent spend shows up in the cost summary, like rank/harness/triage
             // (which route through LlmProviderBridge::with_diagnostics).
@@ -626,6 +665,9 @@ impl Agent {
                 summary: truncate(&result, 400),
             })
             .await;
+            // A tool may have run while the operator cancelled; nothing after
+            // it may reach the model.
+            self.ensure_not_cancelled()?;
 
             // Feed the loop guard the (tool, normalized-args) signature. A
             // detected runaway pattern aborts the turn early with a clear reason.
@@ -710,6 +752,7 @@ impl Agent {
         let sub =
             Agent::with_definition(Arc::clone(&self.backend), self.project.clone(), definition)
                 .with_grep_limits(self.grep_limits)
+                .with_cancellation(self.cancel.clone())
                 .at_delegation_depth(self.delegation_depth + 1);
         // Box the recursive turn: an async fn that awaits itself needs indirection.
         let run = Box::pin(sub.run_turn(Vec::new(), task, &NullSink));

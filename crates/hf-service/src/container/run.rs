@@ -403,7 +403,7 @@ fn syzkaller_terminal_status(termination: hf_core::runtime::CommandTermination) 
 
 impl ServiceContainer {
     fn register_active_run(&self, run_id: Uuid) -> (CancellationToken, ActiveRunGuard) {
-        let cancel = CancellationToken::new();
+        let cancel = self.operation_cancel_token();
         if let Ok(mut runs) = self.active_runs.lock() {
             runs.insert(run_id, cancel.clone());
         }

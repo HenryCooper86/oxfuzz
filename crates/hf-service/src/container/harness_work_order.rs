@@ -1255,6 +1255,7 @@ fn bounded_attempt_failure(error: &ClassifiedError) -> (String, String) {
         ClassifiedError::Storage(_) => "storage",
         ClassifiedError::Validation(_) => "validation",
         ClassifiedError::Timeout => "timeout",
+        ClassifiedError::Cancelled => "cancelled",
         ClassifiedError::Internal(_) => "internal",
     };
     let message =

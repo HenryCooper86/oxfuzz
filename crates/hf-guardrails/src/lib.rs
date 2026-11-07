@@ -233,6 +233,14 @@ impl Guardrails {
         self
     }
 
+    /// The approval gate consulted when the policy requires consent, so a
+    /// caller can wrap it (for example to deny once an operation is cancelled)
+    /// and reinstall it with [`Self::with_approval_gate`].
+    #[must_use]
+    pub fn approval_gate(&self) -> Arc<dyn ApprovalGate> {
+        Arc::clone(&self.gate)
+    }
+
     /// Register an [`Advisor`], consulted before the policy. Tighten-only.
     #[must_use]
     pub fn with_advisor(mut self, advisor: Arc<dyn Advisor>) -> Self {

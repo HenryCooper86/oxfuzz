@@ -169,6 +169,36 @@ describe("transport", () => {
     }
   });
 
+  it("maps chat turn control and approval answers to their web routes", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      return new Response(JSON.stringify("ok"), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    try {
+      const transport = createHttpTransport();
+      await transport.invoke("chat_agent", { message: "hi", provider: "deepseek", turnId: "turn-1" });
+      await transport.invoke("chat_cancel", { turnId: "turn-1" });
+      await transport.invoke("chat_answer_permission", { id: "prompt-1", approved: false });
+
+      expect(calls.map(({ url, init }) => [new URL(url).pathname, init.method])).toEqual([
+        ["/chat/agent", "POST"],
+        ["/chat/cancel", "POST"],
+        ["/chat/permission", "POST"],
+      ]);
+      expect(JSON.parse(String(calls[0].init.body))).toEqual({ message: "hi", provider: "deepseek", turn_id: "turn-1" });
+      expect(JSON.parse(String(calls[1].init.body))).toEqual({ turn_id: "turn-1" });
+      expect(JSON.parse(String(calls[2].init.body))).toEqual({ id: "prompt-1", approved: false });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("sends the configured bearer token in an authorization header", async () => {
     const calls: RequestInit[] = [];
     const originalFetch = globalThis.fetch;

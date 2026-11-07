@@ -9,14 +9,22 @@ import { I18nProvider } from "../i18n";
 // shell and is driven only by the backend's `chat:permission_request` event.
 const transport = vi.hoisted(() => ({
   emit: undefined as undefined | ((payload: unknown) => void),
+  close: undefined as undefined | ((payload: unknown) => void),
   invoke: vi.fn(async () => true),
 }));
 vi.mock("../lib", () => ({
   getTransport: () => ({
     invoke: transport.invoke,
     listen: async (event: string, handler: (e: { payload: unknown }) => void) => {
-      if (event === "chat:permission_request") transport.emit = payload => handler({ payload });
-      return () => { transport.emit = undefined; };
+      if (event === "chat:permission_request") {
+        transport.emit = payload => handler({ payload });
+        return () => { transport.emit = undefined; };
+      }
+      if (event === "chat:permission_closed") {
+        transport.close = payload => handler({ payload });
+        return () => { transport.close = undefined; };
+      }
+      return () => {};
     },
   }),
 }));
@@ -81,5 +89,16 @@ it("counts down and drops the prompt once the backend has denied it", async () =
   await act(async () => { vi.advanceTimersByTime(240_000); });
   expect(dialog()).toBeNull();
   // The backend already denied it on its own timeout; nothing is sent.
+  expect(transport.invoke).not.toHaveBeenCalled();
+});
+
+it("withdraws a prompt the backend closed, such as one of a stopped chat turn", async () => {
+  await act(async () => transport.emit!(request("a", "run libfuzzer for 60s")));
+  await act(async () => transport.emit!(request("b", "write host file: /tmp/x")));
+  await act(async () => transport.close!({ id: "a" }));
+  expect(host.textContent).not.toContain("run libfuzzer for 60s");
+  expect(host.textContent).toContain("write host file: /tmp/x");
+  await act(async () => transport.close!({ id: "b" }));
+  expect(dialog()).toBeNull();
   expect(transport.invoke).not.toHaveBeenCalled();
 });

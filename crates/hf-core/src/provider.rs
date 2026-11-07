@@ -460,8 +460,13 @@ pub struct RouteRequest {
     /// routing (e.g. prefer a `reasoning` model for harness authoring) without
     /// breaking setups whose providers are not tagged that way.
     pub preferred_tags: Vec<String>,
-    /// Preferred provider by ID (exact match, highest priority).
-    pub preferred_provider_id: Option<ProviderId>,
+    /// The one provider allowed to serve this request (exact id match).
+    ///
+    /// A pin is not a preference: when the pinned provider is not registered,
+    /// is frozen, or lacks a required tag, routing fails with an error naming
+    /// it and never substitutes another provider. Tag preferences, the
+    /// preferred model, and the selection strategy do not apply.
+    pub pinned_provider_id: Option<ProviderId>,
     /// Preferred model (exact match, optional).
     pub preferred_model: Option<String>,
     /// Priority level.

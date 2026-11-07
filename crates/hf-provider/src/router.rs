@@ -93,35 +93,10 @@ impl TagBasedRouter {
         providers: &[RoutableProvider],
         route: &RouteRequest,
     ) -> Result<usize, ProviderError> {
-        // Step 0: Explicit provider selection bypasses freeze/priority
-        // prefiltering so manual user choice can retry a previously frozen
-        // provider and surface the real provider error.
-        if let Some(ref preferred_id) = route.preferred_provider_id {
-            let Some((idx, provider)) = providers
-                .iter()
-                .enumerate()
-                .find(|(_, p)| p.provider.metadata().id == *preferred_id)
-            else {
-                return Err(ProviderError::Other {
-                    message: format!("preferred provider '{preferred_id}' is not registered"),
-                });
-            };
-
-            let meta = provider.provider.metadata();
-            if route
-                .required_tags
-                .iter()
-                .all(|tag| meta.tags.contains(tag))
-            {
-                return Ok(idx);
-            }
-
-            return Err(ProviderError::Other {
-                message: format!(
-                    "preferred provider '{}' does not match required tags {:?}",
-                    preferred_id, route.required_tags
-                ),
-            });
+        // Step 0: A pinned provider is the only candidate. Every reason it
+        // cannot serve fails the request naming it; nothing is substituted.
+        if let Some(ref pinned_id) = route.pinned_provider_id {
+            return Self::select_pinned(providers, route, pinned_id);
         }
 
         // Step 1: Filter to non-frozen providers matching all required tags.
@@ -198,6 +173,51 @@ impl TagBasedRouter {
 
         // Step 3: Apply selection strategy among remaining candidates.
         Ok(self.apply_strategy(providers, &candidates))
+    }
+
+    /// Resolve a pinned route: the provider must be registered, not frozen,
+    /// and carry every required tag.
+    fn select_pinned(
+        providers: &[RoutableProvider],
+        route: &RouteRequest,
+        pinned_id: &hf_core::types::ProviderId,
+    ) -> Result<usize, ProviderError> {
+        let Some((idx, provider)) = providers
+            .iter()
+            .enumerate()
+            .find(|(_, p)| p.provider.metadata().id == *pinned_id)
+        else {
+            return Err(ProviderError::Other {
+                message: format!(
+                    "selected provider '{pinned_id}' is not configured or not enabled in the \
+                     provider pool; no other provider was used"
+                ),
+            });
+        };
+        let freeze = provider.freeze_manager.status();
+        if freeze.is_frozen {
+            let reason = freeze.reason.as_deref().unwrap_or("no reason recorded");
+            return Err(ProviderError::Other {
+                message: format!(
+                    "selected provider '{pinned_id}' is frozen ({reason}); no other provider \
+                     was used"
+                ),
+            });
+        }
+        let meta = provider.provider.metadata();
+        if !route
+            .required_tags
+            .iter()
+            .all(|tag| meta.tags.contains(tag))
+        {
+            return Err(ProviderError::Other {
+                message: format!(
+                    "selected provider '{pinned_id}' does not carry the required tags {:?}",
+                    route.required_tags
+                ),
+            });
+        }
+        Ok(idx)
     }
 
     /// Apply the configured selection strategy to the candidate list.
@@ -443,21 +463,70 @@ mod tests {
         assert_eq!(idx, 1, "should skip frozen p1 and select p2");
     }
 
+    fn pinned(id: &str) -> RouteRequest {
+        RouteRequest {
+            pinned_provider_id: Some(hf_core::types::ProviderId::from_string(id)),
+            ..Default::default()
+        }
+    }
+
     #[test]
-    fn test_routing_preferred_provider_bypasses_freeze() {
+    fn test_routing_pinned_provider_wins_over_preferred_tags_and_order() {
         let router = TagBasedRouter::new();
         let providers = vec![
-            make_frozen_routable("p1", "seedream", vec!["image"]),
+            make_routable("p1", "gpt-4", vec!["reasoning"]),
+            make_routable("p2", "gpt-4o", vec!["general"]),
+        ];
+        let route = RouteRequest {
+            preferred_tags: vec!["reasoning".into()],
+            ..pinned("p2")
+        };
+
+        assert_eq!(router.select(&providers, &route).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_routing_pinned_frozen_provider_fails_naming_it_without_substitution() {
+        let router = TagBasedRouter::new();
+        let providers = vec![
+            make_frozen_routable("p1", "seedream", vec!["general"]),
             make_routable("p2", "gpt-4o", vec!["general"]),
         ];
 
+        let error = router.select(&providers, &pinned("p1")).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("'p1'"), "{message}");
+        assert!(message.contains("frozen"), "{message}");
+        assert!(message.contains("test freeze"), "{message}");
+    }
+
+    #[test]
+    fn test_routing_pinned_unknown_provider_fails_naming_it() {
+        let router = TagBasedRouter::new();
+        let providers = vec![make_routable("p2", "gpt-4o", vec!["general"])];
+
+        let message = router
+            .select(&providers, &pinned("missing"))
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("'missing'"), "{message}");
+        assert!(message.contains("not configured"), "{message}");
+    }
+
+    #[test]
+    fn test_routing_pinned_provider_missing_a_required_tag_fails() {
+        let router = TagBasedRouter::new();
+        let providers = vec![
+            make_routable("p1", "gpt-4", vec!["general"]),
+            make_routable("p2", "gpt-4o", vec!["vision"]),
+        ];
         let route = RouteRequest {
-            preferred_provider_id: Some(hf_core::types::ProviderId::from_string("p1")),
-            ..Default::default()
+            required_tags: vec!["vision".into()],
+            ..pinned("p1")
         };
 
-        let idx = router.select(&providers, &route).unwrap();
-        assert_eq!(idx, 0, "preferred provider should bypass freeze prefilter");
+        let message = router.select(&providers, &route).unwrap_err().to_string();
+        assert!(message.contains("'p1'"), "{message}");
     }
 
     #[test]
