@@ -136,6 +136,12 @@ export function ChatView() {
   const [stopping, setStopping] = useState(false);
   const turnRef = useRef<RunningTurn | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  // The session currently on screen. A turn that settles after the operator
+  // moved to another session must not overwrite that session's view.
+  const sessionRef = useRef<string | null>(null);
+  useEffect(() => {
+    sessionRef.current = sessionId;
+  }, [sessionId]);
   const [agents, setAgents] = useState<CallableAgent[]>([]);
   const [agentId, setAgentId] = useState<string>(() => localStorage.getItem(ACTIVE_AGENT_KEY) || "orchestrator");
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -311,6 +317,7 @@ export function ChatView() {
   }, [input, expanded]);
 
   async function attachProjectFolder() {
+    if (busy) return;
     const path = await pickFolder();
     if (path) setActiveProject(path);
   }
@@ -447,7 +454,8 @@ export function ChatView() {
       if (sessionId) {
         // The persisted display transcript is authoritative. Reloading also
         // removes transient tool-progress rows from the visible conversation.
-        setMessages(await loadCanonicalHistory(sessionId));
+        const canonical = await loadCanonicalHistory(sessionId);
+        if (sessionRef.current === sessionId) setMessages(canonical);
       } else {
         setMessages((m) => [
           ...m,
@@ -472,10 +480,12 @@ export function ChatView() {
             /* fall back to dropping this turn's rows locally */
           }
         }
+        if (sessionRef.current !== sessionId) return;
         setMessages((current) => canonical ?? (current.includes(msg) ? current.slice(0, current.indexOf(msg)) : current));
         setInput((current) => (current.trim() ? current : text));
         return;
       }
+      if (sessionRef.current !== sessionId) return;
       let canonical: ChatMessage[] | null = null;
       if (sessionId) {
         try {
@@ -523,7 +533,9 @@ export function ChatView() {
       const outcome = await getTransport().invoke<string>("chat_cancel", { turnId: turn.id });
       if (outcome === "not_running") {
         // The answer was already committed; it arrives as a normal reply.
+        // Either way there is nothing left to wait on: release the button.
         turn.cancelled = false;
+        if (turnRef.current === turn) setStopping(false);
       }
     } catch (error) {
       turn.cancelled = false;
@@ -724,12 +736,14 @@ export function ChatView() {
                 {activeProject.split("/").pop() || activeProject}
                 <button
                   onClick={() => setActiveProject("")}
+                  disabled={busy}
                   className="inline-flex items-center"
                   style={{
                     background: "none",
                     border: "none",
                     color: "var(--text-muted)",
-                    cursor: "pointer",
+                    cursor: busy ? "default" : "pointer",
+                    opacity: busy ? 0.5 : 1,
                     padding: 0,
                   }}
                   title={t("chat.removeAttachment")}
@@ -767,6 +781,7 @@ export function ChatView() {
                 icon={<FolderPlus size={17} />}
                 title={t("chat.attachProject")}
                 onClick={attachProjectFolder}
+                disabled={busy}
               />
               {agents.length > 0 && (
                 <AgentDropdown agents={agents} value={agentId} onSelect={setAgentId} />
@@ -1077,13 +1092,15 @@ function ToolbarIconButton({
   icon,
   title,
   onClick,
+  disabled,
 }: {
   icon: React.ReactNode;
   title: string;
   onClick: () => void;
+  disabled?: boolean;
 }) {
   return (
-    <IconButton size={30} onClick={onClick} title={title} aria-label={title}>
+    <IconButton size={30} onClick={onClick} title={title} aria-label={title} disabled={disabled}>
       {icon}
     </IconButton>
   );
