@@ -95,9 +95,27 @@ agent.
   defined by `hf-prompt`, independent of provider-native tool calling. The
   model is instructed to reply with exactly one JSON object
   (`config/prompts/core_tool_protocol.txt`) and the reply is decoded as JSON.
-- That contract is the only tool-call syntax this codebase parses. Parsers for
+- That contract is the only tool-call syntax the agent is asked for. Parsers for
   provider-specific and tagged formats (`<tool_call>` and its dialects) were
   removed on 2026-08-28: they had no caller, and the agent never emits the
   syntax they read. A provider-native integration adds its parser alongside the
   implementation that needs it, so a format this codebase claims to accept is
   always one it exercises.
+- One alternate encoding is decoded: DeepSeek models sometimes answer a step in
+  their native DSML function-call markup (`<｜DSML｜function_calls>` /
+  `invoke` / `parameter`, U+FF5C delimiters) in plain `content`, because the
+  prompt-based request carries no native tool definitions for the API to parse
+  it against. `hf-agent` (`src/dsml.rs`, called from `parse_step`) decodes such
+  a reply into the same `Step` a JSON tool step produces: `string="true"`
+  parameters become JSON strings, `string="false"` values are parsed as JSON.
+  The decoded step runs through the unchanged dispatch path (allow-list, manual
+  approval, argument-schema validation, loop guard, events), so it gains no
+  privilege a JSON step lacks. The parser is strict and bounded (64 KiB reply,
+  8 invokes, 32 parameters, ASCII names of at most 64 characters, no duplicate
+  parameters, only whitespace after the block); anything it does not fully
+  accept is left as ordinary text and nothing runs. Only the first invoke
+  executes; later invokes are named back to the model as not executed. The
+  step is recorded in the conversation as its JSON encoding, not the markup.
+  Recovery lives in the agent rather than `hf-provider` because the agent's
+  step decoder is the only consumer of tool calls; `ChatResponse.tool_calls`
+  has no reader in prompt-based mode.

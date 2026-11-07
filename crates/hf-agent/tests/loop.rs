@@ -1112,3 +1112,160 @@ async fn delegated_inspection_inherits_finite_grep_limits_and_feedback() {
     assert!(feedback.contains("\"nextOffset\":1"));
     assert!(!feedback.contains("needle content"));
 }
+
+/// The reply `DeepSeek` produced in the reported session: its native DSML
+/// function-call markup in plain `content` instead of a JSON step.
+const DSML_RUN_REPLY: &str = "<｜DSML｜function_calls>\n\
+<｜DSML｜invoke name=\"run\">\n\
+<｜DSML｜parameter name=\"target\" string=\"true\">doprocessing</｜DSML｜parameter>\n\
+<｜DSML｜parameter name=\"engine\" string=\"true\">libfuzzer</｜DSML｜parameter>\n\
+<｜DSML｜parameter name=\"duration_secs\" string=\"false\">10</｜DSML｜parameter>\n\
+</｜DSML｜invoke>\n\
+</｜DSML｜function_calls>";
+
+const DSML_MARKER: &str = "｜DSML｜";
+
+fn tool_calls(events: &[AgentEvent]) -> Vec<(String, serde_json::Value)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::ToolCall { name, args } => Some((name.clone(), args.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_dsml_tool_call_reply_is_dispatched_as_a_tool_step() {
+    let pool = Arc::new(ScriptedPool::new(vec![
+        DSML_RUN_REPLY,
+        r#"{"thought":"done","final":"campaign started"}"#,
+    ]));
+    let captured = Arc::clone(&pool);
+    let provider: Arc<dyn ProviderPool> = pool;
+    let backend = TestBackend::with_tool_result(provider, "run-dispatched-marker".to_owned());
+    let agent = Agent::new(backend, Some(std::env::temp_dir()));
+    let sink = CollectingSink::new();
+
+    let out = agent
+        .run_turn(
+            vec![],
+            "Run a 10 second libFuzzer campaign on doprocessing.",
+            &sink,
+        )
+        .await
+        .unwrap();
+    assert_eq!(out, "campaign started");
+
+    let events = sink.events().await;
+    assert_eq!(
+        tool_calls(&events),
+        vec![(
+            "run".to_owned(),
+            serde_json::json!({"target": "doprocessing", "engine": "libfuzzer", "duration_secs": 10})
+        )]
+    );
+    assert!(
+        last_tool_summary(&events).contains("run-dispatched-marker"),
+        "the recovered call must reach the backend dispatcher"
+    );
+    assert!(events.iter().all(|e| match e {
+        AgentEvent::Complete { content } | AgentEvent::Thinking { text: content } =>
+            !content.contains(DSML_MARKER),
+        _ => true,
+    }));
+
+    // The follow-up request records the step in the JSON protocol, not the
+    // markup, so the model is not shown its own DSML as an example to repeat.
+    let requests = captured.requests.lock().await;
+    assert_eq!(requests.len(), 2);
+    let follow_up = &requests[1].messages;
+    assert!(
+        follow_up.iter().all(|m| !m.content.contains(DSML_MARKER)),
+        "DSML markup must not be replayed to the model"
+    );
+    let recorded = follow_up
+        .iter()
+        .rev()
+        .find(|m| m.role == hf_core::types::Role::Assistant)
+        .expect("the recovered step is recorded");
+    let step: serde_json::Value = serde_json::from_str(&recorded.content).unwrap();
+    assert_eq!(step["tool"], "run");
+    assert_eq!(step["args"]["duration_secs"], 10);
+}
+
+#[tokio::test]
+async fn a_dsml_tool_call_is_gated_by_manual_approval() {
+    let reply = "<｜DSML｜function_calls>\n\
+<｜DSML｜invoke name=\"FileRead\">\n\
+<｜DSML｜parameter name=\"path\" string=\"true\">x</｜DSML｜parameter>\n\
+</｜DSML｜invoke>\n\
+</｜DSML｜function_calls>";
+    let agent = agent_with_deny_gate("manual", vec![reply, r#"{"final":"done"}"#]);
+    let sink = CollectingSink::new();
+    let out = agent.run_turn(vec![], "read", &sink).await.unwrap();
+    assert_eq!(out, "done");
+    assert!(
+        last_tool_summary(&sink.events().await).contains("approval declined"),
+        "a recovered call must pass the same approval gate as a JSON step"
+    );
+}
+
+#[tokio::test]
+async fn a_dsml_tool_call_outside_the_allow_list_is_refused() {
+    // The deny-gate definition allows only FileRead; `run` must be refused by
+    // the same allow-list check a JSON step goes through.
+    let agent = agent_with_deny_gate("assist", vec![DSML_RUN_REPLY, r#"{"final":"done"}"#]);
+    let sink = CollectingSink::new();
+    agent.run_turn(vec![], "run it", &sink).await.unwrap();
+    assert!(
+        last_tool_summary(&sink.events().await).contains("not permitted"),
+        "a recovered call must respect the agent's allow-list"
+    );
+}
+
+#[tokio::test]
+async fn only_the_first_dsml_invoke_runs_and_the_rest_are_reported_back() {
+    let reply = "Starting both.\n<｜DSML｜function_calls>\n\
+<｜DSML｜invoke name=\"discover\">\n\
+<｜DSML｜parameter name=\"lang\" string=\"true\">c</｜DSML｜parameter>\n\
+</｜DSML｜invoke>\n\
+<｜DSML｜invoke name=\"triage\">\n\
+<｜DSML｜parameter name=\"target\" string=\"true\">parse</｜DSML｜parameter>\n\
+</｜DSML｜invoke>\n\
+</｜DSML｜function_calls>";
+    let pool = Arc::new(ScriptedPool::new(vec![reply, r#"{"final":"done"}"#]));
+    let captured = Arc::clone(&pool);
+    let provider: Arc<dyn ProviderPool> = pool;
+    let backend = TestBackend::with_tool_result(provider, "ok".to_owned());
+    let agent = Agent::new(backend, Some(std::env::temp_dir()));
+    let sink = CollectingSink::new();
+    agent.run_turn(vec![], "go", &sink).await.unwrap();
+
+    let events = sink.events().await;
+    let names: Vec<String> = tool_calls(&events).into_iter().map(|(n, _)| n).collect();
+    assert_eq!(names, ["discover"], "one tool per step");
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::Thinking { text } if text == "Starting both.")));
+
+    let requests = captured.requests.lock().await;
+    let feedback = requests[1].messages.last().expect("tool result feedback");
+    assert!(feedback.content.contains("result of discover"));
+    assert!(
+        feedback.content.contains("triage") && feedback.content.contains("not executed"),
+        "the model must learn the extra call did not run: {}",
+        feedback.content
+    );
+}
+
+#[tokio::test]
+async fn malformed_dsml_is_not_executed() {
+    // Truncated mid-parameter: nothing may be invented from it.
+    let truncated = &DSML_RUN_REPLY[..DSML_RUN_REPLY.find("libfuzzer").unwrap()];
+    let agent = agent_with(vec![truncated], Some(std::env::temp_dir()));
+    let sink = CollectingSink::new();
+    let out = agent.run_turn(vec![], "run", &sink).await.unwrap();
+    assert_eq!(out, truncated.trim());
+    assert!(tool_calls(&sink.events().await).is_empty());
+}

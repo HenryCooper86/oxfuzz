@@ -21,6 +21,7 @@
 
 mod agent_tools;
 mod definition;
+mod dsml;
 mod event;
 mod registry;
 mod tools;
@@ -110,6 +111,43 @@ struct Step {
     args: Option<Value>,
     #[serde(default, rename = "final")]
     final_answer: Option<String>,
+    /// Set when the step was decoded from DSML function-call markup instead of
+    /// the JSON protocol; never read from the wire.
+    #[serde(skip)]
+    dsml: Option<DsmlStep>,
+}
+
+/// What a DSML-decoded [`Step`] carries beyond its executed call.
+#[derive(Debug)]
+struct DsmlStep {
+    /// Names of the invokes after the first, which the one-tool-per-step loop
+    /// does not execute.
+    unexecuted: Vec<String>,
+}
+
+/// The JSON protocol encoding of a tool step, recorded in the conversation in
+/// place of a reply that used another syntax for the same step.
+fn protocol_tool_step(thought: Option<&str>, tool: &str, args: &Value) -> String {
+    let mut step = serde_json::Map::new();
+    if let Some(thought) = thought {
+        step.insert("thought".to_owned(), Value::from(thought));
+    }
+    step.insert("tool".to_owned(), Value::from(tool));
+    step.insert("args".to_owned(), args.clone());
+    Value::Object(step).to_string()
+}
+
+/// The tool-result feedback for one executed step, naming any DSML invokes the
+/// step carried but did not execute so the model can issue them again.
+fn tool_feedback(tool: &str, result: &str, dsml: Option<&DsmlStep>) -> String {
+    match dsml.filter(|d| !d.unexecuted.is_empty()) {
+        Some(skipped) => format!(
+            "result of {tool}: {result}\n[note] Only one tool runs per step; these calls \
+             were not executed: {}. Issue each as its own JSON step if still needed.",
+            skipped.unexecuted.join(", ")
+        ),
+        None => format!("result of {tool}: {result}"),
+    }
 }
 
 /// The autonomous fuzzing agent. Its behavior -- system prompt, callable tools,
@@ -616,10 +654,17 @@ impl Agent {
                 self.spill_store().as_deref(),
                 &self.definition.id,
             );
-            messages.push(Message::new(Role::Assistant, content));
+            // A DSML-decoded step is recorded in the JSON protocol: replaying the
+            // markup would show the model its own off-protocol syntax to repeat.
+            let recorded = if step.dsml.is_some() {
+                protocol_tool_step(step.thought.as_deref(), &tool, &args)
+            } else {
+                content
+            };
+            messages.push(Message::new(Role::Assistant, recorded));
             messages.push(Message::new(
                 Role::Tool,
-                format!("result of {tool}: {bounded}"),
+                tool_feedback(&tool, &bounded, step.dsml.as_ref()),
             ));
         }
 
@@ -875,8 +920,16 @@ impl ReminderHandle {
 
 /// Parse a model reply into a [`Step`], tolerating code fences, surrounding
 /// prose, and trailing junk (e.g. a stray extra `}` some models emit).
+///
+/// An exact JSON step wins. Otherwise a reply ending in `DeepSeek` DSML
+/// function-call markup decodes to the tool step it encodes, ahead of the
+/// lenient JSON scans, which would otherwise misread a JSON-valued DSML
+/// parameter as an empty step.
 fn parse_step(content: &str) -> Option<Step> {
     if let Ok(step) = serde_json::from_str::<Step>(content) {
+        return Some(step);
+    }
+    if let Some(step) = parse_dsml_step(content) {
         return Some(step);
     }
     // Find the first `{` and parse the first complete JSON value from there.
@@ -893,6 +946,28 @@ fn parse_step(content: &str) -> Option<Step> {
     parse_relaxed_final_step(&content[start..])
 }
 
+/// Decode a DSML `function_calls` reply into the tool step of its first
+/// invoke. Text before the block becomes the step's thought; later invokes are
+/// kept by name only, to be reported back as not executed.
+fn parse_dsml_step(content: &str) -> Option<Step> {
+    let block = dsml::parse(content)?;
+    let mut calls = block.calls.into_iter();
+    let first = calls.next()?;
+    let unexecuted: Vec<String> = calls.map(|call| call.name).collect();
+    tracing::info!(
+        tool = %first.name,
+        unexecuted = unexecuted.len(),
+        "decoded a DSML function-call reply as a tool step"
+    );
+    Some(Step {
+        thought: (!block.preamble.is_empty()).then_some(block.preamble),
+        tool: Some(first.name),
+        args: Some(Value::Object(first.arguments)),
+        final_answer: None,
+        dsml: Some(DsmlStep { unexecuted }),
+    })
+}
+
 /// Recover the final answer from JSON-looking protocol output that is not valid
 /// JSON, most commonly because a provider emitted literal newlines inside the
 /// `"final"` string. This fallback intentionally only recovers final answers:
@@ -904,6 +979,7 @@ fn parse_relaxed_final_step(content: &str) -> Option<Step> {
         tool: None,
         args: None,
         final_answer: Some(final_answer),
+        dsml: None,
     })
 }
 
