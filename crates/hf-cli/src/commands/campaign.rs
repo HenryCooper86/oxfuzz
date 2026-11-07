@@ -165,13 +165,11 @@ pub(crate) async fn cmd_ci(
     project: PathBuf,
     target: &str,
     engine: &str,
-    lang: &str,
     duration: &str,
     sarif: &std::path::Path,
     ai: AiOption,
 ) -> anyhow::Result<()> {
     let engine_kind = parse_engine(engine)?;
-    let _lang = parse_lang(lang)?;
     let duration_secs = parse_duration(duration)?;
     let container = apply_ai_policy(crate::approval::bootstrap().await, ai, "this CI gate").await?;
     if ai == AiOption::Off {

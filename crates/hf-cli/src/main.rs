@@ -278,9 +278,8 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
         Commands::Triage(args::TriageArgs {
             project,
             target,
-            lang,
             ai,
-        }) => cmd_triage(project, &target, &lang, ai).await?,
+        }) => cmd_triage(project, &target, ai).await?,
         Commands::Corpus(args::CorpusArgs {
             project,
             target,
@@ -311,11 +310,10 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
             project,
             target,
             engine,
-            lang,
             duration,
             sarif,
             ai,
-        }) => cmd_ci(project, &target, &engine, &lang, &duration, &sarif, ai).await?,
+        }) => cmd_ci(project, &target, &engine, &duration, &sarif, ai).await?,
         Commands::Regress(args::RegressArgs { project, target }) => {
             cmd_regress(project, &target).await?;
         }
@@ -376,6 +374,8 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
         #[cfg(feature = "automotive-scapy")]
         Commands::Automotive(args::AutomotiveArgs { op }) => cmd_automotive(op).await?,
     }
+    Ok(())
+}
 
 #[cfg(test)]
 mod log_filter_tests {
@@ -404,6 +404,4 @@ mod log_filter_tests {
             "error"
         );
     }
-}
-    Ok(())
 }

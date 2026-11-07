@@ -621,9 +621,6 @@ pub(crate) struct TriageArgs {
     /// Target symbol.
     #[arg(long)]
     pub(crate) target: String,
-    /// Target language (c, cpp, rust, go, python). Defaults to c.
-    #[arg(long, default_value = "c")]
-    pub(crate) lang: String,
     /// How triage may use the model. It reaches two places: the bug-report
     /// drafts and the advisory per-crash verification verdicts. `off`
     /// ingests and persists crashes with no model calls; `require` makes a
@@ -741,9 +738,6 @@ pub(crate) struct CiArgs {
     /// Fuzzing engine. Defaults to libfuzzer.
     #[arg(long, default_value = "libfuzzer")]
     pub(crate) engine: String,
-    /// Target language (c, cpp, rust, go, python). Defaults to c.
-    #[arg(long, default_value = "c")]
-    pub(crate) lang: String,
     /// Fuzz duration (e.g. 120s, 5m). Defaults to 120s.
     #[arg(long, default_value = "120s")]
     pub(crate) duration: String,
@@ -2825,4 +2819,33 @@ pub(crate) enum MutatorCommand {
     Promote,
     /// Read source, artifact, image and bounded smoke evidence.
     Status,
+}
+
+#[cfg(test)]
+mod unread_flag_tests {
+    use clap::Parser as _;
+
+    use super::Cli;
+
+    #[test]
+    fn triage_and_ci_do_not_accept_a_language_they_never_read() {
+        // Both work from the promoted harness or the retained run workspace,
+        // so a `--lang` value could not change their result (Engineering
+        // Protocol 2.16: never accept a setting nothing reads).
+        for argv in [
+            ["oxfuzz", "triage", "/p", "--target", "t", "--lang", "c"].as_slice(),
+            ["oxfuzz", "ci", "/p", "--target", "t", "--lang", "c"].as_slice(),
+        ] {
+            assert!(
+                Cli::try_parse_from(argv).is_err(),
+                "{argv:?} must not parse"
+            );
+        }
+        for argv in [
+            ["oxfuzz", "triage", "/p", "--target", "t"].as_slice(),
+            ["oxfuzz", "ci", "/p", "--target", "t"].as_slice(),
+        ] {
+            assert!(Cli::try_parse_from(argv).is_ok(), "{argv:?} must parse");
+        }
+    }
 }

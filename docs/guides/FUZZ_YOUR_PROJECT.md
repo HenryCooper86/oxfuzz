@@ -287,8 +287,8 @@ All of these take the same `<project>` and `--target` you fuzzed with:
 | `oxfuzz runs list --project <project>` | Run history and ids |
 
 `repro` defaults to `--lang c`; pass `--lang cpp` or `--lang rust` for those
-targets. (`triage` accepts `--lang` but works from the run's retained
-workspace, so the value does not change its result.) A repro bundle is meant to be built outside
+targets. (`triage` takes no `--lang`: it works from the run's retained
+workspace.) A repro bundle is meant to be built outside
 oxfuzz; running it executes a crashing input with no sandbox, so do that in a
 disposable container or VM.
 
@@ -359,7 +359,7 @@ P=examples/rust_varint
 oxfuzz discover $P --lang rust             # `decode` is listed as a Parser
 oxfuzz fuzz $P --lang rust --target decode --engine libfuzzer \
   --duration-secs 120 --iterations 2
-oxfuzz triage $P --lang rust --target decode
+oxfuzz triage $P --target decode
 oxfuzz repro $P --lang rust --target decode --engine libfuzzer --out varint-repro
 ```
 

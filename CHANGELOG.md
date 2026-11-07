@@ -21,6 +21,13 @@ and 0.7.0 releases respectively.
   intact. Log lines carry colour codes only when stderr is a terminal. Set
   `RUST_LOG` to choose a different level.
 
+### Removed
+
+- `oxfuzz triage --lang` and `oxfuzz ci --lang`. Both commands parsed the
+  value and ignored it: triage works from the run's retained workspace and the
+  CI gate from the promoted harness. Drop the flag from scripts and pipelines;
+  passing it is now a usage error.
+
 ### Fixed
 
 - `oxfuzz doctor` with Docker down reported `MISSING  sandbox image` and told

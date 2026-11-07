@@ -517,15 +517,7 @@ pub(crate) async fn cmd_run(
     Ok(())
 }
 
-pub(crate) async fn cmd_triage(
-    project: PathBuf,
-    target: &str,
-    lang: &str,
-    ai: AiOption,
-) -> anyhow::Result<()> {
-    // Language is validated for a clear error, though triage works off the
-    // already-compiled workspace.
-    let _lang = parse_lang(lang)?;
+pub(crate) async fn cmd_triage(project: PathBuf, target: &str, ai: AiOption) -> anyhow::Result<()> {
     let container = crate::approval::bootstrap().await;
     let crashes = container.triage(&project, target, ai.into()).await?;
     if crashes.is_empty() {
