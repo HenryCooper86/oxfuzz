@@ -48,11 +48,18 @@ use crate::commands::system::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_writer(std::io::stderr)
-        .init();
     let cli = Cli::parse();
+    // An explicit `RUST_LOG` wins; otherwise the command picks the default.
+    let filter = match std::env::var("RUST_LOG") {
+        Ok(directives) => tracing_subscriber::EnvFilter::new(directives),
+        Err(_) => tracing_subscriber::EnvFilter::new(default_log_filter(&cli.command)),
+    };
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        // Colour codes only on a terminal, not in CI logs or redirected files.
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
+        .init();
     // Resolve the config directory before any command runs so an invalid
     // explicit choice (`--config`/`HF_CONFIG_DIR` naming a non-directory)
     // fails here with the operator's own words rather than deep in a command
@@ -73,6 +80,18 @@ async fn main() -> anyhow::Result<()> {
     // main-thread stack for the process's lifetime. Boxing keeps startup within
     // a small RLIMIT_STACK (crates/hf-cli/tests/startup.rs runs with 1 MiB).
     Box::pin(dispatch(cli.command)).await
+}
+
+/// The tracing filter when `RUST_LOG` is unset. Warnings are shown: they carry
+/// operator-facing causes such as "Skipping provider: API key not found", and
+/// an errors-only default left only the bare consequence. `sqlx` stays at
+/// error because it reports slow statements as warnings. The TUI keeps stderr
+/// quiet: it draws on the alternate screen, which a stray line would garble.
+fn default_log_filter(command: &Commands) -> &'static str {
+    match command {
+        Commands::Tui(_) => "error",
+        _ => "warn,sqlx=error",
+    }
 }
 
 async fn dispatch(command: Commands) -> anyhow::Result<()> {
@@ -357,5 +376,34 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
         #[cfg(feature = "automotive-scapy")]
         Commands::Automotive(args::AutomotiveArgs { op }) => cmd_automotive(op).await?,
     }
+
+#[cfg(test)]
+mod log_filter_tests {
+    use clap::Parser as _;
+
+    use super::default_log_filter;
+    use crate::args::Cli;
+
+    fn command(argv: &[&str]) -> crate::args::Commands {
+        Cli::try_parse_from(argv).unwrap().command
+    }
+
+    #[test]
+    fn warnings_are_shown_by_default() {
+        // "Skipping provider: API key not found" is a warning; an errors-only
+        // default left the operator with a bare "no provider available".
+        let filter = default_log_filter(&command(&["oxfuzz", "doctor"]));
+        assert!(filter.starts_with("warn"), "{filter}");
+    }
+
+    #[test]
+    fn the_terminal_ui_keeps_stderr_quiet() {
+        // The TUI draws on the alternate screen; a stderr line garbles it.
+        assert_eq!(
+            default_log_filter(&command(&["oxfuzz", "tui", "/p"])),
+            "error"
+        );
+    }
+}
     Ok(())
 }

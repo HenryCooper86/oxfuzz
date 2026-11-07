@@ -99,9 +99,8 @@ Accepted `provider_type` values (`build_providers` in
 
 For each entry the key is resolved as: a non-empty inline `api_key`, else the
 non-empty value of the variable named by `api_key_env`. An entry that resolves
-no key is skipped, and the only signal is a log line
-(`Skipping provider: API key not found in environment`) that appears with
-`RUST_LOG=warn`. Nothing loads `.env` automatically; export variables in the
+no key is skipped, and the signal is a warning on stderr
+(`Skipping provider: API key not found in environment`). Nothing loads `.env` automatically; export variables in the
 shell or service that launches oxfuzz. Prefer `api_key_env` for real
 secrets.
 
@@ -145,8 +144,8 @@ tend to need more repair rounds and fail review more often than hosted ones.
 ### Checking what was loaded
 
 - `oxfuzz providers` lists the providers that were constructed, with their
-  frozen/healthy state. A defined id that is missing was skipped; rerun with
-  `RUST_LOG=warn` to see why.
+  frozen/healthy state. A defined id that is missing was skipped; the stderr
+  warning says why.
 - `oxfuzz doctor --engine libfuzzer --require-provider` confirms a pool can be
   built, without calling a model. It does not test credentials or
   connectivity.

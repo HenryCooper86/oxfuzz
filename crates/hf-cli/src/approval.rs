@@ -79,7 +79,7 @@ impl PromptChannel {
     }
 
     /// Echo the resolved decision so the terminal transcript shows it (the
-    /// tracing subscriber filters to errors unless `RUST_LOG` asks for more,
+    /// decision is logged at info, below the default `warn` filter,
     /// so the log line alone would not). A transcript echo that fails to write
     /// is lost, not fatal: the decision was already made and logged.
     fn echo(&self, line: &str) {
@@ -142,7 +142,7 @@ impl ApprovalGate for CliApprovalGate {
         // An operator who answered "always" for this kind is not asked again
         // in this process.
         if lock(&self.always_allowed).contains(kind) {
-            tracing::warn!(action = %action.label(), reason, "guardrail approved via session 'always' choice");
+            tracing::info!(action = %action.label(), reason, "guardrail approved via session 'always' choice");
             self.echo(&format!(
                 "[approval] approved ('{kind}' was always-allowed this session): {}",
                 action.label()
@@ -171,13 +171,13 @@ impl ApprovalGate for CliApprovalGate {
         };
         match answer {
             PromptAnswer::Yes => {
-                tracing::warn!(action = %action.label(), reason, "guardrail approved via terminal prompt");
+                tracing::info!(action = %action.label(), reason, "guardrail approved via terminal prompt");
                 self.echo(&format!("[approval] approved: {}", action.label()));
                 true
             }
             PromptAnswer::Always => {
                 lock(&self.always_allowed).insert(kind);
-                tracing::warn!(action = %action.label(), kind, reason, "guardrail approved via terminal prompt; kind always-allowed for this session");
+                tracing::info!(action = %action.label(), kind, reason, "guardrail approved via terminal prompt; kind always-allowed for this session");
                 self.echo(&format!(
                     "[approval] approved ('{kind}' always-allowed for this session): {}",
                     action.label()
@@ -185,7 +185,7 @@ impl ApprovalGate for CliApprovalGate {
                 true
             }
             PromptAnswer::No => {
-                tracing::warn!(action = %action.label(), reason, "guardrail denied via terminal prompt");
+                tracing::info!(action = %action.label(), reason, "guardrail denied via terminal prompt");
                 self.echo(&format!("[approval] denied: {}", action.label()));
                 false
             }

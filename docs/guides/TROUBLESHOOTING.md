@@ -6,9 +6,10 @@ Each entry is symptom, cause, fix. Two habits find most problems quickly:
 
 - Run `oxfuzz doctor` first. It probes Docker, the sandbox image, and each
   engine without building or running anything.
-- Set `RUST_LOG=warn` (or `info`). With `RUST_LOG` unset the CLI prints only
-  errors, so skipped providers, ignored config files, and dropped compile flags
-  are silent. Logs go to stderr.
+- Read the warnings on stderr. With `RUST_LOG` unset the CLI prints warnings
+  and errors (`oxfuzz tui` prints errors only), so skipped providers and
+  ignored config files are named there. Set `RUST_LOG=info` for more, such as
+  dropped compile flags.
 
 Related: [INSTALL.md](INSTALL.md), [CONFIGURATION.md](CONFIGURATION.md),
 [FUZZ_YOUR_PROJECT.md](FUZZ_YOUR_PROJECT.md),
@@ -219,7 +220,7 @@ Symptom: drafts come from the template, `--ai require` fails with
 `No providers configured.` or omits a provider you defined.
 
 `oxfuzz providers` lists only the providers that were actually constructed,
-so a missing id means it was skipped. Run it with `RUST_LOG=warn` to see why:
+so a missing id means it was skipped. The reason is a warning on stderr:
 
 | Warning (stderr) | Cause | Fix |
 | --- | --- | --- |

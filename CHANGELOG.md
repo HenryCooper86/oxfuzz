@@ -12,6 +12,15 @@ and 0.7.0 releases respectively.
 
 ## Unreleased
 
+### Changed
+
+- The CLI now prints warnings on stderr when `RUST_LOG` is unset (it printed
+  only errors), so a provider skipped for a missing API key, an ignored config
+  file, and similar causes are named instead of surfacing only as "no provider
+  available". `oxfuzz tui` still prints errors only, so its screen stays
+  intact. Log lines carry colour codes only when stderr is a terminal. Set
+  `RUST_LOG` to choose a different level.
+
 ### Fixed
 
 - `oxfuzz doctor` with Docker down reported `MISSING  sandbox image` and told

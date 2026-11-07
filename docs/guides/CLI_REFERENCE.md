@@ -877,7 +877,9 @@ on a host or vehicle as part of the normal test or build process.
 
 oxfuzz never loads `.env` itself; export these in the environment that launches
 the process. `.env.example` carries commented examples. Variables used only by
-the test suite are not listed. Logging uses the standard `RUST_LOG` filter.
+the test suite are not listed. Logging uses the standard `RUST_LOG` filter;
+when it is unset the CLI shows warnings and errors on stderr (`tui` shows
+errors only).
 
 | Variable | Meaning | Default |
 | --- | --- | --- |
