@@ -4,9 +4,12 @@
 //! The gate registers each request in [`PendingApprovals`], announces it
 //! through an [`ApprovalNotifier`] (a Tauri event in the desktop shell, an SSE
 //! event in the web server), and waits for [`PendingApprovals::resolve`] or the
-//! timeout. Whatever ends the wait -- an answer, the timeout, or the waiting
-//! future being dropped because its chat turn was cancelled -- removes the
-//! request and announces it closed, so no prompt outlives the request it shows.
+//! timeout. A prompt the notifier reports as reaching no client is denied at
+//! once, so a headless caller is not held for the whole timeout by a question
+//! nobody can see. Whatever ends the wait -- an answer, the timeout, an
+//! undelivered prompt, or the waiting future being dropped because its chat
+//! turn was cancelled -- removes the request and announces it closed, so no
+//! prompt outlives the request it shows.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -58,10 +61,22 @@ pub struct PermissionClosed {
     pub id: String,
 }
 
+/// Whether an approval prompt reached a client that can answer it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Delivery {
+    /// The prompt reached at least one live client.
+    Delivered,
+    /// The prompt reached no client. The text says why and what the operator
+    /// can do about it; the gate logs it and denies the request at once.
+    Undelivered(String),
+}
+
 /// Delivers approval prompts to the person who answers them.
 pub trait ApprovalNotifier: Send + Sync {
-    /// A request is waiting for an answer.
-    fn requested(&self, request: &PermissionRequest);
+    /// A request is waiting for an answer. Report whether the prompt reached a
+    /// client: an undelivered prompt is denied immediately rather than left
+    /// to wait for a deadline nobody can beat.
+    fn requested(&self, request: &PermissionRequest) -> Delivery;
 
     /// A request was answered, timed out, or was withdrawn.
     fn closed(&self, closed: &PermissionClosed);
@@ -158,8 +173,18 @@ impl ApprovalGate for InteractiveApprovalGate {
         let id = Uuid::new_v4();
         let receiver = self.pending.register(id);
         let _open = OpenRequest { gate: self, id };
-        self.notifier
-            .requested(&PermissionRequest::new(id, action, reason, self.timeout));
+        let delivery =
+            self.notifier
+                .requested(&PermissionRequest::new(id, action, reason, self.timeout));
+        if let Delivery::Undelivered(why) = delivery {
+            tracing::warn!(
+                action = %action.label(),
+                reason,
+                %why,
+                "guardrail denied: the approval prompt reached no client"
+            );
+            return false;
+        }
         // A timeout, or a sender dropped without an answer, denies.
         matches!(
             tokio::time::timeout(self.timeout, receiver).await,
@@ -176,11 +201,16 @@ mod tests {
     struct Recorder {
         requested: std::sync::Mutex<Vec<PermissionRequest>>,
         closed: std::sync::Mutex<Vec<String>>,
+        /// When set, every prompt is reported as reaching no client.
+        undelivered: Option<String>,
     }
 
     impl ApprovalNotifier for Recorder {
-        fn requested(&self, request: &PermissionRequest) {
+        fn requested(&self, request: &PermissionRequest) -> Delivery {
             self.requested.lock().unwrap().push(request.clone());
+            self.undelivered
+                .clone()
+                .map_or(Delivery::Delivered, Delivery::Undelivered)
         }
 
         fn closed(&self, closed: &PermissionClosed) {
@@ -274,6 +304,30 @@ mod tests {
         assert_eq!(pending.pending_count(), 0);
         assert_eq!(*recorder.closed.lock().unwrap(), vec![id.to_string()]);
         assert!(!pending.resolve(id, true));
+    }
+
+    #[tokio::test]
+    async fn an_undelivered_prompt_is_denied_at_once_and_closed() {
+        let pending = Arc::new(PendingApprovals::default());
+        let recorder = Arc::new(Recorder {
+            undelivered: Some("no approval client is connected".to_owned()),
+            ..Recorder::default()
+        });
+        // A deadline far beyond the bound below proves the gate does not wait.
+        let gate = InteractiveApprovalGate::new(Arc::clone(&pending), recorder.clone())
+            .with_timeout(Duration::from_mins(1));
+
+        let decision = tokio::time::timeout(
+            Duration::from_secs(5),
+            gate.request_approval(&action(), "why"),
+        )
+        .await
+        .expect("an undelivered prompt must not wait for its deadline");
+
+        assert!(!decision, "a prompt nobody can see is denied");
+        assert_eq!(recorder.requested.lock().unwrap().len(), 1);
+        assert_eq!(pending.pending_count(), 0);
+        assert_eq!(recorder.closed.lock().unwrap().len(), 1);
     }
 
     #[test]

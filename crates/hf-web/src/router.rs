@@ -107,12 +107,27 @@ impl AppState {
     /// The event is serialized before entering the broadcast channel so a
     /// single malformed log line cannot consume unbounded memory per receiver.
     /// A missing receiver is not an error: producers may emit before a browser
-    /// subscribes.
+    /// subscribes. A producer that needs a reader uses [`Self::deliver_event`].
     ///
     /// # Errors
     /// Returns [`PublishEventError`] when the serialized event exceeds the
     /// transport limit.
     pub fn publish_event(&self, event: SseEvent) -> Result<(), PublishEventError> {
+        match self.deliver_event(event) {
+            // Progress and lifecycle events are a live view; one emitted while
+            // no browser is subscribed has nobody to inform and is dropped.
+            Err(PublishEventError::NoSubscriber) => Ok(()),
+            outcome => outcome,
+        }
+    }
+
+    /// Publish one bounded SSE event that must reach at least one connected
+    /// `/events` client, such as an approval prompt waiting for an answer.
+    ///
+    /// # Errors
+    /// Returns [`PublishEventError::NoSubscriber`] when no client is
+    /// connected, and the [`Self::publish_event`] errors otherwise.
+    pub fn deliver_event(&self, event: SseEvent) -> Result<(), PublishEventError> {
         let mut size_writer = EventSizeWriter::new(MAX_SSE_EVENT_BYTES);
         if serde_json::to_writer(&mut size_writer, &event).is_err() {
             if size_writer.exceeded {
@@ -123,8 +138,12 @@ impl AppState {
             }
             return Err(PublishEventError::Serialization);
         }
-        let _ = self.event_tx.send(event);
-        Ok(())
+        // A broadcast send fails only when no receiver is subscribed; the
+        // error carries the unsent event, which is discarded here.
+        self.event_tx
+            .send(event)
+            .map(drop)
+            .map_err(|_unsent| PublishEventError::NoSubscriber)
     }
 }
 
@@ -168,6 +187,9 @@ pub enum PublishEventError {
     /// The event exceeded the per-message transport limit.
     #[error("SSE event is {size} bytes; limit is {limit} bytes")]
     TooLarge { size: usize, limit: usize },
+    /// No `/events` client was connected to receive the event.
+    #[error("no SSE client is connected to /events")]
+    NoSubscriber,
 }
 
 // ---------------------------------------------------------------------------
@@ -3669,13 +3691,25 @@ struct SseApprovalNotifier {
 }
 
 impl hf_service::approval::ApprovalNotifier for SseApprovalNotifier {
-    fn requested(&self, request: &hf_service::approval::PermissionRequest) {
-        if let Err(error) = self
+    fn requested(
+        &self,
+        request: &hf_service::approval::PermissionRequest,
+    ) -> hf_service::approval::Delivery {
+        use hf_service::approval::Delivery;
+        match self
             .state
-            .publish_event(SseEvent::PermissionRequest(request.clone()))
+            .deliver_event(SseEvent::PermissionRequest(request.clone()))
         {
-            // No prompt reaches a browser; the gate denies at its deadline.
-            tracing::warn!(%error, "approval prompt could not be published");
+            Ok(()) => Delivery::Delivered,
+            Err(PublishEventError::NoSubscriber) => Delivery::Undelivered(
+                "no approval client is connected to GET /events: open the web UI to answer \
+                 approval prompts, or set HF_AUTO_APPROVE=1 on the server to approve gated \
+                 actions unattended"
+                    .to_owned(),
+            ),
+            Err(error) => Delivery::Undelivered(format!(
+                "the approval prompt could not be published over SSE: {error}"
+            )),
         }
     }
 
@@ -3702,11 +3736,25 @@ fn parse_turn_id(turn_id: &str) -> Result<uuid::Uuid, ApiError> {
     })
 }
 
-/// The container a web chat turn runs on: approvals the policy requires are
-/// asked of the browser over SSE, unless `HF_AUTO_APPROVE` already approves
-/// them for this headless server.
+/// Whether this server asks a person for approvals over SSE and accepts the
+/// answer at `/chat/permission`.
+///
+/// Only a server with a bearer token does: every prompt reader and every
+/// answer then holds the token, the same single-principal model as the
+/// desktop shell. An open-access loopback server (`HF_WEB_TOKEN_OPTIONAL`
+/// without a token) cannot tell the operator from any other local process --
+/// a process could read prompts on `/events` and approve its own turn -- so it
+/// keeps the environment gate: denied with guidance unless `HF_AUTO_APPROVE`.
+fn interactive_approval_enabled(state: &AppState) -> bool {
+    state.security.token_configured()
+}
+
+/// The container a web chat turn runs on: on a token-authenticated server the
+/// approvals the policy requires are asked of the browser over SSE, unless
+/// `HF_AUTO_APPROVE` already approves them for this headless server. Any other
+/// server keeps the container's environment gate.
 fn chat_container(state: &AppState) -> ServiceContainer {
-    if hf_service::EnvApprovalGate::auto_approve_enabled() {
+    if !interactive_approval_enabled(state) || hf_service::EnvApprovalGate::auto_approve_enabled() {
         return state.container.clone();
     }
     let gate = hf_service::approval::InteractiveApprovalGate::new(
@@ -3725,7 +3773,9 @@ fn chat_container(state: &AppState) -> ServiceContainer {
 
 /// Drive one autonomous agent turn over the project through the service facade.
 /// Tool-call progress is not streamed here; this is a request/response endpoint.
-/// Approval prompts are delivered over SSE and answered at `/chat/permission`.
+/// On a token-authenticated server approval prompts are delivered over SSE and
+/// answered at `/chat/permission`; a prompt no `/events` client receives is
+/// denied at once.
 async fn chat_agent(
     State(state): State<AppState>,
     Json(req): Json<ChatAgentRequest>,
@@ -3786,10 +3836,23 @@ struct ChatPermissionRequest {
 }
 
 /// Answer a pending approval prompt. Returns whether a prompt was waiting.
+/// Refused on a server without a bearer token, which never prompts (see
+/// [`interactive_approval_enabled`]).
 async fn chat_answer_permission(
     State(state): State<AppState>,
     Json(req): Json<ChatPermissionRequest>,
 ) -> ApiResult<bool> {
+    if !interactive_approval_enabled(&state) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "approval prompts are answered only on a server with HF_WEB_TOKEN set; \
+                        this open-access server uses the environment gate instead (set \
+                        HF_AUTO_APPROVE=1 on the server to approve gated actions)"
+                    .to_owned(),
+            }),
+        ));
+    }
     let id = uuid::Uuid::parse_str(&req.id).map_err(|error| {
         (
             StatusCode::BAD_REQUEST,
@@ -3799,6 +3862,63 @@ async fn chat_answer_permission(
         )
     })?;
     Ok(Json(state.pending_approvals.resolve(id, req.approved)))
+}
+
+#[cfg(test)]
+mod approval_notifier_tests {
+    use hf_service::approval::{ApprovalNotifier as _, Delivery, PermissionRequest};
+
+    use super::{AppState, SseApprovalNotifier, MAX_SSE_EVENT_BYTES};
+
+    fn request(reason: &str) -> PermissionRequest {
+        PermissionRequest {
+            id: uuid::Uuid::nil().to_string(),
+            action: "shell: make fuzz".to_owned(),
+            reason: reason.to_owned(),
+            risk: "critical".to_owned(),
+            timeout_secs: 300,
+        }
+    }
+
+    fn notifier() -> SseApprovalNotifier {
+        SseApprovalNotifier {
+            state: AppState::new(hf_service::ServiceContainer::stubbed()),
+        }
+    }
+
+    #[test]
+    fn a_prompt_with_no_event_client_is_reported_undelivered_with_guidance() {
+        let Delivery::Undelivered(why) = notifier().requested(&request("why")) else {
+            panic!("a prompt no client receives must not count as delivered");
+        };
+        assert!(why.contains("/events"), "{why}");
+        assert!(why.contains("HF_AUTO_APPROVE"), "{why}");
+    }
+
+    #[tokio::test]
+    async fn a_prompt_reaching_an_event_client_is_delivered() {
+        let notifier = notifier();
+        let mut events = notifier.state.event_tx.subscribe();
+
+        assert_eq!(notifier.requested(&request("why")), Delivery::Delivered);
+        let event = events.recv().await.expect("the prompt reaches the client");
+        assert_eq!(
+            event.event_name(),
+            hf_service::approval::PERMISSION_REQUEST_EVENT
+        );
+    }
+
+    #[test]
+    fn an_oversized_prompt_is_reported_undelivered() {
+        let notifier = notifier();
+        let _events = notifier.state.event_tx.subscribe();
+        let oversized = "x".repeat(MAX_SSE_EVENT_BYTES + 1);
+
+        let Delivery::Undelivered(why) = notifier.requested(&request(&oversized)) else {
+            panic!("a prompt rejected by the transport limit must not count as delivered");
+        };
+        assert!(why.contains("bytes"), "{why}");
+    }
 }
 
 /// Parse a transcript role string into a [`Role`],

@@ -394,9 +394,15 @@ that asks a person: requests are registered in `PendingApprovals`, announced as
 `chat:permission_request` (a Tauri event, or an SSE event in web mode), and
 answered through `chat_answer_permission` / `POST /chat/permission`. Whatever
 ends a wait -- an answer, the five-minute timeout, or cancellation -- removes
-the request and announces `chat:permission_closed`. The web routes sit behind
-the same bearer-token middleware as every other non-`/health` route. A web
-server with `HF_AUTO_APPROVE` set keeps the environment gate instead.
+the request and announces `chat:permission_closed`. A notifier reports whether
+the prompt reached a client; one that reached nobody (no `/events` subscriber,
+or a failed emit) is denied at once instead of waiting for the timeout. The
+web routes sit behind the same bearer-token middleware as every other
+non-`/health` route, and the web server installs the interactive gate only
+when a bearer token is configured. An open-access server
+(`HF_WEB_TOKEN_OPTIONAL`) or one with `HF_AUTO_APPROVE` set keeps the
+environment gate instead, and an open-access server refuses
+`POST /chat/permission` (see `web-api-security-design.md` section 2).
 
 ### 4.2 Coverage Regression Rollback
 

@@ -12,7 +12,7 @@ use hf_core::provider::{
 };
 use hf_core::types::{ProviderId, SessionId, TokenUsage};
 use hf_service::approval::{
-    ApprovalNotifier, InteractiveApprovalGate, PendingApprovals, PermissionClosed,
+    ApprovalNotifier, Delivery, InteractiveApprovalGate, PendingApprovals, PermissionClosed,
     PermissionRequest,
 };
 use hf_service::{
@@ -179,9 +179,10 @@ struct RecordingNotifier {
 }
 
 impl ApprovalNotifier for RecordingNotifier {
-    fn requested(&self, request: &PermissionRequest) {
+    fn requested(&self, request: &PermissionRequest) -> Delivery {
         self.requested.lock().unwrap().push(request.clone());
         self.notify.notify_one();
+        Delivery::Delivered
     }
 
     fn closed(&self, closed: &PermissionClosed) {

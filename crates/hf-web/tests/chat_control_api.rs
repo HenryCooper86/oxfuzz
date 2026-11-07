@@ -108,13 +108,26 @@ fn manual_agent() -> &'static str {
 }
 
 fn app(pool: Arc<ScriptedPool>) -> axum::Router {
+    app_with_security(
+        pool,
+        WebSecurityConfig::new(Some(TOKEN.to_owned()), false, Vec::new(), Vec::new()).unwrap(),
+    )
+}
+
+/// A loopback development server with `HF_WEB_TOKEN_OPTIONAL` and no token.
+fn open_access_app(pool: Arc<ScriptedPool>) -> axum::Router {
+    app_with_security(
+        pool,
+        WebSecurityConfig::new(None, true, Vec::new(), Vec::new()).unwrap(),
+    )
+}
+
+fn app_with_security(pool: Arc<ScriptedPool>, security: WebSecurityConfig) -> axum::Router {
     // Pin the config dir before any turn reads it.
     manual_agent();
     let container = hf_service::ServiceContainer::stubbed()
         .with_provider_pool(pool)
         .with_guardrails(hf_service::Guardrails::env_gated());
-    let security =
-        WebSecurityConfig::new(Some(TOKEN.to_owned()), false, Vec::new(), Vec::new()).unwrap();
     build_with_state_and_security(AppState::new(container), security)
 }
 
@@ -325,4 +338,67 @@ async fn the_selected_provider_reaches_the_route_of_a_web_turn() {
         routes[0].pinned_provider_id,
         Some(ProviderId::from_string("chosen"))
     );
+}
+
+#[tokio::test]
+async fn a_gated_web_turn_with_no_event_client_is_denied_without_waiting() {
+    let agent = manual_agent();
+    let pool = ScriptedPool::new(&[
+        r#"{"tool":"discover","args":{"lang":"c"}}"#,
+        r#"{"final":"declined and reported"}"#,
+    ]);
+    let app = app(pool);
+
+    // No `/events` client: the prompt reaches nobody, so the gate denies at
+    // once instead of holding the request for its five-minute deadline.
+    let turn = spawn_turn(
+        &app,
+        serde_json::json!({"message": "discover", "agent_id": agent}),
+    );
+    let response = tokio::time::timeout(WAIT, turn)
+        .await
+        .expect("an undeliverable prompt must not wait for its deadline")
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json(response).await, "declined and reported");
+}
+
+#[tokio::test]
+async fn an_open_access_server_keeps_the_environment_gate_and_refuses_answers() {
+    let agent = manual_agent();
+    let pool = ScriptedPool::new(&[
+        r#"{"tool":"discover","args":{"lang":"c"}}"#,
+        r#"{"final":"declined and reported"}"#,
+    ]);
+    let app = open_access_app(Arc::clone(&pool));
+    // An unauthenticated event client is connected; with the interactive gate
+    // it would receive the prompt and the turn would wait for an answer.
+    let events = send(&app, Method::GET, "/events", None, false).await;
+    assert_eq!(events.status(), StatusCode::OK);
+    let _events = events.into_body().into_data_stream();
+
+    let turn = spawn_turn(
+        &app,
+        serde_json::json!({"message": "discover", "agent_id": agent}),
+    );
+    let response = tokio::time::timeout(WAIT, turn)
+        .await
+        .expect("the environment gate denies without prompting")
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json(response).await, "declined and reported");
+
+    let answer = send(
+        &app,
+        Method::POST,
+        "/chat/permission",
+        Some(serde_json::json!({"id": uuid::Uuid::new_v4().to_string(), "approved": true})),
+        false,
+    )
+    .await;
+    assert_eq!(answer.status(), StatusCode::FORBIDDEN);
+    let error = json(answer).await["error"].as_str().unwrap().to_owned();
+    assert!(error.contains("HF_WEB_TOKEN"), "{error}");
+    assert!(error.contains("HF_AUTO_APPROVE"), "{error}");
 }

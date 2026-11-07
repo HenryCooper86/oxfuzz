@@ -20,6 +20,20 @@ configured or the operator explicitly sets `HF_WEB_TOKEN_OPTIONAL=1` for local
 development. Bearer values are compared in constant time and are never written
 to logs, URLs, error bodies, or tracing fields.
 
+Interactive approval of chat tool calls requires a bearer token. With a token,
+a gated chat turn announces its prompt as `chat:permission_request` on
+`GET /events` and accepts the answer at `POST /chat/permission`; both routes
+require the token, so whoever reads and answers the prompt is the token holder,
+the same single-principal model as the desktop shell. An open-access server
+(`HF_WEB_TOKEN_OPTIONAL` without a token) cannot distinguish the operator from
+any other local process, which could read the prompt and approve its own turn,
+so it keeps the environment gate: a gated action is denied with guidance unless
+`HF_AUTO_APPROVE` is set, no prompt is published, and `POST /chat/permission`
+returns `403`. A prompt that reaches no connected `/events` client (or fails
+the SSE size limit) is denied at once with a logged reason instead of waiting
+for the five-minute approval timeout, so a headless caller of `/chat/agent`
+gets its answer immediately.
+
 Browser cross-origin access is denied except for exact origins in
 `HF_WEB_CORS_ORIGINS`. The default allowlist contains only the standard local
 Vite origins. CORS permits `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, and `OPTIONS`, plus
@@ -177,7 +191,7 @@ SSE uses a bounded broadcast channel. Oversized events are rejected before
 enqueueing. A slow subscriber receives a `stream:lagged` event with the number
 of dropped messages, then continues from the channel's current position. The
 web transport exposes only channels with production producers: run progress,
-run lifecycle, and stream lag. Run progress and lifecycle events always carry
+run lifecycle, stream lag, and (token mode only) chat approval prompts. Run progress and lifecycle events always carry
 the service-owned run id. The service emits `running` before execution and
 exactly one terminal lifecycle event (`done`, `failed`, or `cancelled`) after
 the background task returns.

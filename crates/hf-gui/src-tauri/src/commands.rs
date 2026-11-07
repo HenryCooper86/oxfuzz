@@ -752,13 +752,21 @@ struct TauriApprovalNotifier {
 }
 
 impl hf_service::approval::ApprovalNotifier for TauriApprovalNotifier {
-    fn requested(&self, request: &hf_service::approval::PermissionRequest) {
+    fn requested(
+        &self,
+        request: &hf_service::approval::PermissionRequest,
+    ) -> hf_service::approval::Delivery {
         use tauri::Emitter;
-        // A failed emit leaves no prompt on screen; the request is then denied
-        // by the gate's timeout, which is the safe outcome.
-        let _ = self
+        // A failed emit leaves no prompt on screen, so the gate denies at once.
+        match self
             .app
-            .emit(hf_service::approval::PERMISSION_REQUEST_EVENT, request);
+            .emit(hf_service::approval::PERMISSION_REQUEST_EVENT, request)
+        {
+            Ok(()) => hf_service::approval::Delivery::Delivered,
+            Err(error) => hf_service::approval::Delivery::Undelivered(format!(
+                "the approval dialog could not be shown: {error}"
+            )),
+        }
     }
 
     fn closed(&self, closed: &hf_service::approval::PermissionClosed) {

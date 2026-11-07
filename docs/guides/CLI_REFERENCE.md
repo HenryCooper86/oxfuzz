@@ -895,7 +895,7 @@ errors only).
 | `HF_PROVIDER_MODEL` | Model for that fallback provider. | `gpt-4o`. |
 | `HF_PROVIDER_BASE_URL` | Base URL for that fallback provider. | `https://api.openai.com/v1`. |
 | `HF_WEB_TOKEN` | Bearer token for the REST API; required for a non-loopback `serve --host`. `oxfuzz arm` sends it to the server. | Unset: the API rejects every request except `/health`. |
-| `HF_WEB_TOKEN_OPTIONAL` | `1` or `true` allows unauthenticated API access when no token is set. Local development only. | Unset. |
+| `HF_WEB_TOKEN_OPTIONAL` | `1` or `true` allows unauthenticated API access when no token is set. Local development only. Such a server never prompts for chat approvals: gated actions are denied unless `HF_AUTO_APPROVE` is set, and `POST /chat/permission` returns `403`. | Unset. |
 | `HF_WEB_CORS_ORIGINS` | Comma-separated exact browser origins allowed to call the API. | `http://127.0.0.1:5173,http://localhost:5173`. |
 | `HF_WEB_PROJECT_ROOTS` | Host project roots the web API may read, separated by the platform path-list separator (`:` on Unix, `;` on Windows). | The source checkout root when one is found, otherwise none. |
 | `HF_COVERAGE_STAGNATION_SECS` | Seconds without new coverage before a run counts as stagnant. Overrides `oxfuzz.toml`. | `120`. |
