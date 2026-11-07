@@ -5,10 +5,9 @@ lands rather than at release time: section 1 of `docs/guides/RELEASE_CHECKLIST.m
 asks the releaser to review user-facing changes, migrations, and configuration
 compatibility, and this is what that review reads from.
 
-Versions match the release commits that bump `Cargo.toml`. Each version has a
-matching `v<version>` git tag, except 0.6.0 and 0.6.10: those version bumps
-were made without a tag, and their changes first appear in the tagged 0.6.1
-and 0.7.0 releases respectively.
+Versions match the release commits that bump `Cargo.toml`. GitHub keeps
+releases and tags for the three newest versions only; older entries remain
+here as the record.
 
 ## Unreleased
 
