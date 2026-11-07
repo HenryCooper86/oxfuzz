@@ -125,10 +125,22 @@ where
     F: std::future::Future,
     S: Fn(FuzzProgress) + ?Sized,
 {
+    // Pre-launch baseline: a resumed run's output tree already holds the
+    // donor's `fuzzer_stats`, and AFL++ restores `saved_crashes`
+    // cumulatively, so only growth past this mark was found by this run.
+    // `run` is pinned below but not yet polled, so the read precedes launch.
+    let baseline_path = output.to_path_buf();
+    let mut reported_crashes =
+        tokio::task::spawn_blocking(move || hf_engine::afl::read_fuzzer_stats(&baseline_path))
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .flatten()
+            .and_then(|stats| stats.saved_crashes)
+            .unwrap_or(0);
     tokio::pin!(run);
     let mut interval = tokio::time::interval(poll_interval);
     let mut last: Option<hf_engine::afl::AflFuzzerStats> = None;
-    let mut reported_crashes = 0_u64;
     loop {
         tokio::select! {
             result = &mut run => return result,
@@ -4114,16 +4126,18 @@ mod afl_stats_polling_tests {
     async fn poller_drives_the_live_tile_signals_and_counts_each_crash_once() {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path();
+        // A fresh run: no stats file exists before launch.
         std::fs::create_dir(output.join("default")).unwrap();
-        std::fs::write(
-            output.join("default/fuzzer_stats"),
-            "execs_done : 100\nexecs_per_sec : 50\nedges_found : 4\nsaved_crashes : 1\n",
-        )
-        .unwrap();
         let events = Arc::new(Mutex::new(Vec::new()));
         let sink = recorded(&events);
         let writer = output.to_path_buf();
         let run = async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            std::fs::write(
+                writer.join("default/fuzzer_stats"),
+                "execs_done : 100\nexecs_per_sec : 50\nedges_found : 4\nsaved_crashes : 1\n",
+            )
+            .unwrap();
             tokio::time::sleep(Duration::from_millis(100)).await;
             std::fs::write(
                 writer.join("default/fuzzer_stats"),
@@ -4167,6 +4181,48 @@ mod afl_stats_polling_tests {
             vec![1, 2],
             "deltas sum to the saved-crash total, never double counting: {events:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn poller_does_not_report_a_resumed_donors_crashes_as_new() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path();
+        std::fs::create_dir(output.join("default")).unwrap();
+        // The donor run's copied stats: 5 crashes already saved.
+        std::fs::write(
+            output.join("default/fuzzer_stats"),
+            "execs_done : 100\nsaved_crashes : 5\n",
+        )
+        .unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = recorded(&events);
+        let writer = output.to_path_buf();
+        let run = async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            // AFL++ restored 5 and this run found 2 more.
+            std::fs::write(
+                writer.join("default/fuzzer_stats"),
+                "execs_done : 300\nsaved_crashes : 7\n",
+            )
+            .unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Ok::<_, ClassifiedError>(())
+        };
+
+        poll_afl_stats_while(run, output, Duration::from_millis(10), &sink)
+            .await
+            .unwrap();
+
+        let crashes: Vec<u32> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                FuzzProgress::CrashesFound(v) => Some(*v),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(crashes, vec![2], "only this run's crashes: {crashes:?}");
     }
 
     #[tokio::test]
