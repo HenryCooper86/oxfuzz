@@ -51,7 +51,7 @@ a build or run fails with Docker output such as `pull access denied`.
 
 Cause: the runtime always uses the image tag compiled into oxfuzz
 (`SANDBOX_IMAGE` in `crates/hf-runtime/src/config.rs`, currently
-`oxfuzz/fuzz-sandbox:0.2.1`), and it is not present locally. The runtime
+`oxfuzz/fuzz-sandbox:0.2.2`), and it is not present locally. The runtime
 never pulls it on its own.
 
 Fix: from an oxfuzz source checkout run
@@ -65,7 +65,7 @@ skips the script's post-build toolchain and Semgrep verification). Expect a
 long first build and a large image: it compiles honggfuzz, syzkaller (with
 its Go toolchain), and SymCC from source, installs Rust nightly and
 cargo-fuzz, and needs network access while building. The local
-`oxfuzz/fuzz-sandbox:0.2.1` image is about 7 GB on disk.
+`oxfuzz/fuzz-sandbox:0.2.2` image is about 7 GB on disk.
 
 If a prebuilt image has been published for your version,
 `./scripts/pull-sandbox.sh` downloads and verifies it instead; when none is
@@ -101,7 +101,7 @@ checkout, rebuilds on a mismatch; the CLI `doctor` only checks that the tag
 exists.
 
 Fix: check with
-`docker image inspect --format '{{.Architecture}}' oxfuzz/fuzz-sandbox:0.2.1`.
+`docker image inspect --format '{{.Architecture}}' oxfuzz/fuzz-sandbox:0.2.2`.
 For userspace fuzzing, build for the native architecture: run
 `./scripts/build-sandbox.sh` without `OXFUZZ_SANDBOX_PLATFORM`, or with
 `OXFUZZ_SANDBOX_PLATFORM=linux/arm64` on Apple Silicon. Building a foreign
@@ -118,7 +118,7 @@ The runtime, `doctor`, and Build Doctor always use the fixed
 overrides it.
 
 Fix: build with the default tag, or retag your image:
-`docker tag myorg/sandbox:1 oxfuzz/fuzz-sandbox:0.2.1`.
+`docker tag myorg/sandbox:1 oxfuzz/fuzz-sandbox:0.2.2`.
 
 ## Building oxfuzz
 
@@ -333,3 +333,24 @@ Causes: a crates.io or git dependency (the sandbox is offline and vendors only
 That is current scope, not a fault: Go and Python are discovery-only, and
 harness commands name the supported set (`c, cpp, rust`). See
 [SUPPORT_MATRIX.md](SUPPORT_MATRIX.md).
+
+### Crash scans are slow or CASR reports have no symbols
+
+Use **Scan for Crashes** for classification. It does not call an AI provider or
+minimize inputs. **Compose Report** and **Verify with AI** are separate actions.
+The scan status shows the current phase, elapsed time, and completed input count
+when available. **Stop scan** waits for sandbox teardown and keeps completed
+findings; a stopped scan has not necessarily examined every input. Previously
+saved AI reports and confirmed minimization evidence survive a rescan.
+
+Rebuild the sandbox after upgrading to image `oxfuzz/fuzz-sandbox:0.2.2`:
+
+```sh
+./scripts/build-sandbox.sh
+```
+
+This image fixes a GDB output-pipe deadlock in CASR's timeout handling. The
+service also stages honggfuzz crash names in the format CASR accepts. Earlier
+versions could skip all honggfuzz inputs and silently fall back to basic replay,
+then spend several minutes drafting AI reports. Scan the retained run again to
+obtain symbolized CASR evidence. Existing historical findings remain retained.

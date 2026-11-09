@@ -221,7 +221,7 @@ timeout_secs = 30
 # memory_mb = 2048
 # cpus = 1
 # max_context_bytes = 16384
-# image = "oxfuzz/fuzz-sandbox:0.2.1"
+# image = "oxfuzz/fuzz-sandbox:0.2.2"
 # scope_file = "oxfuzz-clang-scope.json"
 # Opt into actual bounded LLVM Static Analyzer exploration and CFG evidence.
 # Omit this nested table for graph-only analysis.

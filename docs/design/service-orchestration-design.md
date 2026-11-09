@@ -1004,3 +1004,12 @@ CLI pipeline prints the same steps and output lines.
 Rejected alternative: running the whole CLI pipeline and approving through the
 app-wide approval prompt. That prompt shows only the action label, so the
 person would approve a harness without its source in view.
+
+### Interactive scan control
+
+The service owns `scan_crashes`, progress events, and cancellation by scan UUID.
+Tauri and REST forward these operations and progress without deciding AI policy.
+An interactive scan never drafts AI reports or minimizes inputs; those longer
+operations remain explicit enrichment. Completed classifications survive a stop.
+Chat turns and scans use separate instances of the same bounded cancellation
+registry, so identifiers and cancellation cannot cross operation types.

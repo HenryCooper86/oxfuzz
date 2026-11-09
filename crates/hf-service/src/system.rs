@@ -446,7 +446,7 @@ mod tests {
 
         assert!(
             remedy.contains(
-                "docker build --platform linux/arm64 -t oxfuzz/fuzz-sandbox:0.2.1 -f docker/sandbox/Dockerfile ."
+                "docker build --platform linux/arm64 -t oxfuzz/fuzz-sandbox:0.2.2 -f docker/sandbox/Dockerfile ."
             ),
             "{remedy}"
         );
@@ -481,7 +481,7 @@ mod tests {
             remedy.contains("docker build --platform linux/amd64"),
             "{remedy}"
         );
-        assert!(remedy.contains("oxfuzz/fuzz-sandbox:0.2.1"), "{remedy}");
+        assert!(remedy.contains("oxfuzz/fuzz-sandbox:0.2.2"), "{remedy}");
         assert!(remedy.contains("docker/sandbox/Dockerfile"), "{remedy}");
         // Without a source checkout the CLI build has nothing to run.
         assert!(!remedy.contains("doctor --build-image"), "{remedy}");

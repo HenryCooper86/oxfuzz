@@ -208,6 +208,8 @@ pub enum SseEvent {
         kind: String,
         data: serde_json::Value,
     },
+    /// `triage:progress` -- one interactive crash scan.
+    ScanProgress(hf_service::ScanProgress),
     /// `run:status` -- one run changed lifecycle state.
     RunStatus { run_id: String, status: String },
     /// `campaign:health` -- one newly retained health condition.
@@ -232,6 +234,7 @@ impl SseEvent {
     fn event_name(&self) -> &'static str {
         match self {
             SseEvent::RunProgress { .. } => "run:progress",
+            SseEvent::ScanProgress(_) => "triage:progress",
             SseEvent::RunStatus { .. } => "run:status",
             #[cfg(feature = "campaign-health")]
             SseEvent::CampaignHealth { .. } => "campaign:health",
@@ -503,6 +506,8 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .route("/corpus/capabilities", post(corpus_capabilities))
         .route("/corpus/{op}", post(corpus))
         .route("/triage", post(triage))
+        .route("/crashes/scan", post(scan_crashes))
+        .route("/crashes/scans/{id}/cancel", post(cancel_crash_scan))
         .route("/crash/verify", post(verify_crash))
         .route("/report", post(report))
         .route("/reports", get(list_report_drafts))
@@ -3117,6 +3122,40 @@ async fn triage(
     Ok(Json(public_value(deduped)?))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScanCrashesRequest {
+    project: String,
+    target: String,
+    scan_id: uuid::Uuid,
+}
+
+async fn scan_crashes(
+    State(state): State<AppState>,
+    Json(req): Json<ScanCrashesRequest>,
+) -> ApiResult<serde_json::Value> {
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
+    let progress_state = state.clone();
+    let progress = std::sync::Arc::new(move |event| {
+        if let Err(error) = progress_state.publish_event(SseEvent::ScanProgress(event)) {
+            tracing::debug!(%error, "crash scan progress not delivered");
+        }
+    });
+    let crashes = state
+        .container
+        .scan_crashes(&project, &req.target, req.scan_id, progress)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(crashes)?))
+}
+
+async fn cancel_crash_scan(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> Json<hf_service::OperationCancelOutcome> {
+    Json(state.container.cancel_crash_scan(id))
+}
+
 #[derive(serde::Deserialize)]
 struct VerifyCrashRequest {
     project: String,
@@ -3821,7 +3860,7 @@ struct ChatCancelRequest {
 async fn chat_cancel(
     State(state): State<AppState>,
     Json(req): Json<ChatCancelRequest>,
-) -> ApiResult<hf_service::ChatCancelOutcome> {
+) -> ApiResult<hf_service::OperationCancelOutcome> {
     Ok(Json(
         state
             .container
@@ -5415,6 +5454,20 @@ mod request_tests {
             .is_err(),
             "a request without a crash id is rejected, not defaulted"
         );
+    }
+
+    #[test]
+    fn crash_scan_requires_identity_and_cannot_enable_ai_drafting() {
+        let valid =
+            r#"{"project":"/p","target":"parse","scan_id":"00000000-0000-0000-0000-000000000001"}"#;
+        let request: super::ScanCrashesRequest = serde_json::from_str(valid).unwrap();
+        assert_eq!(request.scan_id, uuid::Uuid::from_u128(1));
+        assert!(serde_json::from_str::<super::ScanCrashesRequest>(
+            r#"{"project":"/p","target":"parse"}"#
+        )
+        .is_err());
+        let with_ai = valid.replace('}', ",\"ai\":\"auto\"}");
+        assert!(serde_json::from_str::<super::ScanCrashesRequest>(&with_ai).is_err());
     }
 
     #[test]

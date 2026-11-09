@@ -21,7 +21,8 @@ mod chat;
 pub(crate) mod chat_turn;
 #[cfg(feature = "ai-target-ranking")]
 pub use ai_target_ranking::{RankedDiscoveryResult, RankedDiscoveryStatus, RankedInventoryAdvice};
-pub use chat_turn::ChatCancelOutcome;
+mod operation_registry;
+pub use operation_registry::OperationCancelOutcome;
 #[cfg(feature = "clang-analysis")]
 mod clang_analysis;
 #[cfg(feature = "concolic-enrichment")]
@@ -32,6 +33,8 @@ mod coverage_feedback;
 use coverage_feedback::CoverageFeedback;
 pub(crate) mod crash_confirmation;
 mod crash_inputs;
+mod crash_scan;
+pub use crash_scan::{ScanPhase, ScanProgress};
 mod crash_owner;
 mod discovery;
 #[cfg(feature = "run-closeout")]
@@ -741,11 +744,13 @@ pub struct ServiceContainer {
     >,
     /// Cancellation tokens of running chat turns. Shared across clones so a
     /// cancel from any presentation layer reaches the turn.
-    pub(crate) chat_turns: chat_turn::ChatTurnRegistry,
+    pub(crate) chat_turns: operation_registry::OperationRegistry,
     /// The chat turn this container is scoped to, if any; fuzz runs started
     /// through it stop when the turn is cancelled. `None` on every container
     /// except the per-turn scope built by `chat_turn_scope`.
     turn_cancel: Option<CancellationToken>,
+    crash_scans: operation_registry::OperationRegistry,
+    scan_control: Option<Arc<crash_scan::ScanControl>>,
     /// Late-bound link to the campaign scheduler, shared across clones of this
     /// container so any operation in this process (scheduled or interactive)
     /// can emit scheduler events (crash found, run terminated). Set by

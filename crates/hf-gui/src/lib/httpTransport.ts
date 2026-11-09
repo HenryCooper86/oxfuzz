@@ -161,6 +161,8 @@ const COMMAND_MAP: Record<string, CommandEndpoint> = {
   corpus_prune_coverage: { method: "POST", path: "/corpus/prune-coverage" },
   corpus_minimize: { method: "POST", path: "/corpus/minimize" },
   corpus_capabilities: { method: "POST", path: "/corpus/capabilities" },
+  scan_crashes: { method: "POST", path: "/crashes/scan" },
+  cancel_crash_scan: { method: "POST", path: "/crashes/scans/{scan_id}/cancel", emptyBody: true },
   triage: { method: "POST", path: "/triage" },
   verify_crash: { method: "POST", path: "/crash/verify" },
   generate_report: { method: "POST", path: "/report" },

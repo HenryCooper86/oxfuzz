@@ -15,6 +15,7 @@ use super::crash_inputs::{
     bucket_by_cluster, casrep_input_path, collect_casreps, collect_crash_inputs,
     collect_legacy_crash_inputs, deterministic_crash_id, is_regular_file, stage_crash_inputs,
 };
+use super::crash_scan::ScanPhase;
 use super::harness_workspace::{container_input_path, harness_binary_name};
 use super::project_identity::{
     canonical_project_root, project_lookup_identity, stored_project_matches,
@@ -31,30 +32,48 @@ impl ServiceContainer {
         run_id: Uuid,
         crashes: &mut [hf_core::crash::Crash],
     ) -> Result<(), ClassifiedError> {
-        let mut retained_ids = std::collections::HashMap::new();
+        let mut retained_crashes = std::collections::HashMap::new();
         if let Some(store) = self.store() {
             for retained in store
                 .list_crashes_by_run(run_id)
                 .await
                 .map_err(|error| ClassifiedError::Storage(error.to_string()))?
             {
-                if let Some(evidence) = retained.reproduction {
-                    retained_ids.insert(
-                        (retained.stack_signature.clone(), evidence.original_input),
-                        retained.id,
+                let retained = Arc::new(retained);
+                if let Some(evidence) = &retained.reproduction {
+                    retained_crashes.insert(
+                        (
+                            retained.stack_signature.clone(),
+                            evidence.original_input.clone(),
+                        ),
+                        retained.clone(),
                     );
                 }
-                retained_ids.insert((retained.stack_signature, retained.input_path), retained.id);
+                retained_crashes.insert(
+                    (
+                        retained.stack_signature.clone(),
+                        retained.input_path.clone(),
+                    ),
+                    retained,
+                );
             }
         }
         for crash in crashes {
-            // Existing identifiers may have linked review and verification records.
-            crash.id = retained_ids
-                .get(&(crash.stack_signature.clone(), crash.input_path.clone()))
-                .copied()
-                .unwrap_or_else(|| {
-                    deterministic_crash_id(run_id, &crash.stack_signature, &crash.input_path)
-                });
+            if let Some(retained) =
+                retained_crashes.get(&(crash.stack_signature.clone(), crash.input_path.clone()))
+            {
+                crash.id = retained.id;
+                if self.scan_control.is_some() {
+                    // Classification-only scans must not erase earlier enrichment.
+                    crash.bug_report.clone_from(&retained.bug_report);
+                    crash.reproduction.clone_from(&retained.reproduction);
+                    crash.minimized = retained.minimized;
+                    crash.input_path.clone_from(&retained.input_path);
+                }
+            } else {
+                crash.id =
+                    deterministic_crash_id(run_id, &crash.stack_signature, &crash.input_path);
+            }
         }
         Ok(())
     }
@@ -68,6 +87,11 @@ impl ServiceContainer {
     ) -> Result<Vec<hf_core::crash::Crash>, ClassifiedError> {
         const TRIAGE_BUDGET: std::time::Duration = std::time::Duration::from_mins(5);
 
+        if self.scan_control.is_some() {
+            return self
+                .triage_run_record_inner(project, target, run, AiPolicy::Off)
+                .await;
+        }
         tokio::time::timeout(
             TRIAGE_BUDGET,
             self.triage_run_record_inner(project, target, run, policy),
@@ -97,12 +121,24 @@ impl ServiceContainer {
         /// calls. Crashes beyond the cap are still ingested and persisted, just
         /// without a drafted report.
         const MAX_BUG_REPORT_DRAFTS: usize = 20;
-        let _workspace_operation = self.acquire_workspace_operation().await?;
+        let _workspace_operation = if let Some(control) = &self.scan_control {
+            tokio::select! {
+                biased;
+                () = control.cancel.cancelled() => return Err(ClassifiedError::Cancelled),
+                lease = self.acquire_workspace_operation() => lease?,
+            }
+        } else {
+            self.acquire_workspace_operation().await?
+        };
 
         self.authorize_recorded(Action::Triage, "triage_run", Some(project))
             .await?;
         let workspace = workspace_dir(project, target);
         let run_id = run.id;
+        self.scan_progress(|progress| {
+            progress.run_id = Some(run_id);
+            progress.phase = ScanPhase::Staging;
+        });
         let engine = run.engine;
         // A kernel campaign has no discovered symbol, so running discovery to
         // resolve one would fail outright. Its crashes are attributed to a
@@ -143,7 +179,9 @@ impl ServiceContainer {
             .run_casr_triage_locked(&workspace, &out_dir, &run_binary, engine, run_id, target_id)
             .await?
         {
-            Some(crashes) if !crashes.is_empty() => (crashes, std::collections::HashMap::new()),
+            Some(crashes) if !crashes.is_empty() || self.scan_cancelled() => {
+                (crashes, std::collections::HashMap::new())
+            }
             _ => {
                 self.legacy_triage_locked(
                     &out_dir,
@@ -161,6 +199,9 @@ impl ServiceContainer {
         // second triage of the same run replaces these rows instead of adding
         // duplicates (the report lists every persisted crash for the run).
         self.assign_triaged_crash_ids(run_id, &mut deduped).await?;
+        self.scan_progress(|progress| {
+            progress.phase = ScanPhase::Persisting;
+        });
 
         // Persist the completed classification NOW, before the optional (and
         // slower) minimization and LLM bug-report phases. Those phases run under
@@ -176,10 +217,19 @@ impl ServiceContainer {
                 .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
         }
 
+        if self.scan_control.is_some() {
+            self.scan_progress(|progress| progress.findings = deduped.len());
+            let _ = run_binary_path(&workspace, &run, target)?;
+            if self.scan_cancelled() {
+                return Err(ClassifiedError::Cancelled);
+            }
+            return Ok(deduped);
+        }
+
         // Native minimizers execute against the immutable run-owned harness and
         // original crash input. Legacy records without binary digest evidence
         // remain triageable but cannot claim a verified minimized artifact.
-        if run.binary_rev.is_some() {
+        if run.binary_rev.is_some() && self.scan_control.is_none() {
             self.minimize_triaged_crashes_locked(
                 &workspace,
                 &run,
@@ -559,11 +609,7 @@ impl ServiceContainer {
             workspace_read_only: true,
             ..hf_core::runtime::SandboxOptions::default()
         };
-        match self
-            .runtime
-            .run_command_opts(&cmd, workspace, &limits, &sandbox)
-            .await
-        {
+        match self.scan_command(&cmd, workspace, &limits, &sandbox).await {
             // A crashing input exits non-zero; the trace is the useful output.
             Ok(result) if result.termination == hf_core::runtime::CommandTermination::Completed => {
                 Some(format!("{}\n{}", result.stdout, result.stderr))
@@ -642,6 +688,15 @@ impl ServiceContainer {
             ))
         })?;
         let casr_container = container_input_path(workspace, &casr_host);
+        let inventory = hf_crash::ingest_for_engine(out_dir, engine, run_id, target_id)?;
+        let total_inputs = inventory.crashes.len();
+        let input_limit_reached = inventory.artifact_limit_reached;
+        self.scan_progress(|progress| {
+            progress.phase = ScanPhase::Casr;
+            progress.total_inputs = Some(total_inputs);
+            progress.input_limit_reached = input_limit_reached;
+            progress.processed_inputs = Some(0);
+        });
         let cmd = hf_crash::casr_command(engine, &binary, &crash_dir, &casr_container, 30);
         let limits = hf_core::runtime::ResourceLimits {
             max_mem_mb: 4096,
@@ -658,11 +713,24 @@ impl ServiceContainer {
             )],
             ..hf_core::runtime::SandboxOptions::default()
         };
-        match self
-            .runtime
-            .run_command_opts(&cmd, workspace, &limits, &sandbox)
-            .await
-        {
+        match self.scan_command(&cmd, workspace, &limits, &sandbox).await {
+            Ok(r)
+                if self.scan_cancelled()
+                    && r.termination == hf_core::runtime::CommandTermination::Cancelled =>
+            {
+                // Parse only completed bounded reports after the sandbox has been reaped.
+            }
+            Ok(r)
+                if self.scan_control.is_some()
+                    && r.termination == hf_core::runtime::CommandTermination::TimedOut =>
+            {
+                if let Some(control) = &self.scan_control {
+                    control.fail(
+                        "CASR exceeded its 240 second budget; completed findings were retained"
+                            .to_owned(),
+                    );
+                }
+            }
             Ok(r) if r.termination != hf_core::runtime::CommandTermination::Completed => {
                 return Err(ClassifiedError::Sandbox(format!(
                     "CASR triage was force-stopped: {:?}",
@@ -676,14 +744,16 @@ impl ServiceContainer {
                     r.stderr.lines().last().unwrap_or_default()
                 );
             }
-            Ok(_) => {}
+            Ok(_) => {
+                self.scan_progress(|progress| progress.processed_inputs = progress.total_inputs);
+            }
             Err(e) => {
                 tracing::warn!("casr run failed, falling back to built-in triage: {e}");
                 return Ok(None);
             }
         }
         let reports = collect_casreps(&casr_host);
-        if reports.is_empty() {
+        if reports.is_empty() && !self.scan_cancelled() {
             tracing::info!("casr produced no reports; falling back to built-in triage");
             return Ok(None);
         }
@@ -715,8 +785,8 @@ impl ServiceContainer {
                     summary,
                     minimized: false,
                     bug_report: None,
+                    origin: hf_crash::crash_origin(&casr.stack.join("\n")),
                     casr: Some(casr),
-                    origin: hf_core::crash::CrashOrigin::Unknown,
                 }
             })
             .collect::<Vec<_>>();
@@ -762,6 +832,7 @@ impl ServiceContainer {
                 "triage crash ingestion reached a safety limit"
             );
         }
+        let input_limit_reached = ingested.artifact_limit_reached;
         let crashes = ingested.crashes;
         let total_ingested = crashes.len();
         let mut logs: std::collections::HashMap<PathBuf, String> = std::collections::HashMap::new();
@@ -769,13 +840,25 @@ impl ServiceContainer {
         let mut seen_signatures: std::collections::HashSet<String> =
             std::collections::HashSet::new();
         let mut since_new_signature = 0usize;
+        self.scan_progress(|progress| {
+            progress.phase = ScanPhase::Fallback;
+            progress.total_inputs = Some(total_ingested);
+            progress.input_limit_reached = input_limit_reached;
+            progress.processed_inputs = Some(0);
+        });
         for mut crash in crashes {
+            if self.scan_cancelled() {
+                break;
+            }
             if reproduced.len() >= MAX_REPRODUCE || since_new_signature >= SIGNATURE_STAGNATION {
                 break;
             }
             let log = self
                 .reproduce_crash_locked(workspace, binary_host, &crash.input_path)
                 .await;
+            if self.scan_cancelled() {
+                break;
+            }
             if log.as_deref().is_none_or(|value| value.trim().is_empty()) {
                 since_new_signature += 1;
             } else if let Some(log) = log.as_deref() {
@@ -793,6 +876,7 @@ impl ServiceContainer {
                 logs.insert(crash.input_path.clone(), log);
             }
             reproduced.push(crash);
+            self.scan_progress(|progress| progress.processed_inputs = Some(reproduced.len()));
         }
         if reproduced.len() < total_ingested {
             tracing::info!(
@@ -913,6 +997,12 @@ impl ServiceContainer {
                 "syzkaller crash ingestion reached a safety limit"
             );
         }
+        self.scan_progress(|progress| {
+            progress.phase = ScanPhase::Persisting;
+            progress.total_inputs = Some(ingested.crashes.len());
+            progress.processed_inputs = Some(ingested.crashes.len());
+            progress.input_limit_reached = ingested.is_truncated();
+        });
         let mut crashes = hf_crash::dedup(ingested.crashes);
         self.assign_triaged_crash_ids(run_id, &mut crashes).await?;
         if let Some(store) = self.store.as_ref() {
@@ -927,6 +1017,13 @@ impl ServiceContainer {
             crashes = crashes.len(),
             "triaged syzkaller kernel evidence"
         );
+        if self.scan_control.is_some() {
+            self.scan_progress(|progress| progress.findings = crashes.len());
+            if self.scan_cancelled() {
+                return Err(ClassifiedError::Cancelled);
+            }
+            return Ok(crashes);
+        }
         if !crashes.is_empty() {
             self.emit_scheduler_event(
                 crate::scheduler::EVENT_CRASH_FOUND,

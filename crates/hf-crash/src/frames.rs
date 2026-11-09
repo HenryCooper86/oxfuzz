@@ -90,6 +90,7 @@ fn frame_pattern() -> &'static Regex {
 pub fn parse_frames(log: &str) -> Vec<StackFrame> {
     frame_pattern()
         .captures_iter(log)
+        .filter(|captures| !captures[2].trim_start().starts_with("??"))
         .map(|captures| StackFrame {
             index: captures[1].parse().unwrap_or(0),
             function: captures[2].trim().to_owned(),
@@ -227,6 +228,16 @@ pub(crate) mod tests {
     #1 0x4f2c30 in dns_parse_message /work/src/parser/dns.c:140:9
     #2 0x51b3c4 in LLVMFuzzerTestOneInput /work/harness.c:14:5
 ";
+
+    #[test]
+    fn gdb_source_frames_attribute_the_fault_and_unknown_symbols_do_not() {
+        let runtime = "#0 0xffff in ?? () from /lib/aarch64-linux-gnu/libc.so.6\n#1 0xffff in abort () from /lib/aarch64-linux-gnu/libc.so.6";
+        let target = format!("{runtime}\n#2 0xaaaa in match_magic (data=0xffff, len=4) at /work/magic.c:12\n#3 0xbbbb in LLVMFuzzerTestOneInput (data=0xffff, size=4) at /work/harness.c:15");
+        assert_eq!(crash_origin(&target), CrashOrigin::Target);
+        let harness = format!("{runtime}\n#2 0xbbbb in LLVMFuzzerTestOneInput (data=0xffff, size=4) at /work/harness.c:15");
+        assert_eq!(crash_origin(&harness), CrashOrigin::Harness);
+        assert_eq!(crash_origin("#0 0xffff in ?? ()"), CrashOrigin::Unknown);
+    }
 
     #[test]
     fn parses_index_function_file_and_line() {

@@ -121,8 +121,10 @@ impl ServiceContainer {
             campaign_health_delivery: Arc::new(std::sync::Mutex::new(None)),
             active_agents: Arc::new(std::sync::Mutex::new(Vec::new())),
             session_turn_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            chat_turns: super::chat_turn::ChatTurnRegistry::default(),
+            chat_turns: super::operation_registry::OperationRegistry::default(),
             turn_cancel: None,
+            crash_scans: super::operation_registry::OperationRegistry::default(),
+            scan_control: None,
             scheduler_events: Arc::new(std::sync::Mutex::new(None)),
             _health_task: None,
         }
@@ -504,8 +506,10 @@ impl ServiceContainer {
             campaign_health_delivery: Arc::new(std::sync::Mutex::new(None)),
             active_agents: Arc::new(std::sync::Mutex::new(Vec::new())),
             session_turn_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            chat_turns: super::chat_turn::ChatTurnRegistry::default(),
+            chat_turns: super::operation_registry::OperationRegistry::default(),
             turn_cancel: None,
+            crash_scans: super::operation_registry::OperationRegistry::default(),
+            scan_control: None,
             scheduler_events: Arc::new(std::sync::Mutex::new(None)),
             _health_task: Some(health_task),
         }

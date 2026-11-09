@@ -906,6 +906,6 @@ errors only).
 | `HF_AUTO_REVERT_NOTIFY_ONLY` | Report the regression without reverting. Overrides `oxfuzz.toml`. | Off. |
 | `HF_GITLAB_URL`, `HF_GITLAB_PROJECT` | When no issue tracker is configured, the GitLab base URL and project path used to build a crash's prefilled new-issue link. Both must be set. | Unset: derived from the project's git `origin` remote. |
 | `HF_DEFECTDOJO_TOKEN` | DefectDojo API v2 token. Read because the default `config/defectdojo.toml` names it in `api_token_env`. | Unset. |
-| `OXFUZZ_SANDBOX_IMAGE` | Image reference built by `scripts/build-sandbox.sh`; it must carry an explicit version tag. | `oxfuzz/fuzz-sandbox:0.2.1`. |
+| `OXFUZZ_SANDBOX_IMAGE` | Image reference built by `scripts/build-sandbox.sh`; it must carry an explicit version tag. | `oxfuzz/fuzz-sandbox:0.2.2`. |
 | `OXFUZZ_SANDBOX_PLATFORM` | `--platform` passed to the `scripts/build-sandbox.sh` build and probe. | Unset (host platform). |
 | `OXFUZZ_SCAPY_IMAGE` | Image reference built by `scripts/build-scapy-sidecar.sh`; must be pinned, not `latest`. | `oxfuzz/scapy-automotive:2.7.0`. |

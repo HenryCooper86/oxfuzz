@@ -64,6 +64,36 @@ pub struct Crash {
    that the crash is a target vulnerability.
 6. **HITL** -- human reviews, edits, and approves/closes.
 
+### Interactive crash scans
+
+`scan_crashes` classifies and persists findings without minimization or model
+requests. AI report composition and verification are explicit follow-up actions;
+existing automated `triage` callers may still request enrichment through their
+AI policy. Scanning must never call a provider, even when one is configured.
+
+Each scan has a caller-selected UUID and service-owned cancellation registration.
+Progress identifies the scan and retained run, phase, elapsed time, input count,
+and completed replay count when known. An explicit collection-limit flag warns
+when retained inputs exceed the bounded pass; completion never implies every
+retained crash was examined. CASR progress is reported from its own
+completed-input messages; an unknown count is not a fabricated percentage.
+The UI subscribes before starting and ignores events for other scans. Stop
+remains pending until the sandbox is reaped. Early cancellation is remembered
+briefly in a bounded registry and also interrupts workspace-lock waits.
+
+Cancellation and the five-minute scan deadline signal the runtime token rather
+than dropping an active sandbox future. Completed CASR reports or fallback
+classifications are persisted before returning a cancellation; partial results
+are explicitly labelled. The original run evidence remains read-only.
+
+Non-AFL inputs staged for CASR use stable opaque `crash-<id>` names, preventing collisions and debugger
+argument metacharacters. Report resolution reverses that staging name and the optional `.gdb` suffix to
+recover original input provenance. CASR stack frames also feed the shared fault-origin
+classifier; unresolved `??` frames cannot establish target attribution. CASR runs with bounded worker count and
+per-input timeouts. Sandbox image 0.2.2 patches gdb-command 0.7.8 to drain both output
+pipes while waiting, with bounded capture, and to reap GDB on timeout; otherwise
+a symbolized stack plus process mappings can fill a pipe and falsely time out.
+
 ## 4. Reporting Origin
 
 A `CrashOrigin::Harness` crash is a harness bug to fix, not a statement about

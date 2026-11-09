@@ -12,7 +12,7 @@ import { useFindingSelection } from "../providers/findingSelection";
 import { usePipeline } from "../providers/pipeline";
 import { useProject } from "../providers/project";
 import { useRunOutput } from "../providers/runOutput";
-import type { ViewType, RunHistoryItem, Crash, CrashVerdict, FindingReviewFilter, FindingReviewItem, TriageDisposition, IssueExport } from "../types";
+import type { ScanProgress, ViewType, RunHistoryItem, Crash, CrashVerdict, FindingReviewFilter, FindingReviewItem, TriageDisposition, IssueExport } from "../types";
 
 const ReportPreview = lazy(() =>
   import("../components/ReportPreview").then((module) => ({ default: module.ReportPreview })),
@@ -58,6 +58,9 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
   const [targetFilter, setTargetFilter] = useState("");
   const [reloadVersion, setReloadVersion] = useState(0);
   const [scanning, setScanning] = useState(false);
+  const [stoppingScan, setStoppingScan] = useState(false);
+  const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null);
+  const activeScan = useRef<string | null>(null);
   const [reporting, setReporting] = useState(false);
   const [pushing, setPushing] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -103,6 +106,11 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
       detailRequest.current += 1;
       actionRequest.current += 1;
       scanRequest.current += 1;
+      if (activeScan.current) {
+        void getTransport().invoke("cancel_crash_scan", { scanId: activeScan.current }).catch(() => {
+          // The view is gone; the service deadline still bounds a failed stop request.
+        });
+      }
     };
   }, []);
 
@@ -188,11 +196,23 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
 
   const triage = useCallback(async () => {
     const request = ++scanRequest.current;
+    const scanId = crypto.randomUUID();
+    activeScan.current = scanId;
+    let unlisten: (() => void) | undefined;
     const selectedGeneration = selectionGeneration.current;
     setScanning(true);
+    setStoppingScan(false);
+    setScanProgress({ scan_id: scanId, run_id: null, phase: "queued", total_inputs: null, input_limit_reached: false, processed_inputs: null, findings: 0, elapsed_secs: 0 });
     setMessage(null);
     try {
-      const crashes = await getTransport().invoke<Crash[]>("triage", { project: activeProject || ".", target: lastTarget });
+      unlisten = await getTransport().listen<ScanProgress>("triage:progress", ({ payload }) => {
+        if (mounted.current && activeScan.current === payload.scan_id) setScanProgress(payload);
+      });
+      if (!mounted.current || request !== scanRequest.current) return;
+      const crashes = await getTransport().invoke<Crash[]>("scan_crashes", { project: activeProject || ".", target: lastTarget, scanId });
+      if (mounted.current && request === scanRequest.current) {
+        setScanProgress(current => current ? { ...current, phase: "completed", findings: crashes.length } : null);
+      }
       if (
         !mounted.current
         || request !== scanRequest.current
@@ -206,15 +226,37 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
       }
       setReloadVersion((value) => value + 1);
     } catch (error) {
-      if (
-        mounted.current
-        && request === scanRequest.current
-        && selectedGeneration === selectionGeneration.current
-      ) setMessage(t("triage.scanFailed", { error: String(error) }));
+      if (mounted.current && request === scanRequest.current) {
+        const cancelled = /(?:^|\b)cancelled$/.test(String(error));
+        setScanProgress(current => current ? { ...current, phase: cancelled ? "cancelled" : "failed" } : null);
+        if (selectedGeneration === selectionGeneration.current) {
+          setMessage(cancelled ? t("triage.scanCancelled") : t("triage.scanFailed", { error: String(error) }));
+        }
+      }
     } finally {
-      if (mounted.current && request === scanRequest.current) setScanning(false);
+      unlisten?.();
+      if (activeScan.current === scanId) activeScan.current = null;
+      if (mounted.current && request === scanRequest.current) {
+        setScanning(false);
+        setStoppingScan(false);
+        setReloadVersion(value => value + 1);
+      }
     }
   }, [activeProject, lastTarget, markDone, markSkipped, selectFinding, t]);
+
+  const stopScan = useCallback(async () => {
+    const scanId = activeScan.current;
+    if (!scanId) return;
+    setStoppingScan(true);
+    try {
+      await getTransport().invoke("cancel_crash_scan", { scanId });
+    } catch (error) {
+      if (mounted.current && activeScan.current === scanId) {
+        setStoppingScan(false);
+        setMessage(t("triage.stopScanFailed", { error: String(error) }));
+      }
+    }
+  }, [t]);
 
   const actionTarget = selection ? activeFinding?.target_selector ?? "" : lastTarget;
   const actionDisplayTarget = selection ? activeFinding?.target_symbol ?? "" : lastTarget;
@@ -348,10 +390,23 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
           <Button variant="primary" onClick={() => void triage()} disabled={actionsBusy || !lastTarget || isKernelRun} loading={scanning}>
             {!scanning && <Bug size={14} />}{t(scanning ? "triage.scanning" : "triage.scanForCrashes")}
           </Button>
+          {scanning && <Button variant="outline" onClick={() => void stopScan()} disabled={stoppingScan}>
+            {t(stoppingScan ? "triage.stoppingScan" : "triage.stopScan")}
+          </Button>}
         </div>
       </div>
       {message && <div className="text-xs text-text-muted">{message}</div>}
       {disabledReason && <div role="status" className="surface-card text-xs text-text-muted" style={{ padding: "var(--space-sm) var(--space-md)" }}>{disabledReason}</div>}
+      <p className="text-xs text-text-secondary">{t("triage.scanScope")}</p>
+      {scanProgress?.input_limit_reached && <p className="text-sm text-warning">{t("triage.scanLimitNotice")}</p>}
+      {scanProgress && <div role="status" aria-live="polite" className="flex flex-wrap items-center gap-3 text-sm text-text-secondary">
+        <span>{t(scanProgress.phase === "completed" && scanProgress.input_limit_reached ? "triage.scanLimitedComplete" : `triage.scanPhase.${scanProgress.phase}`)}</span>
+        <span>{t("triage.scanElapsed", { seconds: scanProgress.elapsed_secs })}</span>
+        {scanProgress.total_inputs !== null && <span>{scanProgress.processed_inputs === null
+          ? t("triage.scanInputs", { total: scanProgress.total_inputs })
+          : t("triage.scanProcessed", { done: scanProgress.processed_inputs, total: scanProgress.total_inputs })}</span>}
+        <span>{t("triage.scanFindings", { count: scanProgress.findings })}</span>
+      </div>}
       <div className="surface-card grid gap-2" style={{ padding: "var(--space-sm)", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))" }}>
         <Input aria-label={t("triage.searchFindings")} value={search} onChange={(event) => setSearch(event.target.value)} placeholder={t("triage.searchFindings")} />
         <select className="bg-surface-secondary text-text-primary border border-border rounded-md px-2 py-1 min-w-0" aria-label={t("triage.filterDisposition")} value={dispositionFilter} onChange={(event) => setDispositionFilter(event.target.value)}>

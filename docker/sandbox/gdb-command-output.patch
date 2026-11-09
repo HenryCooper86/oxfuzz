@@ -1,0 +1,110 @@
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -61,0 +62,80 @@
++
++// Retain at most 16 MiB per stream while draining excess output to avoid
++// blocking the child. An oversized debugger response is rejected, not parsed.
++const MAX_DEBUGGER_OUTPUT: usize = 16 * 1024 * 1024;
++
++fn capture(mut reader: impl std::io::Read) -> std::io::Result<Vec<u8>> {
++    let mut result = Vec::new();
++    let mut buffer = [0u8; 8192];
++    let mut oversized = false;
++    loop {
++        let count = reader.read(&mut buffer)?;
++        if count == 0 { break; }
++        let keep = count.min(MAX_DEBUGGER_OUTPUT.saturating_sub(result.len()));
++        result.extend_from_slice(&buffer[..keep]);
++        oversized |= keep < count;
++    }
++    if oversized {
++        return Err(std::io::Error::other("debugger output exceeds 16 MiB"));
++    }
++    Ok(result)
++}
++
++fn bounded_output(command: &mut Command, timeout: u64) -> std::io::Result<std::process::Output> {
++    let mut child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
++    let stdout = child.stdout.take().expect("piped stdout");
++    let stderr = child.stderr.take().expect("piped stderr");
++    let stdout = std::thread::spawn(move || capture(stdout));
++    let stderr = std::thread::spawn(move || capture(stderr));
++    let status = if timeout == 0 { child.wait().map(Some) }
++        else { child.wait_timeout(Duration::from_secs(timeout)) };
++    let status = match status {
++        Ok(Some(status)) => status,
++        other => {
++            // A failed kill can mean the process already exited; wait still
++            // reaps it. The surrounding sandbox contains the whole process tree.
++            let _ = child.kill();
++            child.wait()?;
++            return Err(match other {
++                Err(error) => error,
++                _ => std::io::Error::new(std::io::ErrorKind::TimedOut,
++                    format!("Timeout error: {timeout} sec exceeded")),
++            });
++        }
++    };
++    let join = |thread: std::thread::JoinHandle<std::io::Result<Vec<u8>>>| {
++        thread.join().map_err(|_| std::io::Error::other("debugger output reader panicked"))?
++    };
++    Ok(std::process::Output { status, stdout: join(stdout)?, stderr: join(stderr)? })
++}
++
++#[cfg(test)]
++mod output_regressions {
++    use super::*;
++
++    #[test]
++    fn drains_both_pipes_before_waiting_for_exit() {
++        let mut command = Command::new("sh");
++        command.args(["-c", "head -c 1048576 /dev/zero; head -c 1048576 /dev/zero >&2"]);
++        let result = bounded_output(&mut command, 5).unwrap();
++        assert!(result.status.success());
++        assert_eq!(result.stdout.len(), 1048576);
++        assert_eq!(result.stderr.len(), 1048576);
++    }
++
++    #[test]
++    fn preserves_the_execution_deadline() {
++        let mut command = Command::new("sh");
++        command.args(["-c", "exec sleep 30"]);
++        let start = std::time::Instant::now();
++        let error = bounded_output(&mut command, 1).unwrap_err();
++        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
++        assert!(start.elapsed() < Duration::from_secs(5));
++    }
++
++    #[test]
++    fn rejects_excess_output_after_draining_it() {
++        let input = vec![0u8; MAX_DEBUGGER_OUTPUT + 1];
++        assert!(capture(std::io::Cursor::new(input)).is_err());
++    }
++}
+@@ -177,24 +257,2 @@
+-        // Run gdb and get output
+-        let output =
+-        // If timeout is specified, spawn and check timeout
+-        // Else get output
+-        if self.timeout != 0 {
+-            let mut child = gdb
+-                .stderr(Stdio::piped())
+-                .stdout(Stdio::piped())
+-                .spawn()?;
+-            if child
+-                .wait_timeout(Duration::from_secs(self.timeout))
+-                .unwrap()
+-                .is_none()
+-            {
+-                let _ = child.kill();
+-                return Err(error::Error::Gdb(format!(
+-                    "Timeout error: {} sec exceeded",
+-                    self.timeout,
+-                )));
+-            }
+-            child.wait_with_output()
+-        } else {
+-            gdb.output()
+-        };
++        // Drain both pipes concurrently: waiting first deadlocks on full pipes.
++        let output = bounded_output(&mut gdb, self.timeout);

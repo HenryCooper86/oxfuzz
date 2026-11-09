@@ -66,7 +66,8 @@ pub(super) fn stage_crash_inputs(
             outcome.skipped += 1;
             continue;
         };
-        match std::fs::copy(&path, staging.join(name)) {
+        let staged_name = casr_staged_name(name);
+        match std::fs::copy(&path, staging.join(staged_name)) {
             Ok(_) => outcome.staged += 1,
             Err(error) => {
                 tracing::warn!(
@@ -79,6 +80,15 @@ pub(super) fn stage_crash_inputs(
         }
     }
     Ok(outcome)
+}
+
+/// CASR selects crash-prefixed names; an opaque basename also avoids collisions
+/// between engine prefixes and metacharacters in GDB's run command.
+fn casr_staged_name(name: &str) -> String {
+    format!(
+        "crash-{}",
+        Uuid::new_v5(&Uuid::NAMESPACE_OID, name.as_bytes()).simple()
+    )
 }
 
 /// Collect crash input file paths from a run output directory, skipping engine
@@ -168,10 +178,10 @@ mod crash_input_boundary_tests {
             }
         );
         assert_eq!(
-            std::fs::read(staging.join("crash-real")).unwrap(),
+            std::fs::read(staging.join(super::casr_staged_name("crash-real"))).unwrap(),
             b"real crash"
         );
-        assert!(!staging.join("crash-link").exists());
+        assert!(!staging.join(super::casr_staged_name("crash-link")).exists());
 
         let external_out = root.path().join("external-out");
         std::fs::create_dir_all(&external_out).unwrap();
@@ -219,6 +229,58 @@ mod crash_input_boundary_tests {
     }
 
     #[test]
+    fn staging_names_do_not_collide_or_expose_debugger_metacharacters() {
+        let root = tempfile::tempdir().unwrap();
+        let out = root.path().join("out");
+        let staging = root.path().join("staging");
+        std::fs::create_dir_all(&out).unwrap();
+        for name in ["timeout-one", "crash-timeout-one", "crash-$(bad).gdb"] {
+            std::fs::write(out.join(name), name).unwrap();
+        }
+        let result = stage_crash_inputs(EngineKind::LibFuzzer, &out, &staging).unwrap();
+        assert_eq!(result.staged, 3);
+        let staged: Vec<_> = std::fs::read_dir(&staging)
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(staged.len(), 3);
+        for entry in staged {
+            let name = entry.file_name().to_str().unwrap().to_owned();
+            assert!(name.starts_with("crash-"));
+            assert!(name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+            let original = std::fs::read_to_string(entry.path()).unwrap();
+            let resolved = super::casrep_input_path(
+                &out,
+                &staging.join(format!("{name}.gdb.casrep")),
+                &collect_crash_inputs(EngineKind::LibFuzzer, &out),
+            );
+            assert_eq!(resolved, out.join(original));
+        }
+    }
+
+    #[test]
+    fn honggfuzz_staging_uses_casr_eligible_names_and_preserves_input_provenance() {
+        let root = tempfile::tempdir().unwrap();
+        let out = root.path().join("out");
+        let staging = root.path().join("staging");
+        std::fs::create_dir_all(&out).unwrap();
+        let original = out.join("SIGABRT.PC.123.STACK.456");
+        std::fs::write(&original, b"MAGC").unwrap();
+        let staged = stage_crash_inputs(EngineKind::Honggfuzz, &out, &staging).unwrap();
+        assert_eq!(staged.staged, 1);
+        let name = super::casr_staged_name("SIGABRT.PC.123.STACK.456");
+        assert_eq!(std::fs::read(staging.join(&name)).unwrap(), b"MAGC");
+        assert_eq!(
+            super::casrep_input_path(
+                &out,
+                &staging.join(format!("{name}.casrep")),
+                std::slice::from_ref(&original)
+            ),
+            original
+        );
+    }
+
+    #[test]
     fn crash_staging_counts_uncopyable_inputs_as_skipped() {
         // The copy fails at the destination: a directory already holds the
         // staged name. Permission bits on the source would not do, because
@@ -229,7 +291,7 @@ mod crash_input_boundary_tests {
         std::fs::create_dir_all(&out).unwrap();
         std::fs::write(out.join("crash-fine"), b"fine").unwrap();
         std::fs::write(out.join("crash-blocked"), b"blocked").unwrap();
-        std::fs::create_dir_all(staging.join("crash-blocked")).unwrap();
+        std::fs::create_dir_all(staging.join(super::casr_staged_name("crash-blocked"))).unwrap();
 
         let outcome = stage_crash_inputs(EngineKind::LibFuzzer, &out, &staging).unwrap();
         assert_eq!(outcome.staged, 1);
@@ -403,9 +465,15 @@ pub(super) fn casrep_input_path(
     let Some(stem) = casrep.file_stem().and_then(|s| s.to_str()) else {
         return casrep.to_path_buf();
     };
+    // casr-gdb adds a second extension before .casrep.
+    let stem = stem.strip_suffix(".gdb").unwrap_or(stem);
     crash_inputs
         .iter()
-        .find(|p| p.file_name().and_then(|n| n.to_str()) == Some(stem))
+        .find(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|name| name == stem || casr_staged_name(name) == stem)
+        })
         .cloned()
         .unwrap_or_else(|| out_dir.join(stem))
 }
@@ -434,6 +502,8 @@ mod casrep_path_tests {
         let inputs = vec![nested.clone()];
         let casrep = Path::new("/work/casr_out/id:000001,sig:06.casrep");
         assert_eq!(casrep_input_path(out, casrep, &inputs), nested);
+        let gdb = Path::new("/work/casr_out/id:000001,sig:06.gdb.casrep");
+        assert_eq!(casrep_input_path(out, gdb, &inputs), nested);
     }
 
     #[test]

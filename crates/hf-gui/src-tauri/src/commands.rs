@@ -642,6 +642,37 @@ pub async fn triage(
     serde_json::to_value(&deduped).map_err(|e| e.to_string())
 }
 
+/// Classify crashes with progress and no AI drafting.
+#[tauri::command]
+pub async fn scan_crashes(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    target: String,
+    scan_id: uuid::Uuid,
+) -> Result<serde_json::Value, String> {
+    use tauri::Emitter;
+    let container = with_user_approval(&state.container, ExplicitAction::Triage);
+    let progress = std::sync::Arc::new(move |event: hf_service::ScanProgress| {
+        if let Err(error) = app.emit("triage:progress", event) {
+            eprintln!("could not emit crash scan progress: {error}");
+        }
+    });
+    let crashes = container
+        .scan_crashes(std::path::Path::new(&project), &target, scan_id, progress)
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(crashes).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn cancel_crash_scan(
+    state: tauri::State<'_, crate::state::AppState>,
+    scan_id: uuid::Uuid,
+) -> hf_service::OperationCancelOutcome {
+    state.container.cancel_crash_scan(scan_id)
+}
+
 /// On-demand LLM verdict for one crash (L2 4c). Verifying is opt-in per crash so
 /// a "Scan for Crashes" pass is not blocked on a model call for every crash; the
 /// operator asks for a verdict on the specific crash they care about. The crash
@@ -1895,7 +1926,7 @@ fn parse_turn_id(turn_id: &str) -> Result<uuid::Uuid, String> {
 pub async fn chat_cancel(
     state: tauri::State<'_, crate::state::AppState>,
     turn_id: String,
-) -> Result<hf_service::ChatCancelOutcome, String> {
+) -> Result<hf_service::OperationCancelOutcome, String> {
     Ok(state.container.cancel_chat_turn(parse_turn_id(&turn_id)?))
 }
 

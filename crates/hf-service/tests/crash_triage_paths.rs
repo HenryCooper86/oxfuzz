@@ -356,6 +356,9 @@ async fn casr_clustered_triage_end_to_end() {
         .unwrap();
     assert_eq!(persisted.len(), 3);
     assert!(persisted.iter().all(|c| c.casr.is_some()));
+    assert!(persisted
+        .iter()
+        .all(|c| c.origin == hf_core::crash::CrashOrigin::Target));
 }
 
 // --- Tests 3 & 4: built-in (legacy) triage fallback ------------------------
@@ -746,4 +749,236 @@ async fn retriage_preserves_retained_crash_identity() {
             .len(),
         1
     );
+}
+
+#[tokio::test]
+async fn interactive_scan_never_drafts_reports_and_reports_its_owner() {
+    let fixture = triage_fixture("scan-no-ai", &["crash-one".to_owned()]).await;
+    let pool = Arc::new(BugReportPool {
+        drafts: AtomicUsize::new(0),
+        fail: true,
+    });
+    let service =
+        ServiceContainer::new(Arc::new(LegacyReplayRuntime::new(true)), Some(pool.clone()))
+            .with_store(fixture.store.clone());
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = events.clone();
+    let scan_id = Uuid::new_v4();
+    let crashes = service
+        .scan_crashes(
+            &fixture.project,
+            &fixture.symbol,
+            scan_id,
+            Arc::new(move |event| captured.lock().unwrap().push(event)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(crashes.len(), 1);
+    assert_eq!(pool.drafts.load(Ordering::SeqCst), 0);
+    assert!(crashes[0].bug_report.is_none());
+    let events = events.lock().unwrap();
+    assert!(events.iter().all(|e| e.scan_id == scan_id));
+    assert!(events.iter().any(|e| e.run_id == Some(fixture.run_id)));
+    assert_eq!(
+        events.last().unwrap().phase,
+        hf_service::ScanPhase::Completed
+    );
+}
+
+#[tokio::test]
+async fn interactive_scan_honors_cancellation_before_registration() {
+    let service = ServiceContainer::stubbed();
+    let id = Uuid::new_v4();
+    service.cancel_crash_scan(id);
+    let result = service
+        .scan_crashes(Path::new("/missing"), "parse", id, Arc::new(|_| {}))
+        .await;
+    assert!(matches!(result, Err(ClassifiedError::Cancelled)));
+}
+
+struct CancellableCasrRuntime {
+    started: tokio::sync::Notify,
+    reaped: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait]
+impl RuntimeAdapter for CancellableCasrRuntime {
+    async fn run_command(
+        &self,
+        _cmd: &[String],
+        _cwd: &Path,
+        _limits: &ResourceLimits,
+    ) -> Result<CommandResult, ClassifiedError> {
+        panic!("interactive scan must use cancellable sandbox execution")
+    }
+    async fn write_file(&self, _path: &Path, _content: &str) -> Result<(), ClassifiedError> {
+        Ok(())
+    }
+    async fn read_file(&self, _path: &Path) -> Result<String, ClassifiedError> {
+        Ok(String::new())
+    }
+    async fn run_command_streaming_opts(
+        &self,
+        cmd: &[String],
+        cwd: &Path,
+        _limits: &ResourceLimits,
+        opts: &SandboxOptions,
+        cancel: &tokio_util::sync::CancellationToken,
+        on_line: &hf_core::runtime::LineSink<'_>,
+    ) -> Result<CommandResult, ClassifiedError> {
+        assert!(is_casr(cmd));
+        assert!(opts.workspace_read_only);
+        let host = &casr_out_mount(opts).host_path;
+        std::fs::write(host.join("crash-one.casrep"), CASREP_CLUSTER1).unwrap();
+        on_line("10:00:00 [INFO] Progress: 1/2");
+        self.started.notify_one();
+        cancel.cancelled().await;
+        // Teardown is not instantaneous: the caller must await this completion.
+        tokio::task::yield_now().await;
+        self.reaped.store(true, Ordering::SeqCst);
+        Ok(CommandResult {
+            termination: CommandTermination::Cancelled,
+            ..completed(-1, "", "", cwd)
+        })
+    }
+}
+
+#[tokio::test]
+async fn scan_cancel_reaps_sandbox_retains_completed_reports_and_cancels_queued_scan() {
+    let fixture = triage_fixture(
+        "scan-cancel",
+        &["crash-one".to_owned(), "crash-two".to_owned()],
+    )
+    .await;
+    let runtime = Arc::new(CancellableCasrRuntime {
+        started: tokio::sync::Notify::new(),
+        reaped: std::sync::atomic::AtomicBool::new(false),
+    });
+    let service = ServiceContainer::new(runtime.clone(), None).with_store(fixture.store.clone());
+    let id = Uuid::new_v4();
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let scan = {
+        let service = service.clone();
+        let project = fixture.project.clone();
+        let symbol = fixture.symbol.clone();
+        let events = events.clone();
+        tokio::spawn(async move {
+            service
+                .scan_crashes(
+                    &project,
+                    &symbol,
+                    id,
+                    Arc::new(move |event| events.lock().unwrap().push(event)),
+                )
+                .await
+        })
+    };
+    runtime.started.notified().await;
+    let duplicate = service
+        .scan_crashes(&fixture.project, &fixture.symbol, id, Arc::new(|_| {}))
+        .await;
+    assert!(matches!(duplicate, Err(ClassifiedError::Validation(_))));
+    let queued_id = Uuid::new_v4();
+    let queued = {
+        let service = service.clone();
+        let project = fixture.project.clone();
+        let symbol = fixture.symbol.clone();
+        tokio::spawn(async move {
+            service
+                .scan_crashes(&project, &symbol, queued_id, Arc::new(|_| {}))
+                .await
+        })
+    };
+    tokio::task::yield_now().await;
+    service.cancel_crash_scan(queued_id);
+    let queued_result = tokio::time::timeout(std::time::Duration::from_secs(2), queued)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(queued_result, Err(ClassifiedError::Cancelled)));
+    assert!(
+        !runtime.reaped.load(Ordering::SeqCst),
+        "queued stop must not cancel the running scan"
+    );
+    service.cancel_crash_scan(id);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), scan)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(result, Err(ClassifiedError::Cancelled)));
+    assert!(runtime.reaped.load(Ordering::SeqCst));
+    let retained = fixture
+        .store
+        .list_crashes_by_run(fixture.run_id)
+        .await
+        .unwrap();
+    assert_eq!(retained.len(), 1);
+    assert!(retained[0].casr.is_some());
+    let events = events.lock().unwrap();
+    assert!(events.iter().any(|e| e.phase == hf_service::ScanPhase::Casr
+        && e.processed_inputs == Some(1)
+        && e.total_inputs == Some(2)));
+    assert_eq!(
+        events.last().unwrap().phase,
+        hf_service::ScanPhase::Cancelled
+    );
+    assert_eq!(events.last().unwrap().findings, 1);
+}
+
+#[tokio::test]
+async fn rescanning_does_not_erase_a_retained_ai_report() {
+    let fixture = triage_fixture("scan-preserve-report", &["crash-one".to_owned()]).await;
+    let pool = Arc::new(BugReportPool {
+        drafts: AtomicUsize::new(0),
+        fail: false,
+    });
+    let service =
+        ServiceContainer::new(Arc::new(LegacyReplayRuntime::new(true)), Some(pool.clone()))
+            .with_store(fixture.store.clone());
+    let enriched = service
+        .triage_run(
+            &fixture.project,
+            &fixture.symbol,
+            fixture.run_id,
+            hf_service::AiPolicy::Require,
+        )
+        .await
+        .unwrap();
+    let report = enriched[0].bug_report.as_ref().unwrap().title.clone();
+    let rescanned = service
+        .scan_crashes(
+            &fixture.project,
+            &fixture.symbol,
+            Uuid::new_v4(),
+            Arc::new(|_| {}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(pool.drafts.load(Ordering::SeqCst), 1);
+    assert_eq!(rescanned[0].bug_report.as_ref().unwrap().title, report);
+}
+
+#[tokio::test]
+async fn scan_reports_when_artifact_collection_is_limited() {
+    let files: Vec<_> = (0..=hf_crash::MAX_CRASH_ARTIFACTS)
+        .map(|i| format!("crash-{i:04}"))
+        .collect();
+    let fixture = triage_fixture("scan-input-limit", &files).await;
+    let service = ServiceContainer::new(Arc::new(LegacyReplayRuntime::new(false)), None)
+        .with_store(fixture.store.clone());
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = events.clone();
+    service
+        .scan_crashes(
+            &fixture.project,
+            &fixture.symbol,
+            Uuid::new_v4(),
+            Arc::new(move |event| captured.lock().unwrap().push(event)),
+        )
+        .await
+        .unwrap();
+    let events = events.lock().unwrap();
+    let last = events.last().unwrap();
+    assert!(last.input_limit_reached);
+    assert_eq!(last.total_inputs, Some(hf_crash::MAX_CRASH_ARTIFACTS));
 }

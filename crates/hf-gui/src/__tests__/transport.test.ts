@@ -4,6 +4,23 @@ import { createHttpTransport } from "../lib/httpTransport";
 import type { FuzzerRunResult, RunProgressEvent } from "../lib/transport";
 
 describe("transport", () => {
+  it("sends scan identity separately from report generation and cancels that scan", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      return new Response(JSON.stringify([]), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const transport = createHttpTransport();
+      await transport.invoke("scan_crashes", { project: "/p", target: "parse", scanId: "scan-id" });
+      await transport.invoke("cancel_crash_scan", { scanId: "scan-id" });
+      expect(calls.map(({ url }) => new URL(url).pathname)).toEqual(["/crashes/scan", "/crashes/scans/scan-id/cancel"]);
+      expect(JSON.parse(String(calls[0].init.body))).toEqual({ project: "/p", target: "parse", scan_id: "scan-id" });
+      expect(calls[1].init.body).toBeUndefined();
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
   it("maps known-findings approval and target coverage to explicit POST requests", async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     const originalFetch = globalThis.fetch;

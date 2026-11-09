@@ -1060,3 +1060,15 @@ export interface ReportDraft {
   updated_at: string;
   content: string;
 }
+
+/** Service-owned progress for one interactive crash scan. */
+export interface ScanProgress {
+  scan_id: string;
+  run_id: string | null;
+  phase: "queued" | "staging" | "casr" | "fallback" | "persisting" | "completed" | "cancelled" | "failed";
+  total_inputs: number | null;
+  input_limit_reached: boolean;
+  processed_inputs: number | null;
+  findings: number;
+  elapsed_secs: number;
+}

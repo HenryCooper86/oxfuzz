@@ -231,7 +231,7 @@ Validated `[clang_analysis]` configuration initially defaults to:
 | `memory_mb` | 2048 | 128..=16384 |
 | `cpus` | 1 | 1..=8 |
 | `max_context_bytes` | 16384 | 1024..=65536 |
-| `image` | `oxfuzz/fuzz-sandbox:0.2.1` | nonempty image reference, at most 256 bytes |
+| `image` | `oxfuzz/fuzz-sandbox:0.2.2` | nonempty image reference, at most 256 bytes |
 
 String fields have fixed wire ceilings: IDs 1024 bytes, paths 4096 bytes,
 names/types/diagnostics 4096 bytes; identifiers are encoded data, not commands.

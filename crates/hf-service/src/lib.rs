@@ -174,7 +174,6 @@ pub use concolic::{
     content_digest, select_inputs, summarize, ConcolicAvailability, ConcolicOutcome,
     ConcolicStopReason, CONCOLIC_SCHEMA_VERSION,
 };
-pub use container::AiPolicy;
 #[cfg(feature = "native-analysis")]
 pub use container::AnalyzedInventory;
 #[cfg(feature = "harness-work-order")]
@@ -183,17 +182,18 @@ pub use container::{
     build_sandbox_image, copy_project_sources, generate_target_seeds, initialize_workspace_root,
     project_workspace_dir, provider_pool_from_config, provider_pool_from_env, repo_root,
     runtime_from_env, workspace_dir, workspace_root, AgentInstanceSnapshot, AgentPoolSnapshot,
-    ArtifactSummary, ChatCancelOutcome, CompileOutcome, CorpusCapabilities, CorpusCapability,
-    CorpusImportOutcome, CorpusInventory, CoverageSample, EffectiveAutoRevert, FuzzOutcome,
-    FuzzPrepareRequest, FuzzPrepared, FuzzRequest, FuzzStage, FuzzStageView, HarnessBuildObserver,
-    HarnessStep, MemorySnapshot, MinimizeOutcome, PreparedHarnessSource, ProviderSnapshot,
-    QualifiedSmoke, RegressionResult, ReplayInputs, ReplayReview, RunCancelOutcome,
-    RunControlStatus, RunDetailView, RunFunctionCoverage, RunHistoryItem, RunLifecycleStatus,
-    RunOwnerView, RunSummary, RunTelemetryView, SchedulableTarget, SeedEntry,
+    ArtifactSummary, CompileOutcome, CorpusCapabilities, CorpusCapability, CorpusImportOutcome,
+    CorpusInventory, CoverageSample, EffectiveAutoRevert, FuzzOutcome, FuzzPrepareRequest,
+    FuzzPrepared, FuzzRequest, FuzzStage, FuzzStageView, HarnessBuildObserver, HarnessStep,
+    MemorySnapshot, MinimizeOutcome, OperationCancelOutcome, PreparedHarnessSource,
+    ProviderSnapshot, QualifiedSmoke, RegressionResult, ReplayInputs, ReplayReview,
+    RunCancelOutcome, RunControlStatus, RunDetailView, RunFunctionCoverage, RunHistoryItem,
+    RunLifecycleStatus, RunOwnerView, RunSummary, RunTelemetryView, SchedulableTarget, SeedEntry,
     SeedRegenerationOutcome, SeedSurvivalReport, ServiceContainer, SystemSnapshot,
     SyzkallerRunOpts, SyzkallerSummary, FUZZ_PIPELINE_REPAIRS, LLM_SEED_COUNT,
     MAX_PREPARED_HARNESS_SOURCE_BYTES,
 };
+pub use container::{AiPolicy, ScanPhase, ScanProgress};
 #[cfg(feature = "run-closeout")]
 pub use container::{CoverageDiffReport, RunEdgeSetCapture};
 #[cfg(feature = "ai-target-ranking")]

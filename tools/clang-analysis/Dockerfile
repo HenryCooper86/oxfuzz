@@ -1,5 +1,5 @@
 # Lightweight qualification build using the existing sandbox as its toolchain base.
-ARG BASE_IMAGE=oxfuzz/fuzz-sandbox:0.2.1
+ARG BASE_IMAGE=oxfuzz/fuzz-sandbox:0.2.2
 FROM ${BASE_IMAGE}
 RUN apt-get update && apt-get install -y --no-install-recommends clang-18 libclang-18-dev llvm-18-dev cmake g++ make && rm -rf /var/lib/apt/lists/*
 COPY . /tmp/clang-analysis

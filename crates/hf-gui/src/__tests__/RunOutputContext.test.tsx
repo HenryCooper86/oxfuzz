@@ -973,7 +973,7 @@ describe("actual presentation acceptance", () => {
       target: "B-target",
     });
     await click("triage.scanForCrashes");
-    expect(invoke).toHaveBeenCalledWith("triage", { project: "/other", target: "B-target" });
+    expect(invoke).toHaveBeenCalledWith("scan_crashes", { project: "/other", target: "B-target", scanId: expect.any(String) });
   });
 });
 

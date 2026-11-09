@@ -128,6 +128,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ---------------------------------------------------------------------------
 ARG CASR_VERSION=2.13.1
 ARG CASR_BUILD_TOOLCHAIN=1.94.0
+# gdb-command's timed execution waits before reading pipes and can deadlock
+# while printing symbolized stacks/mappings. Keep timeouts and drain concurrently.
+COPY docker/sandbox/gdb-command-output.patch /tmp/gdb-command-output.patch
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gdb \
     lsb-release \
@@ -138,7 +141,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- -y --profile minimal --default-toolchain "${CASR_BUILD_TOOLCHAIN}" \
     && . "$HOME/.cargo/env" \
+    && curl -sSfL https://static.crates.io/crates/gdb-command/gdb-command-0.7.8.crate -o /tmp/gdb-command.crate \
+    && echo "73b2762e2f2c0768e1137b33e9f7cf31599994e96496f4e020cc16e0d4e66319  /tmp/gdb-command.crate" | sha256sum -c - \
+    && tar -xzf /tmp/gdb-command.crate -C /tmp \
+    && patch -d /tmp/gdb-command-0.7.8 -p1 < /tmp/gdb-command-output.patch \
+    && cargo test --manifest-path /tmp/gdb-command-0.7.8/Cargo.toml --lib output_regressions \
     && cargo install casr --version "${CASR_VERSION}" --root /usr/local --locked \
+        --config 'patch.crates-io.gdb-command.path="/tmp/gdb-command-0.7.8"' \
+    && rm -rf /tmp/gdb-command* \
     && rustup self uninstall -y \
     && rm -rf "$HOME/.cargo" "$HOME/.rustup"
 

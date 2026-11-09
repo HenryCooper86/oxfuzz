@@ -17,10 +17,11 @@ import { ReportsView } from "../views/ReportsView";
 import type { FindingReviewItem, ReportDraft } from "../types";
 
 const invoke = vi.hoisted(() => vi.fn());
+const scanListeners = vi.hoisted(() => new Set<(event: { payload: unknown }) => void>());
 const environment = vi.hoisted(() => ({ tauri: false }));
 vi.mock("../lib", async () => ({
   ...(await vi.importActual<typeof import("../lib")>("../lib")),
-  getTransport: () => ({ invoke: (command: string, args?: Record<string, unknown>) => command === "run_history" ? Promise.resolve([{ id: "retained-run" }]) : invoke(command, args) }),
+  getTransport: () => ({ listen: async (_event: string, callback: (event: { payload: unknown }) => void) => { scanListeners.add(callback); return () => scanListeners.delete(callback); }, invoke: (command: string, args?: Record<string, unknown>) => command === "run_history" ? Promise.resolve([{ id: "retained-run" }]) : invoke(command, args) }),
   isTauriEnvironment: () => environment.tauri,
 }));
 
@@ -489,13 +490,14 @@ describe("retained finding navigation", () => {
     expect(invoke.mock.calls.map(([command]) => command)).not.toContain("generate_report");
   });
 
-  it("keeps a newer row selection while an earlier scan is pending", async () => {
+  it.each(["completed", "cancelled"])("keeps a newer row selection when an earlier scan is %s", async (outcome) => {
     let resolveScan: (crashes: FindingReviewItem["crash"][]) => void = () => undefined;
-    const pendingScan = new Promise<FindingReviewItem["crash"][]>((resolve) => { resolveScan = resolve; });
+    let rejectScan: (error: Error) => void = () => undefined;
+    const pendingScan = new Promise<FindingReviewItem["crash"][]>((resolve, reject) => { resolveScan = resolve; rejectScan = reject; });
     invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
       if (command === "finding_review_queue") return Promise.resolve([older, newer]);
       if (command === "finding_review") return Promise.resolve(args?.findingId === newer.crash.id ? newer : older);
-      if (command === "triage") return pendingScan;
+      if (command === "scan_crashes") return pendingScan;
       throw new Error(`unexpected command ${command}`);
     });
 
@@ -512,14 +514,50 @@ describe("retained finding navigation", () => {
     expect(container.querySelector('[title="/evidence/newer/crash-input"]')).not.toBeNull();
     expect(scan?.disabled).toBe(true);
     await act(async () => scan?.click());
-    expect(invoke.mock.calls.filter(([command]) => command === "triage")).toHaveLength(1);
+    expect(invoke.mock.calls.filter(([command]) => command === "scan_crashes")).toHaveLength(1);
 
     await act(async () => {
-      resolveScan([older.crash]);
+      if (outcome === "cancelled") rejectScan(new Error("cancelled"));
+      else resolveScan([older.crash]);
       await Promise.resolve();
     });
     await flush();
     expect(container.querySelector('[title="/evidence/newer/crash-input"]')).not.toBeNull();
+    expect(container.textContent).toContain(`triage.scanPhase.${outcome}`);
+  });
+
+  it("shows only its scan progress and waits for cancellation teardown", async () => {
+    let rejectScan: (error: Error) => void = () => undefined;
+    const pendingScan = new Promise<never>((_resolve, reject) => { rejectScan = reject; });
+    invoke.mockImplementation((command: string) => {
+      if (command === "finding_review_queue") return Promise.resolve([]);
+      if (command === "scan_crashes") return pendingScan;
+      if (command === "cancel_crash_scan") return Promise.resolve("accepted");
+      if (command === "finding_review") return Promise.resolve(older);
+      return Promise.resolve([]);
+    });
+    await act(async () => root.render(<Providers><TriageView /></Providers>));
+    await flush();
+    await act(async () => [...container.querySelectorAll("button")].find(b => b.textContent?.includes("triage.scanForCrashes"))?.click());
+    const args = invoke.mock.calls.find(([cmd]) => cmd === "scan_crashes")?.[1];
+    expect(args?.scanId).toEqual(expect.any(String));
+    expect(args).not.toHaveProperty("ai");
+    const event = { scan_id: args?.scanId, run_id: "run", phase: "casr", total_inputs: 100, input_limit_reached: true, processed_inputs: 12, findings: 0, elapsed_secs: 4 };
+    await act(async () => { for (const listener of scanListeners) listener({ payload: event }); });
+    expect(container.textContent).toContain("triage.scanPhase.casr");
+    expect(container.textContent).toContain("triage.scanLimitNotice");
+    await act(async () => { for (const listener of scanListeners) listener({ payload: { ...event, scan_id: "another-scan", phase: "failed" } }); });
+    expect(container.textContent).not.toContain("triage.scanPhase.failed");
+    const stop = [...container.querySelectorAll("button")].find(b => b.textContent?.includes("triage.stopScan"));
+    await act(async () => stop?.click());
+    expect(invoke).toHaveBeenCalledWith("cancel_crash_scan", { scanId: args?.scanId });
+    expect(container.textContent).toContain("triage.stoppingScan");
+    expect(stop?.disabled).toBe(true);
+    await act(async () => { rejectScan(new Error("cancelled")); });
+    await flush();
+    expect(container.textContent).toContain("triage.scanCancelled");
+    expect(container.textContent).not.toContain("triage.scanFailed");
+    expect(scanListeners.size).toBe(0);
   });
 
   it("composes and saves a selected latest finding in the interface language", async () => {

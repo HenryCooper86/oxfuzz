@@ -30,6 +30,10 @@ pub fn casr_command(
         EngineKind::AflPlusPlus => vec![
             "casr-afl".to_owned(),
             "--ignore-cmdline".to_owned(),
+            "-t".to_owned(),
+            timeout_secs.to_string(),
+            "-j".to_owned(),
+            "2".to_owned(),
             "-i".to_owned(),
             crash_dir.to_owned(),
             "-o".to_owned(),
@@ -40,6 +44,8 @@ pub fn casr_command(
         ],
         _ => vec![
             "casr-libfuzzer".to_owned(),
+            "-j".to_owned(),
+            "2".to_owned(),
             "-t".to_owned(),
             timeout_secs.to_string(),
             "-i".to_owned(),
@@ -222,6 +228,10 @@ mod tests {
         assert_eq!(afl[0], "casr-afl");
         assert!(afl.contains(&"--ignore-cmdline".to_owned()));
         assert_eq!(afl.last().unwrap(), "@@");
+        for command in [&afl, &lf, &hf] {
+            assert!(command.windows(2).any(|pair| pair == ["-t", "30"]));
+            assert!(command.windows(2).any(|pair| pair == ["-j", "2"]));
+        }
     }
 
     #[test]

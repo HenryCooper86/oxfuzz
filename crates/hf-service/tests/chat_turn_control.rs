@@ -16,8 +16,8 @@ use hf_service::approval::{
     PermissionRequest,
 };
 use hf_service::{
-    AgentTurnRequest, ChatCancelOutcome, ClassifiedError, CollectingSink, GuardrailPolicy,
-    Guardrails, NullSink, ServiceContainer,
+    AgentTurnRequest, ClassifiedError, CollectingSink, GuardrailPolicy, Guardrails, NullSink,
+    OperationCancelOutcome, ServiceContainer,
 };
 use uuid::Uuid;
 
@@ -447,11 +447,11 @@ async fn a_cancelled_turn_persists_nothing_and_the_next_turn_runs_normally() {
 
     assert_eq!(
         service.cancel_chat_turn(turn_id),
-        ChatCancelOutcome::Accepted
+        OperationCancelOutcome::Accepted
     );
     assert_eq!(
         service.cancel_chat_turn(turn_id),
-        ChatCancelOutcome::Accepted,
+        OperationCancelOutcome::Accepted,
         "a repeated cancel of a turn still winding down is accepted, not an error"
     );
     let result = tokio::time::timeout(WAIT, running).await.unwrap().unwrap();
@@ -461,7 +461,7 @@ async fn a_cancelled_turn_persists_nothing_and_the_next_turn_runs_normally() {
     );
     assert_eq!(
         service.cancel_chat_turn(turn_id),
-        ChatCancelOutcome::NotRunning
+        OperationCancelOutcome::NotRunning
     );
     assert!(service.chat_history(&session).await.unwrap().is_empty());
     assert!(service.chat_checkpoints(&session).await.unwrap().is_empty());
@@ -502,7 +502,7 @@ async fn cancelling_a_finished_turn_changes_nothing() {
 
     assert_eq!(
         service.cancel_chat_turn(turn_id),
-        ChatCancelOutcome::NotRunning
+        OperationCancelOutcome::NotRunning
     );
     assert_eq!(service.chat_history(&session).await.unwrap().len(), 2);
     assert_eq!(service.chat_checkpoints(&session).await.unwrap().len(), 1);
@@ -548,7 +548,7 @@ async fn a_turn_id_that_is_already_running_is_rejected() {
 
     assert_eq!(
         service.cancel_chat_turn(turn_id),
-        ChatCancelOutcome::Accepted
+        OperationCancelOutcome::Accepted
     );
     let result = tokio::time::timeout(WAIT, running).await.unwrap().unwrap();
     assert!(matches!(result, Err(ClassifiedError::Cancelled)));
@@ -591,7 +591,7 @@ async fn a_turn_queued_behind_its_session_lock_can_be_cancelled() {
     assert!(
         matches!(
             outcome,
-            ChatCancelOutcome::Accepted | ChatCancelOutcome::NotRunning
+            OperationCancelOutcome::Accepted | OperationCancelOutcome::NotRunning
         ),
         "{outcome:?}"
     );
@@ -601,7 +601,10 @@ async fn a_turn_queued_behind_its_session_lock_can_be_cancelled() {
         .unwrap();
     assert!(matches!(result, Err(ClassifiedError::Cancelled)));
 
-    assert_eq!(service.cancel_chat_turn(first), ChatCancelOutcome::Accepted);
+    assert_eq!(
+        service.cancel_chat_turn(first),
+        OperationCancelOutcome::Accepted
+    );
     let result = tokio::time::timeout(WAIT, first_turn)
         .await
         .unwrap()
@@ -655,7 +658,7 @@ async fn cancelling_during_an_approval_wait_denies_it_and_closes_the_prompt() {
 
     assert_eq!(
         service.cancel_chat_turn(turn_id),
-        ChatCancelOutcome::Accepted
+        OperationCancelOutcome::Accepted
     );
     let result = tokio::time::timeout(WAIT, running)
         .await
