@@ -1,0 +1,3 @@
+# Local kernel, rootfs and private SSH key; never publish these with the example.
+/artifacts/
+/workdir/

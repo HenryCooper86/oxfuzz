@@ -1157,6 +1157,53 @@ mod tests {
     }
 
     #[test]
+    fn community_qemu_example_stages_its_relative_artifacts() {
+        let workspace = tempfile::tempdir().unwrap();
+        let example = tempfile::tempdir().unwrap();
+        let artifacts = example.path().join("artifacts");
+        std::fs::create_dir(&artifacts).unwrap();
+        write_artifacts(&artifacts);
+        let config = example.path().join("manager.cfg");
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/syzkaller_qemu/manager.cfg"),
+            &config,
+        )
+        .unwrap();
+        let mut request = request(workspace.path(), &config);
+        request.vm_count = None;
+        request.use_kvm = true;
+
+        let stage = prepare_stage(&request).unwrap();
+        let staged: Value =
+            serde_json::from_slice(&std::fs::read(stage.root.join("inputs/manager.cfg")).unwrap())
+                .unwrap();
+
+        assert_eq!(staged["target"], "linux/amd64");
+        assert_eq!(staged["sandbox"], "namespace");
+        assert_eq!(staged["vm"]["count"], 1);
+        assert_eq!(staged["vm"]["kernel"], "/syzbench/inputs/kernel");
+        assert_eq!(staged["image"], "/syzbench/scratch/rootfs.img");
+        assert_eq!(staged["sshkey"], "/syzbench/inputs/id_rsa");
+        assert_eq!(
+            std::fs::read(stage.root.join("inputs/kernel")).unwrap(),
+            b"kernel-v1"
+        );
+        assert_eq!(
+            std::fs::read(stage.root.join("scratch/rootfs.img")).unwrap(),
+            b"rootfs-v1"
+        );
+        assert_eq!(
+            std::fs::read(stage.root.join("inputs/id_rsa")).unwrap(),
+            b"key-v1"
+        );
+        std::fs::write(stage.root.join("scratch/rootfs.img"), b"guest-write").unwrap();
+        assert_eq!(
+            std::fs::read(artifacts.join("rootfs.img")).unwrap(),
+            b"rootfs-v1"
+        );
+    }
+
+    #[test]
     fn supplied_config_is_rewritten_to_staged_container_paths() {
         let workspace = tempfile::tempdir().unwrap();
         let artifacts = tempfile::tempdir().unwrap();

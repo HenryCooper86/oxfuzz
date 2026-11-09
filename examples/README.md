@@ -1,14 +1,14 @@
-# oxfuzz example targets
+# oxfuzz examples
 
 A curated suite of small, self-contained targets that are ready to run the
 full `oxfuzz` pipeline (`discover -> harness -> run -> triage`) against. Each
-example isolates one bug class and is modeled on a canonical example shipped by
+userspace target isolates one bug class and is modeled on a canonical example shipped by
 an upstream fuzzing engine (LLVM libFuzzer, AFLplusplus, honggfuzz) or on the
 real-world parser pattern that bug class is famous for.
 
 Unlike the heavyweight `examples/` directories in the upstream fuzzer repos
 (which are build recipes that fetch and patch large external libraries such as
-libpng, openssl, and libtiff), every target in the first table below is a
+libpng, openssl, and libtiff), every target in the [userspace targets table](#userspace-targets) is a
 dozen-or-so lines of dependency-free C. The
 [project-shaped targets](#project-shaped-targets) are slightly larger: a
 multi-file CMake C library, a C++17 parser, and a standalone Rust crate. They depend only on libc (`stdint.h`, `stddef.h`,
@@ -16,14 +16,38 @@ multi-file CMake C library, a C++17 parser, and a standalone Rust crate. They de
 parameters, run offline, and crash deterministically -- so they are reproducible
 demo material rather than a moving external build.
 
-Each target in the first table exposes exactly one non-`static`
+Each target in the userspace targets table exposes exactly one non-`static`
 `(const uint8_t *data, size_t len)` entry point so the discovery scanner picks
 it up and the harness generator can wrap it. Every helper function is
 `static`, so the scanner ignores it. All five of those targets work across
 libFuzzer, AFL++, and honggfuzz because the framework generates a standard
 `LLVMFuzzerTestOneInput` harness that each engine drives.
 
-## Targets
+## Community quick starts
+
+Start with one of these engine-specific projects. Run all shell commands from
+the repository root.
+
+| Engine | Example | What you can test |
+| --- | --- | --- |
+| honggfuzz | [Magic-byte target](honggfuzz_magic/README.md) | A small C target with an intentional abort; discovery through reviewed campaign and triage |
+| AFL++ | [Packet parser](aflpp_persistent/README.md) | A small C parser with an unchecked length; sanitizer evidence and retained campaign statistics |
+| syzkaller | [Linux QEMU guest](syzkaller_qemu/README.md) | A one-VM manager configuration, artifact staging, kernel execution and coverage; requires your own kernel and rootfs |
+
+For the C examples, install the CLI and build the sandbox image following
+[Install & Build](../docs/guides/INSTALL.md), then configure a provider using
+[Configuration](../docs/guides/CONFIGURATION.md#choosing-an-llm-provider).
+The demo runner requires Bash and Python 3, uses `cargo run -q -p hf-cli --`
+by default, and accepts an installed CLI through `OXFUZZ_BIN`. Each quick start
+includes a preflight-only command and an offline discovery command. Full runs
+require provider access, sandbox execution, and review at the approval prompt.
+
+Syzkaller uses the trusted-local desktop kernel workflow, not the userspace
+demo script or CLI `run` command. Its example targets Linux/amd64 with KVM;
+read its artifact and resource prerequisites before launching it. Kernel
+campaigns have no planted bug and do not promise a crash in a short run.
+
+## Userspace targets
 
 | Directory | Entry point | Engine style | Bug class | Trigger input |
 | --- | --- | --- | --- | --- |
@@ -114,7 +138,7 @@ it displays the imported source and qualification result, then asks for human
 approval before promoting that exact attempt. Failed qualification, declined
 approval, EOF, or stale promotion stops before a campaign starts. A smoke crash
 is retained for investigation. Use `--example <directory-name>` to select any
-fixture in the first table (the project-shaped targets are not selectable
+fixture in the userspace targets table (the project-shaped targets are not selectable
 there); `--yes` is unsupported. `--engine <engine>` picks the userspace engine
 (`libfuzzer`, the default, `afl++` or `honggfuzz`) and `--duration <duration>`
 bounds the campaign (default `90s`).
@@ -124,17 +148,25 @@ provider configuration before discovery. It does not verify provider credentials
 model connectivity, or live qualification.
 
 Corpora and crash artifacts are generated at runtime and are not committed to
-this repository -- only source files, build files, and Markdown live here. The
+this repository. The examples include source, build and configuration files,
+documentation, and the explicitly identified upstream text seed below. The
 framework writes generated corpora, harnesses, and crash reproducers into its
 own workspace directories when you run the pipeline.
 
 ## Automated coverage
 
 `crates/hf-discovery/tests/showcase_examples.rs` runs discovery over every
-directory in the first table and asserts the documented entry point is found and classified as
+directory in the userspace targets table and asserts the documented entry point is found and classified as
 a fuzzable kind. That layer is deterministic and toolchain-free, so it runs in
 CI. Reproducing the actual *crash* requires a real fuzzing engine and sanitizer
 toolchain and is exercised by the manual / engine-gated runs shown above.
+
+The syzkaller service test `community_qemu_example_stages_its_relative_artifacts`
+loads the bundled manager configuration with inert kernel/rootfs/key files and
+checks staging, path rewriting, and isolation of writes to the copied rootfs.
+It never boots a VM. The demo script's tests in `scripts/tests/test_demo.py`
+exercise approval, refusal, qualification failure, and engine selection with a
+fake CLI. These checks do not replace live engine or Linux/KVM qualification.
 
 ## Upstream honggfuzz examples
 
