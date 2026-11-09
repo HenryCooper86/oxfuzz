@@ -206,8 +206,8 @@ impl ServiceContainer {
         Ok(true)
     }
 
-    /// All sessions in the same conversation tree as `session` (the main session
-    /// plus every branch), for the branch switcher.
+    /// User-facing, non-deleted sessions in the same conversation tree as
+    /// `session`, for the branch switcher.
     pub async fn chat_branches(
         &self,
         session: &hf_core::types::SessionId,
@@ -230,17 +230,24 @@ impl ServiceContainer {
         nodes.sort_by_key(|n| (n.depth, n.created_at));
         Ok(nodes
             .into_iter()
+            .filter(|node| {
+                node.session_type.is_user_facing()
+                    && node.state != hf_core::session::SessionState::Tombstone
+            })
             .map(|n| {
                 let is_main = n.session_type == SessionType::Main;
                 let active = n.id == *session;
                 crate::checkpoints::BranchView {
-                    title: n.title.unwrap_or_else(|| {
-                        if is_main {
-                            "Main".to_owned()
-                        } else {
-                            format!("Branch (depth {})", n.depth)
-                        }
-                    }),
+                    title: n.display_title().map_or_else(
+                        || {
+                            if is_main {
+                                "Main".to_owned()
+                            } else {
+                                format!("Branch (depth {})", n.depth)
+                            }
+                        },
+                        str::to_owned,
+                    ),
                     id: n.id.0,
                     depth: n.depth,
                     is_main,

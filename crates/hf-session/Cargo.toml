@@ -7,16 +7,16 @@ description = "Session tree, parent/child delegation, compaction"
 
 [dependencies]
 hf-core = { workspace = true }
-hf-storage = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 
 [dev-dependencies]
+hf-storage = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
 async-trait = { workspace = true }
 hf-test-utils = { workspace = true }
 toml = { workspace = true }

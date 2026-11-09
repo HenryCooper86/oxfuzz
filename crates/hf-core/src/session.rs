@@ -47,6 +47,13 @@ pub struct SessionNode {
     pub updated_at: Timestamp,
 }
 
+impl SessionNode {
+    /// The user-edited title, falling back to the generated title when unset.
+    pub fn display_title(&self) -> Option<&str> {
+        self.manual_title.as_deref().or(self.title.as_deref())
+    }
+}
+
 /// Session type within the tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

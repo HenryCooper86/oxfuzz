@@ -356,6 +356,15 @@ a failed copy cleans up the incomplete child instead of returning its id.
 Deletion clears both transcripts before deleting or tombstoning metadata, so a
 reported success cannot leave a live transcript behind.
 
+The branch picker includes only user-facing main and branch sessions, excluding
+tombstones while preserving their surviving descendants. It uses a manual title
+when present, then the generated title. An unnamed fork derives its title from
+that same visible parent title; an explicit fork title takes precedence.
+
+Cross-channel aggregation has no active caller. Its unused in-memory manager
+was removed; the persisted `canonical` session-type value remains readable and
+is treated as an internal session, so existing database rows need no migration.
+
 After any successful persistent mutation, presentation layers reload the
 canonical display transcript. Optimistic tool-progress entries are transient
 and are not used to calculate rollback or branch indices. A cached session id

@@ -585,7 +585,11 @@ impl SessionManager {
         }
 
         // 4. Determine fork title.
-        let fork_title = title.or_else(|| source.title.as_ref().map(|t| format!("{t} (Branch)")));
+        let fork_title = title.or_else(|| {
+            source
+                .display_title()
+                .map(|title| format!("{title} (Branch)"))
+        });
 
         // 5. Create the new Branch session.
         let max_depth = self

@@ -73,8 +73,8 @@ Three consequences that carry the value:
 
 Honest accounting, because this is the expensive item.
 
-- `hf-session` (`manager.rs` is 59 KB, `canonical.rs` 21 KB, `checkpoint.rs`
-  24 KB) is rewritten around events rather than around a tree of states.
+- `hf-session`'s tree and checkpoint operations would be rewritten around
+  events rather than stored states.
 - `hf-storage` gains an event table and a replay path; `DATABASE_SCHEMA.md`
   (34 KB) changes materially, and existing rows need a migration or a declared
   discontinuity.
