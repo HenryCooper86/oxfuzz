@@ -391,3 +391,80 @@ fn live_events_skip_the_rate_of_the_startup_snapshot() {
         |event| matches!(event, FuzzProgress::ExecsPerSec(rate) if (*rate - 3512.0).abs() < 1e-9)
     ));
 }
+
+#[test]
+fn reader_preserves_known_start_time_when_another_snapshot_omits_it() {
+    for snapshots in [
+        ["start_time : 100\n", "last_update : 210\n"],
+        ["last_update : 210\n", "start_time : 100\n"],
+    ] {
+        let run_output = tempfile::tempdir().unwrap();
+        for (instance, snapshot) in ["main", "s1"].into_iter().zip(snapshots) {
+            fs::create_dir(run_output.path().join(instance)).unwrap();
+            fs::write(
+                run_output.path().join(instance).join("fuzzer_stats"),
+                snapshot,
+            )
+            .unwrap();
+        }
+        let stats = read_fuzzer_stats(run_output.path()).unwrap().unwrap();
+        assert_eq!(stats.start_time_epoch, Some(100));
+        assert_eq!(stats.to_engine_stats().uptime_secs, Some(110));
+    }
+}
+
+#[test]
+fn reader_rejects_overflowing_run_wide_counts() {
+    for key in ["saved_crashes", "execs_done", "saved_hangs", "corpus_count"] {
+        let run_output = tempfile::tempdir().unwrap();
+        for (instance, value) in [("main", u64::MAX), ("s1", 1)] {
+            fs::create_dir(run_output.path().join(instance)).unwrap();
+            fs::write(
+                run_output.path().join(instance).join("fuzzer_stats"),
+                format!("{key} : {value}\n"),
+            )
+            .unwrap();
+        }
+        assert!(
+            matches!(
+                read_fuzzer_stats(run_output.path()),
+                Err(hf_engine::afl::AflStatsError::AggregateOverflow { key: failed_key })
+                    if failed_key == key
+            ),
+            "{key}"
+        );
+    }
+}
+
+#[test]
+fn reader_rejects_overflowing_run_wide_rates() {
+    let run_output = tempfile::tempdir().unwrap();
+    for instance in ["main", "s1"] {
+        fs::create_dir(run_output.path().join(instance)).unwrap();
+        fs::write(
+            run_output.path().join(instance).join("fuzzer_stats"),
+            "execs_per_sec : 1.7976931348623157e308\n",
+        )
+        .unwrap();
+    }
+    assert!(matches!(
+        read_fuzzer_stats(run_output.path()),
+        Err(hf_engine::afl::AflStatsError::AggregateOverflow {
+            key: "execs_per_sec"
+        })
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn reader_rejects_symlinked_instance_directories() {
+    let run_output = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(outside.path().join("fuzzer_stats"), "saved_crashes : 999\n").unwrap();
+    std::os::unix::fs::symlink(outside.path(), run_output.path().join("default")).unwrap();
+
+    assert!(matches!(
+        read_fuzzer_stats(run_output.path()),
+        Err(hf_engine::afl::AflStatsError::UnsafePath(_))
+    ));
+}

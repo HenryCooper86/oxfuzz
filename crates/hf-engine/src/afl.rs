@@ -353,6 +353,8 @@ pub enum AflStatsError {
     InvalidUtf8(#[from] std::str::Utf8Error),
     #[error("invalid AFL++ fuzzer_stats value for {key}: {value}")]
     InvalidValue { key: &'static str, value: String },
+    #[error("AFL++ run-wide fuzzer_stats sum overflows for {key}")]
+    AggregateOverflow { key: &'static str },
 }
 
 /// Parse a bounded AFL++ `fuzzer_stats` snapshot.
@@ -434,7 +436,8 @@ pub fn parse_fuzzer_stats(contents: &[u8]) -> Result<AflFuzzerStats, AflStatsErr
 /// `Ok(None)` because AFL++ may not have flushed it yet.
 ///
 /// # Errors
-/// Returns [`AflStatsError`] for I/O failures, unsafe paths, or invalid data.
+/// Returns [`AflStatsError`] for I/O failures, unsafe paths, invalid data, or
+/// run-wide sums that exceed the metric's numeric range.
 pub fn read_fuzzer_stats(run_output: &Path) -> Result<Option<AflFuzzerStats>, AflStatsError> {
     require_real_directory(run_output)?;
 
@@ -443,7 +446,11 @@ pub fn read_fuzzer_stats(run_output: &Path) -> Result<Option<AflFuzzerStats>, Af
     let mut instance_dirs: Vec<PathBuf> = Vec::new();
     for entry in std::fs::read_dir(run_output)? {
         let entry = entry?;
-        if entry.file_type()?.is_dir() {
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            return Err(AflStatsError::UnsafePath(entry.path()));
+        }
+        if file_type.is_dir() {
             instance_dirs.push(entry.path());
         }
     }
@@ -451,14 +458,7 @@ pub fn read_fuzzer_stats(run_output: &Path) -> Result<Option<AflFuzzerStats>, Af
 
     let mut aggregate: Option<AflFuzzerStats> = None;
     for instance in instance_dirs {
-        // A symlinked instance directory is rejected rather than followed,
-        // mirroring the snapshot rule below.
-        if std::fs::symlink_metadata(&instance)?
-            .file_type()
-            .is_symlink()
-        {
-            return Err(AflStatsError::UnsafePath(instance));
-        }
+        require_real_directory(&instance)?;
         let path = instance.join(AFL_FUZZER_STATS_FILE);
         let metadata = match std::fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_file() => metadata,
@@ -480,7 +480,7 @@ pub fn read_fuzzer_stats(run_output: &Path) -> Result<Option<AflFuzzerStats>, Af
         let stats = parse_fuzzer_stats(&contents)?;
         aggregate = match aggregate {
             None => Some(stats),
-            Some(current) => Some(current.merged_run_wide(&stats)),
+            Some(current) => Some(current.merged_run_wide(&stats)?),
         };
     }
     Ok(aggregate)
@@ -488,22 +488,26 @@ pub fn read_fuzzer_stats(run_output: &Path) -> Result<Option<AflFuzzerStats>, Af
 
 impl AflFuzzerStats {
     /// Merge one instance snapshot into the run-wide aggregate.
-    fn merged_run_wide(&self, next: &Self) -> Self {
-        Self {
-            execs_per_sec: sum_optional_rate(self.execs_per_sec, next.execs_per_sec),
-            saved_crashes: sum_optional_count(self.saved_crashes, next.saved_crashes),
-            execs_done: sum_optional_count(self.execs_done, next.execs_done),
-            saved_hangs: sum_optional_count(self.saved_hangs, next.saved_hangs),
-            corpus_count: sum_optional_count(self.corpus_count, next.corpus_count),
+    fn merged_run_wide(&self, next: &Self) -> Result<Self, AflStatsError> {
+        Ok(Self {
+            execs_per_sec: sum_optional_rate(self.execs_per_sec, next.execs_per_sec)?,
+            saved_crashes: sum_optional_count(
+                "saved_crashes",
+                self.saved_crashes,
+                next.saved_crashes,
+            )?,
+            execs_done: sum_optional_count("execs_done", self.execs_done, next.execs_done)?,
+            saved_hangs: sum_optional_count("saved_hangs", self.saved_hangs, next.saved_hangs)?,
+            corpus_count: sum_optional_count("corpus_count", self.corpus_count, next.corpus_count)?,
             edges_found: self.edges_found.max(next.edges_found),
             total_edges: self.total_edges.max(next.total_edges),
             cycles_done: self.cycles_done.max(next.cycles_done),
             run_time_secs: self.run_time_secs.max(next.run_time_secs),
             last_update_epoch: self.last_update_epoch.max(next.last_update_epoch),
             last_find_epoch: self.last_find_epoch.max(next.last_find_epoch),
-            start_time_epoch: self.start_time_epoch.min(next.start_time_epoch),
-            stability_pct: min_optional_rate(self.stability_pct, next.stability_pct),
-        }
+            start_time_epoch: min_optional(self.start_time_epoch, next.start_time_epoch),
+            stability_pct: min_optional(self.stability_pct, next.stability_pct),
+        })
     }
 
     /// The live progress events one snapshot contributes to a running campaign.
@@ -569,24 +573,44 @@ impl AflFuzzerStats {
     }
 }
 
-fn min_optional_rate(current: Option<f64>, next: Option<f64>) -> Option<f64> {
+fn min_optional<T: PartialOrd>(current: Option<T>, next: Option<T>) -> Option<T> {
     match (current, next) {
-        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), Some(b)) => Some(if a < b { a } else { b }),
         (Some(a), None) | (None, Some(a)) => Some(a),
         (None, None) => None,
     }
 }
 
-fn sum_optional_rate(current: Option<f64>, next: Option<f64>) -> Option<f64> {
+fn sum_optional_rate(
+    current: Option<f64>,
+    next: Option<f64>,
+) -> Result<Option<f64>, AflStatsError> {
     match (current, next) {
-        (Some(a), Some(b)) => Some(a + b),
-        (Some(a), None) | (None, Some(a)) => Some(a),
-        (None, None) => None,
+        (Some(a), Some(b)) => {
+            let sum = a + b;
+            if !sum.is_finite() {
+                return Err(AflStatsError::AggregateOverflow {
+                    key: "execs_per_sec",
+                });
+            }
+            Ok(Some(sum))
+        }
+        _ => Ok(current.or(next)),
     }
 }
 
-fn sum_optional_count(current: Option<u64>, next: Option<u64>) -> Option<u64> {
-    current.zip(next).map(|(a, b)| a + b).or(current).or(next)
+fn sum_optional_count(
+    key: &'static str,
+    current: Option<u64>,
+    next: Option<u64>,
+) -> Result<Option<u64>, AflStatsError> {
+    match (current, next) {
+        (Some(a), Some(b)) => a
+            .checked_add(b)
+            .map(Some)
+            .ok_or(AflStatsError::AggregateOverflow { key }),
+        _ => Ok(current.or(next)),
+    }
 }
 
 fn require_real_directory(path: &Path) -> Result<(), AflStatsError> {
