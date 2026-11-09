@@ -55,6 +55,7 @@ export function RunView({
   const project = activeProject;
   const [durationOverride, setDurationOverride] = useState<string | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
+  const [logOpen, setLogOpen] = useState(false);
   const engineOptions = fuzzingSettings
     ? enabledEngineOptions(fuzzingSettings, { includeSyzkaller: true })
     : [];
@@ -110,7 +111,7 @@ export function RunView({
   useEffect(() => {
     const el = logRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [log]);
+  }, [log, logOpen]);
 
   // Whether the target's harness binary actually exists on disk. The shared
   // `compiled` flag is only a localStorage hint and can go stale (e.g. after
@@ -490,8 +491,8 @@ export function RunView({
         </div>
       )}
 
-      {(selectedRun || healthEvents.length > 0) && (
-        <section className="surface-card flex flex-col gap-2" style={{ padding: "var(--space-md)" }} aria-label={t("run.healthHistory")}>
+      {(healthEvents.length > 0 || healthState?.loading || healthState?.error || healthState?.hasOlder) && (
+        <section className="flex flex-col gap-2" aria-label={t("run.healthHistory")}>
           <span className="text-sm font-semibold">{t("run.healthHistory")}</span>
           {healthState?.loading && <p role="status" className="text-xs">{t("run.healthLoading")}</p>}
           {healthState?.error && <p role="alert" className="text-xs">{t("run.healthUnavailable")}: {t(healthState.error)}</p>}
@@ -501,9 +502,11 @@ export function RunView({
       )}
 
       {log.length > 0 && (
-        <div
+        <details onToggle={(event) => setLogOpen(event.currentTarget.open)}>
+          <summary className="text-sm cursor-pointer">{t("run.engineOutput")}</summary>
+          {logOpen && <div
           ref={logRef}
-          className="surface-card max-h-96 overflow-auto"
+          className="max-h-64 overflow-auto"
           style={{ padding: "var(--space-md)", fontFamily: "var(--font-mono)" }}
         >
           {log.map((line, i) => (
@@ -511,7 +514,8 @@ export function RunView({
               {line}
             </div>
           ))}
-        </div>
+          </div>}
+        </details>
       )}
     </div>
   );
@@ -583,7 +587,7 @@ function FileField({
 function StatCard({ icon, label, value, color }: { icon: React.ReactNode; label: string; value: number | null; color: string }) {
   const { t } = useI18n();
   return (
-    <div className="surface-card flex items-center gap-3" style={{ padding: "var(--space-md)" }}>
+    <div className="flex items-center gap-3" style={{ padding: "var(--space-sm)", borderLeft: "1px solid var(--border)" }}>
       <div style={{ color }}>{icon}</div>
       <div className="flex flex-col">
         <span className="text-xs text-text-muted uppercase" style={{ letterSpacing: "0.05em", fontWeight: 600 }}>

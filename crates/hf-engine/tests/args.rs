@@ -354,6 +354,11 @@ fn honggfuzz_args_have_run_time() {
         args.get(report + 1).map(String::as_str),
         Some("/work/out/HONGGFUZZ.REPORT.TXT")
     );
+    let stats = args
+        .iter()
+        .position(|a| a == "--statsfile")
+        .expect("--statsfile");
+    assert_eq!(args[stats + 1], "/work/out/honggfuzz.stats");
 }
 
 #[test]

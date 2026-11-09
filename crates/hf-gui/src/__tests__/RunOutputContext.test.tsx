@@ -780,6 +780,20 @@ describe("retention and asynchronous cleanup", () => {
 });
 
 describe("actual presentation acceptance", () => {
+  it("keeps raw engine output opt-in and omits an empty health panel", async () => {
+    invoke.mockImplementation(standard);
+    await mount("/project", <RunView embedded />);
+    await emit("run:progress", { run_id: A, type: "LogLine", data: "engine detail" });
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 110)); });
+    const view = container.querySelector("[data-presentation]")!;
+    const details = view.querySelector<HTMLDetailsElement>("details");
+    expect(details).not.toBeNull();
+    expect(details!.open).toBe(false);
+    expect(view.textContent).not.toContain("engine detail");
+    expect(view.querySelector('[aria-label="run.healthHistory"]')).toBeNull();
+    await act(async () => { details!.open = true; details!.dispatchEvent(new Event("toggle")); });
+    expect(view.textContent).toContain("engine detail");
+  });
   it("renders scheduled and recovered terminal rate and distinct crash labels in RunView", async () => {
     invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
       if (command === "run_history")
@@ -789,6 +803,7 @@ describe("actual presentation acceptance", () => {
     });
     await mount("/project", <RunView embedded />);
     await emit("run:progress", { run_id: A, type: "CrashesFound", data: 3 });
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 110)); });
     expect(container.querySelector("[data-presentation]")?.textContent).toContain(
       "run.currentExecs25",
     );
@@ -1011,6 +1026,7 @@ describe("completion race and retention evidence", () => {
     expect(saved.latest_run_by_project["/project"]).toBe(A);
     for (let i = 0; i < 620; i++)
       await emit("run:progress", { run_id: A, type: "LogLine", data: String(i) });
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 110)); });
     expect(payload().log).toHaveLength(600);
     expect(payload().log.at(-1)).toBe("  619");
     expect(JSON.parse(localStorage.getItem("hf_run_summary_v2")!).runs[A].log).toBeUndefined();
@@ -1365,6 +1381,11 @@ describe("durable selection and legacy semantics", () => {
       first.resolve({ ...owner(A), target: "lower" });
     });
     expect(payload().selectedRun.run_id).toBe(B);
+    await act(async () => {
+      const details = container.querySelector<HTMLDetailsElement>("[data-presentation] details")!;
+      details.open = true;
+      details.dispatchEvent(new Event("toggle"));
+    });
     expect(container.querySelector("[data-presentation]")?.textContent).toContain("higher UUID");
     expect(container.querySelector("[data-presentation]")?.textContent).not.toContain("lower UUID");
   });

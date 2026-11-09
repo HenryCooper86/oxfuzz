@@ -142,10 +142,10 @@ function AppInner() {
   const [showDiag, setShowDiag] = useState(false);
   const [showObs, setShowObs] = useState(false);
   const [showInfo, setShowInfo] = useState(false);
-  // The Progress panel belongs to the pipeline screens: open there by default
-  // on wide windows, and opt-in elsewhere. Each scope remembers its own toggle.
+  // Workflow stages already show progress. Extra panels are opt-in so the
+  // active task has the full content width; each scope remembers its toggle.
   const [progressOpen, setProgressOpen] = useState(() => ({
-    pipeline: typeof window === "undefined" || window.innerWidth >= 1100,
+    pipeline: false,
     other: false,
   }));
   const progressScope = progressPanelScope(activeView);

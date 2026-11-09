@@ -53,6 +53,7 @@ pub(crate) mod health_monitor;
 pub use harness_work_order::HarnessWorkOrderExportRequest;
 mod harness_workspace;
 mod history;
+mod honggfuzz_stats;
 mod lifecycle;
 #[cfg(all(test, feature = "run-closeout"))]
 mod live_recovery_tests;

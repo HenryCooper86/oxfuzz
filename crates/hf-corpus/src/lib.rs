@@ -507,6 +507,7 @@ fn is_coverage_input_name(name: &str) -> bool {
         ".cur_input",
         "README.txt",
         "HONGGFUZZ.REPORT.TXT",
+        hf_core::engine::HONGGFUZZ_STATS_FILE,
     ];
     if ARTIFACT_PREFIXES.iter().any(|p| name.starts_with(p)) || BOOKKEEPING.contains(&name) {
         return false;

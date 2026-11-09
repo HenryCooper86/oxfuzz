@@ -442,6 +442,15 @@ API; the same read at run close emits the closing `Stats` snapshot. Consumers
 must not scan a target-wide output directory or infer final AFL++ counters
 from UI text.
 
+Honggfuzz uses `--statsfile <run-output>/honggfuzz.stats`. The sandbox's pinned
+2.6 source includes a periodic-statistics patch: a complete CSV row is appended
+once per second and at exit, independently of terminal display and coverage
+growth. The service polls a bounded 4 KiB tail, rejects unsafe files and malformed
+complete rows, and skips partial writes. Consecutive timestamps and execution
+totals yield interval throughput; the first observation uses the reported average.
+The last snapshot also supplies terminal edges and hangs. CSV crash counters do
+not produce extra raw crash signals, since those already arrive through logs.
+
 ## 5. Crash Output
 
 For the userspace engines, crash ingestion (`hf-crash::ingest`) sees only

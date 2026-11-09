@@ -100,9 +100,9 @@ fn notify_run_subscriber(callback: impl FnOnce()) {
     }
 }
 
-/// How often the AFL++ stats poller re-reads `fuzzer_stats` during a run.
-/// AFL++ flushes the file about once a second; polling faster buys nothing.
-const AFL_STATS_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+/// How often file-backed engine metrics are sampled during a run.
+/// AFL++ and the pinned honggfuzz sandbox flush once a second.
+const ENGINE_STATS_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Drive `run` to completion while streaming AFL++ `fuzzer_stats` snapshots.
 ///
@@ -1732,7 +1732,15 @@ impl ServiceContainer {
             poll_afl_stats_while(
                 run,
                 &artifacts.output_host,
-                AFL_STATS_POLL_INTERVAL,
+                ENGINE_STATS_POLL_INTERVAL,
+                watched,
+            )
+            .await
+        } else if engine == EngineKind::Honggfuzz {
+            super::honggfuzz_stats::poll(
+                run,
+                &artifacts.output_host,
+                ENGINE_STATS_POLL_INTERVAL,
                 watched,
             )
             .await

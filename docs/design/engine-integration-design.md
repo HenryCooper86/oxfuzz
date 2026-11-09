@@ -31,6 +31,15 @@ or runs a campaign; presentation layers do not select an adapter directly.
 
 ## 3. Supported Engines
 
+Honggfuzz campaigns capture `--statsfile` into the run-owned output directory.
+The pinned sandbox patch publishes this CSV once per second and at exit, even
+when coverage is unchanged; upstream 2.6 only writes on coverage discoveries.
+`hf-engine` reads a bounded tail of complete rows; `hf-service` polls it for
+live metrics and reads it again for terminal evidence. Missing or incomplete
+snapshots remain unknown. Crash log signals are not counted again from CSV.
+The CSV throughput field is the engine's reported whole-run average, matching
+upstream; consecutive timestamp/execution totals supply current interval rate.
+
 | Engine | `EngineKind` | Build wrapper or input | Run entrypoint |
 | --- | --- | --- | --- |
 | AFL++ | `AflPlusPlus` | `afl-clang-fast` / `afl-clang-fast++`, with the libFuzzer-compatible driver | `afl-fuzz` |

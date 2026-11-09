@@ -9,6 +9,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 use uuid::Uuid;
 
+/// Retained honggfuzz telemetry file, excluded from corpus inputs.
+pub const HONGGFUZZ_STATS_FILE: &str = "honggfuzz.stats";
+
 use crate::target::Sanitizer;
 
 /// The kind of fuzzing engine.
@@ -282,7 +285,7 @@ pub struct FuzzRunConfig {
 ///
 /// Every field is optional: availability differs per engine and per moment
 /// (AFL++ flushes `fuzzer_stats` about once a second; libFuzzer reports
-/// coverage only on pulse lines; honggfuzz never reports edges). `Some(0)` is
+/// coverage only on pulse lines). `Some(0)` is
 /// a measured zero, distinct from "not reported". Absent fields stay off the
 /// wire so older readers ignore them.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

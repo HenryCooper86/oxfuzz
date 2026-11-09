@@ -327,6 +327,7 @@ async fn grow_pulls_afl_queue_and_skips_artifacts() {
     fs::write(out.join("default").join("fuzzer_stats"), b"stats...").unwrap();
     // A libFuzzer-style crash artifact at the top level must be skipped.
     fs::write(out.join("crash-deadbeef"), b"crashing-input").unwrap();
+    fs::write(out.join("honggfuzz.stats"), b"stats...").unwrap();
 
     let grown = grow(&corpus_root, &out).unwrap();
     let contents: Vec<String> = grown

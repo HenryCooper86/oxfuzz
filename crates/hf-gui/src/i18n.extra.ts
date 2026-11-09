@@ -1445,6 +1445,7 @@ export const [enExtra, zhExtra] = dictionaries({
   "run.healthUnavailable": ["Health history unavailable","健康记录不可用"],
   "run.healthBusy": ["Health history refresh is busy. Reconnect or reselect the project to retry.","健康记录刷新繁忙。请重新连接或重新选择项目以重试。"],
   "run.healthHistory": ["Campaign health history","测试活动健康记录"],
+  "run.engineOutput": ["Engine output (latest 600 lines)","引擎输出（最近 600 行）"],
   "run.loadOlderHealth": ["Load older health alerts","加载更早的健康告警"],
   "run.meanExecs": ["Execs/sec (whole-run mean)","执行/秒（全程平均）"],
   "run.rawCrashSignals": ["Raw crash signals","原始崩溃信号"],

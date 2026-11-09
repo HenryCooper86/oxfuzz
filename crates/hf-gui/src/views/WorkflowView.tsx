@@ -131,7 +131,7 @@ export function WorkflowView({ onNavigate }: { onNavigate?: (view: ViewType) => 
             ref={(el) => {
               sectionRefs.current[id] = el;
             }}
-            className="surface-card"
+            className="workflow-stage"
             style={{
               overflow: "hidden",
               borderLeft: `3px solid ${current ? "var(--accent)" : done ? "var(--success)" : "var(--border)"}`,
@@ -182,7 +182,7 @@ export function WorkflowView({ onNavigate }: { onNavigate?: (view: ViewType) => 
         ref={(el) => {
           sectionRefs.current.corpus = el;
         }}
-        className="surface-card"
+        className="workflow-stage"
         style={{ overflow: "hidden", opacity: gated ? 0.5 : 1, borderLeft: "3px solid var(--border)" }}
       >
         <button

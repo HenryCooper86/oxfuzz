@@ -1,0 +1,92 @@
+--- a/fuzz.c
++++ b/fuzz.c
+@@ -238,37 +238,6 @@
+             softNewPC, softNewCmp, run->hwCnts.cpuInstrCnt, run->hwCnts.cpuBranchCnt,
+             run->hwCnts.bbCnt, softCurEdge, softCurPC, softCurCmp);
+ 
+-        if (run->global->io.statsFileName) {
+-            const time_t curr_sec      = time(NULL);
+-            const time_t elapsed_sec   = curr_sec - run->global->timing.timeStart;
+-            size_t       curr_exec_cnt = ATOMIC_GET(run->global->cnts.mutationsCnt);
+-            /*
+-             * We increase the mutation counter unconditionally in threads, but if it's
+-             * above hfuzz->mutationsMax we don't really execute the fuzzing loop.
+-             * Therefore at the end of fuzzing, the mutation counter might be higher
+-             * than hfuzz->mutationsMax
+-             */
+-            if (run->global->mutate.mutationsMax > 0 &&
+-                curr_exec_cnt > run->global->mutate.mutationsMax) {
+-                curr_exec_cnt = run->global->mutate.mutationsMax;
+-            }
+-            size_t tot_exec_per_sec = elapsed_sec ? (curr_exec_cnt / elapsed_sec) : 0;
+-
+-            dprintf(run->global->io.statsFileFd,
+-                "%lu, %lu, %lu, %lu, "
+-                "%" PRIu64 ", %" PRIu64 ", %" PRIu64 ", %" PRIu64 ", %" PRIu64 "\n",
+-                curr_sec,                                 /* unix_time */
+-                run->global->timing.lastCovUpdate,        /* last_cov_update */
+-                curr_exec_cnt,                            /* total_exec */
+-                tot_exec_per_sec,                         /* exec_per_sec */
+-                run->global->cnts.crashesCnt,             /* crashes */
+-                run->global->cnts.uniqueCrashesCnt,       /* unique_crashes */
+-                run->global->cnts.timeoutedCnt,           /* hangs */
+-                run->global->feedback.hwCnts.softCntEdge, /* edge_cov */
+-                run->global->feedback.hwCnts.softCntPc    /* block_cov */
+-            );
+-        }
+-
+         /* Update per-input coverage metrics */
+         run->dynfile->cov[0] = softCurEdge + softCurPC + run->hwCnts.bbCnt;
+         run->dynfile->cov[1] = softCurCmp;
+--- a/honggfuzz.c
++++ b/honggfuzz.c
+@@ -261,6 +261,33 @@
+     return NULL;
+ }
+ 
++/* Publish telemetry independently of coverage discoveries and terminal UI. */
++static void writeStats(honggfuzz_t* hfuzz, bool final) {
++    static time_t lastWrite = 0;
++    const time_t curr_sec = time(NULL);
++    if (!hfuzz->io.statsFileName || (!final && curr_sec == lastWrite)) {
++        return;
++    }
++    lastWrite = curr_sec;
++    const time_t elapsed_sec = curr_sec - hfuzz->timing.timeStart;
++    size_t executions = ATOMIC_GET(hfuzz->cnts.mutationsCnt);
++    if (hfuzz->mutate.mutationsMax > 0 && executions > hfuzz->mutate.mutationsMax) {
++        executions = hfuzz->mutate.mutationsMax;
++    }
++    const size_t average = elapsed_sec > 0 ? executions / elapsed_sec : 0;
++    dprintf(hfuzz->io.statsFileFd,
++        "%lu, %lu, %lu, %lu, "
++        "%" PRIu64 ", %" PRIu64 ", %" PRIu64 ", %" PRIu64 ", %" PRIu64 "\n",
++        (unsigned long)curr_sec,
++        (unsigned long)ATOMIC_GET(hfuzz->timing.lastCovUpdate),
++        (unsigned long)executions, (unsigned long)average,
++        (uint64_t)ATOMIC_GET(hfuzz->cnts.crashesCnt),
++        (uint64_t)ATOMIC_GET(hfuzz->cnts.uniqueCrashesCnt),
++        (uint64_t)ATOMIC_GET(hfuzz->cnts.timeoutedCnt),
++        (uint64_t)ATOMIC_GET(hfuzz->feedback.hwCnts.softCntEdge),
++        (uint64_t)ATOMIC_GET(hfuzz->feedback.hwCnts.softCntPc));
++}
++
+ static uint8_t mainThreadLoop(honggfuzz_t* hfuzz) {
+     setupSignalsMainThread();
+     setupMainThreadTimer();
+@@ -271,6 +298,7 @@
+             input_enqueueDynamicInputs(hfuzz);
+         }
+ 
++        writeStats(hfuzz, false);
+         if (hfuzz->display.useScreen) {
+             if (ATOMIC_XCHG(clearWin, false)) {
+                 display_clear();
+@@ -439,6 +467,7 @@
+     }
+ 
+     uint8_t exitcode = mainThreadLoop(&hfuzz);
++    writeStats(&hfuzz, true);
+ 
+     /* Clean-up global buffers */
+     if (hfuzz.feedback.blocklist) {

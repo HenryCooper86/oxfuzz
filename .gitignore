@@ -13,6 +13,7 @@ Thumbs.db
 
 ### Git / Patch helpers
 *.patch
+!docker/sandbox/*.patch
 *.rej
 
 ### Docs

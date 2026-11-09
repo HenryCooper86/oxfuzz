@@ -86,10 +86,12 @@ describe("UI polish foundations", () => {
     expect(app).toContain('activeView === "defectdojo"');
   });
 
-  it("defines centered canvas geometry and responsive scrolling gutters", () => {
+  it("uses the available canvas width and responsive scrolling gutters", () => {
     const css = source("../styles/index.css");
 
-    expect(css).toMatch(/\.view-canvas\s*\{[\s\S]*max-width:\s*1440px/);
+    const canvas = css.match(/\.view-canvas\s*\{([^}]*)\}/)?.[1];
+    expect(canvas).toMatch(/width:\s*100%/);
+    expect(canvas).not.toContain("max-width");
     expect(css).toMatch(/\.view-canvas\s*\{[\s\S]*margin:\s*0 auto/);
     expect(css).toMatch(/\.view-scroll\s*\{[\s\S]*padding:/);
     expect(css).toMatch(/@media\s*\([^)]*max-width:[^)]*\)[\s\S]*\.view-scroll\s*\{/);

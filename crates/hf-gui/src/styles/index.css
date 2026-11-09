@@ -134,15 +134,19 @@ body {
 .view-scroll {
   flex: 1;
   min-width: 0;
+  min-height: 0;
   overflow: auto;
   padding: var(--space-lg);
 }
 
 .view-canvas {
   width: 100%;
-  max-width: 1440px;
   margin: 0 auto;
   padding-bottom: var(--space-xl);
+}
+
+.workflow-stage {
+  border-bottom: 1px solid var(--border);
 }
 
 @media (max-width: 768px) {

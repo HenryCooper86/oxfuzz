@@ -46,6 +46,7 @@ export class RunOutputController {
   private discovery = 0;
   private selection: string | null = null;
   private poll: ReturnType<typeof setInterval> | undefined;
+  private progressNotification: ReturnType<typeof setTimeout> | undefined;
   private pollId: string | null = null;
   private owners = new Map<string, Promise<void>>();
   private telemetry = new Map<string, ReadToken>();
@@ -81,6 +82,8 @@ export class RunOutputController {
   };
   getSnapshot = () => this.state;
   private emit() {
+    clearTimeout(this.progressNotification);
+    this.progressNotification = undefined;
     for (const listener of this.listeners) listener();
     this.persist();
     this.syncSelection();
@@ -134,6 +137,8 @@ export class RunOutputController {
     return () => {
       active = false;
       this.mounted = false;
+      clearTimeout(this.progressNotification);
+      this.progressNotification = undefined;
       ++this.epoch;
       ++this.scope;
       ++this.discovery;
@@ -211,10 +216,11 @@ export class RunOutputController {
     this.state = { ...this.state, runs: { ...this.state.runs, [id]: emptyRun() } };
     return true;
   }
-  private patch(id: string, update: (run: RunData) => RunData) {
+  private patch(id: string, update: (run: RunData) => RunData, paced = false) {
     if (!this.mounted || !this.state.runs[id]) return;
     const before = this.state.runs[id];
     const after = update(before);
+    if (after === before) return;
     // serializeOutput persists only these fields; log/health patches skip the write.
     if (
       before.owner !== after.owner ||
@@ -227,7 +233,13 @@ export class RunOutputController {
     )
       this.persistDirty = true;
     this.state = { ...this.state, runs: { ...this.state.runs, [id]: after } };
-    this.emit();
+    if (paced) {
+      // A crash-heavy engine can emit thousands of lines per second. Keep
+      // the bounded cache current, but yield between screen/storage updates.
+      this.progressNotification ??= setTimeout(() => this.emit(), 100);
+    } else {
+      this.emit();
+    }
   }
   private acceptOwner(owner: RunOwner): boolean {
     if (!this.mounted || !this.admit(owner.run_id)) return false;
@@ -461,7 +473,7 @@ export class RunOutputController {
       this.patch(id, (run) => ({
         ...run,
         log: [...run.log.slice(-(LOG_CAP - 1)), `  ${payload.data}`.slice(-LOG_LINE_CAP)],
-      }));
+      }), true);
     if (payload.type === "CrashesFound") {
       const delta = count(payload.data);
       if (delta !== null)
@@ -470,7 +482,7 @@ export class RunOutputController {
           return count(total) === null
             ? run
             : { ...run, stats: { ...run.stats, rawCrashSignals: total } };
-        });
+        }, true);
     }
     if (payload.type === "ExecsPerSec" || payload.type === "EdgesCovered")
       this.refreshTelemetry(id);

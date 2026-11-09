@@ -2521,6 +2521,7 @@ dependencies = [
  "async-trait",
  "futures",
  "hf-core",
+ "rustix 1.1.4",
  "serde",
  "sha2",
  "tempfile",
