@@ -36,6 +36,9 @@ pub struct CorpusEntry {
 ## 3. Operations
 
 - **Seed** -- initialize from project-supplied seeds or LLM-suggested seeds.
+  Before writing, validate the final inventory after all replacements: count
+  every occupied directory entry, including nonregular entries, and sum the
+  resulting regular-file sizes. Batch order does not change admission.
 - **Grow** -- pull new coverage-inducing inputs from engine output queue.
 - **Prune** -- remove entries that no longer increase coverage.
 - **Survive** -- measure seed survival: each corpus seed runs once through
@@ -56,6 +59,9 @@ pub struct CorpusEntry {
   or a human earned. Provider-only replacements (heuristic replacements for
   dead seeds would die the same way); one round per invocation, idempotent.
 - **Merge** -- combine corpora across engines for the same target.
+- **Remove** -- validate the current corpus budgets and every requested name
+  before deleting. Repeated names, including equivalent filename spellings,
+  are rejected without mutation. Return the complete surviving inventory.
 - **Import** -- bring an external corpus directory (for example an OSS-Fuzz
   corpus checkout) into the target's corpus: bounded listing of regular files
   only, hash-deduplicated against what the corpus already retains and within

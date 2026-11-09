@@ -85,9 +85,9 @@ pub async fn seed(
 
 /// Seed a corpus under an explicit I/O budget.
 ///
-/// Existing regular entries and replacements are included in the resulting
-/// entry and aggregate-byte checks before the first payload is written, and in
-/// the returned inventory after the writes.
+/// Every occupied filename counts toward the resulting entry limit. Regular
+/// entries and all replacements determine the final aggregate-byte total,
+/// independent of input order, before the first payload is written.
 ///
 /// # Errors
 /// Returns `ClassifiedError` if validation, bounded listing, or writing fails.
@@ -149,7 +149,8 @@ fn seed_blocking(
 /// addressed by names that pass the same `safe_entry_name` confinement as
 /// writes. A named entry that does not exist, or is not a regular file, is an
 /// error rather than a silent skip: a concurrent mutation must never let a
-/// caller believe it replaced something it did not. The root itself is
+/// caller believe it replaced something it did not. Repeated names are rejected
+/// before deletion. The root itself is
 /// re-listed (bounded) before and after, so the returned corpus is exact.
 ///
 /// # Errors
@@ -172,6 +173,9 @@ pub fn remove_with_limits(
 ) -> Result<Corpus, ClassifiedError> {
     validate_limits(limits)?;
     ensure_regular_directory(corpus_root)?;
+    enforce_entry_limit(names.len(), limits)?;
+    let mut unique_names = HashSet::with_capacity(names.len());
+    let mut paths = Vec::with_capacity(names.len());
     // Validate every name against the filesystem before deleting anything, so
     // a bad name cannot leave a half-removed corpus. The check is on
     // `symlink_metadata` (the exact inode to be unlinked): `list_with_limits`
@@ -179,6 +183,11 @@ pub fn remove_with_limits(
     // could neither prove existence nor regularity here.
     for name in names {
         let safe = safe_entry_name(name)?;
+        if !unique_names.insert(safe) {
+            return Err(ClassifiedError::Validation(format!(
+                "duplicate corpus entry name: {name}"
+            )));
+        }
         let path = corpus_root.join(safe);
         match std::fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_file() => {}
@@ -193,12 +202,15 @@ pub fn remove_with_limits(
                 )));
             }
         }
+        paths.push(path);
     }
-    for name in names {
-        let safe = safe_entry_name(name)?;
-        let path = corpus_root.join(safe);
+    list_with_limits(corpus_root, limits)?;
+    for path in paths {
         std::fs::remove_file(&path).map_err(|error| {
-            ClassifiedError::Internal(format!("cannot remove corpus entry {name}: {error}"))
+            ClassifiedError::Internal(format!(
+                "cannot remove corpus entry {}: {error}",
+                path.display()
+            ))
         })?;
     }
     list_with_limits(corpus_root, limits)
@@ -210,6 +222,12 @@ fn validate_seed_result(
     limits: CorpusLimits,
 ) -> Result<(), ClassifiedError> {
     let existing = list_with_limits(corpus_root, limits)?;
+    let mut inspected = 0;
+    let mut names: HashSet<OsString> =
+        sorted_directory_entries(corpus_root, &mut inspected, limits)?
+            .iter()
+            .map(DirEntry::file_name)
+            .collect();
     let mut sizes_by_name: HashMap<OsString, u64> = existing
         .entries
         .iter()
@@ -220,15 +238,15 @@ fn validate_seed_result(
                 .map(|name| (name.to_owned(), entry.size))
         })
         .collect();
-    let mut total_bytes = corpus_size(&existing.entries, limits)?;
     for (data, name) in inputs {
         let name = safe_entry_name(name)?.to_owned();
-        if let Some(replaced_size) = sizes_by_name.insert(name, data_len_u64(data)?) {
-            total_bytes = total_bytes.saturating_sub(replaced_size);
-        }
-        enforce_entry_limit(sizes_by_name.len(), limits)?;
-        total_bytes = checked_total(total_bytes, data_len_u64(data)?, limits)?;
+        names.insert(name.clone());
+        sizes_by_name.insert(name, data_len_u64(data)?);
     }
+    enforce_entry_limit(names.len(), limits)?;
+    sizes_by_name
+        .values()
+        .try_fold(0, |total, size| checked_total(total, *size, limits))?;
     Ok(())
 }
 

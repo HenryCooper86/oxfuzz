@@ -190,6 +190,62 @@ async fn seed_preflights_the_resulting_corpus_budget_before_writing() {
 }
 
 #[tokio::test]
+async fn seed_preflight_counts_nonregular_entries_before_writing() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    fs::create_dir_all(corpus_root.join("reserved")).unwrap();
+
+    let result = seed_with_limits(
+        target_id(),
+        &corpus_root,
+        vec![(b"new".to_vec(), "new".to_owned())],
+        CorpusLimits {
+            max_entries: 1,
+            ..DEFAULT_CORPUS_LIMITS
+        },
+    )
+    .await;
+
+    assert!(result.is_err());
+    assert!(!corpus_root.join("new").exists());
+    assert!(corpus_root.join("reserved").is_dir());
+}
+
+#[tokio::test]
+async fn seed_preflight_accounts_for_all_replacements_before_checking_bytes() {
+    for reverse in [false, true] {
+        let dir = TempDir::new().unwrap();
+        let corpus_root = dir.path().join("corpus");
+        fs::create_dir_all(&corpus_root).unwrap();
+        fs::write(corpus_root.join("a"), b"a").unwrap();
+        fs::write(corpus_root.join("b"), b"bbbbbbb").unwrap();
+        let mut inputs = vec![
+            (b"aaaaaaa".to_vec(), "a".to_owned()),
+            (b"b".to_vec(), "b".to_owned()),
+        ];
+        if reverse {
+            inputs.reverse();
+        }
+
+        let corpus = seed_with_limits(
+            target_id(),
+            &corpus_root,
+            inputs,
+            CorpusLimits {
+                max_total_bytes: 8,
+                ..DEFAULT_CORPUS_LIMITS
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(corpus.entries.len(), 2);
+        assert_eq!(fs::read(corpus_root.join("a")).unwrap(), b"aaaaaaa");
+        assert_eq!(fs::read(corpus_root.join("b")).unwrap(), b"b");
+    }
+}
+
+#[tokio::test]
 async fn grow_copies_new_inputs_from_engine_output() {
     let dir = TempDir::new().unwrap();
     let corpus_root = dir.path().join("corpus");
@@ -976,6 +1032,52 @@ async fn remove_deletes_only_named_entries_and_returns_the_survivors() {
         })
         .collect();
     assert_eq!(names, vec!["earned".to_owned(), "keep".to_owned()]);
+}
+
+#[test]
+fn remove_preflight_rejects_repeated_names_without_deleting() {
+    for repeated in ["drop", "drop/"] {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("drop"), b"keep until validation succeeds").unwrap();
+
+        let result = hf_corpus::remove(dir.path(), &["drop".to_owned(), repeated.to_owned()]);
+
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read(dir.path().join("drop")).unwrap(),
+            b"keep until validation succeeds"
+        );
+    }
+}
+
+#[test]
+fn remove_preflight_checks_corpus_limits_before_deleting() {
+    for limits in [
+        CorpusLimits {
+            max_entries: 1,
+            ..DEFAULT_CORPUS_LIMITS
+        },
+        CorpusLimits {
+            max_input_bytes: 2,
+            ..DEFAULT_CORPUS_LIMITS
+        },
+        CorpusLimits {
+            max_total_bytes: 2,
+            ..DEFAULT_CORPUS_LIMITS
+        },
+    ] {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("drop"), b"a").unwrap();
+        fs::write(dir.path().join("keep1"), b"bbb").unwrap();
+        fs::write(dir.path().join("keep2"), b"c").unwrap();
+
+        let result = hf_corpus::remove_with_limits(dir.path(), &["drop".to_owned()], limits);
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(dir.path().join("drop")).unwrap(), b"a");
+        assert_eq!(fs::read(dir.path().join("keep1")).unwrap(), b"bbb");
+        assert_eq!(fs::read(dir.path().join("keep2")).unwrap(), b"c");
+    }
 }
 
 #[test]
