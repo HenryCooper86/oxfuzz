@@ -8,7 +8,6 @@ import { useListboxNav } from "../hooks/useListboxNav";
 import { useProject } from "../providers/project";
 import { usePrefs } from "../providers/prefs";
 import { useI18n } from "../i18nContext";
-import { useRunOutput } from "../providers/runOutput";
 import { MarkdownContent } from "../components/MarkdownContent";
 import {
   applyMode,
@@ -133,9 +132,6 @@ export function ChatView() {
   const confirm = useConfirm();
   const { sendOnEnter } = usePrefs();
   const { t } = useI18n();
-  // In-flight fuzz runs surface as the composer's task count.
-  const { running } = useRunOutput();
-  const taskCount = running ? 1 : 0;
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -146,6 +142,12 @@ export function ChatView() {
   const [stopping, setStopping] = useState(false);
   const turnRef = useRef<RunningTurn | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [loadedProject, setLoadedProject] = useState<string | null>(null);
+  const sessionReady = loadedProject === activeProject;
+  const projectRef = useRef(activeProject);
+  useEffect(() => {
+    projectRef.current = activeProject;
+  }, [activeProject]);
   // The session currently on screen. A turn that settles after the operator
   // moved to another session must not overwrite that session's view.
   const sessionRef = useRef<string | null>(null);
@@ -165,6 +167,13 @@ export function ChatView() {
   const [expanded, setExpanded] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
+
+  if (loadedProject !== null && loadedProject !== activeProject) {
+    setLoadedProject(null);
+    setMessages([]);
+    setPickerOpen(false);
+    setBranchesOpen(false);
+  }
 
   useEffect(() => {
     localStorage.setItem(CHAT_MODE_KEY, mode);
@@ -203,6 +212,7 @@ export function ChatView() {
       if (cancelled) return;
       setSessionId(id);
       setMessages(history);
+      setLoadedProject(activeProject);
     })();
     return () => {
       cancelled = true;
@@ -418,7 +428,7 @@ export function ChatView() {
 
   async function send() {
     const text = input.trim();
-    if (!text || busy) return;
+    if (!text || busy || !sessionReady) return;
 
     const now = () => new Date().toLocaleTimeString();
     const msg: ChatMessage = { role: "user", content: text, timestamp: now() };
@@ -432,11 +442,14 @@ export function ChatView() {
     const turn: RunningTurn = { id: crypto.randomUUID(), cancelled: false, stopRequested: false };
     turnRef.current = turn;
 
+    const isCurrentConversation = () =>
+      projectRef.current === activeProject && sessionRef.current === sessionId;
     const transport = getTransport();
     let unlisten: (() => void) | undefined;
     try {
       // Stream live tool activity from the autonomous agent as system lines.
       unlisten = await transport.listen<AgentEvent>("chat:event", (ev) => {
+        if (!isCurrentConversation()) return;
         const e = ev.payload;
         if (e.type === "tool_call") {
           setMessages((m) => [
@@ -461,11 +474,12 @@ export function ChatView() {
         provider: providerId || null,
         turnId: turn.id,
       });
+      if (!isCurrentConversation()) return;
       if (sessionId) {
         // The persisted display transcript is authoritative. Reloading also
         // removes transient tool-progress rows from the visible conversation.
         const canonical = await loadCanonicalHistory(sessionId);
-        if (sessionRef.current === sessionId) setMessages(canonical);
+        if (isCurrentConversation()) setMessages(canonical);
       } else {
         setMessages((m) => [
           ...m,
@@ -490,12 +504,12 @@ export function ChatView() {
             /* fall back to dropping this turn's rows locally */
           }
         }
-        if (sessionRef.current !== sessionId) return;
+        if (!isCurrentConversation()) return;
         setMessages((current) => canonical ?? (current.includes(msg) ? current.slice(0, current.indexOf(msg)) : current));
         setInput((current) => (current.trim() ? current : text));
         return;
       }
-      if (sessionRef.current !== sessionId) return;
+      if (!isCurrentConversation()) return;
       let canonical: ChatMessage[] | null = null;
       if (sessionId) {
         try {
@@ -556,7 +570,8 @@ export function ChatView() {
   }
 
   function onKeyDown(e: React.KeyboardEvent) {
-    if (e.key !== "Enter") return;
+    // WebKit can report the IME confirmation as keyCode 229 after compositionend.
+    if (e.key !== "Enter" || e.nativeEvent.isComposing || e.keyCode === 229) return;
     if (sendOnEnter && !e.shiftKey) {
       e.preventDefault();
       send();
@@ -572,7 +587,8 @@ export function ChatView() {
     <div className="flex flex-col h-full" style={{ animation: "fadeIn 0.2s ease" }}>
       {/* Messages */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-1" style={{ paddingBottom: "var(--space-md)" }}>
-        {messages.length === 0 && (
+        {!sessionReady && <p role="status">{t("chat.loadingHistory")}</p>}
+        {sessionReady && messages.length === 0 && (
           <div
             className="flex flex-col items-center justify-center h-full text-center"
             style={{ padding: "var(--space-xl) var(--space-md)" }}
@@ -797,21 +813,21 @@ export function ChatView() {
               {agents.length > 0 && (
                 <AgentDropdown agents={agents} value={agentId} onSelect={setAgentId} />
               )}
-              {messages.length >= 2 && !busy && (
+              {messages.length >= 2 && !busy && sessionReady && (
                 <ToolbarIconButton
                   icon={<RotateCcw size={16} />}
                   title={t("chat.undoLastTurn")}
                   onClick={rollbackLast}
                 />
               )}
-              {messages.length > 0 && !busy && (
+              {messages.length > 0 && !busy && sessionReady && (
                 <ToolbarIconButton
                   icon={<Trash2 size={16} />}
                   title={t("chat.clearHistoryTooltip")}
                   onClick={() => void clearHistory()}
                 />
               )}
-              {sessionId && messages.length >= 2 && !busy && (
+              {sessionId && messages.length >= 2 && !busy && sessionReady && (
                 <div className="relative">
                   <ToolbarIconButton
                     icon={<History size={16} />}
@@ -847,7 +863,7 @@ export function ChatView() {
                   )}
                 </div>
               )}
-              {sessionId && messages.length >= 2 && !busy && (
+              {sessionId && messages.length >= 2 && !busy && sessionReady && (
                 <div className="relative">
                   <ToolbarIconButton
                     icon={<GitBranch size={16} />}
@@ -895,9 +911,6 @@ export function ChatView() {
               )}
             </div>
             <div className="flex items-center gap-2">
-              <span className="text-xs text-text-muted" title={t("chat.inFlightRuns")} style={{ whiteSpace: "nowrap" }}>
-                {t("chat.tasks", { n: taskCount })}
-              </span>
               <ToolbarIconButton
                 icon={expanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
                 title={expanded ? t("chat.collapseInput") : t("chat.expandInput")}
@@ -943,7 +956,7 @@ export function ChatView() {
               ) : (
                 <button
                   onClick={send}
-                  disabled={!hasText}
+                  disabled={!hasText || !sessionReady}
                   title={t("chat.send")}
                   aria-label={t("chat.send")}
                   className="inline-flex items-center justify-center rounded-full transition-all duration-150 outline-none disabled:opacity-55"

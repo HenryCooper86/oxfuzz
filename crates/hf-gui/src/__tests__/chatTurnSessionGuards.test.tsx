@@ -16,6 +16,7 @@ const backend = vi.hoisted(() => {
     resolveTurn: undefined as undefined | ((answer: string) => void),
     rejectTurn: undefined as undefined | ((error: Error) => void),
     sessions: 0,
+    emit: undefined as undefined | ((event: { payload: unknown }) => void),
   };
   const turns = (text: string) => [{ role: "assistant", content: text }];
   const invoke = vi.fn(async (command: string, args?: Record<string, unknown>) => {
@@ -37,7 +38,7 @@ const backend = vi.hoisted(() => {
   return { state, invoke };
 });
 vi.mock("../lib", () => ({
-  getTransport: () => ({ invoke: backend.invoke, listen: async () => () => {} }),
+  getTransport: () => ({ invoke: backend.invoke, listen: async (_event: string, handler: (event: { payload: unknown }) => void) => { backend.state.emit = handler; return () => { backend.state.emit = undefined; }; } }),
   pickFolder: vi.fn(async () => null),
 }));
 vi.mock("../providers/prefs", () => ({ usePrefs: () => ({ sendOnEnter: true }) }));
@@ -129,4 +130,65 @@ it("does not let a stale turn overwrite another session's transcript", async () 
   await act(async () => backend.state.resolveTurn!("done"));
   expect(host.textContent).toContain("new session history");
   expect(host.textContent).not.toContain("old session history");
+});
+
+
+it.each([
+  { isComposing: true, keyCode: 13 },
+  { isComposing: false, keyCode: 229 },
+])("does not submit IME confirmation Enter ($isComposing, $keyCode)", async (ime) => {
+  const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!;
+  await act(async () => {
+    setter.call(composer(), "测试");
+    composer().dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () => composer().dispatchEvent(new KeyboardEvent("keydown", {
+    key: "Enter", ...ime, bubbles: true,
+  })));
+  expect(backend.invoke.mock.calls.some(([name]) => name === "chat_agent")).toBe(false);
+  expect(composer().value).toBe("测试");
+  await act(async () => composer().dispatchEvent(new KeyboardEvent("keydown", {
+    key: "Enter", bubbles: true,
+  })));
+  expect(backend.invoke.mock.calls.filter(([name]) => name === "chat_agent")).toHaveLength(1);
+  await act(async () => backend.state.resolveTurn!("done"));
+});
+
+it("waits for the new project's history before sending a turn", async () => {
+  let finishHistory!: (value: unknown) => void;
+  backend.invoke.mockImplementationOnce(async (command) => {
+    expect(command).toBe("chat_history");
+    return new Promise((resolve) => { finishHistory = resolve; });
+  });
+  localStorage.setItem("hf_project_sessions_v1", JSON.stringify({ "/work/second": "session-9" }));
+  await render("/work/second");
+  await sendMessage("new project question");
+  expect(backend.invoke.mock.calls.some(([name]) => name === "chat_agent")).toBe(false);
+  await act(async () => finishHistory([{ role: "assistant", content: "second project history" }]));
+  await act(async () => byLabel("Send")!.click());
+  const call = backend.invoke.mock.calls.find(([name]) => name === "chat_agent")!;
+  expect(call[1]).toMatchObject({ sessionId: "session-9", project: "/work/second" });
+});
+
+it("does not append an old turn's tool events after switching project", async () => {
+  await sendMessage("inspect old project");
+  localStorage.setItem("hf_project_sessions_v1", JSON.stringify({ "/work/second": "session-9" }));
+  await render("/work/second");
+  await act(async () => backend.state.emit!({ payload: { type: "tool_call", name: "Read", args: { path: "old-project-secret.c" } } }));
+  expect(host.textContent).not.toContain("old-project-secret.c");
+  expect(host.textContent).toContain("new session history");
+  await act(async () => backend.state.resolveTurn!("done"));
+});
+
+it("does not restore an old answer while the new project is still loading", async () => {
+  await sendMessage("old project question");
+  let finishHistory!: (value: unknown) => void;
+  backend.invoke.mockImplementationOnce(async () => new Promise((resolve) => { finishHistory = resolve; }));
+  localStorage.setItem("hf_project_sessions_v1", JSON.stringify({ "/work/second": "session-9" }));
+  await render("/work/second");
+  await act(async () => backend.state.resolveTurn!("done"));
+  expect(host.textContent).not.toContain("old session history");
+  expect(host.textContent).toContain("Loading conversation");
+  await act(async () => finishHistory([{ role: "assistant", content: "second project history" }]));
+  expect(host.textContent).toContain("second project history");
 });

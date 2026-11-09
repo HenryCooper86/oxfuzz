@@ -371,6 +371,15 @@ and are not used to calculate rollback or branch indices. A cached session id
 that no longer exists is discarded and replaced with a newly-created session
 instead of silently switching to frontend-only history.
 
+The assistant waits for the selected project's conversation to load before
+accepting a turn. Progress events from a turn belonging to the previous
+project are not rendered in the newly selected conversation. Enter confirms
+IME composition without submitting the draft. The composer labels its prompt
+steering as "Plan & act": it is not a read-only execution policy. Chat undo
+and checkpoint restoration change the conversation, not completed tool side
+effects. The composer does not present a fuzz-run flag as an assistant task
+count.
+
 ### 4.1.1 Chat Turn Control
 
 A turn may name the provider that answers it. `run_chat_turn` runs the agent on
