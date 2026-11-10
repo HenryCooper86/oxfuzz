@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Download oxfuzz, a desktop fuzzing workbench with reviewed harnesses, isolated engines and retained crash evidence."
+    />
+    <meta name="theme-color" content="#101b2b" />
+    <title>oxfuzz — Find the crash. Keep the evidence.</title>
+    <link rel="stylesheet" href="/style.css" />
+    <link rel="icon" href="/mark.svg" type="image/svg+xml" />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <header class="wrap">
+      <a class="brand" href="/" aria-label="oxfuzz home"
+        ><img src="/mark.svg" width="30" height="30" alt="" />oxfuzz</a
+      >
+      <nav aria-label="Main navigation">
+        <a href="#workflow">Workflow</a><a href="#setup">Get started</a
+        ><a class="nav-download" href="#downloads"
+          >Download <span aria-hidden="true">↓</span></a
+        >
+      </nav>
+    </header>
+    <main id="main">
+      <section class="hero wrap">
+        <div>
+          <p class="eyebrow">
+            <span class="status-dot"></span> FUZZING, WITH A HUMAN IN CONTROL
+          </p>
+          <h1>Find the crash.<br />Keep the evidence.</h1>
+          <p class="lede">
+            A desktop workbench for discovering targets, reviewing harnesses and
+            running isolated fuzzing campaigns. From the first input to a crash
+            you can investigate.
+          </p>
+          <div class="hero-actions">
+            <a class="primary" href="#downloads"
+              >Get oxfuzz <span aria-hidden="true">↓</span></a
+            ><a href="#workflow"
+              >Explore the workflow <span aria-hidden="true">↗</span></a
+            >
+          </div>
+          <p class="release-label">
+            v{{VERSION}} <span>·</span> macOS, Linux &amp; Windows
+            <span>·</span> Experimental release
+          </p>
+        </div>
+        <div
+          class="workflow-visual"
+          aria-label="Workflow: target, reviewed harness, sandbox, retained evidence"
+        >
+          <div class="visual-top">
+            <span>CAMPAIGN WORKFLOW</span><span class="mini-mark">+</span>
+          </div>
+          <ol>
+            <li>
+              <span class="step-number">01</span>
+              <div>
+                <strong>Choose a target</strong
+                ><span>C · C++ · Rust · Linux kernels</span>
+              </div>
+            </li>
+            <li>
+              <span class="step-number">02</span>
+              <div>
+                <strong>Review the harness</strong
+                ><span>Model review + human approval</span>
+              </div>
+              <span class="review-label">REVIEW</span>
+            </li>
+            <li>
+              <span class="step-number">03</span>
+              <div>
+                <strong>Run inside the sandbox</strong
+                ><span>Time, memory and CPU limits</span>
+              </div>
+            </li>
+            <li>
+              <span class="step-number">04</span>
+              <div>
+                <strong>Investigate the result</strong
+                ><span>Coverage · crashes · retained artifacts</span>
+              </div>
+            </li>
+          </ol>
+          <div class="visual-footer">
+            <span class="status-dot"></span> Your approval moves the campaign
+            forward.
+          </div>
+        </div>
+      </section>
+      <div class="engine-strip">
+        <div class="wrap">
+          <span>FOUR ENGINE ADAPTERS</span><strong>libFuzzer</strong
+          ><strong>AFL++</strong><strong>honggfuzz</strong
+          ><strong>syzkaller</strong>
+        </div>
+      </div>
+      <section class="section wrap" id="workflow">
+        <div class="section-title">
+          <p class="eyebrow">FROM SOURCE TO EVIDENCE</p>
+          <h2>One place to follow<br />the whole campaign.</h2>
+        </div>
+        <div class="features">
+          <article>
+            <span class="feature-number">01 / PREPARE</span>
+            <h3>Know what you are running.</h3>
+            <p>
+              Discover promising targets, inspect generated harnesses, and
+              approve the exact revision before a full campaign.
+            </p>
+          </article>
+          <article>
+            <span class="feature-number">02 / OBSERVE</span>
+            <h3>Stay close to the run.</h3>
+            <p>
+              Follow live engine metrics, set resource limits, and stop a
+              campaign while retaining its results.
+            </p>
+          </article>
+          <article>
+            <span class="feature-number">03 / INVESTIGATE</span>
+            <h3>Work from retained evidence.</h3>
+            <p>
+              Scan crashes with progress and cancellation. Generate AI reports
+              separately, when you want interpretation.
+            </p>
+          </article>
+        </div>
+      </section>
+      <section class="download-section" id="downloads">
+        <div class="wrap">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">THE CURRENT RELEASE</p>
+              <h2>Make room for better testing.</h2>
+            </div>
+            <span class="version">v{{VERSION}}</span>
+          </div>
+          <p class="section-intro">
+            Choose your desktop package, then build the sandbox below. Downloads
+            are hosted here and do not require a GitHub account.
+          </p>
+          <!-- PREVIEW -->
+          <div class="downloads"><!-- DOWNLOADS --></div>
+          <p class="release-notice">
+            <strong>Experimental distribution.</strong> macOS packages are
+            ad-hoc signed and not notarized. Windows packages are unsigned. Your
+            operating system may warn or block installation. Live release
+            qualification covers macOS Apple silicon; other packages are built
+            and checked in CI.
+          </p>
+        </div>
+      </section>
+      <section class="section wrap" id="setup">
+        <div class="section-title">
+          <p class="eyebrow">BEFORE YOUR FIRST CAMPAIGN</p>
+          <h2>Desktop app.<br />Isolated engines.</h2>
+          <p class="section-intro">
+            Install Docker and keep its daemon running. The sandbox kit builds
+            the pinned engine toolchain locally; it does not include the
+            application source.
+          </p>
+        </div>
+        <div class="setup-steps">
+          <article>
+            <span>1</span>
+            <div>
+              <h3>Install the desktop app</h3>
+              <p>
+                Open the package for your system. On macOS, move oxfuzz to
+                Applications. On Linux, install the DEB/RPM or make the AppImage
+                executable. On Windows, run the installer.
+              </p>
+            </div>
+          </article>
+          <article>
+            <span>2</span>
+            <div>
+              <h3>Build the sandbox</h3>
+              <p>
+                Download and extract the sandbox kit. Run these commands from
+                its directory using Bash, Python 3 and Docker. Windows users
+                need a WSL 2 shell with Docker integration. The first build
+                downloads toolchains and needs several GB of disk space.
+              </p>
+              <pre><code>tar -xzf oxfuzz-sandbox-kit-{{VERSION}}.tar.gz
+cd oxfuzz-sandbox-kit-{{VERSION}}
+./scripts/build-sandbox.sh</code></pre>
+              <p>
+                Keep the resulting image tag
+                <code>oxfuzz/fuzz-sandbox:0.2.2</code>. The desktop app uses
+                this local image.
+              </p>
+            </div>
+          </article>
+          <article>
+            <span>3</span>
+            <div>
+              <h3>Connect a provider and open a project</h3>
+              <p>
+                Configure your chosen AI provider in Settings. Provider access
+                is required for AI assistance and normal harness review. Confirm
+                sandbox readiness, discover a target, and review the harness
+                before approving execution.
+              </p>
+              <p class="note">
+                Kernel fuzzing with syzkaller also needs a compatible
+                instrumented kernel, root filesystem and guest SSH key. These
+                are not included in the desktop download. Physical automotive
+                testing requires separate setup and approval.
+              </p>
+            </div>
+          </article>
+        </div>
+      </section>
+      <section class="details-section">
+        <div class="wrap details-grid">
+          <article id="release-notes">
+            <p class="eyebrow">RELEASE NOTES / {{VERSION}}</p>
+            <h2>A clearer view of the work.</h2>
+            <ul>
+              <li>Bounded fuzzing runs and improved live engine metrics.</li>
+              <li>
+                Crash scanning separated from AI reports, with progress and
+                cancellation.
+              </li>
+              <li>Provider and language selection fixes for the assistant.</li>
+              <li>Improved Settings, Knowledge, Skills and Agents behavior.</li>
+              <li>Icon controls for Dark, Light and System themes.</li>
+              <li>
+                Sandbox SSH/SCP support and retained syzkaller campaign output.
+              </li>
+            </ul>
+          </article>
+          <article id="verify">
+            <p class="eyebrow">VERIFY YOUR DOWNLOAD</p>
+            <h2>Check the bytes.</h2>
+            <p>
+              Compare the SHA-256 of your download with the published checksums
+              before installing.
+            </p>
+            <!-- CHECKSUMS -->
+            <pre><code># macOS
+shasum -a 256 your-download.dmg
+# Linux
+sha256sum your-download.AppImage
+# Windows PowerShell
+Get-FileHash .\your-download.msi -Algorithm SHA256</code></pre>
+            <p class="note">
+              Checksums detect incomplete or altered files. They are not a
+              substitute for a trusted publisher signature.
+            </p>
+          </article>
+        </div>
+      </section>
+    </main>
+    <footer class="wrap">
+      <a class="brand" href="/">oxfuzz</a>
+      <p>A workbench for deliberate fuzzing.</p>
+      <nav aria-label="Footer">
+        <a href="#release-notes">Release notes</a><a href="#verify">Checksums</a
+        ><a href="#setup">Installation</a>
+      </nav>
+    </footer>
+  </body>
+</html>

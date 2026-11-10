@@ -1,0 +1,9 @@
+{
+  "name": "oxfuzz-downloads",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "build": "node build.mjs"
+  }
+}
