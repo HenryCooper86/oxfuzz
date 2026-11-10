@@ -1617,7 +1617,9 @@ pub fn agent_info(
 /// List all skills -- built-in fuzzing skills plus any user-authored ones.
 #[tauri::command]
 #[must_use]
-pub fn list_skills(state: tauri::State<'_, crate::state::AppState>) -> Vec<SkillDefinition> {
+pub fn list_skills(
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Vec<hf_service::SkillDefinitionView> {
     state.container.list_skill_definitions()
 }
 
@@ -1634,8 +1636,11 @@ pub fn list_skills(state: tauri::State<'_, crate::state::AppState>) -> Vec<Skill
 pub fn read_skill(
     state: tauri::State<'_, crate::state::AppState>,
     name: String,
-) -> Option<SkillDefinition> {
-    state.container.get_skill_definition(&name)
+) -> Option<hf_service::SkillDefinitionView> {
+    state
+        .container
+        .get_skill_definition(&name)
+        .map(hf_service::SkillDefinitionView::from)
 }
 
 /// Create or update a user skill (writes `skills/<name>/{skill.toml,root.md}`).

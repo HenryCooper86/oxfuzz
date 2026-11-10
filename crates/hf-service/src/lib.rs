@@ -134,7 +134,7 @@ pub use hf_storage::MAX_CAMPAIGN_HEALTH_EVENT_PAGE_SIZE;
 
 pub use agent::{
     AgentDefinitionView, AgentRegistryInfo, AgentToolDefinition, AgentTurnRequest,
-    ChatResponseLanguage,
+    ChatResponseLanguage, SkillDefinitionView,
 };
 /// Harness lint findings, re-exported so presentation layers can render them
 /// without depending on `hf-harness` directly.

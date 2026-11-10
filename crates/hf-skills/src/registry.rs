@@ -251,6 +251,12 @@ fn is_safe_name(name: &str) -> bool {
 }
 
 impl SkillRegistry {
+    /// Whether removing an override restores a shipped skill.
+    #[must_use]
+    pub fn has_builtin(name: &str) -> bool {
+        BUILTINS.iter().any(|(builtin, _, _)| *builtin == name)
+    }
+
     /// A registry of just the embedded built-in skills (no user directory).
     #[must_use]
     pub fn builtin() -> Self {

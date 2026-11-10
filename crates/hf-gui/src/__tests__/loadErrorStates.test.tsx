@@ -18,8 +18,8 @@ beforeEach(() => {
   invoke.mockReset();
   invoke.mockImplementation(async (command: string) => {
     if (["list_agents", "list_skills", "knowledge_summary"].includes(command) && failing) throw new Error("service unreachable");
-    if (command === "list_agents") return [{ id: "a1", name: "Triage Analyst", description: "d", role: "triage", icon: null, system_prompt: "", allowed_tools: [], model_tags: [], temperature: null, max_iterations: 8, autonomy: "assist", capabilities: [], user_callable: true, skills: [], trust_tier: "user-defined" }];
-    if (command === "list_skills") return [{ name: "corpus-curation", version: "1", description: "Curates corpora", domain: [], body: "", max_input_tokens: 2000, trust_tier: "user-defined" }];
+    if (command === "list_agents") return [{ id: "a1", name: "Triage Analyst", description: "d", role: "triage", icon: null, system_prompt: "", allowed_tools: [], model_tags: [], temperature: null, max_iterations: 8, autonomy: "assist", capabilities: [], user_callable: true, skills: [], trust_tier: "user-defined", builtin_available: false, completion_requirement: null }];
+    if (command === "list_skills") return [{ name: "corpus-curation", version: "1", description: "Curates corpora", domain: [], body: "", builtin_available: false, trust_tier: "user-defined" }];
     if (command === "knowledge_summary") return { db_configured: true, targets: [{ symbol: "parse_value", kind: "Function", fit_score: 0.8, project: "/sample", location: "a.c:1" }], runs: [], crashes: [] };
     if (command === "knowledge_stats") return { indexed: false, files: 0, chunks: 0, documents: 0, legacy_documents_preserved: false, indexed_at: null, effective: { retrieval_strategy: "keyword", chunk_max_tokens: 512, embedding_model: null, embedding_dimensions: null }, configured: { retrieval_strategy: "keyword", chunk_max_tokens: 512, embedding_model: null, embedding_dimensions: null }, stale: false, warnings: [] };
     if (command === "agent_tools") return [];

@@ -156,6 +156,12 @@ fn is_safe_id(id: &str) -> bool {
 }
 
 impl AgentRegistry {
+    /// Whether removing an override restores a shipped agent.
+    #[must_use]
+    pub fn has_builtin(id: &str) -> bool {
+        BUILTINS.iter().any(|(builtin, _)| *builtin == id)
+    }
+
     /// A registry of just the embedded built-in agents (no user directory).
     #[must_use]
     pub fn builtin() -> Self {

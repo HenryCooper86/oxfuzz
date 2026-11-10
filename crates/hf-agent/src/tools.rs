@@ -15,6 +15,10 @@ pub const TOOL_SPECS: &[(&str, &str)] = &[
     ("run", "Drive a fuzzing engine against a compiled harness"),
     ("triage", "Reproduce, classify, and deduplicate crashes"),
     ("corpus", "Seed, grow, prune, or list the corpus"),
+    (
+        crate::DELEGATE_TOOL,
+        "Delegate a scoped task to a specialist agent",
+    ),
 ];
 
 /// Per-tool usage lines for the system-prompt catalog, keyed by tool name.

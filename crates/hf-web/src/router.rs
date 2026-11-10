@@ -4624,7 +4624,7 @@ async fn delete_agent(
     Ok(Json(()))
 }
 
-async fn list_skills(State(state): State<AppState>) -> Json<Vec<hf_service::SkillDefinition>> {
+async fn list_skills(State(state): State<AppState>) -> Json<Vec<hf_service::SkillDefinitionView>> {
     Json(state.container.list_skill_definitions())
 }
 
@@ -4636,8 +4636,13 @@ struct SkillNameRequest {
 async fn read_skill(
     State(state): State<AppState>,
     Json(request): Json<SkillNameRequest>,
-) -> Json<Option<hf_service::SkillDefinition>> {
-    Json(state.container.get_skill_definition(&request.name))
+) -> Json<Option<hf_service::SkillDefinitionView>> {
+    Json(
+        state
+            .container
+            .get_skill_definition(&request.name)
+            .map(hf_service::SkillDefinitionView::from),
+    )
 }
 
 #[derive(Debug, Deserialize)]

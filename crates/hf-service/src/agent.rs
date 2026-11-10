@@ -26,12 +26,31 @@ pub struct AgentDefinitionView {
     #[serde(flatten)]
     pub definition: AgentDefinition,
     pub trust_tier: hf_agent::TrustTier,
+    pub builtin_available: bool,
 }
 
 impl From<AgentDefinition> for AgentDefinitionView {
     fn from(definition: AgentDefinition) -> Self {
         Self {
             trust_tier: definition.trust_tier,
+            builtin_available: AgentRegistry::has_builtin(&definition.id),
+            definition,
+        }
+    }
+}
+
+/// Skill editor data with reset availability independent of provenance.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SkillDefinitionView {
+    #[serde(flatten)]
+    pub definition: hf_skills::SkillDefinition,
+    pub builtin_available: bool,
+}
+
+impl From<hf_skills::SkillDefinition> for SkillDefinitionView {
+    fn from(definition: hf_skills::SkillDefinition) -> Self {
+        Self {
+            builtin_available: hf_skills::SkillRegistry::has_builtin(&definition.name),
             definition,
         }
     }
@@ -172,7 +191,8 @@ impl ServiceContainer {
         &self,
         definition: AgentDefinition,
     ) -> Result<(), ClassifiedError> {
-        validate_agent_definition(&definition, &self.list_skill_definitions())?;
+        let skills = hf_skills::SkillRegistry::with_user_dir(skill_definitions_dir());
+        validate_agent_definition(&definition, &skills.list())?;
         AgentRegistry::with_user_dir(agent_definitions_dir())
             .save(definition)
             .map_err(|error| agent_registry_error(&error))
@@ -191,8 +211,12 @@ impl ServiceContainer {
 
     /// List shipped and user-authored skills from the canonical registry.
     #[must_use]
-    pub fn list_skill_definitions(&self) -> Vec<hf_skills::SkillDefinition> {
-        hf_skills::SkillRegistry::with_user_dir(skill_definitions_dir()).list()
+    pub fn list_skill_definitions(&self) -> Vec<SkillDefinitionView> {
+        hf_skills::SkillRegistry::with_user_dir(skill_definitions_dir())
+            .list()
+            .into_iter()
+            .map(SkillDefinitionView::from)
+            .collect()
     }
 
     /// Read one skill definition from the canonical registry.
@@ -224,6 +248,20 @@ impl ServiceContainer {
     /// Returns a validation error for an invalid or unknown name, or an
     /// internal error when the canonical registry cannot be updated.
     pub fn delete_skill_definition(&self, name: &str) -> Result<(), ClassifiedError> {
+        if !hf_skills::SkillRegistry::has_builtin(name) {
+            let references: Vec<_> = self
+                .list_agent_definitions()
+                .into_iter()
+                .filter(|agent| agent.definition.skills.iter().any(|skill| skill == name))
+                .map(|agent| agent.definition.id)
+                .collect();
+            if !references.is_empty() {
+                return Err(ClassifiedError::Validation(format!(
+                    "skill '{name}' is used by agents: {}; remove those references before deleting it",
+                    references.join(", ")
+                )));
+            }
+        }
         hf_skills::SkillRegistry::with_user_dir(skill_definitions_dir())
             .delete(name)
             .map_err(|error| skill_registry_error(&error))
@@ -709,10 +747,9 @@ fn validate_agent_definition(
         ));
     }
     let known_tool = |candidate: &str| {
-        candidate == hf_agent::DELEGATE_TOOL
-            || hf_agent::TOOL_SPECS
-                .iter()
-                .any(|(name, _)| *name == candidate)
+        hf_agent::TOOL_SPECS
+            .iter()
+            .any(|(name, _)| *name == candidate)
     };
     if let Some(unknown) = definition
         .allowed_tools

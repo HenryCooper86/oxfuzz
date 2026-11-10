@@ -1,3 +1,4 @@
+import { useRegistryEditor } from "../hooks/useRegistryEditor";
 import { CampaignAllocation } from "../components/CampaignAllocation";
 import { KnowledgeIndexDetails, type KnowledgeIndexDetailsStatus } from "../components/KnowledgeIndexDetails";
 import { SchedulerRuntimeStatus, type CampaignSchedulerStatus } from "../components/SchedulerRuntimeStatus";
@@ -92,7 +93,7 @@ function IconBtn({ onClick, icon, danger, title }: { onClick: () => void; icon: 
 }
 function ErrorBanner({ message }: { message: string }) {
   return (
-    <div className="text-xs rounded-md px-3 py-2" style={{ background: "var(--error-subtle, rgba(220,60,60,0.12))", color: "var(--error)", border: "1px solid var(--error)" }}>
+    <div role="alert" className="text-xs rounded-md px-3 py-2" style={{ background: "var(--error-subtle, rgba(220,60,60,0.12))", color: "var(--error)", border: "1px solid var(--error)" }}>
       {message}
     </div>
   );
@@ -122,6 +123,8 @@ interface AgentDefinition {
   user_callable: boolean;
   skills: string[];
   trust_tier: TrustTier;
+  builtin_available: boolean;
+  completion_requirement: { tool: string; reminder: string } | null;
 }
 
 // Editable form state. Numeric/array fields are kept as strings while editing.
@@ -134,13 +137,15 @@ interface AgentDraft {
   allowed_tools: string[];
   model_tags: string; // comma-separated while editing
   temperature: string; // empty -> null
-  max_iterations: number;
+  max_iterations: string;
   autonomy: Autonomy;
   capabilities: string[];
   user_callable: boolean;
   skills: string[];
+  completion_requirement: AgentDefinition["completion_requirement"];
   icon: string | null;
   isNew: boolean;
+  idEdited: boolean;
 }
 
 const ROLES: AgentRole[] = ["orchestrator", "discovery", "harness-author", "run-operator", "triage", "coverage", "corpus"];
@@ -180,13 +185,15 @@ function emptyDraft(): AgentDraft {
     allowed_tools: [],
     model_tags: "",
     temperature: "",
-    max_iterations: 12,
+    max_iterations: "12",
     autonomy: "assist",
     capabilities: [],
     user_callable: true,
     skills: [],
     icon: null,
+    completion_requirement: null,
     isNew: true,
+    idEdited: false,
   };
 }
 
@@ -201,13 +208,15 @@ function draftFrom(a: AgentDefinition, opts: { duplicate?: boolean } = {}): Agen
     allowed_tools: [...a.allowed_tools],
     model_tags: a.model_tags.join(", "),
     temperature: a.temperature == null ? "" : String(a.temperature),
-    max_iterations: a.max_iterations,
+    max_iterations: String(a.max_iterations),
     autonomy: a.autonomy,
     capabilities: [...a.capabilities],
     user_callable: a.user_callable,
     skills: [...a.skills],
     icon: a.icon,
+    completion_requirement: a.completion_requirement,
     isNew: dup,
+    idEdited: true,
   };
 }
 
@@ -215,45 +224,37 @@ export function AgentsView() {
   const { t } = useI18n();
   const confirm = useConfirm();
   const [info, setInfo] = useState<AgentInfo | null>(null);
-  const [agents, setAgents] = useState<AgentDefinition[]>([]);
+  const editor = useRegistryEditor<AgentDefinition, AgentDraft>("list_agents");
+  const { entries: agents, loaded, draft, setDraft, busy, error, setError, loadError, reload } = editor;
   const [tools, setTools] = useState<{ name: string; description: string }[]>([]);
   const [skills, setSkills] = useState<SkillDefinition[]>([]);
-  const [draft, setDraft] = useState<AgentDraft | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  // A failed list load is shown as an error, never as "no agents".
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const reload = () => getTransport().invoke<AgentDefinition[]>("list_agents")
-    .then((d) => { setAgents(d); setLoadError(null); })
-    .catch((e) => setLoadError(String(e)));
+  const [choicesError, setChoicesError] = useState<string | null>(null);
+  const [choicesLoaded, setChoicesLoaded] = useState(false);
+  const choicesRefresh = useMemo(() => createLatestRefresh({
+    load: () => Promise.all([
+      getTransport().invoke<{ name: string; description: string }[]>("agent_tools"),
+      getTransport().invoke<SkillDefinition[]>("list_skills"),
+    ]),
+    commit: ([nextTools, nextSkills]) => { setTools(nextTools); setSkills(nextSkills); setChoicesError(null); setChoicesLoaded(true); },
+  }), []);
+  const reloadChoices = useCallback(() => choicesRefresh.refresh().catch((cause: unknown) => {
+    setChoicesError(String(cause)); setChoicesLoaded(false);
+  }), [choicesRefresh]);
   useEffect(() => {
     let cancelled = false;
-    // Header details are optional context; the agent list below reports its own failure.
-    getTransport().invoke<AgentInfo>("agent_info").then((d) => !cancelled && setInfo(d)).catch(() => {});
-    getTransport().invoke<AgentDefinition[]>("list_agents").then((d) => !cancelled && setAgents(d)).catch((e) => !cancelled && setLoadError(String(e)));
-    getTransport().invoke<{ name: string; description: string }[]>("agent_tools").then((d) => !cancelled && setTools(d)).catch(() => {});
-    getTransport().invoke<SkillDefinition[]>("list_skills").then((d) => !cancelled && setSkills(d)).catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    // Header context is optional; registry and editor failures are shown separately.
+    getTransport().invoke<AgentInfo>("agent_info").then(value => !cancelled && setInfo(value)).catch(() => {});
+    choicesRefresh.activate();
+    void Promise.resolve().then(reloadChoices);
+    return () => { cancelled = true; choicesRefresh.deactivate(); };
+  }, [choicesRefresh, reloadChoices]);
 
-  function startNew() {
-    setError(null);
-    setDraft(emptyDraft());
-  }
-  function startEdit(a: AgentDefinition) {
-    setError(null);
-    setDraft(draftFrom(a));
-  }
-  function startDuplicate(a: AgentDefinition) {
-    setError(null);
-    setDraft(draftFrom(a, { duplicate: true }));
-  }
+  function startNew() { editor.open(emptyDraft); }
+  function startEdit(a: AgentDefinition) { editor.open(() => draftFrom(a)); }
+  function startDuplicate(a: AgentDefinition) { editor.open(() => draftFrom(a, { duplicate: true })); }
 
   function setField<K extends keyof AgentDraft>(key: K, value: AgentDraft[K]) {
-    setDraft((d) => (d ? { ...d, [key]: value } : d));
+    setDraft((d) => (d ? { ...d, [key]: value, idEdited: d.idEdited || key === "id" } : d));
   }
   function toggleTool(name: string) {
     setDraft((d) => {
@@ -271,9 +272,9 @@ export function AgentsView() {
   }
 
   async function save() {
-    if (!draft) return;
+    if (!draft || busy || !choicesLoaded) return;
     const name = draft.name.trim();
-    const id = draft.isNew ? slugify(draft.id.trim() || name) : draft.id;
+    const id = draft.isNew ? slugify(draft.idEdited ? draft.id.trim() : name) : draft.id;
     if (!name) {
       setError(t("agents.errNameRequired"));
       return;
@@ -286,10 +287,17 @@ export function AgentsView() {
       setError(t("agents.errIdSlug"));
       return;
     }
+    if (draft.isNew && agents.some(agent => agent.id === id)) {
+      setError(t("registry.alreadyExists", { id })); return;
+    }
+    const iterations = Number(draft.max_iterations);
+    if (!Number.isInteger(iterations) || iterations < 1 || iterations > 50) {
+      setError(t("agents.errIterations")); return;
+    }
     let temperature: number | null = null;
     if (draft.temperature.trim() !== "") {
       const temp = Number(draft.temperature);
-      if (Number.isNaN(temp)) {
+      if (!Number.isFinite(temp) || temp < 0 || temp > 2) {
         setError(t("agents.errTemperature"));
         return;
       }
@@ -305,37 +313,24 @@ export function AgentsView() {
       allowed_tools: draft.allowed_tools,
       model_tags: splitList(draft.model_tags),
       temperature,
-      max_iterations: Math.max(1, Math.min(50, draft.max_iterations || 1)),
+      max_iterations: iterations,
       autonomy: draft.autonomy,
       capabilities: draft.capabilities,
       user_callable: draft.user_callable,
       skills: draft.skills,
+      completion_requirement: draft.completion_requirement,
     };
-    setBusy(true);
-    setError(null);
-    try {
-      await getTransport().invoke("save_agent", { definition: def });
-      setDraft(null);
-      reload();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
+    await editor.mutate(() => getTransport().invoke("save_agent", { definition: def }));
   }
 
   async function del(a: AgentDefinition) {
-    const builtIn = a.trust_tier === "built-in";
+    if (busy) return;
+    const builtIn = a.builtin_available;
     const prompt = builtIn
       ? t("agents.resetConfirm", { name: a.name })
       : t("agents.deleteConfirm", { name: a.name });
     if (!(await confirm({ title: builtIn ? t("agents.resetTitle") : t("common.delete"), message: prompt, danger: !builtIn, confirmLabel: builtIn ? t("common.reset") : t("common.delete") }))) return;
-    try {
-      await getTransport().invoke("delete_agent", { id: a.id });
-      reload();
-    } catch (e) {
-      setError(String(e));
-    }
+    await editor.mutate(() => getTransport().invoke("delete_agent", { id: a.id }), false);
   }
 
   return (
@@ -354,22 +349,25 @@ export function AgentsView() {
         <span className="text-xs text-text-muted uppercase" style={{ letterSpacing: "0.08em" }}>
           {t("agents.countLabel", { n: agents.length })}
         </span>
-        {!draft && <PrimaryBtn onClick={startNew} icon={<Plus size={13} />}>{t("agents.new")}</PrimaryBtn>}
+        {!draft && <PrimaryBtn disabled={!loaded || !!loadError} onClick={startNew} icon={<Plus size={13} />}>{t("agents.new")}</PrimaryBtn>}
       </div>
 
       {error && !draft && <ErrorBanner message={error} />}
 
+      {choicesError && <ErrorState title={t("agents.choicesFailed")} message={choicesError} action={<Button variant="outline" size="sm" onClick={() => { void reloadChoices(); void reload(); }}>{t("common.retry")}</Button>} />}
+      {!choicesLoaded && !choicesError && <LoadingState label={t("common.loading")} />}
       {draft ? (
         <AgentEditor
           draft={draft}
           tools={tools}
           skills={skills}
-          busy={busy}
+          choicesReady={choicesLoaded}
+          busy={busy || !choicesLoaded}
           error={error}
           onField={setField}
           onToggleTool={toggleTool}
           onToggleSkill={toggleSkill}
-          onCancel={() => { setDraft(null); setError(null); }}
+          onCancel={editor.close}
           onSave={save}
         />
       ) : (
@@ -377,7 +375,8 @@ export function AgentsView() {
           {loadError && (
             <ErrorState title={t("agents.loadFailed")} message={loadError} action={<Button variant="outline" size="sm" onClick={() => void reload()}>{t("common.retry")}</Button>} />
           )}
-          {!loadError && agents.length === 0 && (
+          {!loaded && <LoadingState label={t("common.loading")} />}
+          {loaded && !loadError && agents.length === 0 && (
             <EmptyState icon={<Bot size={20} />} hint={t("agents.empty")} />
           )}
           {agents.map((a) => (
@@ -413,11 +412,11 @@ function AgentRow({ agent, onEdit, onDuplicate, onDelete }: { agent: AgentDefini
       <div className="flex items-center shrink-0">
         <IconBtn onClick={onEdit} icon={<Pencil size={14} />} title={t("common.edit")} />
         <IconBtn onClick={onDuplicate} icon={<Copy size={14} />} title={t("agents.duplicateTitle")} />
-        {builtIn ? (
+        {!builtIn && (agent.builtin_available ? (
           <IconBtn onClick={onDelete} icon={<RotateCcw size={14} />} title={t("agents.resetTitle")} />
         ) : (
           <IconBtn onClick={onDelete} icon={<Trash2 size={14} />} danger title={t("common.delete")} />
-        )}
+        ))}
       </div>
     </div>
   );
@@ -428,6 +427,7 @@ function AgentEditor({
   tools,
   skills,
   busy,
+  choicesReady,
   error,
   onField,
   onToggleTool,
@@ -439,6 +439,7 @@ function AgentEditor({
   tools: { name: string; description: string }[];
   skills: SkillDefinition[];
   busy: boolean;
+  choicesReady: boolean;
   error: string | null;
   onField: <K extends keyof AgentDraft>(key: K, value: AgentDraft[K]) => void;
   onToggleTool: (name: string) => void;
@@ -448,10 +449,11 @@ function AgentEditor({
 }) {
   const { t } = useI18n();
   // For a new agent, the id auto-derives from the name unless the user edits it.
-  const derivedId = draft.isNew ? slugify(draft.id.trim() || draft.name) : draft.id;
+  const derivedId = draft.isNew && !draft.idEdited ? slugify(draft.name) : draft.id;
   return (
     <div className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
       {error && <ErrorBanner message={error} />}
+      <fieldset disabled={busy} className="contents">
       <div className="grid grid-cols-2 gap-3">
         <Field label={t("agents.fieldName")}>
           <Input
@@ -510,6 +512,7 @@ function AgentEditor({
         />
       </Field>
 
+      {choicesReady && <>
       <Field label={t("agents.fieldAllowedTools")} hint={t("agents.fieldAllowedToolsHint")}>
         {tools.length === 0 ? (
           <span className="text-xs text-text-muted">{t("agents.noToolsAvailable")}</span>
@@ -568,6 +571,7 @@ function AgentEditor({
         )}
       </Field>
 
+      </>}
       <div className="grid grid-cols-3 gap-3">
         <Field label={t("agents.fieldModelTags")} hint={t("agents.fieldModelTagsHint")}>
           <Input mono value={draft.model_tags} placeholder="reasoning, code" onChange={(e) => onField("model_tags", e.target.value)} />
@@ -576,12 +580,16 @@ function AgentEditor({
           <Input mono value={draft.temperature} placeholder={t("agents.fieldTemperaturePlaceholder")} onChange={(e) => onField("temperature", e.target.value)} />
         </Field>
         <Field label={t("agents.fieldMaxIterations")} hint={t("agents.fieldMaxIterationsHint")}>
-          <Input mono type="number" min={1} max={50} value={draft.max_iterations} onChange={(e) => onField("max_iterations", Number(e.target.value) || 1)} />
+          <Input mono type="number" min={1} max={50} value={draft.max_iterations} onChange={(e) => onField("max_iterations", e.target.value)} />
         </Field>
       </div>
 
+      {draft.completion_requirement && <Field label={t("agents.completionRule")}>
+        <p className="text-xs text-text-secondary">{draft.completion_requirement.tool}: {draft.completion_requirement.reminder}</p>
+      </Field>}
+      </fieldset>
       <div className="flex gap-2 justify-end">
-        <GhostBtn onClick={onCancel} icon={<X size={13} />}>{t("common.cancel")}</GhostBtn>
+        <GhostBtn onClick={onCancel} icon={<X size={13} />}>{t(busy ? "common.close" : "common.cancel")}</GhostBtn>
         <PrimaryBtn onClick={onSave} disabled={busy} icon={busy ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}>{t("common.save")}</PrimaryBtn>
       </div>
     </div>
@@ -610,7 +618,7 @@ interface SkillDefinition {
   description: string;
   domain: string[];
   body: string;
-  max_input_tokens: number;
+  builtin_available: boolean;
   trust_tier: TrustTier;
 }
 // Editable form state. The markdown body is bound here and saved as part of a
@@ -639,61 +647,22 @@ function skillDraftFrom(s: SkillDefinition, opts: { duplicate?: boolean } = {}):
 export function SkillsView() {
   const { t } = useI18n();
   const confirm = useConfirm();
-  const [skills, setSkills] = useState<SkillDefinition[]>([]);
-  const [loaded, setLoaded] = useState(false);
-  const [draft, setDraft] = useState<SkillDraft | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  // A failed list load is shown as an error, never as "no skills".
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const reload = () => getTransport().invoke<SkillDefinition[]>("list_skills")
-    .then((d) => { setSkills(d); setLoadError(null); })
-    .catch((e) => setLoadError(String(e)));
-  useEffect(() => {
-    let cancelled = false;
-    getTransport()
-      .invoke<SkillDefinition[]>("list_skills")
-      .then((s) => {
-        if (!cancelled) {
-          setSkills(s);
-          setLoaded(true);
-        }
-      })
-      .catch((e) => {
-        if (!cancelled) {
-          setLoadError(String(e));
-          setLoaded(true);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const editor = useRegistryEditor<SkillDefinition, SkillDraft>("list_skills");
+  const { entries: skills, loaded, draft, setDraft, busy, error, setError, loadError, reload } = editor;
 
   function startNew() {
-    setError(null);
-    setDraft({ name: "", description: "", version: "0.1.0", domain: "fuzzing", body: "# new-skill\n\nDescribe when to use this skill and the procedure to follow.\n", isNew: true });
+    editor.open(() => ({ name: "", description: "", version: "0.1.0", domain: "fuzzing", body: "# new-skill\n\nDescribe when to use this skill and the procedure to follow.\n", isNew: true }));
   }
-  async function startEdit(name: string) {
-    setError(null);
-    try {
-      const s = await getTransport().invoke<SkillDefinition | null>("read_skill", { name });
-      if (!s) {
-        setError(t("skills.errNotFound", { name }));
-        return;
-      }
-      setDraft(skillDraftFrom(s));
-    } catch (e) {
-      setError(String(e));
-    }
+  function startEdit(name: string) {
+    editor.open(async () => {
+      const value = await getTransport().invoke<SkillDefinition | null>("read_skill", { name });
+      if (!value) throw new Error(t("skills.errNotFound", { name }));
+      return skillDraftFrom(value);
+    });
   }
-  function startDuplicate(s: SkillDefinition) {
-    setError(null);
-    setDraft(skillDraftFrom(s, { duplicate: true }));
-  }
+  function startDuplicate(skill: SkillDefinition) { editor.open(() => skillDraftFrom(skill, { duplicate: true })); }
   async function save() {
-    if (!draft) return;
+    if (!draft || busy) return;
     const name = draft.isNew ? slugify(draft.name.trim()) : draft.name;
     if (!name) {
       setError(t("skills.errNameRequired"));
@@ -703,40 +672,25 @@ export function SkillsView() {
       setError(t("skills.errNameSlug"));
       return;
     }
-    setBusy(true);
-    setError(null);
-    try {
-      await getTransport().invoke("save_skill", {
-        definition: {
-          name,
-          description: draft.description,
-          version: draft.version,
-          domain: splitList(draft.domain),
-          body: draft.body,
-          max_input_tokens: 0,
-          trust_tier: "user-defined",
-        },
-      });
-      setDraft(null);
-      reload();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
+    if (draft.isNew && skills.some(skill => skill.name === name)) {
+      setError(t("registry.alreadyExists", { id: name })); return;
     }
+    await editor.mutate(() => getTransport().invoke("save_skill", {
+      definition: {
+        name, description: draft.description, version: draft.version,
+        domain: splitList(draft.domain), body: draft.body, trust_tier: "user-defined",
+      },
+    }));
   }
+
   async function del(s: SkillDefinition) {
-    const builtIn = s.trust_tier === "built-in";
+    if (busy) return;
+    const builtIn = s.builtin_available;
     const prompt = builtIn
       ? t("skills.resetConfirm", { name: s.name })
       : t("skills.deleteConfirm", { name: s.name });
     if (!(await confirm({ title: builtIn ? t("agents.resetTitle") : t("common.delete"), message: prompt, danger: !builtIn, confirmLabel: builtIn ? t("common.reset") : t("common.delete") }))) return;
-    try {
-      await getTransport().invoke("delete_skill", { name: s.name });
-      reload();
-    } catch (e) {
-      setError(String(e));
-    }
+    await editor.mutate(() => getTransport().invoke("delete_skill", { name: s.name }), false);
   }
 
   return (
@@ -747,7 +701,7 @@ export function SkillsView() {
         <span className="text-xs text-text-muted uppercase" style={{ letterSpacing: "0.08em" }}>
           {t("skills.countLabel", { n: skills.length })}
         </span>
-        {!draft && <PrimaryBtn onClick={startNew} icon={<Plus size={13} />}>{t("skills.new")}</PrimaryBtn>}
+        {!draft && <PrimaryBtn disabled={!loaded || !!loadError} onClick={startNew} icon={<Plus size={13} />}>{t("skills.new")}</PrimaryBtn>}
       </div>
 
       {error && !draft && <ErrorBanner message={error} />}
@@ -755,6 +709,7 @@ export function SkillsView() {
       {draft ? (
         <div className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
           {error && <ErrorBanner message={error} />}
+          <fieldset disabled={busy} className="contents">
           <div className="grid grid-cols-2 gap-3">
             <Field label={t("skills.fieldName")} hint={draft.isNew ? t("skills.fieldNameHintNew") : t("skills.fieldHintLocked")}>
               <Input mono value={draft.name} disabled={!draft.isNew} placeholder="my-skill" onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
@@ -772,8 +727,9 @@ export function SkillsView() {
           <Field label={t("skills.fieldBody")} hint={t("skills.fieldBodyHint")}>
             <Textarea mono rows={16} value={draft.body} onChange={(e) => setDraft({ ...draft, body: e.target.value })} />
           </Field>
+          </fieldset>
           <div className="flex gap-2 justify-end">
-            <GhostBtn onClick={() => { setDraft(null); setError(null); }} icon={<X size={13} />}>{t("common.cancel")}</GhostBtn>
+            <GhostBtn onClick={editor.close} icon={<X size={13} />}>{t(busy ? "common.close" : "common.cancel")}</GhostBtn>
             <PrimaryBtn onClick={save} disabled={busy} icon={busy ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}>{t("common.save")}</PrimaryBtn>
           </div>
         </div>
@@ -825,11 +781,11 @@ function SkillRow({ skill, onEdit, onDuplicate, onDelete }: { skill: SkillDefini
       <div className="flex items-center shrink-0">
         <IconBtn onClick={onEdit} icon={<Pencil size={14} />} title={t("common.edit")} />
         <IconBtn onClick={onDuplicate} icon={<Copy size={14} />} title={t("skills.duplicateTitle")} />
-        {builtIn ? (
+        {!builtIn && (skill.builtin_available ? (
           <IconBtn onClick={onDelete} icon={<RotateCcw size={14} />} title={t("agents.resetTitle")} />
         ) : (
           <IconBtn onClick={onDelete} icon={<Trash2 size={14} />} danger title={t("common.delete")} />
-        )}
+        ))}
       </div>
     </div>
   );

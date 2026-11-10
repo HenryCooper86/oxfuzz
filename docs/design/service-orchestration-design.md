@@ -1056,6 +1056,21 @@ a prompt directive is not a deterministic language classifier.
 
 ### Registry and settings presentation evidence
 
+Registry editor views expose whether a shipped definition exists independently
+of the current definition's provenance. Removing a user override is presented as
+resetting to that shipped definition; deleting a custom skill referenced by an
+agent is rejected by the service and names the referencing agents. The editable
+tool roster includes delegation. Editing an agent preserves its completion rule.
+
+Editors discard superseded reads and save completions, preserve a newer draft
+when an earlier save finishes, and report tool/skill selection failures with retry.
+Creating a new entry cannot silently replace an existing entry in the loaded
+roster. Invalid numeric limits are reported instead of silently clamped.
+The new-agent ID follows the display name only until the operator edits the ID;
+an explicitly cleared or replaced ID is not regenerated behind the operator.
+List refreshes apply only the latest response and distinguish loading and failure
+from an empty registry.
+
 Agent list/detail JSON includes registry-assigned provenance in a service-owned
 view DTO. Persisted agent TOML continues to omit provenance, and saving always
 assigns user-defined trust. Presentation must not infer built-in status from IDs.
