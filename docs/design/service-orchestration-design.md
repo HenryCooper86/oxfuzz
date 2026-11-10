@@ -572,6 +572,31 @@ known value only while visibly reporting that diagnostics are unavailable. A
 storage failure must never be converted into a zero-call summary, because zero
 is a valid measurement and would conceal an observability outage.
 
+Provider snapshots use the running pool's metadata and per-provider counters,
+including tokens and estimated cost. Saved configuration and model-wide totals
+are not substitutes: providers may share a model, and configuration may change
+after the pool was created. Pool counters cover the current pool lifetime;
+Diagnostics covers the recorder session. An unfrozen provider is available for
+routing, not a successful health probe. Registered agent definitions are shown
+as definitions, never as execution slots. Unmeasured agent telemetry is omitted.
+
+Header panels share one visible side panel so opening another does not squeeze
+the workspace. Polling accepts only the latest response and distinguishes
+loading, failure, and measured empty state. Campaign Info describes the selected
+target, or an active run owned by the selected project, and clears old artifacts
+when that context changes. Workflow progress remains a project checklist, not
+execution readiness; partial progress can also be reset.
+
+Appearance controls in the header and General settings share a button. Each
+press cycles Dark -> Light -> System -> Dark; the button displays the current
+mode and its accessible label identifies the next mode. The provider panel
+inherits its containing panel width rather than imposing a wider fixed width.
+
+Appearance offers System, Light, and Dark in both header and Settings. New or
+invalid preferences resolve to System; saved explicit choices are retained.
+System follows live OS appearance changes, while explicit modes ignore them.
+The document receives the resolved light/dark colors and native color scheme.
+
 ### 4.6 Proof-Carrying Campaign Intelligence
 
 Behind the `proof-carrying` feature, `hf-service` assembles canonical campaign

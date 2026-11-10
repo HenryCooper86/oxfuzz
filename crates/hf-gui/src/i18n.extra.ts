@@ -12,6 +12,13 @@ function dictionaries(messages: Record<string, readonly [string, string?]>) {
 }
 
 export const [enExtra, zhExtra] = dictionaries({
+  "settings.general.themeSystem": ["System", "跟随系统"],
+  "info.artifactsFailed": ["Could not load campaign artifacts", "无法加载运行产物"],
+  "obs.available": ["Available", "可用"],
+  "obs.definitions": ["Definitions", "定义"],
+  "obs.noActiveAgents": ["No active agent turns ({count} registered definitions)", "没有运行中的智能体（已注册 {count} 个定义）"],
+  "obs.stateCounters": ["State counters", "状态计数"],
+  "obs.poolLifetime": ["Provider usage covers the current pool lifetime. Available means eligible for routing, not a verified health check.", "提供商用量统计覆盖当前池的生命周期。“可用”表示可参与路由，并不代表已通过健康检查。"],
   "functionCoverage.load": ["Load campaign function coverage","加载运行函数覆盖率"],
   "functionCoverage.invalid": ["Invalid function coverage response.","函数覆盖率响应无效。"],
   "functionCoverage.observed": ["Functions with observed entry","已观测到入口的函数"],

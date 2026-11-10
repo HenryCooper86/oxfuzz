@@ -1930,17 +1930,14 @@ pub struct AgentInstanceSnapshot {
     pub instance_id: String,
     pub agent_name: String,
     pub state: String,
-    pub elapsed_ms: u64,
-    pub iterations: u32,
-    pub tokens_used: u64,
 }
 
-/// Agent pool state. `available_slots` is the number of registered definitions;
+/// Agent roster and live turns. Definitions are not execution capacity;
 /// `active_instances` and `instances` describe live per-turn executions.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct AgentPoolSnapshot {
     pub active_instances: usize,
-    pub available_slots: usize,
+    pub registered_definitions: usize,
     pub total_instances: usize,
     pub instances: Vec<AgentInstanceSnapshot>,
 }

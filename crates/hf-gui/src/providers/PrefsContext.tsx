@@ -28,7 +28,7 @@ function persist(key: string, value: string) {
 
 export function PrefsProvider({ children }: { children: React.ReactNode }) {
   const [theme, setThemeState] = useState<Theme>(() =>
-    load<Theme>("hf_theme", "dark", (s) => (s === "light" ? "light" : "dark")),
+    load<Theme>("hf_theme", "system", (s) => (s === "light" || s === "dark" ? s : "system")),
   );
   const [fontSize, setFontSizeState] = useState<number>(() =>
     load<number>("hf_font_size", 14, (s) => {
@@ -59,10 +59,19 @@ export function PrefsProvider({ children }: { children: React.ReactNode }) {
       .catch(() => {});
   }, []);
 
-  // Apply theme to the document.
+  const [systemDark, setSystemDark] = useState(() => window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? true);
   useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-  }, [theme]);
+    const media = window.matchMedia?.("(prefers-color-scheme: dark)");
+    if (!media) return;
+    const changed = () => setSystemDark(media.matches);
+    changed(); media.addEventListener("change", changed);
+    return () => media.removeEventListener("change", changed);
+  }, []);
+  const resolvedTheme = theme === "system" ? (systemDark ? "dark" : "light") : theme;
+  useEffect(() => {
+    document.documentElement.dataset.theme = resolvedTheme;
+    document.documentElement.style.colorScheme = resolvedTheme;
+  }, [resolvedTheme]);
 
   // Apply base font size (root px). UI elements using rem scale with this.
   useEffect(() => {
@@ -100,6 +109,7 @@ export function PrefsProvider({ children }: { children: React.ReactNode }) {
   const value = useMemo(
     () => ({
       theme,
+      resolvedTheme,
       fontSize,
       sendOnEnter,
       customDecorations,
@@ -112,6 +122,7 @@ export function PrefsProvider({ children }: { children: React.ReactNode }) {
     }),
     [
       theme,
+      resolvedTheme,
       fontSize,
       sendOnEnter,
       customDecorations,

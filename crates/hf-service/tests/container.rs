@@ -1734,7 +1734,7 @@ async fn system_snapshot_reports_memory_and_empty_providers_without_a_pool() {
     assert_eq!(snap.agents.active_instances, 0);
     assert!(snap.agents.instances.is_empty());
     assert_eq!(
-        snap.agents.available_slots,
+        snap.agents.registered_definitions,
         container.list_agent_definitions().len(),
         "the service snapshot owns the configured agent roster"
     );

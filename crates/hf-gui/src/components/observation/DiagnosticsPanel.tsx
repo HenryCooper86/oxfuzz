@@ -4,9 +4,10 @@
 // filtered by the recorder's session id, so a persistent trace store cannot
 // make historical calls look like current-session spend.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback } from "react";
 import { Activity, Loader2, RotateCw } from "lucide-react";
 import { getTransport } from "../../lib";
+import { usePolledResource } from "../../hooks/usePolledResource";
 import { Badge } from "../ui/Badge";
 import { IconButton } from "../ui/IconButton";
 import { useI18n } from "../../i18nContext";
@@ -31,53 +32,8 @@ const fmtCost = (n: number) => (n > 0 ? `$${n.toFixed(n < 0.01 ? 4 : 2)}` : "$0"
 
 export function DiagnosticsPanel() {
   const { t } = useI18n();
-  const [data, setData] = useState<CostSummary | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const load = useCallback(() => {
-    getTransport()
-      .invoke<CostSummary>("diagnostics_cost_summary")
-      .then((d) => {
-        setData(d);
-        setError(null);
-      })
-      .catch((e) => {
-        setData(null);
-        setError(String(e));
-      })
-      .finally(() => setLoading(false));
-  }, []);
-
-  // Initial load + light polling so cost updates as the agent works.
-  useEffect(() => {
-    let cancelled = false;
-    const tick = () => {
-      getTransport()
-        .invoke<CostSummary>("diagnostics_cost_summary")
-        .then((d) => {
-          if (!cancelled) {
-            setData(d);
-            setError(null);
-          }
-        })
-        // A stale value must not remain labeled as the current session after
-        // the service reports that its diagnostics query failed.
-        .catch((e) => {
-          if (!cancelled) {
-            setData(null);
-            setError(String(e));
-          }
-        })
-        .finally(() => !cancelled && setLoading(false));
-    };
-    tick();
-    const id = setInterval(tick, 5000);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
-  }, []);
+  const load = useCallback(() => getTransport().invoke<CostSummary>("diagnostics_cost_summary"), []);
+  const { data, loading, error, reload } = usePolledResource(load);
 
   const empty = !data || data.calls === 0;
 
@@ -89,8 +45,8 @@ export function DiagnosticsPanel() {
           <span className="text-xs font-semibold uppercase text-text-muted" style={{ letterSpacing: "0.08em" }}>{t("header.diagnostics")}</span>
         </div>
         <div className="flex items-center gap-2">
-          <Badge variant="default">{data?.calls ?? 0}</Badge>
-          <IconButton size={22} onClick={load} title={t("common.refresh")} aria-label={t("common.refresh")}>
+          <Badge variant="default">{data?.calls ?? "—"}</Badge>
+          <IconButton size={22} onClick={() => void reload()} title={t("common.refresh")} aria-label={t("common.refresh")}>
             {loading ? <Loader2 size={12} className="animate-spin" /> : <RotateCw size={12} />}
           </IconButton>
         </div>
@@ -100,7 +56,7 @@ export function DiagnosticsPanel() {
         <div className="flex-1 overflow-y-auto p-2 flex items-center justify-center">
           <div className="flex flex-col items-center text-center gap-1" style={{ opacity: 0.7 }}>
             <Activity size={20} className="text-text-muted" style={{ opacity: 0.5, color: error && !data ? "var(--error)" : undefined }} />
-            {error && !data ? (
+            {loading && !data ? <span role="status">{t("common.loading")}</span> : error && !data ? (
               <>
                 <span className="text-xs" style={{ color: "var(--error)" }}>{t("diag.unavailable")}</span>
                 <span className="text-xs text-text-muted font-mono" style={{ opacity: 0.7 }}>{error}</span>

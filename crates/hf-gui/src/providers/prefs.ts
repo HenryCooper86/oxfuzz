@@ -1,10 +1,11 @@
 import { createContext, useContext } from "react";
 
-export type Theme = "dark" | "light";
+export type Theme = "dark" | "light" | "system";
 export type SandboxArch = "linux/arm64" | "linux/amd64";
 
 export interface PrefsContextValue {
   theme: Theme;
+  resolvedTheme: "dark" | "light";
   fontSize: number;
   sendOnEnter: boolean;
   customDecorations: boolean;
@@ -21,7 +22,8 @@ export const PrefsContext = createContext<PrefsContextValue | null>(null);
 export function usePrefs(): PrefsContextValue {
   return (
     useContext(PrefsContext) ?? {
-      theme: "dark",
+      theme: "system",
+      resolvedTheme: "dark",
       fontSize: 14,
       sendOnEnter: true,
       customDecorations: false,

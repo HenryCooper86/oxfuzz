@@ -61,7 +61,7 @@ function renderWithRepair(
           isSkipped: () => false, markDone: () => undefined, markSkipped: () => undefined, reset: () => undefined,
         }}>
           <PrefsContext.Provider value={{
-            theme: "dark", fontSize: 14, sendOnEnter: true, customDecorations: false,
+            theme: "dark", resolvedTheme: "dark", fontSize: 14, sendOnEnter: true, customDecorations: false,
             sandboxArch: "linux/amd64", setTheme: () => undefined, setFontSize: () => undefined,
             setSendOnEnter: () => undefined, setCustomDecorations: () => undefined,
             setSandboxArch: () => undefined,

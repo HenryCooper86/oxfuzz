@@ -1511,7 +1511,7 @@ describe("selected presentation versus foreground control", () => {
     expect(text).toContain("run.meanExecs62.5");
     expect(text).toContain("run.rawCrashSignals3");
     expect(container.querySelector("[data-presentation] .text-accent")?.textContent).toBe(
-      "Selected triage",
+      "stage.triage",
     );
     expect(text).not.toContain("run.coverage");
     await click("stop");

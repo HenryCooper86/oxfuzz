@@ -5,8 +5,10 @@
 // the agent pool, and runtime memory counters. Polls every 5s. Rendered inside
 // the app's PanelShell (which supplies the title/close chrome).
 
-import { useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { Server, Bot, ChevronDown, ChevronRight } from "lucide-react";
+import { usePolledResource } from "../../hooks/usePolledResource";
+import { Button } from "../ui/Button";
 import { getTransport } from "../../lib";
 import { useI18n } from "../../i18nContext";
 import "./ObservabilityPanel.css";
@@ -29,13 +31,10 @@ interface AgentInstanceSnapshot {
   instance_id: string;
   agent_name: string;
   state: string;
-  elapsed_ms: number;
-  iterations: number;
-  tokens_used: number;
 }
 interface AgentPoolSnapshot {
   active_instances: number;
-  available_slots: number;
+  registered_definitions: number;
   total_instances: number;
   instances: AgentInstanceSnapshot[];
 }
@@ -67,7 +66,7 @@ function ProviderCard({ p }: { p: ProviderSnapshot }) {
         <span className="obs-provider-name">{p.id}</span>
         <span className="obs-provider-model">{p.model}</span>
         <span className={`obs-badge ${p.is_frozen ? "obs-badge-frozen" : "obs-badge-healthy"}`}>
-          {p.is_frozen ? t("obs.frozen") : t("obs.ok")}
+          {p.is_frozen ? t("obs.frozen") : t("obs.available")}
         </span>
       </div>
 
@@ -143,59 +142,31 @@ function Section({
 
 export function ObservabilityPanel() {
   const { t } = useI18n();
-  const [snap, setSnap] = useState<SystemSnapshot | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const load = useCallback(() => getTransport().invoke<SystemSnapshot>("system_snapshot"), []);
+  const { data: snap, error, reload } = usePolledResource(load);
   const [providersOpen, setProvidersOpen] = useState(true);
   const [agentsOpen, setAgentsOpen] = useState(true);
   const [memoryOpen, setMemoryOpen] = useState(false);
 
-  useEffect(() => {
-    let cancelled = false;
-    const tick = () => {
-      getTransport()
-        .invoke<SystemSnapshot>("system_snapshot")
-        .then((d) => {
-          if (!cancelled && d) {
-            setSnap(d);
-            setError(null);
-          }
-        })
-        // The snapshot includes session cost. Do not keep a stale value labeled
-        // as live state after the service reports a diagnostics read failure.
-        .catch((e) => {
-          if (!cancelled) {
-            setSnap(null);
-            setError(String(e));
-          }
-        });
-    };
-    tick();
-    const id = setInterval(tick, 5000);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
-  }, []);
-
   const providerCount = snap?.providers.length ?? 0;
   const activeAgents = snap?.agents.active_instances ?? 0;
-  const slots = snap?.agents.available_slots ?? 0;
+  const definitions = snap?.agents.registered_definitions;
 
   return (
     <div className="obs-panel">
       {/* Summary bar */}
       <div className="obs-summary">
         <div className="obs-summary-item">
-          <span className="obs-summary-value">{providerCount}</span>
+          <span className="obs-summary-value">{snap ? providerCount : "—"}</span>
           <span className="obs-summary-label">{t("obs.providers")}</span>
         </div>
         <div className="obs-summary-item">
-          <span className="obs-summary-value">{activeAgents}</span>
+          <span className="obs-summary-value">{snap ? activeAgents : "—"}</span>
           <span className="obs-summary-label">{t("obs.agents")}</span>
         </div>
         <div className="obs-summary-item">
-          <span className="obs-summary-value">{slots}</span>
-          <span className="obs-summary-label">{t("obs.slots")}</span>
+          <span className="obs-summary-value">{definitions ?? "—"}</span>
+          <span className="obs-summary-label">{t("obs.definitions")}</span>
         </div>
       </div>
 
@@ -206,9 +177,11 @@ export function ObservabilityPanel() {
             <p className="obs-empty-text">
               {error ? t("obs.loadFailed", { error }) : t("obs.loadingSystem")}
             </p>
+            {error && <Button onClick={() => void reload()}>{t("common.retry")}</Button>}
           </div>
         ) : (
           <>
+            <p className="obs-no-items">{t("obs.poolLifetime")}</p>
             <Section title={t("obs.providerPool")} count={providerCount} open={providersOpen} onToggle={() => setProvidersOpen(!providersOpen)}>
               {snap.providers.length === 0 ? (
                 <div className="obs-no-items">{t("obs.noProvider")}</div>
@@ -220,7 +193,7 @@ export function ObservabilityPanel() {
             <Section title={t("obs.agentPool")} count={snap.agents.total_instances} open={agentsOpen} onToggle={() => setAgentsOpen(!agentsOpen)}>
               {snap.agents.instances.length === 0 ? (
                 <div className="obs-no-items">
-                  {t("obs.noAgents", { slots })}
+                  {t("obs.noActiveAgents", { count: definitions ?? 0 })}
                 </div>
               ) : (
                 snap.agents.instances.map((a) => (
@@ -237,7 +210,7 @@ export function ObservabilityPanel() {
               )}
             </Section>
 
-            <Section title={t("obs.memory")} open={memoryOpen} onToggle={() => setMemoryOpen(!memoryOpen)}>
+            <Section title={t("obs.stateCounters")} open={memoryOpen} onToggle={() => setMemoryOpen(!memoryOpen)}>
               <div className="obs-provider-card">
                 <div className="obs-metrics">
                   <Metric label={t("obs.pendingRuns")} value={n(snap.memory.pending_runs)} />

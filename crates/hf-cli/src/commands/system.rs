@@ -728,6 +728,12 @@ mod providers_tests {
         let statuses = vec![
             ProviderStatus {
                 id: ProviderId::from_string("openai-main"),
+                model: "first-model".into(),
+                tags: vec![],
+                max_concurrency: 3,
+                total_input_tokens: 0,
+                total_output_tokens: 0,
+                estimated_cost_usd: 0.0,
                 is_frozen: false,
                 frozen_since: None,
                 thaw_at: None,
@@ -738,6 +744,12 @@ mod providers_tests {
             },
             ProviderStatus {
                 id: ProviderId::from_string("anthropic-main"),
+                model: "second-model".into(),
+                tags: vec![],
+                max_concurrency: 3,
+                total_input_tokens: 0,
+                total_output_tokens: 0,
+                estimated_cost_usd: 0.0,
                 is_frozen: true,
                 frozen_since: None,
                 thaw_at: None,

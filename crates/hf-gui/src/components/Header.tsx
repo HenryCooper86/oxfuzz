@@ -1,19 +1,21 @@
-import { Moon, Sun, PanelLeft } from "lucide-react";
+import { PanelLeft } from "lucide-react";
 import type { ReactNode } from "react";
+import { ThemeButton } from "./ThemeButton";
+import type { Theme } from "../providers/prefs";
 import { IconButton } from "./ui/IconButton";
 
 interface HeaderProps {
   title: string;
   icon?: ReactNode;
-  theme: "dark" | "light";
-  onToggleTheme: () => void;
+  theme: Theme;
+  onThemeChange: (theme: Theme) => void;
   actions?: ReactNode;
   onToggleSidebar?: () => void;
   /** Reserve space for the macOS traffic lights when the sidebar is hidden. */
   reserveLeftInset?: boolean;
 }
 
-export function Header({ title, icon, theme, onToggleTheme, actions, onToggleSidebar, reserveLeftInset }: HeaderProps) {
+export function Header({ title, icon, theme, onThemeChange, actions, onToggleSidebar, reserveLeftInset }: HeaderProps) {
   return (
     <header
       data-tauri-drag-region
@@ -53,9 +55,7 @@ export function Header({ title, icon, theme, onToggleTheme, actions, onToggleSid
       </div>
       <div className="flex items-center gap-1">
         {actions}
-        <IconButton size={32} onClick={onToggleTheme} title="Toggle theme" aria-label="Toggle theme">
-          {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
-        </IconButton>
+        <ThemeButton theme={theme} onChange={onThemeChange} />
       </div>
     </header>
   );

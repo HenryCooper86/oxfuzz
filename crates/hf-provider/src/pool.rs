@@ -770,6 +770,12 @@ impl ProviderPool for ProviderPoolImpl {
 
                 ProviderStatus {
                     id: meta.id.clone(),
+                    model: meta.model.clone(),
+                    tags: meta.tags.clone(),
+                    max_concurrency: meta.max_concurrency,
+                    total_input_tokens: metrics.total_input_tokens,
+                    total_output_tokens: metrics.total_output_tokens,
+                    estimated_cost_usd: metrics.estimated_cost_usd(),
                     is_frozen: freeze_status.is_frozen,
                     frozen_since: freeze_status.frozen_since.map(|inst| {
                         chrono::Utc::now()

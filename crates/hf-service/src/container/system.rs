@@ -23,8 +23,12 @@ impl ServiceContainer {
         let labels = self
             .active_agents
             .lock()
-            .map(|a| a.clone())
-            .unwrap_or_default();
+            .unwrap_or_else(|poisoned| {
+                // Recover the retained labels after a poisoned lock; an empty list
+                // would incorrectly report that all tracked turns had ended.
+                poisoned.into_inner()
+            })
+            .clone();
         let instances: Vec<AgentInstanceSnapshot> = labels
             .iter()
             .enumerate()
@@ -32,14 +36,11 @@ impl ServiceContainer {
                 instance_id: format!("turn-{i}"),
                 agent_name: label.clone(),
                 state: "running".to_owned(),
-                elapsed_ms: 0,
-                iterations: 0,
-                tokens_used: 0,
             })
             .collect();
         AgentPoolSnapshot {
             active_instances: instances.len(),
-            available_slots: 0,
+            registered_definitions: 0,
             total_instances: instances.len(),
             instances,
         }
@@ -93,22 +94,17 @@ impl ServiceContainer {
 
     /// A live system snapshot for the Observability panel: per-provider health
     /// and usage, the agent pool, and runtime memory counters. Merges live
-    /// provider stats (concurrency/requests/errors) with the provider config
-    /// (model/tags/limits), the canonical agent registry, and session
-    /// diagnostics (tokens/cost by model).
+    /// provider metadata and per-provider counters with the canonical agent
+    /// registry, application counters, and the session diagnostics call count.
     pub async fn system_snapshot(
         &self,
     ) -> Result<SystemSnapshot, crate::diagnostics::DiagnosticsError> {
         let statuses = self.provider_statuses().await;
-        let configs = crate::config::get_providers();
         let cost = self.diagnostics.summary().await?;
 
         let providers = statuses
             .into_iter()
             .map(|s| {
-                let cfg = configs.iter().find(|c| c.id == s.id.0);
-                let model = cfg.map(|c| c.model.clone()).unwrap_or_default();
-                let by_model = cost.by_model.iter().find(|m| m.model == model);
                 let error_rate = if s.total_requests > 0 {
                     s.total_errors as f64 / s.total_requests as f64
                 } else {
@@ -116,17 +112,17 @@ impl ServiceContainer {
                 };
                 ProviderSnapshot {
                     id: s.id.0,
-                    model,
-                    tags: cfg.map(|c| c.tags.clone()).unwrap_or_default(),
+                    model: s.model,
+                    tags: s.tags,
                     is_frozen: s.is_frozen,
                     active_requests: s.active_requests,
-                    max_concurrency: cfg.map_or(0, |c| c.max_concurrency),
+                    max_concurrency: s.max_concurrency,
                     total_requests: s.total_requests,
                     total_errors: s.total_errors,
                     error_rate,
-                    total_input_tokens: by_model.map_or(0, |m| m.input_tokens),
-                    total_output_tokens: by_model.map_or(0, |m| m.output_tokens),
-                    estimated_cost_usd: by_model.map_or(0.0, |m| m.cost_usd),
+                    total_input_tokens: s.total_input_tokens,
+                    total_output_tokens: s.total_output_tokens,
+                    estimated_cost_usd: s.estimated_cost_usd,
                 }
             })
             .collect();
@@ -148,7 +144,7 @@ impl ServiceContainer {
         };
 
         let mut agents = self.active_agent_pool();
-        agents.available_slots = self.list_agent_definitions().len();
+        agents.registered_definitions = self.list_agent_definitions().len();
 
         Ok(SystemSnapshot {
             providers,

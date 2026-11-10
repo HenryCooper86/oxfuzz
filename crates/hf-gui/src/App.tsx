@@ -139,9 +139,14 @@ function AppInner() {
     setActiveProject(path);
     setActiveView("workflow");
   };
-  const [showDiag, setShowDiag] = useState(false);
-  const [showObs, setShowObs] = useState(false);
-  const [showInfo, setShowInfo] = useState(false);
+  const [observationPanel, setObservationPanel] = useState<"diagnostics" | "providers" | "info" | null>(null);
+  const showDiag = observationPanel === "diagnostics";
+  const showObs = observationPanel === "providers";
+  const showInfo = observationPanel === "info";
+  const toggleObservation = (panel: "diagnostics" | "providers" | "info") => {
+    setProgressOpen(open => ({ ...open, [progressScope]: false }));
+    setObservationPanel(current => current === panel ? null : panel);
+  };
   // Workflow stages already show progress. Extra panels are opt-in so the
   // active task has the full content width; each scope remembers its toggle.
   const [progressOpen, setProgressOpen] = useState(() => ({
@@ -149,7 +154,7 @@ function AppInner() {
     other: false,
   }));
   const progressScope = progressPanelScope(activeView);
-  const showProgress = progressOpen[progressScope];
+  const showProgress = progressOpen[progressScope] && observationPanel === null;
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [setupDone, setSetupDone] = useState(() => localStorage.getItem("hf_setup_completed") === "true" || localStorage.getItem("hf_setup_deferred") === "true");
   const [setupDeferred, setSetupDeferred] = useState(() => localStorage.getItem("hf_setup_completed") !== "true" && localStorage.getItem("hf_setup_deferred") === "true");
@@ -214,13 +219,13 @@ function AppInner() {
               theme={theme}
               onToggleSidebar={() => setSidebarOpen((o) => !o)}
               reserveLeftInset={!sidebarVisible && platform === "macos"}
-              onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")}
+              onThemeChange={setTheme}
               actions={
                 <div className="flex items-center gap-1">
-                  <HeaderToggle active={showProgress} onClick={() => setProgressOpen((open) => ({ ...open, [progressScope]: !open[progressScope] }))} icon={<ListChecks size={16} />} label={t("header.progress")} />
-                  <HeaderToggle active={showDiag} onClick={() => setShowDiag(!showDiag)} icon={<Activity size={16} />} label={t("header.diagnostics")} />
-                  <HeaderToggle active={showObs} onClick={() => setShowObs(!showObs)} icon={<Gauge size={16} />} label={t("header.observability")} />
-                  <HeaderToggle active={showInfo} onClick={() => setShowInfo(!showInfo)} icon={<Info size={16} />} label={t("header.info")} />
+                  <HeaderToggle active={showProgress} onClick={() => { setObservationPanel(null); setProgressOpen(open => ({ ...open, [progressScope]: !showProgress })); }} icon={<ListChecks size={16} />} label={t("header.progress")} />
+                  <HeaderToggle active={showDiag} onClick={() => toggleObservation("diagnostics")} icon={<Activity size={16} />} label={t("header.diagnostics")} />
+                  <HeaderToggle active={showObs} onClick={() => toggleObservation("providers")} icon={<Gauge size={16} />} label={t("header.observability")} />
+                  <HeaderToggle active={showInfo} onClick={() => toggleObservation("info")} icon={<Info size={16} />} label={t("header.info")} />
                 </div>
               }
             />
@@ -476,6 +481,7 @@ function HeaderToggle({ active, onClick, icon, label }: { active: boolean; onCli
       }}
       title={label}
       aria-label={label}
+      aria-pressed={active}
     >
       {icon}
     </button>

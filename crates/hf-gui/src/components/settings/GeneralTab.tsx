@@ -9,6 +9,7 @@ import { usePrefs } from "../../providers/prefs";
 import { LOCALES, useI18n } from "../../i18nContext";
 import { useToast } from "../ui/toastContext";
 import { Button, Input, Select, Switch } from "../ui";
+import { ThemeButton } from "../ThemeButton";
 import { SandboxSetup } from "../wizard/SandboxSetup";
 import { SettingsGroup, SettingsItem } from "../ui/SettingsGroup";
 
@@ -79,16 +80,7 @@ export function GeneralTab({ onRunWizard }: { onRunWizard?: () => void }) {
           />
         </SettingsItem>
         <SettingsItem title={t("settings.general.theme")}>
-          <Select
-            ariaLabel={t("settings.general.theme")}
-            value={theme}
-            onChange={(v) => setTheme(v === "light" ? "light" : "dark")}
-            options={[
-              { value: "dark", label: t("settings.general.themeDark") },
-              { value: "light", label: t("settings.general.themeLight") },
-            ]}
-            className="w-[140px]"
-          />
+          <ThemeButton theme={theme} onChange={setTheme} />
         </SettingsItem>
         <SettingsItem title={t("settings.general.fontSize")}>
           <div className="flex items-center gap-3">

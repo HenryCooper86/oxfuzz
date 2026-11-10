@@ -509,6 +509,12 @@ pub enum RoutePriority {
 #[derive(Debug, Clone)]
 pub struct ProviderStatus {
     pub id: ProviderId,
+    pub model: String,
+    pub tags: Vec<String>,
+    pub max_concurrency: usize,
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
+    pub estimated_cost_usd: f64,
     pub is_frozen: bool,
     pub frozen_since: Option<Timestamp>,
     pub thaw_at: Option<Timestamp>,

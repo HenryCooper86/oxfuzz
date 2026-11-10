@@ -11,7 +11,7 @@ import {
 } from "../lib/progressPanel";
 
 export function ProgressPanel() {
-  const { coreStages, reset } = usePipeline();
+  const { coreStages, completed, reset } = usePipeline();
   const { t } = useI18n();
   const confirm = useConfirm();
   // Resetting clears this project's checklist only; ask so a stray click does
@@ -105,7 +105,7 @@ export function ProgressPanel() {
           </div>
         </div>
 
-        {doneCount > 0 && (
+        {(completed.length > 0 || doneCount > 0) && (
           <button
             onClick={() => void confirmReset()}
             className="flex items-center gap-1.5 mt-3 text-xs transition-colors duration-150"
@@ -155,6 +155,7 @@ function StepRow({
   current: boolean;
   subProgress?: string;
 }) {
+  const { t } = useI18n();
   // A skipped stage counts as done but renders as a muted dash, not a check.
   const marker = skipped ? <Minus size={12} /> : done ? <Check size={12} /> : index;
   return (
@@ -188,7 +189,7 @@ function StepRow({
         }}
       >
         {label}
-        {skipped && <span className="text-xs text-text-muted"> (skipped)</span>}
+        {skipped && <span className="text-xs text-text-muted"> {t("progress.skipped")}</span>}
         {subProgress && !skipped && (
           <span className="text-xs text-text-muted"> · {subProgress}</span>
         )}
