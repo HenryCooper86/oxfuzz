@@ -493,9 +493,21 @@ pub(super) fn clear_managed_workspace_root(root: &Path) -> Result<(), Classified
 /// workspace).
 #[must_use]
 pub fn workspace_dir(project: &Path, target: &str) -> PathBuf {
-    workspace_root()
-        .join(project_slug(project))
-        .join(sanitize_target(target))
+    workspace_root().join(target_workspace_relative(project, target))
+}
+
+fn target_workspace_relative(project: &Path, target: &str) -> PathBuf {
+    PathBuf::from(project_slug(project)).join(sanitize_target(target))
+}
+
+pub(super) fn prepare_target_workspace(
+    project: &Path,
+    target: &str,
+) -> Result<PathBuf, ClassifiedError> {
+    ensure_workspace_directory(
+        &prepare_configured_workspace_root()?,
+        &target_workspace_relative(project, target),
+    )
 }
 
 /// Where a coverage-plateau refine proposal for `target` is compiled:

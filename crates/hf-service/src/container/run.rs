@@ -3126,7 +3126,8 @@ impl ServiceContainer {
         })?;
         let project_root = canonical_project_root(&opts.project)?;
         let target_label = crate::container::syzkaller_target_label(opts);
-        let kernel_workspace = workspace_dir(&project_root, &target_label);
+        let kernel_workspace =
+            super::workspace::prepare_target_workspace(&project_root, &target_label)?;
         let mut run_record = RunRecord::new(
             project_root.to_string_lossy().to_string(),
             EngineKind::Syzkaller,
@@ -3178,6 +3179,76 @@ impl ServiceContainer {
             .set_run_status(run_id, status, Some(Utc::now()))
             .await
             .map_err(|error| ClassifiedError::Storage(error.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod kernel_workspace_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn first_kernel_run_retains_corpus_without_a_harness_workspace() {
+        let _environment = ServiceContainer::workspace_environment_test_gate()
+            .lock()
+            .await;
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let workspace = directory.path().join("workspace");
+        let store = Arc::new(
+            hf_storage::Store::connect(directory.path().join("kernel.db"))
+                .await
+                .unwrap(),
+        );
+        let service = ServiceContainer::new(Arc::new(hf_runtime::adapter::StubRuntime), None)
+            .with_store(store);
+        let options = SyzkallerRunOpts {
+            project,
+            arch: Some("arm64".to_owned()),
+            duration_secs: 60,
+            kernel_image: Some("kernel".to_owned()),
+            disk_image: None,
+            ssh_key: None,
+            manager_cfg: None,
+            vm_count: Some(1),
+        };
+        let previous = std::env::var_os("HF_WORKSPACE_DIR");
+        std::env::set_var("HF_WORKSPACE_DIR", &workspace);
+        let registration = service.persist_kernel_run_record(&options).await;
+        match previous {
+            Some(value) => std::env::set_var("HF_WORKSPACE_DIR", value),
+            None => std::env::remove_var("HF_WORKSPACE_DIR"),
+        }
+        let mut registration = registration.unwrap();
+        registration.guard.disarm();
+        assert!(
+            registration.kernel_workspace.is_dir(),
+            "first kernel admission creates its retained workspace"
+        );
+        assert!(workspace.join(".oxfuzz-workspace.json").is_file());
+        let stage = directory.path().join("stage");
+        std::fs::create_dir_all(stage.join("workdir")).unwrap();
+        std::fs::write(stage.join("workdir/corpus.db"), b"kernel corpus").unwrap();
+        let messages = retain_syzkaller_run_evidence(
+            stage,
+            &registration.kernel_workspace,
+            registration.run_id,
+        )
+        .await
+        .unwrap();
+        assert!(
+            messages
+                .iter()
+                .all(|message| !message.starts_with("Warning:")),
+            "{messages:?}"
+        );
+        let output = registration
+            .kernel_workspace
+            .join(run_output_relative(registration.run_id));
+        assert_eq!(
+            std::fs::read(output.join("corpus.db")).unwrap(),
+            b"kernel corpus"
+        );
     }
 }
 

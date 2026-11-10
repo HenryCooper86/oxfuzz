@@ -47,7 +47,7 @@ docker run "${run_args[@]}" \
     --mount "type=bind,src=${verification_output},dst=/work/output" \
     "$IMAGE" bash -lc '
         set -euo pipefail
-        for binary in clang afl-fuzz honggfuzz python3 syz-manager casr-san casr-cluster cargo semgrep; do
+        for binary in clang afl-fuzz honggfuzz python3 syz-manager ssh scp qemu-system-aarch64 qemu-system-x86_64 casr-san casr-cluster cargo semgrep; do
             command -v "$binary" >/dev/null
         done
         cargo fuzz --version >/dev/null

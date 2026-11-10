@@ -475,6 +475,15 @@ belong to another target or use incomparable execution conditions.
 
 ### 4.3 Syzkaller Campaign Isolation
 
+Kernel campaign admission creates its permanent target workspace under the
+validated, owned workspace root before persisting the run. Every directory
+component must be a regular directory, not a symbolic link. Kernel campaigns
+have no harness preparation step, so admission must establish this directory
+to retain corpus and crash evidence even for the first run.
+
+The sandbox includes OpenSSH client tools: `syz-manager` uses `ssh` to check
+guest readiness and `scp` to install its executor.
+
 Before `syz-manager` starts, `hf-service` allocates a unique staging directory
 below the runtime's approved workspace root. It validates the selected config,
 kernel, rootfs, and SSH key as regular non-symlink files and copies them into

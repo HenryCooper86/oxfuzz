@@ -175,6 +175,11 @@ not use `EngineRunner`. The manager owns the campaign corpus, workdir, and
 output through its configuration; it does not use the userspace harness
 lifecycle.
 
+Kernel progress parsing accepts both legacy `executed N, cover N` records and
+the bundled manager's `coverage=N exec total=N` records. These are cumulative
+execution counts; the service derives throughput from successive observations,
+not from the manager's human-readable rate whose unit may change to `/min`.
+
 Every consumer resolves output through the persisted run id. Target-wide flat
 output directories are legacy read-only fallbacks and are never launch targets
 for new runs.

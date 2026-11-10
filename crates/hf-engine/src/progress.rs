@@ -28,11 +28,27 @@ pub fn parse_progress_line(line: &str) -> Option<FuzzProgress> {
 ///
 /// syz-manager periodically logs a status line of the form:
 /// `VMs 2, executed 12345, cover 6789, signal 5432, crashes 0, repro 0`.
+/// Newer managers use `coverage=6789 exec total=12345 (20/sec)` and omit crashes.
 /// Returns `None` for lines that are not a status line. Unlike
 /// [`parse_progress_line`], this does not treat the literal `crashes 0` token
 /// as a crash event -- it reports the absolute crash count instead.
 #[must_use]
 pub fn parse_syzkaller_status(line: &str) -> Option<(u64, u64, u64)> {
+    if let Some(cover) = line
+        .split_ascii_whitespace()
+        .find_map(|field| field.strip_prefix("coverage="))
+    {
+        let executed = line
+            .split_ascii_whitespace()
+            .skip_while(|field| *field != "exec")
+            .nth(1)?
+            .strip_prefix("total=")?;
+        // Malformed coverage text means this is not a usable status record.
+        let cover = cover.parse().ok()?;
+        // Malformed execution text likewise cannot supply a counter.
+        let executed = executed.parse().ok()?;
+        return Some((cover, executed, 0));
+    }
     // Require the real status shape: an `executed N` counter and a `cover N`
     // counter, each matched at a word boundary. A bare `contains("cover")`
     // would fire on `discovered`/`recovered` (both contain "cover") and read a
@@ -589,6 +605,28 @@ mod tests {
     fn parses_syz_manager_status_line() {
         let line = "2024/01/02 03:04:05 VMs 2, executed 12345, cover 6789, signal 5432, crashes 3, repro 0";
         assert_eq!(parse_syzkaller_status(line), Some((6789, 12345, 3)));
+    }
+
+    #[test]
+    fn parses_bundled_syz_manager_key_value_status() {
+        let line = "2026/11/10 08:30:53 candidates=52 corpus=0 coverage=0 exec total=627 (10/sec) pending=0 reproducing=0";
+        assert_eq!(parse_syzkaller_status(line), Some((0, 627, 0)));
+        assert_eq!(
+            parse_syzkaller_status("candidates=0 corpus=12 coverage=6789 exec total=12345 (20/sec) pending=0 reproducing=0"),
+            Some((6789, 12345, 0))
+        );
+    }
+
+    #[test]
+    fn rejects_incomplete_key_value_status_counters() {
+        for line in [
+            "coverage=unknown exec total=627 (10/sec)",
+            "coverage=123 exec total=unknown (10/sec)",
+            "coverage=123 total=627 (10/sec)",
+            "coverage=123 exec rate=627 (10/sec)",
+        ] {
+            assert_eq!(parse_syzkaller_status(line), None, "{line}");
+        }
     }
 
     #[test]

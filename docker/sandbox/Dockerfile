@@ -303,3 +303,8 @@ RUN cmake -S /tmp/oxfuzz-clang-analysis -B /tmp/oxfuzz-clang-build \
     && cmake --build /tmp/oxfuzz-clang-build -j2 \
     && cmake --install /tmp/oxfuzz-clang-build \
     && rm -rf /tmp/oxfuzz-clang-analysis /tmp/oxfuzz-clang-build
+
+# syz-manager uses ssh to check guest readiness and scp to install its executor.
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-client \
+    && rm -rf /var/lib/apt/lists/* \
+    && command -v ssh && command -v scp

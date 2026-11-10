@@ -34,7 +34,8 @@ cargo test -p hf-service --lib community_qemu_example_stages_its_relative_artifa
   and `fuzzing.sandbox.max_cpus` to 2 in your existing configuration. The service
   reserves manager memory and derives guest resources from those limits.
 
-The sandbox image contains syzkaller and QEMU. You do not need to install them
+The sandbox image contains syzkaller, QEMU, and the OpenSSH client tools
+(`ssh` and `scp`). You do not need to install them
 on the host to run this example through oxfuzz. Starting the kernel campaign
 does not require generating a userspace harness or calling a model provider.
 
@@ -94,6 +95,11 @@ a kernel defect.
   regular files under `artifacts/`.
 - **Boot or SSH failure:** check that the kernel, rootfs, and key match, and
   that the rootfs is configured for the login described by the upstream guide.
+  A minimal Debian rootfs using `systemd-networkd` also needs `udev` to initialize
+  its network interface, plus an enabled DHCP configuration and SSH server.
+  A guest reaching multi-user mode does not establish that SSH is reachable.
+  Rebuild older sandbox images that lack `ssh` or `scp`; the build script now
+  checks both tools.
 - **Missing KVM or very slow execution:** verify `/dev/kvm` on the dedicated
   Linux host. oxfuzz can normalize the config to emulation when KVM is absent,
   but that does not establish Linux/KVM acceptance.
