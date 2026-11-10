@@ -1674,7 +1674,7 @@ pub fn delete_skill(
 #[must_use]
 pub fn list_agents(
     state: tauri::State<'_, crate::state::AppState>,
-) -> Vec<hf_service::AgentDefinition> {
+) -> Vec<hf_service::AgentDefinitionView> {
     state.container.list_agent_definitions()
 }
 

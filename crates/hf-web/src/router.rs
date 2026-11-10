@@ -4575,7 +4575,7 @@ async fn agent_tools(State(state): State<AppState>) -> Json<Vec<hf_service::Agen
     Json(state.container.agent_tool_definitions())
 }
 
-async fn list_agents(State(state): State<AppState>) -> Json<Vec<hf_service::AgentDefinition>> {
+async fn list_agents(State(state): State<AppState>) -> Json<Vec<hf_service::AgentDefinitionView>> {
     Json(state.container.list_agent_definitions())
 }
 
@@ -4587,8 +4587,13 @@ struct AgentIdRequest {
 async fn get_agent(
     State(state): State<AppState>,
     Json(request): Json<AgentIdRequest>,
-) -> Json<Option<hf_service::AgentDefinition>> {
-    Json(state.container.get_agent_definition(&request.id))
+) -> Json<Option<hf_service::AgentDefinitionView>> {
+    Json(
+        state
+            .container
+            .get_agent_definition(&request.id)
+            .map(hf_service::AgentDefinitionView::from),
+    )
 }
 
 #[derive(Debug, Deserialize)]

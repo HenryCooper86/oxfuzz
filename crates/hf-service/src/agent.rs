@@ -20,6 +20,23 @@ pub struct AgentToolDefinition {
     pub description: String,
 }
 
+/// Agent editor data with registry-assigned provenance exposed in JSON.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentDefinitionView {
+    #[serde(flatten)]
+    pub definition: AgentDefinition,
+    pub trust_tier: hf_agent::TrustTier,
+}
+
+impl From<AgentDefinition> for AgentDefinitionView {
+    fn from(definition: AgentDefinition) -> Self {
+        Self {
+            trust_tier: definition.trust_tier,
+            definition,
+        }
+    }
+}
+
 /// Service-resolved summary for the Agents surface.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AgentRegistryInfo {
@@ -130,8 +147,12 @@ impl ServiceContainer {
     /// List shipped and user-authored agent definitions from the canonical
     /// service-owned registry.
     #[must_use]
-    pub fn list_agent_definitions(&self) -> Vec<AgentDefinition> {
-        AgentRegistry::with_user_dir(agent_definitions_dir()).list()
+    pub fn list_agent_definitions(&self) -> Vec<AgentDefinitionView> {
+        AgentRegistry::with_user_dir(agent_definitions_dir())
+            .list()
+            .into_iter()
+            .map(AgentDefinitionView::from)
+            .collect()
     }
 
     /// Read one agent definition from the canonical registry.

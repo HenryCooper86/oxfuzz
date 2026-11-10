@@ -11,6 +11,15 @@ async fn service_owns_registry_paths_crud_and_selected_agent_validation() {
     std::env::set_var("HF_CONFIG_DIR", &config);
     let service = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
 
+    let roster = serde_json::to_value(service.list_agent_definitions()).unwrap();
+    let builtin = roster
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|agent| agent["id"] == "orchestrator")
+        .unwrap();
+    assert_eq!(builtin["trust_tier"], "built-in");
+
     let mut agent = service
         .get_agent_definition("crash-triager")
         .expect("built-in agent");
@@ -18,6 +27,14 @@ async fn service_owns_registry_paths_crud_and_selected_agent_validation() {
     agent.name = "Release Triager".to_owned();
     service.save_agent_definition(agent).unwrap();
     assert!(config.join("agents/release-triager.toml").is_file());
+    let roster = serde_json::to_value(service.list_agent_definitions()).unwrap();
+    let custom = roster
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|agent| agent["id"] == "release-triager")
+        .unwrap();
+    assert_eq!(custom["trust_tier"], "user-defined");
     assert_eq!(
         service
             .get_agent_definition("release-triager")

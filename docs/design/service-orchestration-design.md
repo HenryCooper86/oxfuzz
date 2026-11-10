@@ -1039,3 +1039,9 @@ history ignores the explicit preference; a frontend-only prompt prefix gives
 presentation code ownership of chat behavior and loses the selected locale from
 persisted evidence. Model compliance is verified with live bilingual examples;
 a prompt directive is not a deterministic language classifier.
+
+### Registry and settings presentation evidence
+
+Agent list/detail JSON includes registry-assigned provenance in a service-owned
+view DTO. Persisted agent TOML continues to omit provenance, and saving always
+assigns user-defined trust. Presentation must not infer built-in status from IDs.
