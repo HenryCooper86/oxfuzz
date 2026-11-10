@@ -27,7 +27,11 @@ let state: string;
 function Switch() { const { setActiveProject } = useProject(); return <button onClick={() => setActiveProject("/project-b")}>Switch project</button>; }
 async function mount() {
   await act(async () => root.render(<StrictMode><I18nProvider><ProjectProvider><TargetProvider><PipelineProvider><Switch /><HarnessView embedded /></PipelineProvider></TargetProvider></ProjectProvider></I18nProvider></StrictMode>));
-  await flush();
+  // The panel is lazy-loaded; one timer turn does not guarantee its import completed.
+  await vi.waitFor(async () => {
+    await flush();
+    expect(invoke.mock.calls.some(([command]) => command === "build_diagnose")).toBe(true);
+  });
 }
 async function flush() { await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); }); }
 function button(text: string) { const result = [...host.querySelectorAll("button")].find((b) => b.textContent === text); if (!result) throw new Error(`Missing ${text}: ${host.textContent}`); return result; }
