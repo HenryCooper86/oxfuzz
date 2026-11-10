@@ -1187,6 +1187,33 @@ impl ServiceContainer {
         crate::workbench::harness_review_queue(self.store.as_deref(), project, target).await
     }
 
+    /// Read qualification evidence for the revision currently active in the workspace.
+    ///
+    /// # Errors
+    /// Rejects missing or inconsistent active revisions instead of substituting history.
+    pub async fn harness_active_review(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+    ) -> Result<crate::HarnessReviewItem, ClassifiedError> {
+        let project = canonical_project_root(project)?;
+        let project = project.as_path();
+        let _workspace_operation = self.acquire_workspace_operation().await?;
+        let _target_revision = self.acquire_target_revision(project, target).await?;
+        let active = self.active_harness_locked(project, target, engine).await?;
+        self.harness_review_queue(Some(project), Some(target))
+            .await?
+            .into_iter()
+            .find(|item| item.harness_id == active.id.to_string())
+            .ok_or_else(|| {
+                ClassifiedError::Storage(format!(
+                    "active harness {} has no retained review item",
+                    active.id
+                ))
+            })
+    }
+
     /// Draft a harness for a target using the LLM provider pool.
     ///
     /// Falls back to a heuristic template when no provider is configured so

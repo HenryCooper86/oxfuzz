@@ -33,15 +33,18 @@ describe("transport", () => {
       await transport.invoke("harness_promote_with_findings", {
         project: "/tmp/project", target: "parse", engine: "libfuzzer",
       });
+      await transport.invoke("harness_active_review", { project: "/tmp/project", target: "parse", engine: "libfuzzer" });
       await transport.invoke("coverage_functions", { project: "/tmp/project", target: "parse" });
       expect(calls.map(({ url, init }) => [new URL(url).pathname, init.method])).toEqual([
         ["/harness/promote-with-findings", "POST"],
+        ["/harness/active-review", "POST"],
         ["/coverage/functions", "POST"],
       ]);
       expect(JSON.parse(String(calls[0].init.body))).toEqual({
         project: "/tmp/project", target: "parse", engine: "libfuzzer",
       });
-      expect(JSON.parse(String(calls[1].init.body))).toEqual({ project: "/tmp/project", target: "parse" });
+      expect(JSON.parse(String(calls[1].init.body))).toEqual({ project: "/tmp/project", target: "parse", engine: "libfuzzer" });
+      expect(JSON.parse(String(calls[2].init.body))).toEqual({ project: "/tmp/project", target: "parse" });
     } finally {
       globalThis.fetch = originalFetch;
     }

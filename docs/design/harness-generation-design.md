@@ -543,3 +543,11 @@ report run identity, plus source/binary identity when supplied by the harness
 review item. Missing evidence and read errors remain explicit. Selection changes
 invalidate pending reads. Each check displays its translated name separately
 from its observed/suspect/unavailable status.
+
+### Current revision evidence in the desktop and web workflow
+
+Approval and Run readiness read the service-resolved active harness revision,
+not the first historical review or any previously promoted revision. The review
+history remains available separately. Compilation invalidates the displayed
+qualification evidence, and finishing a smoke test reloads the active revision's
+independent review, digests, and smoke measurements before approval is enabled.

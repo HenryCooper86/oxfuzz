@@ -270,14 +270,16 @@ export function HarnessView({
     const generation = draftGeneration.current;
     const registration = registrationRef.current;
     (async () => {
-      if (selectionBlocked || !project || !selectedTarget) {
+      if (selectionBlocked || !project || !selectedTarget || qualificationBusy || harnessStatus === "loading"
+        || (harness !== null && compileStatus !== "done" && !externalPromotion)) {
         if (!cancelled) setExisting(null);
         return;
       }
       try {
-        const items = await getTransport().invoke<HarnessReviewItem[]>("harness_review_queue", {
+        const item = await getTransport().invoke<HarnessReviewItem>("harness_active_review", {
           project,
           target: selectedTarget,
+          engine,
         });
         if (cancelled || generation !== draftGeneration.current) return;
         const promotedId = externalPromotion
@@ -287,15 +289,8 @@ export function HarnessView({
           && externalPromotion.engine === engine
           ? externalPromotion.harnessId
           : null;
-        const scoped = items.filter((item) => harnessReviewMatchesScope(
-          item,
-          selectedTarget,
-          lang,
-          engine,
-        ));
-        const match = promotedId
-          ? scoped.find((item) => item.harness_id === promotedId) ?? null
-          : scoped[0] ?? null;
+        const match = harnessReviewMatchesScope(item, selectedTarget, lang, engine)
+          && (!promotedId || item.harness_id === promotedId) ? item : null;
         setExisting(match);
         if (canUseExisting) {
           const promoted = match?.status === "Promoted";
@@ -320,7 +315,7 @@ export function HarnessView({
       }
     })();
     return () => { cancelled = true; };
-  }, [project, selectedTarget, lang, engine, harness, canUseExisting, selectionBlocked, setCompiled, markDone, addRecent, reviewRefresh, externalPromotion]);
+  }, [project, selectedTarget, lang, engine, harness, canUseExisting, selectionBlocked, setCompiled, markDone, addRecent, reviewRefresh, externalPromotion, qualificationBusy, harnessStatus, compileStatus]);
 
   async function generateHarness(target: string): Promise<{ draft: HarnessResult; generation: number } | null> {
     if (!isCurrentScope() || !fuzzingSettings || selectionBlocked || buildBlocked) return null;
@@ -429,7 +424,7 @@ export function HarnessView({
   }
 
   async function promoteHarness(): Promise<boolean> {
-    if (!isCurrentScope() || !fuzzingSettings || selectionBlocked || qualificationBusy) return false;
+    if (!isCurrentScope() || !fuzzingSettings || selectionBlocked || qualificationBusy || !existing) return false;
     const generation = draftGeneration.current;
     addRecent(project);
     setPromotionStatus("loading");
@@ -457,7 +452,7 @@ export function HarnessView({
   }
 
   async function promoteWithFindings(): Promise<boolean> {
-    if (!isCurrentScope() || !fuzzingSettings || selectionBlocked || qualificationBusy) return false;
+    if (!isCurrentScope() || !fuzzingSettings || selectionBlocked || qualificationBusy || !existing) return false;
     const generation = draftGeneration.current;
     addRecent(project);
     setPromotionStatus("loading");
@@ -888,6 +883,7 @@ export function HarnessView({
               selectionBlocked ||
               !fuzzingSettings ||
               qualificationBusy ||
+              !existing ||
               promotionStatus === "done" ||
               (smokeCrashed ? false : !cleanApprovable)
             }

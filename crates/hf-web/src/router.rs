@@ -587,6 +587,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .route("/system/status", get(system_status))
         .route("/workbench/dashboard", post(workbench_dashboard))
         .route("/workbench/harnesses", post(harness_review_queue))
+        .route("/harness/active-review", post(harness_active_review))
         .route("/gitlab/issue", post(issue_export))
         .route("/issues/export", post(issue_export))
         .route("/issues/file", post(file_issue))
@@ -3243,6 +3244,20 @@ async fn harness_review_queue(
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(queue)?))
+}
+
+async fn harness_active_review(
+    State(state): State<AppState>,
+    Json(req): Json<HarnessQualificationRequest>,
+) -> ApiResult<serde_json::Value> {
+    let project = approved_project(&state, &req.project)?;
+    let engine = parse_engine(&req.engine).map_err(map_err(StatusCode::BAD_REQUEST))?;
+    let review = state
+        .container
+        .harness_active_review(&project, &req.target, engine)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(review)?))
 }
 
 #[derive(Debug, Deserialize)]

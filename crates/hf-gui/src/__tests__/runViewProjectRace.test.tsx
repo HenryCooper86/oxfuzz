@@ -71,6 +71,7 @@ function mockTransport(run: Promise<unknown>) {
     if (command === "get_fuzzing_settings") return SETTINGS;
     if (command === "artifact_summary") return { harness_built: true };
     if (command === "harness_review_queue") return [PROMOTED];
+    if (command === "harness_active_review") return PROMOTED;
     if (command === "run_fuzzer") return run;
     if (command === "run_history") return [];
     if (command === "run_owner") return [];
@@ -231,6 +232,7 @@ it.each([
       }
       if (command === "artifact_summary") return { harness_built: true };
       if (command === "harness_review_queue") return [{ ...PROMOTED, engine: retainedEngine }];
+      if (command === "harness_active_review") return { ...PROMOTED, engine: retainedEngine };
       if (command === "campaign_health_events") return { events: [], next_cursor: null };
       return [];
     });
@@ -269,3 +271,25 @@ it.each([
     expect(start!.disabled).toBe(!approved);
   },
 );
+
+it("does not enable a campaign using approval of an older revision", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  seedStorage("/project", ["/project"]);
+  mockTransport(Promise.resolve(null));
+  const original = invoke.getMockImplementation()!;
+  invoke.mockImplementation(async (command: string, ...args: unknown[]) => command === "harness_active_review"
+    ? { ...PROMOTED, harness_id: "new-revision", status: "Compiled", smoke_passed: false }
+    : original(command, ...args));
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  cleanup = async () => { await act(async () => root.unmount()); host.remove(); };
+  await act(async () => root.render(
+    <I18nProvider><ProjectProvider><TargetProvider><PipelineProvider><RunStatusProvider><ToastProvider><RunOutputProvider>
+      <RunView embedded />
+    </RunOutputProvider></ToastProvider></RunStatusProvider></PipelineProvider></TargetProvider></ProjectProvider></I18nProvider>,
+  ));
+  await flush();
+  const start = [...host.querySelectorAll("button")].find(item => item.textContent?.includes("Run Fuzzer"))!;
+  expect(start.disabled).toBe(true);
+});

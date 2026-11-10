@@ -100,7 +100,7 @@ it("keeps hydration progress for a newly opened project", async () => {
   invoke.mockImplementation(async (command: string) => {
     if (command === "get_fuzzing_settings") return SETTINGS;
     if (command === "discover") return { candidates: [], call_graph: {} };
-    if (command === "harness_review_queue") return [{ ...SMOKE_PASSED, smoke_run_id: "smoke-hydrated" }];
+    if (command === "harness_active_review") return { ...SMOKE_PASSED, smoke_run_id: "smoke-hydrated" };
     if (command === "run_owner") return { run_id: "smoke-hydrated", project_root: "/new", target: "parse", kind: "smoke" };
     if (command === "run_harness_behavior") return { version: 1, run_id: "smoke-hydrated", source_sha256: SMOKE_PASSED.source_sha256, binary_sha256: SMOKE_PASSED.binary_sha256,
       ...Object.fromEntries(["input_sensitivity", "entry_rejection", "repeated_input_stability", "persistent_state", "target_coverage_growth"].map(key => [key, { status: "unavailable", detail: "Retained qualification after reopening" }])) };
@@ -191,9 +191,9 @@ it("does not re-register a project removed while hydration is pending", async ()
   invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
     if (command === "get_fuzzing_settings") return SETTINGS;
     if (command === "discover") return { candidates: [], call_graph: {} };
-    if (command === "harness_review_queue") {
-      if (args?.project === "/new") return new Promise((resolve) => { resolveNew = () => resolve([SMOKE_PASSED]); });
-      return [SMOKE_PASSED];
+    if (command === "harness_active_review") {
+      if (args?.project === "/new") return new Promise((resolve) => { resolveNew = () => resolve(SMOKE_PASSED); });
+      return SMOKE_PASSED;
     }
     if (command === "system_status_cmd") return { docker: true, sandbox_image: true };
     if (command === "build_profile") return null;
@@ -265,4 +265,46 @@ it("does not re-register a project removed while hydration is pending", async ()
 
   expect(JSON.parse(localStorage.getItem("hf_recent_projects") ?? "[]")).not.toContain("/new");
   expect(readProgress()["/new"]?.completed ?? []).not.toContain("harness");
+});
+
+it("refreshes approval evidence from the active revision after a smoke test", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  localStorage.clear();
+  localStorage.setItem("hf_locale", "en");
+  localStorage.setItem("hf_active_project", "/new");
+  localStorage.setItem("hf_recent_projects", JSON.stringify(["/new"]));
+  localStorage.setItem("hf_target_selection_v1", JSON.stringify({ "/new": { target: "parse", engine: "libfuzzer", lang: "c", compiled: false } }));
+  let active = { ...SMOKE_PASSED, smoke_run_id: "old-smoke" };
+  invoke.mockReset();
+  invoke.mockImplementation(async (command: string) => {
+    if (command === "get_fuzzing_settings") return SETTINGS;
+    if (command === "discover") return { candidates: [], call_graph: {} };
+    if (command === "harness_review_queue") return [SMOKE_PASSED];
+    if (command === "harness_active_review") return active;
+    if (command === "harness_smoke") {
+      active = { ...active, smoke_run_id: "new-smoke", smoke_execs_per_sec: 4471,
+        ai_review: { ...active.ai_review, reasons: ["review of the active revision"] } };
+      return { status: "SmokePassed", duration_secs: 60, execs_per_sec: 4471, crashes: 0, passed: true };
+    }
+    if (command === "system_status_cmd") return { docker: true, sandbox_image: true };
+    if (command === "build_profile") return null;
+    if (command === "build_diagnose") return { schema_version: 1, operation: "diagnose", profile: null, profile_state: "unconfigured", detected: [], dependency_statuses: [], reasons: [], plan: null, legacy_build_context_available: false, terminal: null };
+    return [];
+  });
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  cleanup = async () => { await act(async () => root.unmount()); host.remove(); };
+  await act(async () => root.render(
+    <I18nProvider><ProjectProvider><TargetProvider><PipelineProvider><RunStatusProvider><ToastProvider><RunOutputProvider>
+      <HarnessView />
+    </RunOutputProvider></ToastProvider></RunStatusProvider></PipelineProvider></TargetProvider></ProjectProvider></I18nProvider>,
+  ));
+  await flush();
+  const smoke = [...host.querySelectorAll("button")].find(item => item.textContent === "Run Smoke Test")!;
+  expect(smoke).toBeTruthy();
+  await act(async () => smoke.click());
+  await flush();
+  expect(host.textContent).toContain("review of the active revision");
+  expect(host.textContent).not.toContain("128 exec/s");
 });

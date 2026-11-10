@@ -913,6 +913,21 @@ pub async fn workbench_dashboard(
         .map_err(|error| error.to_string())
 }
 
+/// Current revision evidence for harness approval and campaign readiness.
+#[tauri::command]
+pub async fn harness_active_review(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: PathBuf,
+    target: String,
+    engine: String,
+) -> Result<hf_service::HarnessReviewItem, String> {
+    state
+        .container
+        .harness_active_review(&project, &target, parse_engine(&engine)?)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 /// Generated harnesses that need human review or promotion.
 #[tauri::command]
 pub async fn harness_review_queue(

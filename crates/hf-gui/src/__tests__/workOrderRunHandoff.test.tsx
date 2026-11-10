@@ -54,6 +54,7 @@ it("carries the promoted exact selector through real Harness, Run, Corpus and re
     if (command === "work_order_list") return [order];
     if (command === "work_order_submissions") return [{ id: "submission", work_order_id: order.id, source: "exact imported source", source_sha256: "b".repeat(64), lint: [], origin: "human", submitted_at: "now" }];
     if (command === "work_order_attempts") return [{ id: attemptId, submission_id: "submission", status: "smoke_passed", current_stage: "complete", harness_id: harnessId, result: { compiled: true, smoke_verdict: "pass", repair_depth: 0, source_sha256: "b".repeat(64), binary_sha256: "c".repeat(64), execs_per_sec: 128, crashes: 0 }, started_at: "now", updated_at: "now", ended_at: "now" }];
+    if (command === "harness_active_review") return review();
     if (command === "harness_review_queue") return !args.target || ["ns::parse", selector].includes(args.target) ? [review()] : [];
     if (command === "work_order_promote") { expect(args.attemptId).toBe(attemptId); promoted = true; return { id: harnessId, status: "Promoted" }; }
     if (command === "artifact_summary") return { harness_built: args.target === selector };

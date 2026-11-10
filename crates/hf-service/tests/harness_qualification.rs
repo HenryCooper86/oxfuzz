@@ -1387,3 +1387,81 @@ async fn dropping_another_fixture_preserves_qualification_configuration() {
         .expect("qualification must retain configuration after another project is dropped");
     assert!(outcome.summary.passed);
 }
+
+#[tokio::test]
+async fn active_review_tracks_recompilation_instead_of_historical_qualification() {
+    let (project, _store, container) = qualified_fixture().await;
+    let source = "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }";
+    let first = container
+        .harness_compile(
+            source.to_owned(),
+            project.path(),
+            EngineKind::LibFuzzer,
+            "parse_entry",
+            TargetLanguage::C,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+    container
+        .harness_smoke(
+            project.path(),
+            "parse_entry",
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+        )
+        .await
+        .unwrap();
+    container
+        .harness_promote(project.path(), "parse_entry", EngineKind::LibFuzzer)
+        .await
+        .unwrap();
+    let second = container
+        .harness_compile(
+            source.to_owned(),
+            project.path(),
+            EngineKind::LibFuzzer,
+            "parse_entry",
+            TargetLanguage::C,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+    assert_ne!(first.harness_id, second.harness_id);
+    let active = container
+        .harness_active_review(project.path(), "parse_entry", EngineKind::LibFuzzer)
+        .await
+        .unwrap();
+    assert_eq!(active.harness_id, second.harness_id.to_string());
+    assert_eq!(active.status, "Compiled");
+    assert!(active.smoke_run_id.is_none());
+    assert!(active.ai_review.is_none());
+    assert!(container
+        .harness_review_queue(
+            Some(&std::fs::canonicalize(project.path()).unwrap()),
+            Some("parse_entry")
+        )
+        .await
+        .unwrap()
+        .iter()
+        .any(|item| item.harness_id == first.harness_id.to_string() && item.status == "Promoted"));
+    container
+        .harness_smoke(
+            project.path(),
+            "parse_entry",
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+        )
+        .await
+        .unwrap();
+    let qualified = container
+        .harness_active_review(project.path(), "parse_entry", EngineKind::LibFuzzer)
+        .await
+        .unwrap();
+    assert_eq!(qualified.harness_id, second.harness_id.to_string());
+    assert!(qualified.smoke_run_id.is_some());
+    assert!(qualified.ai_review.is_some());
+    assert!((qualified.smoke_execs_per_sec - 128.0).abs() < f64::EPSILON);
+}

@@ -919,6 +919,9 @@ describe("Harness repair interactions", () => {
     if (command === "build_history") return Promise.resolve([]);
     if (command === "get_fuzzing_settings") return Promise.resolve({ collect_function_coverage: false, enabled_engines: ["libfuzzer"], default_engine: "libfuzzer", default_duration_secs: 60, sandbox: { max_mem_mb: 2048, max_cpus: 1, max_duration_secs: 7200 } });
       if (command === "discover") return Promise.resolve({ project_root: args.project, candidates: [{ id: "candidate-1", project_root: args.project, language: "c", symbol: "parse_input", kind: "function", location: { file: "src/parser.c", line: 1, col: 1 }, signature: "int parse_input(void)", input_surface: "buffer", complexity: 1, fit_score: 1, sanitizers: [], rationale: "test fixture" }] });
+      if (command === "harness_active_review") return Promise.resolve(args.project === PROJECT_B
+        ? { ...review("harness-project-b", "project B retained source", "Promoted"), project_root: PROJECT_B }
+        : review("harness-exact", "exact promoted source", "Promoted"));
       if (command === "harness_review_queue" && args.project === PROJECT_B) return Promise.resolve([
         { ...review("harness-project-b-wrong", "project B wrong-engine source", "Promoted"), project_root: PROJECT_B, engine: "AFL++" },
         { ...review("harness-project-b", "project B retained source", "Promoted"), project_root: PROJECT_B },
@@ -945,7 +948,7 @@ describe("Harness repair interactions", () => {
     await waitForHarnessReady(view);
     await harnessButton(view, "common.generate");
     expect(view.container.textContent).toContain("local generated draft");
-    expect(view.container.textContent).toContain("harness-old");
+    expect(view.container.textContent).not.toContain("harness-old");
     if (pendingRegeneration) await harnessButton(view, "common.generate");
 
     await act(async () => {
@@ -1011,9 +1014,26 @@ async function harnessButton(view: MountedView, label: string) {
 function configureScopeTransport(operation: (command: string, args: Record<string, unknown>) => Promise<unknown> | undefined) {
   configureHarnessTransport();
   const baseline = transportInvoke.getMockImplementation()!;
+  let active: Record<string, unknown> | null = null;
   transportInvoke.mockImplementation((command: string, args: Record<string, unknown>) => {
     const response = operation(command, args);
-    if (response) return response;
+    if (response) return response.then(value => {
+      const result = value as Record<string, unknown>;
+      if (command === "harness_compile" && result.status === "Compiled") active = {
+        harness_id: "current-harness", target_id: "candidate-0", project_root: args.project,
+        target_symbol: args.target, target_selector: args.target, engine: args.engine, language: args.lang ?? "C",
+        status: "Compiled", smoke_passed: false, smoke_crashes: 0, smoke_execs_per_sec: 0,
+        source_preview: args.source, ai_review: null, source_sha256: "a".repeat(64), binary_sha256: "b".repeat(64), lint: [],
+      };
+      if (command === "harness_smoke" && active && ["SmokePassed", "SmokeFailed"].includes(String(result.status))) active = {
+        ...active, status: "SmokePassed", smoke_passed: result.passed, smoke_crashes: result.crashes,
+        smoke_execs_per_sec: result.execs_per_sec,
+        ai_review: { exercises_target: true, safe_to_execute: true, reasons: ["current review"], reviewed_at: "now" },
+      };
+      if (command.startsWith("harness_promote") && active && result.status === "Promoted") active = { ...active, status: "Promoted" };
+      return value;
+    });
+    if (command === "harness_active_review") return active ? Promise.resolve(active) : Promise.reject(new Error("no active harness"));
     if (command === "discover") {
       return Promise.resolve({
         project_root: args.project,
@@ -1128,13 +1148,13 @@ describe("HarnessView request ownership", () => {
     let generation = 0;
     configureScopeTransport((command) => {
       if (command === "harness_draft") return ++generation === 1 ? Promise.resolve(draftResult("original source")) : pending.promise;
-      if (command === "harness_review_queue") return Promise.resolve([{
+      if (command === "harness_active_review") return Promise.resolve({
         harness_id: "retained-harness", target_id: "candidate-0", target_symbol: "parse_input", target_selector: "src/parser.c::parse_input",
         project_root: PROJECT, engine: "LibFuzzer", language: "C", status: "Promoted", build_output: "fuzz",
         smoke_passed: true, smoke_execs_per_sec: 100, needs_review: false, next_action: "run", source_preview: "retained promoted source",
         ai_review: { exercises_target: true, safe_to_execute: true, reasons: [], reviewed_at: "now" },
         source_sha256: "a".repeat(64), binary_sha256: "b".repeat(64), lint: [],
-      }]);
+      });
     });
     const view = await mountHarnessScope();
     await harnessButton(view, "common.generate");
@@ -1147,13 +1167,13 @@ describe("HarnessView request ownership", () => {
 
   it("does not reuse persisted smoke approval after a new smoke attempt fails", async () => {
     configureScopeTransport((command) => {
-      if (command === "harness_review_queue") return Promise.resolve([{
+      if (command === "harness_active_review") return Promise.resolve({
         harness_id: "retained-harness", target_id: "candidate-0", target_symbol: "parse_input", target_selector: "src/parser.c::parse_input",
         project_root: PROJECT, engine: "LibFuzzer", language: "C", status: "SmokePassed", build_output: "fuzz",
         smoke_passed: true, smoke_execs_per_sec: 100, needs_review: true, next_action: "promote", source_preview: "retained source",
         ai_review: { exercises_target: true, safe_to_execute: true, reasons: [], reviewed_at: "now" },
         source_sha256: "a".repeat(64), binary_sha256: "b".repeat(64), lint: [],
-      }]);
+      });
       if (command === "harness_smoke") return Promise.resolve({ status: "Failed", passed: false, duration_secs: 0, execs_per_sec: 0, crashes: 0, error: "smoke execution unavailable" });
     });
     const view = await mountHarnessScope();
@@ -1165,14 +1185,14 @@ describe("HarnessView request ownership", () => {
   it("offers known-findings approval for a retained crash-bearing smoke run", async () => {
     // The smoke ran in the one-click flow and crashed; this view never ran it.
     configureScopeTransport((command) => {
-      if (command === "harness_review_queue") return Promise.resolve([{
+      if (command === "harness_active_review") return Promise.resolve({
         harness_id: "retained-harness", target_id: "candidate-0", target_symbol: "parse_input", target_selector: "src/parser.c::parse_input",
         project_root: PROJECT, engine: "LibFuzzer", language: "C", status: "SmokePassed", build_output: "fuzz",
         smoke_passed: false, smoke_crashes: 2, smoke_execs_per_sec: 0, needs_review: true,
         next_action: "Triage the smoke crash, or approve with known findings", source_preview: "retained source",
         ai_review: { exercises_target: true, safe_to_execute: true, reasons: [], reviewed_at: "now" },
         source_sha256: "a".repeat(64), binary_sha256: "b".repeat(64), lint: [],
-      }]);
+      });
       if (command === "harness_promote_with_findings") return Promise.resolve({ status: "Promoted" });
     });
     const view = await mountHarnessScope();
@@ -1187,13 +1207,13 @@ describe("HarnessView request ownership", () => {
 
   it("attributes a rejected smoke invoke to the smoke step, not the compile step", async () => {
     configureScopeTransport((command) => {
-      if (command === "harness_review_queue") return Promise.resolve([{
+      if (command === "harness_active_review") return Promise.resolve({
         harness_id: "retained-harness", target_id: "candidate-0", target_symbol: "parse_input", target_selector: "src/parser.c::parse_input",
         project_root: PROJECT, engine: "LibFuzzer", language: "C", status: "SmokePassed", build_output: "fuzz",
         smoke_passed: true, smoke_execs_per_sec: 100, needs_review: true, next_action: "promote", source_preview: "retained source",
         ai_review: { exercises_target: true, safe_to_execute: true, reasons: [], reviewed_at: "now" },
         source_sha256: "a".repeat(64), binary_sha256: "b".repeat(64), lint: [],
-      }]);
+      });
       if (command === "harness_smoke") return Promise.reject(new Error("docker daemon unavailable"));
     });
     const view = await mountHarnessScope();

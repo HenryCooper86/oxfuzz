@@ -126,16 +126,16 @@ export function RunView({
     let cancelled = false;
     Promise.all([
       getTransport().invoke<{ harness_built: boolean | null }>("artifact_summary", { project: project ?? "", target: target ?? "" }),
-      getTransport().invoke<HarnessReviewItem[]>("harness_review_queue", { project: project ?? "", target: target ?? "" }),
+      getTransport().invoke<HarnessReviewItem>("harness_active_review", { project: project ?? "", target: target ?? "", engine }),
     ])
-      .then(([artifacts, harnesses]) => {
+      .then(([artifacts, item]) => {
         if (!cancelled) {
           setHarnessBuilt(Boolean(artifacts.harness_built));
-          setHarnessApproved(harnesses.some((item) =>
+          setHarnessApproved(
             matchesTargetSelection(item.target_symbol, item.target_selector, target)
             && item.status === "Promoted"
             && canonicalHarnessEngine(item.engine) === canonicalHarnessEngine(engine),
-          ));
+          );
         }
       })
       .catch(() => {

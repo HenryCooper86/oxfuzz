@@ -185,6 +185,7 @@ const COMMAND_MAP: Record<string, CommandEndpoint> = {
   system_snapshot: { method: "GET", path: "/system/snapshot" },
   workbench_dashboard: { method: "POST", path: "/workbench/dashboard" },
   harness_review_queue: { method: "POST", path: "/workbench/harnesses" },
+  harness_active_review: { method: "POST", path: "/harness/active-review" },
   gitlab_issue_export: { method: "POST", path: "/gitlab/issue" },
   issue_export: { method: "POST", path: "/issues/export" },
   file_issue: { method: "POST", path: "/issues/file" },
