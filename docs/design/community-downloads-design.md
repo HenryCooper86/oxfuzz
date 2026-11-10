@@ -36,17 +36,39 @@ experimental signing status, Docker/setup requirements, release changes and
 SHA-256 verification instructions. Do not advertise unsupported workflows or
 link visitors to documentation they cannot read after the repository is private.
 No account system, analytics, newsletter form, or payment flow is needed.
+Explain implemented advantages: candidate ranking, harness qualification, visible
+assistant tool calls, provider routing/failover and spending limits, crash triage,
+corpus management, project knowledge and authorized scheduling. Sources are the
+README capability table, embedded Help and provider/settings implementations.
+Provider availability depends on endpoint credentials and model capabilities;
+rankings and generated reports remain reviewable suggestions.
+Compare direct engine use with oxfuzz by workflow task. Acknowledge upstream
+monitoring, corpus and triage tools, link primary documentation, and avoid
+performance claims without controlled measurements.
 The desktop Help and About links point to this public website and its setup
 section. Embedded help remains available offline; external documentation must
 not require access to the private source repository.
 
-Visual decisions: white and pale blue surfaces (#ffffff, #f2f5f8), navy text
-(#101b2b), secondary slate (#43536a), muted gold from the application (#d1b350),
-and cool gray rules (#d7dfe8). Use Avenir Next/Segoe UI for interface text and a
-system monospace face only for commands and checksums. A large left-aligned
-headline and a compact target-to-triage workflow diagram introduce the product;
-platform downloads form clear horizontal groups rather than a grid of marketing
-cards. Keep widths comfortable, focus states visible, and mobile layouts stacked.
+Visual decisions: match the application tokens. Dark mode uses charcoal #0f0f0f,
+secondary surfaces #141414, warm text #e8e6e1 and gold #c8b560. Light mode uses
+white, warm gray #f5f4f1, text #1a1917 and gold #9a7c2a. Use the application's
+system sans-serif stack, large restrained typography and thin separators.
+Green (#6fcf97 dark, #397a52 light) marks isolation and retained-evidence
+capabilities; gold remains the action and selection color.
+Lead with an actual application screenshot; a three-view gallery shows the
+qualification example's dashboard, harness review and run history. Captions
+identify real test data, without suggesting benchmark results. Keep downloads
+in horizontal platform rows and stack content on small screens. Clip native
+screenshot corners proportionally to their original window radius, concealing
+outside-window pixels without trimming the interface.
+
+A single icon button cycles Dark, Light, System, matching the desktop app.
+Default to System. Persist the preference when local storage is available;
+System follows live OS appearance changes. Use accessible current/next names,
+visible keyboard focus, and a small same-origin script allowed by the CSP.
+The gallery uses ordinary buttons with pressed states and works with keyboard
+activation. Without JavaScript the first screenshot and all downloads remain
+usable, with CSS following the system color scheme.
 
 ## Verification
 

@@ -71,7 +71,7 @@ html = html
   .replace(
     "<!-- PREVIEW -->",
     preview
-      ? '<p class="preview">Local candidate preview. Downloads are disabled until release verification finishes.</p>'
+      ? '<p class="preview">Release verification is in progress. Downloads will be enabled after the checks finish.</p>'
       : "",
   )
   .replace(

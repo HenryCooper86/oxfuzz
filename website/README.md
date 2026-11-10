@@ -1,7 +1,10 @@
 # Community download site
 
 Static site for `https://oxfuzz.bionicloud.net`, independent of GitHub visibility.
-No production JavaScript, accounts, tracking, remote fonts or build dependencies.
+A small same-origin script controls the icon theme switch and screenshot gallery.
+No accounts, tracking, remote fonts or build dependencies. Theme defaults to System
+and is saved locally when browser storage is available. Screenshots show the
+approved synthetic qualification fixture, not customer projects or benchmarks.
 
 ```sh
 cd website
