@@ -215,6 +215,19 @@ class RetiredEngineReferenceTests(unittest.TestCase):
                     (root / filename).write_bytes(contents)
                     self.assertEqual(find_forbidden_references(root), [])
 
+    def test_detector_ignores_short_alias_bytes_only_in_binary_media(self) -> None:
+        alias = self.cfl_alias().lower().encode("ascii")
+        cases = (
+            (b"\xff\xd8\xff\x92" + alias + b"\x83", False),
+            (b"source\xff\n" + alias, True),
+            (alias, True),
+        )
+        for contents, expected in cases:
+            with self.subTest(contents=contents), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                (root / "fixture.bin").write_bytes(contents)
+                self.assertEqual(bool(find_forbidden_references(root)), expected)
+
     def test_detector_reports_a_reference_before_skipping_magic_media(self) -> None:
         reference = self.canonical_title()
         with tempfile.TemporaryDirectory() as directory:

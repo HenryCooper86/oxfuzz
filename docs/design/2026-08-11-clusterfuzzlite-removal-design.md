@@ -204,6 +204,8 @@ References to the retired engine may remain only where they are required to:
 
 A repository test scans active source, configuration, documentation, and frontend files using an explicit allowlist for those historical locations. This prevents a future change from reintroducing a selectable engine, misleading readiness property, or stale user guidance.
 
+Compressed media can contain incidental three-byte alias sequences. For non-UTF-8 files with recognized media signatures, the checker scans the full retired name but excludes short aliases. Text files and unrecognized binary sources retain all alias checks regardless of filename. This is a source-reference check, not validation of image contents.
+
 ## 10. Error Handling and Safety
 
 - Engine selection remains explicit and fail-closed.

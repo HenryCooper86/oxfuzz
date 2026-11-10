@@ -83,7 +83,7 @@ HISTORICAL_OCCURRENCE_CONTRACTS = {
     pathlib.Path("docs/design/2026-08-11-clusterfuzzlite-removal-design.md"): HistoricalOccurrenceContract(14, "ba68718775b5b9b6db38e28a93a702d20ee5fe4ff75a73922849a686902355b1"),
     pathlib.Path("crates/hf-gui/src/lib/retiredEngine.ts"): HistoricalOccurrenceContract(3, "0c84e97c315144c25b4db1128c6dd9c1b22374666f7b91f6318f5e6e273e11df"),
     pathlib.Path("scripts/check_retired_engine_references.py"): HistoricalOccurrenceContract(2, "82e66e2ef9c18f0a9427aaa810bd910700a7e6aec73c518cd08aa2c4a29ac58c"),
-    pathlib.Path("scripts/tests/test_retired_engine_references.py"): HistoricalOccurrenceContract(57, "88785264173561eb854670a333da9d1962894bd4c74c75e9fc853553d395bc80"),
+    pathlib.Path("scripts/tests/test_retired_engine_references.py"): HistoricalOccurrenceContract(58, "acd38fc2b07572b04ee695d44b81584bdbe943d10c4d719ce6a64fbd119490f6"),
 }
 ALLOWED_FILES = set(HISTORICAL_OCCURRENCE_CONTRACTS)
 
@@ -328,11 +328,14 @@ def short_alias_spans(decoded: DecodedSource) -> list[tuple[int, int, bool]]:
     return spans
 
 
-def matching_occurrences(source: str) -> list[Occurrence]:
+def matching_occurrences(source: str, *, include_short_aliases: bool = True) -> list[Occurrence]:
     decoded = decode_ascii_escapes(source)
     source_lines = source.split("\n")
     occurrences_by_line: dict[int, Occurrence] = {}
-    for start, _, direct in long_canonical_spans(decoded) + short_alias_spans(decoded):
+    spans = long_canonical_spans(decoded)
+    if include_short_aliases:
+        spans += short_alias_spans(decoded)
+    for start, _, direct in spans:
         source_offset = decoded.source_offsets[start]
         line_number = source.count("\n", 0, source_offset) + 1
         occurrence = Occurrence(line_number, source_lines[line_number - 1], direct)
@@ -459,7 +462,10 @@ def find_forbidden_references(root: pathlib.Path) -> list[str]:
             raise ScanError(relative) from error
         source = contents.decode("utf-8", "surrogateescape")
         is_utf8 = not any("\udc80" <= character <= "\udcff" for character in source)
-        occurrences = matching_occurrences(source)
+        # Compressed media may contain incidental short byte sequences. Full
+        # names remain checked, including malformed media with embedded text.
+        binary_media = not is_utf8 and is_genuine_binary_media(contents)
+        occurrences = matching_occurrences(source, include_short_aliases=not binary_media)
         historical_match = (
             relative in ALLOWED_FILES
             and matches_historical_contract(relative, occurrences)
