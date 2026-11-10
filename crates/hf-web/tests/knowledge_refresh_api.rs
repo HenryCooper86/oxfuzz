@@ -7,6 +7,8 @@ use axum::{
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+static ENVIRONMENT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn request(app: &Router, method: &str, uri: &str, body: Value) -> Value {
     let response = app
         .clone()
@@ -29,6 +31,7 @@ async fn request(app: &Router, method: &str, uri: &str, body: Value) -> Value {
 
 #[tokio::test]
 async fn http_search_refreshes_edits_and_deletions_and_reports_index_settings() {
+    let _environment = ENVIRONMENT.lock().await;
     let root = tempfile::tempdir().unwrap();
     let project = root.path().join("project");
     std::fs::create_dir(&project).unwrap();
@@ -72,4 +75,62 @@ async fn http_search_refreshes_edits_and_deletions_and_reports_index_settings() 
             .unwrap()
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn search_reports_invalid_configuration_instead_of_no_matches() {
+    let _environment = ENVIRONMENT.lock().await;
+    let root = tempfile::tempdir().unwrap();
+    let config = root.path().join("config");
+    std::fs::create_dir(&config).unwrap();
+    std::fs::write(config.join("oxfuzz.toml"), "invalid = [").unwrap();
+    std::env::set_var("HF_CONFIG_DIR", &config);
+    std::env::set_var("HF_WORKSPACE_DIR", root.path().join("workspace"));
+    let response = failing_search(root.path()).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn search_reports_busy_knowledge_instead_of_no_matches() {
+    let _environment = ENVIRONMENT.lock().await;
+    let root = tempfile::tempdir().unwrap();
+    std::env::set_var("HF_CONFIG_DIR", root.path().join("config"));
+    std::env::set_var("HF_WORKSPACE_DIR", root.path().join("workspace"));
+    hf_service::knowledge::index_project(root.path()).unwrap();
+    let docs = hf_service::knowledge::docs_dir(root.path());
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(
+            docs.parent()
+                .unwrap()
+                .join(".locks")
+                .join(docs.file_name().unwrap()),
+        )
+        .unwrap();
+    lock.try_lock().unwrap();
+    let response = failing_search(root.path()).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+async fn failing_search(project: &std::path::Path) -> axum::response::Response {
+    let security =
+        hf_web::WebSecurityConfig::new(None, true, Vec::new(), vec![project.to_path_buf()])
+            .unwrap();
+    let app = hf_web::build_with_state_and_security(
+        hf_web::AppState::new(hf_service::ServiceContainer::stubbed()),
+        security,
+    );
+    app.oneshot(
+        Request::builder()
+            .method("POST")
+            .uri("/knowledge/search")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "project": project, "query": "parser" }).to_string(),
+            ))
+            .unwrap(),
+    )
+    .await
+    .unwrap()
 }

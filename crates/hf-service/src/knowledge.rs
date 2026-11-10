@@ -479,25 +479,18 @@ fn count_docs(project: &Path) -> usize {
 /// and a later `search`. This guarantees a usable result by indexing on demand.
 /// The index build walks the source tree (blocking), so async callers should
 /// run this on a blocking thread.
-#[must_use]
-pub fn search_project_ensured(project: &Path, query: &str, limit: usize) -> Vec<KnowledgeHit> {
-    let config = match crate::config::effective_knowledge_config() {
-        Ok(config) => config,
-        Err(error) => {
-            // Same boundary as `stats_project`: the signature is fixed for the
-            // presentation callers, so the failure is named loudly instead of
-            // searched against fabricated defaults.
-            tracing::error!(%error, "oxfuzz.toml is unreadable; knowledge search is unavailable");
-            return Vec::new();
-        }
-    };
-    match refresh_project_snapshot(project, &config, false) {
-        Ok((_, index)) => search_snapshot(&index, query, limit),
-        Err(error) => {
-            tracing::warn!(%error, "knowledge refresh failed");
-            Vec::new()
-        }
-    }
+///
+/// # Errors
+/// Returns a configuration or refresh error rather than an empty successful search.
+pub fn search_project_ensured(
+    project: &Path,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<KnowledgeHit>, ClassifiedError> {
+    let config = crate::config::effective_knowledge_config()
+        .map_err(|error| ClassifiedError::Validation(format!("oxfuzz.toml: {error}")))?;
+    let (_, index) = refresh_project_snapshot(project, &config, false)?;
+    Ok(search_snapshot(&index, query, limit))
 }
 
 /// Search a project's knowledge base. Returns an empty list if the project has
@@ -853,7 +846,7 @@ mod tests {
         .unwrap();
         assert!(!is_indexed(dir.path()));
         assert!(search_project(dir.path(), "parse_packet", 10).is_empty());
-        let hits = search_project_ensured(dir.path(), "parse_packet", 10);
+        let hits = search_project_ensured(dir.path(), "parse_packet", 10).unwrap();
         assert!(is_indexed(dir.path()));
         assert!(
             !hits.is_empty(),

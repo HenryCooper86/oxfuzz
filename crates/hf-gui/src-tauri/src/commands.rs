@@ -1603,6 +1603,7 @@ pub async fn knowledge_search(
         )
     })
     .await
+    .map_err(|error| error.to_string())?
     .map_err(|error| error.to_string())
 }
 

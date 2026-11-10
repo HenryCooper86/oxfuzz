@@ -617,11 +617,10 @@ impl AgentBackend for ServiceContainer {
         let project = project.to_path_buf();
         let query = query.to_owned();
         tokio::task::spawn_blocking(move || {
-            if !crate::knowledge::is_indexed(&project) {
-                crate::knowledge::index_project(&project)?;
-            }
-            serde_json::to_value(crate::knowledge::search_project(&project, &query, limit))
-                .map_err(|error| ClassifiedError::Internal(error.to_string()))
+            serde_json::to_value(crate::knowledge::search_project_ensured(
+                &project, &query, limit,
+            )?)
+            .map_err(|error| ClassifiedError::Internal(error.to_string()))
         })
         .await
         .map_err(|error| ClassifiedError::Internal(format!("knowledge task: {error}")))?

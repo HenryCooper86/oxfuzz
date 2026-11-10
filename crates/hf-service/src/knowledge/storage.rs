@@ -17,7 +17,7 @@ pub(super) fn identity(project: &Path) -> String {
 pub(crate) struct KnowledgeOperation {
     pub(crate) project: PathBuf,
     pub(crate) docs: PathBuf,
-    _lease: File,
+    lease: File,
 }
 
 impl KnowledgeOperation {
@@ -47,7 +47,7 @@ impl KnowledgeOperation {
         Ok(Self {
             project,
             docs,
-            _lease: lease,
+            lease,
         })
     }
 
@@ -85,6 +85,15 @@ impl KnowledgeOperation {
     }
 }
 
+impl Drop for KnowledgeOperation {
+    fn drop(&mut self) {
+        // Closing alone keeps a lock alive while a fork retains the descriptor.
+        if let Err(error) = self.lease.unlock() {
+            tracing::error!(%error, project = %self.project.display(), "knowledge lease unlock failed; falling back to file close");
+        }
+    }
+}
+
 fn storage_error(error: &std::io::Error) -> ClassifiedError {
     ClassifiedError::Internal(format!("project knowledge storage: {error}"))
 }
@@ -109,6 +118,22 @@ pub(super) fn legacy_documents_preserved(project: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_operation_releases_a_duplicated_lease() {
+        let _environment = super::super::workspace_test_gate().blocking_lock();
+        let _guard = super::super::test_guard();
+        let project = tempfile::tempdir().unwrap();
+        let operation = KnowledgeOperation::acquire(project.path()).unwrap();
+        // A concurrent subprocess fork can retain the descriptor until exec.
+        let inherited = operation.lease.try_clone().unwrap();
+        drop(operation);
+        let next = KnowledgeOperation::acquire(project.path()).unwrap();
+        drop(inherited);
+        assert!(KnowledgeOperation::acquire(project.path()).is_err());
+        drop(next);
+        assert!(KnowledgeOperation::acquire(project.path()).is_ok());
+    }
 
     #[test]
     fn indexing_and_deletion_require_exclusive_project_ownership() {

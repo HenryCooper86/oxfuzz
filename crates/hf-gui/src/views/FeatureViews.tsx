@@ -1,7 +1,7 @@
 import { CampaignAllocation } from "../components/CampaignAllocation";
 import { KnowledgeIndexDetails, type KnowledgeIndexDetailsStatus } from "../components/KnowledgeIndexDetails";
 import { SchedulerRuntimeStatus, type CampaignSchedulerStatus } from "../components/SchedulerRuntimeStatus";
-import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useState, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
 import { Button, IconButton, EmptyState, ErrorState, Input, LoadingState, Select, SeverityBadge, Textarea, ViewHeader } from "../components/ui";
 import { DurationInput } from "../components/ui/DurationInput";
 import { Puzzle, BookOpen, Zap, Target, FileCode, Activity, Bug, Crosshair, Play, Loader2, Plus, Trash2, RotateCw, RotateCcw, Copy, Square, Bot, Shield, Database, Pencil, Save, X, Search, FilePlus, FolderOpen, Layers } from "lucide-react";
@@ -887,14 +887,19 @@ interface KnowledgeIndexStatus extends KnowledgeIndexDetailsStatus {
   indexed_at: string | null;
 }
 
-// BM25 search over the active project's source, backed by hf-knowledge.
 function KnowledgeBaseSearch() {
-  const { t } = useI18n();
   const { activeProject } = useProject();
-  // The status is keyed by project so a slow reply for a project the user has
-  // already navigated away from cannot be rendered (same pattern as the
-  // Automation view's schedulable-target load).
-  const [status, setStatus] = useState<{ project: string; value: KnowledgeIndexStatus } | null>(null);
+  return <ProjectKnowledgeSearch key={activeProject} project={activeProject} />;
+}
+
+function ProjectKnowledgeSearch({ project }: { project: string }) {
+  const { t } = useI18n();
+  const [current, setCurrent] = useState<KnowledgeIndexStatus | null>(null);
+  const [statusError, setStatusError] = useState<string | null>(null);
+  const [statusLoading, setStatusLoading] = useState(!!project);
+  const mounted = useRef(true);
+  const statusVersion = useRef(0);
+  const searchVersion = useRef(0);
   const [indexing, setIndexing] = useState(false);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<KnowledgeHit[] | null>(null);
@@ -902,81 +907,92 @@ function KnowledgeBaseSearch() {
   const [ingesting, setIngesting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const current = activeProject && status?.project === activeProject ? status.value : null;
   const indexed = !!current?.indexed;
 
-  // Load the index status for the active project so the card shows the real
-  // index size/config on first render instead of only after a manual reindex.
-  useEffect(() => {
-    if (!activeProject) return undefined;
-    let cancelled = false;
-    getTransport()
-      .invoke<KnowledgeIndexStatus>("knowledge_stats", { project: activeProject })
-      .then((value) => !cancelled && setStatus({ project: activeProject, value }))
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [activeProject]);
-
-  async function refreshStatus() {
-    if (!activeProject) return;
+  const refreshStatus = useCallback(async () => {
+    if (!project || !mounted.current) return;
+    const version = ++statusVersion.current;
+    setStatusLoading(true);
     try {
-      const value = await getTransport().invoke<KnowledgeIndexStatus>("knowledge_stats", { project: activeProject });
-      setStatus({ project: activeProject, value });
-    } catch {
-      /* a missing status only hides the stats line; index/search report their own errors */
+      const value = await getTransport().invoke<KnowledgeIndexStatus>("knowledge_stats", { project });
+      if (!mounted.current || version !== statusVersion.current) return;
+      setCurrent(value);
+      setStatusError(null);
+    } catch (cause) {
+      if (!mounted.current || version !== statusVersion.current) return;
+      setCurrent(null);
+      setStatusError(String(cause));
+    } finally {
+      if (mounted.current && version === statusVersion.current) setStatusLoading(false);
     }
+  }, [project]);
+
+  useEffect(() => {
+    mounted.current = true;
+    void Promise.resolve().then(refreshStatus);
+    return () => {
+      mounted.current = false;
+      statusVersion.current += 1;
+      searchVersion.current += 1;
+    };
+  }, [refreshStatus]);
+
+  function clearSearch() {
+    searchVersion.current += 1;
+    setHits(null);
+    setSearching(false);
+    setError(null);
   }
 
   // Convert a document (PDF/Office/HTML/...) to Markdown via markitdown in the
   // sandbox and add it to this project's knowledge base.
   async function ingest() {
-    if (!activeProject || ingesting) return;
-    const file = await pickFile(t("knowledge.ingestPickTitle"));
-    if (!file) return;
+    if (!project || ingesting) return;
     setIngesting(true);
-    setHits(null);
-    setError(null);
     try {
-      await getTransport().invoke<KnowledgeStats>("knowledge_ingest", { project: activeProject, file });
+      const file = await pickFile(t("knowledge.ingestPickTitle"));
+      if (!file || !mounted.current) return;
+      clearSearch();
+      await getTransport().invoke<KnowledgeStats>("knowledge_ingest", { project, file });
       await refreshStatus();
     } catch (e) {
-      // Previously swallowed -- an ingest failure (missing markitdown, bad path
-      // in browser mode, etc.) looked identical to "nothing happened".
-      setError(t("knowledge.addDocFailed", { error: String(e) }));
+      if (mounted.current) setError(t("knowledge.addDocFailed", { error: String(e) }));
     } finally {
-      setIngesting(false);
+      if (mounted.current) setIngesting(false);
     }
   }
 
   async function index() {
-    if (!activeProject) return;
+    if (!project || indexing) return;
     setIndexing(true);
-    setHits(null);
-    setError(null);
+    clearSearch();
     try {
-      await getTransport().invoke<KnowledgeStats>("knowledge_index", { project: activeProject });
+      await getTransport().invoke<KnowledgeStats>("knowledge_index", { project });
       await refreshStatus();
     } catch (e) {
-      setError(t("knowledge.indexFailed", { error: String(e) }));
+      if (mounted.current) setError(t("knowledge.indexFailed", { error: String(e) }));
     } finally {
-      setIndexing(false);
+      if (mounted.current) setIndexing(false);
     }
   }
 
   async function search() {
-    if (!activeProject || !query.trim() || !indexed) return;
+    if (!project || !query.trim() || !indexed || searching) return;
+    const version = ++searchVersion.current;
     setSearching(true);
+    setHits(null);
     setError(null);
     try {
-      setHits(await getTransport().invoke<KnowledgeHit[]>("knowledge_search", { project: activeProject, query, limit: 10 }));
+      const result = await getTransport().invoke<KnowledgeHit[]>("knowledge_search", { project, query, limit: 10 });
+      if (!mounted.current || version !== searchVersion.current) return;
+      setHits(result);
       await refreshStatus();
     } catch (e) {
+      if (!mounted.current || version !== searchVersion.current) return;
       setHits(null);
       setError(t("knowledge.searchFailed", { error: String(e) }));
     } finally {
-      setSearching(false);
+      if (mounted.current && version === searchVersion.current) setSearching(false);
     }
   }
 
@@ -997,17 +1013,17 @@ function KnowledgeBaseSearch() {
         <div className="shrink-0 flex items-center gap-2">
           <button
             onClick={ingest}
-            disabled={ingesting || !activeProject}
+            disabled={ingesting || !project}
             title={t("knowledge.addDocTitle")}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-border bg-surface-primary text-text-secondary hover:bg-surface-hover hover:text-text-primary disabled:opacity-55"
           >
             {ingesting ? <Loader2 size={13} className="animate-spin" /> : <FilePlus size={13} />}
             {ingesting ? t("knowledge.ingesting") : t("knowledge.addDoc")}
           </button>
-          <Button variant="outline" size="sm" disabled={!activeProject} onClick={() => void refreshStatus()}>{t("knowledge.checkStatus")}</Button>
+          <Button variant="outline" size="sm" disabled={!project} onClick={() => void refreshStatus()}>{t("knowledge.checkStatus")}</Button>
           <button
             onClick={index}
-            disabled={indexing || !activeProject}
+            disabled={indexing || !project}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-border bg-surface-primary text-text-secondary hover:bg-surface-hover hover:text-text-primary disabled:opacity-55"
           >
             {indexing ? <Loader2 size={13} className="animate-spin" /> : <RotateCw size={13} />}
@@ -1018,6 +1034,9 @@ function KnowledgeBaseSearch() {
       <p className="text-xs text-text-muted">
         {t("knowledge.baseHelp")}
       </p>
+      {project && <p className="text-xs text-text-muted break-all">{project}</p>}
+      {statusLoading && <p role="status" className="text-xs text-text-muted">{t("common.loading")}</p>}
+      {statusError && <p role="alert" className="text-xs text-error">{t("knowledge.statusFailed", { error: statusError })}</p>}
       {current && (
         <p className="text-xs text-text-muted">
           {current.documents > 0 && ` · ${t("knowledge.docsCount", { n: current.documents })}`}
@@ -1030,13 +1049,14 @@ function KnowledgeBaseSearch() {
           {t("knowledge.legacyDocumentsPreserved")}
         </p>
       )}
-      {!activeProject && (
+      {!project && (
         <p className="text-xs" style={{ color: "var(--warning, #d9a441)" }}>
           {t("knowledge.selectProjectFirst")}
         </p>
       )}
       {error && (
         <div
+          role="alert"
           className="text-xs rounded-md"
           style={{ padding: "var(--space-sm)", background: "var(--surface-code)", color: "var(--danger, #e5484d)", border: "1px solid var(--danger, #e5484d)" }}
         >
@@ -1046,7 +1066,7 @@ function KnowledgeBaseSearch() {
       <div className="flex items-center gap-2">
         <Input
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={(e) => { clearSearch(); setQuery(e.target.value); }}
           onKeyDown={(e) => e.key === "Enter" && void search()}
           placeholder={indexed ? t("knowledge.searchPlaceholder") : t("knowledge.searchPlaceholderNoIndex")}
           disabled={!indexed}
@@ -1099,29 +1119,20 @@ function DesktopKnowledgeView() {
   // A failed read is shown as an error, never as "nothing learned yet".
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  const load = () => {
-    setLoading(true);
-    getTransport()
-      .invoke<KnowledgeSummary>("knowledge_summary")
-      .then((d) => { setData(d); setLoadError(null); })
-      .catch((e) => { setData(null); setLoadError(String(e)); })
-      .finally(() => setLoading(false));
-  };
+  const summaryRefresh = useMemo(() => createLatestRefresh({
+    onStart: () => setLoading(true),
+    load: () => getTransport().invoke<KnowledgeSummary>("knowledge_summary"),
+    commit: (value) => { setData(value); setLoadError(null); setLoading(false); },
+  }), []);
+  const load = useCallback(() => summaryRefresh.refresh().catch((cause: unknown) => {
+    setData(null); setLoadError(String(cause)); setLoading(false);
+  }), [summaryRefresh]);
 
-  // Initial load (no synchronous setState in the effect body).
   useEffect(() => {
-    let cancelled = false;
-    getTransport()
-      .invoke<KnowledgeSummary>("knowledge_summary")
-      .then((d) => !cancelled && setData(d))
-      .catch((e) => {
-        if (!cancelled) { setData(null); setLoadError(String(e)); }
-      })
-      .finally(() => !cancelled && setLoading(false));
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    summaryRefresh.activate();
+    void Promise.resolve().then(load);
+    return () => summaryRefresh.deactivate();
+  }, [load, summaryRefresh]);
 
   const empty = data && data.targets.length === 0 && data.runs.length === 0 && data.crashes.length === 0;
 
@@ -1142,6 +1153,7 @@ function DesktopKnowledgeView() {
 
       <KnowledgeBaseSearch />
 
+      <p role="note" className="text-xs text-text-muted">{t("knowledge.summaryScope")}</p>
       {loadError && (
         <ErrorState title={t("knowledge.loadFailed")} message={loadError} action={<Button variant="outline" size="sm" onClick={load}>{t("common.retry")}</Button>} />
       )}
@@ -1179,6 +1191,7 @@ function DesktopKnowledgeView() {
 }
 
 function KnowledgeSection({ title, count, icon, children }: { title: string; count: number; icon: ReactNode; children: ReactNode }) {
+  const { t } = useI18n();
   if (count === 0) return null;
   return (
     <div className="surface-card overflow-hidden">
@@ -1186,6 +1199,7 @@ function KnowledgeSection({ title, count, icon, children }: { title: string; cou
         <span style={{ color: "var(--accent)" }}>{icon}</span>
         <span className="text-sm font-medium">{title}</span>
         <span className="text-xs text-text-muted">{count}</span>
+        {count > 40 && <span className="text-xs text-text-muted">{t("knowledge.summaryLimit", { shown: 40, total: count })}</span>}
       </div>
       <div className="flex flex-col">{children}</div>
     </div>

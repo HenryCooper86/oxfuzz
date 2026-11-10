@@ -106,6 +106,12 @@ process removes or recreates a project's knowledge directory. Project deletion
 removes owned documents and invalidates the local index while holding that
 lease; unrelated projects and original source repositories remain untouched.
 
+Completed knowledge operations explicitly unlock their lease before closing the
+file. Closing alone can leave ownership held by a duplicated descriptor, including
+one inherited during concurrent subprocess creation. Unlock failures are logged;
+closing the owned file remains the fallback. Regression tests retain a duplicated
+descriptor across completion and verify that the next operation acquires ownership.
+
 ### 3.4 Incremental knowledge refresh
 
 Ensured search compares content and configuration SHA-256 fingerprints before
@@ -134,6 +140,14 @@ unreadable inputs or degraded embeddings. Source/status walks run on blocking
 workers in asynchronous transports. Pure cached prompt-context lookup retains
 its existing non-refreshing semantics; model-visible hits still use the existing
 persisted tool and prompt paths.
+
+Interactive and assistant tool searches use ensured refresh and return an error
+when configuration or refresh fails; an empty successful result means the
+search completed without matches. The GUI scopes search state to the selected
+project and query, discards superseded responses, and reports status-check
+failures without retaining a current-index claim. Document selection cannot
+start ingestion after the selected project changes. Database history remains a
+separate all-project summary, with any display limit explicitly identified.
 
 ## 4. Orchestration Flow
 

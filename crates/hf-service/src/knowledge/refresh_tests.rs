@@ -7,13 +7,19 @@ fn ensured_search_refreshes_same_length_edits_and_deletions() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("parser.c");
     std::fs::write(&file, "int alpha_symbol(void) { return 1; }").unwrap();
-    assert!(!search_project_ensured(dir.path(), "alpha_symbol", 5).is_empty());
+    assert!(!search_project_ensured(dir.path(), "alpha_symbol", 5)
+        .unwrap()
+        .is_empty());
     std::fs::write(&file, "int bravo_symbol(void) { return 2; }").unwrap();
     assert_eq!(stats_project(dir.path()).stale, Some(true));
-    assert!(!search_project_ensured(dir.path(), "bravo_symbol", 5).is_empty());
+    assert!(!search_project_ensured(dir.path(), "bravo_symbol", 5)
+        .unwrap()
+        .is_empty());
     assert!(search_project(dir.path(), "alpha_symbol", 5).is_empty());
     std::fs::remove_file(file).unwrap();
-    assert!(search_project_ensured(dir.path(), "bravo_symbol", 5).is_empty());
+    assert!(search_project_ensured(dir.path(), "bravo_symbol", 5)
+        .unwrap()
+        .is_empty());
     assert_eq!(stats_project(dir.path()).files, 0);
 }
 
@@ -145,7 +151,9 @@ fn an_unreadable_source_does_not_leave_its_old_text_searchable() {
     std::fs::write(&file, "int removed_symbol(void) { return 1; }").unwrap();
     index_project(dir.path()).unwrap();
     std::fs::write(file, [0xff, 0xfe]).unwrap();
-    assert!(search_project_ensured(dir.path(), "removed_symbol", 5).is_empty());
+    assert!(search_project_ensured(dir.path(), "removed_symbol", 5)
+        .unwrap()
+        .is_empty());
     assert!(!stats_project(dir.path()).warnings.is_empty());
 }
 

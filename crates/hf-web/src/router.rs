@@ -4224,7 +4224,8 @@ async fn knowledge_search(
         classified_api_error(ClassifiedError::Internal(format!(
             "knowledge search task failed: {error}"
         )))
-    })?;
+    })?
+    .map_err(classified_api_error)?;
     Ok(Json(public_value(hits)?))
 }
 
