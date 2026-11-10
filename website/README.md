@@ -33,3 +33,8 @@ on subsequent deployments. Existing unrelated virtual hosts must be preserved.
 Before making the source repository private, verify anonymous HTTPS downloads and
 their SHA-256 digests. Keep source, runtime data, SSH keys and GitHub credentials
 outside the web root. Retain the previous deployment for rollback.
+
+Sanitized, versioned release-qualification records live in `src/acceptance/` and
+are copied with the site. Keep their bytes stable: the GitHub release records
+reference their public URLs and SHA-256 digests. Do not copy raw runtime logs,
+databases, provider configuration or credentials into that directory.

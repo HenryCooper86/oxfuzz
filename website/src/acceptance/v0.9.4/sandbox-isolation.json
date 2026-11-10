@@ -1,0 +1,57 @@
+{
+  "schema_version": 3,
+  "claim": "sandbox_isolation",
+  "candidate_commit": "d6e940021348e2f1a396ca7e891ab7ff11baea3f",
+  "tag": "v0.9.4",
+  "platform": "macOS arm64 / Linux arm64 Docker",
+  "sandbox_image": {
+    "reference": "oxfuzz/fuzz-sandbox:0.2.2",
+    "id": "sha256:fa0101b94bcb30dbb43e0c7b804e22bc442a766479f8908f5436ded1aa84286f"
+  },
+  "command": "scripts/cargo-test-filtered.sh --locked -p hf-runtime --test live_isolation -- --ignored --test-threads=1 --nocapture",
+  "exit_code": 0,
+  "observed_on": "2026-11-10",
+  "scenarios_passed": [
+    "Network unavailable, input read-only, explicitly mounted output writable, 256 MiB and 1 CPU cgroup limits verified",
+    "Explicit numeric UID/GID can read private input and creates correctly owned output",
+    "Timeout awaits owned-container cleanup",
+    "Running container registered with owned workspace label",
+    "Runtime ownership records inaccessible inside the sandbox",
+    "Fresh runtime cleans up container left by terminated helper client"
+  ],
+  "helper": "Seventh test is the recovery child-process helper, not an independent scenario.",
+  "semgrep": {
+    "version": "1.169.0",
+    "rules_commit": "4d66ecf30bfb1809a984085f2c86a8c3915bfc71",
+    "rules_tree_sha256": "b7b7a88a780c5f7cfe8ce7afc05af84165419e35aa0b1ef7fb553f58667fa613",
+    "offline_bounded_scan": "passed; exact clean.c/vulnerable.c fixture paths, no scan errors/skips, one expected insecure-gets finding and no findings in clean.c",
+    "license_files": "LGPL-2.1 Semgrep and MIT rules notices verified"
+  },
+  "doctor": {
+    "docker": true,
+    "sandbox_image": true,
+    "libfuzzer": true,
+    "aflplusplus": true,
+    "honggfuzz": true,
+    "syzkaller": true,
+    "engine_probe_failed": false,
+    "defectdojo": true
+  },
+  "build_kit": {
+    "file": "oxfuzz-sandbox-kit-0.9.4.tar.gz",
+    "tracked_files": 126,
+    "verification": "Complete public kit built successfully and yielded the exact qualified image ID. Final archive regular-file contents match that built kit. No symlinks, application crates, runtime artifacts or credentials included."
+  },
+  "evidence_sha256": {
+    "sandbox-build.log": "sha256:cc82667f725441797f15ca01f8e1b2d4e6465b901c7a87ad9d79cebc708b4c26",
+    "kit-build.log": "sha256:137333d9284901830962ce88a092c359e695be4d7dc4f1b4342dfe41d2f3d46f",
+    "semgrep-sandbox.log": "sha256:ffd54343124569c2d475fd8a46796da2e42c3abe1b08b15dfd2eba5c519376d3",
+    "doctor.json": "sha256:3c86e921b845e7fad2d655b8f73316658ca14b40e434866ff15cad8a6f0c8712"
+  },
+  "limitations": [
+    "Host is macOS arm64; this is not a Windows Docker or Linux KVM qualification.",
+    "The filtered live-test log is empty because the repository filter suppresses successful test lines; the executed command returned status 0. Scenario statements correspond to assertions in hf-runtime/tests/live_isolation.rs.",
+    "Docker failure recovery scenarios cover only disposable owned containers."
+  ],
+  "candidate_delta": "After the approved cycle: test-only kernel/workspace synchronization and lazy GUI test readiness, source-reference checker handling of short byte sequences in media, website/design files, and desktop Help/About public links/labels changed. Fuzzing/runtime production logic, dependencies, engine adapters, sandbox recipe and qualification sources/runner are unchanged. The cycle was not repeated."
+}
