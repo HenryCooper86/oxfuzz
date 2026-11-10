@@ -24,7 +24,10 @@ for (const settings of [false, true]) {
       for (const [current, next] of [["Dark", "light"], ["Light", "system"], ["System", "dark"]]) {
         const button = host.querySelector<HTMLButtonElement>('button[aria-label^="settings.general.theme:"]');
         expect(button).not.toBeNull();
-        expect(button?.textContent).toContain(`settings.general.theme${current}`);
+        expect(button?.textContent).toBe("");
+        expect(button?.querySelector('svg[aria-hidden="true"]')).not.toBeNull();
+        expect(button?.getAttribute("aria-label")).toContain(`settings.general.theme${current}`);
+        expect(button?.getAttribute("title")).toBe(button?.getAttribute("aria-label"));
         await act(async () => button!.click());
         expect(localStorage.getItem("hf_theme")).toBe(next);
       }

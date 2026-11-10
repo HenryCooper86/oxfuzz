@@ -14,9 +14,8 @@ export function ThemeButton({ theme, onChange }: { theme: Theme; onChange: (them
   const { next, label, icon: Icon } = modes[theme];
   const description = `${t("settings.general.theme")}: ${t(label)} → ${t(modes[next].label)}`;
   return (
-    <Button type="button" onClick={() => onChange(next)} title={description} aria-label={description}>
+    <Button type="button" variant="icon" className="w-8 !px-0" onClick={() => onChange(next)} title={description} aria-label={description}>
       <Icon size={16} aria-hidden="true" />
-      {t(label)}
     </Button>
   );
 }
