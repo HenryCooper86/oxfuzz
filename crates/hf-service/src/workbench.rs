@@ -956,22 +956,14 @@ fn next_actions(totals: &WorkbenchTotals) -> Vec<String> {
         actions.push(format!(
             "Review {} generated harness{} before full fuzzing.",
             totals.harnesses_needing_review,
-            if totals.harnesses_needing_review == 1 {
-                ""
-            } else {
-                "es"
-            }
+            plural_es_suffix(totals.harnesses_needing_review)
         ));
     }
     if totals.crashes_needing_triage > 0 {
         actions.push(format!(
-            "Triage {} crash{} from the latest run.",
+            "Triage {} pending crash{} in this project.",
             totals.crashes_needing_triage,
-            if totals.crashes_needing_triage == 1 {
-                ""
-            } else {
-                "es"
-            }
+            plural_es_suffix(totals.crashes_needing_triage)
         ));
     }
     // A campaign needs a harness, so targets without one point at generation.
@@ -1066,7 +1058,7 @@ fn readiness_summary(totals: &WorkbenchTotals, store_configured: bool) -> Workbe
         blockers.push(format!(
             "{} generated harness{} need human approval.",
             totals.harnesses_needing_review,
-            plural_suffix(totals.harnesses_needing_review),
+            plural_es_suffix(totals.harnesses_needing_review),
         ));
         blocker_items.push(ReadinessNote {
             code: "harnesses_need_review".to_owned(),
@@ -1084,7 +1076,7 @@ fn readiness_summary(totals: &WorkbenchTotals, store_configured: bool) -> Workbe
         blockers.push(format!(
             "{} crash{} still need triage.",
             totals.crashes_needing_triage,
-            plural_suffix(totals.crashes_needing_triage),
+            plural_es_suffix(totals.crashes_needing_triage),
         ));
         blocker_items.push(ReadinessNote {
             code: "crashes_need_triage".to_owned(),
@@ -1166,11 +1158,11 @@ fn readiness_summary(totals: &WorkbenchTotals, store_configured: bool) -> Workbe
     }
 }
 
-fn plural_suffix(count: usize) -> &'static str {
+fn plural_es_suffix(count: usize) -> &'static str {
     if count == 1 {
         ""
     } else {
-        "s"
+        "es"
     }
 }
 
@@ -1695,7 +1687,7 @@ mod tests {
 
 #[cfg(test)]
 mod next_action_tests {
-    use super::{next_action_notes, next_actions, WorkbenchTotals};
+    use super::{next_action_notes, next_actions, readiness_summary, WorkbenchTotals};
 
     fn totals(targets: usize, harnesses: usize, runs: usize) -> WorkbenchTotals {
         WorkbenchTotals {
@@ -1739,6 +1731,22 @@ mod next_action_tests {
             next_actions(&totals(0, 0, 0)),
             vec!["Run target discovery on this project.".to_owned()]
         );
+    }
+
+    #[test]
+    fn pending_crashes_describe_the_project_backlog_not_the_latest_run() {
+        let mut totals = totals(1, 2, 3);
+        totals.harnesses_needing_review = 2;
+        totals.crashes_needing_triage = 84;
+        assert!(next_actions(&totals)
+            .contains(&"Triage 84 pending crashes in this project.".to_owned()));
+        let readiness = readiness_summary(&totals, true);
+        assert!(readiness
+            .blockers
+            .contains(&"2 generated harnesses need human approval.".to_owned()));
+        assert!(readiness
+            .blockers
+            .contains(&"84 crashes still need triage.".to_owned()));
     }
 
     #[test]

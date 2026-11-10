@@ -416,7 +416,7 @@ const zh: Dict = {
   "readiness.action.run_discovery": "在此项目上运行目标发现。",
   "readiness.action.generate_harness": "为排名最高的目标生成测试桩。",
   "readiness.action.review_harnesses": "在完整模糊测试前审查 {n} 个生成的测试桩。",
-  "readiness.action.triage_crashes": "分类最近一次运行中的 {n} 个崩溃。",
+  "readiness.action.triage_crashes": "处理此项目中待分类的 {n} 个崩溃。",
   "readiness.action.smoke_campaign": "为排名最高的目标安排一次简短的冒烟活动。",
   "readiness.action.none": "暂无紧急事项；可安排更深入的夜间活动。",
   "readiness.action.init_persistence": "初始化持久化以开始跟踪团队的模糊测试工作。",
