@@ -5,11 +5,20 @@ lands rather than at release time: section 1 of `docs/guides/RELEASE_CHECKLIST.m
 asks the releaser to review user-facing changes, migrations, and configuration
 compatibility, and this is what that review reads from.
 
-Versions match the release commits that bump `Cargo.toml`. GitHub keeps
-releases and tags for the three newest versions only; older entries remain
-here as the record.
+Versions match the release commits that bump `Cargo.toml`. Public downloads
+retain only the current release; older entries remain here as the record.
 
 ## Unreleased
+
+## 0.9.4 - 2026-11-10
+
+### Changed
+
+- Theme controls use icons and cycle through Dark, Light, and System. Tooltips
+  and accessible labels retain the current and next mode.
+- Crash scanning is separate from AI report generation, with progress and
+  cancellation. Retained crash evidence is used for CASR symbolization.
+- Community examples cover AFL++, honggfuzz, syzkaller, and engine qualification.
 
 ### Added
 
@@ -31,6 +40,17 @@ here as the record.
   out the five-minute approval timeout.
 
 ### Fixed
+
+- Fuzzing duration limits, live honggfuzz and AFL++ metrics, responsive workflow
+  layouts, and retained kernel campaign output.
+- The sandbox now includes SSH/SCP for syzkaller guests. Progress parsing accepts
+  the bundled manager's coverage and cumulative execution counters.
+- Assistant language and provider selection, Settings paths, Knowledge search,
+  Skills and Agents registry editing, automation controls, and automotive results.
+- Progress, Diagnostics, provider-pool and campaign-info panels report their
+  actual data and refresh state.
+
+
 
 - AI Assistant: when DeepSeek answered in its native tool-call markup
   (`<｜DSML｜function_calls>`) instead of the JSON step the agent asks for,

@@ -43,7 +43,7 @@ jobs:
       # The project root inside your checkout.
       PROJECT: .
       # The oxfuzz release to build; pin it so the gate does not change under you.
-      OXFUZZ_REF: v0.9.3
+      OXFUZZ_REF: v0.9.4
     steps:
       - uses: actions/checkout@v7
 
