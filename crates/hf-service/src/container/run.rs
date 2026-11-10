@@ -3363,6 +3363,9 @@ mod syzkaller_health_lifecycle_tests {
 
     #[tokio::test]
     async fn admitted_syzkaller_run_has_exact_id_cancellation_and_health_cleanup() {
+        let _environment = ServiceContainer::workspace_environment_test_gate()
+            .lock()
+            .await;
         let directory = tempfile::tempdir().unwrap();
         let project = directory.path().join("project");
         std::fs::create_dir(&project).unwrap();
@@ -3439,6 +3442,9 @@ mod syzkaller_health_lifecycle_tests {
 
     #[tokio::test]
     async fn admitted_syzkaller_runtime_failure_retains_final_health_before_returning_error() {
+        let _environment = ServiceContainer::workspace_environment_test_gate()
+            .lock()
+            .await;
         let directory = tempfile::tempdir().unwrap();
         let project = directory.path().join("project");
         std::fs::create_dir(&project).unwrap();
@@ -3477,7 +3483,10 @@ mod syzkaller_health_lifecycle_tests {
             )
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("kernel runtime failed"));
+        assert!(
+            error.to_string().contains("kernel runtime failed"),
+            "{error}"
+        );
         let run_id = started.lock().unwrap().expect("admitted run id");
         assert_eq!(
             store.get_run(run_id).await.unwrap().unwrap().status,
