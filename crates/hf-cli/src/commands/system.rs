@@ -248,6 +248,7 @@ pub(crate) async fn cmd_agent(
                 session: None,
                 history_fallback: Vec::new(),
                 message: message.to_owned(),
+                response_language: None,
                 display_message: None,
                 provider: None,
                 turn_id: None,

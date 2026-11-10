@@ -1013,3 +1013,29 @@ An interactive scan never drafts AI reports or minimizes inputs; those longer
 operations remain explicit enrichment. Completed classifications survive a stop.
 Chat turns and scans use separate instances of the same bounded cancellation
 registry, so identifiers and cancellation cannot cross operation types.
+
+### Assistant response language
+
+The UI sends its selected `en` or `zh` locale on each chat turn, including turns
+in an existing session. The service resolves an omitted locale to English for
+CLI and older clients and rejects unsupported wire values. It adds a bounded,
+service-owned instruction to the selected agent's system role: conversational
+prose uses English or Simplified Chinese regardless of the input or history
+language. Code, paths, identifiers, quoted source text and required tool JSON
+remain unchanged. A language switch takes effect on the next submitted turn.
+
+When storage is configured, the service retains the exact language instruction
+in `chat_turn_languages` before model dispatch and fails closed on write errors.
+Failed and cancelled attempts retain this evidence; session deletion cascades
+to its records. Stateless clients without storage have no durable history.
+Successful turns also persist the resolved locale and exact language instruction in
+the user message metadata with the existing atomic transcript/checkpoint write.
+Cancelled or failed turns retain the existing rollback semantics. Previous turn
+metadata is evidence, not an instruction for subsequent turns. Rollback and
+branching preserve the metadata alongside their messages.
+
+Rejected alternatives: inferring the language from user text or transcript
+history ignores the explicit preference; a frontend-only prompt prefix gives
+presentation code ownership of chat behavior and loses the selected locale from
+persisted evidence. Model compliance is verified with live bilingual examples;
+a prompt directive is not a deterministic language classifier.

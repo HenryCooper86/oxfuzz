@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ChatView } from "../views/ChatView";
 import { MarkdownContent } from "../components/MarkdownContent";
 import { I18nProvider } from "../i18n";
+import { useI18n } from "../i18nContext";
 import { ProjectContext } from "../providers/project";
 
 const PROJECT = "/work/proj";
@@ -30,6 +31,12 @@ vi.mock("../lib", () => ({
 let host: HTMLDivElement;
 let root: Root;
 
+function LanguageControl() {
+  const { setLocale } = useI18n();
+  return <><button data-language="en" onClick={() => setLocale("en")}>English</button>
+    <button data-language="zh" onClick={() => setLocale("zh")}>Chinese</button></>;
+}
+
 function Harness({ initial }: { initial: string }) {
   const [activeProject, setActiveProject] = useState(initial);
   return (
@@ -44,6 +51,7 @@ function Harness({ initial }: { initial: string }) {
       }}
     >
       <I18nProvider>
+        <LanguageControl />
         <ChatView />
       </I18nProvider>
     </ProjectContext.Provider>
@@ -206,4 +214,20 @@ it("renders Markdown content without HTML passthrough", async () => {
   await act(async () => root.render(<MarkdownContent text={"<b id=x>hi</b> *em*"} />));
   expect(host.querySelector("#x")).toBeNull();
   expect(host.querySelector("em")?.textContent).toBe("em");
+});
+
+// A language switch must affect the next request without replacing the session.
+it("sends the current interface language on every turn in an existing chat", async () => {
+  setSessions({ [PROJECT]: "s1" });
+  await mount();
+  for (const locale of ["en", "zh", "en"]) {
+    await act(async () => host.querySelector<HTMLButtonElement>(`[data-language="${locale}"]`)!.click());
+    await act(async () => type("Explain fuzzing without using tools."));
+    await act(async () => host.querySelector<HTMLTextAreaElement>("textarea")!.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    ));
+    const call = transport.invoke.mock.calls.filter(([command]) => command === "chat_agent").at(-1)!;
+    expect(call[1]).toMatchObject({ sessionId: "s1", responseLanguage: locale });
+    await act(async () => transport.finishTurn!());
+  }
 });

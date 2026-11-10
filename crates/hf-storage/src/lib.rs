@@ -7,6 +7,7 @@
 
 mod ai_ranking_store;
 mod build_profile_store;
+mod chat_turn_languages;
 pub use ai_ranking_store::{
     AiDiscoveryRecord, AiDiscoveryState, AiRankBatchRecord, AiRankingSource,
 };

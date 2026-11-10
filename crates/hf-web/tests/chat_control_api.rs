@@ -22,6 +22,7 @@ const TOKEN: &str = "chat-control-test-token-0123456789";
 struct ScriptedPool {
     replies: Mutex<VecDeque<String>>,
     routes: Mutex<Vec<RouteRequest>>,
+    requests: Mutex<Vec<ChatRequest>>,
 }
 
 impl ScriptedPool {
@@ -29,6 +30,7 @@ impl ScriptedPool {
         Arc::new(Self {
             replies: Mutex::new(replies.iter().map(|&reply| reply.to_owned()).collect()),
             routes: Mutex::new(Vec::new()),
+            requests: Mutex::new(Vec::new()),
         })
     }
 }
@@ -37,10 +39,11 @@ impl ScriptedPool {
 impl ProviderPool for ScriptedPool {
     async fn chat_completion(
         &self,
-        _request: &ChatRequest,
+        request: &ChatRequest,
         route: &RouteRequest,
     ) -> Result<ChatResponse, ProviderError> {
         self.routes.lock().unwrap().push(route.clone());
+        self.requests.lock().unwrap().push(request.clone());
         let reply = self
             .replies
             .lock()
@@ -401,4 +404,31 @@ async fn an_open_access_server_keeps_the_environment_gate_and_refuses_answers() 
     let error = json(answer).await["error"].as_str().unwrap().to_owned();
     assert!(error.contains("HF_WEB_TOKEN"), "{error}");
     assert!(error.contains("HF_AUTO_APPROVE"), "{error}");
+}
+
+#[tokio::test]
+async fn web_chat_applies_the_selected_language_and_rejects_unknown_locales() {
+    let pool = ScriptedPool::new(&[]);
+    let app = app(Arc::clone(&pool));
+    for (language, status) in [
+        ("zh", StatusCode::OK),
+        ("unknown", StatusCode::UNPROCESSABLE_ENTITY),
+    ] {
+        let response = send(
+            &app,
+            Method::POST,
+            "/chat/agent",
+            Some(serde_json::json!({
+                "message": "Explain fuzzing.", "response_language": language,
+            })),
+            true,
+        )
+        .await;
+        assert_eq!(response.status(), status);
+    }
+    let requests = pool.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].messages[0]
+        .content
+        .contains("Reply in Simplified Chinese"));
 }

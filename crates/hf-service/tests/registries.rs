@@ -65,6 +65,7 @@ async fn service_owns_registry_paths_crud_and_selected_agent_validation() {
                 session: None,
                 history_fallback: Vec::new(),
                 message: "hello".to_owned(),
+                response_language: None,
                 display_message: None,
                 provider: None,
                 turn_id: None,

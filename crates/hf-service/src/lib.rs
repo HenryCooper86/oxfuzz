@@ -132,7 +132,9 @@ pub use hf_runtime::{
 pub use hf_skills::{SkillDefinition, SkillRegistry, TrustTier};
 pub use hf_storage::MAX_CAMPAIGN_HEALTH_EVENT_PAGE_SIZE;
 
-pub use agent::{AgentRegistryInfo, AgentToolDefinition, AgentTurnRequest};
+pub use agent::{
+    AgentRegistryInfo, AgentToolDefinition, AgentTurnRequest, ChatResponseLanguage,
+};
 /// Harness lint findings, re-exported so presentation layers can render them
 /// without depending on `hf-harness` directly.
 pub use hf_harness::{LintFinding, LintSeverity};

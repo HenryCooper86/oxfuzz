@@ -51,6 +51,28 @@ fn skill_registry_error(error: &hf_skills::SkillError) -> ClassifiedError {
     }
 }
 
+/// Language used for the assistant's conversational prose.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub enum ChatResponseLanguage {
+    #[serde(rename = "en")]
+    English,
+    #[serde(rename = "zh")]
+    Chinese,
+}
+
+impl ChatResponseLanguage {
+    fn resolve(requested: Option<Self>) -> Self {
+        requested.unwrap_or(Self::English)
+    }
+
+    fn instruction(self) -> &'static str {
+        match self {
+            Self::English => "Reply in English for all conversational prose in this turn, regardless of the language of the user's message, earlier conversation, or agent role. Preserve code, paths, identifiers, quoted source text, and the required tool JSON protocol.",
+            Self::Chinese => "Reply in Simplified Chinese for all conversational prose in this turn, regardless of the language of the user's message, earlier conversation, or agent role. Preserve code, paths, identifiers, quoted source text, and the required tool JSON protocol.",
+        }
+    }
+}
+
 /// Inputs for one service-orchestrated chat turn.
 pub struct AgentTurnRequest {
     pub project: Option<PathBuf>,
@@ -61,6 +83,8 @@ pub struct AgentTurnRequest {
     /// User-visible text persisted in the transcript when `message` contains
     /// an internal mode instruction. Defaults to `message` when absent.
     pub display_message: Option<String>,
+    /// Current interface language. Omission resolves to English.
+    pub response_language: Option<ChatResponseLanguage>,
     /// The provider the operator selected to answer this turn. Every model
     /// call of the turn is pinned to it, and the turn fails naming it when it
     /// cannot serve; no other provider is substituted. `None` keeps the
@@ -191,15 +215,15 @@ impl ServiceContainer {
     /// Returns `ClassifiedError` if transcript loading or the model call fails,
     /// if the selected provider cannot serve, and
     /// [`ClassifiedError::Cancelled`] when the turn was cancelled before its
-    /// answer was committed (nothing is persisted then).
+    /// answer was committed (no transcript messages or checkpoint are saved;
+    /// language instruction evidence retained before dispatch remains).
     pub async fn run_chat_turn(
         &self,
         request: AgentTurnRequest,
         sink: &dyn EventSink,
     ) -> Result<String, ClassifiedError> {
-        let mut registration = self
-            .chat_turns
-            .register(request.turn_id.unwrap_or_else(Uuid::new_v4))?;
+        let turn_id = request.turn_id.unwrap_or_else(Uuid::new_v4);
+        let mut registration = self.chat_turns.register(turn_id)?;
         let cancel = registration.token().clone();
         let _turn_guard = match &request.session {
             Some(id) => Some(tokio::select! {
@@ -218,14 +242,17 @@ impl ServiceContainer {
             } else {
                 request.history_fallback
             };
+        let language = ChatResponseLanguage::resolve(request.response_language);
         let registry = AgentRegistry::with_user_dir(agent_definitions_dir());
-        let definition = match request.agent_id.as_deref().filter(|id| !id.is_empty()) {
+        let mut definition = match request.agent_id.as_deref().filter(|id| !id.is_empty()) {
             Some(id) => registry
                 .get(id)
                 .cloned()
                 .ok_or_else(|| ClassifiedError::Validation(format!("unknown agent '{id}'")))?,
             None => registry.default_agent(),
         };
+        definition.system_prompt =
+            format!("{}\n\n{}", language.instruction(), definition.system_prompt);
         let turn_pool = self.turn_pool(request.provider)?;
         let backend: Arc<dyn AgentBackend> = Arc::new(
             self.chat_turn_scope(
@@ -240,6 +267,14 @@ impl ServiceContainer {
         let agent = Agent::with_definition(backend, request.project, definition)
             .with_grep_limits(grep_limits)
             .with_cancellation(cancel);
+        if let Some(store) = self.store() {
+            store
+                .record_chat_language(turn_id, request.session.as_ref(), language.instruction())
+                .await
+                .map_err(|error| {
+                    ClassifiedError::Internal(format!("retain chat language: {error}"))
+                })?;
+        }
         let outcome = agent.run_turn(history, &request.message, sink).await;
         if !registration.commit() {
             return Err(ClassifiedError::Cancelled);
@@ -254,8 +289,12 @@ impl ServiceContainer {
             if let Some(pool) = &turn_pool {
                 reply.metadata = answered_by(pool);
             }
-            self.persist_chat_turn_unlocked(id, &[Message::user(display_message), reply])
-                .await?;
+            let mut user = Message::user(display_message);
+            user.metadata = serde_json::json!({
+                "response_language": language,
+                "response_language_instruction": language.instruction(),
+            });
+            self.persist_chat_turn_unlocked(id, &[user, reply]).await?;
         }
         Ok(answer)
     }

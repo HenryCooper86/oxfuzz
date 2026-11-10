@@ -3714,6 +3714,7 @@ async fn chat_send(
 #[derive(Debug, Deserialize)]
 struct ChatAgentRequest {
     message: String,
+    response_language: Option<hf_service::ChatResponseLanguage>,
     #[serde(default)]
     display_message: Option<String>,
     #[serde(default)]
@@ -3856,6 +3857,7 @@ async fn chat_agent(
                 history_fallback,
                 message: req.message,
                 display_message: req.display_message,
+                response_language: req.response_language,
                 provider,
                 turn_id,
             },

@@ -9,15 +9,29 @@ use hf_core::provider::{
 use hf_core::types::TokenUsage;
 use hf_service::{AgentTurnRequest, CollectingSink, ServiceContainer};
 
-struct AnswerPool;
+#[derive(Default)]
+struct AnswerPool {
+    requests: std::sync::Mutex<Vec<ChatRequest>>,
+    store: Option<Arc<hf_storage::Store>>,
+}
 
 #[async_trait::async_trait]
 impl ProviderPool for AnswerPool {
     async fn chat_completion(
         &self,
-        _request: &ChatRequest,
+        request: &ChatRequest,
         _route: &RouteRequest,
     ) -> Result<ChatResponse, ProviderError> {
+        if let Some(store) = &self.store {
+            let instruction: String = sqlx::query_scalar(
+                "SELECT instruction FROM chat_turn_languages ORDER BY rowid DESC LIMIT 1",
+            )
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+            assert!(request.messages[0].content.contains(&instruction));
+        }
+        self.requests.lock().unwrap().push(request.clone());
         Ok(ChatResponse {
             id: "service-agent".to_owned(),
             model: "scripted".to_owned(),
@@ -60,7 +74,7 @@ impl ProviderPool for AnswerPool {
 async fn run_chat_turn_is_available_through_service() {
     let container = ServiceContainer::new(
         Arc::new(hf_runtime::StubRuntime),
-        Some(Arc::new(AnswerPool)),
+        Some(Arc::new(AnswerPool::default())),
     );
     let sink = CollectingSink::new();
     let answer = container
@@ -71,6 +85,7 @@ async fn run_chat_turn_is_available_through_service() {
                 session: None,
                 history_fallback: Vec::new(),
                 message: "hello".to_owned(),
+                response_language: None,
                 display_message: None,
                 provider: None,
                 turn_id: None,
@@ -93,7 +108,7 @@ async fn run_chat_turn_rejects_an_unknown_persistent_session() {
     );
     let container = ServiceContainer::new(
         Arc::new(hf_runtime::StubRuntime),
-        Some(Arc::new(AnswerPool)),
+        Some(Arc::new(AnswerPool::default())),
     )
     .with_store(store);
     let sink = CollectingSink::new();
@@ -106,6 +121,7 @@ async fn run_chat_turn_rejects_an_unknown_persistent_session() {
                 session: Some(hf_core::types::SessionId::from_string("../outside")),
                 history_fallback: Vec::new(),
                 message: "hello".to_owned(),
+                response_language: None,
                 display_message: None,
                 provider: None,
                 turn_id: None,
@@ -127,7 +143,7 @@ async fn run_chat_turn_persists_messages_and_checkpoint_before_success() {
     );
     let container = ServiceContainer::new(
         Arc::new(hf_runtime::StubRuntime),
-        Some(Arc::new(AnswerPool)),
+        Some(Arc::new(AnswerPool::default())),
     )
     .with_store(store);
     let session_id = container
@@ -146,6 +162,7 @@ async fn run_chat_turn_persists_messages_and_checkpoint_before_success() {
                 session: Some(session_id.clone()),
                 history_fallback: Vec::new(),
                 message: "[Plan mode] internal instruction\n\nhello".to_owned(),
+                response_language: None,
                 display_message: Some("hello".to_owned()),
                 provider: None,
                 turn_id: None,
@@ -174,6 +191,7 @@ async fn run_chat_turn_persists_messages_and_checkpoint_before_success() {
                 session: Some(session_id.clone()),
                 history_fallback: Vec::new(),
                 message: "replacement".to_owned(),
+                response_language: None,
                 display_message: Some("replacement".to_owned()),
                 provider: None,
                 turn_id: None,
@@ -197,7 +215,7 @@ async fn run_chat_turn_rolls_back_transcripts_when_checkpoint_save_fails() {
     );
     let container = ServiceContainer::new(
         Arc::new(hf_runtime::StubRuntime),
-        Some(Arc::new(AnswerPool)),
+        Some(Arc::new(AnswerPool::default())),
     )
     .with_store(store.clone());
     let session_id = container
@@ -222,6 +240,7 @@ async fn run_chat_turn_rolls_back_transcripts_when_checkpoint_save_fails() {
                 session: Some(session_id.clone()),
                 history_fallback: Vec::new(),
                 message: "do not retain this turn".to_owned(),
+                response_language: None,
                 display_message: Some("do not retain this turn".to_owned()),
                 provider: None,
                 turn_id: None,
@@ -250,4 +269,123 @@ async fn run_chat_turn_rolls_back_transcripts_when_checkpoint_save_fails() {
             .message_count,
         0
     );
+}
+
+#[tokio::test]
+async fn chat_language_is_in_the_system_message_and_persisted_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("language.db"))
+            .await
+            .unwrap(),
+    );
+    let pool = Arc::new(AnswerPool {
+        store: Some(store.clone()),
+        ..AnswerPool::default()
+    });
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), Some(pool.clone()))
+        .with_store(store.clone());
+    let session = hf_core::types::SessionId::from_string(
+        container.create_chat_session(None).await.unwrap().unwrap(),
+    );
+    for (index, language, code, instruction, input) in [
+        (0, None, "en", "Reply in English", "请解释模糊测试。"),
+        (
+            1,
+            Some(hf_service::ChatResponseLanguage::Chinese),
+            "zh",
+            "Reply in Simplified Chinese",
+            "Explain fuzzing.",
+        ),
+        (
+            2,
+            Some(hf_service::ChatResponseLanguage::English),
+            "en",
+            "Reply in English",
+            "请继续。",
+        ),
+    ] {
+        container
+            .run_chat_turn(
+                AgentTurnRequest {
+                    project: None,
+                    agent_id: None,
+                    session: Some(session.clone()),
+                    history_fallback: Vec::new(),
+                    message: input.into(),
+                    response_language: language,
+                    display_message: None,
+                    provider: None,
+                    turn_id: None,
+                },
+                &CollectingSink::new(),
+            )
+            .await
+            .unwrap();
+        {
+            let requests = pool.requests.lock().unwrap();
+            assert!(requests[index].messages[0].content.contains(instruction));
+            assert_eq!(requests[index].messages.last().unwrap().content, input);
+        }
+        let history = container.chat_history(&session).await.unwrap();
+        assert_eq!(history[index * 2].metadata["response_language"], code);
+        assert!(history[index * 2].metadata["response_language_instruction"]
+            .as_str()
+            .unwrap()
+            .contains(instruction));
+        assert_eq!(history[index * 2].content, input);
+    }
+    container.chat_rollback_last(&session).await.unwrap();
+    let history = container.chat_history(&session).await.unwrap();
+    assert_eq!(history.len(), 4);
+    assert_eq!(history[2].metadata["response_language"], "zh");
+    let retained: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_turn_languages")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(retained, 3, "rollback retains attempted model inputs");
+    container.delete_chat_session(&session).await.unwrap();
+    let retained: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_turn_languages")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(retained, 0, "session deletion removes its language records");
+}
+
+#[tokio::test]
+async fn chat_does_not_contact_a_provider_when_language_evidence_cannot_be_saved() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("failed-language.db"))
+            .await
+            .unwrap(),
+    );
+    let pool = Arc::new(AnswerPool::default());
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), Some(pool.clone()))
+        .with_store(store.clone());
+    sqlx::query("DROP TABLE chat_turn_languages")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let result = container
+        .run_chat_turn(
+            AgentTurnRequest {
+                project: None,
+                agent_id: None,
+                session: None,
+                history_fallback: Vec::new(),
+                message: "hello".into(),
+                response_language: None,
+                display_message: None,
+                provider: None,
+                turn_id: None,
+            },
+            &CollectingSink::new(),
+        )
+        .await;
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("retain chat language"));
+    assert!(pool.requests.lock().unwrap().is_empty());
 }

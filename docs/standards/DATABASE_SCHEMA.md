@@ -1,6 +1,6 @@
 # Database Schema
 
-Status: **implemented through migration 0051**. Scope: `hf-storage` and
+Status: **implemented through migration 0052**. Scope: `hf-storage` and
 `hf-diagnostics`.
 
 ## 1. Storage and migration ownership
@@ -911,6 +911,26 @@ same recovery rules as transcript reads: torn or malformed records are skipped
 with a warning. Reading the last N messages retains N valid messages when
 available; malformed records do not consume a position in that tail.
 
+### `chat_turn_languages`
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | server-generated attempt identifier |
+| `turn_id` | `TEXT NOT NULL` | caller's operation UUID |
+| `session_id` | `TEXT REFERENCES session_metadata(id) ON DELETE CASCADE` | nullable for stateless attempts |
+| `instruction` | `TEXT NOT NULL` | checked: 1–2,048 UTF-8 bytes |
+| `created_at` | `TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` | UTC insertion timestamp |
+
+Migration `0052_chat_turn_languages.sql` retains one language instruction per
+chat attempt before provider dispatch, including failed or cancelled attempts.
+`id` is a server-generated UUID primary key; `turn_id` is the caller's operation
+UUID; nullable `session_id` references `session_metadata(id)` with deletion
+cascade. `instruction` stores the exact system-role addition (1–2,048 UTF-8
+bytes); `created_at` defaults to the UTC insertion timestamp.
+`idx_chat_turn_languages_session` indexes `session_id`. Successful transcript
+messages also retain the locale and instruction in their metadata so branches
+and rollback preserve the successful turn's evidence.
+
 ## 4. Diagnostics tables
 
 ### `diag_traces`
@@ -1375,6 +1395,7 @@ bounded deterministic history, and both cleanup operations.
 | `0049_seed_llm_drafts.sql` | retains each seed-drafting prompt before dispatch and its response once |
 | `0050_retire_closeout_coverage_steps.sql` | deletes `run_closeout_steps` rows for the retired `Coverage` and `Blockers` steps, and `TrustReport` rows that depended on them |
 | `0051_drop_coverage_experiments.sql` | drops `coverage_experiment_executions` and `coverage_experiments`, deleting retained experiment records |
+| `0052_chat_turn_languages.sql` | retains per-attempt response-language instructions before provider dispatch |
 
 ## 7. Read failure contract
 

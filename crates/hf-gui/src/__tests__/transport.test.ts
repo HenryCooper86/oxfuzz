@@ -168,6 +168,7 @@ describe("transport", () => {
       const transport = createHttpTransport();
       const result = await transport.invoke<string>("chat_agent", {
         message: "hi",
+        responseLanguage: "zh",
         project: "/tmp/proj",
         sessionId: "session-1",
         agentId: "orchestrator",
@@ -179,6 +180,7 @@ describe("transport", () => {
       expect(calls[0].url).toBe("http://localhost:8081/chat/agent");
       expect(JSON.parse(String(calls[0].init.body))).toEqual({
         message: "hi",
+        response_language: "zh",
         project: "/tmp/proj",
         session_id: "session-1",
         agent_id: "orchestrator",

@@ -131,7 +131,7 @@ export function ChatView() {
   const { toast } = useToast();
   const confirm = useConfirm();
   const { sendOnEnter } = usePrefs();
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -467,6 +467,7 @@ export function ChatView() {
       const responseText = await transport.invoke<string>("chat_agent", {
         message: applyMode(text, mode),
         displayMessage: text,
+        responseLanguage: locale,
         project: activeProject || null,
         history,
         sessionId,

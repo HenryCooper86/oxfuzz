@@ -151,7 +151,8 @@ impl super::ServiceContainer {
     /// for is denied and its prompt withdrawn, and a fuzz run it started is
     /// cancelled through the run's own token. A tool without cancellation
     /// support finishes its current call; the turn stops at the next step.
-    /// The cancelled turn persists nothing (see the module documentation).
+    /// The cancelled turn adds no transcript messages or checkpoint. Retained
+    /// language instruction evidence is not rolled back.
     #[must_use]
     pub fn cancel_chat_turn(&self, turn_id: Uuid) -> OperationCancelOutcome {
         self.chat_turns.cancel(turn_id)
