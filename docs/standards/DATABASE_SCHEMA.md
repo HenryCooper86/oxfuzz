@@ -5,7 +5,10 @@ Status: **implemented through migration 0051**. Scope: `hf-storage` and
 
 ## 1. Storage and migration ownership
 
-SQLite is embedded through `sqlx`. `Store::connect` uses `HF_DB_PATH` when
+SQLite is embedded through `sqlx`. The bundled engine must be SQLite 3.54.0
+or newer to include the WAL page-size mismatch repair (RUSTSEC-2026-0459).
+The local `sqlx-sqlite` manifest patch selects the repaired native dependency
+while retaining SQLx 0.8 APIs and the existing schema. `Store::connect` uses `HF_DB_PATH` when
 configured and otherwise opens `data/oxfuzz.db`. It creates the parent
 directory and database when needed, then applies the forward-only migrations
 in `crates/hf-storage/migrations/`. Connections wait up to 30 seconds for a

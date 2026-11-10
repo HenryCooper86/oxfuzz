@@ -7854,3 +7854,20 @@ async fn filed_issue_claims_reject_empty_keys_and_bad_records() {
         .await
         .is_err());
 }
+
+#[tokio::test]
+async fn bundled_sqlite_includes_wal_page_size_fix() {
+    let (store, _dir) = temp_store().await;
+    let version: String = sqlx::query_scalar("SELECT sqlite_version()")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    let components: Vec<u32> = version
+        .split('.')
+        .map(|part| part.parse().unwrap())
+        .collect();
+    assert!(
+        components.as_slice() >= [3, 54, 0].as_slice(),
+        "SQLite {version} predates the WAL page-size repair in 3.54.0"
+    );
+}

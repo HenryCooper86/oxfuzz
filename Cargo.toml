@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-exclude = ["third_party/include-flate-compress"]
+exclude = ["third_party/include-flate-compress", "third_party/sqlx-sqlite"]
 members = [
     "crates/hf-core",
     "crates/hf-provider",
@@ -185,6 +185,9 @@ unused_assignments = "allow"
 # Upstream include-flate 0.3.4 still requires the vulnerable Zstd 0.13 series.
 # Keep its adapter unchanged and select the repaired Zstd release locally.
 include-flate-compress = { path = "third_party/include-flate-compress" }
+# SQLx releases still exclude the SQLite WAL page-size repair (RUSTSEC-2026-0459).
+# Keep the adapter source unchanged and select patched bundled SQLite.
+sqlx-sqlite = { path = "third_party/sqlx-sqlite" }
 
 # Build scripts and proc macros (build-override) are loaded by rustc as host
 # dylibs. Since Command Line Tools 27.0, Apple's `strip` leaves these dylibs
