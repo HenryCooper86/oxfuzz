@@ -1272,8 +1272,8 @@ export function AutomationView() {
   );
   const [triggerKind, setTriggerKind] = useState<"interval" | "cron" | "once">("interval");
   const [triggerValue, setTriggerValue] = useState("3600");
-  const [durationOverride, setDurationOverride] = useState<number | null>(null);
-  const duration = durationOverride ?? fuzzingSettings?.default_duration_secs ?? 0;
+  const [durationOverride, setDurationOverride] = useState<string | null>(null);
+  const duration = durationOverride ?? String(fuzzingSettings?.default_duration_secs ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -1282,7 +1282,8 @@ export function AutomationView() {
   // or one target.
   const [project, setProject] = useState(activeProject);
   const [scopeAll, setScopeAll] = useState(true);
-  const [loaded, setLoaded] = useState<{ project: string; items: SchedulableTarget[] } | null>(null);
+  const [loaded, setLoaded] = useState<{ project: string; items: SchedulableTarget[]; error: string | null } | null>(null);
+  const [targetRevision, setTargetRevision] = useState(0);
   const [picked, setPicked] = useState("");
   // Budget (both optional): stop after N runs, or after M minutes of fuzzing.
   const [maxRuns, setMaxRuns] = useState("");
@@ -1291,6 +1292,7 @@ export function AutomationView() {
   // workflow-dispatch cap is fixed at process startup, so both must remain
   // visible along with their effective minimum.
   const [concurrency, setConcurrency] = useState(1);
+  const [concurrencySaving, setConcurrencySaving] = useState(false);
   const [concurrencyLimits, setConcurrencyLimits] =
     useState<CampaignConcurrencyLimits | null>(null);
   const [concurrencyLimitsLoaded, setConcurrencyLimitsLoaded] = useState(false);
@@ -1314,6 +1316,7 @@ export function AutomationView() {
     try {
       const result = await getTransport().invoke<{ armed: boolean }>(armed ? "schedule_arm" : "schedule_disarm");
       setRuntimeStatus((current) => (current ? { ...current, armed: result.armed } : current));
+      await refreshAutomation();
     } catch (e) {
       setError(`${t("automation.runtime.armFailed")}: ${String(e)}`);
     } finally {
@@ -1393,12 +1396,14 @@ export function AutomationView() {
     let cancelled = false;
     getTransport()
       .invoke<SchedulableTarget[]>("schedule_targets", { project })
-      .then((items) => !cancelled && setLoaded({ project, items }))
-      .catch(() => !cancelled && setLoaded({ project, items: [] }));
+      .then((items) => !cancelled && setLoaded({ project, items, error: null }))
+      .catch((cause: unknown) => !cancelled && setLoaded({ project, items: [], error: String(cause) }));
     return () => {
       cancelled = true;
     };
-  }, [project]);
+  }, [project, targetRevision]);
+
+  const targetError = loaded?.project === project ? loaded.error : null;
 
   // `null` means "still loading", which is different from "this project has no
   // promoted harness" -- the empty-state text says so.
@@ -1430,8 +1435,9 @@ export function AutomationView() {
   }
 
   async function applyConcurrency(n: number) {
-    if (!concurrencyLimits) return;
+    if (!concurrencyLimits || concurrencySaving) return;
     const clamped = Math.max(1, Math.min(16, n));
+    setConcurrencySaving(true);
     setConcurrency(clamped);
     try {
       const applied = await getTransport().invoke<number>("schedule_concurrency_set", {
@@ -1450,6 +1456,8 @@ export function AutomationView() {
     } catch (e) {
       setError(String(e));
       setConcurrency(concurrencyLimits.active_fuzz_campaign_limit);
+    } finally {
+      setConcurrencySaving(false);
     }
   }
 
@@ -1476,8 +1484,21 @@ export function AutomationView() {
       setError(invalid);
       return;
     }
-    const runs = maxRuns.trim() ? Math.max(1, Number(maxRuns)) : null;
-    const totalSecs = maxMinutes.trim() ? Math.max(1, Math.round(Number(maxMinutes) * 60)) : null;
+    const durationSecs = Number(duration);
+    if (!Number.isSafeInteger(durationSecs) || durationSecs < 1 || durationSecs > fuzzingSettings.sandbox.max_duration_secs) {
+      setError(t("automation.errDuration", { max: fuzzingSettings.sandbox.max_duration_secs }));
+      return;
+    }
+    const runs = maxRuns.trim() ? Number(maxRuns) : null;
+    if (runs !== null && (!Number.isSafeInteger(runs) || runs < 1)) {
+      setError(t("automation.errRunBudget"));
+      return;
+    }
+    const totalSecs = maxMinutes.trim() ? Math.round(Number(maxMinutes) * 60) : null;
+    if (totalSecs !== null && (!Number.isSafeInteger(totalSecs) || totalSecs < 1)) {
+      setError(t("automation.errTimeBudget"));
+      return;
+    }
     const scopeLabel = scopeAll ? "all targets" : selected?.target ?? "";
     setBusy(true);
     setError(null);
@@ -1491,13 +1512,14 @@ export function AutomationView() {
         // portfolio resolves them per target at run time.
         engine: scopeAll ? "" : selected?.engine ?? "",
         lang: scopeAll ? "c" : selected?.language ?? "c",
-        durationSecs: duration,
+        durationSecs,
         triggerKind,
         triggerValue,
         maxRuns: runs,
         maxTotalSecs: totalSecs,
       });
       setCampaigns(next);
+      await refreshAutomation();
     } catch (e) {
       setError(String(e));
     } finally {
@@ -1518,7 +1540,7 @@ export function AutomationView() {
     setError(null);
     try {
       await getTransport().invoke<number>("schedule_history_clear");
-      setHistory([]);
+      await refreshAutomation();
     } catch (e) {
       setError(String(e));
     }
@@ -1553,6 +1575,7 @@ export function AutomationView() {
     setError(null);
     try {
       setCampaigns(await getTransport().invoke<CampaignView[]>("schedule_delete", { id }));
+      await refreshAutomation();
     } catch (e) {
       setError(String(e));
     }
@@ -1561,6 +1584,7 @@ export function AutomationView() {
     setError(null);
     try {
       setCampaigns(await getTransport().invoke<CampaignView[]>("schedule_set_enabled", { id, enabled }));
+      await refreshAutomation();
     } catch (e) {
       setError(String(e));
     }
@@ -1616,6 +1640,7 @@ export function AutomationView() {
                     min={1}
                     max={16}
                     value={concurrency}
+                    disabled={concurrencySaving}
                     aria-label={t("automation.activeCampaignLimit")}
                     onChange={(e) => void applyConcurrency(Number(e.target.value) || 1)}
                     className="w-14"
@@ -1692,15 +1717,17 @@ export function AutomationView() {
               <Layers size={13} />
               {choices === null
                 ? t("automation.findingTargets")
-                : promotedCount > 0
-                  ? t("automation.rotatesThrough", { n: promotedCount })
-                  : t("automation.noPromotedTarget")}
+                : targetError
+                  ? t("automation.targetsUnavailable")
+                  : promotedCount > 0
+                    ? t("automation.rotatesThrough", { n: promotedCount })
+                    : t("automation.noPromotedTarget")}
             </span>
           ) : (
             <Select
               value={selected ? `${selected.target}::${selected.engine}` : ""}
               onChange={setPicked}
-              placeholder={choices === null ? t("automation.loadingTargets") : t("automation.noPromotedHarness")}
+              placeholder={choices === null ? t("automation.loadingTargets") : targetError ? t("automation.targetsUnavailable") : t("automation.noPromotedHarness")}
               options={(choices ?? []).map((tgt) => ({
                 value: `${tgt.target}::${tgt.engine}`,
                 label: `${tgt.target} · ${tgt.engine} · ${tgt.language}`,
@@ -1710,7 +1737,11 @@ export function AutomationView() {
           )}
         </div>
 
-        {!canSave && project && choices !== null && promotedCount === 0 && (
+        {targetError && <div role="alert" className="text-xs text-error">
+          {targetError}
+          <Button variant="ghost" size="sm" onClick={() => setTargetRevision(value => value + 1)}>{t("common.retry")}</Button>
+        </div>}
+        {!canSave && project && choices !== null && !targetError && promotedCount === 0 && (
           <div className="text-xs text-text-secondary">
             {t("automation.noPromotedHarnessHelp")}
           </div>
@@ -1737,12 +1768,9 @@ export function AutomationView() {
           <span className="text-xs text-text-muted">{t("automation.runLabel")}</span>
           <DurationInput
             ariaLabel={t("automation.runLabel")}
-            seconds={String(duration)}
+            seconds={duration}
             disabled={!fuzzingSettings}
-            onChange={(value) => {
-              const seconds = Number(value);
-              if (Number.isSafeInteger(seconds) && seconds >= 1) setDurationOverride(seconds);
-            }}
+            onChange={setDurationOverride}
           />
         </div>
 
@@ -1766,7 +1794,7 @@ export function AutomationView() {
             {t("automation.schedule")}
           </Button>
         </div>
-        {error && <span className="text-xs" style={{ color: "var(--error)" }}>{error}</span>}
+        {error && <span role="alert" className="text-xs" style={{ color: "var(--error)" }}>{error}</span>}
       </div>
 
       {campaigns.length === 0 && (

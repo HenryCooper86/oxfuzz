@@ -300,6 +300,15 @@ restarts work. While the runtime is running, Automation offers an explicit
 `POST` / `DELETE /schedule/arm`. Both reply `{ "armed": bool }`. This reports loop liveness, not successful dispatch or quiescence
 of campaigns during shutdown.
 
+Automation refreshes the service snapshot after schedule and authorization
+changes and after clearing history. That refresh supersedes older polls, so a
+late pre-change response cannot restore obsolete controls. History clearing
+renders the retained rows returned by the service, including protected
+nonterminal one-time executions. Target lookup failures are shown as failures,
+not as evidence that no approved targets exist. Invalid numeric form values
+are rejected before submission; the displayed duration and budget are never
+silently replaced with a previous value or a minimum allowance.
+
 ## Event cascade budget
 
 `scheduler.max_event_cascade_depth` bounds the number of event-generated links
