@@ -1624,7 +1624,7 @@ export const [enExtra, zhExtra] = dictionaries({
   "settings.about.guidePre": ["An in-app guide is available under ","应用内指南位于侧边栏的 "],
   "settings.about.languages": ["Languages","语言"],
   "settings.about.links": ["Links","链接"],
-  "settings.about.repo": ["GitHub Project","GitHub 项目"],
+  "settings.about.website": ["Download website","下载网站"],
   "settings.about.reportCopied": ["System report copied","系统报告已复制"],
   "settings.about.reportCopiedDesc": ["Paste it into your bug report.","将其粘贴到你的缺陷报告中。"],
   "settings.about.reportCopyFailed": ["Could not copy system report","无法复制系统报告"],

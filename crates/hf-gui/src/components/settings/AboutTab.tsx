@@ -9,10 +9,10 @@ import { useI18n } from "../../i18nContext";
 import { getTransport, openExternal } from "../../lib";
 import {
   GETTING_STARTED_GUIDE_URL,
-  PROJECT_REPOSITORY_URL,
+  PROJECT_WEBSITE_URL,
 } from "../../lib/projectLinks";
 import type { SystemStatus } from "../../types";
-import { Crosshair, Github, BookOpen, ClipboardCheck } from "lucide-react";
+import { Crosshair, Globe, BookOpen, ClipboardCheck } from "lucide-react";
 import { APP_VERSION } from "../../lib/appVersion";
 
 /** Build a Markdown environment report from the live system status, for pasting
@@ -131,11 +131,11 @@ export function AboutTab() {
         <h3 className="text-sm font-semibold">{t("settings.about.links")}</h3>
         <div className="flex flex-col gap-1 items-start">
           <button
-            onClick={() => void openExternal(PROJECT_REPOSITORY_URL)}
+            onClick={() => void openExternal(PROJECT_WEBSITE_URL)}
             className="text-xs text-accent flex items-center gap-2 hover:underline"
             style={{ background: "none", border: "none", padding: 0, cursor: "pointer" }}
           >
-            <Github size={14} /> {t("settings.about.repo")}
+            <Globe size={14} /> {t("settings.about.website")}
           </button>
           <button
             onClick={() => void openExternal(GETTING_STARTED_GUIDE_URL)}

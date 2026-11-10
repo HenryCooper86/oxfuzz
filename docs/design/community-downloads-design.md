@@ -36,6 +36,9 @@ experimental signing status, Docker/setup requirements, release changes and
 SHA-256 verification instructions. Do not advertise unsupported workflows or
 link visitors to documentation they cannot read after the repository is private.
 No account system, analytics, newsletter form, or payment flow is needed.
+The desktop Help and About links point to this public website and its setup
+section. Embedded help remains available offline; external documentation must
+not require access to the private source repository.
 
 Visual decisions: white and pale blue surfaces (#ffffff, #f2f5f8), navy text
 (#101b2b), secondary slate (#43536a), muted gold from the application (#d1b350),

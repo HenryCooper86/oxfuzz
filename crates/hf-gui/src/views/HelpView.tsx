@@ -1,13 +1,13 @@
 import { useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { BookOpen, Github, LifeBuoy, Search } from "lucide-react";
+import { BookOpen, Globe, LifeBuoy, Search } from "lucide-react";
 import { Button, ViewHeader } from "../components/ui";
 import { Mermaid } from "../components/Mermaid";
 import { codeInfo } from "../lib/reportPreviewCode";
 import {
   GETTING_STARTED_GUIDE_URL,
-  PROJECT_REPOSITORY_URL,
+  PROJECT_WEBSITE_URL,
 } from "../lib/projectLinks";
 import { openExternal } from "../lib";
 import { useI18n } from "../i18nContext";
@@ -68,8 +68,8 @@ export function HelpView() {
           <Button variant="outline" size="sm" onClick={() => void openExternal(GETTING_STARTED_GUIDE_URL)} title={L("Open the getting-started guide", "打开入门指南")}>
             <LifeBuoy size={14} /> {L("Getting Started", "入门")}
           </Button>
-          <Button variant="outline" size="sm" onClick={() => void openExternal(PROJECT_REPOSITORY_URL)} title={L("Open the GitHub repository", "打开 GitHub 仓库")}>
-            <Github size={14} /> GitHub
+          <Button variant="outline" size="sm" onClick={() => void openExternal(PROJECT_WEBSITE_URL)} title={L("Open the download website", "打开下载网站")}>
+            <Globe size={14} /> {L("Website", "网站")}
           </Button>
         </div>
       </div>
@@ -160,12 +160,12 @@ export function HelpView() {
           <div className="flex items-center gap-3 mt-6 pt-4" style={{ borderTop: "1px solid var(--border)" }}>
             <BookOpen size={14} className="text-text-muted" />
             <span className="text-xs text-text-muted">
-              {L("Looking for the deep-dive design docs? See the ", "想查看深入的设计文档？请访问")}
+              {L("Looking for downloads and installation instructions? Visit the ", "需要下载和安装说明？请访问")}
               <button
-                onClick={() => void openExternal(PROJECT_REPOSITORY_URL)}
+                onClick={() => void openExternal(PROJECT_WEBSITE_URL)}
                 style={{ background: "none", border: "none", padding: 0, color: "var(--accent)", cursor: "pointer" }}
               >
-                {L("project repository", "项目仓库")}
+                {L("project website", "项目网站")}
               </button>
               {L(".", "。")}
             </span>

@@ -14,6 +14,9 @@ retain only the current release; older entries remain here as the record.
 
 ### Changed
 
+- Community downloads and installation instructions are available at
+  `https://oxfuzz.bionicloud.net`. Help and About link to the public website
+  independently of source repository access.
 - Theme controls use icons and cycle through Dark, Light, and System. Tooltips
   and accessible labels retain the current and next mode.
 - Crash scanning is separate from AI report generation, with progress and
