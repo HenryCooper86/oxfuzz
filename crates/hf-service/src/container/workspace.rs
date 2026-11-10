@@ -1202,6 +1202,7 @@ mod workspace_tests {
 
     #[test]
     fn document_conversion_staging_stays_inside_the_sandbox_workspace() {
+        let _environment = ServiceContainer::workspace_environment_test_gate().blocking_lock();
         let project = Path::new("/home/user/project");
         let import_id = uuid::Uuid::new_v4();
         let staging = document_staging_dir(project, import_id);
@@ -1226,6 +1227,7 @@ mod workspace_tests {
 
     #[test]
     fn normal_target_is_preserved() {
+        let _environment = ServiceContainer::workspace_environment_test_gate().blocking_lock();
         let project = Path::new("/home/user/myproj");
         let ws = workspace_dir(project, "parse_json");
         assert_eq!(ws, base(project).join("parse_json"));
@@ -1233,6 +1235,7 @@ mod workspace_tests {
 
     #[test]
     fn projects_sharing_a_basename_get_distinct_workspaces() {
+        let _environment = ServiceContainer::workspace_environment_test_gate().blocking_lock();
         // Two different projects with the same directory name must not share a
         // workspace, or one's compiled binary/corpus/crashes would be used for
         // the other's runs/triage.
@@ -1243,6 +1246,7 @@ mod workspace_tests {
 
     #[test]
     fn same_project_maps_to_a_stable_workspace() {
+        let _environment = ServiceContainer::workspace_environment_test_gate().blocking_lock();
         // The slug must be deterministic so compile -> run -> triage across
         // separate invocations all resolve to the same on-disk workspace.
         let project = Path::new("/home/user/myproj");
@@ -1254,6 +1258,7 @@ mod workspace_tests {
 
     #[test]
     fn qualified_target_becomes_one_portable_component() {
+        let _environment = ServiceContainer::workspace_environment_test_gate().blocking_lock();
         // A C++ symbol carries `::`, and the documented `file.c::symbol` target
         // syntax carries `::` and `/`. Neither may reach the filesystem raw:
         // `:` is illegal in an NTFS name, and a `/` would nest one target's
@@ -1281,6 +1286,7 @@ mod workspace_tests {
 
     #[test]
     fn plain_identifier_target_keeps_its_directory_name() {
+        let _environment = ServiceContainer::workspace_environment_test_gate().blocking_lock();
         // Every symbol the scanners emit is a plain identifier, so sanitizing
         // must leave existing on-disk workspaces exactly where they were.
         let project = Path::new("/home/user/myproj");
@@ -1292,6 +1298,7 @@ mod workspace_tests {
 
     #[test]
     fn dotdot_target_cannot_escape_workspace() {
+        let _environment = ServiceContainer::workspace_environment_test_gate().blocking_lock();
         let project = Path::new("/home/user/myproj");
         let ws = workspace_dir(project, "../../../../etc/evil");
         // Stays inside the project workspace base...
@@ -1310,6 +1317,7 @@ mod workspace_tests {
 
     #[test]
     fn absolute_target_cannot_escape_workspace() {
+        let _environment = ServiceContainer::workspace_environment_test_gate().blocking_lock();
         let project = Path::new("/home/user/myproj");
         let ws = workspace_dir(project, "/etc/passwd");
         assert!(
@@ -1322,6 +1330,7 @@ mod workspace_tests {
 
     #[test]
     fn degenerate_targets_fall_back_without_colliding() {
+        let _environment = ServiceContainer::workspace_environment_test_gate().blocking_lock();
         // An empty target, a pure-traversal target, and a target literally
         // named `default` are three different targets. Each needs a usable
         // directory, and none may share one with the others.
