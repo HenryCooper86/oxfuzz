@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="620" viewBox="0 0 1040 620" role="img" aria-labelledby="title desc">
+<title id="title">AFL++ terminal workflow illustration</title>
+<desc id="desc">Illustrative commands, not an executed session. 01  INSTRUMENT A FILE-READING TARGET: $ afl-clang-fast -g -O1 parser_cli.c \     -o parser_afl 02  START FROM YOUR SEED FILES: $ afl-fuzz -i seeds -o out -- \     ./parser_afl @@ 03  CHECK CAMPAIGN STATUS: $ afl-whatsup -s out/ # Crashes and hangs stay in the output tree.</desc>
+<rect width="1040" height="620" rx="12" fill="#111312"/>
+<path d="M0 66H1040" stroke="#30332e"/>
+<path d="M32 25l10 8-10 8m18 0h13" fill="none" stroke="#c8b560" stroke-width="2.5"/>
+<text x="82" y="41" fill="#e8e6e1" font-family="ui-monospace, monospace" font-size="22">AFL++ / terminal workflow</text>
+<text x="1000" y="40" text-anchor="end" fill="#aaa59e" font-family="ui-monospace, monospace" font-size="15">ILLUSTRATION</text>
+<text x="38" y="110" fill="#6fcf97" font-family="ui-monospace, monospace" font-size="18" letter-spacing="1">01  INSTRUMENT A FILE-READING TARGET</text>
+<text x="38" y="151" fill="#e8e6e1" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="23" xml:space="preserve">$ afl-clang-fast -g -O1 parser_cli.c \</text>
+<text x="38" y="182" fill="#e8e6e1" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="23" xml:space="preserve">    -o parser_afl</text>
+<text x="38" y="264" fill="#6fcf97" font-family="ui-monospace, monospace" font-size="18" letter-spacing="1">02  START FROM YOUR SEED FILES</text>
+<text x="38" y="305" fill="#e8e6e1" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="23" xml:space="preserve">$ afl-fuzz -i seeds -o out -- \</text>
+<text x="38" y="336" fill="#e8e6e1" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="23" xml:space="preserve">    ./parser_afl @@</text>
+<text x="38" y="418" fill="#6fcf97" font-family="ui-monospace, monospace" font-size="18" letter-spacing="1">03  CHECK CAMPAIGN STATUS</text>
+<text x="38" y="459" fill="#e8e6e1" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="23" xml:space="preserve">$ afl-whatsup -s out/</text>
+<text x="38" y="490" fill="#aaa59e" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="23" xml:space="preserve"># Crashes and hangs stay in the output tree.</text>
+<path d="M38 569H1002" stroke="#30332e"/>
+<text x="38" y="599" fill="#aaa59e" font-family="ui-monospace, monospace" font-size="16">Example filenames and prepared inputs. No run results or benchmark data.</text>
+</svg>

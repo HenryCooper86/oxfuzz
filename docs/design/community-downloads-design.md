@@ -83,3 +83,11 @@ Assumptions: public distribution means application binaries and the minimal
 sandbox build kit, not the application source tree. Version 0.9.4 is the next
 unused patch release. macOS builds remain ad-hoc signed and unnotarized; Windows
 builds remain unsigned unless a signing identity is supplied.
+
+Engine examples use original, explicitly labeled SVG illustrations of documented
+terminal commands alongside real userspace app captures. They are workflow
+pictures, not records of an executed terminal session or comparable performance
+measurements. Prerequisites and placeholder files are visible in the captions.
+The kernel example keeps syzkaller's native web UI and reproduction capabilities
+explicit; it does not present a userspace screen as kernel evidence. A native
+HTML disclosure retains the general task table without repeating it by default.

@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="620" viewBox="0 0 1040 620" role="img" aria-labelledby="title desc">
+<title id="title">honggfuzz terminal workflow illustration</title>
+<desc id="desc">Illustrative commands, not an executed session. 01  COMPILE WITH INSTRUMENTATION: $ hfuzz-clang -g -O1 parser_cli.c \     -o parser_hf 02  CHOOSE WORKSPACE AND RUN LIMIT: $ mkdir -p work $ honggfuzz -i seeds -W work --run_time 60 \     -- ./parser_hf ___FILE___ 03  INSPECT RETAINED FINDINGS: # Review crash files and engine reports in work/.</desc>
+<rect width="1040" height="620" rx="12" fill="#111312"/>
+<path d="M0 66H1040" stroke="#30332e"/>
+<path d="M32 25l10 8-10 8m18 0h13" fill="none" stroke="#c8b560" stroke-width="2.5"/>
+<text x="82" y="41" fill="#e8e6e1" font-family="ui-monospace, monospace" font-size="22">honggfuzz / terminal workflow</text>
+<text x="1000" y="40" text-anchor="end" fill="#aaa59e" font-family="ui-monospace, monospace" font-size="15">ILLUSTRATION</text>
+<text x="38" y="110" fill="#6fcf97" font-family="ui-monospace, monospace" font-size="18" letter-spacing="1">01  COMPILE WITH INSTRUMENTATION</text>
+<text x="38" y="151" fill="#e8e6e1" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="23" xml:space="preserve">$ hfuzz-clang -g -O1 parser_cli.c \</text>
+<text x="38" y="182" fill="#e8e6e1" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="23" xml:space="preserve">    -o parser_hf</text>
+<text x="38" y="264" fill="#6fcf97" font-family="ui-monospace, monospace" font-size="18" letter-spacing="1">02  CHOOSE WORKSPACE AND RUN LIMIT</text>
+<text x="38" y="305" fill="#e8e6e1" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="23" xml:space="preserve">$ mkdir -p work</text>
+<text x="38" y="336" fill="#e8e6e1" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="23" xml:space="preserve">$ honggfuzz -i seeds -W work --run_time 60 \</text>
+<text x="38" y="367" fill="#e8e6e1" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="23" xml:space="preserve">    -- ./parser_hf ___FILE___</text>
+<text x="38" y="418" fill="#6fcf97" font-family="ui-monospace, monospace" font-size="18" letter-spacing="1">03  INSPECT RETAINED FINDINGS</text>
+<text x="38" y="459" fill="#aaa59e" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="23" xml:space="preserve"># Review crash files and engine reports in work/.</text>
+<path d="M38 569H1002" stroke="#30332e"/>
+<text x="38" y="599" fill="#aaa59e" font-family="ui-monospace, monospace" font-size="16">Example filenames and prepared inputs. No run results or benchmark data.</text>
+</svg>

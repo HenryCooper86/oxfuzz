@@ -384,6 +384,66 @@
             and retained evidence into one place.
           </p>
         </div>
+<div class="engine-examples" aria-label="Visual engine workflow examples">
+<p class="example-intro">Compare the work around each engine. Terminal pictures illustrate documented commands; app pictures are real captures from our qualification project. These are different views of a workflow, not matched performance tests. Open any picture for a closer look.</p>
+<nav class="engine-index" aria-label="Engine comparison examples"><a href="#example-libfuzzer">libFuzzer</a><a href="#example-aflplusplus">AFL++</a><a href="#example-honggfuzz">honggfuzz</a><a href="#example-syzkaller">syzkaller</a></nav>
+<article class="engine-example" id="example-libfuzzer">
+  <header><span class="feature-index">libFuzzer</span><h3>From source code to a reviewed harness.</h3></header>
+  <div class="engine-pair">
+    <figure class="terminal-example"><div class="example-label">ENGINE CLI <span>Illustrated workflow</span></div>
+      <a href="/illustrations/libfuzzer-terminal.svg" target="_blank" rel="noopener" aria-label="Open libFuzzer terminal workflow illustration"><img src="/illustrations/libfuzzer-terminal.svg" width="1040" height="620" loading="lazy" alt="libFuzzer commands for instrumenting a target, starting a campaign and inspecting results" /></a>
+      <figcaption>The terminal path starts with a harness you write and an instrumented build you configure.</figcaption>
+    </figure>
+    <figure class="app-example"><div class="example-label">WITH OXFUZZ <span>Real app capture</span></div>
+      <a href="/screenshots/harness.jpg" target="_blank" rel="noopener" aria-label="Open oxfuzz harness comparison screenshot"><img src="/screenshots/harness.jpg" width="2400" height="1600" loading="lazy" alt="Real oxfuzz harness review from the qualification example." /></a>
+      <figcaption><strong>Review the source and the evidence together.</strong> oxfuzz helps draft, compile and smoke-test the harness, then shows the source revision, review findings and approval state together.</figcaption>
+    </figure>
+  </div>
+  <p class="example-assumption">Assumes an installed Clang toolchain and a harness implementing LLVMFuzzerTestOneInput. Replace the replay placeholder with a saved crash file. <a href="https://llvm.org/docs/LibFuzzer.html" target="_blank" rel="noopener">Upstream guide ↗</a></p>
+</article>
+<article class="engine-example" id="example-aflplusplus">
+  <header><span class="feature-index">AFL++</span><h3>From output directories to campaign history.</h3></header>
+  <div class="engine-pair">
+    <figure class="terminal-example"><div class="example-label">ENGINE CLI <span>Illustrated workflow</span></div>
+      <a href="/illustrations/aflplusplus-terminal.svg" target="_blank" rel="noopener" aria-label="Open AFL++ terminal workflow illustration"><img src="/illustrations/aflplusplus-terminal.svg" width="1040" height="620" loading="lazy" alt="AFL++ commands for instrumenting a target, starting a campaign and inspecting results" /></a>
+      <figcaption>AFL++ supplies its own terminal status screen and monitoring tools. You choose the instrumented target, seeds and output directory.</figcaption>
+    </figure>
+    <figure class="app-example"><div class="example-label">WITH OXFUZZ <span>Real app capture</span></div>
+      <a href="/screenshots/run-history.jpg" target="_blank" rel="noopener" aria-label="Open oxfuzz run-history comparison screenshot"><img src="/screenshots/run-history.jpg" width="2400" height="1600" loading="lazy" alt="Real oxfuzz history showing the three userspace qualification engines." /></a>
+      <figcaption><strong>Return to the run without rebuilding its context.</strong> oxfuzz retains the engine, status, duration and measured metrics with the project, so you can inspect completed or stopped campaigns in one history.</figcaption>
+    </figure>
+  </div>
+  <p class="example-assumption">Assumes AFL++ is installed, parser_cli.c accepts an input filename, and seeds contains valid sample files. @@ is the engine’s generated input path. <a href="https://aflplus.plus/docs/fuzzing_in_depth/" target="_blank" rel="noopener">Upstream guide ↗</a></p>
+</article>
+<article class="engine-example" id="example-honggfuzz">
+  <header><span class="feature-index">honggfuzz</span><h3>From command options to a guided campaign.</h3></header>
+  <div class="engine-pair">
+    <figure class="terminal-example"><div class="example-label">ENGINE CLI <span>Illustrated workflow</span></div>
+      <a href="/illustrations/honggfuzz-terminal.svg" target="_blank" rel="noopener" aria-label="Open honggfuzz terminal workflow illustration"><img src="/illustrations/honggfuzz-terminal.svg" width="1040" height="620" loading="lazy" alt="honggfuzz commands for instrumenting a target, starting a campaign and inspecting results" /></a>
+      <figcaption>honggfuzz provides instrumentation, run limits, live statistics and crash output. You connect those pieces to your target and workspace.</figcaption>
+    </figure>
+    <figure class="app-example"><div class="example-label">WITH OXFUZZ <span>Real app capture</span></div>
+      <a href="/screenshots/dashboard.jpg" target="_blank" rel="noopener" aria-label="Open oxfuzz dashboard comparison screenshot"><img src="/screenshots/dashboard.jpg" width="2400" height="1600" loading="lazy" alt="Real oxfuzz dashboard from the shared qualification project." /></a>
+      <figcaption><strong>See what is ready and what needs review.</strong> oxfuzz connects the target, harness review, sandbox readiness and retained runs. Choose the engine and campaign limits in the workbench, then keep the results after stopping.</figcaption>
+    </figure>
+  </div>
+  <p class="example-assumption">Assumes honggfuzz and its compiler wrapper are on PATH, a file-reading target exists, and seed files are prepared. ___FILE___ is honggfuzz’s input placeholder. <a href="https://github.com/google/honggfuzz/blob/master/docs/USAGE.md" target="_blank" rel="noopener">Upstream guide ↗</a></p>
+</article>
+<article class="engine-example kernel-example" id="example-syzkaller">
+  <header><span class="feature-index">syzkaller</span><h3>Kernel fuzzing still needs a prepared guest.</h3></header>
+  <div class="engine-pair">
+    <figure class="terminal-example"><div class="example-label">ENGINE CLI <span>Illustrated workflow</span></div>
+      <a href="/illustrations/syzkaller-terminal.svg" target="_blank" rel="noopener" aria-label="Open syzkaller terminal workflow illustration"><img src="/illustrations/syzkaller-terminal.svg" width="1040" height="620" loading="lazy" alt="Build syzkaller, configure the kernel and virtual machine, then launch syz-manager" /></a>
+      <figcaption>syz-manager starts the VMs and has its own web statistics, crash reproduction and minimization.</figcaption>
+    </figure>
+    <div class="kernel-workflow"><span class="example-label">WITH OXFUZZ</span><h4>Bring kernel runs into the workbench.</h4>
+      <ol><li><strong>Supply the environment.</strong> Select the kernel image, root filesystem and guest SSH key.</li><li><strong>Control the campaign.</strong> Set the duration and resource limits, follow available execution and coverage metrics, and stop the run.</li><li><strong>Keep the artifacts.</strong> Retain the campaign output and corpus; inspect kernel crash artifacts in the syzkaller workdir.</li></ol>
+      <p>The kernel, guest configuration and compatibility checks remain your responsibility. The userspace harness and triage screens above are not kernel screenshots.</p>
+    </div>
+  </div>
+  <p class="example-assumption">Assumes a compatible toolchain, coverage-enabled kernel, bootable guest image, SSH access and a complete manager configuration. <a href="https://github.com/google/syzkaller/blob/master/docs/linux/setup.md" target="_blank" rel="noopener">Setup guide ↗</a> · <a href="https://github.com/google/syzkaller/blob/master/docs/usage.md" target="_blank" rel="noopener">Manager workflow ↗</a></p>
+</article></div>
+        <details class="task-comparison"><summary>Compare the workflow task by task</summary>
         <table>
           <caption>
             Workflow comparison — not a throughput benchmark
@@ -461,6 +521,7 @@
             </tr>
           </tbody>
         </table>
+        </details>
         <div class="comparison-notes">
           <p>
             <strong>What the GUI adds:</strong> coordination, model assistance
