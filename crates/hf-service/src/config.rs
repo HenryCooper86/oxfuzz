@@ -2737,9 +2737,19 @@ fn valid_stagnation_windows(new_harness_windows: u64, stop_windows: u64) -> bool
 /// Resolved config/data locations.
 #[must_use]
 pub fn app_paths() -> AppPaths {
+    let storage_dir = std::env::var_os("HF_DB_PATH")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .map_or_else(data_dir, |database| {
+            database
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or(Path::new("."))
+                .to_path_buf()
+        });
     AppPaths {
         config_dir: config_dir().display().to_string(),
-        data_dir: data_dir().display().to_string(),
+        data_dir: storage_dir.display().to_string(),
         workspace_dir: crate::workspace_root().display().to_string(),
     }
 }
