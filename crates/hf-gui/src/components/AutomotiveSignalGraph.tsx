@@ -30,10 +30,14 @@ interface Point {
   v: number;
 }
 
-interface Series {
+interface SignalPoints {
+  key: string;
   name: string;
   unit: string;
   points: Point[];
+}
+
+interface Series extends SignalPoints {
   min: number;
   max: number;
   color: string;
@@ -66,48 +70,45 @@ function nearest(points: Point[], time: number): Point | null {
 }
 
 export function AutomotiveSignalGraph({ frames }: { frames: OfflineFrameView[] }) {
+  const signals = useMemo(() => {
+    const groups = new Map<string, SignalPoints>();
+    for (const frame of frames) {
+      for (const signal of frame.signals) {
+        const key = JSON.stringify([frame.channel, frame.id, frame.extended, frame.fd, signal.name]);
+        let group = groups.get(key);
+        if (!group) {
+          const id = `0x${frame.id.toString(16).toUpperCase().padStart(frame.extended ? 8 : 3, "0")}`;
+          const source = [frame.channel, `${id}${frame.fd ? " CAN FD" : ""}`].filter(Boolean).join(" · ");
+          group = { key, name: `${signal.name} · ${source}`, unit: signal.unit, points: [] };
+          groups.set(key, group);
+        }
+        group.points.push({ t: frame.timestamp_micros, v: signal.value });
+      }
+    }
+    return [...groups.values()];
+  }, [frames]);
+  // A new set of signal sources needs a new selection; value updates retain it.
+  return <SignalGraphPlot key={JSON.stringify(signals.map((signal) => signal.key))} signals={signals} />;
+}
+
+function SignalGraphPlot({ signals }: { signals: SignalPoints[] }) {
   const { t } = useI18n();
   const [hoverTime, setHoverTime] = useState<number | null>(null);
+  const [selected, setSelected] = useState<string[]>(signals.slice(0, 1).map((signal) => signal.key));
+  const active = selected.slice(0, MAX_SERIES);
+  const series: Series[] = active.map((key, index) => {
+    const source = signals.find((signal) => signal.key === key)!;
+    const values = source.points.map((point) => point.v);
+    return {
+      ...source,
+      min: values.length ? Math.min(...values) : 0,
+      max: values.length ? Math.max(...values) : 1,
+      color: SERIES_COLORS[index] ?? SERIES_COLORS[0],
+      dash: SERIES_DASH[index] ?? "",
+    };
+  });
 
-  const signalNames = useMemo(() => {
-    const names = new Set<string>();
-    for (const frame of frames) {
-      for (const signal of frame.signals) names.add(signal.name);
-    }
-    return [...names].sort();
-  }, [frames]);
-  const [selected, setSelected] = useState<string[]>(signalNames.slice(0, 1));
-
-  const active = useMemo(
-    () => selected.filter((name) => signalNames.includes(name)).slice(0, MAX_SERIES),
-    [selected, signalNames],
-  );
-
-  const series = useMemo<Series[]>(() => {
-    return active.map((name, index) => {
-      const points: Point[] = [];
-      let unit = "";
-      for (const frame of frames) {
-        const match = frame.signals.find((signal) => signal.name === name);
-        if (match) {
-          points.push({ t: frame.timestamp_micros, v: match.value });
-          if (match.unit) unit = match.unit;
-        }
-      }
-      const values = points.map((point) => point.v);
-      return {
-        name,
-        unit,
-        points,
-        min: values.length ? Math.min(...values) : 0,
-        max: values.length ? Math.max(...values) : 1,
-        color: SERIES_COLORS[index] ?? SERIES_COLORS[0],
-        dash: SERIES_DASH[index] ?? "",
-      };
-    });
-  }, [frames, active]);
-
-  if (signalNames.length === 0) return null;
+  if (signals.length === 0) return null;
 
   const multi = series.length > 1;
   const allPoints = series.flatMap((entry) => entry.points);
@@ -195,14 +196,14 @@ export function AutomotiveSignalGraph({ frames }: { frames: OfflineFrameView[] }
 
       {/* Signal picker: overlay up to MAX_SERIES. */}
       <div className="flex flex-wrap gap-1.5">
-        {signalNames.map((name) => {
-          const index = active.indexOf(name);
+        {signals.map((signal) => {
+          const index = active.indexOf(signal.key);
           const on = index >= 0;
           const atCap = !on && active.length >= MAX_SERIES;
           return (
             <button
-              key={name}
-              onClick={() => toggle(name)}
+              key={signal.key}
+              onClick={() => toggle(signal.key)}
               disabled={atCap}
               className="inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-11px transition-colors"
               style={{
@@ -222,7 +223,7 @@ export function AutomotiveSignalGraph({ frames }: { frames: OfflineFrameView[] }
                   display: "inline-block",
                 }}
               />
-              {name}
+              {signal.name}
             </button>
           );
         })}
@@ -242,7 +243,7 @@ export function AutomotiveSignalGraph({ frames }: { frames: OfflineFrameView[] }
         >
           {gridRows.map((row) => (
             <line
-              key={row.label}
+              key={row.fraction}
               x1={PAD_L}
               y1={gridY(row.fraction)}
               x2={WIDTH - PAD_R}
@@ -254,7 +255,7 @@ export function AutomotiveSignalGraph({ frames }: { frames: OfflineFrameView[] }
           ))}
           {series.map((entry) => (
             <path
-              key={entry.name}
+              key={entry.key}
               d={entry.points
                 .map(
                   (point, index) =>
@@ -286,7 +287,7 @@ export function AutomotiveSignalGraph({ frames }: { frames: OfflineFrameView[] }
               const point = nearest(entry.points, hoverTime);
               if (!point) return null;
               return (
-                <circle key={entry.name} cx={xAt(point.t)} cy={yAt(entry, point.v)} r={3} fill={entry.color} />
+                <circle key={entry.key} cx={xAt(point.t)} cy={yAt(entry, point.v)} r={3} fill={entry.color} />
               );
             })}
         </svg>
@@ -294,7 +295,7 @@ export function AutomotiveSignalGraph({ frames }: { frames: OfflineFrameView[] }
         {/* y-axis labels */}
         {gridRows.map((row) => (
           <span
-            key={row.label}
+            key={row.fraction}
             className="absolute text-10px font-mono text-text-muted"
             style={{ left: 4, top: gridY(row.fraction), transform: "translateY(-50%)" }}
           >
@@ -350,7 +351,7 @@ export function AutomotiveSignalGraph({ frames }: { frames: OfflineFrameView[] }
             {series.map((entry) => {
               const point = nearest(entry.points, hoverTime);
               return (
-                <div key={entry.name} className="flex items-center gap-1.5">
+                <div key={entry.key} className="flex items-center gap-1.5">
                   <span
                     aria-hidden="true"
                     style={{ width: 8, height: 8, borderRadius: 2, background: entry.color }}
@@ -371,7 +372,7 @@ export function AutomotiveSignalGraph({ frames }: { frames: OfflineFrameView[] }
       {multi && (
         <div className="flex flex-wrap gap-3">
           {series.map((entry) => (
-            <span key={entry.name} className="inline-flex items-center gap-1.5 text-11px text-text-secondary">
+            <span key={entry.key} className="inline-flex items-center gap-1.5 text-11px text-text-secondary">
               <svg width="18" height="8" aria-hidden="true">
                 <line
                   x1="0"

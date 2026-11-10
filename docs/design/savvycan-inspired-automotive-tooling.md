@@ -146,10 +146,15 @@ importer trait is shaped so BLF drops in without touching the others.
 
 ### 5.4 Service operation
 
-A new `ImportCapture` operation stages the file, parses it in-process (no
-sidecar), optionally DBC-decodes, and persists the same operation evidence as an
-offline analysis, so imported captures flow into planning, corpus seeding, and
-reporting unchanged.
+The implemented text-log import reads a bounded operator-selected file,
+parses it in-process (no sidecar), and optionally DBC-decodes it. Its results
+are transient analysis views; unlike sidecar PCAP analysis, they do not yet
+produce retained operations or feed campaign reports and state-corpus promotion.
+The UI states that limitation. Durable import remains future work.
+
+Changing a capture, format, or DBC invalidates the affected displayed results.
+Retries clear previous results before dispatch, and responses for superseded
+inputs cannot replace the current view or report an obsolete error.
 
 ## 6. ISO-TP reassembly + UDS discovery
 
@@ -206,7 +211,11 @@ rate/time-bounded by the existing `OperationLimits` and guardrails.
 
 Render DBC-decoded signal values over time from a decoded transcript. Pure
 client-side rendering over evidence already produced by 4.2; no new backend
-authority. Multi-signal, with export of the underlying series.
+authority. A plotted series includes the channel, arbitration ID, standard or
+extended namespace, CAN/CAN-FD format, and signal name. Equal signal names on
+different frames never merge. Labels identify the source, and a changed set of
+available signals resets selection to a valid series. Multi-signal, with export
+of the underlying series.
 
 ### 8.2 Capture diff (pure Rust, `hf-automotive::analysis`)
 

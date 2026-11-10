@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Activity, FileSearch, GitCompare, Upload } from "lucide-react";
 import { useI18n } from "../i18nContext";
 import { isTauriEnvironment, pickFile } from "../lib";
@@ -106,19 +106,36 @@ export function AutomotiveOfflineWorkspace() {
   const [secondPath, setSecondPath] = useState("");
   const [diff, setDiff] = useState<CaptureDiffView | null>(null);
   const [diffBusy, setDiffBusy] = useState(false);
+  const analysisVersion = useRef(0);
+  const diffVersion = useRef(0);
+
+  function invalidateAnalysis() {
+    analysisVersion.current += 1;
+    setResult(null);
+    setError(null);
+  }
+
+  function invalidateDiff() {
+    diffVersion.current += 1;
+    setDiff(null);
+    setError(null);
+  }
 
   async function analyze() {
     if (!desktop || !capturePath || busy) return;
     setBusy(true);
     setError(null);
+    setResult(null);
+    const version = ++analysisVersion.current;
     try {
       const next = await importAutomotiveCapture({
         capturePath,
         format,
         dbcPath: dbcPath || null,
       });
-      setResult(next);
+      if (analysisVersion.current === version) setResult(next);
     } catch (reason) {
+      if (analysisVersion.current !== version) return;
       const message = String(reason);
       setError(message);
       toast({ title: t("automotive.offline.analyzeFailed"), description: message, variant: "error" });
@@ -131,10 +148,13 @@ export function AutomotiveOfflineWorkspace() {
     if (!desktop || !capturePath || !secondPath || diffBusy) return;
     setDiffBusy(true);
     setError(null);
+    setDiff(null);
+    const version = ++diffVersion.current;
     try {
       const next = await diffAutomotiveCaptures({ firstPath: capturePath, secondPath, format });
-      setDiff(next);
+      if (diffVersion.current === version) setDiff(next);
     } catch (reason) {
+      if (diffVersion.current !== version) return;
       const message = String(reason);
       setError(message);
       toast({ title: t("automotive.offline.analyzeFailed"), description: message, variant: "error" });
@@ -161,14 +181,23 @@ export function AutomotiveOfflineWorkspace() {
       <div className="flex flex-wrap items-center gap-2">
         <Select
           value={format}
-          onChange={(next) => setFormat(next as OfflineCaptureFormat)}
+          onChange={(next) => {
+            invalidateAnalysis();
+            invalidateDiff();
+            setFormat(next as OfflineCaptureFormat);
+          }}
           options={OFFLINE_CAPTURE_FORMAT_OPTIONS}
           className="min-w-40"
         />
         <Button
           variant="outline"
           disabled={!desktop}
-          onClick={() => void pickFile(t("automotive.offline.selectCapture")).then((p) => p && setCapturePath(p))}
+          onClick={() => void pickFile(t("automotive.offline.selectCapture")).then((p) => {
+            if (!p) return;
+            invalidateAnalysis();
+            invalidateDiff();
+            setCapturePath(p);
+          })}
         >
           <Upload size={14} />
           {capturePath ? displayName(capturePath) : t("automotive.offline.selectCapture")}
@@ -176,7 +205,11 @@ export function AutomotiveOfflineWorkspace() {
         <Button
           variant="ghost"
           disabled={!desktop}
-          onClick={() => void pickFile(t("automotive.offline.loadDbc")).then((p) => p && setDbcPath(p))}
+          onClick={() => void pickFile(t("automotive.offline.loadDbc")).then((p) => {
+            if (!p) return;
+            invalidateAnalysis();
+            setDbcPath(p);
+          })}
         >
           {dbcPath ? displayName(dbcPath) : t("automotive.offline.loadDbc")}
         </Button>
@@ -310,7 +343,11 @@ export function AutomotiveOfflineWorkspace() {
           <Button
             variant="outline"
             disabled={!desktop}
-            onClick={() => void pickFile(t("automotive.offline.selectSecond")).then((p) => p && setSecondPath(p))}
+            onClick={() => void pickFile(t("automotive.offline.selectSecond")).then((p) => {
+              if (!p) return;
+              invalidateDiff();
+              setSecondPath(p);
+            })}
           >
             <Upload size={14} />
             {secondPath ? displayName(secondPath) : t("automotive.offline.selectSecond")}
