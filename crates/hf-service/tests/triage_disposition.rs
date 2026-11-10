@@ -291,3 +291,15 @@ fn queue_order_does_not_depend_on_input_order() {
         sorted(vec![c, b, a])
     );
 }
+
+#[test]
+fn minimization_limit_does_not_deny_retained_casr_classification() {
+    for severity in [CrashSeverity::Exploitable, CrashSeverity::NotExploitable] {
+        let crash = with_casr(crash(CrashOrigin::Target, false), severity);
+        let view = triage_disposition(&crash, &finding_proof_card(&crash));
+        assert_eq!(view.claim_ceiling, ClaimCeiling::TargetFaultObserved);
+        assert!(view.claim_limit.contains("not minimized"));
+        assert!(!view.claim_limit.contains("unclassified"));
+        assert!(view.claim_limit.contains("do not describe"));
+    }
+}

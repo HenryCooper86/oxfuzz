@@ -276,7 +276,7 @@ fn claim_limit(ceiling: ClaimCeiling) -> &'static str {
              defect, and exploitability is unclassified."
         }
         ClaimCeiling::TargetFaultObserved => {
-            "The input is not minimized and exploitability is unclassified; do not describe \
+            "The input is not minimized; do not describe \
              this finding as exploitable."
         }
         ClaimCeiling::TargetFaultMinimized => {

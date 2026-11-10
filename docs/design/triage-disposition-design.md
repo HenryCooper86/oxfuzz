@@ -127,8 +127,9 @@ Ceilings, ordered:
 
 The paired `claim_limit` sentence states what is not supported. For every
 ceiling below `ExploitabilityClassified` on a target fault it states that
-exploitability is unclassified and the finding must not be described as
-exploitable. This is the discipline the ladder exists to enforce: an
+the finding must not be described as exploitable. An unminimized input may
+already have a CASR classification; its limit names missing minimization without
+claiming that classification is absent. This is the discipline the ladder exists to enforce: an
 out-of-bounds read with no exploitability evidence is a read primitive and a
 denial of service, and calling it anything stronger is a claim without a record
 behind it.
