@@ -266,10 +266,11 @@
             <div>
               <h3>Turn crashes into something you can investigate.</h3>
               <p>
-                Reproduce and classify crashes, group duplicate findings, and
-                keep the inputs and run artifacts. Scan with progress and
-                cancellation, then request an AI report separately when you need
-                an explanation.
+                Inspect stack traces and CASR severity assessments for supported
+                userspace crashes. Group duplicate findings by stack signature
+                and retain their inputs and run artifacts. Scan with progress
+                and cancellation, then request a separate AI report for review.
+                Kernel crash artifacts remain in the syzkaller workdir.
               </p>
               <span class="feature-detail"
                 >Crash triage · Deduplication · Reviewable reports</span
@@ -316,6 +317,24 @@
         aria-label="Keep improving your campaigns"
       >
         <article>
+          <span class="feature-index">Skills</span>
+          <h3>Reuse your team's guidance.</h3>
+          <p>
+            Create and version Markdown skills for harness authoring, target
+            review or domain-specific work. Edit or duplicate reusable guidance
+            and assign it to agents; built-in definitions can be reset.
+          </p>
+        </article>
+        <article>
+          <span class="feature-index">Agents</span>
+          <h3>Define how the assistant works.</h3>
+          <p>
+            Configure an agent's role, instructions, allowed tools, assigned
+            skills, model tags and iteration limits. Customization keeps the
+            sandbox and human approval gates in place.
+          </p>
+        </article>
+        <article>
           <span class="feature-index">Corpus &amp; coverage</span>
           <h3>Keep useful inputs.</h3>
           <p>
@@ -338,6 +357,16 @@
             Schedule campaigns for approved targets with run budgets and
             concurrency limits. Explicit scheduler authorization keeps
             background work under your control.
+          </p>
+        </article>
+        <article>
+          <span class="feature-index">Reports &amp; handoff</span>
+          <h3>Bring findings into your workflow.</h3>
+          <p>
+            Export reports as Markdown or HTML and crash findings as SARIF.
+            Prepare GitHub or GitLab issue drafts, then review the named scope
+            before publishing through a configured tracker or DefectDojo
+            integration.
           </p>
         </article>
       </section>

@@ -38,7 +38,8 @@ link visitors to documentation they cannot read after the repository is private.
 No account system, analytics, newsletter form, or payment flow is needed.
 Explain implemented advantages: candidate ranking, harness qualification, visible
 assistant tool calls, provider routing/failover and spending limits, crash triage,
-corpus management, project knowledge and authorized scheduling. Sources are the
+corpus management, project knowledge, reusable skills, configurable agents,
+reviewed finding handoff and authorized scheduling. Sources are the
 README capability table, embedded Help and provider/settings implementations.
 Provider availability depends on endpoint credentials and model capabilities;
 rankings and generated reports remain reviewable suggestions.
