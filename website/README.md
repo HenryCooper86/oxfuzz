@@ -3,10 +3,19 @@
 Static site for `https://oxfuzz.bionicloud.net`. It introduces the app, links the
 source repository on GitHub and invites contributions; downloads are hosted here.
 The GitHub links assume the repository is public.
-A small same-origin script controls the icon theme switch and screenshot gallery.
+Small same-origin scripts control the theme switch, the step gallery and motion.
 No accounts, tracking, remote fonts or build dependencies. Theme defaults to System
-and is saved locally when browser storage is available. Screenshots show the
-approved synthetic qualification fixture, not customer projects or benchmarks.
+and is saved locally when browser storage is available.
+
+The page is published in English (`/`) and Simplified Chinese (`/zh/`) from one
+template, `src/index.html`. Every visible string lives in `locales.mjs`; the build
+fails on a missing or unused key, and a test keeps the two languages in step.
+
+The screenshots and the recording in `src/screenshots/` come from a real session
+on the bundled examples (`examples/utf8_decoder`, `examples/cmake_tlv_lib`), and
+the numbers on the page are the ones that session produced. Retake them together
+if the app's look changes. Motion (`src/motion.js`) is skipped entirely when the
+visitor asks for reduced motion, and the recording is replaced by a still.
 
 ```sh
 cd website

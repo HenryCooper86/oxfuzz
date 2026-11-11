@@ -10,14 +10,18 @@
   const media = matchMedia("(prefers-color-scheme: dark)");
   const root = document.documentElement;
   let button;
-  const label = (value) => value[0].toUpperCase() + value.slice(1);
+  const chinese = (root.lang || "").startsWith("zh");
+  const names = chinese
+    ? { dark: "深色", light: "浅色", system: "跟随系统" }
+    : { dark: "Dark", light: "Light", system: "System" };
+  const label = (value) => names[value];
   function render() {
     root.dataset.theme =
       preference === "system" ? (media.matches ? "dark" : "light") : preference;
     root.dataset.preference = preference;
     if (button) {
       const next = modes[(modes.indexOf(preference) + 1) % modes.length];
-      const description = `Theme: ${label(preference)} → ${label(next)}`;
+      const description = `${chinese ? "主题：" : "Theme: "}${label(preference)} → ${label(next)}`;
       button.setAttribute("aria-label", description);
       button.setAttribute("title", description);
     }

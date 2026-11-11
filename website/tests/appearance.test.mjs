@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 
-async function setup({ saved, blocked = false, dark = false } = {}) {
+async function setup({ saved, blocked = false, dark = false, lang } = {}) {
   const handlers = {};
   const attributes = {};
   const button = {
@@ -15,7 +15,7 @@ async function setup({ saved, blocked = false, dark = false } = {}) {
       handlers[k] = fn;
     },
   };
-  const root = { dataset: {} };
+  const root = { dataset: {}, lang };
   const media = {
     matches: dark,
     addEventListener(k, fn) {
@@ -33,9 +33,9 @@ async function setup({ saved, blocked = false, dark = false } = {}) {
     },
   };
   const listeners = {};
-  const views = ["dashboard", "harness", "run-history"].map((id) => ({
+  const views = ["discover", "harness", "run", "triage"].map((id) => ({
     id,
-    hidden: id !== "dashboard",
+    hidden: id !== "discover",
   }));
   const selectors = views.map((view) => ({
     dataset: { view: view.id },
@@ -115,10 +115,14 @@ test("gallery selection exposes exactly the requested screenshot and pressed con
   app.selectors[1].click();
   assert.deepEqual(
     app.views.map((v) => v.hidden),
-    [true, false, true],
+    [true, false, true, true],
   );
   assert.deepEqual(
     app.selectors.map((v) => v["aria-pressed"]),
-    ["false", "true", "false"],
+    ["false", "true", "false", "false"],
   );
+});
+test("the Chinese edition labels the theme switch in Chinese", async () => {
+  const app = await setup({ lang: "zh-CN" });
+  assert.match(app.attributes["aria-label"], /主题.*跟随系统.*深色/);
 });

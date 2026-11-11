@@ -1,27 +1,36 @@
 <!doctype html>
-<html lang="en">
+<html lang="{{lang}}">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta
-      name="description"
-      content="oxfuzz is an open-source desktop app that finds fuzz targets in your code, writes and reviews harnesses with you, runs libFuzzer, AFL++, honggfuzz and syzkaller in a sandbox, and keeps every crash as evidence."
-    />
+    <meta name="description" content="{{meta_description}}" />
     <meta name="color-scheme" content="dark light" />
     <script src="/appearance.js"></script>
-    <title>oxfuzz — Find the crash. Keep the evidence.</title>
+    <script src="/motion.js"></script>
+    <title>{{page_title}}</title>
+    <link rel="alternate" hreflang="en" href="/" />
+    <link rel="alternate" hreflang="zh-CN" href="/zh/" />
     <link rel="stylesheet" href="/style.css" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" sizes="any" />
   </head>
   <body>
-    <a class="skip" href="#main">Skip to content</a>
+    <a class="skip" href="#main">{{skip}}</a>
     <header class="site-header wrap">
-      <a class="brand" href="/" aria-label="oxfuzz home"
+      <a class="brand" href="{{home}}" aria-label="{{home_aria}}"
         ><img src="/mark.svg" width="28" height="28" alt="" />oxfuzz</a
       >
-      <nav aria-label="Main navigation">
-        <a href="#how">How it works</a><a href="#engines">Engines</a
-        ><a href="#open-source">Contribute</a><a href="#downloads">Download</a>
+      <nav aria-label="{{nav_aria}}">
+        <a href="#how">{{nav_how}}</a><a href="#engines">{{nav_engines}}</a
+        ><a href="#open-source">{{nav_contribute}}</a
+        ><a href="#downloads">{{nav_download}}</a>
+        <a
+          class="lang-link"
+          href="{{alt_href}}"
+          lang="{{alt_lang}}"
+          hreflang="{{alt_lang}}"
+          title="{{alt_title}}"
+          >{{alt_label}}</a
+        >
         <a
           class="github-link"
           href="https://github.com/HenryCooper86/oxfuzz"
@@ -64,167 +73,220 @@
     <main id="main">
       <section class="hero wrap">
         <div class="hero-copy">
-          <h1>Find the crash.<br />Keep the evidence.</h1>
-          <p class="lede">
-            oxfuzz is an open-source desktop app for fuzzing C, C++ and Rust
-            code. It finds functions worth fuzzing, drafts a harness for you to
-            review, runs the fuzzer in a sandbox, and turns every crash into a
-            finding you can reproduce.
-          </p>
+          <h1>{{hero_title}}</h1>
+          <p class="lede">{{hero_lede}}</p>
           <div class="hero-actions">
-            <a class="button primary" href="#downloads"
-              >Download v{{VERSION}}</a
-            >
+            <a class="button primary" href="#downloads">{{hero_download}}</a>
             <a
               class="button secondary"
               href="https://github.com/HenryCooper86/oxfuzz"
               rel="noopener"
-              >View the source on GitHub</a
+              >{{hero_source}}</a
             >
           </div>
-          <p class="hero-facts">
-            Free under the MIT license. Runs on macOS, Linux and Windows.
-          </p>
+          <p class="hero-facts">{{hero_facts}}</p>
         </div>
 
-        <figure class="finding" aria-label="Example of a finding in oxfuzz">
-          <div class="finding-head">
-            <span class="finding-kind">stack-buffer-overflow, write</span>
-            <span class="finding-severity">exploitable</span>
+        <figure class="fuzz" data-fuzz aria-label="{{fuzz_aria}}">
+          <div class="fuzz-bar">
+            <span class="fuzz-target">AFL++ / decode_utf8</span>
+            <span
+              class="fuzz-status"
+              data-running="{{fuzz_running}}"
+              data-found="{{fuzz_found}}"
+              >{{fuzz_found}}</span
+            >
           </div>
-          <p class="finding-where">parse_number at number.c:26</p>
-          <pre class="finding-stack"><code>#0  parse_number            number.c:26
-#1  LLVMFuzzerTestOneInput  harness.c</code></pre>
-          <dl class="finding-facts">
-            <div>
-              <dt>Engine</dt>
-              <dd>libFuzzer</dd>
+          <div class="fuzz-input">
+            <span class="fuzz-label">{{fuzz_input}}</span>
+            <span class="fuzz-bytes" aria-hidden="true"
+              ><b>e2</b><b>de</b><b></b><b></b><b></b><b></b
+            ></span>
+            <span class="fuzz-execs"
+              ><span data-execs>123</span> {{fuzz_execs}}</span
+            >
+          </div>
+          <div class="finding">
+            <div class="finding-head">
+              <span class="finding-kind">{{finding_kind}}</span>
+              <span class="finding-severity">{{finding_severity}}</span>
             </div>
-            <div>
-              <dt>Found after</dt>
-              <dd>1 second</dd>
-            </div>
-            <div>
-              <dt>Crashing input</dt>
-              <dd>kept with the run</dd>
-            </div>
-          </dl>
+            <p class="finding-where">{{finding_where}}</p>
+            <pre
+              class="finding-stack"
+            ><code>#0  decode_utf8             utf8.c:31
+#1  LLVMFuzzerTestOneInput  harness.c:7</code></pre>
+            <dl class="finding-facts">
+              <div>
+                <dt>{{fact_engine}}</dt>
+                <dd>AFL++</dd>
+              </div>
+              <div>
+                <dt>{{fact_found}}</dt>
+                <dd>{{fact_found_value}}</dd>
+              </div>
+              <div>
+                <dt>{{fact_inputs}}</dt>
+                <dd>{{fact_inputs_value}}</dd>
+              </div>
+            </dl>
+          </div>
           <figcaption>
-            A real result from the bundled
-            <code>json_number_parser</code> example.
+            <span>{{finding_caption}}</span>
+            <button type="button" class="fuzz-replay" data-replay hidden>
+              {{fuzz_replay}}
+            </button>
           </figcaption>
         </figure>
       </section>
 
-      <section class="gallery wrap" aria-label="Screenshots of oxfuzz">
-        <div class="gallery-tabs" role="group" aria-label="Choose a screen">
-          <button type="button" data-view="dashboard" aria-pressed="true">
-            Dashboard
+      <section class="section wrap demo" id="demo">
+        <div class="demo-copy" data-reveal>
+          <h2>{{demo_title}}</h2>
+          <p class="section-intro">{{demo_intro}}</p>
+          <dl class="demo-facts">
+            <div>
+              <dt>{{demo_fact_score}}</dt>
+              <dd>{{demo_fact_score_value}}</dd>
+            </div>
+            <div>
+              <dt>{{demo_fact_campaign}}</dt>
+              <dd>{{demo_fact_campaign_value}}</dd>
+            </div>
+            <div>
+              <dt>{{demo_fact_speed}}</dt>
+              <dd>{{demo_fact_speed_value}}</dd>
+            </div>
+            <div>
+              <dt>{{demo_fact_result}}</dt>
+              <dd>{{demo_fact_result_value}}</dd>
+            </div>
+          </dl>
+        </div>
+        <figure class="window" data-reveal>
+          <div class="window-bar" aria-hidden="true"><i></i><i></i><i></i></div>
+          <picture>
+            <source
+              media="(prefers-reduced-motion: reduce)"
+              srcset="/screenshots/run.jpg"
+            />
+            <img
+              src="/screenshots/oxfuzz-at-work.gif"
+              width="1200"
+              height="750"
+              loading="lazy"
+              alt="{{demo_alt}}"
+            />
+          </picture>
+        </figure>
+      </section>
+
+      <section class="section wrap" id="why">
+        <h2 data-reveal>{{why_title}}</h2>
+        <p class="section-intro" data-reveal>{{why_intro}}</p>
+        <div class="guarantees" data-reveal="stagger">
+          <div>
+            <h3>{{why_1_title}}</h3>
+            <p>{{why_1_text}}</p>
+          </div>
+          <div>
+            <h3>{{why_2_title}}</h3>
+            <p>{{why_2_text}}</p>
+          </div>
+          <div>
+            <h3>{{why_3_title}}</h3>
+            <p>{{why_3_text}}</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section wrap gallery" id="how">
+        <h2 data-reveal>{{how_title}}</h2>
+        <div
+          class="gallery-tabs"
+          role="group"
+          aria-label="{{how_tabs_aria}}"
+          data-reveal
+        >
+          <button type="button" data-view="discover" aria-pressed="true">
+            {{step_discover}}
           </button>
           <button type="button" data-view="harness" aria-pressed="false">
-            Harness review
+            {{step_harness}}
           </button>
-          <button type="button" data-view="run-history" aria-pressed="false">
-            Run history
+          <button type="button" data-view="run" aria-pressed="false">
+            {{step_run}}
+          </button>
+          <button type="button" data-view="triage" aria-pressed="false">
+            {{step_triage}}
           </button>
         </div>
-        <figure id="dashboard">
+        <figure id="discover">
           <a
-            href="/screenshots/dashboard.jpg"
+            href="/screenshots/discover.jpg"
             target="_blank"
             rel="noopener"
-            aria-label="Open dashboard screenshot at full size"
+            aria-label="{{shot_open}}"
             ><img
-              src="/screenshots/dashboard.jpg"
-              width="2400"
-              height="1600"
-              fetchpriority="high"
-              alt="oxfuzz dashboard showing one reviewed target, three retained runs and corpus readiness"
+              src="/screenshots/discover.jpg"
+              width="2160"
+              height="1350"
+              loading="lazy"
+              alt="{{discover_alt}}"
           /></a>
-          <figcaption>
-            The dashboard shows what needs your attention: harnesses to review,
-            crashes to triage, runs in progress.
-          </figcaption>
+          <figcaption>{{discover_caption}}</figcaption>
         </figure>
         <figure id="harness" hidden>
           <a
             href="/screenshots/harness.jpg"
             target="_blank"
             rel="noopener"
-            aria-label="Open harness review screenshot at full size"
+            aria-label="{{shot_open}}"
             ><img
               src="/screenshots/harness.jpg"
-              width="2400"
-              height="1600"
+              width="2160"
+              height="1350"
               loading="lazy"
-              alt="oxfuzz harness review showing the qualification parser source and promoted revision"
+              alt="{{harness_alt}}"
           /></a>
-          <figcaption>
-            You read the harness source and its smoke-test result before you
-            approve it. Nothing runs a campaign until you do.
-          </figcaption>
+          <figcaption>{{harness_caption}}</figcaption>
         </figure>
-        <figure id="run-history" hidden>
+        <figure id="run" hidden>
           <a
-            href="/screenshots/run-history.jpg"
+            href="/screenshots/run.jpg"
             target="_blank"
             rel="noopener"
-            aria-label="Open run history screenshot at full size"
+            aria-label="{{shot_open}}"
             ><img
-              src="/screenshots/run-history.jpg"
-              width="2400"
-              height="1600"
+              src="/screenshots/run.jpg"
+              width="2160"
+              height="1350"
               loading="lazy"
-              alt="oxfuzz run history showing coverage, throughput and completed or cancelled qualification runs"
+              alt="{{run_alt}}"
           /></a>
-          <figcaption>
-            Every run keeps its coverage, speed, crashes and inputs, including
-            runs you stopped early.
-          </figcaption>
+          <figcaption>{{run_caption}}</figcaption>
         </figure>
-      </section>
-
-      <section class="section wrap" id="how">
-        <h2>From a codebase to a triaged crash in four steps</h2>
-        <ol class="steps">
-          <li>
-            <h3>Discover</h3>
-            <p>
-              oxfuzz scans your project and ranks the functions most worth
-              fuzzing, with a short reason for each.
-            </p>
-          </li>
-          <li>
-            <h3>Review the harness</h3>
-            <p>
-              A model drafts the harness. It is compiled and smoke-tested in
-              the sandbox, then waits for your approval.
-            </p>
-          </li>
-          <li>
-            <h3>Run</h3>
-            <p>
-              Start a time-limited campaign and watch coverage and speed live.
-              Stop it whenever you like; the results stay.
-            </p>
-          </li>
-          <li>
-            <h3>Triage</h3>
-            <p>
-              Crashes are replayed, grouped by stack, and rated. Export a
-              report, SARIF, or an issue draft.
-            </p>
-          </li>
-        </ol>
+        <figure id="triage" hidden>
+          <a
+            href="/screenshots/triage.jpg"
+            target="_blank"
+            rel="noopener"
+            aria-label="{{shot_open}}"
+            ><img
+              src="/screenshots/triage.jpg"
+              width="2160"
+              height="1350"
+              loading="lazy"
+              alt="{{triage_alt}}"
+          /></a>
+          <figcaption>{{triage_caption}}</figcaption>
+        </figure>
       </section>
 
       <section class="section wrap" id="engines">
-        <h2>Four engines, one workflow</h2>
-        <p class="section-intro">
-          oxfuzz drives the fuzzers you already trust. You choose the engine;
-          the steps around it stay the same.
-        </p>
-        <div class="engines">
+        <h2 data-reveal>{{engines_title}}</h2>
+        <p class="section-intro" data-reveal>{{engines_intro}}</p>
+        <div class="engines" data-reveal="stagger">
           <article>
             <img
               src="/illustrations/libfuzzer-terminal.svg"
@@ -234,9 +296,9 @@
               alt=""
             />
             <h3>libFuzzer</h3>
-            <p>In-process and fast. The usual first choice for a library.</p>
+            <p>{{engine_libfuzzer}}</p>
             <a href="https://llvm.org/docs/LibFuzzer.html" rel="noopener"
-              >libFuzzer documentation</a
+              >{{engine_libfuzzer_link}}</a
             >
           </article>
           <article>
@@ -248,11 +310,9 @@
               alt=""
             />
             <h3>AFL++</h3>
-            <p>Coverage-guided with strong mutation and corpus tools.</p>
-            <a
-              href="https://aflplus.plus/docs/fuzzing_in_depth/"
-              rel="noopener"
-              >AFL++ documentation</a
+            <p>{{engine_afl}}</p>
+            <a href="https://aflplus.plus/docs/fuzzing_in_depth/" rel="noopener"
+              >{{engine_afl_link}}</a
             >
           </article>
           <article>
@@ -264,11 +324,11 @@
               alt=""
             />
             <h3>honggfuzz</h3>
-            <p>Multi-process, with hardware and software feedback.</p>
+            <p>{{engine_honggfuzz}}</p>
             <a
               href="https://github.com/google/honggfuzz/blob/master/docs/USAGE.md"
               rel="noopener"
-              >honggfuzz documentation</a
+              >{{engine_honggfuzz_link}}</a
             >
           </article>
           <article>
@@ -280,159 +340,110 @@
               alt=""
             />
             <h3>syzkaller</h3>
-            <p>
-              Linux kernel fuzzing in a VM. You supply the kernel and guest
-              image.
-            </p>
+            <p>{{engine_syzkaller}}</p>
             <a
               href="https://github.com/google/syzkaller/blob/master/docs/linux/setup.md"
               rel="noopener"
-              >syzkaller setup guide</a
+              >{{engine_syzkaller_link}}</a
             >
           </article>
         </div>
       </section>
 
       <section class="section wrap" id="control">
-        <h2>The fuzzer runs untrusted code. You stay in charge of it.</h2>
-        <div class="guarantees">
+        <h2 data-reveal>{{control_title}}</h2>
+        <div class="guarantees" data-reveal="stagger">
           <div>
-            <h3>Sandboxed</h3>
-            <p>
-              Every build and every run happens in a Docker container with no
-              network. Nothing generated runs on your machine directly.
-            </p>
+            <h3>{{control_1_title}}</h3>
+            <p>{{control_1_text}}</p>
           </div>
           <div>
-            <h3>Approved by a person</h3>
-            <p>
-              A harness is reviewed by a model and then by you. Campaigns only
-              run harnesses you approved.
-            </p>
+            <h3>{{control_2_title}}</h3>
+            <p>{{control_2_text}}</p>
           </div>
           <div>
-            <h3>Your choice of model</h3>
-            <p>
-              Use OpenAI, Anthropic, Gemini, Azure OpenAI, Ollama, or any
-              OpenAI-compatible endpoint, with spending limits you set.
-            </p>
+            <h3>{{control_3_title}}</h3>
+            <p>{{control_3_text}}</p>
           </div>
         </div>
-        <p class="also">
-          Also included: scheduled campaigns, corpus tools, project search,
-          reusable skills and agents, and DefectDojo, GitHub and GitLab
-          hand-off.
-        </p>
+        <p class="also" data-reveal>{{control_also}}</p>
       </section>
 
       <section class="open-source" id="open-source">
         <div class="wrap open-source-grid">
-          <div>
-            <h2>oxfuzz is open source, and you can help shape it</h2>
-            <p>
-              The whole project is on GitHub under the MIT license: the desktop
-              app, the service behind it, and the sandbox. Read it, run it,
-              change it.
-            </p>
-            <p>
-              Any improvement is welcome. A bug report, a fixed typo, a new
-              example target, or a feature you built for your own team all
-              make oxfuzz better for the next person.
-            </p>
+          <div data-reveal>
+            <h2>{{oss_title}}</h2>
+            <p>{{oss_p1}}</p>
+            <p>{{oss_p2}}</p>
             <a
               class="button primary"
               href="https://github.com/HenryCooper86/oxfuzz"
               rel="noopener"
-              >Open the repository</a
+              >{{oss_button}}</a
             >
           </div>
-          <ul class="ways">
+          <ul class="ways" data-reveal="stagger">
             <li>
               <a
                 href="https://github.com/HenryCooper86/oxfuzz/issues/new/choose"
                 rel="noopener"
-                >Report a bug or ask for a feature</a
+                >{{oss_way_1}}</a
               >
-              <span>Tell us what broke or what is missing.</span>
+              <span>{{oss_way_1_text}}</span>
             </li>
             <li>
               <a
                 href="https://github.com/HenryCooper86/oxfuzz/blob/main/CONTRIBUTING.md"
                 rel="noopener"
-                >Send a pull request</a
+                >{{oss_way_2}}</a
               >
-              <span>The contributing guide covers setup, tests and style.</span>
+              <span>{{oss_way_2_text}}</span>
             </li>
             <li>
               <a
                 href="https://github.com/HenryCooper86/oxfuzz/issues"
                 rel="noopener"
-                >Pick up an open issue</a
+                >{{oss_way_3}}</a
               >
-              <span>See what is planned and what needs a hand.</span>
+              <span>{{oss_way_3_text}}</span>
             </li>
             <li>
               <a
                 href="https://github.com/HenryCooper86/oxfuzz/blob/main/SECURITY.md"
                 rel="noopener"
-                >Report a security problem privately</a
+                >{{oss_way_4}}</a
               >
-              <span>Please do not open a public issue for these.</span>
+              <span>{{oss_way_4_text}}</span>
             </li>
           </ul>
         </div>
       </section>
 
       <section class="section wrap" id="downloads">
-        <h2>Download oxfuzz {{VERSION}}</h2>
-        <p class="section-intro">
-          Pick the package for your system. You also need Docker, and the
-          sandbox kit to build the fuzzing environment.
-        </p>
+        <h2>{{dl_title}}</h2>
+        <p class="section-intro">{{dl_intro}}</p>
         <!-- PREVIEW -->
         <div class="downloads"><!-- DOWNLOADS --></div>
-        <p class="release-notice">
-          This is an early release. macOS packages are ad-hoc signed and not
-          notarized, and Windows packages are unsigned, so your system may warn
-          you before installing. Only the macOS Apple silicon package is tested
-          live for each release; the others are built and checked in CI.
-        </p>
+        <p class="release-notice">{{dl_notice}}</p>
 
         <div class="setup" id="setup">
-          <h3>Set up in three steps</h3>
+          <h3>{{setup_title}}</h3>
           <ol>
+            <li>{{setup_1}}</li>
             <li>
-              <strong>Install the app.</strong> On macOS, drag oxfuzz to
-              Applications. On Linux, install the DEB or RPM, or make the
-              AppImage executable. On Windows, run the installer.
-            </li>
-            <li>
-              <strong>Build the sandbox.</strong> Extract the sandbox kit and
-              run the script below. It needs Bash, Python 3 and Docker (on
-              Windows, a WSL 2 shell), and a few GB of disk space.
+              {{setup_2}}
               <pre><code>tar -xzf oxfuzz-sandbox-kit-{{VERSION}}.tar.gz
 cd oxfuzz-sandbox-kit-{{VERSION}}
 ./scripts/build-sandbox.sh</code></pre>
             </li>
-            <li>
-              <strong>Add a model provider and open a project.</strong> Enter
-              your provider in Settings, then open a source folder and follow
-              the workflow.
-            </li>
+            <li>{{setup_3}}</li>
           </ol>
-          <p class="note">
-            Kernel fuzzing with syzkaller also needs an instrumented kernel, a
-            root filesystem and a guest SSH key, which the download does not
-            include.
-          </p>
+          <p class="note">{{setup_note}}</p>
         </div>
 
         <div class="verify" id="verify">
-          <h3>Verify your download</h3>
-          <p>
-            Compare the SHA-256 of the file with the published checksums before
-            you install it.
-          </p>
+          <h3>{{verify_title}}</h3>
+          <p>{{verify_text}}</p>
           <!-- CHECKSUMS -->
           <pre><code># macOS
 shasum -a 256 your-download.dmg
@@ -445,26 +456,26 @@ Get-FileHash .\your-download.msi -Algorithm SHA256</code></pre>
     </main>
 
     <footer class="site-footer wrap">
-      <a class="brand" href="/"
+      <a class="brand" href="{{home}}"
         ><img src="/mark.svg" width="22" height="22" alt="" />oxfuzz</a
       >
-      <p>Open source under the MIT license.</p>
-      <nav aria-label="Footer">
+      <p>{{footer_license}}</p>
+      <nav aria-label="{{footer_aria}}">
         <a href="https://github.com/HenryCooper86/oxfuzz" rel="noopener"
           >GitHub</a
         ><a
           href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md"
           rel="noopener"
-          >Release notes</a
+          >{{footer_notes}}</a
         ><a
           href="https://github.com/HenryCooper86/oxfuzz/blob/main/CONTRIBUTING.md"
           rel="noopener"
-          >Contributing</a
+          >{{footer_contributing}}</a
         ><a
           href="https://github.com/HenryCooper86/oxfuzz/blob/main/LICENSE"
           rel="noopener"
-          >License</a
-        ><a href="#verify">Checksums</a>
+          >{{footer_license_link}}</a
+        ><a href="#verify">{{footer_checksums}}</a>
       </nav>
     </footer>
   </body>
