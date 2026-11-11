@@ -390,7 +390,7 @@ impl EngineRunner {
             return Err(ClassifiedError::Engine(format!(
                 "fuzz run exited {} : {}",
                 result.exit_code,
-                result.stderr.chars().take(500).collect::<String>()
+                failure_reason(&result.stdout, &result.stderr)
             )));
         }
         let progress = aggregate.progress(true);
@@ -400,6 +400,58 @@ impl EngineRunner {
             termination: CommandTermination::Completed,
         })
     }
+}
+
+/// Longest failure reason carried in an engine error.
+const MAX_FAILURE_REASON_CHARS: usize = 500;
+
+/// Why a failed engine run stopped, for the error the operator reads.
+///
+/// libFuzzer and honggfuzz write diagnostics to stderr, so its head is used
+/// when present. AFL++ prints its abort reason at the end of stdout and leaves
+/// stderr empty, so otherwise the reason is the tail of stdout with terminal
+/// color sequences removed.
+fn failure_reason(stdout: &str, stderr: &str) -> String {
+    if !stderr.trim().is_empty() {
+        return stderr.chars().take(MAX_FAILURE_REASON_CHARS).collect();
+    }
+    let mut kept: Vec<String> = Vec::new();
+    let mut budget = MAX_FAILURE_REASON_CHARS;
+    for line in stdout.lines().rev() {
+        let line = strip_terminal_colors(line);
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let cost = line.chars().count() + 1;
+        if cost > budget {
+            break;
+        }
+        budget -= cost;
+        kept.push(line.to_owned());
+    }
+    kept.reverse();
+    kept.join("\n")
+}
+
+/// Remove ANSI CSI sequences (`ESC [ ... final-byte`) from one line.
+fn strip_terminal_colors(line: &str) -> String {
+    let mut plain = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\u{1b}' {
+            plain.push(ch);
+            continue;
+        }
+        if chars.next() == Some('[') {
+            for code in chars.by_ref() {
+                if ('@'..='~').contains(&code) {
+                    break;
+                }
+            }
+        }
+    }
+    plain
 }
 
 /// Whether one engine-stdout line is an anchored terminal completion marker.

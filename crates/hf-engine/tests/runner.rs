@@ -747,6 +747,37 @@ async fn runner_returns_error_on_nonzero_exit() {
     assert!(result.is_err(), "should fail on non-zero exit");
 }
 
+/// AFL++ reports why it aborted on stdout, not stderr. The error must carry
+/// that reason; an empty message leaves the operator with nothing to act on.
+#[tokio::test]
+async fn a_failed_exit_reports_the_engine_reason_printed_on_stdout() {
+    let rt = MockRuntime {
+        exit_code: 1,
+        stdout: "afl-fuzz++4.09c\n[*] Attempting dry run\n\n[-] PROGRAM ABORT : No usable test cases in '/work/corpus'\n         Location : read_testcases(), src/afl-fuzz-init.c:1234\n".to_owned(),
+        termination: CommandTermination::Completed,
+    };
+    let result = EngineRunner::new()
+        .run(
+            EngineKind::AflPlusPlus,
+            &run_config(EngineKind::AflPlusPlus, 60),
+            "/work/fuzz_bin",
+            "/work/corpus",
+            "/work/out",
+            &rt,
+            &PathBuf::from("/work"),
+        )
+        .await;
+    let Err(error) = result else {
+        panic!("a nonzero exit without a completion line is an engine failure");
+    };
+    let error = error.to_string();
+    assert!(error.contains("fuzz run exited 1"), "{error}");
+    assert!(
+        error.contains("PROGRAM ABORT : No usable test cases"),
+        "{error}"
+    );
+}
+
 /// A run killed at the sandbox wall-clock cap keeps the coverage it measured.
 ///
 /// The edge counts and exec rates come from the fuzzer's own stats lines and
