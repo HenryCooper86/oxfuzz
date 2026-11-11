@@ -1,6 +1,8 @@
 # Community download site
 
-Static site for `https://oxfuzz.bionicloud.net`, independent of GitHub visibility.
+Static site for `https://oxfuzz.bionicloud.net`. It introduces the app, links the
+source repository on GitHub and invites contributions; downloads are hosted here.
+The GitHub links assume the repository is public.
 A small same-origin script controls the icon theme switch and screenshot gallery.
 No accounts, tracking, remote fonts or build dependencies. Theme defaults to System
 and is saved locally when browser storage is available. Screenshots show the
@@ -30,8 +32,7 @@ Verify its hashes, then atomically replace the `/srv/oxfuzz/current` symlink.
 configuration. Do not replace Certbot's generated configuration with this template
 on subsequent deployments. Existing unrelated virtual hosts must be preserved.
 
-Before making the source repository private, verify anonymous HTTPS downloads and
-their SHA-256 digests. Keep source, runtime data, SSH keys and GitHub credentials
+After each deployment, verify anonymous HTTPS downloads and their SHA-256 digests. Keep source, runtime data, SSH keys and GitHub credentials
 outside the web root. Retain the previous deployment for rollback.
 
 Sanitized, versioned release-qualification records live in `src/acceptance/` and

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="Download oxfuzz, a desktop fuzzing workbench with reviewed harnesses, isolated engines and retained crash evidence."
+      content="oxfuzz is an open-source desktop app that finds fuzz targets in your code, writes and reviews harnesses with you, runs libFuzzer, AFL++, honggfuzz and syzkaller in a sandbox, and keeps every crash as evidence."
     />
     <meta name="color-scheme" content="dark light" />
     <script src="/appearance.js"></script>
@@ -15,15 +15,22 @@
   </head>
   <body>
     <a class="skip" href="#main">Skip to content</a>
-    <header class="wrap">
+    <header class="site-header wrap">
       <a class="brand" href="/" aria-label="oxfuzz home"
-        ><img src="/mark.svg" width="30" height="30" alt="" />oxfuzz</a
+        ><img src="/mark.svg" width="28" height="28" alt="" />oxfuzz</a
       >
       <nav aria-label="Main navigation">
-        <a href="#workflow">Inside the app</a
-        ><a href="#capabilities">Capabilities</a><a href="#setup">Get started</a
-        ><a class="nav-download" href="#downloads"
-          >Download <span aria-hidden="true">↓</span></a
+        <a href="#how">How it works</a><a href="#engines">Engines</a
+        ><a href="#open-source">Contribute</a><a href="#downloads">Download</a>
+        <a
+          class="github-link"
+          href="https://github.com/HenryCooper86/oxfuzz"
+          rel="noopener"
+          ><svg viewBox="0 0 16 16" aria-hidden="true">
+            <path
+              d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"
+            /></svg
+          >GitHub</a
         >
         <button
           id="theme-toggle"
@@ -53,656 +60,411 @@
         </button>
       </nav>
     </header>
+
     <main id="main">
       <section class="hero wrap">
-        <div class="hero-topline">
-          <p class="eyebrow">
-            <span class="status-dot"></span> The desktop fuzzing workbench
-          </p>
-          <span class="release-label">v{{VERSION}} / Experimental</span>
-        </div>
         <div class="hero-copy">
-          <h1>Find the crash.<br /><span>Keep the evidence.</span></h1>
-          <div class="hero-description">
-            <p class="lede">
-              From a promising target to a reproducible result. Discover,
-              review, fuzz and investigate — with the whole campaign in view.
-            </p>
-            <div class="hero-actions">
-              <a class="primary" href="#downloads"
-                >Download oxfuzz <span aria-hidden="true">↓</span></a
-              ><a class="text-link" href="#setup"
-                >Get started <span aria-hidden="true">↗</span></a
-              >
+          <h1>Find the crash.<br />Keep the evidence.</h1>
+          <p class="lede">
+            oxfuzz is an open-source desktop app for fuzzing C, C++ and Rust
+            code. It finds functions worth fuzzing, drafts a harness for you to
+            review, runs the fuzzer in a sandbox, and turns every crash into a
+            finding you can reproduce.
+          </p>
+          <div class="hero-actions">
+            <a class="button primary" href="#downloads"
+              >Download v{{VERSION}}</a
+            >
+            <a
+              class="button secondary"
+              href="https://github.com/HenryCooper86/oxfuzz"
+              rel="noopener"
+              >View the source on GitHub</a
+            >
+          </div>
+          <p class="hero-facts">
+            Free under the MIT license. Runs on macOS, Linux and Windows.
+          </p>
+        </div>
+
+        <figure class="finding" aria-label="Example of a finding in oxfuzz">
+          <div class="finding-head">
+            <span class="finding-kind">stack-buffer-overflow, write</span>
+            <span class="finding-severity">exploitable</span>
+          </div>
+          <p class="finding-where">parse_number at number.c:26</p>
+          <pre class="finding-stack"><code>#0  parse_number            number.c:26
+#1  LLVMFuzzerTestOneInput  harness.c</code></pre>
+          <dl class="finding-facts">
+            <div>
+              <dt>Engine</dt>
+              <dd>libFuzzer</dd>
             </div>
-            <p class="platforms">
-              macOS &nbsp; / &nbsp; Linux &nbsp; / &nbsp; Windows
+            <div>
+              <dt>Found after</dt>
+              <dd>1 second</dd>
+            </div>
+            <div>
+              <dt>Crashing input</dt>
+              <dd>kept with the run</dd>
+            </div>
+          </dl>
+          <figcaption>
+            A real result from the bundled
+            <code>json_number_parser</code> example.
+          </figcaption>
+        </figure>
+      </section>
+
+      <section class="gallery wrap" aria-label="Screenshots of oxfuzz">
+        <div class="gallery-tabs" role="group" aria-label="Choose a screen">
+          <button type="button" data-view="dashboard" aria-pressed="true">
+            Dashboard
+          </button>
+          <button type="button" data-view="harness" aria-pressed="false">
+            Harness review
+          </button>
+          <button type="button" data-view="run-history" aria-pressed="false">
+            Run history
+          </button>
+        </div>
+        <figure id="dashboard">
+          <a
+            href="/screenshots/dashboard.jpg"
+            target="_blank"
+            rel="noopener"
+            aria-label="Open dashboard screenshot at full size"
+            ><img
+              src="/screenshots/dashboard.jpg"
+              width="2400"
+              height="1600"
+              fetchpriority="high"
+              alt="oxfuzz dashboard showing one reviewed target, three retained runs and corpus readiness"
+          /></a>
+          <figcaption>
+            The dashboard shows what needs your attention: harnesses to review,
+            crashes to triage, runs in progress.
+          </figcaption>
+        </figure>
+        <figure id="harness" hidden>
+          <a
+            href="/screenshots/harness.jpg"
+            target="_blank"
+            rel="noopener"
+            aria-label="Open harness review screenshot at full size"
+            ><img
+              src="/screenshots/harness.jpg"
+              width="2400"
+              height="1600"
+              loading="lazy"
+              alt="oxfuzz harness review showing the qualification parser source and promoted revision"
+          /></a>
+          <figcaption>
+            You read the harness source and its smoke-test result before you
+            approve it. Nothing runs a campaign until you do.
+          </figcaption>
+        </figure>
+        <figure id="run-history" hidden>
+          <a
+            href="/screenshots/run-history.jpg"
+            target="_blank"
+            rel="noopener"
+            aria-label="Open run history screenshot at full size"
+            ><img
+              src="/screenshots/run-history.jpg"
+              width="2400"
+              height="1600"
+              loading="lazy"
+              alt="oxfuzz run history showing coverage, throughput and completed or cancelled qualification runs"
+          /></a>
+          <figcaption>
+            Every run keeps its coverage, speed, crashes and inputs, including
+            runs you stopped early.
+          </figcaption>
+        </figure>
+      </section>
+
+      <section class="section wrap" id="how">
+        <h2>From a codebase to a triaged crash in four steps</h2>
+        <ol class="steps">
+          <li>
+            <h3>Discover</h3>
+            <p>
+              oxfuzz scans your project and ranks the functions most worth
+              fuzzing, with a short reason for each.
+            </p>
+          </li>
+          <li>
+            <h3>Review the harness</h3>
+            <p>
+              A model drafts the harness. It is compiled and smoke-tested in
+              the sandbox, then waits for your approval.
+            </p>
+          </li>
+          <li>
+            <h3>Run</h3>
+            <p>
+              Start a time-limited campaign and watch coverage and speed live.
+              Stop it whenever you like; the results stay.
+            </p>
+          </li>
+          <li>
+            <h3>Triage</h3>
+            <p>
+              Crashes are replayed, grouped by stack, and rated. Export a
+              report, SARIF, or an issue draft.
+            </p>
+          </li>
+        </ol>
+      </section>
+
+      <section class="section wrap" id="engines">
+        <h2>Four engines, one workflow</h2>
+        <p class="section-intro">
+          oxfuzz drives the fuzzers you already trust. You choose the engine;
+          the steps around it stay the same.
+        </p>
+        <div class="engines">
+          <article>
+            <img
+              src="/illustrations/libfuzzer-terminal.svg"
+              width="1040"
+              height="620"
+              loading="lazy"
+              alt=""
+            />
+            <h3>libFuzzer</h3>
+            <p>In-process and fast. The usual first choice for a library.</p>
+            <a href="https://llvm.org/docs/LibFuzzer.html" rel="noopener"
+              >libFuzzer documentation</a
+            >
+          </article>
+          <article>
+            <img
+              src="/illustrations/aflplusplus-terminal.svg"
+              width="1040"
+              height="620"
+              loading="lazy"
+              alt=""
+            />
+            <h3>AFL++</h3>
+            <p>Coverage-guided with strong mutation and corpus tools.</p>
+            <a
+              href="https://aflplus.plus/docs/fuzzing_in_depth/"
+              rel="noopener"
+              >AFL++ documentation</a
+            >
+          </article>
+          <article>
+            <img
+              src="/illustrations/honggfuzz-terminal.svg"
+              width="1040"
+              height="620"
+              loading="lazy"
+              alt=""
+            />
+            <h3>honggfuzz</h3>
+            <p>Multi-process, with hardware and software feedback.</p>
+            <a
+              href="https://github.com/google/honggfuzz/blob/master/docs/USAGE.md"
+              rel="noopener"
+              >honggfuzz documentation</a
+            >
+          </article>
+          <article>
+            <img
+              src="/illustrations/syzkaller-terminal.svg"
+              width="1040"
+              height="620"
+              loading="lazy"
+              alt=""
+            />
+            <h3>syzkaller</h3>
+            <p>
+              Linux kernel fuzzing in a VM. You supply the kernel and guest
+              image.
+            </p>
+            <a
+              href="https://github.com/google/syzkaller/blob/master/docs/linux/setup.md"
+              rel="noopener"
+              >syzkaller setup guide</a
+            >
+          </article>
+        </div>
+      </section>
+
+      <section class="section wrap" id="control">
+        <h2>The fuzzer runs untrusted code. You stay in charge of it.</h2>
+        <div class="guarantees">
+          <div>
+            <h3>Sandboxed</h3>
+            <p>
+              Every build and every run happens in a Docker container with no
+              network. Nothing generated runs on your machine directly.
+            </p>
+          </div>
+          <div>
+            <h3>Approved by a person</h3>
+            <p>
+              A harness is reviewed by a model and then by you. Campaigns only
+              run harnesses you approved.
+            </p>
+          </div>
+          <div>
+            <h3>Your choice of model</h3>
+            <p>
+              Use OpenAI, Anthropic, Gemini, Azure OpenAI, Ollama, or any
+              OpenAI-compatible endpoint, with spending limits you set.
             </p>
           </div>
         </div>
-        <div class="product-gallery" id="workflow">
-          <div class="gallery-heading">
-            <span><span class="status-dot"></span> Inside oxfuzz</span
-            ><span>Real app. Real qualification runs.</span>
-          </div>
-          <figure id="dashboard">
-            <a
-              href="/screenshots/dashboard.jpg"
-              target="_blank"
-              rel="noopener"
-              aria-label="Open dashboard screenshot at full size"
-              ><img
-                src="/screenshots/dashboard.jpg"
-                width="2400"
-                height="1600"
-                fetchpriority="high"
-                alt="oxfuzz dashboard showing one reviewed target, three retained runs and corpus readiness"
-            /></a>
-            <figcaption>
-              See targets, harness reviews, retained runs and readiness in one
-              workbench.
-            </figcaption>
-          </figure>
-          <figure id="harness" hidden>
-            <a
-              href="/screenshots/harness.jpg"
-              target="_blank"
-              rel="noopener"
-              aria-label="Open harness review screenshot at full size"
-              ><img
-                src="/screenshots/harness.jpg"
-                width="2400"
-                height="1600"
-                loading="lazy"
-                alt="oxfuzz harness review showing the qualification parser source and promoted revision"
-            /></a>
-            <figcaption>
-              Inspect the source and review the exact harness revision before
-              running a campaign.
-            </figcaption>
-          </figure>
-          <figure id="run-history" hidden>
-            <a
-              href="/screenshots/run-history.jpg"
-              target="_blank"
-              rel="noopener"
-              aria-label="Open run history screenshot at full size"
-              ><img
-                src="/screenshots/run-history.jpg"
-                width="2400"
-                height="1600"
-                loading="lazy"
-                alt="oxfuzz run history showing coverage, throughput and completed or cancelled qualification runs"
-            /></a>
-            <figcaption>
-              Follow coverage and throughput, then return to the evidence after
-              a run ends.
-            </figcaption>
-          </figure>
-          <div
-            class="gallery-controls"
-            role="group"
-            aria-label="Application screenshots"
-          >
-            <button
-              type="button"
-              data-view="dashboard"
-              aria-controls="dashboard"
-              aria-pressed="true"
-            >
-              <span>01</span><strong>The workbench</strong
-              ><small>Know what needs attention</small>
-            </button>
-            <button
-              type="button"
-              data-view="harness"
-              aria-controls="harness"
-              aria-pressed="false"
-            >
-              <span>02</span><strong>Harness review</strong
-              ><small>Keep approval in your hands</small>
-            </button>
-            <button
-              type="button"
-              data-view="run-history"
-              aria-controls="run-history"
-              aria-pressed="false"
-            >
-              <span>03</span><strong>Campaign evidence</strong
-              ><small>Keep the results, even after stop</small>
-            </button>
-          </div>
-          <p class="screenshot-note">
-            Captured in v{{VERSION}} using the small qualification example.
-            Metrics are test results, not performance benchmarks. Select a view,
-            or open an image to inspect it.
-          </p>
-        </div>
+        <p class="also">
+          Also included: scheduled campaigns, corpus tools, project search,
+          reusable skills and agents, and DefectDojo, GitHub and GitLab
+          hand-off.
+        </p>
       </section>
-      <section class="engine-strip wrap" aria-label="Supported engine adapters">
-        <span>Choose your engine</span><strong>libFuzzer</strong
-        ><strong>AFL++</strong><strong>honggfuzz</strong
-        ><strong>syzkaller</strong>
-      </section>
-      <section class="principles wrap">
-        <p class="eyebrow">Powerful engines.<br />Deliberate execution.</p>
-        <div>
-          <h2>Automation with a human in control.</h2>
-          <p>
-            Model-assisted discovery and harness review. Sandboxed builds and
-            runs. Explicit approval before execution. Crash scanning and AI
-            reports are separate, so you decide when to ask for interpretation.
-          </p>
-          <ul class="capabilities" aria-label="Campaign controls">
+
+      <section class="open-source" id="open-source">
+        <div class="wrap open-source-grid">
+          <div>
+            <h2>oxfuzz is open source, and you can help shape it</h2>
+            <p>
+              The whole project is on GitHub under the MIT license: the desktop
+              app, the service behind it, and the sandbox. Read it, run it,
+              change it.
+            </p>
+            <p>
+              Any improvement is welcome. A bug report, a fixed typo, a new
+              example target, or a feature you built for your own team all
+              make oxfuzz better for the next person.
+            </p>
+            <a
+              class="button primary"
+              href="https://github.com/HenryCooper86/oxfuzz"
+              rel="noopener"
+              >Open the repository</a
+            >
+          </div>
+          <ul class="ways">
             <li>
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M12 3 4 6v6c0 4 8 9 8 9s8-5 8-9V6Z" />
-                <path d="m8 12 3 3 5-6" /></svg
-              >Sandboxed execution
+              <a
+                href="https://github.com/HenryCooper86/oxfuzz/issues/new/choose"
+                rel="noopener"
+                >Report a bug or ask for a feature</a
+              >
+              <span>Tell us what broke or what is missing.</span>
             </li>
             <li>
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M9 11 12 14 21 5" />
-                <path
-                  d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"
-                /></svg
-              >Human approval
+              <a
+                href="https://github.com/HenryCooper86/oxfuzz/blob/main/CONTRIBUTING.md"
+                rel="noopener"
+                >Send a pull request</a
+              >
+              <span>The contributing guide covers setup, tests and style.</span>
             </li>
             <li>
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M7 3h7l5 5v13H5V3Z" />
-                <path d="M14 3v6h5M8 13h8m-8 4h5" /></svg
-              >Retained evidence
+              <a
+                href="https://github.com/HenryCooper86/oxfuzz/issues"
+                rel="noopener"
+                >Pick up an open issue</a
+              >
+              <span>See what is planned and what needs a hand.</span>
+            </li>
+            <li>
+              <a
+                href="https://github.com/HenryCooper86/oxfuzz/blob/main/SECURITY.md"
+                rel="noopener"
+                >Report a security problem privately</a
+              >
+              <span>Please do not open a public issue for these.</span>
             </li>
           </ul>
         </div>
       </section>
-      <section class="advantages wrap" id="capabilities">
-        <div class="advantages-heading">
-          <p class="eyebrow">Less setup. More investigation.</p>
-          <h2>
-            Start with a codebase.<br /><span>Build a fuzzing workflow.</span>
-          </h2>
-          <p>
-            oxfuzz connects the work around the engine: deciding what to test,
-            creating a harness, controlling the run and making the results
-            useful.
-          </p>
-        </div>
-        <div class="advantage-rows">
-          <article>
-            <span class="feature-index">01 / Discover</span>
-            <div>
-              <h3>Find promising fuzzing candidates.</h3>
-              <p>
-                Scan a project for candidate functions and inspect their input
-                surfaces, complexity and reachability. AI recommendations
-                explain bug potential and harness feasibility alongside the
-                original scan score, so you can choose where to start.
-              </p>
-              <span class="feature-detail"
-                >Ranked targets · Explainable recommendations · Code
-                context</span
-              >
-            </div>
-          </article>
-          <article>
-            <span class="feature-index">02 / Prepare</span>
-            <div>
-              <h3>Go from target to a reviewed harness.</h3>
-              <p>
-                Draft a harness with AI, compile it in the sandbox and check it
-                with a smoke test. Inspect the source, review findings and
-                retained evidence before approving the exact revision for a
-                campaign.
-              </p>
-              <span class="feature-detail"
-                >Harness generation · Compile checks · Smoke-test evidence</span
-              >
-            </div>
-          </article>
-          <article>
-            <span class="feature-index evidence-index">03 / Investigate</span>
-            <div>
-              <h3>Turn crashes into something you can investigate.</h3>
-              <p>
-                Inspect stack traces and CASR severity assessments for supported
-                userspace crashes. Group duplicate findings by stack signature
-                and retain their inputs and run artifacts. Scan with progress
-                and cancellation, then request a separate AI report for review.
-                Kernel crash artifacts remain in the syzkaller workdir.
-              </p>
-              <span class="feature-detail"
-                >Crash triage · Deduplication · Reviewable reports</span
-              >
-            </div>
-          </article>
-        </div>
-      </section>
-      <section class="ai-section">
-        <div class="wrap ai-layout">
-          <div>
-            <p class="eyebrow">Your models. Your workflow.</p>
-            <h2>AI assistance,<br />with a choice of providers.</h2>
-            <p>
-              Ask the assistant to discover targets, prepare harnesses or
-              explain findings. Tool activity stays visible, and the same
-              approval rules apply whether you use chat or the workflow screens.
-            </p>
-          </div>
-          <div class="provider-details">
-            <ul class="provider-list" aria-label="Supported provider backends">
-              <li>OpenAI</li>
-              <li>Anthropic</li>
-              <li>Gemini</li>
-              <li>Azure OpenAI</li>
-              <li>Ollama</li>
-              <li>OpenAI-compatible</li>
-            </ul>
-            <p>
-              Configure a provider pool, route work by tags and use failover
-              when a provider is unavailable. Set model-call, token and spending
-              limits, and inspect usage as work progresses.
-            </p>
-            <p class="note">
-              Use your own provider access or a configured local endpoint.
-              Available models and tool capabilities depend on the provider; AI
-              recommendations and reports still need your review.
-            </p>
-          </div>
-        </div>
-      </section>
-      <section
-        class="supporting-features wrap"
-        aria-label="Keep improving your campaigns"
-      >
-        <article>
-          <span class="feature-index">Skills</span>
-          <h3>Reuse your team's guidance.</h3>
-          <p>
-            Create and version Markdown skills for harness authoring, target
-            review or domain-specific work. Edit or duplicate reusable guidance
-            and assign it to agents; built-in definitions can be reset.
-          </p>
-        </article>
-        <article>
-          <span class="feature-index">Agents</span>
-          <h3>Define how the assistant works.</h3>
-          <p>
-            Configure an agent's role, instructions, allowed tools, assigned
-            skills, model tags and iteration limits. Customization keeps the
-            sandbox and human approval gates in place.
-          </p>
-        </article>
-        <article>
-          <span class="feature-index">Corpus &amp; coverage</span>
-          <h3>Keep useful inputs.</h3>
-          <p>
-            Seed, grow, prune and merge corpora. Track coverage changes and
-            carry useful inputs into the next campaign.
-          </p>
-        </article>
-        <article>
-          <span class="feature-index">Project knowledge</span>
-          <h3>Keep context close.</h3>
-          <p>
-            Index project code and documents, search them with full-text
-            retrieval, and return to retained targets, runs and findings.
-          </p>
-        </article>
-        <article>
-          <span class="feature-index">Automation</span>
-          <h3>Make testing repeatable.</h3>
-          <p>
-            Schedule campaigns for approved targets with run budgets and
-            concurrency limits. Explicit scheduler authorization keeps
-            background work under your control.
-          </p>
-        </article>
-        <article>
-          <span class="feature-index">Reports &amp; handoff</span>
-          <h3>Bring findings into your workflow.</h3>
-          <p>
-            Export reports as Markdown or HTML and crash findings as SARIF.
-            Prepare GitHub or GitLab issue drafts, then review the named scope
-            before publishing through a configured tracker or DefectDojo
-            integration.
-          </p>
-        </article>
-      </section>
-      <section class="comparison wrap" id="comparison">
-        <div class="comparison-heading">
-          <p class="eyebrow">Engine CLI or oxfuzz?</p>
-          <h2>
-            The same engines.<br /><span class="green-text"
-              >A connected workflow around them.</span
-            >
-          </h2>
-          <p>
-            Direct engine use gives you close control over flags and scripts.
-            oxfuzz brings target selection, harness review, campaign controls
-            and retained evidence into one place.
-          </p>
-        </div>
-<div class="engine-examples" aria-label="Visual engine workflow examples">
-<p class="example-intro">Compare the work around each engine. Terminal pictures illustrate documented commands; app pictures are real captures from our qualification project. These are different views of a workflow, not matched performance tests. Open any picture for a closer look.</p>
-<nav class="engine-index" aria-label="Engine comparison examples"><a href="#example-libfuzzer">libFuzzer</a><a href="#example-aflplusplus">AFL++</a><a href="#example-honggfuzz">honggfuzz</a><a href="#example-syzkaller">syzkaller</a></nav>
-<article class="engine-example" id="example-libfuzzer">
-  <header><span class="feature-index">libFuzzer</span><h3>From source code to a reviewed harness.</h3></header>
-  <div class="engine-pair">
-    <figure class="terminal-example"><div class="example-label">ENGINE CLI <span>Illustrated workflow</span></div>
-      <a href="/illustrations/libfuzzer-terminal.svg" target="_blank" rel="noopener" aria-label="Open libFuzzer terminal workflow illustration"><img src="/illustrations/libfuzzer-terminal.svg" width="1040" height="620" loading="lazy" alt="libFuzzer commands for instrumenting a target, starting a campaign and inspecting results" /></a>
-      <figcaption>The terminal path starts with a harness you write and an instrumented build you configure.</figcaption>
-    </figure>
-    <figure class="app-example"><div class="example-label">WITH OXFUZZ <span>Real app capture</span></div>
-      <a href="/screenshots/harness.jpg" target="_blank" rel="noopener" aria-label="Open oxfuzz harness comparison screenshot"><img src="/screenshots/harness.jpg" width="2400" height="1600" loading="lazy" alt="Real oxfuzz harness review from the qualification example." /></a>
-      <figcaption><strong>Review the source and the evidence together.</strong> oxfuzz helps draft, compile and smoke-test the harness, then shows the source revision, review findings and approval state together.</figcaption>
-    </figure>
-  </div>
-  <p class="example-assumption">Assumes an installed Clang toolchain and a harness implementing LLVMFuzzerTestOneInput. Replace the replay placeholder with a saved crash file. <a href="https://llvm.org/docs/LibFuzzer.html" target="_blank" rel="noopener">Upstream guide ↗</a></p>
-</article>
-<article class="engine-example" id="example-aflplusplus">
-  <header><span class="feature-index">AFL++</span><h3>From output directories to campaign history.</h3></header>
-  <div class="engine-pair">
-    <figure class="terminal-example"><div class="example-label">ENGINE CLI <span>Illustrated workflow</span></div>
-      <a href="/illustrations/aflplusplus-terminal.svg" target="_blank" rel="noopener" aria-label="Open AFL++ terminal workflow illustration"><img src="/illustrations/aflplusplus-terminal.svg" width="1040" height="620" loading="lazy" alt="AFL++ commands for instrumenting a target, starting a campaign and inspecting results" /></a>
-      <figcaption>AFL++ supplies its own terminal status screen and monitoring tools. You choose the instrumented target, seeds and output directory.</figcaption>
-    </figure>
-    <figure class="app-example"><div class="example-label">WITH OXFUZZ <span>Real app capture</span></div>
-      <a href="/screenshots/run-history.jpg" target="_blank" rel="noopener" aria-label="Open oxfuzz run-history comparison screenshot"><img src="/screenshots/run-history.jpg" width="2400" height="1600" loading="lazy" alt="Real oxfuzz history showing the three userspace qualification engines." /></a>
-      <figcaption><strong>Return to the run without rebuilding its context.</strong> oxfuzz retains the engine, status, duration and measured metrics with the project, so you can inspect completed or stopped campaigns in one history.</figcaption>
-    </figure>
-  </div>
-  <p class="example-assumption">Assumes AFL++ is installed, parser_cli.c accepts an input filename, and seeds contains valid sample files. @@ is the engine’s generated input path. <a href="https://aflplus.plus/docs/fuzzing_in_depth/" target="_blank" rel="noopener">Upstream guide ↗</a></p>
-</article>
-<article class="engine-example" id="example-honggfuzz">
-  <header><span class="feature-index">honggfuzz</span><h3>From command options to a guided campaign.</h3></header>
-  <div class="engine-pair">
-    <figure class="terminal-example"><div class="example-label">ENGINE CLI <span>Illustrated workflow</span></div>
-      <a href="/illustrations/honggfuzz-terminal.svg" target="_blank" rel="noopener" aria-label="Open honggfuzz terminal workflow illustration"><img src="/illustrations/honggfuzz-terminal.svg" width="1040" height="620" loading="lazy" alt="honggfuzz commands for instrumenting a target, starting a campaign and inspecting results" /></a>
-      <figcaption>honggfuzz provides instrumentation, run limits, live statistics and crash output. You connect those pieces to your target and workspace.</figcaption>
-    </figure>
-    <figure class="app-example"><div class="example-label">WITH OXFUZZ <span>Real app capture</span></div>
-      <a href="/screenshots/dashboard.jpg" target="_blank" rel="noopener" aria-label="Open oxfuzz dashboard comparison screenshot"><img src="/screenshots/dashboard.jpg" width="2400" height="1600" loading="lazy" alt="Real oxfuzz dashboard from the shared qualification project." /></a>
-      <figcaption><strong>See what is ready and what needs review.</strong> oxfuzz connects the target, harness review, sandbox readiness and retained runs. Choose the engine and campaign limits in the workbench, then keep the results after stopping.</figcaption>
-    </figure>
-  </div>
-  <p class="example-assumption">Assumes honggfuzz and its compiler wrapper are on PATH, a file-reading target exists, and seed files are prepared. ___FILE___ is honggfuzz’s input placeholder. <a href="https://github.com/google/honggfuzz/blob/master/docs/USAGE.md" target="_blank" rel="noopener">Upstream guide ↗</a></p>
-</article>
-<article class="engine-example kernel-example" id="example-syzkaller">
-  <header><span class="feature-index">syzkaller</span><h3>Kernel fuzzing still needs a prepared guest.</h3></header>
-  <div class="engine-pair">
-    <figure class="terminal-example"><div class="example-label">ENGINE CLI <span>Illustrated workflow</span></div>
-      <a href="/illustrations/syzkaller-terminal.svg" target="_blank" rel="noopener" aria-label="Open syzkaller terminal workflow illustration"><img src="/illustrations/syzkaller-terminal.svg" width="1040" height="620" loading="lazy" alt="Build syzkaller, configure the kernel and virtual machine, then launch syz-manager" /></a>
-      <figcaption>syz-manager starts the VMs and has its own web statistics, crash reproduction and minimization.</figcaption>
-    </figure>
-    <div class="kernel-workflow"><span class="example-label">WITH OXFUZZ</span><h4>Bring kernel runs into the workbench.</h4>
-      <ol><li><strong>Supply the environment.</strong> Select the kernel image, root filesystem and guest SSH key.</li><li><strong>Control the campaign.</strong> Set the duration and resource limits, follow available execution and coverage metrics, and stop the run.</li><li><strong>Keep the artifacts.</strong> Retain the campaign output and corpus; inspect kernel crash artifacts in the syzkaller workdir.</li></ol>
-      <p>The kernel, guest configuration and compatibility checks remain your responsibility. The userspace harness and triage screens above are not kernel screenshots.</p>
-    </div>
-  </div>
-  <p class="example-assumption">Assumes a compatible toolchain, coverage-enabled kernel, bootable guest image, SSH access and a complete manager configuration. <a href="https://github.com/google/syzkaller/blob/master/docs/linux/setup.md" target="_blank" rel="noopener">Setup guide ↗</a> · <a href="https://github.com/google/syzkaller/blob/master/docs/usage.md" target="_blank" rel="noopener">Manager workflow ↗</a></p>
-</article></div>
-        <details class="task-comparison"><summary>Compare the workflow task by task</summary>
-        <table>
-          <caption>
-            Workflow comparison — not a throughput benchmark
-          </caption>
-          <thead>
-            <tr>
-              <th scope="col">Task</th>
-              <th scope="col">Using engines directly</th>
-              <th scope="col">Using oxfuzz</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <th scope="row">Choose what to fuzz</th>
-              <td>
-                <span class="mobile-column" aria-hidden="true">Engine CLI</span
-                >Identify a target using your code knowledge and analysis tools.
-              </td>
-              <td>
-                <span class="mobile-column" aria-hidden="true">oxfuzz</span
-                >Inspect ranked candidates and explained AI recommendations
-                before selecting a target.
-              </td>
-            </tr>
-            <tr>
-              <th scope="row">Prepare a harness</th>
-              <td>
-                <span class="mobile-column" aria-hidden="true">Engine CLI</span
-                >Write or adapt a target and configure its instrumented build.
-              </td>
-              <td>
-                <span class="mobile-column" aria-hidden="true">oxfuzz</span
-                >Generate, compile and smoke-test a harness; review and approve
-                the exact revision.
-              </td>
-            </tr>
-            <tr>
-              <th scope="row">Run and monitor</th>
-              <td>
-                <span class="mobile-column" aria-hidden="true">Engine CLI</span
-                >Use engine options, terminal output and native monitoring
-                tools.
-              </td>
-              <td>
-                <span class="mobile-column" aria-hidden="true">oxfuzz</span>Set
-                time, CPU and memory limits, follow supported engine metrics,
-                and stop from the workbench.
-              </td>
-            </tr>
-            <tr>
-              <th scope="row">Investigate crashes</th>
-              <td>
-                <span class="mobile-column" aria-hidden="true">Engine CLI</span
-                >Use the engine's crash output and reproduction or minimization
-                tools, alongside your debugger.
-              </td>
-              <td>
-                <span class="mobile-column" aria-hidden="true">oxfuzz</span>Scan
-                retained crashes, inspect grouped findings and request a
-                separate AI report for review.
-              </td>
-            </tr>
-            <tr>
-              <th scope="row">Repeat and keep context</th>
-              <td>
-                <span class="mobile-column" aria-hidden="true">Engine CLI</span
-                >Organize corpus/output directories and connect your own
-                scheduling and reporting scripts.
-              </td>
-              <td>
-                <span class="mobile-column" aria-hidden="true">oxfuzz</span>Keep
-                run history, harness revisions and policy decisions together;
-                schedule approved targets with explicit authorization.
-              </td>
-            </tr>
-          </tbody>
-        </table>
-        </details>
-        <div class="comparison-notes">
-          <p>
-            <strong>What the GUI adds:</strong> coordination, model assistance
-            and reviewable evidence. Engines already provide fuzzing, corpus
-            handling and monitoring features; for example, AFL++ includes status
-            and plotting tools, and syzkaller has its own web statistics.
-          </p>
-          <p>
-            <strong>What still matters:</strong> target quality, harness
-            correctness, corpus, engine settings and hardware. oxfuzz requires
-            Docker and provider access for AI features; syzkaller still needs a
-            compatible kernel and VM setup. No speedup or higher bug yield is
-            claimed here.
-          </p>
-        </div>
-        <p class="comparison-sources">
-          Engine documentation:
-          <a
-            href="https://llvm.org/docs/LibFuzzer.html"
-            target="_blank"
-            rel="noopener"
-            >libFuzzer</a
-          >
-          ·
-          <a
-            href="https://aflplus.plus/docs/fuzzing_in_depth/"
-            target="_blank"
-            rel="noopener"
-            >AFL++</a
-          >
-          ·
-          <a
-            href="https://github.com/google/honggfuzz"
-            target="_blank"
-            rel="noopener"
-            >honggfuzz</a
-          >
-          ·
-          <a
-            href="https://github.com/google/syzkaller/blob/master/docs/setup.md"
-            target="_blank"
-            rel="noopener"
-            >syzkaller</a
-          >
+
+      <section class="section wrap" id="downloads">
+        <h2>Download oxfuzz {{VERSION}}</h2>
+        <p class="section-intro">
+          Pick the package for your system. You also need Docker, and the
+          sandbox kit to build the fuzzing environment.
         </p>
-      </section>
-      <section class="download-section" id="downloads">
-        <div class="wrap">
-          <div class="section-heading">
-            <div>
-              <p class="eyebrow">THE CURRENT RELEASE</p>
-              <h2>Your next campaign starts here.</h2>
-            </div>
-            <span class="version">v{{VERSION}}</span>
-          </div>
-          <p class="section-intro">
-            Choose your desktop package, then build the sandbox below. Downloads
-            are hosted here and do not require a GitHub account.
-          </p>
-          <!-- PREVIEW -->
-          <div class="downloads"><!-- DOWNLOADS --></div>
-          <p class="release-notice">
-            <strong>Experimental distribution.</strong> macOS packages are
-            ad-hoc signed and not notarized. Windows packages are unsigned. Your
-            operating system may warn or block installation. Live release
-            qualification covers macOS Apple silicon; other packages are built
-            and checked in CI.
-          </p>
-        </div>
-      </section>
-      <section class="section wrap" id="setup">
-        <div class="section-title">
-          <p class="eyebrow">BEFORE YOUR FIRST CAMPAIGN</p>
-          <h2>
-            Desktop app.<br /><span class="green-text">Isolated engines.</span>
-          </h2>
-          <p class="section-intro">
-            Install Docker and keep its daemon running. The sandbox kit builds
-            the pinned engine toolchain locally; it does not include the
-            application source.
-          </p>
-        </div>
-        <div class="setup-steps">
-          <article>
-            <span>1</span>
-            <div>
-              <h3>Install the desktop app</h3>
-              <p>
-                Open the package for your system. On macOS, move oxfuzz to
-                Applications. On Linux, install the DEB/RPM or make the AppImage
-                executable. On Windows, run the installer.
-              </p>
-            </div>
-          </article>
-          <article>
-            <span>2</span>
-            <div>
-              <h3>Build the sandbox</h3>
-              <p>
-                Download and extract the sandbox kit. Run these commands from
-                its directory using Bash, Python 3 and Docker. Windows users
-                need a WSL 2 shell with Docker integration. The first build
-                downloads toolchains and needs several GB of disk space.
-              </p>
+        <!-- PREVIEW -->
+        <div class="downloads"><!-- DOWNLOADS --></div>
+        <p class="release-notice">
+          This is an early release. macOS packages are ad-hoc signed and not
+          notarized, and Windows packages are unsigned, so your system may warn
+          you before installing. Only the macOS Apple silicon package is tested
+          live for each release; the others are built and checked in CI.
+        </p>
+
+        <div class="setup" id="setup">
+          <h3>Set up in three steps</h3>
+          <ol>
+            <li>
+              <strong>Install the app.</strong> On macOS, drag oxfuzz to
+              Applications. On Linux, install the DEB or RPM, or make the
+              AppImage executable. On Windows, run the installer.
+            </li>
+            <li>
+              <strong>Build the sandbox.</strong> Extract the sandbox kit and
+              run the script below. It needs Bash, Python 3 and Docker (on
+              Windows, a WSL 2 shell), and a few GB of disk space.
               <pre><code>tar -xzf oxfuzz-sandbox-kit-{{VERSION}}.tar.gz
 cd oxfuzz-sandbox-kit-{{VERSION}}
 ./scripts/build-sandbox.sh</code></pre>
-              <p>
-                Keep the resulting image tag
-                <code>oxfuzz/fuzz-sandbox:0.2.2</code>. The desktop app uses
-                this local image.
-              </p>
-            </div>
-          </article>
-          <article>
-            <span>3</span>
-            <div>
-              <h3>Connect a provider and open a project</h3>
-              <p>
-                Configure your chosen AI provider in Settings. Provider access
-                is required for AI assistance and normal harness review. Confirm
-                sandbox readiness, discover a target, and review the harness
-                before approving execution.
-              </p>
-              <p class="note">
-                Kernel fuzzing with syzkaller also needs a compatible
-                instrumented kernel, root filesystem and guest SSH key. These
-                are not included in the desktop download. Physical automotive
-                testing requires separate setup and approval.
-              </p>
-            </div>
-          </article>
+            </li>
+            <li>
+              <strong>Add a model provider and open a project.</strong> Enter
+              your provider in Settings, then open a source folder and follow
+              the workflow.
+            </li>
+          </ol>
+          <p class="note">
+            Kernel fuzzing with syzkaller also needs an instrumented kernel, a
+            root filesystem and a guest SSH key, which the download does not
+            include.
+          </p>
         </div>
-      </section>
-      <section class="details-section">
-        <div class="wrap details-grid">
-          <article id="release-notes">
-            <p class="eyebrow">RELEASE NOTES / {{VERSION}}</p>
-            <h2>A clearer view of the work.</h2>
-            <ul>
-              <li>Bounded fuzzing runs and improved live engine metrics.</li>
-              <li>
-                Crash scanning separated from AI reports, with progress and
-                cancellation.
-              </li>
-              <li>Provider and language selection fixes for the assistant.</li>
-              <li>Improved Settings, Knowledge, Skills and Agents behavior.</li>
-              <li>Icon controls for Dark, Light and System themes.</li>
-              <li>
-                Sandbox SSH/SCP support and retained syzkaller campaign output.
-              </li>
-            </ul>
-          </article>
-          <article id="verify">
-            <p class="eyebrow">VERIFY YOUR DOWNLOAD</p>
-            <h2>Check the bytes.</h2>
-            <p>
-              Compare the SHA-256 of your download with the published checksums
-              before installing.
-            </p>
-            <!-- CHECKSUMS -->
-            <pre><code># macOS
+
+        <div class="verify" id="verify">
+          <h3>Verify your download</h3>
+          <p>
+            Compare the SHA-256 of the file with the published checksums before
+            you install it.
+          </p>
+          <!-- CHECKSUMS -->
+          <pre><code># macOS
 shasum -a 256 your-download.dmg
 # Linux
 sha256sum your-download.AppImage
 # Windows PowerShell
 Get-FileHash .\your-download.msi -Algorithm SHA256</code></pre>
-            <p class="note">
-              Checksums detect incomplete or altered files. They are not a
-              substitute for a trusted publisher signature.
-            </p>
-          </article>
         </div>
       </section>
     </main>
-    <footer class="wrap">
-      <a class="brand" href="/">oxfuzz</a>
-      <p>A workbench for deliberate fuzzing.</p>
+
+    <footer class="site-footer wrap">
+      <a class="brand" href="/"
+        ><img src="/mark.svg" width="22" height="22" alt="" />oxfuzz</a
+      >
+      <p>Open source under the MIT license.</p>
       <nav aria-label="Footer">
-        <a href="#release-notes">Release notes</a><a href="#verify">Checksums</a
-        ><a href="#setup">Installation</a>
+        <a href="https://github.com/HenryCooper86/oxfuzz" rel="noopener"
+          >GitHub</a
+        ><a
+          href="https://github.com/HenryCooper86/oxfuzz/blob/main/CHANGELOG.md"
+          rel="noopener"
+          >Release notes</a
+        ><a
+          href="https://github.com/HenryCooper86/oxfuzz/blob/main/CONTRIBUTING.md"
+          rel="noopener"
+          >Contributing</a
+        ><a
+          href="https://github.com/HenryCooper86/oxfuzz/blob/main/LICENSE"
+          rel="noopener"
+          >License</a
+        ><a href="#verify">Checksums</a>
       </nav>
     </footer>
   </body>

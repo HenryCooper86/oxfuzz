@@ -57,3 +57,25 @@ test("publication requires a complete package set and hashes the served bytes", 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("the page links the source repository and invites contributions", async () => {
+  const html = await readFile(
+    fileURLToPath(new URL("../src/index.html", import.meta.url)),
+    "utf8",
+  );
+  const repository = "https://github.com/HenryCooper86/oxfuzz";
+  // Header, hero, the contribute section and the footer all reach GitHub.
+  assert.ok(html.split(`href="${repository}"`).length - 1 >= 4);
+  for (const path of [
+    "/issues/new/choose",
+    "/blob/main/CONTRIBUTING.md",
+    "/blob/main/SECURITY.md",
+    "/blob/main/LICENSE",
+  ])
+    assert.ok(html.includes(`${repository}${path}`), path);
+  assert.match(html, /open source/i);
+  assert.match(html, /MIT license/);
+  assert.match(html, /Any improvement is welcome/);
+  // The old page told visitors they did not need GitHub at all.
+  assert.equal(html.includes("do not require a GitHub account"), false);
+});
