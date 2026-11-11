@@ -30,7 +30,7 @@ import { FuzzingPolicyNotice } from "../components/FuzzingPolicyNotice";
 import { TargetSelectionRepairNotice } from "../components/TargetSelectionRepairNotice";
 import { projectStorageKey } from "../lib/projectState";
 import { WorkOrderPanel } from "../components/WorkOrderPanel";
-import { harnessReviewMatchesScope, candidateTargetSelector, matchesTargetSelection } from "../lib/harnessScope";
+import { harnessReviewMatchesScope, candidateTargetSelector, matchesTargetSelection, engineDisplayName, harnessStatusLabelKey } from "../lib/harnessScope";
 
 /** Which generator wrote a draft. Under `auto` a provider outage substitutes
  *  the template, and the two harnesses are materially different. */
@@ -178,6 +178,7 @@ export function HarnessView({
   const mounted = useRef(true);
   const draftGeneration = useRef(0);
   const canUseExisting = harness === null && harnessStatus === "idle";
+  const existingStatusKey = existing ? harnessStatusLabelKey(existing.status, existing.smoke_passed) : null;
   const qualificationBusy = compileStatus === "loading" || smokeStatus === "loading" || promotionStatus === "loading";
 
   useEffect(() => {
@@ -603,7 +604,7 @@ export function HarnessView({
               className="text-xs px-2 py-0.5 rounded-sm"
               style={{ background: "var(--surface-active)", border: "1px solid var(--border)" }}
             >
-              {existing.engine} · {existing.status}{existing.smoke_passed ? ` · ${t("harness.smokeOk")}` : ""}
+              {engineDisplayName(existing.engine)} · {existingStatusKey ? t(existingStatusKey) : existing.status}
             </span>
           </div>
           {existing.source_preview && (

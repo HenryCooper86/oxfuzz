@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { engineDisplayName } from "../lib/harnessScope";
 import { formatRunStat } from "../lib/runStats";
 import { useI18n } from "../i18nContext";
 import { pickFile, getTransport } from "../lib";
@@ -304,7 +305,7 @@ export function RunView({
       {!validDuration && fuzzingSettings && <p id="run-duration-error" role="alert" className="text-sm text-error">{t("run.invalidDuration", { max: formatDuration(fuzzingSettings.sandbox.max_duration_secs) })}</p>}
       {fuzzingSettings && project && <section className="surface-card p-3 text-sm" aria-label={t("run.approvalTitle")}>
         <p className="font-semibold">{t("run.approvalTitle")}</p>
-        <p className="break-all">{project} · {isSyz ? t("run.kernelArtifacts") : target} · {engine}</p>
+        <p className="break-all">{project} · {isSyz ? t("run.kernelArtifacts") : target} · <span className="whitespace-nowrap">{engineDisplayName(engine)}</span></p>
         <p>{validDuration ? formatDuration(durationSeconds) : t("run.invalidBudget")} · {fuzzingSettings.sandbox.max_mem_mb} MiB · {fuzzingSettings.sandbox.max_cpus} CPU</p>
         <p>{t(isSyz ? "run.approvalKernel" : "run.approvalDetail")}</p>
       </section>}

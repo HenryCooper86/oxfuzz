@@ -68,6 +68,13 @@ export function WorkflowView({ onNavigate }: { onNavigate?: (view: ViewType) => 
   // nothing is highlighted (a finished campaign shouldn't mark Triage "current").
   const activeStage: CoreStageId = (coreStages.find((c) => c.current)?.id ?? "triage") as CoreStageId;
   const [expanded, setExpanded] = useState<SectionId | null>(activeStage);
+  // The open stage belongs to one project. Opening another project starts at
+  // that project's own current stage, not wherever the last one was left.
+  const [expandedFor, setExpandedFor] = useState(activeProject);
+  if (expandedFor !== activeProject) {
+    setExpandedFor(activeProject);
+    setExpanded(activeStage);
+  }
   const sectionRefs = useRef<Partial<Record<SectionId, HTMLElement | null>>>({});
   const gated = !activeProject;
 

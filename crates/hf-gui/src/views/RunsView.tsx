@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { engineDisplayName } from "../lib/harnessScope";
 import { getTransport, isTauriEnvironment, onDataChanged, emitDataChanged } from "../lib";
 import { formatInvokeError, formatRunHistoryError } from "../lib/invokeError";
 import { useI18n } from "../i18nContext";
@@ -123,7 +124,7 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus, onReviewFindings 
     destructiveInFlight.current = true;
     setDeletingRunId(r.id);
     try {
-      if (!(await confirm({ title: t("runs.deleteRunTitle"), message: t("runs.deleteRunMsg", { engine: r.engine, n: r.crashes }), danger: true, confirmLabel: t("common.delete") }))) return;
+      if (!(await confirm({ title: t("runs.deleteRunTitle"), message: t("runs.deleteRunMsg", { engine: engineDisplayName(r.engine), n: r.crashes }), danger: true, confirmLabel: t("common.delete") }))) return;
       await getTransport().invoke("delete_run", { runId: r.id });
       setRuns((rs) => rs.filter((x) => x.id !== r.id));
       setSelected((s) => s.filter((id) => id !== r.id));
@@ -363,7 +364,7 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus, onReviewFindings 
           <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 200px), 1fr))" }}>
             {compareRuns.map((r, index) => (
               <div key={r.id} className="rounded-md border border-border min-w-0" style={{ padding: "var(--space-md)", background: "var(--surface-secondary)" }}>
-                <div className="text-sm font-semibold truncate">{t(index === 0 ? "runs.comparison.baseline" : "runs.comparison.result")} - {r.engine}</div>
+                <div className="text-sm font-semibold truncate">{t(index === 0 ? "runs.comparison.baseline" : "runs.comparison.result")} - {engineDisplayName(r.engine)}</div>
                 <div className="text-xs text-text-muted mb-2">{r.target ?? t("runs.unknownTarget")} · {new Date(r.started_at).toLocaleString()}</div>
                 <CompareRow label={t("runs.status")} value={r.status} />
                 <CompareRow label={t("runs.harness")} value={revLabel(r.harness_rev) ?? "—"} />
@@ -406,7 +407,7 @@ function ScopedRunsView({ onNavigate, focusedId, onClearFocus, onReviewFindings 
                     title={t("runs.selectToCompare")}
                   >
                     <Play size={14} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
-                    <span className="text-sm font-medium truncate" style={{ minWidth: 90 }}>{r.engine}</span>
+                    <span className="text-sm font-medium truncate" style={{ minWidth: 90 }}>{engineDisplayName(r.engine)}</span>
                     {r.target && <span className="text-xs text-text-muted truncate hidden md:inline" style={{ maxWidth: 140 }}>{r.target}</span>}
                     <span className="text-xs shrink-0" style={{ color: STATUS_COLOR[r.status] ?? "var(--text-muted)" }}>{r.status}</span>
                     {r.harness_rev && (
@@ -562,7 +563,7 @@ function MorningHealth({ summary, loading, error, t, onSelect }: { onSelect: (id
   const groups: Array<[string, string[]]> = [["runs.healthFailed", summary.failed], ["runs.healthStalled", summary.stalled], ["runs.healthInterrupted", summary.interrupted], ["runs.healthUnprocessed", summary.unprocessed]];
   return <section className="surface-card flex flex-col gap-2" style={{ padding: "var(--space-md)" }} aria-label={t("runs.healthTitle")}>
     <span className="text-sm font-semibold">{t("runs.healthTitle")}</span>
-    {groups.map(([label, ids]) => <div key={label} className="text-xs"><span className="text-text-muted">{t(label)}: </span>{ids.length === 0 ? t("runs.healthMeasuredZero") : ids.map((id) => <a key={`${label}:${id}`} href={`#run-${id}`} className="mr-1 font-mono" title={id} onClick={() => onSelect(id)}>{id.slice(0, 8)}</a>)}</div>)}
+    {groups.map(([label, ids]) => <div key={label} className="text-xs"><span className="text-text-muted">{t(label)}: </span>{ids.length === 0 ? t("runs.healthMeasuredZero") : ids.map((id) => <a key={`${label}:${id}`} href={`#run-${id}`} className="mr-1 font-mono no-underline hover:underline" style={{ color: "var(--accent)" }} title={id} onClick={() => onSelect(id)}>{id.slice(0, 8)}</a>)}</div>)}
   </section>;
 }
 

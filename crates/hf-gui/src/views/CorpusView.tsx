@@ -3,7 +3,7 @@ import { fileRowName } from "../lib/publicPaths";
 import { Database, FolderOpen, Plus, Scissors, Sparkles, Sprout } from "lucide-react";
 import { CoverageBlockerPanel } from "../components/CoverageBlockerPanel";
 import { PathActions } from "../components/PathActions";
-import { Button, ViewHeader } from "../components/ui";
+import { Button, Input, ViewHeader } from "../components/ui";
 import { useI18n } from "../i18nContext";
 import { getTransport, isTauriEnvironment, onDataChanged, pickFolder } from "../lib";
 import { useConfirm } from "../providers/confirm";
@@ -231,7 +231,7 @@ function CorpusWorkspace({ project, target, lang, embedded }: { project: string;
         <div className="text-sm font-medium">{t("corpus.importTitle")}</div>
         <p className="text-xs text-text-muted">{t(desktop ? "corpus.importDesktopHelp" : "corpus.importServerHelp")}</p>
         <div className="flex flex-wrap gap-2">
-          <input name="corpus-import-source" className="input flex-1" value={importSource} onChange={(event) => setImportSource(event.target.value)} placeholder={t(desktop ? "corpus.directoryPath" : "corpus.serverDirectoryPath")} />
+          <Input mono name="corpus-import-source" className="flex-1" value={importSource} onChange={(event) => setImportSource(event.target.value)} placeholder={t(desktop ? "corpus.directoryPath" : "corpus.serverDirectoryPath")} />
           {desktop && <ActionButton icon={<FolderOpen size={14} />} label={t("corpus.chooseDirectory")} loading={false} disabled={busy} onClick={() => void chooseImportSource()} />}
           <ActionButton icon={<Plus size={14} />} label={t("corpus.import")} loading={loading === "corpus_import"} disabled={!target || busy || !importSource.trim()} onClick={() => void runOperation<CorpusImportOutcome>({ command: "corpus_import", args: { source: importSource.trim() }, refresh: true, completed: (result) => setNotice(t("corpus.importResult", { added: result.added, bytes: result.added_bytes, duplicates: result.duplicates, skipped: result.skipped })) })} />
         </div>

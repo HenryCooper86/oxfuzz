@@ -65,7 +65,9 @@ export function DurationInput({
           { value: "m", label: t("duration.minutes") },
           { value: "h", label: t("duration.hours") },
         ]}
-        className="w-28"
+        // The amount field takes the row's spare width; the unit must not be
+        // squeezed until "minutes" is cut off.
+        className="w-28 shrink-0"
       />
     </div>
   );

@@ -34,6 +34,41 @@ export function canonicalHarnessEngine(value: unknown): string {
   }
 }
 
+const ENGINE_DISPLAY_NAMES: Record<string, string> = {
+  libfuzzer: "libFuzzer",
+  "afl++": "AFL++",
+  honggfuzz: "honggfuzz",
+  syzkaller: "syzkaller",
+};
+
+/** The engine's product name; the service spells it as a Rust enum variant. */
+export function engineDisplayName(value: string): string {
+  return ENGINE_DISPLAY_NAMES[canonicalHarnessEngine(value)] ?? value;
+}
+
+/**
+ * Translation key for a retained harness revision's state. `SmokePassed`
+ * means the smoke test completed; whether it was clean is `smokePassed`, and
+ * a run that found crashes must not be labelled a pass. `null` for a status
+ * this build does not know.
+ */
+export function harnessStatusLabelKey(status: string, smokePassed: boolean): string | null {
+  switch (status) {
+    case "Draft":
+      return "harness.statusLabel.draft";
+    case "Compiled":
+      return "harness.statusLabel.compiled";
+    case "SmokePassed":
+      return smokePassed ? "harness.statusLabel.smokePassed" : "harness.statusLabel.smokeFindings";
+    case "Promoted":
+      return "harness.statusLabel.approved";
+    case "Failed":
+      return "harness.statusLabel.failed";
+    default:
+      return null;
+  }
+}
+
 export function harnessReviewMatchesScope(
   item: HarnessReviewItem,
   target: string,

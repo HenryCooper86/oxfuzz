@@ -1,4 +1,5 @@
 import { useRegistryEditor } from "../hooks/useRegistryEditor";
+import { formatDuration, formatTriggerSummary } from "../lib/duration";
 import { CampaignAllocation } from "../components/CampaignAllocation";
 import { KnowledgeIndexDetails, type KnowledgeIndexDetailsStatus } from "../components/KnowledgeIndexDetails";
 import { SchedulerRuntimeStatus, type CampaignSchedulerStatus } from "../components/SchedulerRuntimeStatus";
@@ -1777,8 +1778,8 @@ export function AutomationView() {
             <div className="flex flex-col min-w-0 flex-1">
               <span className="text-sm font-medium truncate">{c.name}</span>
               <span className="text-xs text-text-muted font-mono">
-                {c.trigger} · {c.target ?? t("automation.allTargets")} · {c.engine || c.lang} · {c.duration_secs}s
-                {c.max_runs != null ? ` · ${c.runs_done}/${c.max_runs} ${t("automation.runsUnit")}` : c.max_total_secs != null ? ` · ${c.secs_done}/${c.max_total_secs}s` : c.runs_done > 0 ? ` · ${c.runs_done} ${t("automation.runsUnit")}` : ""}
+                {formatTriggerSummary(c.trigger)} · {c.target ?? t("automation.allTargets")} · {c.engine || c.lang} · {formatDuration(c.duration_secs)}
+                {c.max_runs != null ? ` · ${c.runs_done}/${c.max_runs} ${t("automation.runsUnit")}` : c.max_total_secs != null ? ` · ${formatDuration(c.secs_done)} / ${formatDuration(c.max_total_secs)}` : c.runs_done > 0 ? ` · ${c.runs_done} ${t("automation.runsUnit")}` : ""}
                 {c.last_fire ? ` · ${t("automation.lastFire", { time: new Date(c.last_fire).toLocaleString() })}` : ` · ${t("automation.neverRun")}`}
               </span>
               <Suspense fallback={<span className="text-xs text-text-muted">{t("common.loading")}</span>}>

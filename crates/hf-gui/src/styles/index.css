@@ -262,6 +262,10 @@ button {
   -webkit-appearance: none;
   appearance: none;
   background: transparent;
+  /* `appearance: none` keeps the user-agent's 2px outset border. A button that
+     wants a border sets its width with a class; a bare button must not grow a
+     box. Only the width is reset, so classed borders keep their style. */
+  border-width: 0;
   color: inherit;
   font: inherit;
   cursor: pointer;

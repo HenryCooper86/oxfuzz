@@ -25,3 +25,13 @@ export function formatDuration(seconds: number): string {
   const parts = [h ? `${h} h` : "", m ? `${m} min` : "", s || (!h && !m) ? `${s} s` : ""];
   return parts.filter(Boolean).join(" ");
 }
+
+/**
+ * The service summarizes an interval trigger as "every 3600s". Show its
+ * interval the way every other duration is shown; other summaries (cron
+ * expressions, one-time instants) pass through unchanged.
+ */
+export function formatTriggerSummary(trigger: string): string {
+  const interval = /^every (\d+)s$/.exec(trigger);
+  return interval ? `every ${formatDuration(Number(interval[1]))}` : trigger;
+}

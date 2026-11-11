@@ -1,4 +1,5 @@
 import { ModelBudgetPanel } from "../components/ModelBudgetPanel";
+import { engineDisplayName, harnessStatusLabelKey } from "../lib/harnessScope";
 import { IssueDraft } from "../components/IssueDraft";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -1237,12 +1238,14 @@ function HarnessQueue({ items, onOpen }: { items: HarnessReviewItem[]; onOpen?: 
 }
 
 function HarnessRow({ item }: { item: HarnessReviewItem }) {
+  const { t } = useI18n();
+  const statusKey = harnessStatusLabelKey(item.status, item.smoke_passed);
   return (
     <div className="rounded-md border border-border" style={{ padding: "var(--space-sm)", background: "var(--surface-secondary)" }}>
       <div className="flex items-center justify-between gap-2">
         <div className="min-w-0">
           <div className="text-sm font-medium truncate">{item.target_symbol}</div>
-          <div className="text-xs text-text-muted truncate">{item.engine} / {item.status}</div>
+          <div className="text-xs text-text-muted truncate">{engineDisplayName(item.engine)} / {statusKey ? t(statusKey) : item.status}</div>
         </div>
         <StatusBadge value={item.next_action} />
       </div>
@@ -1261,7 +1264,7 @@ function RecentRuns({ runs, onOpen }: { runs: WorkbenchRun[]; onOpen?: () => voi
         <div className="flex flex-col gap-1 mt-3">
           {runs.map((run) => (
             <div key={run.id} className="grid items-center gap-2 text-xs" style={{ gridTemplateColumns: "1fr auto auto" }}>
-              <span className="truncate text-text-secondary">{run.engine}</span>
+              <span className="truncate text-text-secondary">{engineDisplayName(run.engine)}</span>
               <span className="text-text-muted">{run.status}</span>
               <span style={{ color: run.crash_count > 0 ? "var(--error)" : "var(--text-muted)" }}>{t("dashboard.crashesCount", { count: run.crash_count })}</span>
             </div>

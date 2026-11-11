@@ -10,6 +10,12 @@ retain only the current release; older entries remain here as the record.
 
 ## Unreleased
 
+### Removed
+
+- 47 unused Settings translation entries left over from removed Engines,
+  Guardrails and Runtime panels.
+- `ToolRegistryImpl::get_definition`, which nothing called.
+
 ### Fixed
 
 - Browser mode: workflow buttons that need approval (Smoke Test, Approve for
@@ -32,6 +38,41 @@ retain only the current release; older entries remain here as the record.
   reloading.
 - Run stat tiles show a fast whole-run mean exec rate as a whole number; slow
   rates keep one decimal place.
+- AFL++ smoke evidence reports the rate AFL++ measured (`fuzzer_stats`), as
+  campaigns do. It used to scrape console text and could record a meaningless
+  number such as "999 exec/s" for a run at 268,000.
+- A C harness draft that calls the target without declaring it gets one
+  corrective model pass before it is shown, so the step-by-step Compile no
+  longer fails on "call to undeclared function" for a project with no header.
+- AFL++ runs no longer stream one log line per queue entry (hundreds per
+  second) to the live log; the stats events already carry that progress.
+- Harness behaviour for an engine other than AFL++ gives one reason for all
+  five checks instead of an AFL++-specific one for coverage growth.
+- Harness and run labels read "AFL++ · Approved" or "Smoke test found
+  crashes" instead of raw names such as "AflPlusPlus · SmokePassed".
+- The Fuzzing Workflow opens a newly selected project on that project's own
+  current step, not the step the previous project was left on.
+- Triage does not show `<redacted-path>` as a crash's file name in browser
+  mode; Run History's attention links, the Corpus import field and the
+  "Verify with AI" button match the rest of the interface.
+- Automation: scheduled campaigns run once you choose "Authorize scheduled
+  runs". They were always denied with "requires approval" unless the service
+  had `HF_AUTO_APPROVE` set, whatever the app said. Authorization covers only
+  the fuzz run of an already-approved harness and is withdrawn on every start.
+- Seeding no longer fails with "duplicate corpus hash" when the model proposes
+  a seed whose bytes are already in the corpus. Such proposals are skipped,
+  and duplicate generated seeds left by earlier runs are removed so affected
+  targets recover.
+- Automation shows a campaign's interval and duration as "every 1 h" and
+  "1 min" instead of raw seconds.
+- Corpus lists each input with its recorded source (Seed, Fuzzer, Minimized)
+  instead of labelling every file Manual; it now agrees with Artifacts.
+- The Run page says a target's first campaign may take up to a minute while
+  its fuzzing dictionary is prepared, instead of an unexplained "Waiting for
+  the service to start the run".
+- The duration unit selector no longer shrinks until "minutes" is cut off.
+- The server no longer logs a warning on every inventory read for a legacy
+  output directory that never existed.
 - Triage: Scan for Crashes is available whenever a target is selected, not
   only after a fuzz run finished in the same window; a disabled scan says
   why. Before, the button was silently disabled after a reload, a failed run,

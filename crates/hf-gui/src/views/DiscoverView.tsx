@@ -640,7 +640,7 @@ function CandidateCard({
       onMouseLeave={(e) => (e.currentTarget.style.borderColor = "var(--border)")}
     >
       {hasTree ? (
-        <button aria-label={t("discover.toggleCallTreeNode")} aria-expanded={treeOpen} onClick={toggleTree} className="shrink-0 p-2 text-text-muted">{treeOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</button>
+        <button aria-label={t("discover.toggleCallTreeNode")} aria-expanded={treeOpen} onClick={toggleTree} className="shrink-0 p-2 text-text-muted rounded-sm hover:text-text-primary">{treeOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</button>
       ) : (
         <span className="shrink-0" style={{ width: "14px" }} />
       )}

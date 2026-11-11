@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { fileRowName, isRedactedPath } from "../lib/publicPaths";
 import { groupFindings } from "../lib/findingGroups";
 import { IssueDraft } from "../components/IssueDraft";
 import { Bug, ChevronDown, ChevronRight, Download, FileText, Share2 } from "lucide-react";
@@ -494,7 +495,7 @@ function CrashDetail({ item, verdict, onVerify, actionBusy }: { item: FindingRev
   // Order: what broke (plain summary, kind, where), how to confirm it, then the
   // fix workflow and the full evidence record for anyone who needs it.
   return <div className="flex flex-col gap-3">
-    <div className="flex items-center gap-2"><span className="text-xs px-2 py-1 rounded-sm font-medium" style={{ background: "var(--error-subtle)", color: "var(--error)" }}>{crash.kind}</span>{crash.casr && <SeverityBadge severity={crash.casr.severity} title={crash.casr.severity_short || crash.casr.severity} />}<span className="text-xs text-text-muted font-mono truncate min-w-0 flex-1" title={crash.input_path}>{crash.input_path.split("/").pop()}</span><PathActions path={crash.input_path} /></div>
+    <div className="flex items-center gap-2"><span className="text-xs px-2 py-1 rounded-sm font-medium" style={{ background: "var(--error-subtle)", color: "var(--error)" }}>{crash.kind}</span>{crash.casr && <SeverityBadge severity={crash.casr.severity} title={crash.casr.severity_short || crash.casr.severity} />}{isRedactedPath(crash.input_path) && !crash.name ? <span className="flex-1" /> : <span className="text-xs text-text-muted font-mono truncate min-w-0 flex-1" title={crash.input_path}>{fileRowName(crash.name, crash.input_path)}</span>}{!isRedactedPath(crash.input_path) && <PathActions path={crash.input_path} />}</div>
     {crash.bug_report ? <div><p className="text-sm font-medium text-accent m-0">{crash.bug_report.title}</p><p className="text-xs text-text-secondary">{crash.bug_report.summary}</p></div>
       : crash.summary && <p className="text-sm text-text-secondary">{crash.summary}</p>}
     <div className="text-xs text-text-muted font-mono">{item.target_symbol} · {crash.run_id}</div>
@@ -517,7 +518,7 @@ function CrashDetail({ item, verdict, onVerify, actionBusy }: { item: FindingRev
     </div>}
     {crash.stack_signature && <code className="text-xs text-text-secondary block font-mono p-2 rounded-md" style={{ background: "var(--surface-code)" }}>{crash.stack_signature}</code>}
     <div className="border-t border-border pt-3">
-      {verdict === undefined && <Button size="sm" variant="ghost" onClick={onVerify} disabled={actionBusy || !item.latest_scoped_actions_allowed} title={item.latest_scoped_action_reason ?? undefined}>{t("triage.verifyCrash")}</Button>}
+      {verdict === undefined && <Button size="sm" variant="outline" onClick={onVerify} disabled={actionBusy || !item.latest_scoped_actions_allowed} title={item.latest_scoped_action_reason ?? undefined}>{t("triage.verifyCrash")}</Button>}
       {verdict === "loading" && <span className="text-xs text-text-muted">{t("triage.verifying")}</span>}
       {verdict === "none" && <span className="text-xs text-text-muted">{t("triage.noVerdict")}</span>}
       {verdict && verdict !== "loading" && verdict !== "none" && <div className="flex flex-col gap-1 text-xs">
