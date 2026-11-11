@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { emitHarnessReplaced } from "../lib/events";
 import { Check, LoaderCircle, Rocket, X } from "lucide-react";
 import { getTransport } from "../lib";
 import { useI18n } from "../i18nContext";
@@ -170,8 +171,12 @@ export function OneClickFuzz({ onOpen, apiRef }: {
     setLog([]);
     setLogOpen(false);
     const unlisten: (() => void)[] = [];
+    // The target whose compiled revision reached its smoke test. That revision
+    // is retained whatever the smoke test finds.
+    let smokeTested: string | null = null;
     try {
       unlisten.push(await getTransport().listen<StageEvent>("fuzz:stage", (event) => {
+        if (event.payload.stage === "smoke" && event.payload.target) smokeTested = event.payload.target;
         const at = Date.now();
         setSteps(rows => applyStage(rows, event.payload, at));
         setNow(at);
@@ -195,6 +200,7 @@ export function OneClickFuzz({ onOpen, apiRef }: {
       if (prepared.harness_reused) {
         setPhase({ kind: "ready", scope });
       } else {
+        emitHarnessReplaced(scope);
         setPhase({ kind: "awaitingApproval", scope });
         onOpen("harness");
       }
@@ -202,6 +208,14 @@ export function OneClickFuzz({ onOpen, apiRef }: {
       setSteps(rows => closeRunning(rows, "failed", Date.now()));
       setLogOpen(true);
       setPhase({ kind: "error", message: String(error) });
+      if (smokeTested) {
+        // A crash-bearing revision can still be approved with known findings;
+        // put it in front of the person instead of an older local draft.
+        setTarget(smokeTested);
+        setEngine(settings.default_engine);
+        emitHarnessReplaced({ project, target: smokeTested, engine: settings.default_engine });
+        onOpen("harness");
+      }
     } finally {
       unlisten.forEach(stop => stop());
     }

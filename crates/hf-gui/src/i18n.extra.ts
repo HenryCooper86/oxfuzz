@@ -1992,6 +1992,7 @@ export const [enExtra, zhExtra] = dictionaries({
   "triage.reportSaved": ["Saved {format} to {path}","已将 {format} 保存到 {path}"],
   "triage.scanFailed": ["Scan failed: {error}","扫描失败：{error}"],
   "triage.scanForCrashes": ["Scan for Crashes","扫描崩溃"],
+  "triage.scanNeedsTarget": ["Select a target in Discover or Harness first; a scan reads that target's retained run output.","请先在“发现”或“Harness”中选择目标；扫描会读取该目标保留的运行输出。"],
   "triage.scanTooltipKernel": ["Kernel crashes are collected by syzkaller, not per-target triage","内核崩溃由 syzkaller 收集，而非按目标分类定级"],
   "triage.scanTooltipNoTarget": ["Run a fuzz campaign first","请先运行模糊测试活动"],
   "triage.scanTooltipReady": ["Scan the last run's output for crashes","扫描上次运行的输出以查找崩溃"],

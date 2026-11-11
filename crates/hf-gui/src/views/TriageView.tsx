@@ -12,6 +12,7 @@ import { useFindingSelection } from "../providers/findingSelection";
 import { usePipeline } from "../providers/pipeline";
 import { useProject } from "../providers/project";
 import { useRunOutput } from "../providers/runOutput";
+import { useTarget } from "../providers/target";
 import type { ScanProgress, ViewType, RunHistoryItem, Crash, CrashVerdict, FindingReviewFilter, FindingReviewItem, TriageDisposition, IssueExport } from "../types";
 
 const ReportPreview = lazy(() =>
@@ -42,6 +43,11 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
   const { activeProject } = useProject();
   const { markDone, markSkipped } = usePipeline();
   const { lastTarget, lastEngine, summary } = useRunOutput();
+  // A scan reads the target's retained run output, so it does not need a run
+  // from this page session: fall back to the selected target after a reload,
+  // a failed run, or a run the assistant started.
+  const { target: selectedTarget } = useTarget();
+  const scanTarget = lastTarget || selectedTarget;
   const { selection: savedSelection, selectFinding } = useFindingSelection();
   const [queue, setQueue] = useState<FindingReviewItem[]>([]);
   const [selectedFinding, setSelectedFinding] = useState<FindingReviewItem | null>(null);
@@ -209,7 +215,7 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
         if (mounted.current && activeScan.current === payload.scan_id) setScanProgress(payload);
       });
       if (!mounted.current || request !== scanRequest.current) return;
-      const crashes = await getTransport().invoke<Crash[]>("scan_crashes", { project: activeProject || ".", target: lastTarget, scanId });
+      const crashes = await getTransport().invoke<Crash[]>("scan_crashes", { project: activeProject || ".", target: scanTarget, scanId });
       if (mounted.current && request === scanRequest.current) {
         setScanProgress(current => current ? { ...current, phase: "completed", findings: crashes.length } : null);
       }
@@ -242,7 +248,7 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
         setReloadVersion(value => value + 1);
       }
     }
-  }, [activeProject, lastTarget, markDone, markSkipped, selectFinding, t]);
+  }, [activeProject, scanTarget, markDone, markSkipped, selectFinding, t]);
 
   const stopScan = useCallback(async () => {
     const scanId = activeScan.current;
@@ -387,7 +393,7 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
           {activeFinding && isTauriEnvironment() && <Button variant="outline" size="sm" onClick={() => void exportRepro()} disabled={actionsBusy || !latestActionsAllowed} title={disabledReason ?? t("triage.downloadRepro")}>
             <Download size={14} />{t("triage.downloadRepro")}
           </Button>}
-          <Button variant="primary" onClick={() => void triage()} disabled={actionsBusy || !lastTarget || isKernelRun} loading={scanning}>
+          <Button variant="primary" onClick={() => void triage()} disabled={actionsBusy || !scanTarget || isKernelRun} loading={scanning} title={scanTarget ? undefined : t("triage.scanNeedsTarget")}>
             {!scanning && <Bug size={14} />}{t(scanning ? "triage.scanning" : "triage.scanForCrashes")}
           </Button>
           {scanning && <Button variant="outline" onClick={() => void stopScan()} disabled={stoppingScan}>

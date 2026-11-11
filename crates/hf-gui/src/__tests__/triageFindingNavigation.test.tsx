@@ -96,8 +96,10 @@ const resolved = {
   disposition: { ...older.disposition, disposition: "resolved", action: "no_action", claim_ceiling: "remediation_verified" },
 } as FindingReviewItem;
 
-function Providers({ children, locale = "en", translate = (key) => key }: {
+function Providers({ children, locale = "en", translate = (key) => key, selectedTarget = "", lastTarget = "latest_target" }: {
   children: React.ReactNode;
+  selectedTarget?: string;
+  lastTarget?: string;
   locale?: "en" | "zh";
   translate?: (key: string, params?: Record<string, string | number>) => string;
 }) {
@@ -113,8 +115,8 @@ function Providers({ children, locale = "en", translate = (key) => key }: {
         deleteProjectData: async () => undefined,
       }}>
         <PipelineContext.Provider value={{ completed: [], isDone: () => false, currentStage: "triage", coreStages: [], isSkipped: () => false, markDone: () => undefined, markSkipped: () => undefined, reset: () => undefined }}>
-          <TargetContext.Provider value={{ target: "", engine: "libfuzzer", lang: "c", compiled: false, selectionRepair: null, storageError: null, setTarget: () => undefined, setEngine: () => undefined, setLang: () => undefined, setCompiled: () => undefined, canResetTargetSelections: false, resetTargetSelections: () => undefined, retryStorage: () => undefined }}>
-            <RunOutputContext.Provider value={{ log: [], stats: EMPTY_RUN_STATS, summary: { edges: 12, crashes: 1, execs: 40 }, running: false, cancelling: false, lastTarget: "latest_target", lastEngine: "libfuzzer", runFuzzer: async () => 0, replayRun: async () => 0, runSyzkaller: async () => 0, cancelRun: async () => undefined }}>
+          <TargetContext.Provider value={{ target: selectedTarget, engine: "libfuzzer", lang: "c", compiled: false, selectionRepair: null, storageError: null, setTarget: () => undefined, setEngine: () => undefined, setLang: () => undefined, setCompiled: () => undefined, canResetTargetSelections: false, resetTargetSelections: () => undefined, retryStorage: () => undefined }}>
+            <RunOutputContext.Provider value={{ log: [], stats: EMPTY_RUN_STATS, summary: { edges: 12, crashes: 1, execs: 40 }, running: false, cancelling: false, lastTarget, lastEngine: "libfuzzer", runFuzzer: async () => 0, replayRun: async () => 0, runSyzkaller: async () => 0, cancelRun: async () => undefined }}>
               <ToastContext.Provider value={{ toast: () => undefined }}>
                 <ConfirmContext.Provider value={async () => true}>
                   <FindingSelectionProvider>
@@ -524,6 +526,29 @@ describe("retained finding navigation", () => {
     await flush();
     expect(container.querySelector('[title="/evidence/newer/crash-input"]')).not.toBeNull();
     expect(container.textContent).toContain(`triage.scanPhase.${outcome}`);
+  });
+
+  it("scans the selected target when no run finished in this session", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "finding_review") return Promise.resolve(older);
+      return Promise.resolve([]);
+    });
+    await act(async () => root.render(<Providers selectedTarget="parse_packet" lastTarget=""><TriageView /></Providers>));
+    await flush();
+    const scan = [...container.querySelectorAll("button")].find(b => b.textContent?.includes("triage.scanForCrashes"));
+    expect(scan?.disabled).toBe(false);
+    await act(async () => scan?.click());
+    await flush();
+    expect(invoke.mock.calls.find(([cmd]) => cmd === "scan_crashes")?.[1]).toMatchObject({ target: "parse_packet" });
+  });
+
+  it("explains why a scan is unavailable when no target is known", async () => {
+    invoke.mockImplementation((command: string) => Promise.resolve(command === "finding_review" ? older : []));
+    await act(async () => root.render(<Providers lastTarget=""><TriageView /></Providers>));
+    await flush();
+    const scan = [...container.querySelectorAll("button")].find(b => b.textContent?.includes("triage.scanForCrashes"));
+    expect(scan?.disabled).toBe(true);
+    expect(scan?.title).toBe("triage.scanNeedsTarget");
   });
 
   it("shows only its scan progress and waits for cancellation teardown", async () => {

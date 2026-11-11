@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { fileRowName } from "../lib/publicPaths";
 import { getTransport, isTauriEnvironment, emitDataChanged } from "../lib";
 import { useProject } from "../providers/project";
 import { useToast } from "../components/ui/toastContext";
@@ -94,7 +95,7 @@ function ArtifactInventory({ activeProject, desktop }: { activeProject: string; 
   }
 
   async function deleteCrash(c: Crash) {
-    if (!(await confirm({ title: t("artifacts.deleteCrashTitle"), message: t("artifacts.deleteCrashMessage", { name: c.input_path.split("/").pop() ?? "" }), danger: true, confirmLabel: t("common.delete") }))) return;
+    if (!(await confirm({ title: t("artifacts.deleteCrashTitle"), message: t("artifacts.deleteCrashMessage", { name: fileRowName(c.name, c.input_path) }), danger: true, confirmLabel: t("common.delete") }))) return;
     if (!mounted.current) return;
     try {
       await getTransport().invoke("delete_crash", desktop
@@ -111,7 +112,7 @@ function ArtifactInventory({ activeProject, desktop }: { activeProject: string; 
   }
 
   async function deleteCorpus(e: CorpusEntry) {
-    if (!(await confirm({ title: t("artifacts.deleteCorpusTitle"), message: t("artifacts.deleteCorpusMessage", { name: e.path.split("/").pop() ?? "" }), danger: true, confirmLabel: t("common.delete") }))) return;
+    if (!(await confirm({ title: t("artifacts.deleteCorpusTitle"), message: t("artifacts.deleteCorpusMessage", { name: fileRowName(e.name, e.path) }), danger: true, confirmLabel: t("common.delete") }))) return;
     if (!mounted.current) return;
     try {
       await getTransport().invoke("delete_corpus_entry", desktop
@@ -146,10 +147,10 @@ function ArtifactInventory({ activeProject, desktop }: { activeProject: string; 
 
   const q = filter.trim().toLowerCase();
   const shownCrashes = q
-    ? crashes.filter((c) => `${c.input_path} ${c.kind}`.toLowerCase().includes(q))
+    ? crashes.filter((c) => `${fileRowName(c.name, c.input_path)} ${c.input_path} ${c.kind}`.toLowerCase().includes(q))
     : crashes;
   const shownCorpus = q
-    ? corpus.filter((e) => `${e.path} ${e.source}`.toLowerCase().includes(q))
+    ? corpus.filter((e) => `${fileRowName(e.name, e.path)} ${e.path} ${e.source}`.toLowerCase().includes(q))
     : corpus;
 
   const empty = scanned && !error && crashes.length === 0 && corpus.length === 0;
@@ -224,7 +225,7 @@ function ArtifactInventory({ activeProject, desktop }: { activeProject: string; 
               <Bug size={14} style={{ color: "var(--error)", flexShrink: 0 }} />
               <Badge variant="error">{c.kind || "crash"}</Badge>
               <span className="text-xs font-mono text-text-secondary truncate flex-1 min-w-0" title={c.input_path}>
-                {c.input_path.split("/").pop()}
+                {fileRowName(c.name, c.input_path)}
               </span>
               {c.minimized && <span className="text-xs text-text-muted shrink-0">{t("artifacts.minimized")}</span>}
               <PathActions path={c.input_path} />
@@ -246,7 +247,7 @@ function ArtifactInventory({ activeProject, desktop }: { activeProject: string; 
             >
               <Database size={14} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
               <span className="text-xs font-mono text-text-secondary truncate flex-1 min-w-0" title={e.path}>
-                {e.path.split("/").pop()}
+                {fileRowName(e.name, e.path)}
               </span>
               <span className="text-xs text-text-muted shrink-0">{e.size} B</span>
               <span className="text-xs text-text-muted shrink-0">{e.source}</span>

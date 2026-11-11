@@ -3,6 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import { useEffect, useState } from "react";
+import { isRedactedPath } from "../../lib/publicPaths";
 import { Copy, Wand2 } from "lucide-react";
 import { getTransport, isTauriEnvironment } from "../../lib";
 import { usePrefs } from "../../providers/prefs";
@@ -158,7 +159,7 @@ function PathField({ value, onCopy, label }: { value: string; onCopy: () => void
   return (
     <div className="relative flex items-center w-full">
       <Input aria-label={label} mono readOnly value={value} title={value} className="pr-9 text-text-secondary select-all" />
-      <Button disabled={!value || value === "<redacted-path>"} variant="icon" size="sm" className="absolute right-1" onClick={onCopy} title={t("settings.general.copyPath")} aria-label={t("settings.general.copyPath")}>
+      <Button disabled={!value || isRedactedPath(value)} variant="icon" size="sm" className="absolute right-1" onClick={onCopy} title={t("settings.general.copyPath")} aria-label={t("settings.general.copyPath")}>
         <Copy size={13} />
       </Button>
     </div>

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, lazy, Suspense } from "react";
+import { onHarnessReplaced } from "../lib/events";
 import { useI18n } from "../i18nContext";
 import { getTransport } from "../lib";
 import { useProject } from "../providers/project";
@@ -208,6 +209,32 @@ export function HarnessView({
     setHarnessError(null);
     setSeedError(null);
   }
+
+  // A new revision of this target's harness was retained by another path (a
+  // mutator import, the one-click flow). Drop the local draft and its step
+  // results so the panel shows, and the person reviews, the retained revision.
+  const showRetainedRevision = useCallback(() => {
+    draftGeneration.current += 1;
+    setHarness(null);
+    setPrevSource(null);
+    setShowDiff(false);
+    setHarnessStatus("idle");
+    setHarnessError(null);
+    setCompileResult(null);
+    setCompileStatus("done");
+    setSmokeResult(null);
+    setSmokeStatus("idle");
+    setPromotionResult(null);
+    setPromotionStatus("idle");
+    setCompiled(false);
+    setReviewRefresh((value) => value + 1);
+  }, [setCompiled]);
+
+  useEffect(() => onHarnessReplaced((scope) => {
+    if (scope.project === project && scope.target === selectedTarget && scope.engine === engine) {
+      showRetainedRevision();
+    }
+  }), [project, selectedTarget, engine, showRetainedRevision]);
 
   function isCurrentScope() {
     return mounted.current && currentScope.current === requestScope;
@@ -598,7 +625,7 @@ export function HarnessView({
           </p>
           <ManagedMutatorPanel key={`${project}:${selectedTarget}:${engine}:${existing.harness_id}:${reviewRefresh}:${smokeStatus}:${promotionStatus}`} project={project} target={selectedTarget} engine={engine} lang={lang}
             harnessId={existing.harness_id} disabled={selectionBlocked || buildBlocked || qualificationBusy}
-            onImported={() => { setHarness(null); setHarnessStatus("idle"); setSmokeResult(null); setSmokeStatus("idle"); setPromotionResult(null); setPromotionStatus("idle"); setCompileResult(null); setCompileStatus("done"); setCompiled(false); setReviewRefresh((value) => value + 1); }} />
+            onImported={showRetainedRevision} />
         </div>
       )}
 

@@ -10,6 +10,38 @@ retain only the current release; older entries remain here as the record.
 
 ## Unreleased
 
+### Fixed
+
+- Browser mode: workflow buttons that need approval (Smoke Test, Approve for
+  Campaigns, Run, crash scan and triage, corpus engine operations, issue and
+  DefectDojo publication) work on a server started with `HF_WEB_TOKEN`. The
+  authenticated request approves that one operation, as the desktop click
+  does. Before, they were always denied unless `HF_AUTO_APPROVE` was set. An
+  open-access server (`HF_WEB_TOKEN_OPTIONAL`) is unchanged.
+- Browser mode: Corpus and Artifacts show each file's name instead of
+  `<redacted-path>`, and Run History no longer reports "Could not check which
+  runs need attention" for every project.
+- Browser mode: the Run page shows live coverage and exec-rate tiles, the
+  coverage curve and the run summary. The web API redacted each run's project
+  root, so the page never matched a run to the open project and stayed blank.
+  A project root inside the approved web roots is now returned to the request
+  that asked for it; every other host path is still redacted.
+- Fuzz this project: the harness review shows the revision that was just built
+  and smoke-tested, including when the smoke test stops on a crash, instead of
+  an older unbuilt draft. "Approve with Known Findings" is reachable without
+  reloading.
+- Run stat tiles show a fast whole-run mean exec rate as a whole number; slow
+  rates keep one decimal place.
+- Triage: Scan for Crashes is available whenever a target is selected, not
+  only after a fuzz run finished in the same window; a disabled scan says
+  why. Before, the button was silently disabled after a reload, a failed run,
+  or a run the assistant started.
+- A failed AFL++ run reports the reason AFL++ printed (for example "We need at
+  least one valid input seed that does not crash!") instead of an empty
+  "fuzz run exited 1" message.
+- Generated default seeds are JSON only for targets whose name says JSON. A
+  target merely named `parse_*` gets format-neutral seeds.
+
 ## 0.9.4 - 2026-11-10
 
 ### Changed

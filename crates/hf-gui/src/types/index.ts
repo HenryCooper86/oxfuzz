@@ -251,6 +251,8 @@ export interface SemgrepInventory {
 
 export interface CorpusEntry {
   target_id?: string;
+  /** File name; present on browser rows, whose `path` is redacted. */
+  name?: string;
   path: string;
   sha256: string;
   size: number;
@@ -273,6 +275,8 @@ export interface Crash {
   id: string;
   run_id: string;
   target_id: string;
+  /** File name; present on browser rows, whose `input_path` is redacted. */
+  name?: string;
   input_path: string;
   stack_signature: string;
   kind: string;

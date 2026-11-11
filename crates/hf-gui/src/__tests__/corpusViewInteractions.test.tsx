@@ -366,6 +366,24 @@ describe("CorpusView interactions", () => {
     expect(mocks.pickFolder).not.toHaveBeenCalled();
   });
 
+  it("names and keys browser rows whose paths the server redacted", async () => {
+    const redacted = (name: string, size: number) => ({ ...entry(name, size), path: "<redacted-path>", name });
+    mocks.invoke.mockImplementation((command: string) => {
+      if (command === "corpus_capabilities") return Promise.resolve(ready);
+      if (command === "corpus_list") return Promise.resolve([redacted("seed_a", 4), redacted("seed_b", 7)]);
+      if (command === "run_history") return Promise.resolve([]);
+      throw new Error(`unexpected ${command}`);
+    });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await act(async () => root.render(<Providers />));
+    await flush();
+
+    const names = [...container.querySelectorAll("tbody tr")].map((row) => row.children[0]?.textContent);
+    expect(names).toEqual(["seed_a", "seed_b"]);
+    expect(errors.mock.calls.filter(([message]) => String(message).includes("same key"))).toEqual([]);
+    errors.mockRestore();
+  });
+
   it("prompts for a target without presenting an unavailable or empty inventory", async () => {
     await act(async () => root.render(<Providers initialTarget="" />));
     await flush();

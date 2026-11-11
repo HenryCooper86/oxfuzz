@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { OneClickFuzz, type OneClickApi } from "../components/OneClickFuzz";
 import { I18nProvider } from "../i18n";
+import { onHarnessReplaced } from "../lib/events";
 
 // One-click fuzzing stops at the human approval: preparation carries only the
 // smoke-test consent, and a run starts only after that exact harness is approved.
@@ -47,6 +48,8 @@ afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi
 
 it("prepares, stops at approval, and starts one run only after that harness is approved", async () => {
   let finish!: (value: unknown) => void;
+  const replaced: unknown[] = [];
+  const stopListening = onHarnessReplaced(scope => replaced.push(scope));
   mocks.invoke.mockImplementation((command: string) => command === "fuzz_prepare" ? new Promise(resolve => { finish = resolve; }) : Promise.resolve(null));
   expect(host.textContent).toContain("10 min");
   await act(async () => button("Fuzz this project")!.click());
@@ -59,6 +62,10 @@ it("prepares, stops at approval, and starts one run only after that harness is a
   expect(mocks.setLang).toHaveBeenCalledWith("c");
   expect(mocks.markDone).toHaveBeenCalledWith("discover", "/proj");
   expect(open).toHaveBeenCalledWith("harness");
+  // The Harness view may still hold an older draft for this target; it is told
+  // which scope now has a new revision so the review shows what was built.
+  expect(replaced).toEqual([{ project: "/proj", target: "parse_number", engine: "libfuzzer" }]);
+  stopListening();
   expect(host.textContent).toContain("approve it to start a 10 min run");
   expect(mocks.runFuzzer).not.toHaveBeenCalled();
 
@@ -82,6 +89,35 @@ it("asks before running when the target already had an approved harness", async 
   await act(async () => button("Start a 10 min run")!.click());
   await flush();
   expect(mocks.runFuzzer).toHaveBeenCalledWith({ project: "/proj", target: "parse_number", engine: "afl++", duration: 600 });
+});
+
+it("shows the built revision for review when its smoke test stops on a crash", async () => {
+  let fail!: (error: Error) => void;
+  const replaced: unknown[] = [];
+  const stopListening = onHarnessReplaced(scope => replaced.push(scope));
+  mocks.invoke.mockImplementation((command: string) => command === "fuzz_prepare" ? new Promise((_resolve, reject) => { fail = reject; }) : Promise.resolve(null));
+  await act(async () => button("Fuzz this project")!.click());
+  await act(async () => mocks.stage!({ stage: "smoke", target: "parse_number", reused: false }));
+  await act(async () => fail(new Error("fuzz smoke stopped: the qualification run found 1 crash(es)")));
+  await flush();
+  stopListening();
+  // The compiled revision and its crash evidence are retained; approving it
+  // with known findings is the person's decision, so the review must show it.
+  expect(replaced).toEqual([{ project: "/proj", target: "parse_number", engine: "libfuzzer" }]);
+  expect(mocks.setTarget).toHaveBeenCalledWith("parse_number");
+  expect(open).toHaveBeenCalledWith("harness");
+  expect(host.textContent).toContain("found 1 crash(es)");
+});
+
+it("leaves the harness review alone when preparation fails before a build", async () => {
+  const replaced: unknown[] = [];
+  const stopListening = onHarnessReplaced(scope => replaced.push(scope));
+  mocks.invoke.mockRejectedValue(new Error("no provider configured"));
+  await act(async () => button("Fuzz this project")!.click());
+  await flush();
+  stopListening();
+  expect(replaced).toEqual([]);
+  expect(open).not.toHaveBeenCalled();
 });
 
 it("shows a preparation failure", async () => {

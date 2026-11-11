@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { formatRunStat } from "../lib/runStats";
 import { useI18n } from "../i18nContext";
 import { pickFile, getTransport } from "../lib";
 import { useProject } from "../providers/project";
@@ -594,7 +595,7 @@ function StatCard({ icon, label, value, color }: { icon: React.ReactNode; label:
           {label}
         </span>
         <span className="text-lg font-semibold" style={{ color }}>
-        {value === null ? t("run.unknown") : value.toLocaleString()}
+        {value === null ? t("run.unknown") : formatRunStat(value)}
         </span>
       </div>
     </div>
