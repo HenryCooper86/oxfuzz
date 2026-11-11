@@ -549,7 +549,10 @@ mod doctor_tests {
 
         assert!(matches!(
             cli.command,
-            Commands::Discover(crate::args::DiscoverArgs { semgrep: true, .. })
+            Commands::Discover(crate::args::DiscoverArgs {
+                analyzers: crate::args::DiscoverAnalyzerArgs { semgrep: true, .. },
+                ..
+            })
         ));
     }
 

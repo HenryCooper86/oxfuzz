@@ -179,6 +179,21 @@ pub(crate) struct DiscoverArgs {
     /// scores when none is configured, `require` fails instead.
     #[arg(long, value_enum, default_value_t = AiOption::Auto)]
     pub(crate) ai: AiOption,
+    /// Opt-in analyzers compiled in by their own feature flags.
+    #[cfg(any(feature = "clang-analysis", feature = "semgrep-enrichment"))]
+    #[command(flatten)]
+    pub(crate) analyzers: DiscoverAnalyzerArgs,
+    /// Print the inventory as JSON. JSON is also the default whenever stdout
+    /// is not a terminal; on a terminal the default is a ranked table.
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+/// Opt-in discovery analyzers. Each flag exists only when its feature is
+/// compiled in, and the two are mutually exclusive.
+#[cfg(any(feature = "clang-analysis", feature = "semgrep-enrichment"))]
+#[derive(clap::Args)]
+pub(crate) struct DiscoverAnalyzerArgs {
     /// Analyze C/C++ calls and types with the sandboxed Clang helper.
     #[cfg(feature = "clang-analysis")]
     #[arg(long, conflicts_with_all = ["rank", "ai"])]
@@ -188,10 +203,6 @@ pub(crate) struct DiscoverArgs {
     #[cfg(feature = "semgrep-enrichment")]
     #[arg(long)]
     pub(crate) semgrep: bool,
-    /// Print the inventory as JSON. JSON is also the default whenever stdout
-    /// is not a terminal; on a terminal the default is a ranked table.
-    #[arg(long)]
-    pub(crate) json: bool,
 }
 
 /// Generate a harness for a target.
