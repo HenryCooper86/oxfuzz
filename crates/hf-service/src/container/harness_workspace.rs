@@ -101,10 +101,14 @@ pub fn is_generated_seed_name(name: &str) -> bool {
 }
 
 /// Generate target-aware seed inputs for a corpus.
+///
+/// A format is chosen only when the target's name states it. "parse" alone
+/// does not: it names most fuzz targets, and text seeds for a binary parser
+/// are misread by its length fields. Unnamed formats get format-neutral seeds.
 #[must_use]
 pub fn generate_target_seeds(target: &str) -> Vec<(Vec<u8>, String)> {
     let lower = target.to_ascii_lowercase();
-    if lower.contains("json") || lower.contains("parse") {
+    if lower.contains("json") {
         vec![
             (b"{}".to_vec(), "seed_empty_obj".to_owned()),
             (b"[]".to_vec(), "seed_empty_arr".to_owned()),
@@ -1582,5 +1586,41 @@ mod sandbox_link_tests {
             !workspace.path().join("build/gen").exists(),
             "no byte of the outside tree may land in the workspace"
         );
+    }
+}
+
+#[cfg(test)]
+mod target_seed_tests {
+    use super::generate_target_seeds;
+
+    fn names(target: &str) -> Vec<String> {
+        generate_target_seeds(target)
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect()
+    }
+
+    /// "parse" names almost every fuzz target and says nothing about the
+    /// format: a binary packet parser seeded with JSON text starts from inputs
+    /// its length fields misread.
+    #[test]
+    fn a_parser_that_does_not_name_a_format_gets_format_neutral_seeds() {
+        let seeds = names("parse_packet");
+        assert!(seeds.contains(&"seed_null_byte".to_owned()), "{seeds:?}");
+        assert!(
+            !seeds.iter().any(|name| name == "seed_empty_obj"),
+            "{seeds:?}"
+        );
+    }
+
+    #[test]
+    fn a_target_that_names_json_keeps_json_seeds() {
+        for target in ["parse_json", "json_number", "JsonDecode"] {
+            let seeds = names(target);
+            assert!(
+                seeds.contains(&"seed_empty_obj".to_owned()),
+                "{target}: {seeds:?}"
+            );
+        }
     }
 }
