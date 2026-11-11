@@ -80,9 +80,7 @@ impl HarnessBehaviorReport {
             entry_rejection: BehaviorCheck::unavailable(reason),
             repeated_input_stability: BehaviorCheck::unavailable(reason),
             persistent_state: BehaviorCheck::unavailable(reason),
-            target_coverage_growth: BehaviorCheck::unavailable(
-                "AFL maps include harness code; no per-input target-only profile was retained",
-            ),
+            target_coverage_growth: BehaviorCheck::unavailable(reason),
             observations: Vec::new(),
             commands: Vec::new(),
             command_timeout_secs: 0,
@@ -175,6 +173,23 @@ mod collection;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unavailable_report_gives_every_check_the_callers_reason() {
+        let report = HarnessBehaviorReport::unavailable("Behavioral probes support AFL++ only");
+        for check in [
+            &report.input_sensitivity,
+            &report.entry_rejection,
+            &report.repeated_input_stability,
+            &report.persistent_state,
+            &report.target_coverage_growth,
+        ] {
+            assert_eq!(
+                check,
+                &BehaviorCheck::unavailable("Behavioral probes support AFL++ only")
+            );
+        }
+    }
 
     #[test]
     fn instability_and_contamination_refuse_promotion_but_input_proxy_does_not() {

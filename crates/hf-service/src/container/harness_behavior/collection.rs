@@ -11,6 +11,11 @@ use hf_storage::RunRecord;
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, io::Read as _, path::Path};
 
+/// Why target-only coverage growth is not judged even when the AFL++ probes
+/// ran: that is a statement about AFL++ maps, so only an AFL++ report says it.
+const AFL_TARGET_COVERAGE_UNAVAILABLE: &str =
+    "AFL maps include harness code; no per-input target-only profile was retained";
+
 type ProbeBatch<'a> = (&'static str, Vec<(&'static str, &'static str, &'a [u8])>);
 
 const MAX_MAP_BYTES: u64 = 64 * 1024;
@@ -149,6 +154,8 @@ impl ServiceContainer {
         report.binary_sha256 = Some(artifacts.binary_sha256.clone());
         report.sandbox_rev = run.sandbox_rev.clone();
         if harness.engine == EngineKind::AflPlusPlus {
+            report.target_coverage_growth =
+                BehaviorCheck::unavailable(AFL_TARGET_COVERAGE_UNAVAILABLE);
             report = self
                 .probe_harness_behavior(project, harness, artifacts, config, image, report)
                 .await?;

@@ -261,6 +261,53 @@ impl ServiceContainer {
         hf_corpus::list(&corpus_dir)
     }
 
+    /// The target's corpus as it is on disk, with each entry's recorded source.
+    ///
+    /// A directory listing cannot say where an input came from, so
+    /// [`Self::corpus_list`] tags every entry `Manual`. The persisted inventory
+    /// knows which entries were seeded, found by a fuzzer or minimized; an
+    /// entry is matched to its record by file name and content digest. An
+    /// entry with no record keeps the listing's `Manual`.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the directory cannot be read or the stored
+    /// inventory cannot be loaded.
+    pub async fn corpus_inventory(
+        &self,
+        project: &Path,
+        target: &str,
+    ) -> Result<hf_core::corpus::Corpus, ClassifiedError> {
+        let mut corpus = self.corpus_list(project, target)?;
+        let Some(store) = self.store.as_ref() else {
+            return Ok(corpus);
+        };
+        // A target that was never discovered has no persisted inventory.
+        let Some(candidate) = self
+            .resolve_target_candidate_any_language(project, target)
+            .await?
+        else {
+            return Ok(corpus);
+        };
+        let recorded: std::collections::HashMap<_, _> = store
+            .list_corpus_entries(candidate.id)
+            .await?
+            .into_iter()
+            .filter_map(|entry| {
+                let name = entry.path.file_name()?.to_owned();
+                Some(((name, entry.sha256), entry.source))
+            })
+            .collect();
+        for entry in &mut corpus.entries {
+            let Some(name) = entry.path.file_name() else {
+                continue;
+            };
+            if let Some(source) = recorded.get(&(name.to_owned(), entry.sha256.clone())) {
+                entry.source = *source;
+            }
+        }
+        Ok(corpus)
+    }
+
     /// Seed the corpus with default inputs.
     ///
     /// # Errors

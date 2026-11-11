@@ -119,6 +119,15 @@ pub(super) fn collect_crash_inputs(engine: EngineKind, out_dir: &Path) -> Vec<Pa
 }
 
 pub(super) fn collect_legacy_crash_inputs(out_dir: &Path) -> Vec<PathBuf> {
+    // Current runs keep their output under `runs/<id>/`; most workspaces never
+    // had the legacy tree. Its absence is the normal case, not a lost scan,
+    // so it is not reported on every inventory read.
+    if matches!(
+        std::fs::symlink_metadata(out_dir),
+        Err(ref error) if error.kind() == std::io::ErrorKind::NotFound
+    ) {
+        return Vec::new();
+    }
     hf_crash::ingest(out_dir, Uuid::nil(), Uuid::nil()).map_or_else(
         // Swallowed: a legacy output tree that cannot be scanned holds no
         // collectible crash inputs; logged like the engine-aware sibling

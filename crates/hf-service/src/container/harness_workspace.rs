@@ -100,6 +100,54 @@ pub fn is_generated_seed_name(name: &str) -> bool {
     name.starts_with("seed_") || name.starts_with("llmseed_") || name.starts_with("regen_")
 }
 
+/// Map each content digest in `corpus_dir` to the file that holds it, first
+/// removing generated seeds that duplicate another input.
+///
+/// Earlier seeding wrote a model-proposed seed even when its bytes were
+/// already in the corpus, leaving two files with one digest and a target whose
+/// inventory could no longer be recorded. Only a generated seed
+/// ([`is_generated_seed_name`]) is ever removed, and only when another file
+/// keeps the same bytes, so no input is lost.
+pub(super) fn retire_duplicate_generated_seeds(
+    corpus_dir: &Path,
+) -> Result<std::collections::HashMap<String, String>, ClassifiedError> {
+    let mut held = std::collections::HashMap::new();
+    if !corpus_dir.is_dir() {
+        return Ok(held);
+    }
+    let mut entries: Vec<(String, String, PathBuf)> = hf_corpus::list(corpus_dir)?
+        .entries
+        .into_iter()
+        .filter_map(|entry| {
+            let name = entry.path.file_name()?.to_str()?.to_owned();
+            Some((entry.sha256, name, entry.path))
+        })
+        .collect();
+    // Keep an earned or hand-placed input over a generated one, then the
+    // oldest heuristic seed over a model-proposed one.
+    entries
+        .sort_by_key(|(_, name, _)| (is_generated_seed_name(name), name.starts_with("llmseed_")));
+    for (sha, name, path) in entries {
+        match held.entry(sha) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(name);
+            }
+            std::collections::hash_map::Entry::Occupied(_) if is_generated_seed_name(&name) => {
+                std::fs::remove_file(&path).map_err(|error| {
+                    ClassifiedError::Internal(format!(
+                        "remove duplicate generated seed {}: {error}",
+                        path.display()
+                    ))
+                })?;
+            }
+            // Two non-generated files with one digest are not this function's
+            // to resolve; the recording step reports them.
+            std::collections::hash_map::Entry::Occupied(_) => {}
+        }
+    }
+    Ok(held)
+}
+
 /// Generate target-aware seed inputs for a corpus.
 ///
 /// A format is chosen only when the target's name states it. "parse" alone

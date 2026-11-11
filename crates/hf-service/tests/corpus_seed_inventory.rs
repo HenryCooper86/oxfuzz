@@ -75,3 +75,40 @@ async fn seeding_preserves_existing_corpus_inventory() {
         "the campaign-grown entry must survive a later seeding pass: {persisted:?}"
     );
 }
+
+/// The Corpus page and the Artifacts page describe the same files. The
+/// directory listing alone cannot say where an input came from, so the
+/// inventory takes each entry's source from the persisted record.
+#[tokio::test]
+async fn the_corpus_inventory_reports_each_entrys_recorded_source() {
+    use hf_core::corpus::CorpusSource;
+
+    isolate_workspace();
+    let project = fixture_project();
+    let store_dir = tempfile::tempdir().unwrap();
+    let container = ServiceContainer::stubbed()
+        .with_store_path(store_dir.path().join("store.db"))
+        .await
+        .unwrap();
+    let target = "parse_value";
+    container.corpus_seed(project.path(), target).await.unwrap();
+
+    // Dropped into the directory by hand and never recorded.
+    let corpus_dir = hf_service::workspace_dir(project.path(), target).join("corpus");
+    std::fs::write(corpus_dir.join("by_hand"), b"hand-written input").unwrap();
+
+    let inventory = container
+        .corpus_inventory(project.path(), target)
+        .await
+        .unwrap();
+    assert_eq!(inventory.entries.len(), 3);
+    for entry in &inventory.entries {
+        let name = entry.path.file_name().unwrap().to_string_lossy();
+        let expected = if name == "by_hand" {
+            CorpusSource::Manual
+        } else {
+            CorpusSource::Seed
+        };
+        assert_eq!(entry.source, expected, "{name}");
+    }
+}

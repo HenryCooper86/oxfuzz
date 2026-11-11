@@ -474,7 +474,8 @@ pub async fn corpus_list(
 ) -> Result<serde_json::Value, String> {
     let corpus = state
         .container
-        .corpus_list(std::path::Path::new(&project), &target)
+        .corpus_inventory(std::path::Path::new(&project), &target)
+        .await
         .map_err(|e| e.to_string())?;
     serde_json::to_value(&corpus.entries).map_err(|e| e.to_string())
 }

@@ -3108,7 +3108,8 @@ async fn corpus(
         "list" => {
             let corpus = state
                 .container
-                .corpus_list(&project, &req.target)
+                .corpus_inventory(&project, &req.target)
+                .await
                 .map_err(classified_api_error)?;
             Ok(Json(public_file_rows(corpus.entries)?))
         }

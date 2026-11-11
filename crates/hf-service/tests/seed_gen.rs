@@ -226,3 +226,57 @@ async fn generate_seeds_reports_only_the_seeds_it_wrote() {
         "a pre-existing entry is not reported as generated"
     );
 }
+
+/// A proposed seed whose bytes are already in the corpus under another name
+/// adds nothing, and two files with one digest cannot be recorded for a
+/// target: before, the whole seeding call (and the scheduled campaign that
+/// made it) failed with "duplicate corpus hash".
+#[tokio::test]
+async fn generate_seeds_llm_skips_content_the_corpus_already_holds() {
+    isolate_workspace();
+    let project = write_sample_project();
+    let store = Arc::new(
+        hf_storage::Store::connect(project.path().join("seeds.db"))
+            .await
+            .unwrap(),
+    );
+    let container = ServiceContainer::new(
+        Arc::new(hf_runtime::StubRuntime),
+        Some(Arc::new(HexSeedPool {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        })),
+    )
+    .with_store(store);
+    // The pool proposes "{}" among its seeds; the corpus already has it.
+    let corpus = hf_service::workspace_dir(project.path(), "parse_entry").join("corpus");
+    std::fs::create_dir_all(&corpus).unwrap();
+    std::fs::write(corpus.join("seed_empty_obj"), b"{}").unwrap();
+    // Left behind by an earlier run of the defect: a generated seed that
+    // duplicates another input. It is removed so the target can be recorded.
+    std::fs::write(corpus.join("seed_marker"), b"left-behind").unwrap();
+    std::fs::write(corpus.join("llmseed_40"), b"left-behind").unwrap();
+
+    let written = container
+        .generate_seeds_llm(project.path(), "parse_entry", TargetLanguage::C, 8)
+        .await
+        .expect("a duplicate proposal must not fail seeding");
+    assert_eq!(written.len(), 1, "{written:?}");
+
+    let mut contents: Vec<Vec<u8>> = std::fs::read_dir(&corpus)
+        .unwrap()
+        .map(|entry| std::fs::read(entry.unwrap().path()).unwrap())
+        .collect();
+    let total = contents.len();
+    contents.sort();
+    contents.dedup();
+    assert_eq!(contents.len(), total, "no two corpus files share content");
+    assert!(corpus.join("seed_marker").exists());
+    assert!(!corpus.join("llmseed_40").exists());
+
+    // Rewriting its own earlier seeds is still idempotent.
+    let again = container
+        .generate_seeds_llm(project.path(), "parse_entry", TargetLanguage::C, 8)
+        .await
+        .expect("repeat seeding succeeds");
+    assert_eq!(again.len(), written.len());
+}

@@ -665,7 +665,7 @@ pub(crate) async fn cmd_corpus(
             );
         }
         "list" => {
-            let corpus = container.corpus_list(&project, target)?;
+            let corpus = container.corpus_inventory(&project, target).await?;
             println!("{}", serde_json::to_string_pretty(&corpus.entries)?);
         }
         other => {

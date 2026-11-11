@@ -3060,6 +3060,10 @@ impl ServiceContainer {
                 .collect();
         }
 
+        // One digest is recorded once per target. A proposal whose bytes the
+        // corpus already holds under another name adds nothing, and writing it
+        // would make the inventory unrecordable.
+        let held = super::harness_workspace::retire_duplicate_generated_seeds(&corpus_dir)?;
         let mut named_seeds = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for (i, data) in datas.into_iter().enumerate() {
@@ -3069,6 +3073,9 @@ impl ServiceContainer {
                 continue;
             }
             let name = format!("llmseed_{i}");
+            if held.get(&sha).is_some_and(|holder| *holder != name) {
+                continue;
+            }
             named_seeds.push((data, name));
         }
 

@@ -102,12 +102,6 @@ impl ToolRegistryImpl {
         ))
     }
 
-    /// Get a tool definition by name.
-    pub async fn get_definition(&self, name: &ToolName) -> Option<ToolDefinition> {
-        let inner = self.inner.read().await;
-        inner.definitions.get(name).cloned()
-    }
-
     /// Search for tools by keywords in name/description and optional category.
     ///
     /// The query is split on whitespace, commas, or semicolons into individual
