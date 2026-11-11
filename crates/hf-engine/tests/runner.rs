@@ -569,6 +569,45 @@ async fn cancelled_run_returns_ok_instead_of_erroring() {
     assert!(cancelled.is_ok(), "a cancelled run should not error");
 }
 
+/// Without its UI, AFL++ prints one line per queue entry it starts on --
+/// hundreds per second. They carry no progress the stats events lack, and
+/// forwarding each one floods the live log every presentation layer renders.
+#[tokio::test]
+async fn afl_per_test_case_lines_are_not_forwarded_to_the_live_log() {
+    let rt = MockRuntime {
+        exit_code: 0,
+        stdout: "[+] All set and ready to roll!\n\u{1b}[1;94m[*] \u{1b}[0mFuzzing test case #53 (64 total, 0 crashes saved, state: started :-), mode=explore, perf_score=459, exec_us=3, hits=0, map=9, ascii=0, run_time=0:00:00:46)...\u{1b}[0m\n[*] Fuzzing test case #54 (64 total, 0 crashes saved)...\n[+] We're done here. Have a nice day!\n".to_owned(),
+        termination: CommandTermination::Completed,
+    };
+    let lines = std::sync::Mutex::new(Vec::new());
+    let result = EngineRunner::new()
+        .run_streaming(
+            EngineKind::AflPlusPlus,
+            &run_config(EngineKind::AflPlusPlus, 60),
+            "/work/fuzz_bin",
+            "/work/corpus",
+            "/work/out",
+            &rt,
+            &PathBuf::from("/work"),
+            &tokio_util::sync::CancellationToken::new(),
+            &|event| {
+                if let FuzzProgress::LogLine(line) = event {
+                    lines.lock().unwrap().push(line);
+                }
+            },
+        )
+        .await;
+    assert!(result.is_ok(), "{:?}", result.err());
+    let lines = lines.into_inner().unwrap();
+    assert_eq!(
+        lines,
+        vec![
+            "[+] All set and ready to roll!".to_owned(),
+            "[+] We're done here. Have a nice day!".to_owned(),
+        ]
+    );
+}
+
 #[tokio::test]
 async fn runner_afl_parses_progress() {
     let rt = MockRuntime {

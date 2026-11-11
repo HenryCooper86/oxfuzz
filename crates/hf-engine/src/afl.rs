@@ -357,6 +357,17 @@ pub enum AflStatsError {
     AggregateOverflow { key: &'static str },
 }
 
+/// Whether `line` is AFL++'s per-queue-entry console line.
+///
+/// With `AFL_NO_UI` set AFL++ prints "Fuzzing test case #N (...)" each time it
+/// starts on a queue entry -- hundreds of lines per second on a fast target.
+/// The periodic `fuzzer_stats` snapshot already reports everything they say,
+/// so the live log omits them; the run's captured output keeps them.
+#[must_use]
+pub fn is_test_case_chatter(line: &str) -> bool {
+    line.contains("Fuzzing test case #")
+}
+
 /// Parse a bounded AFL++ `fuzzer_stats` snapshot.
 ///
 /// Only exact, documented keys are accepted. Unknown fields are ignored, but

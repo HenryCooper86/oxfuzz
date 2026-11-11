@@ -314,7 +314,9 @@ impl EngineRunner {
             if line_signals_completion(line) {
                 saw_completion.store(true, Relaxed);
             }
-            on_progress(FuzzProgress::LogLine(line.to_owned()));
+            if !(engine == EngineKind::AflPlusPlus && crate::afl::is_test_case_chatter(line)) {
+                on_progress(FuzzProgress::LogLine(line.to_owned()));
+            }
             if is_syzkaller {
                 // Structured syzkaller progress comes only from status lines;
                 // emit coverage live and a crash event per newly-seen crash.

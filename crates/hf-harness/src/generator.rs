@@ -55,6 +55,7 @@ async fn complete_draft(
     let source = extract_code_block(resp.text()).ok_or_else(|| {
         ClassifiedError::Harness("LLM response contained no fenced code block".to_owned())
     })?;
+    let source = declare_target_if_missing(target, engine, source, llm.as_ref()).await;
     Ok(HarnessDraft {
         target_id: target.id,
         engine,
@@ -69,6 +70,81 @@ async fn complete_draft(
         rationale: String::new(),
         generator: hf_core::harness::DraftGenerator::Llm,
     })
+}
+
+/// Whether a C draft calls the target without any declaration in scope.
+///
+/// The compiler rejects such a draft ("call to undeclared function"), and the
+/// step-by-step harness flow compiles exactly the source the person reviewed,
+/// with no repair loop. A project header include may declare the target, so
+/// any quoted include counts as a declaration.
+fn target_call_lacks_declaration(source: &str, target: &TargetCandidate) -> bool {
+    if target.language != TargetLanguage::C {
+        return false;
+    }
+    let includes_project_header = source
+        .lines()
+        .map(str::trim_start)
+        .any(|line| line.starts_with("#include") && line.contains('"'));
+    if includes_project_header {
+        return false;
+    }
+    let Some(entry) = source.find("LLVMFuzzerTestOneInput") else {
+        return false;
+    };
+    let (before, after) = source.split_at(entry);
+    contains_identifier(after, &target.symbol) && !contains_identifier(before, &target.symbol)
+}
+
+/// Whether `text` contains `name` as a whole C identifier.
+fn contains_identifier(text: &str, name: &str) -> bool {
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    text.match_indices(name).any(|(at, _)| {
+        let before = text[..at].chars().next_back();
+        let after = text[at + name.len()..].chars().next();
+        !before.is_some_and(is_ident) && !after.is_some_and(is_ident)
+    })
+}
+
+/// One corrective pass for a draft that calls the target undeclared.
+///
+/// The correction is kept only when it still calls the target and now
+/// declares it; anything else leaves the original draft, whose compile error
+/// then says what is wrong.
+async fn declare_target_if_missing(
+    target: &TargetCandidate,
+    engine: EngineKind,
+    source: String,
+    llm: &dyn LlmProvider,
+) -> String {
+    if !target_call_lacks_declaration(&source, target) {
+        return source;
+    }
+    let diagnostics = format!(
+        "harness.c: error: call to undeclared function '{symbol}'; ISO C99 and later do not \
+         support implicit function declarations. Declare '{symbol}' before \
+         LLVMFuzzerTestOneInput with the exact prototype from the target source, or include \
+         the project header that declares it.",
+        symbol = target.symbol
+    );
+    let prompt = render_harness_repair_prompt(target, engine, &source, &diagnostics);
+    let request = ChatRequest::from_messages(vec![Message::user(prompt)]);
+    // Swallowed: a failed correction call leaves the original draft, and the
+    // compile step then reports the undeclared call itself.
+    let corrected = llm
+        .chat_completion(&request)
+        .await
+        .ok()
+        .and_then(|response| extract_code_block(response.text()));
+    match corrected {
+        Some(corrected)
+            if contains_identifier(&corrected, &target.symbol)
+                && !target_call_lacks_declaration(&corrected, target) =>
+        {
+            corrected
+        }
+        _ => source,
+    }
 }
 
 /// Maximum characters of build diagnostics to feed back into a repair prompt.
@@ -999,7 +1075,7 @@ pub async fn smoke_fuzz_in_paths_with_config_and_sandbox_image(
     let combined = format!("{}\n{}", result.stdout, result.stderr);
     let mutator_exercised =
         crate::managed_mutator::observe_smoke(&mut harness, &combined, result.exit_code);
-    let execs = parse_execs_per_sec(&combined);
+    let execs = smoke_execs_per_sec(harness.engine, &out_dir, &combined);
     let crashes = parse_crashes(&combined).max(count_smoke_artifacts(harness.engine, &out_dir));
     // The harness is valid only if the fuzzer actually exercised the target. A
     // crash (even at 0 exec/s, found immediately) proves it did. Otherwise we
@@ -1430,6 +1506,29 @@ fn extract_code_block(s: &str) -> Option<String> {
     Some(after_lang[..end].to_owned())
 }
 
+/// Execution rate of a finished smoke run.
+///
+/// AFL++ records its measured rate in `fuzzer_stats`, which campaigns already
+/// read; its console lines carry per-test-case numbers that are not rates, so
+/// scraping them reported nonsense into the approval evidence. Other engines,
+/// and an AFL++ run without a measured snapshot, are read from their output.
+fn smoke_execs_per_sec(engine: EngineKind, out_dir: &Path, output: &str) -> f64 {
+    let measured = (engine == EngineKind::AflPlusPlus)
+        .then(|| {
+            // Swallowed: a missing, unsafe or malformed stats file only means
+            // this run has no engine-recorded rate; the output scrape below
+            // still decides whether the harness ran.
+            hf_engine::afl::read_fuzzer_stats(out_dir).ok().flatten()
+        })
+        .flatten()
+        // The startup snapshot (run_time 0) divides a few calibration execs by
+        // almost no time; its rate is not a measurement.
+        .filter(|stats| stats.run_time_secs != Some(0))
+        .and_then(|stats| stats.execs_per_sec)
+        .filter(|rate| rate.is_finite() && *rate > 0.0);
+    measured.unwrap_or_else(|| parse_execs_per_sec(output))
+}
+
 /// Parse execs/sec from fuzzer stdout.
 fn parse_execs_per_sec(stdout: &str) -> f64 {
     // Match libFuzzer's "exec/s: N" as well as "5000 execs/sec" and
@@ -1835,6 +1934,65 @@ mod tests {
             reachable_functions: Vec::new(),
             accumulated_complexity: 3,
         }
+    }
+
+    const UNDECLARED: &str = "#include <stdint.h>\n#include <stddef.h>\n\nint LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n    parse_header(data, size);\n    return 0;\n}\n";
+    const DECLARED: &str = "#include <stdint.h>\n#include <stddef.h>\n\nint parse_header(const uint8_t *data, size_t size);\n\nint LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n    parse_header(data, size);\n    return 0;\n}\n";
+
+    #[test]
+    fn an_undeclared_target_call_is_detected_only_when_nothing_declares_it() {
+        let target = sample_target();
+        assert!(target_call_lacks_declaration(UNDECLARED, &target));
+        assert!(!target_call_lacks_declaration(DECLARED, &target));
+        // A project header may declare it.
+        let with_header = UNDECLARED.replace("#include <stddef.h>", "#include \"parse.h\"");
+        assert!(!target_call_lacks_declaration(&with_header, &target));
+        // A longer identifier that merely contains the symbol is not a declaration.
+        let lookalike = UNDECLARED.replace(
+            "int LLVMFuzzerTestOneInput",
+            "int parse_header_v2(void);\nint LLVMFuzzerTestOneInput",
+        );
+        assert!(target_call_lacks_declaration(&lookalike, &target));
+        // C++ mangles and overloads; only C drafts are checked.
+        let mut cpp = sample_target();
+        cpp.language = TargetLanguage::Cpp;
+        assert!(!target_call_lacks_declaration(UNDECLARED, &cpp));
+    }
+
+    #[tokio::test]
+    async fn a_draft_that_calls_the_target_undeclared_gets_one_correction() {
+        let target = sample_target();
+        let llm = MockProvider::fixed(format!("```c\n{DECLARED}```"));
+        let source =
+            declare_target_if_missing(&target, EngineKind::LibFuzzer, UNDECLARED.to_owned(), &llm)
+                .await;
+        assert_eq!(source, DECLARED);
+    }
+
+    #[tokio::test]
+    async fn a_correction_that_drops_the_target_call_is_not_accepted() {
+        let target = sample_target();
+        let seen = Arc::new(Mutex::new(String::new()));
+        // This provider answers with a harness that never calls the target.
+        let llm = CaptureProvider {
+            seen: Arc::clone(&seen),
+        };
+        let source =
+            declare_target_if_missing(&target, EngineKind::LibFuzzer, UNDECLARED.to_owned(), &llm)
+                .await;
+        assert_eq!(source, UNDECLARED);
+        let prompt = seen.lock().expect("capture lock").clone();
+        assert!(
+            prompt.contains("call to undeclared function 'parse_header'"),
+            "{prompt}"
+        );
+        // A draft that already declares the target costs no extra model call.
+        seen.lock().expect("capture lock").clear();
+        let untouched =
+            declare_target_if_missing(&target, EngineKind::LibFuzzer, DECLARED.to_owned(), &llm)
+                .await;
+        assert_eq!(untouched, DECLARED);
+        assert!(seen.lock().expect("capture lock").is_empty());
     }
 
     #[tokio::test]
@@ -2649,6 +2807,45 @@ mod tests {
             "summary exceeded the budget: {}",
             summary.len()
         );
+    }
+
+    #[test]
+    fn afl_smoke_rate_comes_from_the_engines_own_stats_file() {
+        let out = tempfile::tempdir().unwrap();
+        let instance = out.path().join("default");
+        std::fs::create_dir(&instance).unwrap();
+        std::fs::write(
+            instance.join("fuzzer_stats"),
+            "run_time          : 60\nexecs_done        : 16117097\nexecs_per_sec     : 268613.81\n",
+        )
+        .unwrap();
+        // AFL++ without its UI prints per-test-case lines whose numbers are not
+        // rates; the scrape of this real line used to become the smoke rate.
+        let log = "[*] Fuzzing test case #53 (64 total, 0 crashes saved, perf_score=459, exec_us=3, hits=0, map=9)";
+        let rate = smoke_execs_per_sec(EngineKind::AflPlusPlus, out.path(), log);
+        assert!((rate - 268_613.81).abs() < 0.01, "{rate}");
+    }
+
+    #[test]
+    fn smoke_rate_falls_back_to_the_log_without_measured_afl_stats() {
+        let out = tempfile::tempdir().unwrap();
+        // No stats file at all.
+        let log = "    exec speed : 1234.5/sec";
+        let rate = smoke_execs_per_sec(EngineKind::AflPlusPlus, out.path(), log);
+        assert!((rate - 1234.5).abs() < f64::EPSILON, "{rate}");
+        // A startup snapshot (run_time 0) is not a measurement.
+        let instance = out.path().join("default");
+        std::fs::create_dir(&instance).unwrap();
+        std::fs::write(
+            instance.join("fuzzer_stats"),
+            "run_time          : 0\nexecs_per_sec     : 8000.00\n",
+        )
+        .unwrap();
+        let rate = smoke_execs_per_sec(EngineKind::AflPlusPlus, out.path(), log);
+        assert!((rate - 1234.5).abs() < f64::EPSILON, "{rate}");
+        // Other engines never consult an AFL++ stats file.
+        let rate = smoke_execs_per_sec(EngineKind::LibFuzzer, out.path(), "exec/s: 500");
+        assert!((rate - 500.0).abs() < f64::EPSILON, "{rate}");
     }
 
     #[test]
