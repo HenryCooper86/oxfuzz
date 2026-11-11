@@ -191,3 +191,113 @@ async fn workflow_routes_preserve_service_approval_denials() {
         );
     }
 }
+
+const TOKEN: &str = "workflow-parity-test-token-0123456789";
+
+fn token_router(container: ServiceContainer, project: &Path) -> Router {
+    hf_web::build_with_state_and_security(
+        hf_web::AppState::new(container),
+        hf_web::WebSecurityConfig::new(
+            Some(TOKEN.to_owned()),
+            false,
+            Vec::new(),
+            vec![project.to_path_buf()],
+        )
+        .unwrap(),
+    )
+}
+
+async fn post_as_operator(app: &Router, uri: &str, body: Value) -> (StatusCode, Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {TOKEN}"))
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+/// On a token-authenticated server the workflow request is the operator's
+/// decision for that one operation, as a desktop click is; nothing else the
+/// server runs inherits it.
+#[tokio::test]
+async fn an_authenticated_workflow_request_approves_only_its_own_operation() {
+    let (_directory, project) = project_fixture();
+    let gate = Arc::new(DenyApproval::default());
+    let container = ServiceContainer::new(Arc::new(CoverageRuntime), None)
+        .with_store_path(project.join("state.db"))
+        .await
+        .unwrap()
+        .with_guardrails(Guardrails::new(GuardrailPolicy::default(), gate.clone()));
+    let app = token_router(container.clone(), &project);
+    let (_, body) = post_as_operator(
+        &app,
+        "/harness/promote-with-findings",
+        json!({ "project": project, "target": "parse", "engine": "libfuzzer" }),
+    )
+    .await;
+    assert!(
+        !body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("approval declined"),
+        "{body}"
+    );
+    // Coverage measurement is not an explicit approval route: it still asks
+    // the server's own gate, which declines.
+    let (status, body) = post_as_operator(
+        &app,
+        "/coverage/functions",
+        json!({ "project": project, "target": "parse" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!([]));
+    assert_eq!(*gate.0.lock().unwrap(), vec![Action::RunHarness]);
+    let decisions = container.policy_decisions(10).await.unwrap();
+    assert!(decisions.iter().any(|decision| {
+        decision.origin == "harness_promote_with_findings" && decision.decision == "approved"
+    }));
+}
+
+#[tokio::test]
+async fn an_explicit_workflow_request_cannot_override_a_hard_policy_denial() {
+    let (_directory, project) = project_fixture();
+    let container = ServiceContainer::new(Arc::new(CoverageRuntime), None)
+        .with_store_path(project.join("state.db"))
+        .await
+        .unwrap()
+        .with_guardrails(Guardrails::new(
+            GuardrailPolicy {
+                auto_allow_max: hf_service::RiskTier::Low,
+                deny_at: Some(hf_service::RiskTier::High),
+            },
+            Arc::new(DenyApproval::default()),
+        ));
+    let app = token_router(container, &project);
+    let (status, body) = post_as_operator(
+        &app,
+        "/harness/promote-with-findings",
+        json!({ "project": project, "target": "parse", "engine": "libfuzzer" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("denied by policy"),
+        "{body}"
+    );
+}

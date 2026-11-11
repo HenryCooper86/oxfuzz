@@ -302,11 +302,13 @@ async fn qualify_submission(
     let submission_id = parse_identifier(&submission_id)?;
     require_empty_body(request).await?;
     authorize_submission(&state, submission_id).await?;
-    let attempt = state
-        .container
-        .qualify_harness_work_order_submission(submission_id)
-        .await
-        .map_err(work_order_api_error)?;
+    let attempt = crate::router::workflow_container(
+        &state,
+        hf_service::workflow_approval::ExplicitAction::RunHarness,
+    )
+    .qualify_harness_work_order_submission(submission_id)
+    .await
+    .map_err(work_order_api_error)?;
     Ok(Json(attempt))
 }
 
@@ -367,11 +369,13 @@ async fn promote_attempt(
     let attempt_id = parse_identifier(&attempt_id)?;
     require_empty_body(request).await?;
     authorize_attempt(&state, attempt_id).await?;
-    let harness = state
-        .container
-        .promote_harness_work_order_attempt(attempt_id)
-        .await
-        .map_err(work_order_api_error)?;
+    let harness = crate::router::workflow_container(
+        &state,
+        hf_service::workflow_approval::ExplicitAction::PromoteHarness,
+    )
+    .promote_harness_work_order_attempt(attempt_id)
+    .await
+    .map_err(work_order_api_error)?;
     Ok(Json(PromotedHarnessResponse {
         id: harness.id,
         target_id: harness.target_id,

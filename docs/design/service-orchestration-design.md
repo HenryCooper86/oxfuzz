@@ -436,6 +436,13 @@ when a bearer token is configured. An open-access server
 environment gate instead, and an open-access server refuses
 `POST /chat/permission` (see `web-api-security-design.md` section 2).
 
+An explicit workflow action is a second, narrower source of approval:
+`workflow_approval::with_user_approval` clones the container with a gate that
+approves exactly the operation the person selected. The desktop shell applies
+it to its workflow commands, and the web server applies it to the matching
+routes when a bearer token is configured. The two presentation layers share
+this one implementation.
+
 ### 4.2 Coverage Regression Rollback
 
 Automatic harness rollback is evidence-gated. A completed campaign run may be

@@ -1,11 +1,18 @@
-//! Approval supplied by an explicit desktop workflow action.
+//! Approval supplied by an explicit workflow action in a presentation layer.
+//!
+//! A person who clicks a workflow button (the desktop shell), or sends the
+//! equivalent authenticated request (a token-authenticated web server), has
+//! decided that one operation. The gate here turns that decision into approval
+//! for exactly the selected [`Action`] on a clone of the container, so nothing
+//! else the process runs inherits it and configured hard denials still apply.
 
 use std::sync::Arc;
 
-use hf_service::{Action, ApprovalGate, ServiceContainer};
+use crate::{Action, ApprovalGate, ServiceContainer};
 
-#[derive(Clone, Copy)]
-pub(crate) enum ExplicitAction {
+/// The operation an explicit workflow action selects.
+#[derive(Clone, Copy, Debug)]
+pub enum ExplicitAction {
     RunHarness,
     PromoteHarness,
     RunFuzzer,
@@ -23,7 +30,9 @@ pub(crate) enum ExplicitAction {
     AutomotiveReplay,
 }
 
-pub(crate) fn with_user_approval(
+/// Clone `container` with approval limited to `action`.
+#[must_use]
+pub fn with_user_approval(
     container: &ServiceContainer,
     action: ExplicitAction,
 ) -> ServiceContainer {
@@ -75,7 +84,7 @@ impl ApprovalGate for WorkflowApproval {
 mod tests {
     use std::sync::Arc;
 
-    use hf_service::{Action, ApprovalGate, GuardrailPolicy, Guardrails, ServiceContainer};
+    use crate::{Action, ApprovalGate, GuardrailPolicy, Guardrails, ServiceContainer};
 
     use super::{with_user_approval, ExplicitAction};
 
@@ -199,8 +208,8 @@ mod tests {
     async fn explicit_click_cannot_override_a_hard_policy_denial() {
         let original = service().with_guardrails(Guardrails::new(
             GuardrailPolicy {
-                auto_allow_max: hf_service::RiskTier::Low,
-                deny_at: Some(hf_service::RiskTier::High),
+                auto_allow_max: crate::RiskTier::Low,
+                deny_at: Some(crate::RiskTier::High),
             },
             Arc::new(Decline),
         ));
@@ -217,8 +226,8 @@ mod tests {
     async fn triage_consent_does_not_extend_to_harness_execution() {
         let original = service().with_guardrails(Guardrails::new(
             GuardrailPolicy {
-                auto_allow_max: hf_service::RiskTier::Low,
-                deny_at: Some(hf_service::RiskTier::Critical),
+                auto_allow_max: crate::RiskTier::Low,
+                deny_at: Some(crate::RiskTier::Critical),
             },
             Arc::new(Decline),
         ));

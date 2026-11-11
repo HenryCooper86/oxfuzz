@@ -263,6 +263,11 @@ impl WebSecurityConfig {
         &self.project_roots
     }
 
+    /// The approved roots, shared with the response-redaction scope.
+    pub(crate) fn shared_project_roots(&self) -> Arc<Vec<PathBuf>> {
+        Arc::clone(&self.project_roots)
+    }
+
     /// Remaining lockout when failed authentications reached
     /// [`AUTH_FAILURE_THRESHOLD`] within [`AUTH_FAILURE_WINDOW`]; `None` when a
     /// new attempt may be evaluated. The gate is shared by every clone of this
@@ -470,6 +475,41 @@ pub(crate) enum PathPolicyError {
     OutsideProject,
 }
 
+tokio::task_local! {
+    /// Approved project roots of the request whose response is being built.
+    static PUBLIC_PROJECT_ROOTS: Arc<Vec<PathBuf>>;
+}
+
+/// Run `request` with the server's approved project roots visible to response
+/// redaction, so a `project_root` inside them is returned instead of redacted.
+///
+/// The client chose that path and repeats it on every project-scoped request,
+/// so it is the browser's identity for the project, not a host secret. Outside
+/// this scope (events, background work, tests) every path is redacted.
+pub(crate) async fn with_public_project_roots<F: std::future::Future>(
+    roots: Arc<Vec<PathBuf>>,
+    request: F,
+) -> F::Output {
+    PUBLIC_PROJECT_ROOTS.scope(roots, request).await
+}
+
+/// Whether `path` is a project location the current request may be shown.
+fn is_public_project_root(path: &str) -> bool {
+    let path = Path::new(path);
+    // A stored root is canonical; anything that still needs normalizing is
+    // not one, and component-wise `starts_with` would let `..` escape a root.
+    if path
+        .components()
+        .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return false;
+    }
+    PUBLIC_PROJECT_ROOTS
+        .try_with(|roots| roots.iter().any(|root| path.starts_with(root)))
+        // Outside a request scope nothing is exempt.
+        .unwrap_or(false)
+}
+
 pub(crate) fn redact_public_json(mut value: serde_json::Value) -> serde_json::Value {
     redact_json_value(&mut value);
     value
@@ -490,6 +530,11 @@ fn redact_json_value(value: &mut serde_json::Value) {
                     *item = serde_json::Value::Object(serde_json::Map::new());
                 } else if is_secret_key(key) {
                     *item = serde_json::Value::Null;
+                } else if is_project_root_key(key)
+                    && item.as_str().is_some_and(is_public_project_root)
+                {
+                    // The request's own project identity; see
+                    // [`with_public_project_roots`].
                 } else if is_path_key(key) {
                     redact_json_path_values(item);
                 } else {
@@ -499,6 +544,10 @@ fn redact_json_value(value: &mut serde_json::Value) {
         }
         _ => {}
     }
+}
+
+fn is_project_root_key(key: &str) -> bool {
+    key.eq_ignore_ascii_case("project_root")
 }
 
 fn redact_json_path_values(value: &mut serde_json::Value) {
@@ -659,6 +708,32 @@ mod tests {
         assert_eq!(redacted["source_paths"][0], "<redacted-path>");
         assert_eq!(redacted["source_paths"][1], "src/parser.c");
         assert_eq!(redacted["location"]["file"], "src/parser.c");
+    }
+
+    /// The browser selected the project by this path and every project-scoped
+    /// request repeats it, so a run's or finding's `project_root` inside the
+    /// approved roots is the client's own identity for it, not a host secret.
+    #[tokio::test]
+    async fn a_project_root_inside_the_approved_roots_is_returned_to_its_request() {
+        let roots = std::sync::Arc::new(vec![std::path::PathBuf::from("/srv/projects")]);
+        let redacted = super::with_public_project_roots(roots, async {
+            redact_public_json(serde_json::json!({
+                "project_root": "/srv/projects/parser",
+                "owner": { "project_root": "/srv/projects/parser" },
+                "evidence_dir": "/srv/projects/parser/evidence",
+                "other": { "project_root": "/home/operator/private" },
+                "escape": { "project_root": "/srv/projects/../secrets" },
+                "sibling": { "project_root": "/srv/projects-private/x" },
+            }))
+        })
+        .await;
+        assert_eq!(redacted["project_root"], "/srv/projects/parser");
+        assert_eq!(redacted["owner"]["project_root"], "/srv/projects/parser");
+        // Only the project identity is exempt; every other path stays hidden.
+        assert_eq!(redacted["evidence_dir"], "<redacted-path>");
+        assert_eq!(redacted["other"]["project_root"], "<redacted-path>");
+        assert_eq!(redacted["escape"]["project_root"], "<redacted-path>");
+        assert_eq!(redacted["sibling"]["project_root"], "<redacted-path>");
     }
 
     #[test]

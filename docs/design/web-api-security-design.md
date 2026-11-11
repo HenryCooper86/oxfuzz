@@ -34,6 +34,21 @@ the SSE size limit) is denied at once with a logged reason instead of waiting
 for the five-minute approval timeout, so a headless caller of `/chat/agent`
 gets its answer immediately.
 
+Explicit workflow routes carry scoped approval on a token-authenticated server.
+A request to a route that selects one gated operation (harness smoke test,
+harness approval, fuzz run or replay start, engine-backed corpus operations,
+triage and crash scan, issue filing, DefectDojo publication, project build,
+change-comparison publication, remediation verification, work-order
+qualification and promotion) is the operator's decision for that operation,
+exactly as the corresponding desktop click is. The route runs on a clone of the
+container whose gate approves only that `Action`
+(`hf_service::workflow_approval`), so no other request and no background work
+inherits it, a hard policy denial (`deny_at`) still applies, and the decision
+is recorded in the policy audit trail. This grants the token holder nothing
+new: the same principal already answers every chat approval prompt. An
+open-access server keeps the environment gate for these routes, and automotive
+routes keep it on every web server.
+
 Browser cross-origin access is denied except for exact origins in
 `HF_WEB_CORS_ORIGINS`. The default allowlist contains only the standard local
 Vite origins. CORS permits `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, and `OPTIONS`, plus
@@ -143,7 +158,19 @@ REST responses do not expose absolute host paths, provider credentials,
 authorization headers, environment-variable secret names, or raw secret config
 values. Path-bearing service records retain their shape where browser parity
 requires it, but absolute path values are replaced by an explicit redaction
-marker. Provider and raw-config reads clear secret fields. Desktop commands are
+marker. One value is exempt: a `project_root` that lies inside the server's
+approved project roots is returned as is within the request that asked for it.
+The browser selected the project by that path and repeats it on every
+project-scoped request, and run events already carry it, so it is the client's
+identity for the project rather than a host secret; the browser keys run
+output, run health and findings by it. The exemption is request-scoped
+(`security::with_public_project_roots`), applies to that key only, and never
+to a path containing `..`; workspace, evidence, corpus and configuration paths
+stay redacted, and report DTOs keep their redacted `project`. File-listing
+rows (corpus inputs and crash reproducers) additionally
+carry `name`, the file's final path component, because a redacted path no
+longer names or identifies the row; clients display `name` and never use a
+redacted path as identity. Provider and raw-config reads clear secret fields. Desktop commands are
 not changed in general; their trusted local presentation can continue to show
 local paths. One-time recovery is stricter across every presentation: REST,
 Tauri, and CLI use the service-owned bounded recovery error code and message,

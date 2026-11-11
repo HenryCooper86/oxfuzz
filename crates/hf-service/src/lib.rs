@@ -96,6 +96,7 @@ pub mod triage_disposition;
 pub mod unreached_surface;
 pub mod verification;
 pub mod workbench;
+pub mod workflow_approval;
 
 #[cfg(feature = "build-doctor")]
 pub use build_profiles::SaveBuildProfileRequest;

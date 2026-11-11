@@ -22,6 +22,7 @@ use hf_service::{
 
 use crate::security::{redact_config_text, redact_public_json};
 use crate::WebSecurityConfig;
+use hf_service::workflow_approval::{with_user_approval, ExplicitAction};
 
 mod allocation;
 
@@ -1080,7 +1081,7 @@ async fn auth_audit(
     }
 
     tracing::info!(%method, %path, "hf-web request");
-    next.run(req).await
+    crate::security::with_public_project_roots(security.shared_project_roots(), next.run(req)).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1271,6 +1272,61 @@ fn public_value<T: Serialize>(value: T) -> Result<serde_json::Value, ApiError> {
     Ok(redact_public_json(value))
 }
 
+/// Public form of file-listing rows (corpus inputs, crash reproducers).
+///
+/// Redaction replaces every absolute host path with one marker, so a row's
+/// path no longer names its file. Each row gains `name`, the final path
+/// component, before redaction; a file name inside the workspace is not a host
+/// location, and the listing is unusable without it.
+fn public_file_rows<T: Serialize>(rows: T) -> Result<serde_json::Value, ApiError> {
+    let mut value = serde_json::to_value(rows).map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("response serialization failed: {error}"),
+            }),
+        )
+    })?;
+    if let serde_json::Value::Array(rows) = &mut value {
+        for row in rows {
+            let serde_json::Value::Object(fields) = row else {
+                continue;
+            };
+            let name = ["path", "input_path"]
+                .iter()
+                .find_map(|key| fields.get(*key)?.as_str())
+                .and_then(|path| std::path::Path::new(path).file_name())
+                .map(|name| name.to_string_lossy().into_owned());
+            if let Some(name) = name {
+                fields.insert("name".to_owned(), serde_json::Value::String(name));
+            }
+        }
+    }
+    Ok(redact_public_json(value))
+}
+
+#[cfg(test)]
+mod public_file_rows_tests {
+    use super::public_file_rows;
+
+    #[test]
+    fn rows_keep_their_file_name_when_the_path_is_redacted() {
+        let rows = serde_json::json!([
+            { "path": "/srv/oxfuzz/workspaces/p/corpus/seed_a", "sha256": "aa" },
+            { "path": "/srv/oxfuzz/workspaces/p/corpus/seed_b", "sha256": "bb" },
+            { "input_path": "/srv/oxfuzz/workspaces/p/crashes/crash-1", "kind": "asan" },
+        ]);
+        let Ok(public) = public_file_rows(rows) else {
+            panic!("rows serialize");
+        };
+        assert_eq!(public[0]["name"], "seed_a");
+        assert_eq!(public[1]["name"], "seed_b");
+        assert_eq!(public[2]["name"], "crash-1");
+        assert_eq!(public[0]["path"], "<redacted-path>");
+        assert_eq!(public[2]["input_path"], "<redacted-path>");
+    }
+}
+
 #[cfg(feature = "proof-carrying")]
 #[derive(Debug, Deserialize)]
 struct CampaignEvidenceRequest {
@@ -1426,8 +1482,7 @@ async fn harness_tournament(
     Json(request): Json<hf_service::HarnessTournamentRequest>,
 ) -> ApiResult<serde_json::Value> {
     let _project = approved_project(&state, std::path::Path::new(&request.project))?;
-    let result = state
-        .container
+    let result = workflow_container(&state, ExplicitAction::RunHarness)
         .run_harness_tournament(request)
         .await
         .map_err(classified_api_error)?;
@@ -1460,8 +1515,7 @@ async fn build_run(
     Json(request): Json<hf_service::RunBuildPlanRequest>,
 ) -> ApiResult<serde_json::Value> {
     let _project = approved_project(&state, std::path::Path::new(&request.project))?;
-    let outcome = state
-        .container
+    let outcome = workflow_container(&state, ExplicitAction::RunProjectBuild)
         .run_build_plan(request)
         .await
         .map_err(classified_api_error)?;
@@ -1569,8 +1623,7 @@ async fn change_publish(
 ) -> ApiResult<serde_json::Value> {
     approve_run_owner(&state, &request.base_run_id.to_string()).await?;
     approve_run_owner(&state, &request.head_run_id.to_string()).await?;
-    let published = state
-        .container
+    let published = workflow_container(&state, ExplicitAction::PublishChangeComparison)
         .publish_change_comparison(request)
         .await
         .map_err(classified_api_error)?;
@@ -1616,8 +1669,7 @@ async fn remediation_operation_verify(
     State(state): State<AppState>,
     Path(id): Path<uuid::Uuid>,
 ) -> ApiResult<serde_json::Value> {
-    state
-        .container
+    workflow_container(&state, ExplicitAction::VerifyRemediation)
         .start_remediation_verification(hf_service::RemediationStartRequest { operation_id: id })
         .await
         .map_err(classified_api_error)?;
@@ -2257,8 +2309,7 @@ async fn fuzz_prepare(
 ) -> ApiResult<hf_service::FuzzPrepared> {
     let engine = parse_engine(&req.engine).map_err(map_err(StatusCode::BAD_REQUEST))?;
     let project = approved_project(&state, &req.project)?;
-    let prepared = state
-        .container
+    let prepared = workflow_container(&state, ExplicitAction::RunHarness)
         .fuzz_prepare(
             hf_service::FuzzPrepareRequest {
                 project: &project,
@@ -2299,8 +2350,7 @@ async fn harness_smoke(
         Some(value) => parse_lang(value).map_err(map_err(StatusCode::BAD_REQUEST))?,
         None => TargetLanguage::C,
     };
-    let smoke = state
-        .container
+    let smoke = workflow_container(&state, ExplicitAction::RunHarness)
         .harness_smoke(&project, &req.target, engine, lang)
         .await
         .map_err(classified_api_error)?;
@@ -2324,8 +2374,7 @@ async fn harness_promote(
 ) -> ApiResult<serde_json::Value> {
     let engine = parse_engine(&req.engine).map_err(map_err(StatusCode::BAD_REQUEST))?;
     let project = approved_project(&state, &req.project)?;
-    let harness = state
-        .container
+    let harness = workflow_container(&state, ExplicitAction::PromoteHarness)
         .harness_promote(&project, &req.target, engine)
         .await
         .map_err(classified_api_error)?;
@@ -2342,8 +2391,7 @@ async fn harness_promote_with_findings(
 ) -> ApiResult<serde_json::Value> {
     let engine = parse_engine(&req.engine).map_err(map_err(StatusCode::BAD_REQUEST))?;
     let project = approved_project(&state, &req.project)?;
-    let harness = state
-        .container
+    let harness = workflow_container(&state, ExplicitAction::PromoteHarness)
         .harness_promote_with_findings(&project, &req.target, engine)
         .await
         .map_err(classified_api_error)?;
@@ -2659,8 +2707,7 @@ async fn launch_campaign(
             seed,
             ai,
         } => {
-            state
-                .container
+            workflow_container(&state, ExplicitAction::RunFuzzer)
                 .start_fuzzer(
                     project,
                     target,
@@ -2674,8 +2721,7 @@ async fn launch_campaign(
                 .await
         }
         CampaignLaunch::Replay(review) => {
-            state
-                .container
+            workflow_container(&state, ExplicitAction::RunFuzzer)
                 .start_replay(review, on_progress, on_status)
                 .await
         }
@@ -2902,7 +2948,7 @@ async fn all_crashes(
         .project_crashes(&project)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(crashes)?))
+    Ok(Json(public_file_rows(crashes)?))
 }
 
 async fn all_corpus(
@@ -2915,7 +2961,7 @@ async fn all_corpus(
         .project_corpus_entries_with_targets(&project)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(entries)?))
+    Ok(Json(public_file_rows(entries)?))
 }
 
 async fn export_project_data(
@@ -3008,8 +3054,7 @@ async fn corpus_survival(
     Json(req): Json<CorpusRequest>,
 ) -> ApiResult<serde_json::Value> {
     let project = approved_project(&state, std::path::Path::new(&req.project))?;
-    let outcome = state
-        .container
+    let outcome = workflow_container(&state, ExplicitAction::RunFuzzer)
         .seed_survival(&project, &req.target)
         .await
         .map_err(classified_api_error)?;
@@ -3021,8 +3066,7 @@ async fn corpus_prune_coverage(
     Json(req): Json<CorpusRequest>,
 ) -> ApiResult<serde_json::Value> {
     let project = approved_project(&state, std::path::Path::new(&req.project))?;
-    let outcome = state
-        .container
+    let outcome = workflow_container(&state, ExplicitAction::RunFuzzer)
         .corpus_prune_coverage(&project, &req.target)
         .await
         .map_err(classified_api_error)?;
@@ -3034,8 +3078,7 @@ async fn corpus_minimize(
     Json(req): Json<CorpusRequest>,
 ) -> ApiResult<serde_json::Value> {
     let project = approved_project(&state, std::path::Path::new(&req.project))?;
-    let outcome = state
-        .container
+    let outcome = workflow_container(&state, ExplicitAction::RunFuzzer)
         .corpus_minimize(&project, &req.target)
         .await
         .map_err(classified_api_error)?;
@@ -3067,7 +3110,7 @@ async fn corpus(
                 .container
                 .corpus_list(&project, &req.target)
                 .map_err(classified_api_error)?;
-            Ok(Json(public_value(corpus.entries)?))
+            Ok(Json(public_file_rows(corpus.entries)?))
         }
         "seed" => {
             let n = state
@@ -3115,12 +3158,11 @@ async fn triage(
     Json(req): Json<TriageRequest>,
 ) -> ApiResult<serde_json::Value> {
     let project = approved_project(&state, std::path::Path::new(&req.project))?;
-    let deduped = state
-        .container
+    let deduped = workflow_container(&state, ExplicitAction::Triage)
         .triage(&project, &req.target, req.ai)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(deduped)?))
+    Ok(Json(public_file_rows(deduped)?))
 }
 
 #[derive(Deserialize)]
@@ -3142,12 +3184,11 @@ async fn scan_crashes(
             tracing::debug!(%error, "crash scan progress not delivered");
         }
     });
-    let crashes = state
-        .container
+    let crashes = workflow_container(&state, ExplicitAction::Triage)
         .scan_crashes(&project, &req.target, req.scan_id, progress)
         .await
         .map_err(classified_api_error)?;
-    Ok(Json(public_value(crashes)?))
+    Ok(Json(public_file_rows(crashes)?))
 }
 
 async fn cancel_crash_scan(
@@ -3306,8 +3347,7 @@ async fn file_issue(
     Json(req): Json<FileIssueRequest>,
 ) -> ApiResult<hf_service::CreatedIssue> {
     let project = approved_project(&state, std::path::Path::new(&req.project))?;
-    let created = state
-        .container
+    let created = workflow_container(&state, ExplicitAction::PublishFindings)
         .file_issue(&project, &req.crash_id)
         .await
         .map_err(classified_api_error)?;
@@ -3341,8 +3381,7 @@ async fn defectdojo_push(
     Json(req): Json<DefectDojoPushRequest>,
 ) -> ApiResult<hf_service::PushOutcome> {
     let project = approved_project(&state, std::path::Path::new(&req.project))?;
-    let outcome = state
-        .container
+    let outcome = workflow_container(&state, ExplicitAction::PublishFindings)
         .push_to_defectdojo_for_run(&project, req.target.as_deref(), req.expected_run_id)
         .await
         .map_err(classified_api_error)?;
@@ -3512,8 +3551,7 @@ async fn report_defectdojo_push(
     // it into a classified (path-bearing) message; the bounded policy error
     // is the only failure surface a foreign owner sees.
     let approved_owner = approved_project(&state, publication.project())?;
-    let outcome = state
-        .container
+    let outcome = workflow_container(&state, ExplicitAction::PublishFindings)
         .push_report_to_defectdojo(&publication.with_canonical_project(approved_owner))
         .await
         .map_err(classified_api_error)?;
@@ -3802,6 +3840,23 @@ fn parse_turn_id(turn_id: &str) -> Result<uuid::Uuid, ApiError> {
 /// keeps the environment gate: denied with guidance unless `HF_AUTO_APPROVE`.
 fn interactive_approval_enabled(state: &AppState) -> bool {
     state.security.token_configured()
+}
+
+/// The container an explicit workflow route runs on.
+///
+/// On a token-authenticated server the request is the operator's decision for
+/// the one operation the route selects, exactly as a desktop click is: the
+/// token holder is already the single principal who answers approval prompts
+/// (see [`interactive_approval_enabled`]). Approval is limited to `action` on
+/// this clone, so nothing else inherits it and a hard policy denial still
+/// applies. An open-access server cannot tell the operator from any other
+/// local process and keeps the environment gate.
+pub(crate) fn workflow_container(state: &AppState, action: ExplicitAction) -> ServiceContainer {
+    if interactive_approval_enabled(state) {
+        with_user_approval(&state.container, action)
+    } else {
+        state.container.clone()
+    }
 }
 
 /// The container a web chat turn runs on: on a token-authenticated server the

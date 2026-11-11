@@ -207,4 +207,20 @@ async fn owner_health_hydration_and_morning_summary_are_project_scoped() {
     let summary: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(summary["failed"], serde_json::json!([run_id]));
     assert_eq!(summary["unprocessed"], serde_json::json!([run_id]));
+    // The browser keys run output and health by the project it opened, so the
+    // approved project root comes back as sent rather than as a redaction marker.
+    assert_eq!(summary["project_root"], serde_json::json!(project));
+
+    let response = request(
+        &app,
+        Method::GET,
+        &format!("/runs/{run_id}/owner"),
+        Body::empty(),
+    )
+    .await;
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let owner: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(owner["project_root"], serde_json::json!(project));
 }
