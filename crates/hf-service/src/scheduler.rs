@@ -7,6 +7,7 @@
 //! the background, and persists schedules to JSON so they survive restarts.
 
 mod preview;
+mod run_approval;
 #[cfg(test)]
 mod timing_tests;
 pub use hf_scheduler::manager::SchedulerRuntimeStatus;
@@ -2356,8 +2357,10 @@ fn campaign_state_path(schedules_path: &Path) -> PathBuf {
 
 impl CampaignScheduler {
     /// Start the scheduler: install the dispatcher, reload persisted schedules,
-    /// and begin ticking. Campaigns run with permissive guardrails -- creating a
-    /// schedule is the human authorization for its future headless runs.
+    /// and begin ticking. Campaigns run under the environment's guardrail
+    /// policy; the fuzz run of an already-approved harness is approved while
+    /// the operator has authorized scheduled execution ([`Self::arm`]), and
+    /// otherwise needs the environment opt-in (see `scheduler::run_approval`).
     ///
     /// `notifier` (set by the desktop shell) is called when a scheduled run finds
     /// crashes, so the UI can toast; pass `None` for headless CLI/web.
@@ -2398,8 +2401,18 @@ impl CampaignScheduler {
         // Let every clone of the service container emit scheduler events
         // (crash found, run terminated) into this manager's event bridge.
         container.bind_scheduler_events(&manager);
+        // A weak handle: the manager owns the dispatcher that owns this gate.
+        let armed = {
+            let manager = Arc::downgrade(&manager);
+            move || manager.upgrade().is_some_and(|manager| manager.is_armed())
+        };
+        let run_approval = run_approval::ScheduledRunApproval::new(
+            Arc::new(armed),
+            Arc::new(hf_guardrails::EnvApprovalGate),
+        );
         let dispatcher = Arc::new(FuzzCampaignDispatcher {
-            container: container.with_guardrails(Guardrails::from_env()),
+            container: container
+                .with_guardrails(Guardrails::from_env_with_gate(Arc::new(run_approval))),
             state: Arc::clone(&state),
             gate: Arc::clone(&gate),
             notifier: Arc::clone(&notifier),

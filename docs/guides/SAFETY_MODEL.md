@@ -64,3 +64,11 @@ environment instead (`.env.example` documents every variable):
 - `HF_USE_DOCKER=0` -- forces the non-executing stub runtime; every build and
   fuzz run then fails closed instead of leaving the sandbox. There is no
   configuration that runs a harness on the host.
+
+Scheduled campaigns have one more source of consent. They run with nobody
+present, so **Automation > Authorize scheduled runs** is the operator's
+standing decision: while it is granted, a scheduled campaign may run the
+harness a person already smoke-tested and approved, without the environment
+variables above. Authorization is withdrawn again on every start of the app or
+service and whenever you choose **Withdraw authorization**; it covers only the
+campaign's fuzz run, never compiling, promoting or running a new harness.

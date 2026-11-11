@@ -297,7 +297,12 @@ restarts work. While the runtime is running, Automation offers an explicit
 **Authorize scheduled runs** action (confirmed before it is sent) and
 **Withdraw authorization**. The desktop shell calls the scheduler's `arm` and
 `disarm` through `schedule_arm` / `schedule_disarm`; the browser build uses
-`POST` / `DELETE /schedule/arm`. Both reply `{ "armed": bool }`. This reports loop liveness, not successful dispatch or quiescence
+`POST` / `DELETE /schedule/arm`. Both reply `{ "armed": bool }`. While
+armed, the campaign dispatcher's approval gate
+(`hf_service::scheduler::run_approval`) approves the fuzz run of an
+already-approved harness; disarmed, or for any other action, the decision
+falls to the environment gate. Arming is therefore what lets a scheduled
+campaign execute, not only what releases recovered work. This reports loop liveness, not successful dispatch or quiescence
 of campaigns during shutdown.
 
 Automation refreshes the service snapshot after schedule and authorization
