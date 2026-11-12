@@ -1,0 +1,57 @@
+{
+  "schema_version": 3,
+  "claim": "userspace_engines",
+  "candidate_commit": "8199e83448ac059bde537f6ff7e6688e35283b34",
+  "tag": "v0.9.5",
+  "qualification_commit": "8199e83448ac059bde537f6ff7e6688e35283b34",
+  "qualification_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "candidate_delta": "None. The cycle ran on the candidate commit with a clean working tree.",
+  "source_sha256": "a21529ba223ec0a03b349e9f78b879eed69dc60d8d130dbac1b97fb7bf05a591",
+  "status": "passed",
+  "started_at": "2026-11-12T07:06:59.008830+00:00",
+  "ended_at": "2026-11-12T07:08:53.873304+00:00",
+  "platform": "macOS-27.2.1-arm64-arm-64bit",
+  "cycles": 1,
+  "cpu_cores": 1,
+  "memory_mib": 2048,
+  "smoke_and_replay_duration_secs": 10,
+  "review": "Normal configured provider review passed before execution; explicit human approval was supplied for this exact source pair.",
+  "cleanup": "verified_by_fixture",
+  "engines": {
+    "libfuzzer": {
+      "smoke_passed": true,
+      "smoke_duration_secs": 10,
+      "smoke_execs_per_sec": 1326586.0,
+      "smoke_crashes": 0,
+      "stop_ms": 538,
+      "campaign_run_id": "9738017c-5c41-46f8-a567-b8a1852cbfea",
+      "replay_run_id": "c8c4f04c-253a-4b7d-a26b-7bd555da5506",
+      "binary_sha256": "4bf4a4056cdb4b02400bd74b21261ce2f00b543fd47c1231d3ed8116858d63a2"
+    },
+    "afl++": {
+      "smoke_passed": true,
+      "smoke_duration_secs": 10,
+      "smoke_execs_per_sec": 273385.26,
+      "smoke_crashes": 0,
+      "stop_ms": 1479,
+      "campaign_run_id": "3cbf4279-05f0-4410-904d-983b811fcf88",
+      "replay_run_id": "a4ebbd53-8a82-4f6d-8d08-cbc912630054",
+      "binary_sha256": "87bc80a92dc98d0a254692a4e3f796a8f483e425564ffd01cde09584cc6ffb04"
+    },
+    "honggfuzz": {
+      "smoke_passed": true,
+      "smoke_duration_secs": 10,
+      "smoke_execs_per_sec": 163081.0,
+      "smoke_crashes": 0,
+      "stop_ms": 541,
+      "campaign_run_id": "295ebdc6-b8a5-4477-a193-622b4ad5e7b7",
+      "replay_run_id": "3df5b42e-8315-4ede-adbf-a473294fc088",
+      "binary_sha256": "cf29269db3e44e6987f10d0e988aa437c3c0fe3e21202d493378cd80b1a1a054"
+    }
+  },
+  "limitations": [
+    "One short cycle per engine does not establish long-duration stability or a statistical latency percentile.",
+    "No crashes occurred; crash reproduction and symbolization are not claimed by this cycle.",
+    "Executed on macOS arm64 with a Linux arm64 Docker sandbox; not a Windows or Linux desktop installation test."
+  ]
+}
