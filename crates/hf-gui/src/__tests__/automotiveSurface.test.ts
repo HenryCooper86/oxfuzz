@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { enExtra, zhExtra } from "../i18n.extra";
 
 function source(relativePath: string): string {
   return readFileSync(new URL(relativePath, import.meta.url), "utf8");
@@ -113,6 +114,18 @@ describe("automotive surface boundaries", () => {
     expect(source("../../src-tauri/src/commands.rs")).toContain(
       "pub async fn automotive_live_monitor",
     );
+  });
+
+  it("reports a quiet bus as a result, not as a failed capture", () => {
+    // An empty virtual bus is the normal state until a replay runs. It was
+    // shown as "Live capture failed: validation error: adapter_failure ...".
+    const monitor = source("../components/AutomotiveLiveMonitor.tsx");
+    expect(monitor).toContain("captured no frames");
+    expect(monitor).toContain('t("automotive.live.quiet"');
+    expect(monitor).toContain('t("automotive.live.quietHint"');
+    expect(enExtra["automotive.live.quiet"]).toBe("No frames on {interface}");
+    expect(zhExtra["automotive.live.quiet"]).toBe("{interface} 上没有帧");
+    expect(enExtra["automotive.live.quietHint"]).toContain("Nothing was captured");
   });
 
   it("wires a read-only UDS discovery scan with a dangerous-service denial", () => {

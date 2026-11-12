@@ -330,6 +330,8 @@ export const [enExtra, zhExtra] = dictionaries({
   "automotive.live.start": ["Start live capture","开始实时捕获"],
   "automotive.live.started": ["Live capture retained","已保留实时捕获"],
   "automotive.live.failed": ["Live capture failed","实时捕获失败"],
+  "automotive.live.quiet": ["No frames on {interface}","{interface} 上没有帧"],
+  "automotive.live.quietHint": ["Nothing was captured because nothing transmitted during the capture window. A virtual bus is silent until a virtual replay or scan sends on it.","捕获窗口内没有任何节点发送数据，因此没有捕获到帧。虚拟总线在虚拟重放或扫描发送数据之前保持静默。"],
   "automotive.live.gated": ["Enable automotive with a virtual_can mode and at least one vcan interface to run a live capture.","请启用汽车协议并配置 virtual_can 模式及至少一个 vcan 接口，方可运行实时捕获。"],
   "automotive.sender.title": ["Frame sender","帧发送器"],
   "automotive.sender.description": ["Transmit one CAN frame repeatedly on an allowlisted virtual CAN interface. Reuses the replay path, so the peak-rate guard and human confirmation apply.","在允许列表中的虚拟 CAN 接口上重复发送一个 CAN 帧。复用回放路径，因此峰值速率保护和人工确认同样适用。"],

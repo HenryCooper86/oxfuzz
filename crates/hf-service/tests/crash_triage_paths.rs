@@ -361,6 +361,103 @@ async fn a_campaign_triage_keeps_what_casr_finished_before_its_budget_ran_out() 
     assert_eq!(crashes[0].stack_signature, "parse.c:30:3");
 }
 
+/// CASR reports one crash line, represented by a different input each pass.
+struct CasrChangesRepresentativeRuntime {
+    passes: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl RuntimeAdapter for CasrChangesRepresentativeRuntime {
+    async fn resolve_image_reference(
+        &self,
+        _image: &str,
+    ) -> Result<Option<hf_core::runtime::ImmutableImageReference>, ClassifiedError> {
+        Ok(Some(hf_test_utils::immutable_test_image()?))
+    }
+
+    async fn run_command(
+        &self,
+        cmd: &[String],
+        cwd: &Path,
+        limits: &ResourceLimits,
+    ) -> Result<CommandResult, ClassifiedError> {
+        self.run_command_opts(cmd, cwd, limits, &SandboxOptions::default())
+            .await
+    }
+
+    async fn write_file(&self, _path: &Path, _content: &str) -> Result<(), ClassifiedError> {
+        Ok(())
+    }
+
+    async fn read_file(&self, _path: &Path) -> Result<String, ClassifiedError> {
+        Ok(String::new())
+    }
+
+    async fn run_command_opts(
+        &self,
+        cmd: &[String],
+        cwd: &Path,
+        _limits: &ResourceLimits,
+        opts: &SandboxOptions,
+    ) -> Result<CommandResult, ClassifiedError> {
+        if is_casr(cmd) {
+            let pass = self
+                .passes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let name = if pass == 0 { "crash-a" } else { "crash-b" };
+            let host = &casr_out_mount(opts).host_path;
+            std::fs::write(host.join(format!("{name}.casrep")), CASREP_UNCLUSTERED).unwrap();
+            return Ok(completed(0, "", "", cwd));
+        }
+        if is_minimize(cmd) {
+            return Ok(timed_out(cwd));
+        }
+        Ok(completed(0, "", "", cwd))
+    }
+}
+
+#[tokio::test]
+async fn retriage_keeps_one_finding_when_its_representative_input_changes() {
+    // A finding was identified by its signature and its input file. A second
+    // scan that picked another input for the same crash line stored a second
+    // finding for one bug, or retired the one the operator had open.
+    let crash_files: Vec<String> = ["crash-a", "crash-b"]
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
+    let fixture = triage_fixture("casr-representative", &crash_files).await;
+    let container = ServiceContainer::new(
+        Arc::new(CasrChangesRepresentativeRuntime {
+            passes: std::sync::atomic::AtomicUsize::new(0),
+        }),
+        None,
+    )
+    .with_store(Arc::clone(&fixture.store));
+
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let crashes = container
+            .triage_run(
+                &fixture.project,
+                &fixture.symbol,
+                fixture.run_id,
+                hf_service::AiPolicy::Off,
+            )
+            .await
+            .unwrap();
+        assert_eq!(crashes.len(), 1);
+        ids.push(crashes[0].id);
+    }
+
+    assert_eq!(ids[0], ids[1], "one bug keeps one identity across scans");
+    let retained = fixture
+        .store
+        .list_crashes_by_run(fixture.run_id)
+        .await
+        .unwrap();
+    assert_eq!(retained.len(), 1, "{retained:?}");
+}
+
 #[tokio::test]
 async fn casr_clustered_triage_end_to_end() {
     let crash_files: Vec<String> = ["crash-a", "crash-b", "crash-c", "crash-d"]

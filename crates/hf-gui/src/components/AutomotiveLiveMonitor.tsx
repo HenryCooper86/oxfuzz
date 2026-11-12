@@ -32,12 +32,15 @@ export function AutomotiveLiveMonitor({
   const interfaces = settings.virtual_interfaces;
   const [iface, setIface] = useState(interfaces[0] ?? "vcan0");
   const [busy, setBusy] = useState(false);
+  // The interface whose last capture saw no traffic, shown beside the button.
+  const [quietInterface, setQuietInterface] = useState<string | null>(null);
   const ready =
     settings.enabled && settings.allowed_modes.includes("virtual_can") && interfaces.length > 0;
 
   async function start() {
     if (!ready || busy) return;
     setBusy(true);
+    setQuietInterface(null);
     try {
       const outcome = await liveMonitorAutomotive({ projectRoot, interface: iface, protocol });
       toast({
@@ -47,11 +50,23 @@ export function AutomotiveLiveMonitor({
       });
       onOperation();
     } catch (reason) {
-      toast({
-        title: t("automotive.live.failed"),
-        description: String(reason),
-        variant: "error",
-      });
+      // The sidecar reports an empty bus as an error because it has no
+      // transcript to retain. To the operator it is an answer, not a fault.
+      const quiet = String(reason).includes("captured no frames");
+      setQuietInterface(quiet ? iface : null);
+      if (quiet) {
+        toast({
+          title: t("automotive.live.quiet", { interface: iface }),
+          description: t("automotive.live.quietHint"),
+        });
+        onOperation();
+      } else {
+        toast({
+          title: t("automotive.live.failed"),
+          description: String(reason),
+          variant: "error",
+        });
+      }
     } finally {
       setBusy(false);
     }
@@ -77,6 +92,11 @@ export function AutomotiveLiveMonitor({
           {t("automotive.live.start")}
         </Button>
       </div>
+      {quietInterface && (
+        <p role="status" className="text-12px text-text-secondary" data-live-quiet>
+          {t("automotive.live.quiet", { interface: quietInterface })}. {t("automotive.live.quietHint")}
+        </p>
+      )}
       {!ready && (
         <div className="flex items-start gap-2 text-11px text-text-muted">
           <ShieldAlert size={14} className="shrink-0 text-warning" />

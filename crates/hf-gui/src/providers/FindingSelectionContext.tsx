@@ -54,10 +54,21 @@ export function FindingSelectionProvider({ children }: { children: React.ReactNo
     setSelections((current) => ({ ...current, [activeProject]: { findingId, runId } }));
   }, [activeProject]);
 
+  const clearFinding = useCallback(() => {
+    if (!activeProject) return;
+    setSelections((current) => {
+      if (!(activeProject in current)) return current;
+      const next = { ...current };
+      delete next[activeProject];
+      return next;
+    });
+  }, [activeProject]);
+
   const value = useMemo(() => ({
     selection: activeProject ? retainedSelections[activeProject] ?? null : null,
     selectFinding,
-  }), [activeProject, retainedSelections, selectFinding]);
+    clearFinding,
+  }), [activeProject, retainedSelections, selectFinding, clearFinding]);
 
   return <FindingSelectionContext.Provider value={value}>{children}</FindingSelectionContext.Provider>;
 }

@@ -467,6 +467,48 @@ describe("retained finding navigation", () => {
     expect(container.textContent).toContain("gui.noFindingsHint");
   });
 
+  it("moves on from a remembered finding that a re-scan replaced", async () => {
+    // A re-scan can retire the finding the view last showed. Reopening Triage
+    // then greeted the operator with "finding ... is unavailable or was
+    // deleted" for something they never asked to open.
+    invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "finding_review_queue") return Promise.resolve([newer]);
+      if (command === "finding_review") {
+        return args?.findingId === newer.crash.id
+          ? Promise.resolve(newer)
+          : Promise.reject(new Error(`validation error: finding ${String(args?.findingId)} not found`));
+      }
+      throw new Error(`unexpected command ${command}`);
+    });
+
+    await act(async () => root.render(<Providers><TriageView /></Providers>));
+    await flush();
+    await flush();
+
+    expect(container.textContent).not.toContain("triage.findingUnavailable");
+    expect(container.querySelector('[title="/evidence/newer/crash-input"]')).not.toBeNull();
+    const stored = JSON.parse(localStorage.getItem(FINDING_SELECTION_STORAGE_KEY) ?? "{}");
+    expect(stored[PROJECT_A].findingId).toBe(newer.crash.id);
+  });
+
+  it("forgets a remembered finding that is gone when nothing else is retained", async () => {
+    invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "finding_review_queue") return Promise.resolve([]);
+      if (command === "finding_review") {
+        return Promise.reject(new Error(`validation error: finding ${String(args?.findingId)} not found`));
+      }
+      throw new Error(`unexpected command ${command}`);
+    });
+
+    await act(async () => root.render(<Providers><TriageView /></Providers>));
+    await flush();
+    await flush();
+
+    expect(container.textContent).not.toContain("triage.findingUnavailable");
+    const stored = JSON.parse(localStorage.getItem(FINDING_SELECTION_STORAGE_KEY) ?? "{}");
+    expect(stored[PROJECT_A]).toBeUndefined();
+  });
+
   it("does not expose latest-target actions while exact detail is pending or missing", async () => {
     let rejectDetail: (error: Error) => void = () => undefined;
     const pendingDetail = new Promise<FindingReviewItem>((_resolve, reject) => { rejectDetail = reject; });

@@ -33,6 +33,15 @@ impl ServiceContainer {
         crashes: &mut [hf_core::crash::Crash],
     ) -> Result<(), ClassifiedError> {
         let mut retained_crashes = std::collections::HashMap::new();
+        // The run's retained findings by stack signature, in stored order.
+        // A finding is one bug; which input represents it can change between
+        // scans (a different sample, a different CASR pick), and that must
+        // neither add a second finding nor retire the one an operator has
+        // open, drafted a report for, or minimized.
+        let mut retained_by_signature: std::collections::HashMap<
+            String,
+            std::collections::VecDeque<Arc<hf_core::crash::Crash>>,
+        > = std::collections::HashMap::new();
         if let Some(store) = self.store() {
             for retained in store
                 .list_crashes_by_run(run_id)
@@ -40,6 +49,12 @@ impl ServiceContainer {
                 .map_err(|error| ClassifiedError::Storage(error.to_string()))?
             {
                 let retained = Arc::new(retained);
+                if !retained.stack_signature.is_empty() {
+                    retained_by_signature
+                        .entry(retained.stack_signature.clone())
+                        .or_default()
+                        .push_back(Arc::clone(&retained));
+                }
                 if let Some(evidence) = &retained.reproduction {
                     retained_crashes.insert(
                         (
@@ -58,10 +73,30 @@ impl ServiceContainer {
                 );
             }
         }
-        for crash in crashes {
+        // Exact matches claim their retained finding first, so the signature
+        // fallback below only hands out findings no crash of this pass names.
+        let mut claimed = std::collections::HashSet::new();
+        for crash in crashes.iter() {
             if let Some(retained) =
                 retained_crashes.get(&(crash.stack_signature.clone(), crash.input_path.clone()))
             {
+                claimed.insert(retained.id);
+            }
+        }
+        for crash in crashes {
+            let exact = retained_crashes
+                .get(&(crash.stack_signature.clone(), crash.input_path.clone()))
+                .cloned();
+            let retained = exact.or_else(|| {
+                let candidates = retained_by_signature.get_mut(&crash.stack_signature)?;
+                while let Some(candidate) = candidates.pop_front() {
+                    if claimed.insert(candidate.id) {
+                        return Some(candidate);
+                    }
+                }
+                None
+            });
+            if let Some(retained) = retained {
                 crash.id = retained.id;
                 if self.scan_control.is_some() {
                     // Classification-only scans must not erase earlier enrichment.

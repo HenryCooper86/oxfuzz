@@ -49,13 +49,16 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
   // a failed run, or a run the assistant started.
   const { target: selectedTarget } = useTarget();
   const scanTarget = lastTarget || selectedTarget;
-  const { selection: savedSelection, selectFinding } = useFindingSelection();
+  const { selection: savedSelection, selectFinding, clearFinding } = useFindingSelection();
   const [queue, setQueue] = useState<FindingReviewItem[]>([]);
   const [selectedFinding, setSelectedFinding] = useState<FindingReviewItem | null>(null);
   const [queueLoading, setQueueLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [queueError, setQueueError] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
+  // The remembered finding the service no longer has, until the queue says
+  // what to show instead.
+  const [goneFindingId, setGoneFindingId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [dispositionFilter, setDispositionFilter] = useState(initialRunId ? "all" : "open");
   const [originFilter, setOriginFilter] = useState("");
@@ -179,12 +182,29 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
         if (request === detailRequest.current) setSelectedFinding(item);
       })
       .catch((error) => {
-        if (request === detailRequest.current) setDetailError(String(error));
+        if (request !== detailRequest.current) return;
+        // A re-scan retires findings it supersedes, so a remembered one can
+        // be gone. That is not an error the operator caused: move on to what
+        // is retained instead of reporting it. Any other failure is shown.
+        if (/finding \S+ (was )?not found/.test(String(error))) setGoneFindingId(selection.findingId);
+        else setDetailError(String(error));
       })
       .finally(() => {
         if (request === detailRequest.current) setDetailLoading(false);
       });
   }, [activeProject, selection]);
+
+  useEffect(() => {
+    if (!goneFindingId || queueLoading) return;
+    if (selection?.findingId !== goneFindingId) {
+      queueMicrotask(() => setGoneFindingId(null));
+      return;
+    }
+    const next = queue.find((item) => item.crash.id !== goneFindingId);
+    queueMicrotask(() => setGoneFindingId(null));
+    if (next) selectFinding(next.crash.id, next.crash.run_id);
+    else clearFinding();
+  }, [goneFindingId, queueLoading, queue, selection, selectFinding, clearFinding]);
 
   const activeFinding = selectedFinding?.crash.id === selection?.findingId
     ? selectedFinding

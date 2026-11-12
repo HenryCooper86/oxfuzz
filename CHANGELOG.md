@@ -53,6 +53,15 @@ retain only the current release; older entries remain here as the record.
   keeps the findings CASR completed, as the interactive scan does. Before,
   the campaign failed with "CASR triage was force-stopped: TimedOut" and
   discarded them.
+- Triage: a finding keeps its identity when a later scan of the same run
+  picks a different input to represent it. Before, the re-scan stored a
+  second finding for the same bug or retired the one that was open.
+- Triage: reopening the view after a remembered finding was retired shows a
+  retained finding (or none) instead of "finding ... is unavailable or was
+  deleted".
+- Automotive: a live capture that sees no traffic reports "No frames on
+  vcan0" with an explanation, instead of "Live capture failed: validation
+  error".
 - Triage: the finding list and the detail pane share the width, and long
   stack-trace tokens wrap inside their box. The list could not shrink, so it
   left the detail pane a narrow strip with build ids running past its edge.
