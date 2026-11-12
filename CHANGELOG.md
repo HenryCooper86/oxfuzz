@@ -10,6 +10,8 @@ retain only the current release; older entries remain here as the record.
 
 ## Unreleased
 
+## 0.9.5 - 2026-11-12
+
 ### Removed
 
 - 47 unused Settings translation entries left over from removed Engines,

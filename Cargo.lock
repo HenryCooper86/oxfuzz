@@ -2340,7 +2340,7 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hf-agent"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "hf-context",
@@ -2363,7 +2363,7 @@ dependencies = [
 
 [[package]]
 name = "hf-analysis"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "hf-core",
  "streaming-iterator",
@@ -2375,7 +2375,7 @@ dependencies = [
 
 [[package]]
 name = "hf-automotive"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -2385,7 +2385,7 @@ dependencies = [
 
 [[package]]
 name = "hf-cli"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2409,7 +2409,7 @@ dependencies = [
 
 [[package]]
 name = "hf-context"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "hf-core",
@@ -2421,7 +2421,7 @@ dependencies = [
 
 [[package]]
 name = "hf-core"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2436,7 +2436,7 @@ dependencies = [
 
 [[package]]
 name = "hf-corpus"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "hex",
  "hf-core",
@@ -2448,7 +2448,7 @@ dependencies = [
 
 [[package]]
 name = "hf-coverage"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "hf-core",
  "serde",
@@ -2459,7 +2459,7 @@ dependencies = [
 
 [[package]]
 name = "hf-crash"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "futures",
  "hex",
@@ -2477,7 +2477,7 @@ dependencies = [
 
 [[package]]
 name = "hf-diagnostics"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2493,7 +2493,7 @@ dependencies = [
 
 [[package]]
 name = "hf-discovery"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "futures",
  "hf-analysis",
@@ -2516,7 +2516,7 @@ dependencies = [
 
 [[package]]
 name = "hf-engine"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "futures",
@@ -2533,7 +2533,7 @@ dependencies = [
 
 [[package]]
 name = "hf-guardrails"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "hf-core",
@@ -2545,7 +2545,7 @@ dependencies = [
 
 [[package]]
 name = "hf-gui"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2563,7 +2563,7 @@ dependencies = [
 
 [[package]]
 name = "hf-harness"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "futures",
@@ -2584,7 +2584,7 @@ dependencies = [
 
 [[package]]
 name = "hf-knowledge"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2601,7 +2601,7 @@ dependencies = [
 
 [[package]]
 name = "hf-prompt"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "hf-core",
  "serde",
@@ -2613,7 +2613,7 @@ dependencies = [
 
 [[package]]
 name = "hf-provider"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2635,7 +2635,7 @@ dependencies = [
 
 [[package]]
 name = "hf-runtime"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "hf-core",
@@ -2651,7 +2651,7 @@ dependencies = [
 
 [[package]]
 name = "hf-scheduler"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2670,7 +2670,7 @@ dependencies = [
 
 [[package]]
 name = "hf-service"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "cap-primitives",
@@ -2720,7 +2720,7 @@ dependencies = [
 
 [[package]]
 name = "hf-session"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2740,7 +2740,7 @@ dependencies = [
 
 [[package]]
 name = "hf-skills"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "serde",
  "thiserror 2.0.19",
@@ -2750,7 +2750,7 @@ dependencies = [
 
 [[package]]
 name = "hf-spill"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "sha2",
  "tempfile",
@@ -2761,7 +2761,7 @@ dependencies = [
 
 [[package]]
 name = "hf-storage"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2779,7 +2779,7 @@ dependencies = [
 
 [[package]]
 name = "hf-test-utils"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "futures",
@@ -2791,7 +2791,7 @@ dependencies = [
 
 [[package]]
 name = "hf-tools"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "cap-primitives",
@@ -2815,7 +2815,7 @@ dependencies = [
 
 [[package]]
 name = "hf-web"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-stream",
  "async-trait",
