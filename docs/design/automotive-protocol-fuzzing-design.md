@@ -145,7 +145,12 @@ offline analysis uses `SandboxNetworkMode::None` with no added capabilities;
 vcan uses `SandboxNetworkMode::None` plus only `SandboxCapability::NetAdmin`
 and `SandboxCapability::NetRaw`; physical bench uses
 `SandboxNetworkMode::Host` plus only `SandboxCapability::NetRaw`. All three
-retain capability dropping and `no-new-privileges`. `Bridge` networking is not
+retain capability dropping and `no-new-privileges`. Docker applies added
+capabilities only to the container's root, so the vcan profile runs as uid 0
+(the sidecar image's default user, 65532, would hold neither capability and
+could not create the interface); with every other capability dropped and no
+network namespace to reach, that root can configure and read vcan and little
+else. Offline analysis keeps the unprivileged user. `Bridge` networking is not
 an automotive default. Interfaces may not be selected with a raw command or
 generic tool call.
 

@@ -2261,7 +2261,20 @@ fn sandbox_options(
             (SandboxNetworkMode::Host, vec![SandboxCapability::NetRaw])
         }
     };
+    // Docker's `--cap-add` reaches only the container's root: a non-root
+    // process starts with an empty effective set, and `no-new-privileges`
+    // rules out regaining one through a file capability. The sidecar image
+    // runs as uid 65532, so on virtual CAN it held neither capability it was
+    // granted and `ip link add ... type vcan` always failed. Virtual CAN
+    // therefore runs as the container's root, which with every other
+    // capability dropped and no network namespace to reach can create and
+    // read the vcan interface and nothing else root usually could. Offline
+    // analysis needs no capability and keeps the image's unprivileged user;
+    // the physical bench is unchanged pending its own qualification.
+    let user = (prepared.mode == AutomotiveMode::VirtualCan)
+        .then_some(hf_core::runtime::SandboxUser { uid: 0, gid: 0 });
     SandboxOptions {
+        user,
         extra_mounts: vec![
             SandboxMount::read_only(input_dir.to_path_buf(), SIDECAR_INPUT_ROOT),
             SandboxMount::writable(output_dir.to_path_buf(), SIDECAR_OUTPUT_ROOT),
@@ -4435,6 +4448,14 @@ mod tests {
         assert_eq!(
             options.capabilities,
             vec![SandboxCapability::NetAdmin, SandboxCapability::NetRaw]
+        );
+        // The image's default user is unprivileged, and Docker's added
+        // capabilities are effective only for the container's root: as uid
+        // 65532 the sidecar held neither and could never create vcan0.
+        assert_eq!(
+            options.user,
+            Some(hf_core::runtime::SandboxUser { uid: 0, gid: 0 }),
+            "virtual CAN needs its two capabilities to be effective"
         );
         // A live operation carries an execution policy for a virtual interface.
         let config = limits

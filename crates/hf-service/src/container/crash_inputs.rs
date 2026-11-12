@@ -27,10 +27,47 @@ fn is_regular_directory(path: &Path) -> bool {
 pub(super) struct StagedCrashInputs {
     pub(super) staged: usize,
     pub(super) skipped: usize,
+    /// Inputs left out of this replay pass because the run retained more
+    /// than [`CASR_REPLAY_LIMIT`]. They stay in the run's output directory.
+    pub(super) held_back: usize,
 }
 
-/// Stage every crash input from a run output directory into a clean flat
-/// directory for CASR.
+/// The most crash inputs one CASR pass replays.
+///
+/// CASR replays each input under the sanitizer and again under a debugger,
+/// then clusters the reports at the end. Measured on the reference sandbox it
+/// finishes about 1.3 inputs a second with its two jobs, so the 240 second
+/// budget covers roughly 300; a run that retained more was cut off before
+/// clustering, with only the first inputs in directory order replayed. 128
+/// finishes in under half the budget on a target several times slower, and
+/// [`replay_sample`] takes them from across the whole run.
+pub(super) const CASR_REPLAY_LIMIT: usize = 128;
+
+/// At most `limit` of `inputs`, evenly spaced and in their original order.
+///
+/// A fuzzer that floods its output with crashing inputs writes them over the
+/// length of the run. Replaying a prefix sees only the first seconds; an even
+/// spread is as likely to meet a second bug that appeared late.
+pub(super) fn replay_sample<T>(inputs: Vec<T>, limit: usize) -> Vec<T> {
+    let total = inputs.len();
+    if total <= limit || limit == 0 {
+        return inputs;
+    }
+    inputs
+        .into_iter()
+        .enumerate()
+        // Input `index` is kept when it is the first to reach a new one of the
+        // `limit` equal slices of the run.
+        .filter(|(index, _)| {
+            *index == 0 || index * limit / total != (index - 1) * limit / total
+        })
+        .map(|(_, input)| input)
+        .collect()
+}
+
+/// Stage a run's crash inputs into a clean flat directory for CASR: all of
+/// them, or an even sample of [`CASR_REPLAY_LIMIT`] when the run retained
+/// more than one pass can replay.
 ///
 /// Returns an error only when the staging directory itself cannot be prepared;
 /// per-input copy failures are counted in [`StagedCrashInputs::skipped`] and
@@ -57,7 +94,11 @@ pub(super) fn stage_crash_inputs(
         )));
     }
     let mut outcome = StagedCrashInputs::default();
-    for path in collect_crash_inputs(engine, out_dir) {
+    let retained = collect_crash_inputs(engine, out_dir);
+    let total = retained.len();
+    let replayed = replay_sample(retained, CASR_REPLAY_LIMIT);
+    outcome.held_back = total - replayed.len();
+    for path in replayed {
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             tracing::warn!(
                 path = %path.display(),
@@ -158,6 +199,62 @@ pub(super) fn collect_workspace_crash_inputs(workspace: &Path) -> Vec<PathBuf> {
     inputs
 }
 
+#[cfg(test)]
+mod replay_sample_tests {
+    use hf_core::engine::EngineKind;
+
+    use super::{replay_sample, stage_crash_inputs, CASR_REPLAY_LIMIT};
+
+    #[test]
+    fn a_crash_flood_is_sampled_across_the_whole_run_not_cut_at_a_prefix() {
+        let inputs: Vec<u32> = (0..1024).collect();
+        let sample = replay_sample(inputs, 128);
+
+        assert_eq!(sample.len(), 128);
+        assert_eq!(sample[0], 0, "the first input is always replayed");
+        assert!(
+            *sample.last().unwrap() >= 1000,
+            "the sample reaches the end of the run: {:?}",
+            sample.last()
+        );
+        assert!(sample.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(sample, replay_sample((0..1024).collect(), 128));
+    }
+
+    #[test]
+    fn a_run_within_the_limit_is_replayed_whole() {
+        assert_eq!(replay_sample(vec![1, 2, 3], 128), [1, 2, 3]);
+        assert_eq!(
+            replay_sample((0..128).collect::<Vec<u32>>(), 128).len(),
+            128
+        );
+    }
+
+    #[test]
+    fn staging_holds_back_what_one_replay_pass_cannot_finish() {
+        // honggfuzz retained 1,024 inputs for one overflow; CASR replayed 317
+        // of them in its 240 s and never reached its clustering stage.
+        let root = tempfile::tempdir().unwrap();
+        let out = root.path().join("out");
+        let staging = root.path().join("staging");
+        std::fs::create_dir_all(&out).unwrap();
+        let total = CASR_REPLAY_LIMIT + 72;
+        for index in 0..total {
+            std::fs::write(out.join(format!("crash-{index:04}")), index.to_string()).unwrap();
+        }
+
+        let staged = stage_crash_inputs(EngineKind::LibFuzzer, &out, &staging).unwrap();
+
+        assert_eq!(staged.staged, CASR_REPLAY_LIMIT);
+        assert_eq!(staged.held_back, 72);
+        assert_eq!(staged.skipped, 0);
+        assert_eq!(
+            std::fs::read_dir(&staging).unwrap().count(),
+            CASR_REPLAY_LIMIT
+        );
+    }
+}
+
 #[cfg(all(test, unix))]
 mod crash_input_boundary_tests {
     use super::{collect_crash_inputs, stage_crash_inputs};
@@ -183,7 +280,8 @@ mod crash_input_boundary_tests {
             stage_crash_inputs(EngineKind::LibFuzzer, &out, &staging).unwrap(),
             super::StagedCrashInputs {
                 staged: 1,
-                skipped: 0
+                skipped: 0,
+                held_back: 0
             }
         );
         assert_eq!(

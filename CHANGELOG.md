@@ -18,6 +18,18 @@ retain only the current release; older entries remain here as the record.
 
 ### Fixed
 
+- Triage: a run that retained more than 128 crashing inputs is replayed as
+  an even sample of 128 taken across the whole run, so CASR finishes inside
+  its time budget and clusters the result. Before, a honggfuzz crash flood
+  was cut off after the first few hundred inputs in directory order, ended
+  as "Scan failed", and never clustered. The scan states that it did not
+  cover every retained input, and the rest stay in the run's output.
+- Automotive: virtual-CAN operations can create their interface. The
+  sidecar image runs as an unprivileged user, for which Docker's added
+  capabilities are not effective, so `vcan0` creation always failed. The
+  virtual-CAN profile now runs as the container's root with every capability
+  dropped except the two it is granted, no network, and
+  `no-new-privileges`. Offline analysis keeps the unprivileged user.
 - AI Assistant: asked what has been done or found in a project, it answers
   from oxfuzz's retained targets, harnesses, runs and findings through a new
   read-only `ProjectStatus` tool. Before, it could only read the project

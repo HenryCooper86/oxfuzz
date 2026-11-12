@@ -650,6 +650,7 @@ impl ServiceContainer {
         // a flat directory of crash inputs. For non-AFL engines we stage only
         // real crash inputs into a clean dir, since engines like honggfuzz mix
         // coverage maps and logs into `out` that CASR would otherwise replay.
+        let mut held_back = 0;
         let crash_dir = if engine == EngineKind::AflPlusPlus {
             container_input_path(workspace, out_dir)
         } else {
@@ -672,6 +673,16 @@ impl ServiceContainer {
                     staged.staged + staged.skipped
                 )));
             }
+            held_back = staged.held_back;
+            if held_back > 0 {
+                tracing::warn!(
+                    run_id = %run_id,
+                    replayed = staged.staged,
+                    held_back,
+                    "the run retained more crash inputs than one CASR pass replays; \
+                     replaying an even sample"
+                );
+            }
             container_input_path(workspace, &staging)
         };
         // Fresh CASR output directory each pass.
@@ -690,7 +701,7 @@ impl ServiceContainer {
         let casr_container = container_input_path(workspace, &casr_host);
         let inventory = hf_crash::ingest_for_engine(out_dir, engine, run_id, target_id)?;
         let total_inputs = inventory.crashes.len();
-        let input_limit_reached = inventory.artifact_limit_reached;
+        let input_limit_reached = inventory.artifact_limit_reached || held_back > 0;
         self.scan_progress(|progress| {
             progress.phase = ScanPhase::Casr;
             progress.total_inputs = Some(total_inputs);
@@ -749,7 +760,12 @@ impl ServiceContainer {
                 );
             }
             Ok(_) => {
-                self.scan_progress(|progress| progress.processed_inputs = progress.total_inputs);
+                // Inputs held back from this pass were not replayed.
+                self.scan_progress(|progress| {
+                    progress.processed_inputs = progress
+                        .total_inputs
+                        .map(|total| total.saturating_sub(held_back));
+                });
             }
             Err(e) => {
                 tracing::warn!("casr run failed, falling back to built-in triage: {e}");
