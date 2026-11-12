@@ -1,8 +1,15 @@
 # Desktop app screenshots
 
-These images are the product evidence rendered by the top-level `README.md`.
-Keep the filenames, content, and descriptions synchronized with the current
-desktop app.
+These images are the product evidence rendered by the desktop guide
+(`docs/guides/DESKTOP_APP.md`). Keep the filenames, content, and descriptions
+synchronized with the current desktop app.
+
+Since 2026-11-12 the top-level `README.md` and `README.zh.md` no longer render
+`hero.png`. They show the recording and the four workflow captures in
+`website/src/screenshots/`, so the repository introduction and the website
+present the same real session. Retake those together with the website (see
+`website/README.md`); the set below still needs its own refresh for the current
+sidebar and version.
 
 ## Status: seven of eight captured 2026-07-23, sanitized 2026-08-06
 
@@ -64,7 +71,7 @@ the native application unless the documented feature is web-only.
 
 | File | View | What it must communicate |
 | --- | --- | --- |
-| `hero.png` | Dashboard | Operational readiness, evidence counts, harness review, recent runs, and crash handoff. This is the README hero image. |
+| `hero.png` | Dashboard | Operational readiness, evidence counts, harness review, recent runs, and crash handoff. Formerly the README hero image. |
 | `discover.png` | Discover | A populated, ranked Target Inventory with fit score and source location. |
 | `harness.png` | Harness | The active revision plus sandbox qualification, human promotion, and seed-corpus flow. |
 | `run.png` | Run | The selected approved target, enabled engine, bounded duration, and retained campaign metrics. |

@@ -1,32 +1,144 @@
-# oxfuzz（中文）
+<div align="center">
+
+<a href="https://oxfuzz.bionicloud.net/zh/"><img src="website/src/mark.svg" alt="oxfuzz" width="84" height="84"></a>
+
+# oxfuzz
 
 [English](README.md) &middot; **中文**
 
+### 抢在用户之前，找到那个崩溃。
+
+面向 C、C++ 和 Rust 的开源 AI 模糊测试智能体。
+
+[![Release](https://img.shields.io/github/v/release/HenryCooper86/oxfuzz?color=c8b560&label=release)](https://github.com/HenryCooper86/oxfuzz/releases/latest)
 [![CI](https://github.com/HenryCooper86/oxfuzz/actions/workflows/ci.yml/badge.svg)](https://github.com/HenryCooper86/oxfuzz/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Rust 1.94](https://img.shields.io/badge/Rust-1.94-orange.svg)](rust-toolchain.toml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Rust 1.94](https://img.shields.io/badge/rust-1.94-orange.svg)](rust-toolchain.toml)
+[![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-555.svg)](docs/guides/INSTALL.md)
 
-> AI 辅助的模糊测试工作台：发现测试目标，借助大语言模型起草并修复测试桩，在沙箱中驱动 AFL++、honggfuzz、libFuzzer 和 syzkaller，并对崩溃进行分诊——任何内容运行前都需人工审批。提供桌面 GUI、命令行和 REST API。
+[**官网**](https://oxfuzz.bionicloud.net) &middot; [**下载**](https://oxfuzz.bionicloud.net/#downloads) &middot; [**入门指南**](docs/guides/GETTING_STARTED.md) &middot; [**文档**](#documentation) &middot; [**参与贡献**](#contributing)
 
-**目标发现** &middot; **测试桩生成** &middot; **引擎集成** &middot; **崩溃三查** &middot; **语料库与覆盖率闭环** &middot; **用户可扩展技能**
+</div>
+
+给 oxfuzz 一个源码目录，它会挑出最值得攻击的函数，写好测试桩，在沙箱里运行
+AFL++、libFuzzer、honggfuzz 或 syzkaller，并把每个崩溃连同可复现的输入和调用栈
+一起交给你。每一步都由你批准。桌面应用、命令行和 REST API 共用同一套服务核心。
 
 <p align="center">
-  <img src="docs/screenshots/hero.png" alt="oxfuzz 仪表盘：运营就绪度、测试桩审核、近期运行与崩溃移交" width="900">
+  <img src="website/src/screenshots/oxfuzz-at-work.gif" alt="录屏：oxfuzz 展示生成的测试桩，运行一分钟的 AFL++ 测试并实时显示覆盖率和速度，然后列出得到的发现" width="900">
 </p>
 
+<p align="center"><sub>内置示例 <code>utf8_decoder</code> 上的一次真实运行，为便于展示做了缩短。</sub></p>
+
+<div align="center">
+
+| 目标评分 | 测试时长 | 峰值速度 | 发现于 | 结果 |
+| :---: | :---: | :---: | :---: | :---: |
+| **83 / 100** | **1 分钟，AFL++** | **每秒 10,095 次执行** | **第 123 次执行** | **4 个崩溃输入，1 个发现** |
+
+</div>
+
+这个发现是：`decode_utf8` 在 `utf8.c:31` 处的 `use-after-poison`，评级为很可能可利用。
+只需两个字节 —— 首字节声称后面有三个字节，解码器就会读到缓冲区之外。
+
 ---
 
-## 模糊测试新手？从这里开始
+## 为什么选择 oxfuzz
 
-用大白话说：**模糊测试（fuzzing）** 就是自动向一个程序投喂数以百万计的畸形、奇怪的输入，找出会让它崩溃的那些 —— 每一次崩溃都是一个潜在缺陷，往往是安全漏洞。手工做这件事需要专家级的工作：决定测什么、编写测试代码、安全地运行它，并读懂崩溃。
+模糊测试器向你的代码投入数以百万计的异常输入，并盯住内存错误。真正费事的一直是
+前期工作：选目标、写测试桩、带着 sanitizer 编译，再从一大堆重复的崩溃里理出头绪。
+oxfuzz 替你做完这些，把决定权留给你。
 
-**oxfuzz 用 AI 与确定性工具来协调这套工作流。** 你把它指向一份代码库，它会对候选目标进行排名、起草并资格化测试桩、在强制沙箱内驱动真实的模糊测试引擎，并为发现的崩溃保留证据。人工审批被绑定到被允许进入完整 campaign 的那一个确切的测试桩修订版。
+<table>
+<tr>
+<td width="33%" valign="top">
 
-如果你不是模糊测试工程师，请先阅读 **[入门指南](docs/guides/GETTING_STARTED.md)** —— 它从零开始解释一切，带你在桌面应用里走完第一次运行，并附有每个术语的词汇表。
+**几分钟内开始第一次运行**
 
----
+打开一个目录，就能得到排好序的目标列表，每个都附有理由。不用手写测试桩。
 
-## 亮点
+</td>
+<td width="33%" valign="top">
+
+**拿得出证据的崩溃**
+
+每个发现都保留输入、sanitizer 报告和调用栈，团队里任何人都能重放。
+
+</td>
+<td width="33%" valign="top">
+
+**未经审查的代码不会运行**
+
+生成的代码只在没有网络的容器里编译和运行，而且要先经过你的批准。
+
+</td>
+</tr>
+</table>
+
+模糊测试新手？**[入门指南](docs/guides/GETTING_STARTED.md)** 从零开始解释一切，
+带你在桌面应用里走完第一次运行，并附有每个术语的词汇表。
+
+## 从源码目录到分类完毕的崩溃，只需四步
+
+<table>
+<tr>
+<td width="50%" valign="top">
+<a href="website/src/screenshots/discover.jpg"><img src="website/src/screenshots/discover.jpg" alt="oxfuzz 的发现界面，列出九个已排序的模糊测试目标，其中 tlv_decode 评分 100 分并被推荐优先测试"></a>
+
+**1. 发现目标。** oxfuzz 扫描整个项目，给最值得测试的函数排序，并为每个函数给出评分和简短理由。
+
+</td>
+<td width="50%" valign="top">
+<a href="website/src/screenshots/harness.jpg"><img src="website/src/screenshots/harness.jpg" alt="oxfuzz 的测试桩界面，显示为 decode_utf8 生成的测试桩源码及其冒烟测试结果"></a>
+
+**2. 审查测试桩。** 模型先起草，随后在沙箱里编译并做冒烟测试，然后等你确认。在你批准之前，不会启动任何测试。
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<a href="website/src/screenshots/run.jpg"><img src="website/src/screenshots/run.jpg" alt="oxfuzz 的运行界面，显示一分钟 AFL++ 测试结束后的覆盖边数、崩溃信号和每秒执行次数"></a>
+
+**3. 运行。** 启动一次限时测试，实时查看覆盖率、速度和崩溃。可以随时停止，结果会保留。
+
+</td>
+<td width="50%" valign="top">
+<a href="website/src/screenshots/triage.jpg"><img src="website/src/screenshots/triage.jpg" alt="oxfuzz 的崩溃分类界面，显示一个发现及其 sanitizer 分类和位于 utf8.c 第 31 行的调用栈"></a>
+
+**4. 崩溃分类。** 崩溃会被重放、按调用栈归并并评级。可以导出报告、SARIF 或 issue 草稿。
+
+</td>
+</tr>
+</table>
+
+## 四个引擎，一套流程
+
+oxfuzz 驱动的是你早已信任的模糊测试器。引擎由你选择，其余步骤保持不变。
+
+| 引擎 | 适用场景 |
+| --- | --- |
+| [**libFuzzer**](https://llvm.org/docs/LibFuzzer.html) | 进程内运行，速度快。测试库代码时通常首选它。 |
+| [**AFL++**](https://aflplus.plus/) | 覆盖率引导，变异能力和语料工具都很强。 |
+| [**honggfuzz**](https://honggfuzz.dev/) | 多进程，支持硬件和软件反馈。 |
+| [**syzkaller**](docs/guides/SYZKALLER_SETUP.md) | 在虚拟机中对 Linux 内核做模糊测试。内核和客户机镜像由你提供。 |
+
+目前支持哪些语言、引擎与构建系统，见[支持矩阵](docs/guides/SUPPORT_MATRIX.md)。
+
+## 模糊测试运行的是不可信代码，控制权始终在你手里。
+
+- **沙箱隔离。** 每次编译、每次运行都在没有网络的 Docker 容器中进行。生成的代码不会
+  直接在你的机器上运行，也不存在主机执行回退。
+- **由人批准。** 测试桩先由模型审查，再由你审查。人工审批被绑定到被允许进入测试的
+  那一个确切的测试桩修订版。
+- **模型由你选择。** 可使用 OpenAI、Anthropic、Gemini、Azure OpenAI、Ollama，或任何
+  兼容 OpenAI 的接口，并自行设定花费上限。
+
+详见[安全模型](docs/guides/SAFETY_MODEL.md)。
+
+<details>
+<summary><b>oxfuzz 的全部能力</b>（完整能力表）</summary>
+
+<br>
 
 | 能力 | 说明 |
 | --- | --- |
@@ -53,11 +165,21 @@
 参见[手动资格验证](docs/guides/MANUAL_QUALIFICATION.md)和
 [原生自定义变异器](docs/guides/MANAGED_MUTATORS.md)，了解尚需操作员完成的检查。
 
+</details>
+
 ---
 
-## 快速开始
+## 安装
 
-**[入门指南](docs/guides/GETTING_STARTED.md)** 会带你走完桌面应用；**[CLI 参考](docs/guides/CLI_REFERENCE.md)** 覆盖每一个子命令。简短版本：
+**桌面应用。** 从 **[oxfuzz.bionicloud.net](https://oxfuzz.bionicloud.net/#downloads)**
+或[最新的 GitHub release](https://github.com/HenryCooper86/oxfuzz/releases/latest)
+下载适用于 macOS、Linux 或 Windows 的安装包，用沙箱套件构建沙箱，在“设置”中添加模型服务，
+然后打开一个源码目录。需要 Docker。这是早期版本：macOS 安装包为临时签名且未经公证，
+Windows 安装包未签名，安装前系统可能会给出警告。
+
+**从源码构建。** 命令行、桌面应用和沙箱镜像都可以从本仓库构建；见[安装与构建](docs/guides/INSTALL.md)。
+
+## 快速开始（命令行）
 
 ```bash
 git clone https://github.com/HenryCooper86/oxfuzz.git && cd oxfuzz
@@ -79,11 +201,25 @@ oxfuzz fuzz <project> --lang c        # 发现 -> harness -> smoke -> 提升 -> 
 不想安装？`cargo build --release -p hf-cli` 会把二进制留在
 `target/release/oxfuzz`。没有可用模型？`oxfuzz fuzz <project> --ai off
 --no-llm-review` 可在不调用模型的情况下跑完整条流水线：harness 从确定性
-模板起步，资格验证依靠 lint 检查与你本人的审批，而不是模型评审。支持哪些语言与引擎见[支持矩阵](docs/guides/SUPPORT_MATRIX.md)；
+模板起步，资格验证依靠 lint 检查与你本人的审批，而不是模型评审。
 要对你自己的代码库进行模糊测试，请参阅[对你自己的项目做模糊测试](docs/guides/FUZZ_YOUR_PROJECT.md)。
 遇到问题请查看[故障排查](docs/guides/TROUBLESHOOTING.md)。
+**[CLI 参考](docs/guides/CLI_REFERENCE.md)** 覆盖每一个子命令。
 
-逐步执行、让每个产物都处于你显式控制之下的流程如下：
+Docker 必须已安装并正在运行。harness 起草与 AI 排序需要 LLM 提供方；没有提供方时，
+请使用下面的 work-order 流程并加上 `--ai off`。harness 编译与
+模糊测试启动属于需要审批的高风险操作：在终端中 CLI 会按操作逐项询问
+（`[y]es` 仅此一次、`[n]o` 拒绝、`[a]lways` 本次会话内允许该类操作）；
+管道或 CI 等非终端环境不会提示，而是从环境变量读取授权
+（`HF_AUTO_APPROVE=1`，可信本地循环可用 `HF_GUARDRAILS=permissive`），
+桌面应用则通过对话框询问。参见
+[安全模型](docs/guides/SAFETY_MODEL.md)与
+[配置](docs/guides/CONFIGURATION.md)了解完整搭建。
+
+<details>
+<summary><b>带人工评审的逐步流程</b>（每个产物都处于你的显式控制之下）</summary>
+
+<br>
 
 ```bash
 oxfuzz discover <project> --lang c --rank
@@ -100,18 +236,15 @@ oxfuzz run <project> --target <relative-file>::<symbol> \
 oxfuzz triage <project> --target <relative-file>::<symbol>
 ```
 
-Docker 必须已安装并正在运行。harness 起草与 AI 排序需要 LLM 提供方；没有提供方时，
-请使用上面的 work-order 流程并加上 `--ai off`。harness 编译与
-模糊测试启动属于需要审批的高风险操作：在终端中 CLI 会按操作逐项询问
-（`[y]es` 仅此一次、`[n]o` 拒绝、`[a]lways` 本次会话内允许该类操作）；
-管道或 CI 等非终端环境不会提示，而是从环境变量读取授权
-（`HF_AUTO_APPROVE=1`，可信本地循环可用 `HF_GUARDRAILS=permissive`），
-桌面应用则通过对话框询问。参见
-**[安全模型](docs/guides/SAFETY_MODEL.md)**、
-**[安装与构建](docs/guides/INSTALL.md)** 与
-**[配置](docs/guides/CONFIGURATION.md)** 了解完整搭建。
+导入与资格验证并不等于批准 harness。提升操作指定的是你评审过的那一次保留的资格验证尝试；
+重新运行 `oxfuzz harness` 会生成新的草稿，而不是批准之前的源码。
 
-## 带人工评审的演示
+</details>
+
+<details>
+<summary><b>带人工评审的演示</b>（在内置示例中重新发现一个植入的缺陷）</summary>
+
+<br>
 
 完成快速开始后，使用演示脚本发现示例目标并准备待评审的 harness：
 
@@ -130,7 +263,11 @@ Docker 必须已安装并正在运行。harness 起草与 AI 排序需要 LLM �
 预检检查提供方配置，不验证凭据或模型连通性。完成时间和缺陷发现取决于提供方、引擎、
 harness 和语料库。其他示例分别覆盖其他缺陷类别；见 **[examples/README.md](examples/README.md)**。
 
+</details>
+
 ---
+
+<a id="documentation"></a>
 
 ## 文档
 
@@ -138,17 +275,18 @@ harness 和语料库。其他示例分别覆盖其他缺陷类别；见 **[examp
 
 > 说明：详细的参考文档目前为英文。
 
-**指南**
+| 指南 | |
+| --- | --- |
+| [安装与构建](docs/guides/INSTALL.md) | 先决条件、CLI 与桌面构建、预构建应用，以及可选的 DefectDojo。 |
+| [对你自己的项目做模糊测试](docs/guides/FUZZ_YOUR_PROJECT.md) | 将 oxfuzz 用于真实的 C、C++ 或 Rust 代码库：构建系统、头文件与 CI。 |
+| [支持矩阵](docs/guides/SUPPORT_MATRIX.md) | 目前支持哪些语言、引擎与构建系统。 |
+| [故障排查](docs/guides/TROUBLESHOOTING.md) | Docker、沙箱镜像、模型提供方与构建失败。 |
+| [桌面应用](docs/guides/DESKTOP_APP.md) | 主界面：一次完整的 campaign、AI 助手与设置。 |
+| [CLI 参考](docs/guides/CLI_REFERENCE.md) | 每个子命令、快速开始流程、可选 Semgrep 增强与汽车协议工作流。 |
+| [配置](docs/guides/CONFIGURATION.md) | 配置树、提供方与环境。 |
+| [安全模型](docs/guides/SAFETY_MODEL.md) | 沙箱、护栏与人工闭环审批。 |
 
-- [安装与构建](docs/guides/INSTALL.md) —— 先决条件、CLI 与桌面构建、预构建应用，以及可选的 DefectDojo。
-- [对你自己的项目做模糊测试](docs/guides/FUZZ_YOUR_PROJECT.md) —— 将 oxfuzz 用于真实的 C、C++ 或 Rust 代码库：构建系统、头文件与 CI。
-- [支持矩阵](docs/guides/SUPPORT_MATRIX.md) —— 目前支持哪些语言、引擎与构建系统。
-- [故障排查](docs/guides/TROUBLESHOOTING.md) —— Docker、沙箱镜像、模型提供方与构建失败。
-- [桌面应用](docs/guides/DESKTOP_APP.md) —— 主界面：一次完整的 campaign、AI 助手与设置。
-- [CLI 参考](docs/guides/CLI_REFERENCE.md) —— 每个子命令、快速开始流程、可选 Semgrep 增强与汽车协议工作流。
-- [配置](docs/guides/CONFIGURATION.md) —— 配置树、提供方与环境。
-- [安全模型](docs/guides/SAFETY_MODEL.md) —— 沙箱、护栏与人工闭环审批。
-- [Syzkaller 搭建](docs/guides/SYZKALLER_SETUP.md) &middot; [发布检查清单](docs/guides/RELEASE_CHECKLIST.md) &middot; [持续集成](docs/guides/CI.md)
+另见：[Syzkaller 搭建](docs/guides/SYZKALLER_SETUP.md) &middot; [发布检查清单](docs/guides/RELEASE_CHECKLIST.md) &middot; [持续集成](docs/guides/CI.md)
 
 **参考**
 
@@ -156,11 +294,20 @@ harness 和语料库。其他示例分别覆盖其他缺陷类别；见 **[examp
 - [文档地图](docs/README.md) —— 按受众与任务为读者导航。
 - [设计文档](docs/design/) &middot; [工程标准](docs/standards/)
 
-**项目**
+<a id="contributing"></a>
 
-- [贡献指南](CONTRIBUTING.md) &middot; [行为准则](CODE_OF_CONDUCT.md) &middot; [获取帮助](SUPPORT.md) &middot; [安全策略](SECURITY.md) &middot; [愿景](VISION.md) &middot; [工程协议](docs/standards/ENGINEERING_PROTOCOL.md)
+## 参与贡献
 
----
+oxfuzz 是开源项目，欢迎你一起把它做得更好。整个项目都在这里，采用 MIT 许可：桌面应用、
+背后的服务以及沙箱。一份缺陷报告、一处错别字修正、一个新的示例目标，或者你为自己团队做的
+功能，都会让下一位使用者受益。
+
+- [报告缺陷或提出功能建议](https://github.com/HenryCooper86/oxfuzz/issues/new/choose) —— 告诉我们哪里出了问题，或者还缺什么。
+- [提交 Pull Request](CONTRIBUTING.md) —— 贡献指南介绍了环境搭建、测试和代码风格。
+- [认领一个未解决的 issue](https://github.com/HenryCooper86/oxfuzz/issues) —— 看看有哪些计划，哪些地方需要帮手。
+- [私下报告安全问题](SECURITY.md) —— 这类问题请不要公开提交 issue。
+
+更多：[行为准则](CODE_OF_CONDUCT.md) &middot; [获取帮助](SUPPORT.md) &middot; [愿景](VISION.md) &middot; [工程协议](docs/standards/ENGINEERING_PROTOCOL.md)
 
 ## 致谢
 
@@ -173,8 +320,6 @@ oxfuzz 受到 [Gorgias (gorgiaxx)](https://github.com/gorgiaxx) 的 **[y-agent](
 分发声明与确切来源保留在
 [`third_party/semgrep`](third_party/semgrep) 与
 [`third_party/semgrep-rules`](third_party/semgrep-rules)。
-
----
 
 ## 许可证
 
