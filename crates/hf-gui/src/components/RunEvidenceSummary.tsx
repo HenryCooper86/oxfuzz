@@ -2,10 +2,11 @@ import type { RunHistoryItem } from "../types";
 import { useI18n } from "../i18nContext";
 import { Button } from "./ui";
 
-export function RunOutcomeNotice({ crashes }: { crashes: number }) {
+export function RunOutcomeNotice({ crashes, stoppedAtFirstCrash = false }: { crashes: number; stoppedAtFirstCrash?: boolean }) {
   const { t } = useI18n();
   return <div className="flex flex-col gap-2">
     <p className="text-sm">{crashes === 0 ? t("results.noCrashes") : t("results.crashes", { n: crashes })}</p>
+    {stoppedAtFirstCrash && <p className="text-sm" data-first-crash-stop>{t("results.firstCrashStop")}</p>}
     <p className="text-xs text-text-secondary">{t("results.limit")}</p>
   </div>;
 }
@@ -20,7 +21,7 @@ export function RunEvidenceSummary({ run, onFindings, onReport }: {
     <h3 className="text-sm font-semibold">{t("results.scope")}</h3>
     <p className="text-xs break-all">{run.project_root} · {run.target_selector ?? run.target ?? t("runs.unknownTarget")}</p>
     <p className="text-xs">{run.engine} · {run.status} · {run.requested_duration_secs === null ? t("results.budgetUnknown") : t("results.budget", { value: run.requested_duration_secs })}</p>
-    <RunOutcomeNotice crashes={run.crashes} />
+    <RunOutcomeNotice crashes={run.crashes} stoppedAtFirstCrash={run.stopped_at_first_crash === true} />
     <p className="text-xs text-text-secondary">{run.edges === null ? t("results.coverageUnknown") : t("results.coverage", { n: run.edges })}</p>
     <div className="flex flex-wrap gap-2">
       {onFindings && <Button onClick={onFindings}>{t("results.findings")}</Button>}

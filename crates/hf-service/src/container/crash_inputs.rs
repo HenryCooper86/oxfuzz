@@ -310,15 +310,28 @@ mod crash_input_boundary_tests {
 
 /// Recursively collect and parse every `.casrep` report under `dir`.
 /// Collapse crashes that CASR placed in the same cluster to one representative
-/// (the first seen). Crashes without a cluster id pass through unchanged, so
-/// this only ever tightens dedup, never loses an un-clustered crash.
+/// (the first seen).
+///
+/// A crash without a cluster id falls back to the stack signature: the first
+/// with each signature is kept, and one with no signature always is, since
+/// nothing says it repeats another. CASR clusters at the end of its run, so a
+/// run stopped by its time budget or by the operator leaves every report it
+/// wrote unclustered; passing those through whole turned one overflow found
+/// by 317 inputs into 317 findings.
 pub(super) fn bucket_by_cluster(crashes: Vec<hf_core::crash::Crash>) -> Vec<hf_core::crash::Crash> {
     let mut seen_clusters = std::collections::HashSet::new();
+    let mut seen_signatures = std::collections::HashSet::new();
     let mut kept = Vec::with_capacity(crashes.len());
     for crash in crashes {
-        match crash.casr.as_ref().and_then(|c| c.cluster) {
-            Some(cluster) if !seen_clusters.insert(cluster) => {} // duplicate cluster -> drop
-            _ => kept.push(crash),
+        let first_of_its_kind = match crash.casr.as_ref().and_then(|c| c.cluster) {
+            Some(cluster) => seen_clusters.insert(cluster),
+            None => {
+                crash.stack_signature.is_empty()
+                    || seen_signatures.insert(crash.stack_signature.clone())
+            }
+        };
+        if first_of_its_kind {
+            kept.push(crash);
         }
     }
     kept
@@ -338,6 +351,67 @@ pub(super) fn collect_casreps(dir: &Path) -> Vec<(PathBuf, hf_core::crash::CasrR
         );
     }
     collection.reports
+}
+
+#[cfg(test)]
+mod cluster_bucketing_tests {
+    use hf_core::crash::{Crash, CrashKind, CrashOrigin};
+    use uuid::Uuid;
+
+    use super::bucket_by_cluster;
+
+    fn crash(signature: &str, cluster: Option<u32>) -> Crash {
+        Crash {
+            reproduction: None,
+            id: Uuid::new_v4(),
+            run_id: Uuid::nil(),
+            target_id: Uuid::nil(),
+            input_path: std::path::PathBuf::from("out/crash"),
+            stack_signature: signature.to_owned(),
+            kind: CrashKind::Asan,
+            summary: signature.to_owned(),
+            minimized: false,
+            bug_report: None,
+            origin: CrashOrigin::Unknown,
+            casr: Some(hf_core::crash::CasrReport {
+                cluster,
+                ..hf_crash::parse_casrep(r#"{"CrashLine":"parse.c:1:1","Stacktrace":["parse"]}"#)
+                    .unwrap()
+            }),
+        }
+    }
+
+    #[test]
+    fn reports_casr_never_clustered_collapse_by_stack_signature() {
+        // CASR clusters at the end of its run. Cut off by its time budget on a
+        // honggfuzz flood, it left 317 reports for one overflow unclustered,
+        // and each became its own finding.
+        let mut crashes: Vec<Crash> = (0..3).map(|_| crash("utf8.c:31:27", None)).collect();
+        crashes.push(crash("harness+0x111dfc", None));
+        crashes.push(crash("harness+0x111dfc", None));
+
+        let kept = bucket_by_cluster(crashes);
+
+        let signatures: Vec<&str> = kept.iter().map(|c| c.stack_signature.as_str()).collect();
+        assert_eq!(signatures, ["utf8.c:31:27", "harness+0x111dfc"]);
+    }
+
+    #[test]
+    fn clusters_and_unsigned_reports_keep_their_existing_treatment() {
+        let kept = bucket_by_cluster(vec![
+            crash("a.c:1:1", Some(1)),
+            crash("a.c:2:2", Some(1)),
+            crash("b.c:1:1", Some(2)),
+            // No signature to compare: nothing says these are one bug.
+            crash("", None),
+            crash("", None),
+        ]);
+        let clusters: Vec<Option<u32>> = kept
+            .iter()
+            .map(|c| c.casr.as_ref().and_then(|casr| casr.cluster))
+            .collect();
+        assert_eq!(clusters, [Some(1), Some(2), None, None]);
+    }
 }
 
 #[cfg(test)]

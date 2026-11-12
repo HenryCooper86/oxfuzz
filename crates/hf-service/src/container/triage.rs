@@ -720,15 +720,19 @@ impl ServiceContainer {
             {
                 // Parse only completed bounded reports after the sandbox has been reaped.
             }
-            Ok(r)
-                if self.scan_control.is_some()
-                    && r.termination == hf_core::runtime::CommandTermination::TimedOut =>
-            {
+            Ok(r) if r.termination == hf_core::runtime::CommandTermination::TimedOut => {
+                // CASR writes one report per input as it goes, so what it
+                // finished before the budget ran out is real evidence. Every
+                // caller keeps it: an interactive scan is told through its
+                // control, and a campaign, which has none, through the log.
+                // Failing the campaign instead discarded the findings of a
+                // run whose only fault was having too many crashing inputs.
+                let notice =
+                    "CASR exceeded its 240 second budget; completed findings were retained";
                 if let Some(control) = &self.scan_control {
-                    control.fail(
-                        "CASR exceeded its 240 second budget; completed findings were retained"
-                            .to_owned(),
-                    );
+                    control.fail(notice.to_owned());
+                } else {
+                    tracing::warn!(run_id = %run_id, "{notice}");
                 }
             }
             Ok(r) if r.termination != hf_core::runtime::CommandTermination::Completed => {
@@ -1407,6 +1411,27 @@ impl ServiceContainer {
     ) -> Option<hf_coverage::CoverageSummary> {
         let json = self.coverage_export_json_cached(project, target).await?;
         hf_coverage::parse_llvm_cov_summary(&json)
+    }
+
+    /// The coverage totals and covered-function count a report shows, from one
+    /// measurement.
+    ///
+    /// [`Self::coverage_summary`] and [`Self::coverage_functions`] each request
+    /// the measurement, and a refused or failed measurement is not cached, so
+    /// reading them in turn asks the approval gate twice for one report. This
+    /// reads the export once and derives both figures from it.
+    pub(crate) async fn coverage_report_figures(
+        &self,
+        project: &Path,
+        target: &str,
+    ) -> (Option<hf_coverage::CoverageSummary>, usize) {
+        match self.coverage_export_json_cached(project, target).await {
+            Some(json) => (
+                hf_coverage::parse_llvm_cov_summary(&json),
+                parse_covered_functions(&json).len(),
+            ),
+            None => (None, 0),
+        }
     }
 }
 

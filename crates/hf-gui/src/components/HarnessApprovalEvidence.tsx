@@ -126,8 +126,10 @@ export function HarnessApprovalEvidence({ item }: { item: HarnessReviewItem }) {
             ? localized(t, "harness.evidence.smokePassed", "passed")
             : item.smoke_crashes > 0
               ? t("harness.evidence.smokeCrashed", { n: item.smoke_crashes })
-              : localized(t, "harness.evidence.smokeNotPassed", "not passed")}{" "}
-          ({item.smoke_execs_per_sec.toFixed(0)} exec/s)
+              : localized(t, "harness.evidence.smokeNotPassed", "not passed")}
+          {/* libFuzzer reports no rate for a smoke run that ends inside its
+              first second; zero here means unmeasured, not a stalled harness. */}
+          {item.smoke_execs_per_sec > 0 && ` (${item.smoke_execs_per_sec.toFixed(0)} exec/s)`}
         </span>
       </div>
 

@@ -201,6 +201,7 @@ fn observation(candidate: &AllocationCandidate, order: u8, edges: u64) -> RunHis
         id: format!("run-{order}"),
         target_id: Some(candidate.target_id),
         requested_duration_secs: Some(10),
+        stopped_at_first_crash: false,
         project_root: "/project".into(),
         target: Some(candidate.target.clone()),
         target_selector: Some(candidate.target.clone()),

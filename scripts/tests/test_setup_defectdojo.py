@@ -71,5 +71,25 @@ class DefectDojoSetupTests(unittest.TestCase):
         self.assertNotRegex(self.script, r"curl[^\n]*[ ]-d[ ]")
 
 
+    def test_database_migrated_past_the_pinned_release_is_refused(self) -> None:
+        # A database created by a newer DefectDojo (the installer was unpinned
+        # before 2026-08-30) reports every pinned migration as applied, so the
+        # stack starts and then fails on columns the newer release dropped.
+        self.assertIn("applied_migrations", self.script)
+        self.assertIn("disk_migrations", self.script)
+        self.assertIn("migrated by a newer DefectDojo", self.script)
+        check = self.script.index("schema_ahead_of_pin")
+        provision = self.script.index("api-token-auth")
+        self.assertLess(
+            self.script.index("migrated by a newer DefectDojo"),
+            provision,
+            "the refusal must precede token provisioning and the config write",
+        )
+        self.assertLess(check, provision)
+
+    def test_schema_refusal_names_the_data_loss_of_its_remedy(self) -> None:
+        self.assertRegex(self.script, r"down -v")
+        self.assertIn("deletes every DefectDojo finding", self.script)
+
 if __name__ == "__main__":
     unittest.main()

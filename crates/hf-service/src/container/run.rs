@@ -1534,6 +1534,7 @@ impl ServiceContainer {
         // budget. Its evidence is persisted exactly like a clean run's; what it
         // is not is a fair regression baseline.
         let truncated = result.termination != hf_core::runtime::CommandTermination::Completed;
+        let engine_elapsed = run_started.elapsed();
 
         // Keep the retained corpus immutable throughout execution. Engines
         // write only to this run's disposable snapshot/output; after the
@@ -1655,6 +1656,14 @@ impl ServiceContainer {
             stagnation: feedback.proposal(),
             auto_revert,
             cmplog: run_cfg.cmplog,
+            stopped_at_first_crash: super::stopped_at_first_crash(
+                engine,
+                run_cfg.max_cpus,
+                run_cfg.duration,
+                crashes,
+                result.termination == hf_core::runtime::CommandTermination::Completed,
+                engine_elapsed,
+            ),
         })
     }
 

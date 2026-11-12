@@ -2139,6 +2139,10 @@ pub struct RunHistoryItem {
     pub target_id: Option<Uuid>,
     /// Requested campaign budget from retained config, distinct from elapsed time.
     pub requested_duration_secs: Option<u64>,
+    /// The engine ended the run at its first crash, before the requested
+    /// budget; see [`RunSummary::stopped_at_first_crash`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stopped_at_first_crash: bool,
     pub project_root: String,
     /// Target symbol resolved through the run's persisted harness.
     pub target: Option<String>,
@@ -2344,6 +2348,92 @@ pub struct RunSummary {
     /// solving, so the summary must say when that cost was active.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cmplog: bool,
+    /// The engine ended the run at its first crash, before the requested
+    /// budget. Single-process libFuzzer does this by design; without the flag
+    /// a one-minute campaign that lasted a second reads as a full campaign.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stopped_at_first_crash: bool,
+}
+
+/// Whether a finished run is single-process libFuzzer exiting at its first
+/// crash with budget left.
+///
+/// libFuzzer reports elapsed time in whole seconds, so a run counts as early
+/// only when it ended more than one second short of the budget. Fork mode
+/// (`max_cpus > 1`) and the other engines keep fuzzing past a crash.
+/// `completed` is false for a run the operator cancelled or the sandbox
+/// stopped. The live summary and run history both derive the flag here.
+pub(crate) fn stopped_at_first_crash(
+    engine: EngineKind,
+    max_cpus: u32,
+    budget: Option<std::time::Duration>,
+    crashes: u64,
+    completed: bool,
+    elapsed: std::time::Duration,
+) -> bool {
+    engine == EngineKind::LibFuzzer
+        && max_cpus <= 1
+        && crashes > 0
+        && completed
+        && budget.is_some_and(|budget| {
+            elapsed.saturating_add(std::time::Duration::from_secs(1)) < budget
+        })
+}
+
+#[cfg(test)]
+mod first_crash_stop_tests {
+    use std::time::Duration;
+
+    use hf_core::engine::EngineKind;
+
+    const BUDGET: Option<Duration> = Some(Duration::from_secs(60));
+
+    fn stopped(
+        engine: EngineKind,
+        max_cpus: u32,
+        crashes: u64,
+        completed: bool,
+        elapsed: Duration,
+    ) -> bool {
+        super::stopped_at_first_crash(engine, max_cpus, BUDGET, crashes, completed, elapsed)
+    }
+
+    #[test]
+    fn single_process_libfuzzer_ending_early_with_a_crash_is_flagged() {
+        assert!(stopped(
+            EngineKind::LibFuzzer,
+            1,
+            1,
+            true,
+            Duration::from_millis(400),
+        ));
+    }
+
+    #[test]
+    fn a_run_that_used_its_budget_or_kept_fuzzing_is_not_flagged() {
+        let libfuzzer = EngineKind::LibFuzzer;
+        let done = true;
+        let early = Duration::from_secs(1);
+        // Ran to the budget, within libFuzzer's whole-second resolution.
+        assert!(!stopped(
+            libfuzzer,
+            1,
+            1,
+            done,
+            Duration::from_millis(59_500)
+        ));
+        // Ended early without a crash: some other exit, not this one.
+        assert!(!stopped(libfuzzer, 1, 0, done, early));
+        // The operator stopped it.
+        assert!(!stopped(libfuzzer, 1, 1, false, early));
+        // Fork mode and the other engines continue past a crash.
+        assert!(!stopped(libfuzzer, 2, 1, done, early));
+        assert!(!stopped(EngineKind::AflPlusPlus, 1, 1, done, early));
+        // No budget, nothing to end short of.
+        assert!(!super::stopped_at_first_crash(
+            libfuzzer, 1, None, 1, done, early
+        ));
+    }
 }
 
 /// The outcome of the auto-revert policy firing for a finished run: its harness

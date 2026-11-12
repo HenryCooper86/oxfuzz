@@ -194,6 +194,39 @@ while [ "$waited" -lt "$READY_TIMEOUT" ]; do
   printf '  ... still starting (%ss, last HTTP %s)\n' "$waited" "$code"
 done
 
+# --- Refuse a database migrated past the pinned release ---------------------
+# A database created by a newer DefectDojo reports every pinned migration as
+# applied, so the pinned stack starts cleanly and then fails on columns the
+# newer release removed ("column ... does not exist" on the login page). The
+# mismatch shows as applied migrations the pinned code does not have on disk.
+# Installs made before this script pinned a release (2026-08-30) can be in
+# this state. Prints the count and the latest unknown migration, or nothing.
+schema_ahead_of_pin() {
+  ( cd "$DD_DIR" && \
+    COMPOSE_PROJECT_NAME="$DD_PROJECT" \
+    COMPOSE_FILE="$DD_DIR/docker-compose.yml:$DD_DIR/docker-compose.override.yml" \
+    DJANGO_VERSION="$DJANGO_IMAGE_VERSION" \
+    NGINX_VERSION="$NGINX_IMAGE_VERSION" \
+    docker compose --env-file "$DD_ENV" exec -T uwsgi python manage.py shell -c '
+from django.db import connection
+from django.db.migrations.loader import MigrationLoader
+loader = MigrationLoader(connection)
+unknown = sorted(
+    name for app, name in loader.applied_migrations
+    if app == "dojo" and (app, name) not in loader.disk_migrations
+)
+if unknown:
+    print("OXFUZZ_SCHEMA_AHEAD", len(unknown), unknown[-1])
+' 2>/dev/null ) | sed -n 's/^OXFUZZ_SCHEMA_AHEAD //p'
+}
+
+if [ "$ready" = "1" ] && [ -f "$DD_DIR/docker-compose.override.yml" ]; then
+  ahead="$(schema_ahead_of_pin)"
+  if [ -n "$ahead" ]; then
+    die "the DefectDojo database of project '${DD_PROJECT}' was migrated by a newer DefectDojo than the pinned release (unknown migrations and the latest: ${ahead}). The pinned release cannot run against it. To start clean, remove the project's volumes and re-run this script: (cd \"${DD_DIR}\" && docker compose -p ${DD_PROJECT} down -v) -- this deletes every DefectDojo finding, product, and user in that project. To keep the data, run the DefectDojo release that created it outside this installer."
+  fi
+fi
+
 # --- Provision an API token (best-effort) ----------------------------------
 TOKEN=""
 if [ "$ready" = "1" ]; then

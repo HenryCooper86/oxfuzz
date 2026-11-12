@@ -105,8 +105,8 @@ export function AboutTab() {
           <Badge>C</Badge>
           <Badge>C++</Badge>
           <Badge>Rust</Badge>
-          <Badge>Go</Badge>
-          <Badge>Python</Badge>
+          <Badge>{t("settings.about.discoveryOnly", { language: "Go" })}</Badge>
+          <Badge>{t("settings.about.discoveryOnly", { language: "Python" })}</Badge>
         </div>
       </div>
 

@@ -34,6 +34,8 @@ export interface RunHistoryItem {
   id: string;
   target_id: string | null;
   requested_duration_secs: number | null;
+  /** The engine ended the run at its first crash, before the requested budget. */
+  stopped_at_first_crash?: boolean;
   kind: string;
   project_root: string;
   target: string | null;

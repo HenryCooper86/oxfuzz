@@ -25,6 +25,8 @@ export interface RunSummary {
   execs: number | null;
   stagnation?: string | null;
   autoRevert?: AutoRevert | null;
+  /** The engine ended the run at its first crash, before the requested budget. */
+  stoppedAtFirstCrash?: boolean;
 }
 
 export interface RunOutputValue {

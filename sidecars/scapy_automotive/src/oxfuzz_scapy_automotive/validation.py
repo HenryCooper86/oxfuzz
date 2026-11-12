@@ -250,13 +250,19 @@ def validate_operation_config(config_value: Any) -> dict[str, Any]:
             "interface name is not valid for the selected mode", field="interface"
         )
 
+    # A send allowlist names what may be transmitted, and every frame is
+    # checked against it at dispatch. An empty one therefore permits nothing:
+    # it is what a read-only live monitor is issued, and it is valid on
+    # virtual CAN. A physical bench must name its scope, because its approval
+    # is bound to these lists.
+    physical = mode == "physical_bench"
     arbitration_ids = _integer_list(
         config.get("arbitration_id_allowlist"),
         "arbitration_id_allowlist",
         0x1FFFFFFF,
-        required=True,
+        required=physical,
     )
-    service_required = protocol == "uds" or mode == "physical_bench"
+    service_required = physical
     services = _integer_list(
         config.get("service_allowlist", []),
         "service_allowlist",

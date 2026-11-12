@@ -93,8 +93,9 @@ impl ServiceContainer {
     /// should offer -- and it carries the engine and language off the harness,
     /// so a schedule cannot be created for a combination that will fail at 3am.
     ///
-    /// One entry per (target, engine) pair: a target promoted for two engines is
-    /// schedulable under either.
+    /// One entry per (target, engine) pair that can run: where the target's
+    /// workspace names its active harness, only that approval; otherwise every
+    /// promoted engine.
     ///
     /// # Errors
     /// Returns [`ClassifiedError::Validation`] when persistence is not configured.
@@ -178,6 +179,18 @@ impl ServiceContainer {
                 } else {
                     candidate.symbol.clone()
                 };
+                // A workspace holds one active harness. Approving a target
+                // under another engine replaces it, and the earlier approval
+                // stays `Promoted` in the store but can no longer run:
+                // dispatch refuses it ("active harness uses X rather than
+                // Y"). A workspace with no marker predates the marker and
+                // keeps every approval.
+                let active = super::harness_workspace::read_current_harness_id(
+                    &crate::container::workspace::workspace_dir(&identity, &selector),
+                );
+                if active.is_some_and(|active| active != harness.id) {
+                    continue;
+                }
                 schedulable.push(SchedulableTarget {
                     target: selector,
                     engine: harness.engine.as_str().to_owned(),

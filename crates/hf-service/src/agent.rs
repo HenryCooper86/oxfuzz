@@ -375,6 +375,89 @@ impl ServiceContainer {
         }
     }
 
+    /// The retained state of `project` for the agent's `ProjectStatus` tool.
+    ///
+    /// Reduced from the same summary the Dashboard renders, so the assistant
+    /// and the Dashboard give one account of a project. Source previews,
+    /// digests, and proof cards are left out: the model needs to know what
+    /// exists, and the operator reviews evidence in the application.
+    async fn agent_project_status(&self, project: &Path) -> Result<Value, ClassifiedError> {
+        /// Rows of each kind the model is shown; the totals carry the rest.
+        const ROWS: usize = 10;
+        let dashboard = self.workbench_dashboard(Some(project), None).await?;
+        let targets: Vec<Value> = dashboard
+            .top_targets
+            .iter()
+            .take(ROWS)
+            .map(|target| {
+                serde_json::json!({
+                    "symbol": target.symbol,
+                    "language": target.language,
+                    "fit_score": target.fit_score,
+                })
+            })
+            .collect();
+        let harnesses: Vec<Value> = dashboard
+            .harness_reviews
+            .iter()
+            .take(ROWS)
+            .map(|harness| {
+                serde_json::json!({
+                    "target": harness.target_symbol,
+                    "engine": harness.engine,
+                    "status": harness.status,
+                    "smoke_passed": harness.smoke_passed,
+                    "smoke_crashes": harness.smoke_crashes,
+                    "next_action": harness.next_action,
+                })
+            })
+            .collect();
+        let runs: Vec<Value> = dashboard
+            .recent_runs
+            .iter()
+            .take(ROWS)
+            .map(|run| {
+                serde_json::json!({
+                    "run_id": run.id,
+                    "engine": run.engine,
+                    "status": run.status,
+                    "started_at": run.started_at,
+                    "ended_at": run.ended_at,
+                    "crashes": run.crash_count,
+                })
+            })
+            .collect();
+        let findings: Vec<Value> = dashboard
+            .crash_reviews
+            .iter()
+            .take(ROWS)
+            .map(|crash| {
+                serde_json::json!({
+                    "target": crash.target_symbol,
+                    "kind": crash.kind,
+                    "summary": crash.summary,
+                    "severity": crash.severity,
+                    "minimized": crash.minimized,
+                    "has_bug_report": crash.has_bug_report,
+                    "run_id": crash.run_id,
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "totals": dashboard.totals,
+            "readiness": {
+                "state": dashboard.readiness.state,
+                "headline": dashboard.readiness.headline,
+                "detail": dashboard.readiness.detail,
+            },
+            "targets": targets,
+            "harnesses": harnesses,
+            "runs": runs,
+            "findings": findings,
+            "next_actions": dashboard.next_actions,
+        }))
+    }
+
     async fn dispatch_agent_tool(
         &self,
         project: &Path,
@@ -662,6 +745,10 @@ impl AgentBackend for ServiceContainer {
         })
         .await
         .map_err(|error| ClassifiedError::Internal(format!("knowledge task: {error}")))?
+    }
+
+    async fn project_status(&self, project: &Path) -> Result<Value, ClassifiedError> {
+        self.agent_project_status(project).await
     }
 
     fn skills_dir(&self) -> PathBuf {

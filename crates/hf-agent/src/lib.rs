@@ -74,6 +74,10 @@ pub trait AgentBackend: Send + Sync {
         limit: usize,
     ) -> Result<Value, ClassifiedError>;
 
+    /// What the service has retained for a project: discovered targets,
+    /// harnesses, runs, and findings. Read-only.
+    async fn project_status(&self, project: &std::path::Path) -> Result<Value, ClassifiedError>;
+
     /// Root containing user-editable skill definitions.
     fn skills_dir(&self) -> PathBuf;
 

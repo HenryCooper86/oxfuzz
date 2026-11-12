@@ -18,6 +18,47 @@ retain only the current release; older entries remain here as the record.
 
 ### Fixed
 
+- AI Assistant: asked what has been done or found in a project, it answers
+  from oxfuzz's retained targets, harnesses, runs and findings through a new
+  read-only `ProjectStatus` tool. Before, it could only read the project
+  folder and reported that nothing had been run.
+- Desktop: composing a report, loading a target's covered functions, and
+  exploring coverage blockers ask for approval in the approval dialog before
+  measuring coverage, which compiles and executes the harness. Before, the
+  measurement was declined without a prompt and the Policy Audit recorded two
+  `denied_by_operator` rows per report. A report now requests one decision.
+- The approval dialog is titled "oxfuzz needs your approval"; it said "The
+  agent is asking for approval" for requests no agent made.
+- libFuzzer runs: a run that ends at its first crash says so, in the Run view
+  and in Run History, and no longer shows 0 execs/sec. libFuzzer prints `exec/s: 0` for the first second of
+  every run; that sample is treated as unmeasured. Harness evidence omits an
+  unmeasured smoke rate instead of printing `(0 exec/s)`.
+- Triage: a crash scan cut off by CASR's time budget no longer records every
+  processed input as its own finding. CASR clusters at the end of its run,
+  so an interrupted scan left its reports unclustered; they now collapse by
+  stack signature (one honggfuzz overflow produced 317 findings).
+- Scheduled campaigns: when CASR runs out of its time budget, the campaign
+  keeps the findings CASR completed, as the interactive scan does. Before,
+  the campaign failed with "CASR triage was force-stopped: TimedOut" and
+  discarded them.
+- Triage: a long crash file name no longer pushes the finding detail pane
+  past the right edge of the window.
+- Automation: a campaign offers and rotates through only the approval that
+  is a target's active harness. A target approved under several engines in
+  turn counted as several targets, and the campaign could pick a superseded
+  one and fail with "active harness uses honggfuzz rather than afl++".
+- Automotive: a virtual-CAN live capture is no longer rejected with "value
+  must be a non-empty array". The sidecar required non-empty send allowlists
+  for an operation that sends nothing; they may now be empty on virtual CAN
+  (a physical bench still must name its scope). Rebuild the sidecar image
+  with `scripts/build-scapy-sidecar.sh`.
+- Run History: runs whose closeout has not finished are listed under
+  "Closeout pending" instead of "Unprocessed".
+- Settings > About: Go and Python are marked discovery-only.
+- `scripts/setup-defectdojo.sh` refuses a DefectDojo database migrated by a
+  newer release than the pinned one, naming the remedy and its data loss.
+  Before, the stack started and the login page failed on a missing column.
+- Dependencies: `rustix` 1.1.4 -> 1.1.6 (RUSTSEC-2026-0486).
 - Browser mode: workflow buttons that need approval (Smoke Test, Approve for
   Campaigns, Run, crash scan and triage, corpus engine operations, issue and
   DefectDojo publication) work on a server started with `HF_WEB_TOKEN`. The

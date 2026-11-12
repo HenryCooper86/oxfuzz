@@ -460,7 +460,7 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
             </div>;
           })}
         </div>
-        <div className="surface-card flex-1" style={{ padding: "var(--space-md)" }}>
+        <div className="surface-card flex-1 min-w-0" style={{ padding: "var(--space-md)" }}>
           {detailLoading && <div role="status" className="text-xs text-text-muted">{t("triage.loadingFinding")}</div>}
           {detailError && <div role="alert" className="text-xs" style={{ color: "var(--error)" }}>{t("triage.findingUnavailable", { id: selection?.findingId ?? "", error: detailError })}</div>}
           {activeFinding && <CrashDetail item={activeFinding} verdict={verdicts[activeFinding.crash.id]} onVerify={() => void verifyCrash(activeFinding)} actionBusy={actionsBusy} />}

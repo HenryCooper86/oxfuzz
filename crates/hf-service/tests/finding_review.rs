@@ -27,6 +27,12 @@ fn isolate_workspace() {
         ));
         std::env::set_var("HF_WORKSPACE_DIR", &root);
         hf_service::initialize_workspace_root().unwrap();
+        // Without a pinned config directory these tests read the source
+        // tree's `config/`, so a developer's live `defectdojo.toml` turned
+        // the publication refusal asserted below into a real push.
+        let config = root.join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        std::env::set_var("HF_CONFIG_DIR", &config);
     });
 }
 

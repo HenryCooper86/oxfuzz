@@ -141,6 +141,7 @@ export function parseSummary(value: unknown): RunSummary | null {
     execs,
     stagnation: typeof value.stagnation === "string" ? value.stagnation : null,
     autoRevert: parseAutoRevert(value.auto_revert ?? value.autoRevert),
+    stoppedAtFirstCrash: value.stopped_at_first_crash === true,
   };
 }
 export function parseHealth(value: unknown, runId: string): HealthItem | null {

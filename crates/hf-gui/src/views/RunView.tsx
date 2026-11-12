@@ -418,7 +418,7 @@ export function RunView({
       )}
 
       {summary && !running && <section className="surface-card p-3 flex flex-col gap-2">
-        <RunOutcomeNotice crashes={summary.crashes} />
+        <RunOutcomeNotice crashes={summary.crashes} stoppedAtFirstCrash={summary.stoppedAtFirstCrash} />
         {onNavigate && <RunCompletionActions crashes={summary.crashes} onNavigate={onNavigate} />}
       </section>}
 

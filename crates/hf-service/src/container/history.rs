@@ -263,9 +263,32 @@ impl ServiceContainer {
                     .as_ref()
                     .and_then(|config| config.duration)
                     .map(|duration| duration.as_secs());
+                // Prefer the fuzzer's recorded crash count (available even
+                // without triage); fall back to the deduped crashes table
+                // for runs recorded before stats were persisted.
+                let crashes = r.crash_count.map_or_else(
+                    || crashes_by_run.get(&r.id).copied().unwrap_or(0),
+                    |c| usize::try_from(c).unwrap_or(0),
+                );
+                // An unfinished run has no elapsed time to fall short with.
+                let elapsed = r
+                    .ended_at
+                    .and_then(|end| (end - r.started_at).to_std().ok())
+                    .unwrap_or(std::time::Duration::MAX);
+                let stopped_at_first_crash = r.config.as_ref().is_some_and(|config| {
+                    super::stopped_at_first_crash(
+                        r.engine,
+                        config.max_cpus,
+                        config.duration,
+                        crashes as u64,
+                        r.status == hf_storage::RunStatus::Done,
+                        elapsed,
+                    )
+                });
                 RunHistoryItem {
                     target_id,
                     requested_duration_secs,
+                    stopped_at_first_crash,
                     target_selector,
                     id: r.id.to_string(),
                     project_root: r.project_root,
@@ -277,13 +300,7 @@ impl ServiceContainer {
                     started_at: r.started_at.to_rfc3339(),
                     ended_at: r.ended_at.map(|t| t.to_rfc3339()),
                     duration_secs,
-                    // Prefer the fuzzer's recorded crash count (available even
-                    // without triage); fall back to the deduped crashes table
-                    // for runs recorded before stats were persisted.
-                    crashes: r.crash_count.map_or_else(
-                        || crashes_by_run.get(&r.id).copied().unwrap_or(0),
-                        |c| usize::try_from(c).unwrap_or(0),
-                    ),
+                    crashes,
                     edges: r.edges,
                     execs: r.execs,
                     harness_rev: r.harness_rev,

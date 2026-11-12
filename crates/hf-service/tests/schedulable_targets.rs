@@ -6,6 +6,8 @@
 //! produces a schedule that fails on every fire, hours later, with nobody
 //! watching. These tests pin that contract.
 
+mod common;
+
 use chrono::Utc;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -127,6 +129,46 @@ async fn only_promoted_harnesses_are_schedulable() {
     assert_eq!(schedulable[0].target, "parse_value");
     assert_eq!(schedulable[0].engine, "libfuzzer");
     assert_eq!(schedulable[0].language, "c");
+}
+
+#[tokio::test]
+async fn a_superseded_approval_is_not_schedulable() {
+    // A target's workspace holds one active harness. Approving it under
+    // libFuzzer, then AFL++, then honggfuzz leaves three Promoted records, of
+    // which only the last can run; a campaign offered all three picked AFL++
+    // and failed with "active harness uses honggfuzz rather than afl++".
+    common::install_managed_workspace("oxfuzz_schedulable_it");
+    let (container, _dir) = test_container().await;
+    let store = container.store().unwrap();
+
+    let mut multi = target("parse_multi", TargetLanguage::C);
+    multi.project_root = PathBuf::from("/tmp/schedulable_superseded_project");
+    store.upsert_target(&multi, Utc::now()).await.unwrap();
+    let superseded = harness(
+        multi.id,
+        EngineKind::LibFuzzer,
+        TargetLanguage::C,
+        HarnessStatus::Promoted,
+    );
+    let active = harness(
+        multi.id,
+        EngineKind::Honggfuzz,
+        TargetLanguage::C,
+        HarnessStatus::Promoted,
+    );
+    store.upsert_harness(&superseded).await.unwrap();
+    store.upsert_harness(&active).await.unwrap();
+    let workspace = hf_service::workspace_dir(&multi.project_root, "parse_multi");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("harness.active"), active.id.to_string()).unwrap();
+
+    let schedulable = container
+        .schedulable_targets(&multi.project_root)
+        .await
+        .unwrap();
+
+    let engines: Vec<&str> = schedulable.iter().map(|t| t.engine.as_str()).collect();
+    assert_eq!(engines, ["honggfuzz"], "{schedulable:?}");
 }
 
 #[tokio::test]

@@ -88,6 +88,29 @@ class ValidationTests(unittest.TestCase):
         with self.assertRaises(SidecarError):
             validate_operation_config(config)
 
+    def test_send_allowlists_may_be_empty_on_virtual_can_but_not_on_a_physical_bench(
+        self,
+    ) -> None:
+        # An empty send allowlist permits no frame, which is what a read-only
+        # live monitor is issued. A physical bench must name what it may send.
+        config = virtual_config()
+        config["arbitration_id_allowlist"] = []
+        config["service_allowlist"] = []
+        validated = validate_operation_config(config)
+        self.assertEqual(validated["arbitration_id_allowlist"], [])
+        self.assertEqual(validated["service_allowlist"], [])
+
+        for field in ("arbitration_id_allowlist", "service_allowlist"):
+            physical = physical_config()
+            physical[field] = []
+            with self.subTest(field=field), self.assertRaises(SidecarError):
+                validate_operation_config(physical)
+
+        missing = virtual_config()
+        del missing["arbitration_id_allowlist"]
+        with self.assertRaises(SidecarError):
+            validate_operation_config(missing)
+
     def test_limits_are_positive_and_mode_capped(self) -> None:
         for field in limits():
             config = virtual_config()

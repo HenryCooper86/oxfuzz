@@ -231,6 +231,13 @@ impl AgentBackend for TestBackend {
         Ok(serde_json::json!([]))
     }
 
+    async fn project_status(
+        &self,
+        _project: &std::path::Path,
+    ) -> Result<serde_json::Value, hf_core::error::ClassifiedError> {
+        Ok(serde_json::json!({}))
+    }
+
     fn skills_dir(&self) -> std::path::PathBuf {
         std::path::PathBuf::from("skills")
     }
@@ -1357,6 +1364,12 @@ impl AgentBackend for CancellingBackend {
         limit: usize,
     ) -> Result<serde_json::Value, hf_core::error::ClassifiedError> {
         self.inner.knowledge_search(project, query, limit).await
+    }
+    async fn project_status(
+        &self,
+        project: &std::path::Path,
+    ) -> Result<serde_json::Value, hf_core::error::ClassifiedError> {
+        self.inner.project_status(project).await
     }
     fn skills_dir(&self) -> std::path::PathBuf {
         self.inner.skills_dir()

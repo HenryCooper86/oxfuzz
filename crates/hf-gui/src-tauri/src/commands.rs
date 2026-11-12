@@ -776,6 +776,30 @@ impl hf_service::EventSink for TauriEventSink {
     }
 }
 
+/// Clone the container so a high-risk action asks the operator in the
+/// app-wide approval dialog and waits for the answer.
+///
+/// The container's own gate declines without asking. A command whose work
+/// reaches an approval-gated action the click did not name (an agent turn, a
+/// report that measures coverage) uses this, so a refusal recorded as the
+/// operator's is one the operator made.
+fn with_approval_dialog(
+    state: &crate::state::AppState,
+    app: &tauri::AppHandle,
+) -> hf_service::ServiceContainer {
+    let gate = std::sync::Arc::new(hf_service::approval::InteractiveApprovalGate::new(
+        state.pending_approvals.clone(),
+        std::sync::Arc::new(TauriApprovalNotifier { app: app.clone() }),
+    ));
+    state.container.clone().with_guardrails(
+        state
+            .container
+            .guardrails()
+            .clone()
+            .with_approval_gate(gate),
+    )
+}
+
 /// Delivers guardrail approval prompts to the app-wide approval dialog as
 /// Tauri events. The service-owned gate waits for the answer, denies on its
 /// timeout, and withdraws the prompt when the chat turn is cancelled.
@@ -1838,12 +1862,13 @@ pub async fn chat_history(
 /// Functions covered by a fuzz run of `target`, for the call-tree overlay.
 #[tauri::command]
 pub async fn coverage_functions(
+    app: tauri::AppHandle,
     state: tauri::State<'_, crate::state::AppState>,
     project: String,
     target: String,
 ) -> Result<Vec<String>, String> {
-    Ok(state
-        .container
+    // Measuring executes the harness; see `generate_report`.
+    Ok(with_approval_dialog(&state, &app)
         .coverage_functions(std::path::Path::new(&project), &target)
         .await)
 }
@@ -1900,16 +1925,7 @@ pub async fn chat_agent(
 
     // Run with an interactive guardrail gate: high-risk tool calls (e.g. run a
     // fuzzer) prompt the user via `chat:permission_request` before executing.
-    let gate = std::sync::Arc::new(hf_service::approval::InteractiveApprovalGate::new(
-        state.pending_approvals.clone(),
-        std::sync::Arc::new(TauriApprovalNotifier { app: app.clone() }),
-    ));
-    let guardrails = state
-        .container
-        .guardrails()
-        .clone()
-        .with_approval_gate(gate);
-    let container = state.container.clone().with_guardrails(guardrails);
+    let container = with_approval_dialog(&state, &app);
     let sink = TauriEventSink { app };
 
     // Register the turn so the Observability panel shows live agent activity;
@@ -2314,6 +2330,7 @@ pub async fn morning_health_summary(
 /// (`en` / `zh`); omitting it composes in English.
 #[tauri::command]
 pub async fn generate_report(
+    app: tauri::AppHandle,
     state: tauri::State<'_, crate::state::AppState>,
     project: String,
     target: String,
@@ -2326,8 +2343,10 @@ pub async fn generate_report(
             .map_err(|error| error.to_string())?,
         None => hf_service::ReportLanguage::default(),
     };
-    state
-        .container
+    // The report measures coverage by compiling and executing the harness in
+    // the sandbox. Composing a report does not name that execution, so the
+    // operator is asked rather than assumed to consent or to refuse.
+    with_approval_dialog(&state, &app)
         .generate_report_for_run(
             std::path::Path::new(&project),
             &target,
@@ -3191,14 +3210,15 @@ pub async fn oracle_violation(
 #[cfg(feature = "coverage-blockers")]
 #[tauri::command]
 pub async fn coverage_blockers(
+    app: tauri::AppHandle,
     state: tauri::State<'_, crate::state::AppState>,
     project: String,
     target: String,
     lang: String,
 ) -> Result<serde_json::Value, String> {
     let lang = parse_lang(&lang)?;
-    let view = state
-        .container
+    // Measuring executes the harness; see `generate_report`.
+    let view = with_approval_dialog(&state, &app)
         .explore_coverage_blockers(hf_service::CoverageBlockerRequest {
             project,
             target,
@@ -4652,6 +4672,35 @@ mod export_dialog_tests {
             .find("#[tauri::command]")
             .expect("a following command delimits export_report");
         &rest[..end]
+    }
+
+    /// Just the `generate_report` command.
+    fn generate_report_command() -> &'static str {
+        let start = COMMANDS_SOURCE
+            .find("pub async fn generate_report(")
+            .expect("generate_report command");
+        let rest = &COMMANDS_SOURCE[start..];
+        let end = rest
+            .find("#[tauri::command]")
+            .expect("a following command delimits generate_report");
+        &rest[..end]
+    }
+
+    #[test]
+    fn generate_report_asks_the_operator_before_measuring_coverage() {
+        // The report measures coverage by compiling and executing the harness,
+        // which needs approval. The container's default gate declines without
+        // asking, which recorded `denied_by_operator` for a question nobody
+        // was shown; the report must go through the approval dialog instead.
+        let src = generate_report_command();
+        assert!(
+            src.contains("with_approval_dialog(&state, &app)"),
+            "generate_report must use the interactive approval gate:\n{src}"
+        );
+        assert!(
+            !src.contains("state\n        .container\n        .generate_report_for_run("),
+            "generate_report must not compose through the default gate:\n{src}"
+        );
     }
 
     #[test]

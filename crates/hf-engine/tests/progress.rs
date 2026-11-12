@@ -333,7 +333,11 @@ fn libfuzzer_new_and_inited_lines_yield_stats_snapshots() {
     assert_eq!(stats.execs_total, Some(2));
     assert_eq!(stats.edges_covered, Some(10));
     assert_eq!(stats.corpus_count, Some(1));
-    assert_eq!(stats.execs_per_sec, Some(0.0));
+    // libFuzzer divides by whole elapsed seconds, so `exec/s: 0` on a status
+    // line of the first second is not a measured rate. This asserted
+    // `Some(0.0)` until a run that crashed inside that second was reported as
+    // fuzzing at zero executions per second.
+    assert_eq!(stats.execs_per_sec, None);
 }
 
 #[test]

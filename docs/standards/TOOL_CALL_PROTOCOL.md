@@ -20,7 +20,7 @@ pub trait Tool: Send + Sync {
   definitions by name; JSON Schema is validated before execution.
 - Execution captures the implementation and registered definition under one
   registry read lock, so replacement cannot pair different registrations.
-- The active agent advertises its complete four-tool inspection surface
+- The active agent advertises its complete five-tool inspection surface
   directly and exposes no discovery meta-tool. `ToolIndex` and
   `ToolRegistry::search` remain available for an owner whose registry outgrows
   what one prompt can carry; nothing in the shipped agent calls them.
@@ -36,6 +36,7 @@ pub trait Tool: Send + Sync {
 | `Glob` | List project files matching a glob. |
 | `Grep` | Search project files with a regular expression. |
 | `KnowledgeSearch` | BM25 search over the active project's source index. |
+| `ProjectStatus` | What the service has retained for the active project: targets, harnesses, runs, findings. |
 
 `FileRead`, `Glob`, and `Grep` are implemented in `hf-tools`.
 `FileRead` authorizes the kernel-resolved canonical path, then opens each path
@@ -47,8 +48,11 @@ opened nonblocking and rejected. Both small-file and streaming readers stop at
 the admitted size plus one detection byte and reject growth. These controls
 prevent symlink replacement from redirecting a read; they do not promise an
 immutable snapshot against in-place writes or operating-system mount changes.
-`KnowledgeSearch` is registered by `hf-agent` with its `AgentBackend`, so all
-four advertised tools have executable registry entries. The registry assembly
+`KnowledgeSearch` and `ProjectStatus` are registered by `hf-agent` with its
+`AgentBackend`, so all five advertised tools have executable registry entries.
+`ProjectStatus` exists because the file tools see only the project folder,
+which holds none of what oxfuzz retained; it is served from the same summary
+as the Dashboard and starts nothing. The registry assembly
 test in `hf-agent::agent_tools` enforces exact parity between this catalog and
 the executable surface. Grep uses finite configured reader/result allowances
 and reports partial observed totals and continuation in its persisted result

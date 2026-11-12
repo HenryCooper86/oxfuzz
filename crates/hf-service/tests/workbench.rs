@@ -218,6 +218,59 @@ async fn dashboard_summarizes_targets_harnesses_runs_and_crashes() {
 }
 
 #[tokio::test]
+async fn the_agent_is_told_what_the_store_retains_for_a_project() {
+    // The project folder holds source only. Asked what had been found, an
+    // assistant limited to file tools answered that nothing had been run while
+    // the Dashboard showed a triaged crash.
+    use hf_agent::AgentBackend;
+
+    let (container, _dir) = test_container().await;
+    let store = container.store().unwrap();
+    let target = sample_target("/proj");
+    let harness = sample_harness(target.id);
+    let run = sample_run("/proj", harness.id);
+    let crash = Crash {
+        reproduction: None,
+        id: Uuid::new_v4(),
+        run_id: run.id,
+        target_id: target.id,
+        input_path: PathBuf::from("out/crash-1"),
+        stack_signature: "sig".to_owned(),
+        kind: CrashKind::Asan,
+        summary: "heap-buffer-overflow".to_owned(),
+        minimized: false,
+        bug_report: None,
+        casr: None,
+        origin: hf_core::crash::CrashOrigin::Unknown,
+    };
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    store.upsert_harness(&harness).await.unwrap();
+    store.insert_run(&run).await.unwrap();
+    store.upsert_crash(&crash).await.unwrap();
+
+    let status = container.project_status(Path::new("/proj")).await.unwrap();
+
+    assert_eq!(status["totals"]["runs"], 1);
+    assert_eq!(status["totals"]["crashes"], 1);
+    assert_eq!(status["targets"][0]["symbol"], "parse_packet");
+    assert_eq!(status["runs"][0]["run_id"], run.id.to_string());
+    assert_eq!(status["findings"][0]["summary"], "heap-buffer-overflow");
+    assert_eq!(status["findings"][0]["minimized"], false);
+    assert!(
+        status["harnesses"][0].get("source_preview").is_none(),
+        "the status names harnesses without carrying their source"
+    );
+
+    // Another project's state is not this project's.
+    let other = container
+        .project_status(Path::new("/elsewhere"))
+        .await
+        .unwrap();
+    assert_eq!(other["totals"]["crashes"], 0);
+    assert!(other["findings"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn finding_proof_preserves_harness_origin_and_undefined_casr() {
     let (container, _dir) = test_container().await;
     let store = container.store().unwrap();
@@ -425,6 +478,56 @@ async fn run_history_exposes_service_owned_comparison_groups() {
 /// The history fallback (runs recorded before deterministic crash counts)
 /// must count the deduped view, matching the report/SARIF surfaces for the
 /// same rows.
+#[tokio::test]
+async fn run_history_marks_a_libfuzzer_run_that_stopped_at_its_first_crash() {
+    // The Run view replaces its live summary with the history row, so a flag
+    // carried only by the live summary disappeared a moment after the run.
+    let (container, _dir) = test_container().await;
+    let store = container.store().unwrap();
+    let target = sample_target("/proj");
+    let harness = sample_harness(target.id);
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    store.upsert_harness(&harness).await.unwrap();
+
+    let started = Utc::now() - chrono::Duration::minutes(10);
+    let mut stopped = sample_run("/proj", harness.id);
+    stopped.config.as_mut().unwrap().duration = Some(std::time::Duration::from_secs(60));
+    stopped.started_at = started;
+    stopped.ended_at = Some(started + chrono::Duration::milliseconds(700));
+    stopped.status = RunStatus::Done;
+    stopped.crash_count = Some(1);
+
+    let mut full = sample_run("/proj", harness.id);
+    full.config.as_mut().unwrap().duration = Some(std::time::Duration::from_secs(60));
+    full.started_at = started + chrono::Duration::minutes(2);
+    full.ended_at = Some(full.started_at + chrono::Duration::seconds(60));
+    full.status = RunStatus::Done;
+    full.crash_count = Some(1);
+
+    store.insert_run(&stopped).await.unwrap();
+    store.insert_run(&full).await.unwrap();
+
+    let history = container
+        .run_history(Some(Path::new("/proj")))
+        .await
+        .unwrap();
+    let flag = |id: Uuid| {
+        history
+            .iter()
+            .find(|item| item.id == id.to_string())
+            .unwrap()
+            .stopped_at_first_crash
+    };
+    assert!(
+        flag(stopped.id),
+        "a sub-second crash exit left budget unused"
+    );
+    assert!(
+        !flag(full.id),
+        "a run that used its budget is an ordinary run"
+    );
+}
+
 #[tokio::test]
 async fn run_history_counts_deduped_crashes_for_legacy_runs() {
     let (container, _dir) = test_container().await;

@@ -327,6 +327,7 @@ mod tests {
             id: id.to_owned(),
             target_id: None,
             requested_duration_secs: Some(60),
+            stopped_at_first_crash: false,
             project_root: "/p".to_owned(),
             target: Some("parse_packet".to_owned()),
             target_selector: Some("src/parser.c::parse_packet".to_owned()),

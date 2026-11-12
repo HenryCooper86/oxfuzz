@@ -277,6 +277,90 @@ impl RuntimeAdapter for CasrClusterRuntime {
     }
 }
 
+/// CASR writes three unclustered reports for one crash line, then runs out of
+/// its time budget before the clustering stage.
+struct CasrTimesOutAfterReportsRuntime;
+
+#[async_trait]
+impl RuntimeAdapter for CasrTimesOutAfterReportsRuntime {
+    async fn resolve_image_reference(
+        &self,
+        _image: &str,
+    ) -> Result<Option<hf_core::runtime::ImmutableImageReference>, ClassifiedError> {
+        Ok(Some(hf_test_utils::immutable_test_image()?))
+    }
+
+    async fn run_command(
+        &self,
+        cmd: &[String],
+        cwd: &Path,
+        limits: &ResourceLimits,
+    ) -> Result<CommandResult, ClassifiedError> {
+        self.run_command_opts(cmd, cwd, limits, &SandboxOptions::default())
+            .await
+    }
+
+    async fn write_file(&self, _path: &Path, _content: &str) -> Result<(), ClassifiedError> {
+        Ok(())
+    }
+
+    async fn read_file(&self, _path: &Path) -> Result<String, ClassifiedError> {
+        Ok(String::new())
+    }
+
+    async fn run_command_opts(
+        &self,
+        cmd: &[String],
+        cwd: &Path,
+        _limits: &ResourceLimits,
+        opts: &SandboxOptions,
+    ) -> Result<CommandResult, ClassifiedError> {
+        if is_casr(cmd) {
+            let host = &casr_out_mount(opts).host_path;
+            for name in ["crash-a", "crash-b", "crash-c"] {
+                std::fs::write(host.join(format!("{name}.casrep")), CASREP_UNCLUSTERED).unwrap();
+            }
+            return Ok(timed_out(cwd));
+        }
+        if is_minimize(cmd) {
+            return Ok(timed_out(cwd));
+        }
+        Ok(completed(0, "", "", cwd))
+    }
+}
+
+#[tokio::test]
+async fn a_campaign_triage_keeps_what_casr_finished_before_its_budget_ran_out() {
+    // The interactive scan retains completed reports when CASR times out. The
+    // campaign path treated the same timeout as a hard error, so a scheduled
+    // honggfuzz campaign with a crash flood fuzzed for its minute and then
+    // failed with every finding discarded.
+    let crash_files: Vec<String> = ["crash-a", "crash-b", "crash-c"]
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
+    let fixture = triage_fixture("casr-timeout", &crash_files).await;
+    let container = ServiceContainer::new(Arc::new(CasrTimesOutAfterReportsRuntime), None)
+        .with_store(Arc::clone(&fixture.store));
+
+    let crashes = container
+        .triage_run(
+            &fixture.project,
+            &fixture.symbol,
+            fixture.run_id,
+            hf_service::AiPolicy::Off,
+        )
+        .await
+        .expect("a CASR timeout keeps the reports it completed");
+
+    assert_eq!(
+        crashes.len(),
+        1,
+        "three reports for one crash line are one finding: {crashes:?}"
+    );
+    assert_eq!(crashes[0].stack_signature, "parse.c:30:3");
+}
+
 #[tokio::test]
 async fn casr_clustered_triage_end_to_end() {
     let crash_files: Vec<String> = ["crash-a", "crash-b", "crash-c", "crash-d"]

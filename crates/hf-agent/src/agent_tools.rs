@@ -19,7 +19,13 @@ use hf_tools::executor::ToolExecutor;
 use hf_tools::registry::ToolRegistryImpl;
 
 /// Names of the read-only inspection tools (exempt from the allowlist).
-pub const INSPECTION_TOOLS: &[&str] = &["FileRead", "Glob", "Grep", "KnowledgeSearch"];
+pub const INSPECTION_TOOLS: &[&str] = &[
+    "FileRead",
+    "Glob",
+    "Grep",
+    "KnowledgeSearch",
+    "ProjectStatus",
+];
 
 /// Build a well-formed `{"error": "..."}` tool result.
 ///
@@ -38,7 +44,9 @@ pub const INSPECTION_CATALOG: &str = "\
 - FileRead: read a source file. args: {\"path\":\"...\"}\n\
 - Glob: list files matching a glob. args: {\"pattern\":\"**/*.c\"}\n\
 - Grep: search file contents by regex. args: {\"pattern\":\"...\"}\n\
-- KnowledgeSearch: BM25 search the project's source for symbols/patterns. args: {\"query\":\"...\"}";
+- KnowledgeSearch: BM25 search the project's source for symbols/patterns. args: {\"query\":\"...\"}\n\
+- ProjectStatus: what oxfuzz has already retained for this project (targets, harnesses, runs, findings). \
+The project folder holds none of it; call this before saying what has or has not been done. args: {}";
 
 /// Build the inspection-tool registry (read-only file/search tools).
 pub async fn build_inspection_registry(
@@ -60,8 +68,12 @@ pub async fn build_inspection_registry(
             grep::GrepTool::tool_definition(),
         ),
         (
-            Arc::new(KnowledgeSearchTool::new(backend)),
+            Arc::new(KnowledgeSearchTool::new(Arc::clone(&backend))),
             KnowledgeSearchTool::tool_definition(),
+        ),
+        (
+            Arc::new(ProjectStatusTool::new(backend)),
+            ProjectStatusTool::tool_definition(),
         ),
     ];
     for (tool, def) in tools {
@@ -161,6 +173,71 @@ impl Tool for KnowledgeSearchTool {
     }
 }
 
+/// A `ProjectStatus` tool backed by the service's retained state.
+///
+/// The file tools see only the project folder, which holds source and nothing
+/// oxfuzz produced. Without this the agent can only conclude that nothing has
+/// been discovered, run, or found, whatever the store holds. The project root
+/// comes from `ToolInput::working_dir`, as for [`KnowledgeSearchTool`].
+struct ProjectStatusTool {
+    definition: ToolDefinition,
+    backend: Arc<dyn crate::AgentBackend>,
+}
+
+impl ProjectStatusTool {
+    fn tool_definition() -> ToolDefinition {
+        ToolDefinition {
+            name: ToolName::from_string("ProjectStatus"),
+            description: "Report what oxfuzz has retained for the active project: discovered \
+                 targets, harnesses and their review state, fuzz runs, and crash findings. \
+                 Read-only; starts nothing."
+                .to_owned(),
+            help: None,
+            parameters: serde_json::json!({ "type": "object", "properties": {} }),
+            result_schema: None,
+            category: ToolCategory::Knowledge,
+            tool_type: ToolType::BuiltIn,
+            capabilities: RuntimeCapability::default(),
+            is_dangerous: false,
+        }
+    }
+
+    fn new(backend: Arc<dyn crate::AgentBackend>) -> Self {
+        Self {
+            definition: Self::tool_definition(),
+            backend,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for ProjectStatusTool {
+    async fn execute(&self, input: ToolInput) -> Result<ToolOutput, ToolError> {
+        let Some(dir) = input.working_dir.as_deref() else {
+            return Err(ToolError::Other {
+                message: "no active project to report on".to_owned(),
+            });
+        };
+        let status = self
+            .backend
+            .project_status(std::path::Path::new(dir))
+            .await
+            .map_err(|error| ToolError::Other {
+                message: error.to_string(),
+            })?;
+        Ok(ToolOutput {
+            success: true,
+            content: status,
+            warnings: Vec::new(),
+            metadata: serde_json::Value::Null,
+        })
+    }
+
+    fn definition(&self) -> &ToolDefinition {
+        &self.definition
+    }
+}
+
 /// Execute an inspection tool through the registry executor, returning the
 /// tool output (or error) rendered as a JSON string for the agent transcript.
 pub async fn dispatch_inspection(
@@ -240,6 +317,16 @@ mod tests {
                 }
             }
             Ok(serde_json::Value::Array(hits))
+        }
+
+        async fn project_status(
+            &self,
+            project: &std::path::Path,
+        ) -> Result<serde_json::Value, hf_core::error::ClassifiedError> {
+            Ok(serde_json::json!({
+                "project": project,
+                "findings": [{ "summary": "heap-buffer-overflow in parse_value" }],
+            }))
         }
 
         fn skills_dir(&self) -> std::path::PathBuf {
@@ -358,6 +445,32 @@ mod tests {
         assert!(
             out.contains("copy_chunk") && out.contains("chunk.c"),
             "KnowledgeSearch should lazily index and return matching source; got: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn registry_reports_retained_project_state() {
+        // An empty project folder is all the file tools can see; the retained
+        // finding reaches the agent only through the backend.
+        let dir = tempfile::tempdir().unwrap();
+        let registry = build_inspection_registry(
+            test_backend(),
+            hf_core::grep_limits::GrepLimitsConfig::default()
+                .resolve()
+                .unwrap(),
+        )
+        .await;
+        let out = dispatch_inspection(
+            &registry,
+            "ProjectStatus",
+            &serde_json::json!({}),
+            dir.path().to_str(),
+        )
+        .await;
+
+        assert!(
+            out.contains("heap-buffer-overflow in parse_value"),
+            "ProjectStatus should return the backend's retained state; got: {out}"
         );
     }
 }

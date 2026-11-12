@@ -128,10 +128,22 @@ fn libfuzzer_stats_from_line(line: &str) -> Option<EngineStats> {
         execs_total: counter.parse().ok(),
         edges_covered: number_near_word(line, "cov"),
         corpus_count: corpus_count_from_line(&lower),
-        execs_per_sec: rate_after_keyword(line, "exec/s"),
+        execs_per_sec: libfuzzer_measured_rate(line),
         uptime_secs: uptime_from_fork_line(&lower),
         ..EngineStats::default()
     })
+}
+
+/// The `exec/s` rate a line reports, when it is a measurement.
+///
+/// libFuzzer computes the rate as executions over whole elapsed seconds, so
+/// each `#N` status line of a run's first second prints `exec/s: 0` at any
+/// speed. A run that ends inside that second (a crash on an early input)
+/// would otherwise be recorded as fuzzing at zero executions per second.
+fn libfuzzer_measured_rate(line: &str) -> Option<f64> {
+    let rate = rate_after_keyword(line, "exec/s")?;
+    let status_line = line.trim_start().starts_with('#');
+    (!status_line || rate > 0.0).then_some(rate)
 }
 
 /// Parse a libFuzzer terminal counter (`stat::<name>: <value>`).
@@ -342,7 +354,7 @@ fn edges_from_line(line: &str) -> Option<u64> {
 fn execs_from_line(line: &str) -> Option<f64> {
     let lower = line.to_ascii_lowercase();
     if lower.contains("exec/s") {
-        rate_after_keyword(line, "exec/s")
+        libfuzzer_measured_rate(line)
     } else if lower.contains("execs") {
         let pos = lower.find("execs")?;
         let after = &line[pos + "execs".len()..];
@@ -465,6 +477,32 @@ mod tests {
         assert!(parse_progress_events("Speed : -1/sec")
             .iter()
             .all(|event| !matches!(event, FuzzProgress::ExecsPerSec(_))));
+    }
+
+    #[test]
+    fn libfuzzer_zero_rate_in_the_first_second_is_not_a_measurement() {
+        // libFuzzer divides executions by whole elapsed seconds, so every
+        // status line of the first second prints `exec/s: 0` at any speed.
+        let line = "#6\tINITED cov: 7 ft: 7 corp: 5/11b exec/s: 0 rss: 30Mb";
+        let events = parse_progress_events(line);
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, FuzzProgress::EdgesCovered(7))));
+        assert!(events
+            .iter()
+            .all(|e| !matches!(e, FuzzProgress::ExecsPerSec(_))));
+        assert!(events.iter().all(|e| match e {
+            FuzzProgress::Stats(stats) => stats.execs_per_sec.is_none(),
+            _ => true,
+        }));
+        assert!(!matches!(
+            super::parse_progress_line("#6\tINITED exec/s: 0 rss: 30Mb"),
+            Some(FuzzProgress::ExecsPerSec(_))
+        ));
+        // An engine that measures its own rate may report a real zero.
+        assert!(parse_progress_events("Speed : 0/sec")
+            .iter()
+            .any(|e| matches!(e, FuzzProgress::ExecsPerSec(v) if v.abs() < f64::EPSILON)));
     }
 
     #[test]

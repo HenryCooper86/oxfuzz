@@ -500,8 +500,7 @@ impl ServiceContainer {
         };
 
         // Live coverage (best-effort) and corpus composition.
-        let coverage = self.coverage_summary(project, target).await;
-        let covered_functions = self.coverage_functions(project, target).await.len();
+        let (coverage, covered_functions) = self.coverage_report_figures(project, target).await;
         let corpus = self
             .collect_corpus_stats(project, target, target_id)
             .await?;

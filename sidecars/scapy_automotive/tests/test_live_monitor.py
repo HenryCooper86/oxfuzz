@@ -81,6 +81,44 @@ class LiveMonitorTests(unittest.TestCase):
             )
             self.assertEqual(data["transcript_hash"], response["transcript_sha256"])
 
+    def test_live_monitor_runs_with_the_empty_send_allowlists_the_service_issues(self) -> None:
+        # A live monitor never transmits, so the service issues it empty send
+        # allowlists. Config validation demanded non-empty ones and rejected
+        # every live capture before it started.
+        with tempfile.TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            config = virtual_config()
+            config["protocol"] = "can"
+            config["arbitration_id_allowlist"] = []
+            config["service_allowlist"] = []
+            transport = _SniffTransport(
+                [
+                    {
+                        "arbitration_id": 0x123,
+                        "is_extended_id": False,
+                        "payload_hex": "deadbeef",
+                        "timestamp": 1.0,
+                    },
+                ]
+            )
+            response = process_request(
+                {
+                    "schema_version": 1,
+                    "request_id": "live-empty-allowlists",
+                    "operation": "live_monitor",
+                    "payload": {
+                        "protocol": config["protocol"],
+                        "mode": {"mode": "virtual_can", "interface": config["interface"]},
+                        "limits": config["limits"],
+                    },
+                },
+                artifact_store=store,
+                execution_config=config,
+                transport=transport,
+            )
+            self.assertTrue(response["ok"], response.get("error"))
+            self.assertEqual(response["result"]["data"]["event_count"], 1)
+
     def test_live_monitor_rejects_offline_mode(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = _store(Path(directory))
