@@ -436,7 +436,7 @@ function ScopedTriageView({ embedded, initialRunId, onNavigate }: { embedded: bo
         {onNavigate && <Button onClick={() => onNavigate("workflow")}>{t("gui.workflowAction")}</Button>}
       </> : <><p>{t("gui.noFindingsHint")}</p><Button onClick={() => { setSearch(""); setDispositionFilter("all"); setOriginFilter(""); setSeverityFilter(""); setRunFilter(""); setTargetFilter(""); }}>{t("gui.clearFilters")}</Button></>}</div>}
       {(visibleQueue.length > 0 || selection || detailLoading || detailError) && <div className="flex gap-3" style={{ animation: "slideInUp 0.2s ease" }}>
-        <div className="flex flex-col gap-1 flex-1">
+        <div className="flex flex-col gap-1 flex-1 min-w-0">
           {findingGroups.map((group) => {
             const others = group.members.slice(1);
             const open = expandedGroups.has(group.key);
@@ -512,11 +512,11 @@ function CrashDetail({ item, verdict, onVerify, actionBusy }: { item: FindingRev
         {crash.casr.crashline && <span className="text-xs text-text-muted font-mono">@ {crash.casr.crashline}</span>}
         {crash.casr.cluster != null && <span className="text-xs text-text-muted">{t("triage.cluster", { n: crash.casr.cluster })}</span>}
       </div>
-      {crash.casr.stack.length > 0 && <code className="text-xs text-text-secondary block font-mono p-2 rounded-md whitespace-pre-wrap" style={{ background: "var(--surface-code)" }}>
+      {crash.casr.stack.length > 0 && <code className="text-xs text-text-secondary block font-mono p-2 rounded-md whitespace-pre-wrap" style={{ background: "var(--surface-code)", overflowWrap: "anywhere" }}>
         {crash.casr.stack.slice(0, 8).join("\n")}
       </code>}
     </div>}
-    {crash.stack_signature && <code className="text-xs text-text-secondary block font-mono p-2 rounded-md" style={{ background: "var(--surface-code)" }}>{crash.stack_signature}</code>}
+    {crash.stack_signature && <code className="text-xs text-text-secondary block font-mono p-2 rounded-md" style={{ background: "var(--surface-code)", overflowWrap: "anywhere" }}>{crash.stack_signature}</code>}
     <div className="border-t border-border pt-3">
       {verdict === undefined && <Button size="sm" variant="outline" onClick={onVerify} disabled={actionBusy || !item.latest_scoped_actions_allowed} title={item.latest_scoped_action_reason ?? undefined}>{t("triage.verifyCrash")}</Button>}
       {verdict === "loading" && <span className="text-xs text-text-muted">{t("triage.verifying")}</span>}

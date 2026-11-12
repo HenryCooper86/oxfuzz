@@ -53,6 +53,9 @@ retain only the current release; older entries remain here as the record.
   keeps the findings CASR completed, as the interactive scan does. Before,
   the campaign failed with "CASR triage was force-stopped: TimedOut" and
   discarded them.
+- Triage: the finding list and the detail pane share the width, and long
+  stack-trace tokens wrap inside their box. The list could not shrink, so it
+  left the detail pane a narrow strip with build ids running past its edge.
 - Triage: a long crash file name no longer pushes the finding detail pane
   past the right edge of the window.
 - Automation: a campaign offers and rotates through only the approval that

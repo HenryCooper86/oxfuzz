@@ -78,6 +78,24 @@ describe("the Triage detail pane", () => {
   });
 });
 
+describe("the Triage list and detail panes", () => {
+  const triage = source("../views/TriageView.tsx");
+
+  it("share the width instead of the list squeezing the detail pane", () => {
+    // The list had no minimum-width override, so its long summaries kept it
+    // wide and the detail pane was left a narrow strip.
+    expect(triage).toContain('<div className="flex flex-col gap-1 flex-1 min-w-0">');
+  });
+
+  it("break long stack-trace tokens inside their box", () => {
+    // Build ids and run paths have no spaces; without a break rule they ran
+    // past the right edge of the code block.
+    const blocks = triage.split("\n").filter((line) => line.includes("var(--surface-code)") && line.includes("<code"));
+    expect(blocks.length).toBeGreaterThanOrEqual(2);
+    for (const block of blocks) expect(block).toContain('overflowWrap: "anywhere"');
+  });
+});
+
 describe("labels that claimed more than the product does", () => {
   it("does not attribute every approval request to the agent", () => {
     // Composing a report asks through the same dialog as a chat turn.
