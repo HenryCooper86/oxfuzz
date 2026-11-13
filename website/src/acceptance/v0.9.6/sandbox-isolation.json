@@ -1,0 +1,32 @@
+{
+  "schema_version": 3,
+  "claim": "sandbox_isolation",
+  "candidate_commit": "b4133d9ff2a23f9e77f5e0a23a897179b8966cbe",
+  "tag": "v0.9.6",
+  "platform": "macOS arm64 / Linux arm64 Docker",
+  "sandbox_image": {
+    "reference": "oxfuzz/fuzz-sandbox:0.2.2",
+    "id": "sha256:fa0101b94bcb30dbb43e0c7b804e22bc442a766479f8908f5436ded1aa84286f"
+  },
+  "command": "cargo test --locked -p hf-runtime --test live_isolation -- --ignored --test-threads=1 --nocapture",
+  "exit_code": 0,
+  "observed_on": "2026-11-13",
+  "scenarios_passed": [
+    "Network unavailable, input read-only, explicitly mounted output writable, 256 MiB and 1 CPU cgroup limits verified",
+    "Explicit numeric UID/GID can read private input and creates correctly owned output",
+    "Timeout awaits owned-container cleanup",
+    "Running container registered with owned workspace label",
+    "Runtime ownership records inaccessible inside the sandbox",
+    "Fresh runtime cleans up container left by terminated helper client"
+  ],
+  "helper": "Seventh test is the recovery child-process helper, not an independent scenario.",
+  "semgrep": {
+    "provenance": "Not repeated for v0.9.6. Retained from the v0.9.4 record: same sandbox image ID, Semgrep 1.169.0 and rules commit 4d66ecf30bfb1809a984085f2c86a8c3915bfc71."
+  },
+  "limitations": [
+    "Host is macOS arm64; this is not a Windows Docker or Linux KVM qualification.",
+    "Docker failure recovery scenarios cover only disposable owned containers.",
+    "All seven tests reported ok (six scenarios and the recovery helper). The Semgrep offline scan was not repeated for v0.9.6: the sandbox image, Semgrep version and rules snapshot are those qualified for v0.9.4."
+  ],
+  "candidate_delta": "None. The tests ran on the candidate commit with a clean working tree."
+}

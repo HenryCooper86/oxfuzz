@@ -1,0 +1,40 @@
+{
+  "schema_version": 3,
+  "claim": "installed_clients",
+  "candidate_commit": "b4133d9ff2a23f9e77f5e0a23a897179b8966cbe",
+  "tag": "v0.9.6",
+  "local_build_commit": "b4133d9ff2a23f9e77f5e0a23a897179b8966cbe",
+  "production_delta": "None. The local build and the release installer were both built from the candidate commit.",
+  "platform": "macOS arm64",
+  "version_observed": "0.9.6",
+  "local_executable_sha256": "e9d24e30d4f1afcf88ef1fd3574a1f45bf80da63e810882de7d3b69739593d7a",
+  "observed_on": "2026-11-13",
+  "observed": {
+    "local_build": "Built with scripts/build-app.sh at the candidate commit. The sidebar showed 0.9.6. Dashboard listed the two replaced approvals as superseded and the active one as ready; Run History showed no rate for the two libFuzzer runs that ended at their first crash; the Fuzzing Workflow showed retained findings.",
+    "same_day_walk": "On 2026-11-12, builds of the commits this release contains were exercised on the same example: discovery with provider assessment, harness build and smoke test, approval, bounded libFuzzer, AFL++ and honggfuzz campaigns, crash scan, report composition with its approval prompt, DefectDojo publication, a scheduled campaign, corpus operations, knowledge search, provider connection test, and read-only automotive virtual-CAN capture and UDS scan. Those runs were made for v0.9.5 and are not repeated here; v0.9.6 adds two display fixes only.",
+    "not_observed": [
+      "First-run setup wizard",
+      "Windows and Linux desktop installations",
+      "Physical-bench automotive operations",
+      "syzkaller campaigns"
+    ]
+  },
+  "final_release_installer": {
+    "workflow_run": 43422708332,
+    "candidate_commit": "b4133d9ff2a23f9e77f5e0a23a897179b8966cbe",
+    "file": "oxfuzz_0.9.6_aarch64.dmg",
+    "sha256": "44521db91806755b11459900cde2e26855433393d5e362545929f46c3b2bb1c1",
+    "executable_sha256": "08ed1b5940b4799faccaf218dd873bbd3511adaed1afa43bd6690913c0a83716",
+    "checks": [
+      "Downloaded asset SHA-256 matches GitHub metadata",
+      "DMG verification and read-only mount succeeded",
+      "Copied app passes codesign --verify --deep --strict (ad-hoc signature)",
+      "Launched the copied app against the existing local data: sidebar showed 0.9.6, the Fuzzing Workflow showed completed stages and retained findings with their stack traces, and the status bar reported Docker, sandbox and all four engines ready",
+      "No campaign was executed from the installer build"
+    ]
+  },
+  "limitations": [
+    "Only the macOS Apple silicon installer was launched; the other packages were built and digest-checked only.",
+    "macOS packages are ad-hoc signed and not notarized; Windows packages are unsigned."
+  ]
+}
