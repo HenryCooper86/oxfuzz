@@ -97,6 +97,16 @@ pub use harness_workspace::{
     copy_project_sources, generate_target_seeds, stage_generated_build_inputs,
 };
 pub(crate) use workspace::ensure_workspace_directory;
+
+/// Whether a later approval replaced `harness_id` as the active harness of
+/// `candidate`'s workspace; see [`workspace::approval_in_workspace`].
+pub(crate) fn approval_superseded(
+    project: &Path,
+    candidate: &hf_core::target::TargetCandidate,
+    harness_id: Uuid,
+) -> bool {
+    workspace::approval_in_workspace(project, candidate, harness_id).1
+}
 pub use workspace::{
     initialize_workspace_root, project_workspace_dir, workspace_dir, workspace_root,
 };

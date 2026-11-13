@@ -170,25 +170,12 @@ impl ServiceContainer {
                 // harness: a harness promoted under a file-qualified selector
                 // (work-order flow, CLI disambiguation) is only runnable
                 // under that spelling, and campaign admission keys its
-                // workspace off exactly this value.
-                let qualified = crate::container::qualified_target_selector(&candidate);
-                let selector = if crate::container::workspace::workspace_has_active_harness(
-                    &identity, &qualified,
-                ) {
-                    qualified
-                } else {
-                    candidate.symbol.clone()
-                };
-                // A workspace holds one active harness. Approving a target
-                // under another engine replaces it, and the earlier approval
-                // stays `Promoted` in the store but can no longer run:
-                // dispatch refuses it ("active harness uses X rather than
-                // Y"). A workspace with no marker predates the marker and
-                // keeps every approval.
-                let active = super::harness_workspace::read_current_harness_id(
-                    &crate::container::workspace::workspace_dir(&identity, &selector),
+                // workspace off exactly this value. An approval a later one
+                // replaced in that workspace cannot run and is not offered.
+                let (selector, superseded) = crate::container::workspace::approval_in_workspace(
+                    &identity, &candidate, harness.id,
                 );
-                if active.is_some_and(|active| active != harness.id) {
+                if superseded {
                     continue;
                 }
                 schedulable.push(SchedulableTarget {

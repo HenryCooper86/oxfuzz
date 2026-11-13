@@ -538,6 +538,30 @@ pub fn workspace_has_active_harness(project: &Path, selector: &str) -> bool {
     std::fs::symlink_metadata(&marker).is_ok_and(|metadata| metadata.file_type().is_file())
 }
 
+/// The selector under which `candidate`'s workspace lives, and whether that
+/// workspace's active harness is one other than `harness_id`.
+///
+/// A workspace holds one active harness. Approving a target under another
+/// engine replaces it, and the earlier approval stays `Promoted` in the store
+/// but can no longer run: dispatch refuses it. A workspace with no marker
+/// predates the marker, so nothing there is superseded.
+pub(crate) fn approval_in_workspace(
+    project: &Path,
+    candidate: &hf_core::target::TargetCandidate,
+    harness_id: uuid::Uuid,
+) -> (String, bool) {
+    let qualified = crate::container::qualified_target_selector(candidate);
+    let selector = if workspace_has_active_harness(project, &qualified) {
+        qualified
+    } else {
+        candidate.symbol.clone()
+    };
+    let active =
+        super::harness_workspace::read_current_harness_id(&workspace_dir(project, &selector));
+    let superseded = active.is_some_and(|active| active != harness_id);
+    (selector, superseded)
+}
+
 /// The on-disk workspace directory holding every target's artifacts for a
 /// single project (compiled harnesses, corpora, crash reproducers, coverage
 /// builds). This is the parent of the per-target [`workspace_dir`] directories,

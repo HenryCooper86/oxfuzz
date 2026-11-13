@@ -10,6 +10,14 @@ retain only the current release; older entries remain here as the record.
 
 ## Unreleased
 
+### Fixed
+
+- Dashboard: an approval that a later one replaced as the target's active
+  harness is labelled "Superseded by a later approval" instead of "Ready for
+  scheduled runs".
+- Run History: a run that never measured a rate shows no rate instead of 0
+  executions per second.
+
 ## 0.9.5 - 2026-11-12
 
 ### Removed

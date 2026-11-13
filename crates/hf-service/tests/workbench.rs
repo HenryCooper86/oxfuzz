@@ -479,6 +479,79 @@ async fn run_history_exposes_service_owned_comparison_groups() {
 /// must count the deduped view, matching the report/SARIF surfaces for the
 /// same rows.
 #[tokio::test]
+async fn dashboard_does_not_call_a_superseded_approval_ready_to_run() {
+    // A target approved under libFuzzer and then honggfuzz keeps two Promoted
+    // records, but its workspace holds only the later harness. The Dashboard
+    // listed both as "Ready for scheduled runs".
+    common::install_managed_workspace("oxfuzz_workbench_it");
+    let (container, _dir) = test_container().await;
+    let store = container.store().unwrap();
+    let target = sample_target("/proj-superseded");
+    let mut superseded = sample_harness(target.id);
+    superseded.status = HarnessStatus::Promoted;
+    let mut active = sample_harness(target.id);
+    active.engine = EngineKind::Honggfuzz;
+    active.status = HarnessStatus::Promoted;
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    store.upsert_harness(&superseded).await.unwrap();
+    store.upsert_harness(&active).await.unwrap();
+    let workspace = hf_service::workspace_dir(Path::new("/proj-superseded"), &target.symbol);
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("harness.active"), active.id.to_string()).unwrap();
+
+    let dashboard = container
+        .workbench_dashboard(Some(Path::new("/proj-superseded")), None)
+        .await
+        .unwrap();
+
+    let action = |id: Uuid| {
+        dashboard
+            .harness_reviews
+            .iter()
+            .find(|item| item.harness_id == id.to_string())
+            .unwrap()
+            .next_action
+            .clone()
+    };
+    assert_eq!(action(active.id), "Ready for scheduled runs");
+    assert_eq!(action(superseded.id), "Superseded by a later approval");
+}
+
+#[tokio::test]
+async fn run_history_leaves_an_unmeasured_rate_unknown() {
+    // A libFuzzer run that crashes inside its first second never reports a
+    // rate; the stored 0 was shown as zero executions per second.
+    let (container, _dir) = test_container().await;
+    let store = container.store().unwrap();
+    let target = sample_target("/proj-rate");
+    let harness = sample_harness(target.id);
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    store.upsert_harness(&harness).await.unwrap();
+    let mut unmeasured = sample_run("/proj-rate", harness.id);
+    unmeasured.status = RunStatus::Done;
+    unmeasured.execs = Some(0.0);
+    let mut measured = sample_run("/proj-rate", harness.id);
+    measured.status = RunStatus::Done;
+    measured.execs = Some(1200.0);
+    store.insert_run(&unmeasured).await.unwrap();
+    store.insert_run(&measured).await.unwrap();
+
+    let history = container
+        .run_history(Some(Path::new("/proj-rate")))
+        .await
+        .unwrap();
+    let rate = |id: Uuid| {
+        history
+            .iter()
+            .find(|item| item.id == id.to_string())
+            .unwrap()
+            .execs
+    };
+    assert_eq!(rate(unmeasured.id), None);
+    assert_eq!(rate(measured.id), Some(1200.0));
+}
+
+#[tokio::test]
 async fn run_history_marks_a_libfuzzer_run_that_stopped_at_its_first_crash() {
     // The Run view replaces its live summary with the history row, so a flag
     // carried only by the live summary disappeared a moment after the run.

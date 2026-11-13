@@ -302,7 +302,10 @@ impl ServiceContainer {
                     duration_secs,
                     crashes,
                     edges: r.edges,
-                    execs: r.execs,
+                    // A finished run with a zero rate never measured one
+                    // (libFuzzer reports none for a run that ends inside its
+                    // first second); unknown is not zero executions a second.
+                    execs: r.execs.filter(|rate| *rate > 0.0),
                     harness_rev: r.harness_rev,
                     binary_rev: r.binary_rev,
                     evidence_dir: r.evidence_dir,

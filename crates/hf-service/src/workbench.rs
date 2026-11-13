@@ -819,7 +819,16 @@ fn harness_review_items(
                 smoke_crashes: smoke.map_or(0, |s| s.crashes),
                 smoke_execs_per_sec: smoke.map_or(0.0, |s| s.execs_per_sec),
                 needs_review,
-                next_action: next_harness_action(h.status, smoke),
+                next_action: if h.status == HarnessStatus::Promoted
+                    && target.is_some_and(|t| {
+                        crate::container::approval_superseded(&t.project_root, t, h.id)
+                    }) {
+                    // Still approved, but a later approval replaced it as the
+                    // target's active harness, so it is not what a run uses.
+                    "Superseded by a later approval".to_owned()
+                } else {
+                    next_harness_action(h.status, smoke)
+                },
                 source_preview: source_preview(&h.source),
                 ai_review: record.and_then(ai_review_summary),
                 source_sha256,
