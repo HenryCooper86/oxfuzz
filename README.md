@@ -323,6 +323,7 @@ under the MIT license: the desktop app, the service behind it, and the sandbox.
 A bug report, a fixed typo, a new example target, or a feature you built for
 your own team all make oxfuzz better for the next person.
 
+- [Tell us how your first run went](https://github.com/HenryCooper86/oxfuzz/discussions/34) -- the 0.9.6 feedback thread; short notes are welcome.
 - [Report a bug or ask for a feature](https://github.com/HenryCooper86/oxfuzz/issues/new/choose) -- tell us what broke or what is missing.
 - [Send a pull request](CONTRIBUTING.md) -- the contributing guide covers setup, tests and style.
 - [Pick up an open issue](https://github.com/HenryCooper86/oxfuzz/issues) -- see what is planned and what needs a hand.

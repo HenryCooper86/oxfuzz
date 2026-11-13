@@ -18,9 +18,9 @@ response time, but questions and reports are read.
 
 ## Where to ask
 
-GitHub Discussions is not enabled for this repository. Until it is, use the
-issue tracker:
-
+- **Feedback and open questions**: use
+  [Discussions](https://github.com/HenryCooper86/oxfuzz/discussions). The
+  release feedback thread is pinned there.
 - **Usage questions**: open an issue with the
   [Question form](https://github.com/HenryCooper86/oxfuzz/issues/new?template=question.yml).
 - **Bugs**: use the

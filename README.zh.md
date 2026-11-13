@@ -302,6 +302,7 @@ oxfuzz 是开源项目，欢迎你一起把它做得更好。整个项目都在�
 背后的服务以及沙箱。一份缺陷报告、一处错别字修正、一个新的示例目标，或者你为自己团队做的
 功能，都会让下一位使用者受益。
 
+- [告诉我们你的第一次运行情况](https://github.com/HenryCooper86/oxfuzz/discussions/34) —— 0.9.6 反馈讨论帖；简短的反馈同样欢迎。
 - [报告缺陷或提出功能建议](https://github.com/HenryCooper86/oxfuzz/issues/new/choose) —— 告诉我们哪里出了问题，或者还缺什么。
 - [提交 Pull Request](CONTRIBUTING.md) —— 贡献指南介绍了环境搭建、测试和代码风格。
 - [认领一个未解决的 issue](https://github.com/HenryCooper86/oxfuzz/issues) —— 看看有哪些计划，哪些地方需要帮手。

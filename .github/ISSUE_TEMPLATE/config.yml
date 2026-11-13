@@ -1,11 +1,15 @@
 # Issues go through the forms in this directory so reports arrive with the
 # environment details needed to reproduce them. Blank issues are disabled for
 # that reason; the Question form covers anything that is not a bug or a feature
-# request. Discussions is not enabled on this repository, so there is no link
-# to it here. Security reports must not become public issues and are routed to
-# the private process instead.
+# request. Open-ended feedback and questions that are not yet a report go to
+# Discussions. Security reports must not become public issues and are routed
+# to the private process instead.
 blank_issues_enabled: false
 contact_links:
+  - name: Feedback and discussion
+    url: https://github.com/HenryCooper86/oxfuzz/discussions
+    about: >-
+      Tell us how a run went, ask an open question, or share what you built.
   - name: Security vulnerability
     url: https://github.com/HenryCooper86/oxfuzz/security/advisories/new
     about: >-
