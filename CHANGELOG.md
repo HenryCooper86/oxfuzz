@@ -10,6 +10,8 @@ retain only the current release; older entries remain here as the record.
 
 ## Unreleased
 
+## 0.9.6 - 2026-11-13
+
 ### Fixed
 
 - Dashboard: an approval that a later one replaced as the target's active

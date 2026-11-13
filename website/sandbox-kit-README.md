@@ -1,4 +1,4 @@
-# oxfuzz 0.9.5 sandbox build kit
+# oxfuzz 0.9.6 sandbox build kit
 
 This kit builds the local Docker image required by the desktop app. It contains
 only the sandbox recipe, verification scripts, Clang helper source, bundled

@@ -2,15 +2,15 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { validateRelease } from "../release.mjs";
 const asset = {
-  name: "oxfuzz_0.9.5_aarch64.dmg",
+  name: "oxfuzz_0.9.6_aarch64.dmg",
   size: 42,
   sha256: "a".repeat(64),
 };
-const release = () => ({ version: "0.9.5", assets: [asset] });
+const release = () => ({ version: "0.9.6", assets: [asset] });
 test("accepts verified desktop assets and derives same-origin download paths", () => {
   assert.equal(
     validateRelease(release())[0].url,
-    "/downloads/v0.9.5/oxfuzz_0.9.5_aarch64.dmg",
+    "/downloads/v0.9.6/oxfuzz_0.9.6_aarch64.dmg",
   );
 });
 test("rejects unavailable or malformed download evidence", () => {
