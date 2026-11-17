@@ -322,6 +322,16 @@ async fn project_build_context(
     // Profile absence was resolved above; use that legacy selection without a
     // second async profile read that could introduce unretained configured context.
     match super::build_context::resolve_project_build_context(project) {
+        // The build falls back to inferred include directories for a project
+        // with no database (`capture_harness_build_inputs`); the model is
+        // told the same directories, or it guesses a header spelling the
+        // compiler then rejects.
+        Ok(None) if matches!(language, TargetLanguage::C | TargetLanguage::Cpp) => {
+            // A root that cannot be canonicalized has no sources to read
+            // here; the build that follows reports it.
+            let root = super::canonical_project_root(project).ok();
+            Ok(root.and_then(|root| super::build_context::inferred_include_context(&root)))
+        }
         Ok(context) => Ok(context),
         Err(error) => {
             tracing::warn!("legacy compile database for {} is unusable ({error}); drafting without build context", project.display());
@@ -831,7 +841,12 @@ impl ServiceContainer {
         let analysis = self.retained_clang_context(project, candidate).await?;
         #[cfg(not(feature = "clang-analysis"))]
         let analysis: Option<String> = None;
-        let target_source = self.retained_target_source(project, candidate).await?;
+        let include_dirs = build
+            .as_ref()
+            .map_or(&[][..], |context| context.include_dirs.as_slice());
+        let target_source = self
+            .retained_target_source(project, candidate, include_dirs)
+            .await?;
         Ok(DraftInputs {
             related,
             build,

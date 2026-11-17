@@ -46,6 +46,30 @@ pub struct Harness {
    one, the project's real include directories, defines, and standard. Without
    those the model guesses header paths and guesses whether a configuration
    macro is set, and each wrong guess costs a repair round through the provider.
+   A project with neither a saved build profile nor a compile database gets
+   inferred include directories instead
+   (`hf_discovery::include_roots`): for every project `#include` that does
+   not resolve beside the including file or from the project root, the
+   project directory under which that spelling names an existing file. The
+   inference reads project files only and executes nothing; the directories
+   are confined to the project root by construction, reach the compiler
+   through the same `staged_compile_flags` path, and are covered by the
+   retained compile-flags digest. A bare `<name.h>` is never resolved against
+   project files, so a project file named like a system header cannot shadow
+   it. A database or profile, when present, is used alone. Rejected
+   alternative: adding a conventional `include/` directory unconditionally,
+   which is wrong for projects that keep headers elsewhere and unneeded for
+   projects whose includes already resolve.
+   The target-definition section also names the project header that declares
+   the target and the exact `#include` directive that reaches it under those
+   directories (`find_declaring_header`); the note is part of the retained
+   `harness_target_sources` text. A Rust target's section instead names the
+   crate identifier the cargo-fuzz build links (`rust_crate_ident`: the root
+   `Cargo.toml` package name with `-` as `_`), because a model shown only the
+   file guesses the crate from the directory name. The base prompt forbids `__has_include`
+   probing, code guarded by a macro the model was not shown, rewriting the
+   fuzzer's input before the call, and uninitialized output structures; each
+   was observed in first drafts for the bundled `cmake_tlv_lib` example.
    The draft is also conditioned on the project's previously promoted
    harnesses (accepted examples): up to two, same language as the target,
    newest first, read from the persisted `harnesses` rows a human promotion

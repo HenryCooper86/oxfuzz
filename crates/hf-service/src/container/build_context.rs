@@ -53,6 +53,28 @@ pub(crate) fn resolve_project_build_context(
     Ok(None)
 }
 
+/// Include directories implied by the project's own `#include` lines, for a
+/// project with neither a saved build profile nor a compile database.
+///
+/// A database or profile states the real flags and is never mixed with this.
+/// Reads project files only. An inference that cannot run leaves the build
+/// with no extra flags, which is what it had before this fallback existed.
+pub(crate) fn inferred_include_context(canonical_root: &Path) -> Option<BuildContext> {
+    if !cfg!(feature = "build-context") {
+        return None;
+    }
+    match hf_discovery::include_roots::infer_include_context(canonical_root) {
+        Ok(context) => context,
+        Err(error) => {
+            tracing::warn!(
+                "include directories of {} could not be inferred ({error}); building without them",
+                canonical_root.display()
+            );
+            None
+        }
+    }
+}
+
 /// Parse one selected database without falling back to another location.
 pub(crate) fn read_compile_database(
     path: &Path,

@@ -7,6 +7,8 @@ pub mod ai_ranking;
 #[cfg(feature = "build-context")]
 pub mod build_context;
 pub mod enrichment;
+#[cfg(feature = "build-context")]
+pub mod include_roots;
 mod reachability;
 pub mod scanner;
 #[cfg(feature = "semgrep-enrichment")]

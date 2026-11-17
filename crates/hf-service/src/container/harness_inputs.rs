@@ -214,6 +214,14 @@ impl ServiceContainer {
                 "NeedsBuild: configured compile database is absent".into(),
             ));
         }
+        // No profile and no database: the flags below, and their retained
+        // digest, come from the project's own `#include` lines instead.
+        let context =
+            if database.is_none() && matches!(language, TargetLanguage::C | TargetLanguage::Cpp) {
+                super::build_context::inferred_include_context(&root)
+            } else {
+                context
+            };
         let flags = if language == TargetLanguage::Rust {
             Vec::new()
         } else {

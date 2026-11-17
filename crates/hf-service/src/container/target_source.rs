@@ -120,6 +120,102 @@ pub(super) fn read_target_definition(
     })
 }
 
+/// Header files examined for the target's declaration.
+const MAX_DECLARATION_HEADERS: usize = 4000;
+
+/// The project header that declares a target, and how the build finds it.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct DeclaringHeader {
+    /// Header path relative to the canonical project root, `/`-separated.
+    pub(super) relative_file: String,
+    /// The path to write in `#include "..."`: relative to the include
+    /// directory that contains the header, else to the project root, which
+    /// the harness build always searches.
+    pub(super) include_spelling: String,
+}
+
+/// Whether `extension` names a C or C++ header.
+fn is_header_extension(extension: &str) -> bool {
+    matches!(extension, "h" | "hh" | "hpp" | "hxx")
+}
+
+/// Whether `text` declares or calls `symbol`: the identifier, bounded on both
+/// sides, followed by an opening parenthesis.
+fn mentions_function(text: &str, symbol: &str) -> bool {
+    let is_identifier = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    text.match_indices(symbol).any(|(at, _)| {
+        let before = at.checked_sub(1).map(|index| text.as_bytes()[index]);
+        let after = text[at + symbol.len()..].trim_start().as_bytes().first();
+        !before.is_some_and(is_identifier) && after == Some(&b'(')
+    })
+}
+
+/// Find the header that declares `candidate` inside `canonical_root`.
+///
+/// `include_dirs` are the absolute include directories the harness build
+/// searches. Of several headers that mention the target, the one nearest the
+/// project root is chosen, then the lexicographically first, so the result
+/// does not depend on walk order. `None` for a language without headers, when
+/// no header mentions the target, or when the project cannot be walked.
+pub(super) fn find_declaring_header(
+    canonical_root: &Path,
+    candidate: &TargetCandidate,
+    include_dirs: &[std::path::PathBuf],
+) -> Option<DeclaringHeader> {
+    use hf_core::target::TargetLanguage;
+    if !matches!(candidate.language, TargetLanguage::C | TargetLanguage::Cpp) {
+        return None;
+    }
+    let mut headers = Vec::new();
+    for language in [TargetLanguage::C, TargetLanguage::Cpp] {
+        // A project that cannot be walked gets no header note; the draft
+        // still carries the target's signature.
+        let files = hf_discovery::discoverable_source_files(canonical_root, language).ok()?;
+        headers.extend(files.into_iter().filter(|path| {
+            path.extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(is_header_extension)
+        }));
+    }
+    headers.sort_by(|a, b| {
+        a.components()
+            .count()
+            .cmp(&b.components().count())
+            .then_with(|| a.cmp(b))
+    });
+    headers.truncate(MAX_DECLARATION_HEADERS);
+    let header = headers.into_iter().find(|relative| {
+        read_project_file(canonical_root, relative)
+            .is_some_and(|file| mentions_function(&file.text, &candidate.symbol))
+    })?;
+    let absolute = canonical_root.join(&header);
+    let spelling = include_dirs
+        .iter()
+        .filter_map(|directory| absolute.strip_prefix(directory).ok())
+        .min_by_key(|relative| relative.components().count())
+        .unwrap_or(&header);
+    Some(DeclaringHeader {
+        relative_file: hf_core::runtime::posix_relative(&header),
+        include_spelling: hf_core::runtime::posix_relative(spelling),
+    })
+}
+
+/// The identifier a Rust target's crate is linked into the harness as: the
+/// root `Cargo.toml` package name, which the cargo-fuzz build depends on, with
+/// `-` written as `_`. `None` for another language or a project whose root
+/// manifest names no package.
+pub(super) fn rust_crate_ident(
+    canonical_root: &Path,
+    candidate: &TargetCandidate,
+) -> Option<String> {
+    if candidate.language != hf_core::target::TargetLanguage::Rust {
+        return None;
+    }
+    let manifest = read_project_file(canonical_root, Path::new("Cargo.toml"))?;
+    let name = hf_harness::cargo_fuzz::crate_name_from_cargo_toml(&manifest.text)?;
+    Some(name.replace('-', "_"))
+}
+
 /// Lines shown on each side of a faulting line.
 const CRASH_SITE_RADIUS: u32 = 20;
 
@@ -172,6 +268,7 @@ impl ServiceContainer {
         &self,
         project: &Path,
         candidate: &TargetCandidate,
+        include_dirs: &[std::path::PathBuf],
     ) -> Result<Option<String>, ClassifiedError> {
         let Some(store) = self.store() else {
             return Ok(None);
@@ -180,11 +277,27 @@ impl ServiceContainer {
         let Some(definition) = read_target_definition(&root, candidate) else {
             return Ok(None);
         };
-        let rendered = hf_prompt::render_target_source_section(
+        let mut rendered = hf_prompt::render_target_source_section(
             &definition.relative_file,
             candidate.location.line,
             &definition.excerpt,
         );
+        // The note is part of the retained section, so the exact text the
+        // model saw stays reconstructable (Engineering Protocol 2.13).
+        if !rendered.is_empty() {
+            if let Some(header) = find_declaring_header(&root, candidate, include_dirs) {
+                rendered.push_str(&hf_prompt::render_target_header_note(
+                    &header.relative_file,
+                    &header.include_spelling,
+                ));
+            }
+            if let Some(crate_ident) = rust_crate_ident(&root, candidate) {
+                rendered.push_str(&hf_prompt::render_target_crate_note(
+                    &crate_ident,
+                    &definition.relative_file,
+                ));
+            }
+        }
         if rendered.is_empty() || rendered.len() > hf_storage::MAX_TARGET_SOURCE_SECTION_BYTES {
             return Ok(None);
         }
@@ -207,7 +320,7 @@ impl ServiceContainer {
 
 #[cfg(test)]
 mod tests {
-    use super::{read_crash_site, read_target_definition};
+    use super::{find_declaring_header, read_crash_site, read_target_definition, rust_crate_ident};
     use hf_core::target::{
         InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
     };
@@ -364,5 +477,83 @@ mod tests {
         assert!(read_crash_site(&root, &path.to_string_lossy(), 1).is_none());
         assert!(read_crash_site(&root, "/work/../../etc/passwd", 1).is_none());
         assert!(read_crash_site(&root, "src/parse.c", 99).is_none());
+    }
+    #[test]
+    fn the_declaring_header_is_spelled_relative_to_its_include_directory() {
+        // The bundled `cmake_tlv_lib` layout: the model wrote `"tlv.h"`.
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir_all(root.join("include/tlv")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("include/tlv/tlv.h"),
+            "int parse (const unsigned char *data, unsigned long len);\n",
+        )
+        .unwrap();
+        // Mentions a longer identifier only, and a source file is not a header.
+        std::fs::write(
+            root.join("a.h"),
+            "int parse_all(void);\nint reparse(void);\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/parse.c"),
+            "int parse(const unsigned char *d, unsigned long n) { return 0; }\n",
+        )
+        .unwrap();
+        let target = candidate(&root, "src/parse.c", 1, Some(1));
+
+        let header = find_declaring_header(&root, &target, &[root.join("include")]).unwrap();
+        assert_eq!(header.relative_file, "include/tlv/tlv.h");
+        assert_eq!(header.include_spelling, "tlv/tlv.h");
+
+        // Without an include directory the project root is what the build searches.
+        let header = find_declaring_header(&root, &target, &[]).unwrap();
+        assert_eq!(header.include_spelling, "include/tlv/tlv.h");
+    }
+
+    #[test]
+    fn a_rust_target_is_named_through_its_package_not_its_directory() {
+        // The bundled `rust_varint` example is the package
+        // `oxfuzz_example_varint`; every first draft called
+        // `rust_varint::decode` and failed to compile.
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"example-varint\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/lib.rs"),
+            "pub fn decode(d: &[u8]) -> usize { d.len() }\n",
+        )
+        .unwrap();
+        let mut target = candidate(&root, "src/lib.rs", 1, Some(1));
+        assert_eq!(
+            rust_crate_ident(&root, &target),
+            None,
+            "a C target has no crate"
+        );
+        target.language = TargetLanguage::Rust;
+        assert_eq!(
+            rust_crate_ident(&root, &target).as_deref(),
+            Some("example_varint")
+        );
+    }
+
+    #[test]
+    fn a_target_no_header_declares_has_no_header_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::write(root.join("other.h"), "int unrelated(int);\n").unwrap();
+        std::fs::write(
+            root.join("parse.c"),
+            "int parse(const char *s) { return s[0]; }\n",
+        )
+        .unwrap();
+        let target = candidate(&root, "parse.c", 1, Some(1));
+        assert_eq!(find_declaring_header(&root, &target, &[]), None);
     }
 }
