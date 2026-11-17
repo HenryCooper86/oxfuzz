@@ -518,6 +518,126 @@ async fn dashboard_does_not_call_a_superseded_approval_ready_to_run() {
 }
 
 #[tokio::test]
+async fn dashboard_names_an_approval_with_known_findings() {
+    // A harness whose smoke test crashed can be approved only through the
+    // explicit known-findings approval. It then read "Ready for scheduled
+    // runs" beside "smoke not passed, 1 crash", which the assistant reported
+    // to the operator as a contradiction to repair.
+    let (container, _dir) = test_container().await;
+    let store = container.store().unwrap();
+    let target = sample_target("/proj-known-findings");
+    let mut harness = sample_harness(target.id);
+    harness.status = HarnessStatus::Promoted;
+    harness.smoke_run = Some(hf_core::harness::SmokeRunSummary {
+        duration_secs: 1,
+        execs_per_sec: 0.0,
+        crashes: 2,
+        passed: false,
+        source_sha256: None,
+        binary_sha256: None,
+        run_id: None,
+    });
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    store.upsert_harness(&harness).await.unwrap();
+
+    let dashboard = container
+        .workbench_dashboard(Some(Path::new("/proj-known-findings")), None)
+        .await
+        .unwrap();
+
+    let item = &dashboard.harness_reviews[0];
+    assert!(!item.needs_review);
+    assert_eq!(
+        item.next_action,
+        "Approved with known findings; triage the 2 smoke crashes"
+    );
+}
+
+#[tokio::test]
+async fn dashboard_counts_a_runs_crashes_before_they_are_triaged() {
+    // Run History reported one crash for a finished run while the Dashboard's
+    // Recent Runs said zero for the same run, because the Dashboard counted
+    // only triaged crash rows. Both read the run's recorded count first.
+    let (container, _dir) = test_container().await;
+    let store = container.store().unwrap();
+    let target = sample_target("/proj-untriaged");
+    let harness = sample_harness(target.id);
+    let mut run = sample_run("/proj-untriaged", harness.id);
+    run.status = RunStatus::Done;
+    run.crash_count = Some(3);
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    store.upsert_harness(&harness).await.unwrap();
+    store.insert_run(&run).await.unwrap();
+
+    let dashboard = container
+        .workbench_dashboard(Some(Path::new("/proj-untriaged")), None)
+        .await
+        .unwrap();
+    let history = container
+        .run_history(Some(Path::new("/proj-untriaged")))
+        .await
+        .unwrap();
+
+    assert_eq!(history[0].crashes, 3);
+    assert_eq!(dashboard.recent_runs[0].crash_count, 3);
+    // Nothing is triaged yet, so the Dashboard said "No urgent work queued"
+    // straight after a run that found crashes.
+    assert_eq!(dashboard.totals.crashes_unscanned, 3);
+    assert!(dashboard
+        .next_actions
+        .contains(&"Scan 3 retained crash artifacts in Triage.".to_owned()));
+    assert!(dashboard
+        .next_action_items
+        .iter()
+        .any(|item| item.code == "scan_crashes" && item.count == 3));
+}
+
+#[tokio::test]
+async fn dashboard_does_not_ask_for_review_of_a_replaced_build() {
+    // A first attempt is compiled, then a second is compiled and approved.
+    // The workspace holds one binary, the later one, so the first can no
+    // longer be smoke-tested or approved. The Dashboard still counted it as
+    // awaiting human approval and reported the project as "review required".
+    common::install_managed_workspace("oxfuzz_workbench_replaced_it");
+    let (container, _dir) = test_container().await;
+    let store = container.store().unwrap();
+    let target = sample_target("/proj-replaced");
+    let mut replaced = sample_harness(target.id);
+    replaced.status = HarnessStatus::Compiled;
+    let mut active = sample_harness(target.id);
+    active.source = "second revision".to_owned();
+    active.status = HarnessStatus::Promoted;
+    let mut draft = sample_harness(target.id);
+    draft.source = "third revision, not built yet".to_owned();
+    draft.status = HarnessStatus::Draft;
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    for harness in [&replaced, &active, &draft] {
+        store.upsert_harness(harness).await.unwrap();
+    }
+    let workspace = hf_service::workspace_dir(Path::new("/proj-replaced"), &target.symbol);
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("harness.active"), active.id.to_string()).unwrap();
+
+    let dashboard = container
+        .workbench_dashboard(Some(Path::new("/proj-replaced")), None)
+        .await
+        .unwrap();
+
+    let item = |id: Uuid| {
+        dashboard
+            .harness_reviews
+            .iter()
+            .find(|item| item.harness_id == id.to_string())
+            .unwrap()
+    };
+    assert!(!item(replaced.id).needs_review);
+    assert_eq!(item(replaced.id).next_action, "Replaced by a later build");
+    // A draft has no binary yet, so the active binary says nothing about it.
+    assert!(item(draft.id).needs_review);
+    assert_eq!(dashboard.totals.harnesses_needing_review, 1);
+}
+
+#[tokio::test]
 async fn run_history_leaves_an_unmeasured_rate_unknown() {
     // A libFuzzer run that crashes inside its first second never reports a
     // rate; the stored 0 was shown as zero executions per second.

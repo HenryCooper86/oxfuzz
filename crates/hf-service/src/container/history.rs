@@ -263,13 +263,7 @@ impl ServiceContainer {
                     .as_ref()
                     .and_then(|config| config.duration)
                     .map(|duration| duration.as_secs());
-                // Prefer the fuzzer's recorded crash count (available even
-                // without triage); fall back to the deduped crashes table
-                // for runs recorded before stats were persisted.
-                let crashes = r.crash_count.map_or_else(
-                    || crashes_by_run.get(&r.id).copied().unwrap_or(0),
-                    |c| usize::try_from(c).unwrap_or(0),
-                );
+                let crashes = run_crash_count(&r, crashes_by_run.get(&r.id).copied());
                 // An unfinished run has no elapsed time to fall short with.
                 let elapsed = r
                     .ended_at
@@ -939,6 +933,19 @@ fn remove_run_evidence_roots(roots: Vec<PathBuf>) -> Result<(), ClassifiedError>
         })?;
     }
     Ok(())
+}
+
+/// How many crashes a run produced, for every surface that lists runs.
+///
+/// The engine's recorded count comes first: it exists as soon as the run ends,
+/// before any triage. `triaged` is the deduplicated crash rows attributed to
+/// the run, the only evidence for runs recorded before counts were persisted.
+pub(crate) fn run_crash_count(run: &hf_storage::RunRecord, triaged: Option<usize>) -> usize {
+    run.crash_count.map_or_else(
+        || triaged.unwrap_or(0),
+        // A count beyond usize cannot occur on a supported target; saturate.
+        |count| usize::try_from(count).unwrap_or(usize::MAX),
+    )
 }
 
 #[cfg(test)]

@@ -56,6 +56,7 @@ pub(crate) mod health_monitor;
 pub use harness_work_order::HarnessWorkOrderExportRequest;
 mod harness_workspace;
 mod history;
+pub(crate) use history::run_crash_count;
 mod honggfuzz_stats;
 mod lifecycle;
 #[cfg(all(test, feature = "run-closeout"))]

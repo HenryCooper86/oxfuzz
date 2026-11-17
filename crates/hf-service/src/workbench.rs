@@ -38,6 +38,10 @@ pub struct WorkbenchTotals {
     /// and next-actions key on this, not `crashes`, so a fully-triaged project
     /// stops reporting "triage required" -- matching the Fuzzing Workflow.
     pub crashes_needing_triage: usize,
+    /// Crash artifacts recorded by runs none of whose crashes are findings
+    /// yet. They become findings through a Triage scan, so until then
+    /// `crashes` does not count them.
+    pub crashes_unscanned: usize,
     pub corpus_entries: usize,
 }
 
@@ -375,6 +379,11 @@ pub async fn dashboard<S: std::hash::BuildHasher>(
         .iter()
         .filter(|r| matches!(r.status, RunStatus::Pending | RunStatus::Running))
         .count();
+    let crashes_unscanned = filtered_runs
+        .iter()
+        .filter(|run| !crash_count_by_run.contains_key(&run.id))
+        .map(|run| crate::container::run_crash_count(run, None))
+        .sum();
 
     let totals = WorkbenchTotals {
         projects: project_count,
@@ -385,6 +394,7 @@ pub async fn dashboard<S: std::hash::BuildHasher>(
         active_runs,
         crashes: crash_reviews.len(),
         crashes_needing_triage: crash_reviews.iter().filter(|c| !c.has_bug_report).count(),
+        crashes_unscanned,
         corpus_entries: corpus_entry_count,
     };
     let readiness = readiness_summary(&totals, true);
@@ -752,6 +762,8 @@ fn crash_count_by_run(crashes: &[Crash]) -> BTreeMap<Uuid, usize> {
 }
 
 fn run_view(run: RunRecord, crash_count_by_run: &BTreeMap<Uuid, usize>) -> WorkbenchRun {
+    let crash_count =
+        crate::container::run_crash_count(&run, crash_count_by_run.get(&run.id).copied());
     WorkbenchRun {
         id: run.id.to_string(),
         project_root: run.project_root,
@@ -759,7 +771,7 @@ fn run_view(run: RunRecord, crash_count_by_run: &BTreeMap<Uuid, usize>) -> Workb
         status: format!("{:?}", run.status),
         started_at: format_ts(run.started_at),
         ended_at: run.ended_at.map(format_ts),
-        crash_count: crash_count_by_run.get(&run.id).copied().unwrap_or_default(),
+        crash_count,
     }
 }
 
@@ -784,10 +796,18 @@ fn harness_review_items(
         .map(|h| {
             let target = target_by_id.get(&h.target_id);
             let smoke = h.smoke_run.as_ref();
-            let needs_review = matches!(
-                h.status,
-                HarnessStatus::Draft | HarnessStatus::Compiled | HarnessStatus::SmokePassed
-            );
+            // A workspace holds one harness binary. A built revision that is
+            // no longer that binary was replaced by a later build: whether it
+            // was approved or still awaiting review, nothing can run it.
+            let replaced = !matches!(h.status, HarnessStatus::Draft)
+                && target.is_some_and(|t| {
+                    crate::container::approval_superseded(&t.project_root, t, h.id)
+                });
+            let needs_review = !replaced
+                && matches!(
+                    h.status,
+                    HarnessStatus::Draft | HarnessStatus::Compiled | HarnessStatus::SmokePassed
+                );
             let record = review_by_harness.get(&h.id);
             // The review record is the binding evidence an approval attests
             // to, so its digests lead; the smoke evidence's are the fallback
@@ -819,13 +839,12 @@ fn harness_review_items(
                 smoke_crashes: smoke.map_or(0, |s| s.crashes),
                 smoke_execs_per_sec: smoke.map_or(0.0, |s| s.execs_per_sec),
                 needs_review,
-                next_action: if h.status == HarnessStatus::Promoted
-                    && target.is_some_and(|t| {
-                        crate::container::approval_superseded(&t.project_root, t, h.id)
-                    }) {
+                next_action: if replaced && h.status == HarnessStatus::Promoted {
                     // Still approved, but a later approval replaced it as the
                     // target's active harness, so it is not what a run uses.
                     "Superseded by a later approval".to_owned()
+                } else if replaced {
+                    "Replaced by a later build".to_owned()
                 } else {
                     next_harness_action(h.status, smoke)
                 },
@@ -947,6 +966,13 @@ fn next_harness_action(status: HarnessStatus, smoke: Option<&SmokeRunSummary>) -
         (HarnessStatus::Compiled, true) | (HarnessStatus::SmokePassed, _) => {
             "Review and approve for campaign".to_owned()
         }
+        // Only the explicit known-findings approval promotes a revision
+        // whose smoke test crashed, so this state is a recorded decision.
+        (HarnessStatus::Promoted, _) if smoke_crashed => {
+            let crashes = smoke.map_or(0, |s| s.crashes);
+            let noun = if crashes == 1 { "crash" } else { "crashes" };
+            format!("Approved with known findings; triage the {crashes} smoke {noun}")
+        }
         (HarnessStatus::Promoted, _) => "Ready for scheduled runs".to_owned(),
         (HarnessStatus::Failed, _) => "Fix build or regenerate".to_owned(),
     }
@@ -973,6 +999,17 @@ fn next_actions(totals: &WorkbenchTotals) -> Vec<String> {
             "Triage {} pending crash{} in this project.",
             totals.crashes_needing_triage,
             plural_es_suffix(totals.crashes_needing_triage)
+        ));
+    }
+    if totals.crashes_unscanned > 0 {
+        actions.push(format!(
+            "Scan {} retained crash artifact{} in Triage.",
+            totals.crashes_unscanned,
+            if totals.crashes_unscanned == 1 {
+                ""
+            } else {
+                "s"
+            }
         ));
     }
     // A campaign needs a harness, so targets without one point at generation.
@@ -1007,6 +1044,12 @@ fn next_action_notes(totals: &WorkbenchTotals) -> Vec<ReadinessNote> {
         items.push(ReadinessNote {
             code: "triage_crashes".to_owned(),
             count: totals.crashes_needing_triage,
+        });
+    }
+    if totals.crashes_unscanned > 0 {
+        items.push(ReadinessNote {
+            code: "scan_crashes".to_owned(),
+            count: totals.crashes_unscanned,
         });
     }
     if totals.targets > 0 && totals.harnesses == 0 {
@@ -1708,6 +1751,7 @@ mod next_action_tests {
             active_runs: 0,
             crashes: 0,
             crashes_needing_triage: 0,
+            crashes_unscanned: 0,
             corpus_entries: 0,
         }
     }
