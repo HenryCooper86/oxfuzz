@@ -1866,7 +1866,8 @@ mod tests {
     fn compile_script_links_a_project_main_under_a_renamed_symbol() {
         // A project unit that defines `main` would collide with the engine
         // driver's `main`; it is compiled first, alone, with the same compiler,
-        // arguments, and flags, and only its object enters the link.
+        // arguments, and flags, and its object enters the link through the
+        // archive of project programs.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("cli.c"), "int main(void){return 0;}").unwrap();
         std::fs::write(dir.path().join("lib.c"), "int parse(int x){return x;}").unwrap();
@@ -1886,8 +1887,10 @@ mod tests {
             script.starts_with(
                 "clang -fsanitize=fuzzer '-DA=1' -I/work -Dmain=oxfuzz_project_main_0 \
                  -c /work/'cli.c' -o /tmp/oxfuzz_project_main_0.o && \
+                 rm -f /tmp/oxfuzz_project_programs.a && \
+                 ar rcs /tmp/oxfuzz_project_programs.a /tmp/oxfuzz_project_main_0.o && \
                  clang -fsanitize=fuzzer '-DA=1' -I/work /work/'harness.c' /work/'lib.c' \
-                 /tmp/oxfuzz_project_main_0.o -o /tmp/'fuzz_p'"
+                 /tmp/oxfuzz_project_programs.a -o /tmp/'fuzz_p'"
             ),
             "{script}"
         );

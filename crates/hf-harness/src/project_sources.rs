@@ -3,8 +3,16 @@
 //! A harness build links every staged C/C++ unit so multi-file targets
 //! resolve. Each unit's [`UnitRole`] (from `hf_core::c_unit`, shared with
 //! discovery) decides how: an entry program is compiled alone with `main`
-//! renamed and its object is linked, so every other symbol it defines stays
-//! available; a fuzz entry (a harness the project already ships) is left out.
+//! renamed and its object goes into one static archive, so every other symbol
+//! it defines stays available while a program the harness does not need is
+//! never linked; a fuzz entry (a harness the project already ships) is left
+//! out.
+//!
+//! The archive matters for a project that ships several programs. bzip2 has
+//! `bzip2.c`, `bzip2recover.c` and `unzcrash.c`, each with its own `progName`:
+//! linked as plain objects they collide, and no harness repair can fix that.
+//! The linker takes an archive member only to resolve a symbol something
+//! already needs.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -85,22 +93,37 @@ impl ProjectLinkInputs {
                 object = entry_object(index),
             );
         }
+        if !self.entry_programs.is_empty() {
+            let objects = (0..self.entry_programs.len())
+                .map(entry_object)
+                .collect::<Vec<_>>()
+                .join(" ");
+            // Writing to a String cannot fail.
+            let _ = write!(
+                script,
+                "rm -f {ENTRY_PROGRAM_ARCHIVE} && ar rcs {ENTRY_PROGRAM_ARCHIVE} {objects} && "
+            );
+        }
         script
     }
 
-    /// Link arguments: the library units as container paths, then the objects
-    /// [`precompile_script`](Self::precompile_script) produces. Every path from
-    /// the project is shell-quoted.
+    /// Link arguments: the library units as container paths, then the archive
+    /// of entry-program objects [`precompile_script`](Self::precompile_script)
+    /// produces, last so it resolves what the units before it left undefined.
+    /// Every path from the project is shell-quoted.
     #[must_use]
     pub fn link_args(&self, container_ws: &str) -> String {
         self.library
             .iter()
             .map(|path| format!("{container_ws}/{}", sh_quote(path)))
-            .chain((0..self.entry_programs.len()).map(entry_object))
+            .chain((!self.entry_programs.is_empty()).then(|| ENTRY_PROGRAM_ARCHIVE.to_owned()))
             .collect::<Vec<_>>()
             .join(" ")
     }
 }
+
+/// The static archive holding every entry program's object.
+const ENTRY_PROGRAM_ARCHIVE: &str = "/tmp/oxfuzz_project_programs.a";
 
 /// The symbol an entry program's `main` is renamed to.
 fn renamed_main(index: usize) -> String {
@@ -225,12 +248,31 @@ mod tests {
             "clang -fsanitize=fuzzer -I/work -Dmain=oxfuzz_project_main_0 -c /work/'tools/cli.c' \
              -o /tmp/oxfuzz_project_main_0.o && \
              clang -fsanitize=fuzzer -I/work -Dmain=oxfuzz_project_main_1 -c /work/'tools/dump.c' \
-             -o /tmp/oxfuzz_project_main_1.o && "
+             -o /tmp/oxfuzz_project_main_1.o && \
+             rm -f /tmp/oxfuzz_project_programs.a && \
+             ar rcs /tmp/oxfuzz_project_programs.a /tmp/oxfuzz_project_main_0.o \
+             /tmp/oxfuzz_project_main_1.o && "
         );
+        // The programs are linked as one archive, after the library units, so
+        // two programs defining the same global do not collide: only a member
+        // the harness needs is pulled in.
         assert_eq!(
             inputs.link_args("/work"),
-            "/work/'lib/parse.c' /tmp/oxfuzz_project_main_0.o /tmp/oxfuzz_project_main_1.o"
+            "/work/'lib/parse.c' /tmp/oxfuzz_project_programs.a"
         );
+    }
+
+    #[test]
+    fn a_project_without_entry_programs_builds_no_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "parse.c",
+            "int parse(const char *s){return s[0];}",
+        );
+        let inputs = ProjectLinkInputs::collect(dir.path(), &["harness.c"]);
+        assert_eq!(inputs.precompile_script("clang", "/work"), "");
+        assert_eq!(inputs.link_args("/work"), "/work/'parse.c'");
     }
 
     #[test]

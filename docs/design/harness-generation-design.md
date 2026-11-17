@@ -60,6 +60,14 @@ pub struct Harness {
    alternative: adding a conventional `include/` directory unconditionally,
    which is wrong for projects that keep headers elsewhere and unneeded for
    projects whose includes already resolve.
+   A project unit that defines `main` is compiled alone with `main` renamed,
+   and those objects are linked as one static archive after the library
+   units. The linker takes an archive member only to resolve a symbol the
+   link already needs, so a project that ships several programs (bzip2's
+   `bzip2.c`, `bzip2recover.c`, `unzcrash.c`, each defining `progName`) links,
+   while a target that lives in a program file is still found. Linked as
+   plain objects those programs collided on every build, and the repair loop
+   spent its attempts on an error no harness edit can fix.
    The target-definition section also names the project header that declares
    the target and the exact `#include` directive that reaches it under those
    directories (`find_declaring_header`); the note is part of the retained
